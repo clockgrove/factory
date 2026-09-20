@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import {
   assertQualificationMergeProof,
   readQualificationMergeProofForIdentity,
-  selectQualificationPublicationRecord,
 } from "./qualification-merge-proof.mjs";
 
 const hash = (value) =>
@@ -17,6 +16,18 @@ const one = (values, reason) => {
 };
 const sameAttempt = (a, b) =>
   ["objective", "runId", "workItem", "attempt"].every((key) => a[key] === b[key]);
+const latestPublication = (events, integration) => {
+  const publications = events
+    .filter((event) => event.event === "PublicationRecorded" && sameAttempt(event, integration))
+    .sort((left, right) => left.sequence - right.sequence);
+  assert.ok(publications.length > 0 && publications.length <= 100, "publication proof missing");
+  assert.equal(
+    new Set(publications.map((event) => event.sequence)).size,
+    publications.length,
+    "publication generations repeat a sequence",
+  );
+  return publications.at(-1);
+};
 
 /** Terminal Factory cleanup retires disposable review refs; merged PRs and receipts stay durable. */
 export async function observeSettledQualificationMergeProofs({ entry, request, repository }) {
@@ -35,11 +46,7 @@ export async function observeSettledQualificationMergeProofs({ entry, request, r
       ),
       "integration missing",
     );
-    const publication = selectQualificationPublicationRecord(
-      events.filter(
-        (event) => event.event === "PublicationRecorded" && sameAttempt(event, integration),
-      ),
-    );
+    const publication = latestPublication(events, integration);
     const published = one(
       events.filter(
         (event) =>
@@ -51,15 +58,34 @@ export async function observeSettledQualificationMergeProofs({ entry, request, r
     );
     const validation = one(
       events.filter(
-        (event) => event.event === "ValidationRecorded" && sameAttempt(event, integration),
+        (event) =>
+          event.event === "ValidationRecorded" &&
+          sameAttempt(event, integration) &&
+          event.evidenceDigest === publication.validationDigest &&
+          event.baseSha === publication.baseSha &&
+          event.sequence < publication.sequence,
       ),
       "validation proof missing",
     );
     const validated = one(
       events.filter(
-        (event) => event.event === "AttemptValidated" && sameAttempt(event, integration),
+        (event) =>
+          event.event === "AttemptValidated" &&
+          sameAttempt(event, integration) &&
+          event.sequence > validation.sequence &&
+          event.sequence < published.sequence,
       ),
       "semantic review proof missing",
+    );
+    assert.equal(validated.artifactDigest, published.artifactDigest);
+    assert.ok(
+      !events.some(
+        (event) =>
+          event.event === "AttemptValidated" &&
+          sameAttempt(event, integration) &&
+          event.sequence > published.sequence,
+      ),
+      "semantic review advanced after the final publication",
     );
     assert.equal(validation.passed, true);
     assert.equal(validation.baseSha, publication.baseSha);

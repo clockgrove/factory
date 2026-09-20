@@ -22,6 +22,11 @@ import {
   readQualificationMergeProofForIdentity,
 } from "./qualification-merge-proof.mjs";
 import {
+  assertSettledQualificationMergeProof,
+  observeSettledQualificationMergeProofs,
+} from "./qualification-settled-merge-proof.mjs";
+import { settledQualificationEvidence } from "./qualification-settled-evidence.mjs";
+import {
   assertQualificationCheckpoint,
   nativeProofReader,
   nativeQualificationEvents,
@@ -48,6 +53,8 @@ const harnessFiles = [
   "verify-native-linear-objective.mjs",
   "verify-live-objective.mjs",
   "qualification-merge-proof.mjs",
+  "qualification-settled-merge-proof.mjs",
+  "qualification-settled-evidence.mjs",
   "qualification-sibling-refresh-proof.mjs",
   "qualification-native-scopes.mjs",
   "qualification-model-accounting.mjs",
@@ -623,6 +630,7 @@ export async function executeNativeLinearControllerCase({
   runRequest,
   save = () => {},
   observe = () => observeControllerRun({ call, request, evidence, owner, repo }),
+  capturePreterminalProofs = () => {},
   wait = sleep,
   maximumObservations = 900,
 }) {
@@ -652,6 +660,7 @@ export async function executeNativeLinearControllerCase({
     if (!evidence.nativeLinearIntervention && runId) {
       const progress = revalidatedProgress(observation.events, runId);
       if (progress) {
+        await capturePreterminalProofs({ evidence, request, events: observation.events });
         const requestId = `${evidence.qualificationNamespace}-${caseName}`;
         evidence.nativeLinearIntervention = {
           case: caseName,
@@ -785,12 +794,7 @@ function assertExactReview(proof, events) {
   );
 }
 
-export async function observeNativeLinearProofs(
-  { evidence, request },
-  read = nativeProofReader(request),
-  readMerge = (expected) => readQualificationMergeProofForIdentity({ request }, expected),
-) {
-  const events = nativeQualificationEvents(evidence);
+async function observeNativeLinearProofsFromEvents({ evidence, events }, read, readMerge) {
   evidence.nativeLinearProofs = [];
   evidence.mergeProofs = [];
   for (const { position, publications } of publicationsByPosition(events)) {
@@ -907,6 +911,81 @@ export async function observeNativeLinearProofs(
     evidence.mergeProofs.push(await readMerge(expected));
   }
   return evidence.mergeProofs;
+}
+
+export async function observeNativeLinearProofs(
+  { evidence, request },
+  read = nativeProofReader(request),
+  readMerge = (expected) => readQualificationMergeProofForIdentity({ request }, expected),
+) {
+  return observeNativeLinearProofsFromEvents(
+    { evidence, events: nativeQualificationEvents(evidence) },
+    read,
+    readMerge,
+  );
+}
+
+async function observeNativeLinearPreterminalProofs({ evidence, request, events }) {
+  const pulls = [];
+  for (const pullRequest of new Set(
+    events
+      .filter((event) => event.event === "PublicationRecorded")
+      .map((event) => event.pullRequest),
+  ))
+    pulls.push(
+      (
+        await request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+          pull_number: pullRequest,
+        })
+      ).data,
+    );
+  const snapshot = { ...evidence, pulls, nativeLinearProofs: [], mergeProofs: [] };
+  await observeNativeLinearProofsFromEvents(
+    { evidence: snapshot, events },
+    nativeProofReader(request),
+    (expected) => readQualificationMergeProofForIdentity({ request }, expected),
+  );
+  evidence.nativeLinearPreterminal = {
+    observedThroughSequence: Math.max(...events.map((event) => event.sequence)),
+    nativeLinearProofs: snapshot.nativeLinearProofs,
+    mergeProofs: snapshot.mergeProofs,
+  };
+}
+
+/** Terminal proof reads immutable commits and merged PR state, never disposable control refs. */
+export async function observeNativeLinearSettledProofs({ evidence, request }) {
+  const events = nativeQualificationEvents(evidence);
+  const read = nativeProofReader(request);
+  evidence.nativeLinearCommits = [];
+  for (const { position, publications } of publicationsByPosition(events))
+    for (const [publicationIndex, publication] of publications.entries()) {
+      const validation = one(
+        events.filter(
+          (event) =>
+            event.event === "ValidationRecorded" &&
+            event.runId === publication.runId &&
+            event.workItem === publication.workItem &&
+            event.attempt === publication.attempt &&
+            event.evidenceDigest === publication.validationDigest &&
+            event.baseSha === publication.baseSha &&
+            event.sequence < publication.sequence,
+        ),
+        "settled native validation is missing or repeated",
+      );
+      evidence.nativeLinearCommits.push({
+        position,
+        publicationIndex,
+        publicationSequence: publication.sequence,
+        demand: { kind: "commit", oid: publication.headSha },
+        commit: await read({ kind: "commit", oid: publication.headSha }),
+        validation,
+      });
+    }
+  return observeSettledQualificationMergeProofs({
+    entry: { ...evidence, events },
+    request,
+    repository: evidence.repository,
+  });
 }
 
 export function assertNativeLinearFinalTree(events, finalTreeSha) {
@@ -1523,6 +1602,185 @@ export function assertNativeLinearPublicationProofs(
   assertNativeLinearGenerationSets(evidence, events);
 }
 
+export function assertNativeLinearSettledPublicationProofs(
+  evidence,
+  events,
+  groups = publicationsByPosition(events),
+) {
+  const settled = settledQualificationEvidence(events, {
+    runId: evidence.runResult.runId,
+    terminalEvent: "FactoryRunCompleted",
+  });
+  const expectedCount = groups.reduce((sum, group) => sum + group.publications.length, 0);
+  assert.equal(expectedCount, 6, "native linear run must contain exactly six generations");
+  assert.equal(
+    evidence.nativeLinearCommits.length,
+    expectedCount,
+    "settled native commit coverage differs",
+  );
+  const expectedReviewUsageIds = [];
+  for (const group of groups) {
+    const invalidations = events
+      .filter(
+        (event) =>
+          event.event === "ValidationInvalidated" &&
+          event.workItem === group.publications[0].workItem &&
+          event.attempt === group.publications[0].attempt,
+      )
+      .sort((left, right) => left.sequence - right.sequence);
+    assert.equal(
+      invalidations.length,
+      group.publications.length - 1,
+      "settled publication invalidation coverage differs",
+    );
+    for (const [publicationIndex, publication] of group.publications.entries()) {
+      const invalidation = publicationIndex === 0 ? undefined : invalidations[publicationIndex - 1];
+      const validation = one(
+        events.filter(
+          (event) =>
+            event.event === "ValidationRecorded" &&
+            event.runId === publication.runId &&
+            event.workItem === publication.workItem &&
+            event.attempt === publication.attempt &&
+            event.evidenceDigest === publication.validationDigest &&
+            event.baseSha === publication.baseSha &&
+            event.sequence > (invalidation?.sequence ?? -1) &&
+            event.sequence < publication.sequence,
+        ),
+        "settled native validation is missing or repeated",
+      );
+      const published = one(
+        events.filter(
+          (event) =>
+            event.event === "AttemptPublished" &&
+            event.runId === publication.runId &&
+            event.workItem === publication.workItem &&
+            event.attempt === publication.attempt &&
+            event.headSha === publication.headSha &&
+            event.sequence > validation.sequence &&
+            event.sequence < publication.sequence,
+        ),
+        "settled native publication is missing or repeated",
+      );
+      const validated = one(
+        events.filter(
+          (event) =>
+            event.event === "AttemptValidated" &&
+            event.runId === publication.runId &&
+            event.workItem === publication.workItem &&
+            event.attempt === publication.attempt &&
+            event.artifactDigest === published.artifactDigest &&
+            event.sequence > validation.sequence &&
+            event.sequence < published.sequence,
+        ),
+        "settled native semantic review is missing or repeated",
+      );
+      const review = publicationReview(publication, validation, published, publicationIndex);
+      expectedReviewUsageIds.push(review.usageId);
+      const reviewUsage = one(
+        events.filter(
+          (event) =>
+            event.event === "BudgetReconciled" &&
+            event.runId === publication.runId &&
+            event.workItem === publication.workItem &&
+            event.attempt === publication.attempt &&
+            event.unit === "model_tokens" &&
+            event.usageId === review.usageId,
+        ),
+        "settled native review accounting is missing or repeated",
+      );
+      assert.ok(
+        reviewUsage.sequence > (invalidation?.sequence ?? validation.sequence) &&
+          reviewUsage.sequence < validated.sequence &&
+          validated.sequence < published.sequence &&
+          published.sequence < publication.sequence,
+        "settled review/publication chronology differs",
+      );
+      assert.equal(publication.validationDigest, validation.evidenceDigest);
+      assert.equal(
+        publication.exactHeadValidationDigest,
+        exactHeadValidationDigest(publication, validation),
+      );
+      if (invalidation)
+        assert.equal(invalidation.headSha, group.publications[publicationIndex - 1].headSha);
+      const commit = one(
+        evidence.nativeLinearCommits.filter(
+          (entry) =>
+            entry.position === group.position &&
+            entry.publicationIndex === publicationIndex &&
+            entry.publicationSequence === publication.sequence,
+        ),
+        "settled native commit coverage differs",
+      );
+      assert.deepEqual(commit.demand, { kind: "commit", oid: publication.headSha });
+      assert.equal(commit.commit.oid, publication.headSha);
+      assert.deepEqual(commit.commit.parentOids, [validation.baseSha]);
+      assert.equal(commit.commit.treeOid, validation.outputTreeSha);
+      assert.deepEqual(commit.validation, validation);
+    }
+  }
+  for (const eventName of ["ValidationRecorded", "AttemptValidated", "AttemptPublished"])
+    assert.equal(
+      events.filter(
+        (event) => event.runId === evidence.runResult.runId && event.event === eventName,
+      ).length,
+      expectedCount,
+      `unmatched settled ${eventName} generation`,
+    );
+  const actualReviewUsageIds = settled.model.usage
+    .filter((event) => /^(?:review-|rebase-review-)/.test(event.usageId))
+    .map((event) => event.usageId)
+    .sort();
+  assert.deepEqual(
+    actualReviewUsageIds,
+    expectedReviewUsageIds.sort(),
+    "unmatched settled semantic-review usage generation",
+  );
+  assert.equal(evidence.status.summary.economics.unresolvedModelInvocations, 0);
+  assert.equal(
+    evidence.status.summary.economics.usage.model_tokens.value,
+    settled.model.total,
+    "settled status model total differs",
+  );
+  for (const field of ["inputTokens", "outputTokens", "cachedInputTokens"])
+    assert.equal(
+      evidence.status.summary.economics.modelTokenBreakdown[field].tokens.value,
+      settled.counters[field],
+      `settled status ${field} differs`,
+    );
+  return settled;
+}
+
+export function assertNativeLinearPreterminalProof(evidence, events) {
+  const snapshot = evidence.nativeLinearPreterminal;
+  const progress = evidence.nativeLinearIntervention?.progress;
+  assert.ok(snapshot && progress, "native intervention lacks preterminal checkpoint proof");
+  assert.ok(
+    Number.isSafeInteger(snapshot.observedThroughSequence) &&
+      snapshot.observedThroughSequence >= progress.publicationSequence,
+    "preterminal proof predates the intervention trigger",
+  );
+  const proof = one(
+    snapshot.nativeLinearProofs.filter(
+      (entry) =>
+        entry.publication.workItem === progress.workItem &&
+        entry.publication.attempt === progress.attempt &&
+        entry.publication.sequence === progress.publicationSequence,
+    ),
+    "intervention publication checkpoint proof is missing or repeated",
+  );
+  assert.equal(proof.commitRead.oid, progress.durableHeadSha);
+  assert.deepEqual(proof.commitRead.parentOids, [proof.validation.baseSha]);
+  assert.equal(proof.commitRead.treeOid, progress.outputTreeSha);
+  assert.equal(assertExactReview(proof, events), progress.reviewIdentityDigest);
+  assert.equal(proof.reviewDemand.ref.includes(progress.reviewIdentityDigest), true);
+  assert.ok(
+    Array.isArray(snapshot.mergeProofs) && snapshot.mergeProofs.length > 0,
+    "preterminal proof lacks the already integrated prefix",
+  );
+  return proof;
+}
+
 export function assertNativeLinearTerminal(events, expectedState) {
   const outcomes = events.filter((event) => [...terminalEvents.values()].includes(event.event));
   const outcome = one(outcomes, "native terminal receipt is missing, repeated, or conflicting");
@@ -2038,7 +2296,7 @@ export function assertNativeLinearLifecycle(evidence, caseName = evidence.native
   }
 
   assertNativeLinearHistory(events);
-  assertNativeLinearPublicationProofs(evidence, events, groups);
+  assertNativeLinearSettledPublicationProofs(evidence, events, groups);
 
   assert.equal(evidence.objective.state, "closed");
   assert.ok(evidence.children.every((child) => child.state === "closed"));
@@ -2067,7 +2325,7 @@ export function assertNativeLinearLifecycle(evidence, caseName = evidence.native
       evidence.mergeProofs.filter((entry) => entry.workItem === finalPublication.workItem),
       "native GraphQL proof coverage differs",
     );
-    assertQualificationMergeProof(mergeProof, {
+    assertSettledQualificationMergeProof(mergeProof, {
       repository: evidence.repository,
       pull,
       publication: finalPublication,
@@ -2102,6 +2360,7 @@ export function assertNativeLinearLifecycle(evidence, caseName = evidence.native
     "partial completion did not precede descendant revalidation",
   );
   if (caseName === "response-loss-restart") {
+    assertNativeLinearPreterminalProof(evidence, events);
     const intervention = evidence.nativeLinearIntervention;
     assert.equal(intervention?.case, caseName);
     assert.equal(intervention.responseLost, true);
@@ -2216,11 +2475,17 @@ export function nativeLinearQualification(env) {
         },
       };
     },
-    afterRun: async ({ evidence, request, save, call, checkout, owner, repo }) => {
+    afterRun: async ({ evidence, save, call, checkout, owner, repo }) => {
       assertCommittedHarness(evidence);
       try {
-        if (evidence.runResult.status !== "completed")
-          await observeNativeLinearProofs({ evidence, request });
+        if (evidence.runResult.status !== "completed") {
+          assert.ok(
+            evidence.nativeLinearPreterminal,
+            "native cancellation lacks preterminal checkpoint proof",
+          );
+          evidence.nativeLinearProofs = evidence.nativeLinearPreterminal.nativeLinearProofs;
+          evidence.mergeProofs = evidence.nativeLinearPreterminal.mergeProofs;
+        }
         if (caseName !== "cascade") {
           const controller = await call("factory_controller_status", {
             owner,
@@ -2301,7 +2566,7 @@ export function nativeLinearQualification(env) {
       }
       save();
     },
-    observeMergeProofs: observeNativeLinearProofs,
+    observeMergeProofs: observeNativeLinearSettledProofs,
     assessCompletion: assessNativeLinearLifecycle,
     verifyFinalArtifact: verifyNativeLinearFinalArtifact,
   };
@@ -2318,7 +2583,12 @@ export function nativeLinearQualification(env) {
         policy: evidence.policy,
       },
     });
-    qualification.executeRun = (hooks) => executeNativeLinearControllerCase({ caseName, ...hooks });
+    qualification.executeRun = (hooks) =>
+      executeNativeLinearControllerCase({
+        caseName,
+        ...hooks,
+        capturePreterminalProofs: observeNativeLinearPreterminalProofs,
+      });
   }
   return qualification;
 }

@@ -61,6 +61,10 @@ const time = (event) => {
 };
 const sameAttempt = (a, b) =>
   ["objective", "runId", "workItem", "attempt"].every((key) => a[key] === b[key]);
+const sameModelInvocation = (a, b) =>
+  ["objective", "runId", "workItem", "attempt", "phase", "modelInvocationId"].every(
+    (key) => a[key] === b[key],
+  );
 const endNames = new Set([
   "AttemptSucceeded",
   "AttemptFailed",
@@ -94,6 +98,28 @@ function reservationWindows(events) {
       ),
     };
   });
+}
+
+function unsettledAttemptReservations(events) {
+  return reservationWindows(events)
+    .filter((window) => !window.events.some((event) => event.event === "AttemptDeferred"))
+    .filter(
+      ({ reservation, events: windowEvents }) =>
+        !windowEvents.some(
+          (event) => event.event === "AttemptIntegrated" && sameAttempt(event, reservation),
+        ),
+    )
+    .map(({ reservation }) => reservation);
+}
+
+function concurrencySettlementDependencies(events) {
+  const start = events.find((event) => event.event === "FactoryRunStarted");
+  const run = start ? events.filter((event) => event.runId === start.runId) : [];
+  return {
+    start,
+    attempts: unsettledAttemptReservations(run),
+    modelInvocations: qualificationModelAccounting(run, { requireMarkers: true }).unresolved,
+  };
 }
 
 function concurrencyRunIdentity(observation, authority, { activated = true } = {}) {
@@ -315,23 +341,21 @@ export function scopedPauseObservationContract(settled) {
     accept: (pair) => settled(pair[1], true),
     progress: (pair) => {
       const target = pair[1];
-      assert.ok(target && Object.hasOwn(target, "changedReceipts"));
-      const changed = eventsOf({
-        receipts: [...target.changedReceipts, ...target.pendingReceipts],
+      assert.ok(target, "scoped-pause target observation is unavailable");
+      assert.ok(Array.isArray(target.baselineReceipts), "scoped-pause baseline is unavailable");
+      assert.ok(Array.isArray(target.pendingReceipts), "scoped-pause pending receipts unavailable");
+      const pending = eventsOf({ receipts: target.pendingReceipts });
+      if (pending.some((event) => event.event === "RunPauseAcknowledged")) return true;
+      const baseline = eventsOf({ receipts: target.baselineReceipts });
+      if (!baseline.some((event) => event.event === "RunPauseAcknowledged")) return false;
+      const dependencies = concurrencySettlementDependencies(baseline);
+      return pending.some((event) => {
+        if (["AttemptIntegrated", "AttemptDeferred"].includes(event.event))
+          return dependencies.attempts.some((reservation) => sameAttempt(event, reservation));
+        if (event.event === "BudgetReconciled")
+          return dependencies.modelInvocations.some((marker) => sameModelInvocation(event, marker));
+        return false;
       });
-      if (changed.some((event) => event.event === "RunPauseAcknowledged")) return true;
-      const events = eventsOf(target);
-      if (!events.some((event) => event.event === "RunPauseAcknowledged")) return false;
-      const active = target.status?.capacity?.activeReservations;
-      assert.ok(Array.isArray(active), "scoped-pause active reservations unavailable");
-      return changed.some(
-        (event) =>
-          event.event === "AttemptIntegrated" &&
-          active.some(
-            (reservation) =>
-              reservation.workItem === event.workItem && reservation.attempt === event.attempt,
-          ),
-      );
     },
   };
 }
@@ -1368,6 +1392,7 @@ export async function main(env = process.env, run = checkpointMain) {
           return {
             ...record.latestFreshObservation,
             receipts,
+            baselineReceipts: record.latestFreshObservation.receipts,
             changedReceipts,
             pendingReceipts,
             topologyPending,
@@ -1545,33 +1570,18 @@ export async function main(env = process.env, run = checkpointMain) {
         };
         const settled = (observation, paused, index = paused ? 1 : 0, activated = true) => {
           if (observation.status.run.state !== (paused ? "paused" : "completed")) return false;
-          const events = eventsOf(observation),
-            windows = reservationWindows(events),
-            reservations = windows
-              .filter((window) => !window.events.some((event) => event.event === "AttemptDeferred"))
-              .map(({ reservation }) => reservation);
+          const events = eventsOf(observation);
           if (
             !events.some(
               (event) => event.event === (paused ? "RunPauseAcknowledged" : "FactoryRunCompleted"),
             )
           )
             return false;
+          const dependencies = concurrencySettlementDependencies(events);
           if (
-            reservations.some((reserved) => {
-              const window = windows.find((candidate) => candidate.reservation === reserved);
-              return !window.events.some(
-                (event) => event.event === "AttemptIntegrated" && sameAttempt(event, reserved),
-              );
-            })
-          )
-            return false;
-          const start = events.find((event) => event.event === "FactoryRunStarted");
-          if (
-            !start ||
-            qualificationModelAccounting(
-              events.filter((event) => event.runId === start.runId),
-              { requireMarkers: true },
-            ).unresolved.length
+            !dependencies.start ||
+            dependencies.attempts.length > 0 ||
+            dependencies.modelInvocations.length > 0
           )
             return false;
           // Status and comments are independently fetched; one-sided completion is pending, not proof.

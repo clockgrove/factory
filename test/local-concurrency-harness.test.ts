@@ -1420,31 +1420,85 @@ describe("independent authenticated timing assertions", () => {
     });
     expect(concurrencyReceiptProgress("refill", [...pair()].reverse())).toBe(true);
   });
-  it("uses exact active-reservation dependencies for partial scoped-pause wake hints", () => {
+  it("uses exact unsettled receipt windows for partial scoped-pause wake hints", () => {
+    const start = event(2, 1, "FactoryRunStarted", 1, 21);
+    const reserved = event(2, 4, "AttemptReserved", 8, 21);
     const request = event(2, 5, "RunPauseRequested", 9, 21);
     const ack = event(2, 6, "RunPauseAcknowledged", 10, 21);
     const integrated = event(2, 7, "AttemptIntegrated", 11, 21);
     const arbitrary = event(2, 7, "FindingDecision", 11, 21);
+    const baseline = observation([start, reserved, request, ack]);
     const hinted = (change: Record<string, unknown>) => [
-      { ...observation([]), changedReceipts: [], pendingReceipts: [] },
       {
-        ...observation([request, ack, change]),
+        ...observation([]),
+        baselineReceipts: [],
+        changedReceipts: [],
+        pendingReceipts: [],
+      },
+      {
+        ...observation([start, reserved, request, ack, change]),
+        baselineReceipts: baseline.receipts,
         changedReceipts: [{ event: change }],
         pendingReceipts: [{ event: change }],
-        status: { capacity: { activeReservations: [{ workItem: 21, attempt: 1 }] } },
       },
     ];
     const contract = scopedPauseObservationContract(() => {
       throw Error("full settlement proof must not run on a partial hint");
     });
+    expect(
+      contract.progress([
+        hinted(integrated)[0],
+        {
+          ...observation([start, reserved, request, ack]),
+          baselineReceipts: observation([start, reserved, request]).receipts,
+          changedReceipts: [{ event: ack }],
+          pendingReceipts: [{ event: ack }],
+        },
+      ]),
+    ).toBe(true);
     expect(contract.progress(hinted(integrated))).toBe(true);
     expect(contract.progress(hinted(arbitrary))).toBe(false);
+    const marker = {
+      ...event(2, 8, "BudgetReserved", 12, 21),
+      kind: "budget",
+      phase: "management",
+      unit: "model_tokens",
+      modelInvocationId: "review-21",
+      usageId: "invocation-review-21",
+      amount: 0,
+      policyDigest: "a".repeat(64),
+      directorEpoch: 1,
+    };
+    const reconciled = {
+      ...marker,
+      event: "BudgetReconciled",
+      sequence: 9,
+      usageId: "review-21-actual",
+      amount: 2,
+    };
+    const accountingBaseline = observation([start, request, ack, marker]);
+    expect(
+      contract.progress([
+        hinted(integrated)[0],
+        {
+          ...observation([start, request, ack, marker, reconciled]),
+          baselineReceipts: accountingBaseline.receipts,
+          changedReceipts: [{ event: reconciled }],
+          pendingReceipts: [{ event: reconciled }],
+        },
+      ]),
+    ).toBe(true);
     expect(
       contract.progress([
         hinted(integrated)[0],
         {
           ...hinted(integrated)[1],
-          status: { capacity: { activeReservations: [{ workItem: 22, attempt: 1 }] } },
+          baselineReceipts: observation([
+            start,
+            event(2, 4, "AttemptReserved", 8, 22),
+            request,
+            ack,
+          ]).receipts,
         },
       ]),
     ).toBe(false);
@@ -1852,34 +1906,32 @@ describe("bounded existing installed-controller composition", () => {
   it("rereads the full scoped-pause observation after a later integration hint", async () => {
     const f = scenarioPort();
     const originalPoll = f.port.pollPair;
-    const activeReservation = { workItem: 4, attempt: 1 };
+    const start = event(2, 1, "FactoryRunStarted", 1, 4);
+    const reserved = event(2, 4, "AttemptReserved", 8, 4);
     const pauseRequest = event(2, 5, "RunPauseRequested", 9, 4);
     const pauseAck = event(2, 6, "RunPauseAcknowledged", 10, 4);
     const integration = event(2, 7, "AttemptIntegrated", 11, 4);
     const unrelated = event(2, 7, "FindingDecision", 11, 4);
     const contradictory = event(2, 7, "AttemptIntegrated", 11, 5);
-    const scoped = (receipts: Record<string, unknown>[], activeReservations: unknown[]) => ({
+    const scoped = (receipts: Record<string, unknown>[]) => ({
       scopedPauseFixture: true,
       receipts: receipts.map((event) => ({ event })),
-      status: { capacity: { activeReservations } },
     });
-    const baseline = scoped([pauseRequest, pauseAck], [activeReservation]);
+    const baseline = scoped([start, reserved, pauseRequest, pauseAck]);
     const hint = (changed: Record<string, unknown>) => ({
-      ...scoped([pauseRequest, pauseAck, changed], [activeReservation]),
+      ...scoped([start, reserved, pauseRequest, pauseAck, changed]),
+      baselineReceipts: baseline.receipts,
       changedReceipts: [{ event: changed }],
       pendingReceipts: [{ event: changed }],
     });
     const hinted = hint(integration);
-    const complete = scoped([pauseRequest, pauseAck, integration], []);
+    const complete = scoped([start, reserved, pauseRequest, pauseAck, integration]);
     f.port.settled = (observation, paused) => {
       if (!(observation as { scopedPauseFixture?: boolean }).scopedPauseFixture) return true;
       expect(paused).toBe(true);
       const value = observation as typeof complete;
       const integrated = value.receipts.some(({ event }) => event.event === "AttemptIntegrated");
-      if (!integrated) return false;
-      if (value.status.capacity.activeReservations.length > 0)
-        throw Error("stale active capacity must not be accepted");
-      return true;
+      return integrated;
     };
     f.port.pollPair = async (phase, accept, progress) => {
       if (phase !== "scoped-pause") return originalPoll(phase, accept, progress);
@@ -1888,7 +1940,6 @@ describe("bounded existing installed-controller composition", () => {
       expect(accept([peer, baseline])).toBe(false);
       expect(progress?.([peer, hint(unrelated)])).toBe(false);
       expect(progress?.([peer, hint(contradictory)])).toBe(false);
-      expect(() => accept([peer, hinted])).toThrow(/stale active capacity/);
       expect(progress?.([peer, hinted])).toBe(true);
       expect(accept([peer, complete])).toBe(true);
       return [peer, complete];

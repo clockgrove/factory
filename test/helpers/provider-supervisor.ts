@@ -81,6 +81,10 @@ const retiredProviderFixtureRemovalOptions = {
   maxRetries: 5,
   retryDelay: 100,
 } as const;
+export type RetiredProviderFixtureRemoval = (
+  path: string,
+  options: typeof retiredProviderFixtureRemovalOptions,
+) => Promise<void>;
 const PNPM_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-pnpm")!
   .runtimeRequirement!;
 const NPM_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "node-npm")!
@@ -91,6 +95,7 @@ const BUN_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(
 const UV_RUNTIME_REQUIREMENT = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "python-uv")!
   .runtimeRequirement!;
 export interface ProviderFaults {
+  removeRetiredPath?: RetiredProviderFixtureRemoval;
   recordProtocol?: typeof RESULT_RECORD_PROTOCOL;
   loseResultReceiptResponse?: boolean;
   reviewUnmetCriteria?: boolean;
@@ -2065,9 +2070,10 @@ jobs:
           vi.restoreAllMocks();
           vi.unstubAllGlobals();
           // Never enumerate or sweep user caches, including interrupted real runs.
+          const removeRetiredPath = faults.removeRetiredPath ?? rm;
           for (const root of retainedArtifactRoots)
-            await rm(root, retiredProviderFixtureRemovalOptions);
-          await rm(repository, retiredProviderFixtureRemovalOptions);
+            await removeRetiredPath(root, retiredProviderFixtureRemovalOptions);
+          await removeRetiredPath(repository, retiredProviderFixtureRemovalOptions);
         } finally {
           // After a timeout this callback only opens fixture admission once the
           // old run actually settles; it never restores mocks or deletes files.

@@ -2,7 +2,10 @@ import { access, rm } from "node:fs/promises";
 import { afterEach, expect, it, vi } from "vitest";
 import { GitHubReader } from "../src/github.js";
 import { LeaseManager } from "../src/control/lease.js";
-import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
+import {
+  providerSupervisorFixture,
+  type RetiredProviderFixtureRemoval,
+} from "./helpers/provider-supervisor.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -16,11 +19,15 @@ function deferred() {
   });
   return { promise, resolve };
 }
-async function blockedFixture(signal?: AbortSignal) {
+async function blockedFixture(
+  signal?: AbortSignal,
+  removeRetiredPath?: RetiredProviderFixtureRemoval,
+) {
   const fixture = await providerSupervisorFixture("daytona-burst", {
     localOnly: true,
     dependencyChain: true,
     controllerActivation: true,
+    ...(removeRetiredPath ? { removeRetiredPath } : {}),
   });
   const entered = deferred(),
     unblock = deferred();
@@ -56,6 +63,74 @@ async function blockedFixture(signal?: AbortSignal) {
   ]);
   return { fixture, run, outcome, unblock, observedRuns };
 }
+
+it("passes Node's bounded native retry contract only after the fixture run drains", async () => {
+  let repository = "";
+  const transient = Object.assign(new Error("transient directory mutation"), {
+    code: "ENOTEMPTY",
+  });
+  const attempts: number[] = [];
+  const removeRetiredPath = vi.fn<RetiredProviderFixtureRemoval>(async (path, options) => {
+    if (path !== repository) return rm(path, options);
+    for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) {
+      attempts.push(attempt);
+      if (attempt === 0) {
+        expect(transient).toMatchObject({ code: "ENOTEMPTY" });
+        continue;
+      }
+      return rm(path, { recursive: options.recursive, force: options.force });
+    }
+    throw transient;
+  });
+  const f = await blockedFixture(undefined, removeRetiredPath);
+  cleanup.push(() => f.fixture.dispose());
+  repository = f.fixture.repository;
+  const disposal = f.fixture.dispose();
+  expect(removeRetiredPath).not.toHaveBeenCalled();
+  f.unblock.resolve();
+  await expect(disposal).resolves.toBeUndefined();
+  expect(await f.outcome).toMatchObject({ result: { status: "cancelled" } });
+  expect(attempts).toEqual([0, 1]);
+  expect(removeRetiredPath).toHaveBeenCalledWith(repository, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
+  await expect(access(repository)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("propagates persistent retired-repository removal failure and preserves its evidence", async () => {
+  let repository = "";
+  const persistent = Object.assign(new Error("persistent fixture cleanup failure"), {
+    code: "ENOTEMPTY",
+  });
+  const attempts: number[] = [];
+  const removeRetiredPath = vi.fn<RetiredProviderFixtureRemoval>(async (path, options) => {
+    if (path !== repository) return rm(path, options);
+    for (let attempt = 0; attempt <= options.maxRetries; attempt += 1) attempts.push(attempt);
+    throw persistent;
+  });
+  const fixture = await providerSupervisorFixture("daytona-burst", {
+    localOnly: true,
+    removeRetiredPath,
+  });
+  repository = fixture.repository;
+  try {
+    await expect(fixture.dispose()).rejects.toBe(persistent);
+    await expect(fixture.dispose()).rejects.toBe(persistent);
+    expect(attempts).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(removeRetiredPath).toHaveBeenCalledWith(repository, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
+    await expect(access(repository)).resolves.toBeUndefined();
+  } finally {
+    await rm(repository, { recursive: true, force: true });
+  }
+});
 
 it("drains an abandoned real Supervisor before restoring mocks or admitting the next fixture", async () => {
   const f = await blockedFixture();

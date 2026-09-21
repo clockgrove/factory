@@ -957,13 +957,32 @@ describe("Supervisor model dispatch journal", () => {
         }),
         parseFactoryEvent({
           protocol: "clockgrove.factory/v2",
+          kind: "budget",
+          event: "BudgetReconciled",
+          objective: 7,
+          runId: f.runId,
+          workItem: 9,
+          attempt: 1,
+          sequence: sequence + 1,
+          at: new Date().toISOString(),
+          phase: "execution",
+          unit: "model_tokens",
+          amount: 10,
+          usageId: "synthetic-gate",
+          modelInvocationId: "synthetic-gate",
+          directorEpoch: f.lease.epoch,
+          policyDigest: f.lease.policyDigest,
+          reportedModelUsage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+        }),
+        parseFactoryEvent({
+          protocol: "clockgrove.factory/v2",
           kind: "provider",
           event: "ProviderQuotaBlocked",
           objective: 7,
           runId: f.runId,
           workItem: 9,
           attempt: 1,
-          sequence: sequence + 1,
+          sequence: sequence + 2,
           at: new Date().toISOString(),
           reasonCode: "provider-quota-exhausted",
           provider: "fixture-provider",
@@ -971,7 +990,7 @@ describe("Supervisor model dispatch journal", () => {
           backend: "codex-sdk/local-worktree",
           modelInvocationId: "synthetic-gate",
           providerMessage: "fixture provider quota exhausted",
-          accounting: "unknown",
+          accounting: "exact",
         }),
         parseFactoryEvent({
           protocol: "clockgrove.factory/v2",
@@ -979,13 +998,18 @@ describe("Supervisor model dispatch journal", () => {
           event: "FactoryRunCancellationRequested",
           objective: 7,
           runId: f.runId,
-          sequence: sequence + 2,
+          sequence: sequence + 3,
           at: new Date().toISOString(),
           requestId: "cancel-with-resumed-sibling",
           requestedBy: "operator",
         }),
       );
       expect(providerQuotaGates(f.events(), f.runId)).toHaveLength(1);
+      expect(
+        unresolvedModelInvocations(f.events(), f.runId).some(
+          (event) => event.modelInvocationId === "synthetic-gate",
+        ),
+      ).toBe(false);
 
       expect(await f.run()).toMatchObject({ status: "cancelled" });
       const siblingAdmission = (

@@ -2768,10 +2768,26 @@ export function registerAdoptedRecoveryTests() {
             policyDigest: f.pd,
           }),
           f.event({
+            kind: "budget",
+            event: "BudgetReconciled",
+            runId: "successor",
+            sequence: terminalSequence + 1,
+            workItem: gatedSibling.number,
+            attempt: 1,
+            phase: "execution",
+            unit: "model_tokens",
+            amount: 10,
+            usageId: modelInvocationId,
+            modelInvocationId,
+            directorEpoch: f.lease.epoch,
+            policyDigest: f.pd,
+            reportedModelUsage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+          }),
+          f.event({
             kind: "provider",
             event: "ProviderQuotaBlocked",
             runId: "successor",
-            sequence: terminalSequence + 1,
+            sequence: terminalSequence + 2,
             workItem: gatedSibling.number,
             attempt: 1,
             reasonCode: "provider-quota-exhausted",
@@ -2780,14 +2796,14 @@ export function registerAdoptedRecoveryTests() {
             backend: "codex-sdk/local-worktree",
             modelInvocationId,
             providerMessage: "fixture provider quota exhausted",
-            accounting: "unknown",
+            accounting: "exact",
           }),
         ];
         const cancellation = f.event({
           kind: "run",
           event: "FactoryRunCancellationRequested",
           runId: "successor",
-          sequence: terminalSequence + 2,
+          sequence: terminalSequence + 3,
           requestId: "cancel-with-succeeded-artifact-consumer",
           requestedBy: "operator",
         });
@@ -2815,6 +2831,18 @@ export function registerAdoptedRecoveryTests() {
         expect(f.launch).not.toHaveBeenCalled();
         expect(f.validate).not.toHaveBeenCalled();
         expect(f.review).not.toHaveBeenCalled();
+        expect(
+          gatedSibling.factoryEvents!.filter(
+            (event) => event.kind === "budget" && event.modelInvocationId === modelInvocationId,
+          ),
+        ).toMatchObject([
+          { event: "BudgetReserved", amount: 0 },
+          {
+            event: "BudgetReconciled",
+            amount: 10,
+            reportedModelUsage: { inputTokens: 7, outputTokens: 3, cachedInputTokens: 2 },
+          },
+        ]);
         const interruptionEvents = consumer.factoryEvents!.filter(
           (event) =>
             event.kind === "attempt" &&

@@ -516,7 +516,7 @@ describe("cleanup-only cancellation of a stale activation", () => {
         delete event.reportedModelUsage;
       }
     h.requestCancellation();
-    expect(await h.f.run()).toMatchObject({ status: "cancelled" });
+    await expect(h.f.run()).rejects.toThrow(/execution model accounting remains open or ambiguous/);
     expect(
       unresolvedModelInvocations(h.f.events()).filter((event) => event.phase === "execution"),
     ).toHaveLength(1);
@@ -531,5 +531,6 @@ describe("cleanup-only cancellation of a stale activation", () => {
             event.unit === "model_tokens",
         ),
     ).toBe(false);
+    expect(h.f.events().some((event) => event.event === "FactoryRunCancelled")).toBe(false);
   }, 30_000);
 });

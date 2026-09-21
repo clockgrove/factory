@@ -32,19 +32,23 @@ backends/cloud fallback, and set sandbox and managed-session allowances to zero.
 An explicit 250,000–500,000 model-token stop threshold is required initially. It
 is an observed admission threshold, not a provider-enforced hard token cap.
 Missing usage, uncertain cleanup, lost authority, or exhausted allowance must
-remain blocked/incomplete. The harness does not override those gates.
-In particular, absence alone does not supply a killed worker's token counters:
-restart stops before retry/resume if its actual model-usage receipt is missing.
+remain blocked/incomplete. The harness does not override those gates. Exact
+producer absence after cancellation can close the invocation lifecycle as
+`terminal-unavailable`; it does not supply token counters or make remaining
+model-token allowance available.
 
 The pinned TypeScript Codex SDK reports usage on `turn.completed`; its failed-turn and abort
 surfaces do not provide an equivalent final usage result. Factory drains the cancelled stream and
 observes any reported counters before cleanup. An interruption without those counters can therefore
-prove cancellation and resource absence while leaving accounting incomplete. Do not substitute a
+prove cancellation and resource absence and record that invocation as terminal unavailable. The
+invocation is non-replayable, while aggregate token use and remaining allowance stay unavailable.
+Do not substitute a
 CLI account-wide usage percentage, guessed token count, or process absence for the missing worker
 receipt.
 The [official JSON event example](https://learn.chatgpt.com/docs/non-interactive-mode#make-output-machine-readable)
 also places usage on `turn.completed`; it does not establish a separate interrupted-usage retrieval
-contract. This limitation is not proof of a Factory implementation defect or a passed accounting gate.
+contract. Terminal-unavailable accounting closes only the exact invocation lifecycle; it is not an
+exact spending receipt or a zero-token observation.
 
 ## Explicit phases
 

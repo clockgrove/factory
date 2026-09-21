@@ -77,12 +77,34 @@ export const deepScenarioTests = Object.freeze([
 
 export const prImpactRules = Object.freeze([
   {
+    path: "src/control/budget.ts",
+    tests: [
+      "test/admission-settlement.test.ts",
+      "test/economics.test.ts",
+      "test/model-invocation-budget.test.ts",
+      "test/qualification-model-accounting.test.ts",
+      "test/recovery-accounting.test.ts",
+      "test/recovery-runtime.test.ts",
+      "test/runtime-economics.test.ts",
+      "test/supervisor-cancel-usage.test.ts",
+    ],
+  },
+  {
+    path: "scripts/qualification-model-accounting.mjs",
+    tests: ["test/local-fault-harness.test.ts", "test/qualification-model-accounting.test.ts"],
+  },
+  {
+    path: "scripts/verify-local-faults.mjs",
+    tests: ["test/local-fault-harness.test.ts"],
+  },
+  {
     path: "src/supervisor.ts",
     tests: [
       "test/supervisor-preflight.test.ts",
       "test/supervisor-commands.test.ts",
       "test/regular-pipeline-supervisor.test.ts",
       "test/supervisor-result-receipts.test.ts",
+      "test/supervisor-cancel-usage.test.ts",
     ],
   },
   {

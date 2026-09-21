@@ -5,6 +5,7 @@ import {
   deriveBudgetUsage,
   isModelInvocationMarker,
   remainingBudget,
+  terminalUnavailableModelInvocations,
   unreconciledBudgetReservations,
 } from "../control/budget.js";
 import type { FactoryEvent } from "../protocol/events.js";
@@ -22,7 +23,12 @@ type RunTerminalEvent = Extract<
   FactoryEvent,
   { kind: "run"; event: "FactoryRunCompleted" | "FactoryRunCancelled" | "FactoryRunEscalated" }
 >;
-type Source = { runId: string; workItem?: number; attempt?: number };
+type Source = {
+  runId: string;
+  workItem?: number;
+  attempt?: number;
+  modelInvocationId?: string;
+};
 export interface RecoveryAccountingAssessment {
   scope: "historical-assessment";
   runIds: string[];
@@ -442,6 +448,22 @@ export function assessRecoveryAccounting(input: {
       reason:
         "An exact model dispatch has no linked actual-usage reconciliation; its zero-valued intent marker is not observed zero consumption.",
     });
+  const terminalUnavailable = terminalUnavailableModelInvocations([...events]);
+  const terminalUnavailableAttempts = new Set<string>();
+  for (const { marker } of terminalUnavailable) {
+    terminalUnavailableAttempts.add(
+      JSON.stringify([marker.runId, marker.workItem, marker.attempt]),
+    );
+    unknown({
+      runId: marker.runId,
+      ...(marker.workItem === undefined ? {} : { workItem: marker.workItem }),
+      ...(marker.attempt === undefined ? {} : { attempt: marker.attempt }),
+      modelInvocationId: marker.modelInvocationId,
+      phase: marker.phase,
+      reason:
+        "The model invocation reached a proved terminal producer state without provider counters; its consumption remains unavailable and cannot be replayed.",
+    });
+  }
   if (outstanding.length)
     block(
       "unreconciled-budget-reservations",
@@ -520,6 +542,7 @@ export function assessRecoveryAccounting(input: {
       counts.set(first.workItem, entry);
     }
     if (!group.some((event) => event.event === "AttemptStarted")) continue;
+    if (terminalUnavailableAttempts.has(attemptKey(first))) continue;
     const workerUsage = workerBudgets.get(attemptKey(first));
     const terminals = group.filter((event) => terminalWorkers.has(event.event));
     const observed = terminals.filter((event) => event.reportedModelTokens !== undefined);
@@ -593,6 +616,7 @@ export function assessRecoveryAccounting(input: {
       "unknown-model-usage",
       "Model usage coverage is incomplete; remaining recorded allowance is not a spending grant.",
     );
+  if (result.unknownModelUsageCount > 0 && result.remaining) result.remaining.modelTokens = null;
   if (result.remaining.modelTokens === 0)
     block(
       "model-token-limit",

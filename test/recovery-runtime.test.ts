@@ -2112,8 +2112,53 @@ describe("verified successor runtime loader", () => {
     expect(await f.read()).toMatchObject({
       status: "verified",
       currentUnknownModelUsageCount: 1,
-      currentUnknownModelUsage: [{ workItem: 8, attempt: 1 }],
+      currentUnknownModelUsage: [{ workItem: 8, attempt: 1, accounting: "unresolved" }],
       usage: { modelTokens: 10 },
+      remaining: { modelTokens: null },
+    });
+  });
+
+  it("preserves terminal-unavailable invocation identity without treating it as replayable", async () => {
+    const f = await adopted();
+    const reserved = await addAttempt(f);
+    const modelInvocationId = "worker-8-1";
+    f.snapshot.workItems[0]!.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        runId: "successor",
+        sequence: 102,
+        workItem: 8,
+        attempt: 1,
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${modelInvocationId}`,
+        modelInvocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+      }),
+      event({
+        ...reserved,
+        event: "AttemptCancelled",
+        sequence: 103,
+        modelInvocationId,
+        producerState: "absent",
+        modelUsageAccounting: "terminal-unavailable",
+      }),
+    );
+    expect(await f.read()).toMatchObject({
+      status: "verified",
+      currentUnknownModelUsageCount: 1,
+      currentUnknownModelUsage: [
+        {
+          workItem: 8,
+          attempt: 1,
+          accounting: "terminal-unavailable",
+          modelInvocationId,
+        },
+      ],
+      remaining: { modelTokens: null },
     });
   });
 

@@ -1,5 +1,5 @@
 import type { FactoryEvent, MediaEvent } from "../protocol/events.js";
-import { unreconciledBudgetReservations } from "./budget.js";
+import { terminalUnavailableModelInvocations, unreconciledBudgetReservations } from "./budget.js";
 import { unreconciledCapacityReservations } from "../scheduling/capacity-ledger.js";
 import { deduplicateFactoryEvents, hasCurrentWriterAuthority } from "./receipts.js";
 import type { IssueAdmissionEntry, IssueAdmissionEvidence } from "./issue-admission.js";
@@ -287,6 +287,7 @@ export function buildAdmissionSettlementEvidence(args: {
     };
   }
   const unreconciled = unreconciledBudgetReservations(scoped);
+  const terminalUnavailable = terminalUnavailableModelInvocations(scoped);
   const retainedUnknownModelInvocationId = args.retainedUnknownModelInvocationId;
   const recoveryBlock = attemptRecoveryBlockForAttempt(
     scoped,
@@ -299,6 +300,7 @@ export function buildAdmissionSettlementEvidence(args: {
   if (unreconciled.length) {
     if (
       !retainedUnknownModelInvocationId ||
+      terminalUnavailable.length !== 0 ||
       unreconciled.length !== 1 ||
       unreconciled.some(
         (event) =>
@@ -310,7 +312,13 @@ export function buildAdmissionSettlementEvidence(args: {
     )
       throw new Error("admission budget or model usage remains unknown");
   } else if (retainedUnknownModelInvocationId) {
-    throw new Error("admission cannot retain model usage that is already reconciled");
+    if (
+      terminalUnavailable.length !== 1 ||
+      terminalUnavailable[0]?.marker.modelInvocationId !== retainedUnknownModelInvocationId
+    )
+      throw new Error("admission cannot retain model usage that is already reconciled");
+  } else if (terminalUnavailable.length) {
+    throw new Error("admission terminal-unavailable model usage was not retained");
   }
   if (unreconciledCapacityReservations(scoped).length)
     throw new Error("admission capacity remains reserved");

@@ -425,7 +425,7 @@ const Attempt = Common.extend({
   sameAttemptResume: z.literal("unavailable").optional(),
   terminalEvidence: z.literal("unavailable").optional(),
   artifactEvidence: z.literal("unavailable").optional(),
-  modelUsageAccounting: z.literal("unknown").optional(),
+  modelUsageAccounting: z.enum(["unknown", "terminal-unavailable"]).optional(),
   nextDisposition: z.literal("explicit-recovery").optional(),
   admissionClass: z.enum(["local", "remote-required", "burst"]).optional(),
   admissionReason: z
@@ -448,25 +448,64 @@ const Attempt = Common.extend({
   minimumCloudTimeSavedMinutes: z.number().nonnegative().finite().optional(),
   reason: boundedText(8_000).optional(),
 }).superRefine((event, context) => {
-  const recoveryFields = [
-    event.modelInvocationId,
-    event.producerState,
-    event.sameAttemptResume,
-    event.terminalEvidence,
-    event.artifactEvidence,
-    event.modelUsageAccounting,
-    event.nextDisposition,
-  ];
-  if (
-    event.event === "AttemptRecoveryBlocked"
-      ? recoveryFields.some((field) => field === undefined)
-      : recoveryFields.some((field) => field !== undefined)
-  )
+  const hasInvocationDisposition =
+    event.modelInvocationId !== undefined ||
+    event.producerState !== undefined ||
+    event.modelUsageAccounting !== undefined;
+  const hasRecoveryDisposition =
+    event.sameAttemptResume !== undefined ||
+    event.terminalEvidence !== undefined ||
+    event.artifactEvidence !== undefined ||
+    event.nextDisposition !== undefined;
+  if (event.event === "AttemptRecoveryBlocked") {
+    if (
+      !event.modelInvocationId ||
+      event.producerState !== "absent" ||
+      event.sameAttemptResume !== "unavailable" ||
+      event.terminalEvidence !== "unavailable" ||
+      event.artifactEvidence !== "unavailable" ||
+      event.modelUsageAccounting !== "unknown" ||
+      event.nextDisposition !== "explicit-recovery"
+    )
+      context.addIssue({
+        code: "custom",
+        message: "recovery-blocked evidence must completely bind one absent producer",
+      });
+    if (event.reportedModelTokens !== undefined || event.reportedModelUsage !== undefined)
+      context.addIssue({
+        code: "custom",
+        path: ["modelUsageAccounting"],
+        message: "unknown model usage cannot also report exact model counters",
+      });
+  } else if (event.event === "AttemptCancelled") {
+    if (
+      hasRecoveryDisposition ||
+      (hasInvocationDisposition &&
+        (!event.modelInvocationId ||
+          event.producerState !== "absent" ||
+          event.modelUsageAccounting !== "terminal-unavailable"))
+    )
+      context.addIssue({
+        code: "custom",
+        message:
+          "cancelled terminal-unavailable evidence must completely bind one absent model invocation",
+      });
+    if (
+      hasInvocationDisposition &&
+      (event.reportedModelTokens !== undefined || event.reportedModelUsage !== undefined)
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["modelUsageAccounting"],
+        message: "terminal-unavailable model usage cannot also report exact model counters",
+      });
+  } else if (hasInvocationDisposition || hasRecoveryDisposition) {
     context.addIssue({
       code: "custom",
       message:
-        "recovery-blocked evidence must completely bind one absent producer and belongs only to AttemptRecoveryBlocked",
+        "recovery evidence belongs only to AttemptRecoveryBlocked; terminal-unavailable evidence belongs only to AttemptCancelled",
     });
+  }
   if ((event.sourceArchiveDigest === undefined) !== (event.sourceArchiveBytes === undefined))
     context.addIssue({
       code: "custom",

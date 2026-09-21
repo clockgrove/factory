@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { isModelInvocationMarker, unresolvedModelInvocations } from "../control/budget.js";
+import {
+  isModelInvocationMarker,
+  terminalUnavailableModelInvocations,
+  unresolvedModelInvocations,
+} from "../control/budget.js";
 import { deduplicateFactoryEvents } from "../control/receipts.js";
 import { queuedReasonCode } from "../explanations/index.js";
 import type { FactoryEvent } from "../protocol/events.js";
@@ -66,6 +70,7 @@ export interface RuntimeEconomics {
   >;
   executionModelUsageCoverage: {
     startedAttemptsWithReceipt: number;
+    startedAttemptsWithTerminalUnavailable: number;
     startedAttemptsWithoutReceipt: number;
   };
   nativeUsageCoverage: {
@@ -563,6 +568,10 @@ export function summarizeRuntimeEconomics(
         key(value) === key(started) && value.phase === "execution" && value.unit === "model_tokens",
     ),
   ).length;
+  const terminalUnavailableModel = terminalUnavailableModelInvocations(events).filter(
+    ({ marker }) =>
+      marker.phase === "execution" && starts.some((started) => key(started) === key(marker)),
+  ).length;
   const attemptsWithUsage = [...attempts.keys()].filter((identity) =>
     [...usage.values()].some((value) => key(value) === identity),
   ).length;
@@ -673,6 +682,7 @@ export function summarizeRuntimeEconomics(
           ),
     executionModelUsageCoverage: {
       startedAttemptsWithReceipt: withModel,
+      startedAttemptsWithTerminalUnavailable: terminalUnavailableModel,
       startedAttemptsWithoutReceipt: starts.length - withModel,
     },
     nativeUsageCoverage: {

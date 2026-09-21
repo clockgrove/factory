@@ -47,6 +47,143 @@ describe("installed qualifier model accounting", () => {
     expect(unknown.unresolved).toEqual(unresolvedModelInvocations([rows[0]!]));
     expect(unknown.usage).toEqual([]);
   });
+  it("closes a proven absent cancellation as terminal unavailable without inventing usage", () => {
+    const [marker] = fixture();
+    const cancelled = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "attempt",
+      event: "AttemptCancelled",
+      objective: marker!.objective,
+      runId: marker!.runId,
+      sequence: 2,
+      at: "2026-09-07T00:00:01Z",
+      workItem: marker!.workItem,
+      attempt: marker!.attempt,
+      backend: "codex-sdk/local-worktree",
+      baseSha: "b".repeat(40),
+      reason: "operator cancellation",
+      directorEpoch: marker!.directorEpoch,
+      policyDigest: marker!.policyDigest,
+      modelInvocationId: marker!.modelInvocationId,
+      producerState: "absent",
+      modelUsageAccounting: "terminal-unavailable",
+    });
+
+    expect(
+      qualificationModelAccounting([marker!, cancelled], { requireMarkers: true }),
+    ).toMatchObject({
+      total: 0,
+      usage: [],
+      unresolved: [],
+      terminalUnavailable: [expect.objectContaining({ modelInvocationId: "worker-8-1" })],
+    });
+    expect(() =>
+      qualificationModelAccounting([marker!, { ...cancelled, reportedModelTokens: 0 }], {
+        requireMarkers: true,
+      }),
+    ).toThrow();
+    expect(() =>
+      qualificationModelAccounting([...fixture(), { ...cancelled, sequence: 3 }], {
+        requireMarkers: true,
+      }),
+    ).toThrow(/conflicting terminal accounting dispositions/);
+    expect(
+      qualificationModelAccounting([marker!, cancelled, { ...cancelled, sequence: 3 }], {
+        requireMarkers: true,
+      }).terminalUnavailable,
+    ).toHaveLength(1);
+  });
+  it("matches runtime closure for abandonment and ambiguity", () => {
+    const [marker, exact] = fixture();
+    const abandoned = parseFactoryEvent({
+      ...marker!,
+      event: "BudgetAbandoned",
+      sequence: 2,
+      amount: 0,
+      usageId: "abandoned-worker-8-1",
+      reason: "provider boundary was not crossed",
+    });
+    const abandonedProof = qualificationModelAccounting([marker!, abandoned], {
+      requireMarkers: true,
+    });
+    expect(abandonedProof.abandoned).toEqual([abandoned]);
+    expect(abandonedProof.unresolved).toEqual(unresolvedModelInvocations([marker!, abandoned]));
+
+    const laterMarker = parseFactoryEvent({ ...marker!, sequence: 3 });
+    const earlierExact = parseFactoryEvent({ ...exact!, sequence: 2 });
+    expect(
+      qualificationModelAccounting([earlierExact, laterMarker], { requireMarkers: true })
+        .unresolved,
+    ).toEqual(unresolvedModelInvocations([earlierExact, laterMarker]));
+  });
+  it.each([
+    { amount: 1 },
+    { usageId: "wrong-abandonment" },
+    { reason: undefined },
+    { reason: "" },
+    { reason: "x".repeat(4001) },
+    { reportedModelUsage: { inputTokens: 0, outputTokens: 0 } },
+    { usageEvidence: "as-recorded" },
+  ])("rejects malformed abandonment evidence with runtime parity: %j", (patch) => {
+    const [marker] = fixture();
+    const abandonment = {
+      ...marker!,
+      event: "BudgetAbandoned",
+      sequence: 2,
+      amount: 0,
+      usageId: "abandoned-worker-8-1",
+      reason: "provider boundary was not crossed",
+      ...patch,
+    };
+    expect(() =>
+      qualificationModelAccounting([marker!, abandonment], { requireMarkers: true }),
+    ).toThrow();
+    expect(() => parseFactoryEvent(abandonment)).toThrow();
+  });
+  it("rejects recovery-blocked and terminal-unavailable dispositions for one invocation", () => {
+    const [marker] = fixture();
+    const blocked = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "attempt",
+      event: "AttemptRecoveryBlocked",
+      objective: marker!.objective,
+      runId: marker!.runId,
+      sequence: 2,
+      at: "2026-09-07T00:00:01Z",
+      workItem: marker!.workItem,
+      attempt: marker!.attempt,
+      backend: "codex-sdk/local-worktree",
+      baseSha: "b".repeat(40),
+      directorEpoch: marker!.directorEpoch,
+      policyDigest: marker!.policyDigest,
+      modelInvocationId: marker!.modelInvocationId,
+      producerState: "absent",
+      sameAttemptResume: "unavailable",
+      terminalEvidence: "unavailable",
+      artifactEvidence: "unavailable",
+      modelUsageAccounting: "unknown",
+      nextDisposition: "explicit-recovery",
+    });
+    const cancelled = parseFactoryEvent({
+      ...blocked,
+      event: "AttemptCancelled",
+      sequence: 3,
+      sameAttemptResume: undefined,
+      terminalEvidence: undefined,
+      artifactEvidence: undefined,
+      modelUsageAccounting: "terminal-unavailable",
+      nextDisposition: undefined,
+    });
+    expect(
+      qualificationModelAccounting([marker!, blocked], { requireMarkers: true }).unresolved,
+    ).toEqual(unresolvedModelInvocations([marker!, blocked]));
+    expect(() =>
+      qualificationModelAccounting([marker!, blocked, cancelled], { requireMarkers: true }),
+    ).toThrow(/conflicting terminal accounting dispositions/);
+    expect(() => unresolvedModelInvocations([marker!, blocked, cancelled])).toThrow(
+      /conflicting terminal accounting dispositions/,
+    );
+  });
   it.each([
     "policyDigest",
     "directorEpoch",
@@ -72,21 +209,27 @@ describe("installed qualifier model accounting", () => {
     expect(qualificationModelAccounting([...rows, ...rows], { requireMarkers: true }).total).toBe(
       37,
     );
+    const repeated = qualificationModelAccounting([...rows, { ...rows[1], sequence: 3 }], {
+      requireMarkers: true,
+    });
+    expect(repeated.total).toBe(37);
+    expect(repeated.usage).toHaveLength(1);
     expect(() =>
-      qualificationModelAccounting([...rows, { ...rows[1], sequence: 3 }], {
+      qualificationModelAccounting([...rows, { ...rows[1], sequence: 3, amount: 38 }], {
         requireMarkers: true,
       }),
-    ).toThrow(/repeated/);
+    ).toThrow(/conflicting evidence/);
     expect(() =>
       qualificationModelAccounting([{ ...rows[0], amount: 37 }, rows[1]!], {
         requireMarkers: true,
       }),
     ).toThrow();
-    expect(() =>
-      qualificationModelAccounting([{ ...rows[0], sequence: 3 }, rows[1]!], {
+    const laterMarker = parseFactoryEvent({ ...rows[0]!, sequence: 3 });
+    expect(
+      qualificationModelAccounting([laterMarker, rows[1]!], {
         requireMarkers: true,
-      }),
-    ).toThrow(/precedes/);
+      }).unresolved,
+    ).toEqual(unresolvedModelInvocations([laterMarker, rows[1]!]));
   });
   it("requires explicit linkage for fresh policies without rewriting historical receipts", () => {
     const rows = fixture();

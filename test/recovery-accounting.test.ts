@@ -368,6 +368,62 @@ describe("historical successor accounting assessment", () => {
       expect.arrayContaining(["unknown-model-usage", "unreconciled-budget-reservations"]),
     );
   });
+  it("retains one terminal-unavailable invocation without reopening or double-counting it", () => {
+    const attempt = {
+      ...common("one", 2),
+      kind: "attempt" as const,
+      workItem: 2,
+      attempt: 1,
+      backend: "codex-sdk/local-worktree",
+      baseSha: "a".repeat(40),
+      directorEpoch: 1,
+      policyDigest: digest,
+    };
+    const marker = parseFactoryEvent({
+      ...common("one", 3),
+      kind: "budget",
+      event: "BudgetReserved",
+      workItem: 2,
+      attempt: 1,
+      phase: "execution",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: "invocation-worker-2-1",
+      modelInvocationId: "worker-2-1",
+      directorEpoch: 1,
+      policyDigest: digest,
+    });
+    const cancelled = parseFactoryEvent({
+      ...attempt,
+      sequence: 4,
+      event: "AttemptCancelled",
+      modelInvocationId: "worker-2-1",
+      producerState: "absent",
+      modelUsageAccounting: "terminal-unavailable",
+    });
+    const result = assess([
+      ...history("one"),
+      parseFactoryEvent({ ...attempt, event: "AttemptStarted" }),
+      marker,
+      cancelled,
+    ]);
+    expect(result.usage?.modelTokens).toBe(10);
+    expect(result.remaining?.modelTokens).toBeNull();
+    expect(result.unknownModelUsageCount).toBe(1);
+    expect(result.unknownModelUsage).toEqual([
+      expect.objectContaining({
+        runId: "one",
+        workItem: 2,
+        attempt: 1,
+        phase: "execution",
+        modelInvocationId: "worker-2-1",
+        reason: expect.stringContaining("proved terminal producer state"),
+      }),
+    ]);
+    expect(result.unreconciledReservations).toEqual([]);
+    expect(codes(result)).toContain("unknown-model-usage");
+    expect(codes(result)).not.toContain("unreconciled-budget-reservations");
+  });
   it("reports contradictory worker counters without hiding the recorded subtotal", () => {
     const events = [...history("one"), ...worker("one")];
     Object.assign(events.find((event) => event.event === "AttemptSucceeded")!, {

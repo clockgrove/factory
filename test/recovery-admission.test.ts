@@ -338,11 +338,20 @@ describe("cumulative recovery accounting admission", () => {
   it("unknown usage is cleared only by the exact plan acknowledgement", () => {
     const input = fixture(history().filter((entry) => entry.kind !== "budget"));
     expect(codes(verifyRecoveryAdmission(input))).toContain("unknown-model-usage");
+    expect(input.chain.accounting!.remaining!.modelTokens).toBeNull();
     input.plan.unknownUsageAcknowledgementDigest = recoveryUnknownUsageDigest(
       input.plan.sourceEventsDigest,
       input.chain.accounting!,
     );
     expect(verifyRecoveryAdmission(input.refresh()).status).toBe("verified");
+    expect(
+      codes(
+        verifyRecoveryAdmission({
+          ...input.refresh(),
+          required: { ...zero(), modelTokens: 1 },
+        }),
+      ),
+    ).toContain("model-usage-unavailable");
     input.plan.unknownUsageAcknowledgementDigest = digest("f");
     expect(verifyRecoveryAdmission(input.refresh()).status).toBe("blocked");
   });

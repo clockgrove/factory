@@ -492,7 +492,7 @@ describe("pure authenticated recovery chain verification", () => {
       expect(result.status).toBe("verified");
       expect(result.accounting?.usage?.modelTokens).toBe(10);
       expect(result.accounting?.unknownModelUsageCount).toBe(mode === "complete" ? 0 : 1);
-      expect(result.accounting?.remaining?.modelTokens).toBe(1090);
+      expect(result.accounting?.remaining?.modelTokens).toBe(mode === "complete" ? 1090 : null);
       expect(value.events).toEqual(before);
     },
   );

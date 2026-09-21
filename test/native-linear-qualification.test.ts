@@ -1580,9 +1580,18 @@ describe("native linear-stack installed matrix", () => {
     expect(assertNoOpenLiabilities([marker, actual])).toMatchObject({ total: 8, unresolved: [] });
     expect(() => assertNoOpenLiabilities([marker])).toThrow(/unresolved/);
     expect(() => assertNoOpenLiabilities([actual])).toThrow(/dispatch marker/);
-    expect(() => assertNoOpenLiabilities([marker, actual, { ...actual, sequence: 3 }])).toThrow(
-      /repeated|multiple actual/,
-    );
+    expect(() =>
+      assertNoOpenLiabilities([
+        marker,
+        actual,
+        {
+          ...actual,
+          sequence: 3,
+          amount: 9,
+          reportedModelUsage: { inputTokens: 6, outputTokens: 3, cachedInputTokens: 2 },
+        },
+      ]),
+    ).toThrow(/repeated|multiple actual/);
   });
 
   it("rejects conflicting terminal receipts", () => {

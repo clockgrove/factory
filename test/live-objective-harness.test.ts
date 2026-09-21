@@ -867,7 +867,7 @@ describe("explicit installed regular qualification", () => {
     expect(() => assertRegularCompletion(value)).not.toThrow();
 
     marker.sequence = actual.sequence + 1;
-    expect(() => assertRegularCompletion(value)).toThrow(/model usage precedes dispatch intent/);
+    expect(() => assertRegularCompletion(value)).toThrow(/unreconciled BudgetReserved/);
     marker.sequence = actual.sequence - 1;
     marker.policyDigest = "f".repeat(64);
     expect(() => assertRegularCompletion(value)).toThrow(/dispatch binding/);

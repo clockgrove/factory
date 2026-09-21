@@ -8,6 +8,20 @@ export const isQualificationModelMarker = (event) =>
   event.unit === "model_tokens" &&
   event.modelInvocationId !== undefined;
 
+export const isQualificationTerminalUnavailable = (event) =>
+  event.kind === "attempt" &&
+  event.event === "AttemptCancelled" &&
+  event.modelUsageAccounting === "terminal-unavailable" &&
+  event.producerState === "absent" &&
+  event.modelInvocationId !== undefined;
+
+const isQualificationRecoveryBlocked = (event) =>
+  event.kind === "attempt" &&
+  event.event === "AttemptRecoveryBlocked" &&
+  event.modelUsageAccounting === "unknown" &&
+  event.producerState === "absent" &&
+  event.modelInvocationId !== undefined;
+
 const identity = (event) =>
   JSON.stringify([
     event.objective,
@@ -84,8 +98,11 @@ export function qualificationModelAccounting(events, { requireMarkers = false } 
   );
   const markers = new Map(),
     actual = new Map(),
-    usageKeys = new Set();
-  const usage = rows.filter(
+    abandoned = new Map(),
+    terminalUnavailable = new Map(),
+    recoveryBlocked = new Map(),
+    usageByKey = new Map();
+  const rawUsage = rows.filter(
     (event) =>
       event.kind === "budget" &&
       event.event === "BudgetReconciled" &&
@@ -102,8 +119,57 @@ export function qualificationModelAccounting(events, { requireMarkers = false } 
     assert.ok(!prior || binding(prior, event), "conflicting model dispatch binding");
     if (!prior || event.sequence < prior.sequence) markers.set(key, event);
   }
+  for (const event of rows.filter(isQualificationTerminalUnavailable)) {
+    assert.ok(
+      typeof event.modelInvocationId === "string" &&
+        event.modelInvocationId.length > 0 &&
+        event.modelInvocationId.length <= 160 &&
+        /^[A-Za-z0-9._:/+-]+$/.test(event.modelInvocationId),
+      "terminal unavailable receipt has an invalid model invocation",
+    );
+    for (const field of ["objective", "workItem", "attempt", "directorEpoch"])
+      assert.ok(Number.isSafeInteger(event[field]) && event[field] > 0);
+    assert.ok(
+      typeof event.runId === "string" && event.runId.length > 0 && event.runId.length <= 160,
+    );
+    assert.match(event.policyDigest ?? "", /^[a-f0-9]{64}$/i);
+    assert.equal(event.reportedModelTokens, undefined);
+    assert.equal(event.reportedModelUsage, undefined);
+    const key = identity({ ...event, phase: "execution" });
+    const marker = markers.get(key);
+    assert.ok(marker, "terminal unavailable receipt has no exact dispatch marker");
+    assert.ok(binding(marker, event), "terminal unavailable receipt differs from dispatch binding");
+    assert.ok(
+      event.sequence > marker.sequence,
+      "terminal unavailable receipt precedes dispatch intent",
+    );
+    const prior = terminalUnavailable.get(key);
+    assert.ok(
+      !prior ||
+        (binding(prior, event) &&
+          prior.backend === event.backend &&
+          prior.baseSha === event.baseSha),
+      "conflicting terminal unavailable receipts for one invocation",
+    );
+    if (!prior || event.sequence < prior.sequence) terminalUnavailable.set(key, event);
+  }
+  for (const event of rows.filter(isQualificationRecoveryBlocked)) {
+    const key = identity({ ...event, phase: "execution" });
+    const marker = markers.get(key);
+    assert.ok(marker, "recovery-blocked receipt has no exact dispatch marker");
+    assert.ok(binding(marker, event), "recovery-blocked receipt differs from dispatch binding");
+    const prior = recoveryBlocked.get(key);
+    assert.ok(
+      !prior ||
+        (binding(prior, event) &&
+          prior.backend === event.backend &&
+          prior.baseSha === event.baseSha),
+      "conflicting recovery-blocked receipts for one invocation",
+    );
+    if (!prior || event.sequence < prior.sequence) recoveryBlocked.set(key, event);
+  }
   let total = 0;
-  for (const event of usage) {
+  for (const event of rawUsage) {
     assert.ok(Number.isSafeInteger(event.amount) && event.amount >= 0, "invalid known model usage");
     actualCounters(event);
     const usageKey = JSON.stringify([
@@ -114,10 +180,22 @@ export function qualificationModelAccounting(events, { requireMarkers = false } 
       event.phase,
       event.usageId,
     ]);
-    assert.ok(!usageKeys.has(usageKey), "model usage repeated");
-    usageKeys.add(usageKey);
-    total += event.amount;
-    assert.ok(Number.isSafeInteger(total), "model usage total overflow");
+    const priorUsage = usageByKey.get(usageKey);
+    assert.ok(
+      !priorUsage ||
+        (priorUsage.amount === event.amount &&
+          priorUsage.modelInvocationId === event.modelInvocationId &&
+          priorUsage.policyDigest === event.policyDigest &&
+          priorUsage.directorEpoch === event.directorEpoch &&
+          JSON.stringify(priorUsage.reportedModelUsage) ===
+            JSON.stringify(event.reportedModelUsage)),
+      "model usage repeated with conflicting evidence",
+    );
+    if (!priorUsage) {
+      usageByKey.set(usageKey, event);
+      total += event.amount;
+      assert.ok(Number.isSafeInteger(total), "model usage total overflow");
+    }
     if (event.modelInvocationId !== undefined) {
       linkedShape(event, requireMarkers);
       assert.ok(
@@ -125,14 +203,82 @@ export function qualificationModelAccounting(events, { requireMarkers = false } 
         "dispatch marker cannot masquerade as actual usage",
       );
       const key = identity(event);
-      assert.ok(!actual.has(key), "multiple actual receipts for one model invocation");
-      actual.set(key, event);
+      const prior = actual.get(key);
+      assert.ok(
+        !prior ||
+          (prior.amount === event.amount &&
+            prior.usageId === event.usageId &&
+            binding(prior, event) &&
+            JSON.stringify(prior.reportedModelUsage) === JSON.stringify(event.reportedModelUsage)),
+        "multiple conflicting actual receipts for one model invocation",
+      );
+      if (!prior || event.sequence < prior.sequence) actual.set(key, event);
       const marker = markers.get(key);
       assert.ok(marker, "model usage has no exact dispatch marker");
       assert.ok(binding(marker, event), "model usage differs from original dispatch binding");
-      assert.ok(event.sequence > marker.sequence, "model usage precedes dispatch intent");
     } else assert.ok(!requireMarkers, "model usage lacks dispatch linkage");
   }
-  const unresolved = [...markers.values()].filter((marker) => !actual.has(identity(marker)));
-  return { usage, markers: [...markers.values()], unresolved, total };
+  for (const event of rows.filter(
+    (event) =>
+      event.kind === "budget" &&
+      event.event === "BudgetAbandoned" &&
+      event.unit === "model_tokens" &&
+      event.modelInvocationId !== undefined,
+  )) {
+    linkedShape(event, requireMarkers);
+    assert.equal(event.amount, 0, "model abandonment cannot report usage");
+    assert.equal(
+      event.usageId,
+      `abandoned-${event.modelInvocationId}`,
+      "model abandonment has an invalid usage identity",
+    );
+    assert.ok(
+      typeof event.reason === "string" && event.reason.length > 0 && event.reason.length <= 4000,
+      "model abandonment requires a bounded reason",
+    );
+    assert.equal(event.reportedModelUsage, undefined);
+    assert.equal(event.usageEvidence, undefined);
+    const key = identity(event);
+    const marker = markers.get(key);
+    assert.ok(marker, "model abandonment has no exact dispatch marker");
+    assert.ok(binding(marker, event), "model abandonment differs from original dispatch binding");
+    const prior = abandoned.get(key);
+    assert.ok(
+      !prior ||
+        (prior.amount === event.amount && prior.usageId === event.usageId && binding(prior, event)),
+      "multiple conflicting abandonment receipts for one model invocation",
+    );
+    if (!prior || event.sequence < prior.sequence) abandoned.set(key, event);
+  }
+  for (const key of markers.keys()) {
+    const terminal = terminalUnavailable.get(key);
+    const recovery = recoveryBlocked.get(key);
+    const exact = actual.get(key);
+    const abandonedDisposition = abandoned.get(key);
+    assert.ok(
+      !(exact && abandonedDisposition) &&
+        !(terminal && (exact || abandonedDisposition || recovery)) &&
+        !(recovery && (exact || abandonedDisposition)),
+      "model invocation has conflicting terminal accounting dispositions",
+    );
+  }
+  const unresolved = [...markers.values()].filter((marker) => {
+    const key = identity(marker);
+    const exact = actual.get(key);
+    const abandonedDisposition = abandoned.get(key);
+    return (
+      !terminalUnavailable.has(key) &&
+      !(exact && exact.sequence > marker.sequence) &&
+      !(abandonedDisposition && abandonedDisposition.sequence > marker.sequence)
+    );
+  });
+  const usage = [...usageByKey.values()];
+  return {
+    usage,
+    markers: [...markers.values()],
+    abandoned: [...abandoned.values()],
+    terminalUnavailable: [...terminalUnavailable.values()],
+    unresolved,
+    total,
+  };
 }

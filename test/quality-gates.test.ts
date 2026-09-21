@@ -127,12 +127,27 @@ describe("proportional quality gates", () => {
       relatedInputs: ["src/supervisor.ts"],
       mappedTests: [
         "test/regular-pipeline-supervisor.test.ts",
+        "test/supervisor-cancel-usage.test.ts",
         "test/supervisor-commands.test.ts",
         "test/supervisor-preflight.test.ts",
         "test/supervisor-result-receipts.test.ts",
       ],
     });
     expect(prImpactRules.some(({ path }) => path === "src/supervisor.ts")).toBe(true);
+    expect(selectPrChecks(["scripts/qualification-model-accounting.mjs"]).mappedTests).toEqual([
+      "test/local-fault-harness.test.ts",
+      "test/qualification-model-accounting.test.ts",
+    ]);
+    expect(selectPrChecks(["src/control/budget.ts"]).mappedTests).toEqual([
+      "test/admission-settlement.test.ts",
+      "test/economics.test.ts",
+      "test/model-invocation-budget.test.ts",
+      "test/qualification-model-accounting.test.ts",
+      "test/recovery-accounting.test.ts",
+      "test/recovery-runtime.test.ts",
+      "test/runtime-economics.test.ts",
+      "test/supervisor-cancel-usage.test.ts",
+    ]);
     expect(selectPrChecks(["test/helpers/qualification-install.ts"]).mappedTests).toEqual([
       "test/phase4-qualification-install-authority.test.ts",
       "test/qualification-install-identity.test.ts",

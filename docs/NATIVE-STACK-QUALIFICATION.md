@@ -47,10 +47,17 @@ export FACTORY_LIVE_OBJECTIVE_REPOSITORY=OWNER/DISPOSABLE_REPO
 export FACTORY_LIVE_OBJECTIVE_CHECKOUT=/home/USER/Codex/disposable-repo
 export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
 export FACTORY_MANAGEMENT_TRANSCRIPT_DIR=/home/USER/Codex/factory-private-evidence/native-transcripts-UNIQUE
-export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=500000
+export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=750000
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/Codex/factory-private-evidence/native-cascade
 node scripts/verify-native-linear-objective.mjs
 ```
+
+Select an explicit model-token threshold from 250,000 through 750,000 for each native-linear row;
+500,000 remains valid when that smaller allowance is sufficient. This is an observed-stop policy,
+not a hard cap: after recorded usage reaches the selected threshold, Factory refuses the next model
+call, but an already admitted in-flight call can make the final reconciled total exceed the
+threshold. The selected allowance does not authorize paid backends, sandbox minutes, managed agent
+sessions, credentials, or recovery of a completed run.
 
 Create the transcript directory first with mode `0700`. It must be a canonical current-user-owned
 Linux path outside the disposable checkout. The shared installed-runtime builder passes that exact

@@ -662,6 +662,44 @@ describe("native linear-stack installed matrix", () => {
     });
   });
 
+  it.each([500_000, 750_000])(
+    "accepts an explicit %i observed-token policy within the native-linear envelope",
+    (maxModelTokens) => {
+      const qualification = nativeLinearQualification({
+        FACTORY_LIVE_NATIVE_LINEAR_OBJECTIVE: "1",
+        FACTORY_LIVE_OBJECTIVE_PREFLIGHT: "1",
+        FACTORY_LIVE_NATIVE_LINEAR_CASE: "cascade",
+        FACTORY_LIVE_OBJECTIVE_NAMESPACE: "native-linear-token-boundary",
+        FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: String(maxModelTokens),
+        FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+        FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
+      });
+
+      expect(qualification).toMatchObject({
+        policy: {
+          economics: {
+            maxModelTokens,
+            modelTokenBudgetMode: "observed-stop",
+          },
+        },
+      });
+    },
+  );
+
+  it("rejects a native-linear observed-token policy above 750000", () => {
+    expect(() =>
+      nativeLinearQualification({
+        FACTORY_LIVE_NATIVE_LINEAR_OBJECTIVE: "1",
+        FACTORY_LIVE_OBJECTIVE_PREFLIGHT: "1",
+        FACTORY_LIVE_NATIVE_LINEAR_CASE: "cascade",
+        FACTORY_LIVE_OBJECTIVE_NAMESPACE: "native-linear-token-overflow",
+        FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "750001",
+        FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+        FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
+      }),
+    ).toThrow("model-token limit must be 250000-750000");
+  });
+
   it("rejects missing immutable model configuration before live work", () => {
     const base = {
       FACTORY_LIVE_NATIVE_LINEAR_OBJECTIVE: "1",

@@ -1,7 +1,18 @@
 import { expect, it, vi } from "vitest";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
+import type { BackendRegistry } from "../src/execution/registry.js";
 
-const inspectCompilerPreflight = vi.hoisted(() => vi.fn());
+const inspectCompilerPreflight = vi.hoisted(() =>
+  vi.fn<
+    (input: {
+      checkout: string;
+      baseSha: string;
+      policy: typeof DEFAULT_RUN_POLICY;
+      registry: BackendRegistry;
+      executionTrust?: "trusted_local" | "isolated" | "managed";
+    }) => Promise<unknown>
+  >(),
+);
 
 vi.mock("../src/application/compiler-preflight.js", () => ({ inspectCompilerPreflight }));
 
@@ -17,6 +28,12 @@ it("uses the exact retained CLI default when compiler preflight omits policy", a
     eligibleDeferredAdapters: [],
     toolchains: [],
     validation: { status: "valid", violations: [] },
+    execution: {
+      protocol: "clockgrove.factory/execution-route-preflight",
+      result: "passed",
+      required: null,
+      routes: [],
+    },
   });
   const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
   try {
@@ -24,7 +41,15 @@ it("uses the exact retained CLI default when compiler preflight omits policy", a
     expect(inspectCompilerPreflight).toHaveBeenCalledExactlyOnceWith({
       checkout: "/home/example/repository",
       baseSha,
-      allowedNetworkDestinations: DEFAULT_RUN_POLICY.allowedNetworkDestinations,
+      policy: DEFAULT_RUN_POLICY,
+      registry: expect.anything(),
+    });
+    const registry = inspectCompilerPreflight.mock.calls[0]![0].registry as BackendRegistry;
+    expect(registry.get("github-copilot/github-managed")).toBeNull();
+    expect(registry.capabilities("github-copilot/github-managed")).toMatchObject({
+      runtimeKind: "github-managed",
+      isolation: "managed",
+      requiresPaidRuntime: true,
     });
     expect(JSON.parse(String(stdout.mock.calls.at(-1)![0]))).toMatchObject({
       result: "passed",

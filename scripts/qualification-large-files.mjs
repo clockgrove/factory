@@ -680,71 +680,27 @@ export function assertLargeFileRefusal(observation) {
 
 export function largeFileObjectiveBody(namespace) {
   const p = largeFilePaths(namespace);
-  return `Qualify deterministic large-file handling for namespace ${namespace}. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or LFS files. Do not fetch/install/upload LFS or add dependencies.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes of valid PCM WAV from the existing bounded deterministic recipe. It must produce a genuine binary Git patch above 5 MiB.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest recipe scoped to ${p.test}. The final result must preserve both existing canonical LFS pointers in Git, while their unchanged locally provisioned objects remain available. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
+  return `Qualify deterministic large-file handling for namespace ${namespace}. This committed synthetic fixture is explicitly trusted for local execution; set every Work Item execution trust to trusted_local. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or LFS files. Do not fetch/install/upload LFS or add dependencies.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes of valid PCM WAV from the existing bounded deterministic recipe. It must produce a genuine binary Git patch above 5 MiB.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest recipe scoped to ${p.test}. The final result must preserve both existing canonical LFS pointers in Git, while their unchanged locally provisioned objects remain available. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
 }
 
 export function largeFileRefusalObjectiveBody(namespace, scenario) {
   assert.ok(["scope", "secret", "symlink"].includes(scenario), "unknown artifact refusal case");
   const paths = largeFilePaths(namespace);
-  const trust =
-    scenario === "symlink"
-      ? " This committed synthetic fixture is explicitly trusted for local execution; set the Work Item execution trust to trusted_local."
-      : "";
   return (
     `Exercise the committed bounded negative-artifact fixture for ${scenario}. ` +
     `Create exactly one Work Item, with no dependencies, which invokes node ${paths.recipe} ${scenario}. ` +
     `Do not alter the recipe, baseline test, attributes or LFS pointers. ` +
     `Allowed output path is only ${paths.payload}. Do not repair or normalize the deliberately invalid fixture output. ` +
-    `This is synthetic qualification content, not a real credential or an authorization to change any other path.${trust} ` +
+    `This is synthetic qualification content, not a real credential or an authorization to change any other path. ` +
+    `It is explicitly trusted for local execution; set the Work Item execution trust to trusted_local. ` +
     `Validation command: ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest entry point. ` +
     `Factory is expected to reject the produced artifact; do not fabricate a successful artifact or change the acceptance boundary.\n`
   );
 }
 
-const requiredIsolation = { trusted_local: "process", isolated: "container", managed: "managed" };
-const isolationRank = { none: 0, process: 1, container: 2, microvm: 3, managed: 3 };
-
-/** Prove that the fixture's declared execution trust can reach the intended artifact gate. */
-export function assessLargeFileExecutionPreflight({ scenario, trust, routes }) {
-  assert.ok(["scope", "secret", "symlink"].includes(scenario), "unknown artifact refusal case");
-  assert.ok(Object.hasOwn(requiredIsolation, trust), "unknown fixture execution trust");
-  assert.ok(Array.isArray(routes) && routes.length > 0 && routes.length <= 16);
-  const minimumIsolation = requiredIsolation[trust];
-  const observed = routes.map((route) => {
-    assert.match(route.id ?? "", /^[a-z0-9][a-z0-9./-]*$/);
-    assert.ok(Object.hasOwn(isolationRank, route.isolation), "unknown route isolation");
-    const compatible =
-      trust === "managed"
-        ? route.isolation === "managed"
-        : isolationRank[route.isolation] >= isolationRank[minimumIsolation];
-    return { id: route.id, isolation: route.isolation, compatible };
-  });
-  const compatible = observed.filter((route) => route.compatible);
-  const violations = compatible.length
-    ? []
-    : [
-        {
-          code: "fixture-execution-isolation-unavailable",
-          item: scenario,
-          field: "executionIntent.trust",
-          expected: { trust, minimumIsolation },
-          observed: { routes: observed.map(({ id, isolation }) => ({ id, isolation })) },
-        },
-      ];
-  return {
-    protocol: "clockgrove.factory/large-file-execution-preflight-v1",
-    scenario,
-    trust,
-    minimumIsolation,
-    routes: observed,
-    result: violations.length === 0 ? "passed" : "blocked",
-    violations,
-  };
-}
-
 export function producedLfsObjectiveBody(namespace) {
   const p = largeFilePaths(namespace);
-  return `Qualify deterministic produced Git LFS handling for namespace ${namespace}. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or existing LFS files. Do not install dependencies or change LFS configuration.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes from the existing bounded deterministic recipe. The pinned repository rule selects this path for authenticated Git LFS upload.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest recipe scoped to ${p.test}. The final Git tree must contain the canonical pointer for ${p.payload}, its exact authenticated remote object must remain readable, and both existing LFS pointers must remain unchanged. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
+  return `Qualify deterministic produced Git LFS handling for namespace ${namespace}. This committed synthetic fixture is explicitly trusted for local execution; set every Work Item execution trust to trusted_local. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or existing LFS files. Do not install dependencies or change LFS configuration.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes from the existing bounded deterministic recipe. The pinned repository rule selects this path for authenticated Git LFS upload.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest recipe scoped to ${p.test}. The final Git tree must contain the canonical pointer for ${p.payload}, its exact authenticated remote object must remain readable, and both existing LFS pointers must remain unchanged. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
 }
 
 /** Apply a held artifact before publication and inspect the exact resulting raw Git tree. */

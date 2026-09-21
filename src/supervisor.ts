@@ -62,6 +62,7 @@ import {
   type ValidationInvocation,
 } from "./validation/repository-capture.js";
 import { repositoryCapturePlanningCapabilities } from "./validation/repository-capture-capabilities.js";
+import { executionRouteCatalog } from "./execution/route-capabilities.js";
 import {
   executeLocalRepositoryCaptures,
   executeLocalValidationCommand,
@@ -5791,6 +5792,7 @@ export class FactorySupervisor {
                   repositoryLfs,
                   allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
                   runPolicy: this.#policy,
+                  executionRoutes: executionRouteCatalog(this.#registry, this.#policy),
                   mediaPlanning: compilerMediaInputs?.mediaPlanning ?? {
                     assetManifest: null,
                     assetBindings: [],

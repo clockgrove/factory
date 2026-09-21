@@ -82,6 +82,7 @@ import type { WorkerAssetInput } from "../assets/contracts.js";
 import { declaredAssetHandlerContract } from "../assets/handlers.js";
 import type { CompilerMediaProducerCapability, MediaIntent } from "../assets/media-intent.js";
 import { evaluateBoundRepositoryCaptureCapabilities } from "../validation/repository-capture-catalog.js";
+import { assessExecutionTrustRoutes } from "../execution/route-capabilities.js";
 export { CompilerInvariantError } from "./invariant-error.js";
 
 export class CompilerRequestValidationError extends Error {
@@ -411,6 +412,11 @@ export function assertCompilerProjectionAuthority(
     compilerEvalDigest(request.factoryCapabilities)
   )
     throw new Error("Factory lifecycle capabilities differ from immutable run policy");
+  if (
+    compilerEvalDigest(request.executionRoutes.routes.map(({ id }) => id)) !==
+    compilerEvalDigest(runPolicy.backendOrder)
+  )
+    throw new Error("execution route capabilities differ from immutable run policy");
   const egress = runPolicy.compilerMediaEgress;
   if (
     request.media.assetEgress.mode !== egress.mode ||
@@ -632,6 +638,32 @@ export function validateCompilerRequest(requestInput: unknown): CompilerValidati
     byId.add(identity);
     recipeIdentities.set(recipe.id, byId);
   }
+  if (
+    !request.executionRoutes.routes.some(
+      ({ unavailableReasons }) => unavailableReasons.length === 0,
+    )
+  )
+    violations.push(
+      violation(
+        "execution-route-unavailable",
+        "/executionRoutes",
+        "at least one policy-authorized execution route",
+        request.executionRoutes.routes.map(({ id, unavailableReasons }) => ({
+          id,
+          unavailableReasons,
+        })),
+      ),
+    );
+  const executionRouteIds = request.executionRoutes.routes.map(({ id }) => id);
+  if (new Set(executionRouteIds).size !== executionRouteIds.length)
+    violations.push(
+      violation(
+        "schema-invalid",
+        "/executionRoutes/routes",
+        "unique execution route IDs",
+        executionRouteIds,
+      ),
+    );
   for (const [command, identities] of commandIdentities)
     if (identities.size > 1)
       violations.push(
@@ -813,6 +845,7 @@ export async function prepareCompilerRequest(input: {
     inventory: compilerPlanningInventory(input.inventory),
     inventorySource: input.inventorySource ?? "independent-extraction",
     factoryCapabilities: factoryCompilerCapabilities(context.runPolicy),
+    executionRoutes: context.executionRoutes,
     repository: {
       manifests: pinnedFacts.manifests,
       requiredTools: [...new Set(pinnedFacts.repository.lfs?.requiredTools ?? [])].sort(),
@@ -2704,6 +2737,30 @@ export function parseAndValidateCompilerProposal(
           pointer("workItems", itemIndex, "executionIntent", "additionalNetworkDestinations"),
           request.constraints.allowedNetworkDestinations,
           denied,
+          item.id,
+        ),
+      );
+    const routeAssessment = assessExecutionTrustRoutes(
+      request.executionRoutes,
+      item.executionIntent.trust,
+    );
+    if (routeAssessment.result === "blocked")
+      violations.push(
+        violation(
+          "execution-route-unavailable",
+          pointer("workItems", itemIndex, "executionIntent", "trust"),
+          routeAssessment.required,
+          {
+            routes: routeAssessment.routes.map(
+              ({ id, runtimeKind, hostExecution, isolation, reasons }) => ({
+                id,
+                runtimeKind,
+                hostExecution,
+                isolation,
+                reasons,
+              }),
+            ),
+          },
           item.id,
         ),
       );

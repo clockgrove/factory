@@ -123,13 +123,18 @@ export function providerPolicy(authority) {
 }
 
 export function providerObjective(profile, namespace) {
-  const executionTrust = profile === "daytona-burst" ? "trusted_local" : "managed";
+  const executionTrust = providerExecutionTrust(profile);
   return (
     objectiveBodyFor(namespace, executionTrust).replace("cloud workers, ", "") +
     (profile === "daytona-burst"
       ? "\nThe two foundations must be independent root sibling delivery units; the final unit must join-after-merge. Factory may overflow one concurrent worker to the explicitly authorized Daytona sandbox; independent provider validation must remain isolated."
       : `\nUse only the ${PROFILES[profile]} managed profile. Daytona is authorized only for independent validation. Do not substitute local execution or a different managed profile.`)
   );
+}
+
+export function providerExecutionTrust(profile) {
+  assert.ok(Object.hasOwn(PROFILES, profile ?? ""), "unknown provider profile");
+  return profile === "daytona-burst" ? "trusted_local" : "managed";
 }
 
 export function assessProviderCompletion(evidence, authority) {
@@ -504,8 +509,8 @@ export async function observeManagedAgentTermination(request, evidence) {
   }
 }
 
-export async function main() {
-  const authority = providerAuthority(process.env);
+export async function main(env = process.env, run = runInstalledObjective) {
+  const authority = providerAuthority(env);
   if (!authority) {
     console.log(
       "Not exercised: explicit FACTORY_LIVE_PROVIDER=1 and provider/target/budget/cleanup authority are required.",
@@ -519,7 +524,8 @@ export async function main() {
     "Not exercised: Codex managed profile lacks qualified stable provider actor identity; no Objective or session was created",
   );
   const policy = providerPolicy(authority);
-  const namespace = qualificationNamespace(process.env.FACTORY_LIVE_OBJECTIVE_NAMESPACE);
+  const namespace = qualificationNamespace(env.FACTORY_LIVE_OBJECTIVE_NAMESPACE);
+  const executionTrust = providerExecutionTrust(authority.profile);
   const observe = async ({ evidence, request }) => {
     // The exact original-run listing covers workers and validators, including
     // validators belonging to a managed-agent Objective. This never deletes them.
@@ -533,18 +539,19 @@ export async function main() {
       };
     }
   };
-  await runInstalledObjective({
+  await run({
     scope:
       authority.profile === "daytona-burst"
         ? "installed-daytona-burst-objective-happy-path"
         : "installed-managed-objective-happy-path",
     policy,
     namespace,
+    executionTrust,
     objectiveBody: providerObjective(authority.profile, namespace),
     assessCompletion: (evidence) => assessProviderCompletion(evidence, authority),
     beforeRun: async ({ call, checkout, evidence, request }) => {
       evidence.providerAuthority = authority;
-      assert.ok(process.env.DAYTONA_API_KEY, "Daytona validation credentials are unavailable");
+      assert.ok(env.DAYTONA_API_KEY, "Daytona validation credentials are unavailable");
       if (authority.profile === "daytona-burst") {
         const probes = await call("probe_execution_backends", { repository: checkout });
         assert.ok(

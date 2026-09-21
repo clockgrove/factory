@@ -165,6 +165,10 @@ export const COMPILER_RULES: Readonly<Record<CompilerViolationCode, CompilerRule
     "execution-requirement-limit",
     "A Work Item exceeds a projected execution-requirement bound.",
   ),
+  "execution-route-unavailable": rule(
+    "execution-route-unavailable",
+    "No policy-authorized execution route can satisfy the Work Item trust requirement.",
+  ),
   "exclusive-resource-limit": rule(
     "exclusive-resource-limit",
     "A Work Item exceeds a projected exclusive-resource bound.",

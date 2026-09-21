@@ -19,6 +19,13 @@ import type {
 import { adaptFixtureCompiler } from "./helpers/compiler-proposal.js";
 import { validatePlanningCheckout, readPlanningRepositoryLayout } from "../src/application/plan.js";
 import { BackendRegistry } from "../src/execution/registry.js";
+import { CodexCliLocalBackend } from "../src/backends/codex-cli-local.js";
+
+function executionRegistry() {
+  const registry = new BackendRegistry();
+  registry.register(new CodexCliLocalBackend());
+  return registry;
+}
 
 const snapshot = (): ApplicationSnapshot => ({
   id: "objective-node",
@@ -411,7 +418,7 @@ describe("FactoryApplicationService", () => {
         },
         planning: {
           management: backend,
-          backendRegistry: new BackendRegistry(),
+          backendRegistry: executionRegistry(),
           repositoryPath: checkout,
           validateCheckout: validatePlanningCheckout,
           readRepositoryLayout: (max, base) => readPlanningRepositoryLayout(checkout, max, base),
@@ -453,7 +460,7 @@ describe("FactoryApplicationService", () => {
       reader: { readObjective: async () => snapshot() },
       planning: {
         management: backend,
-        backendRegistry: new BackendRegistry(),
+        backendRegistry: executionRegistry(),
         repositoryPath: "/repo",
         readRepositoryLayout: async () => ({
           // Checkout/base are independently supplied so this case reaches inventory validation.

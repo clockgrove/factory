@@ -24,6 +24,7 @@ import {
   assessToolSelection,
   parseToolSelectionCorpus,
 } from "../src/evaluation/tool-selection-corpus.js";
+import { semanticExecutionRoutes } from "./helpers/semantic-compiler.js";
 
 const corpusRoot = fileURLToPath(new URL("./fixtures/evaluation", import.meta.url));
 const sha = "a".repeat(40);
@@ -249,6 +250,7 @@ describe("representative executable corpus integrity, not compiler/model quality
         defaultBranch: "main",
         allowedNetworkDestinations: corpusRunPolicy.allowedNetworkDestinations,
         runPolicy: corpusRunPolicy,
+        executionRoutes: semanticExecutionRoutes(corpusRunPolicy),
         repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
       },
       backend,
@@ -275,6 +277,7 @@ describe("representative executable corpus integrity, not compiler/model quality
           defaultBranch: "main",
           allowedNetworkDestinations: corpusRunPolicy.allowedNetworkDestinations,
           runPolicy: corpusRunPolicy,
+          executionRoutes: semanticExecutionRoutes(corpusRunPolicy),
           repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
         },
         backend,

@@ -42,6 +42,7 @@ import {
 import { policyMediaCompilerCapabilities } from "../media/adapter.js";
 import { policyMediaReviewRules } from "../media/review.js";
 import type { BackendRegistry } from "../execution/registry.js";
+import { executionRouteCatalog } from "../execution/route-capabilities.js";
 import { repositoryCapturePlanningCapabilities } from "../validation/repository-capture-capabilities.js";
 
 export interface PlanInput {
@@ -427,6 +428,7 @@ export async function buildPlanReport(input: {
         repositoryLfs,
         allowedNetworkDestinations: policy.allowedNetworkDestinations,
         runPolicy: policy,
+        executionRoutes: executionRouteCatalog(input.planning.backendRegistry, policy),
         mediaPlanning,
         repositoryCapturePlanning: repositoryCapturePlanningCapabilities({
           registry: input.planning.backendRegistry,

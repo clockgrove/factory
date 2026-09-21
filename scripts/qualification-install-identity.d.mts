@@ -6,6 +6,7 @@ export function installedCompilerPreflight(
     checkout: string;
     baseSha: string;
     policy?: unknown;
+    executionTrust?: "trusted_local" | "isolated" | "managed";
     environment?: NodeJS.ProcessEnv;
   },
   execute?: (
@@ -24,6 +25,12 @@ export function installedCompilerPreflight(
   pinnedFactsDigest: string;
   toolchains: unknown[];
   validation: { status: string; violations: Array<{ code: string }> };
+  execution: {
+    protocol: "clockgrove.factory/execution-route-preflight";
+    result: "passed" | "blocked";
+    required: { trust: string; minimumIsolation: string } | null;
+    routes: unknown[];
+  };
 };
 export function installedLocalScopePreflight(
   input: {

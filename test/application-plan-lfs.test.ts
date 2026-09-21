@@ -12,6 +12,7 @@ import {
 import { assertCleanPlanningFiles } from "../src/application/checkout.js";
 import * as pinned from "../src/execution/pinned-compilation-tree.js";
 import { BackendRegistry } from "../src/execution/registry.js";
+import { CodexCliLocalBackend } from "../src/backends/codex-cli-local.js";
 import * as lfs from "../src/repository-profiles/git-lfs.js";
 import { readRepositoryFacts } from "../src/repository-profiles/read.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
@@ -30,6 +31,11 @@ import {
 } from "./helpers/compiler-proposal.js";
 
 const roots: string[] = [];
+function executionRegistry() {
+  const registry = new BackendRegistry();
+  registry.register(new CodexCliLocalBackend());
+  return registry;
+}
 afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
@@ -116,7 +122,7 @@ async function fixture() {
   git("commit", "-qm", "LFS planning baseline");
   const baseSha = git("rev-parse", "HEAD");
   const planning = {
-    backendRegistry: new BackendRegistry(),
+    backendRegistry: executionRegistry(),
     repositoryPath: repository,
     validateCheckout: validatePlanningCheckout,
     readRepositoryLayout: (max: number, base?: string) =>

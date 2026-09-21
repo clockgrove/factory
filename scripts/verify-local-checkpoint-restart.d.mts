@@ -313,6 +313,7 @@ export function continueAppServerCheckpointScenario(
 export interface CheckpointExtension {
   authority?: CheckpointAuthority;
   scope?: string;
+  executionTrust?: "trusted_local" | "isolated" | "managed";
   harnessPaths?: string[];
   omitActivationPolicy?: boolean;
   maxObservedChildren?: number;

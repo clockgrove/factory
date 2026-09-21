@@ -111,6 +111,42 @@ function canonicalProfile(profile: GitHubManagedAgentProfile): GitHubManagedAgen
   return canonical;
 }
 
+export function githubManagedAgentBackendCapabilities(
+  profileInput: GitHubManagedAgentProfile,
+): ExecutionBackendCapabilities {
+  const profile = canonicalProfile(profileInput);
+  return {
+    id: profile.backendId,
+    supportTier: "supported",
+    agentKind: profile.agentKind,
+    runtimeKind: "github-managed",
+    hostExecution: false,
+    isolation: "managed",
+    supportedOs: ["linux"],
+    // GitHub assignment does not pin or report the managed runner's arch.
+    supportedArchitectures: [],
+    supportedTools: ["git", "node", "npm", "npx", "bash", "sh", "grep", "python", "python3"],
+    supportedServices: [],
+    // GitHub documents only a human Stop session UI, not an Agent Tasks
+    // cancellation endpoint.
+    supportsCancellation: false,
+    supportsObservation: true,
+    supportsResume: false,
+    supportsLocalInference: false,
+    requiresPaidRuntime: true,
+    providerManagedPublication: true,
+    requiredCredentials: ["github-user-token", profile.requiredCapability],
+  };
+}
+
+/** Static routes Factory can plan before repository actor discovery. Profiles
+ * with a release-level discovery blocker remain unavailable. */
+export function githubManagedAgentRouteCapabilities(): ExecutionBackendCapabilities[] {
+  return GITHUB_MANAGED_AGENT_PROFILES.filter(
+    ({ actorDiscoveryBlocker }) => actorDiscoveryBlocker === undefined,
+  ).map(githubManagedAgentBackendCapabilities);
+}
+
 function sameLogin(left: string, right: string): boolean {
   const normalize = (login: string) =>
     login
@@ -250,29 +286,7 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
     };
     this.#now = options.now ?? Date.now;
     this.#runGit = options.runGit ?? git;
-    this.capabilities = {
-      id: profile.backendId,
-      supportTier: "supported",
-      agentKind: profile.agentKind,
-      runtimeKind: "github-managed",
-      hostExecution: false,
-      isolation: "managed",
-      supportedOs: ["linux"],
-      // GitHub assignment does not pin or report the managed runner's arch.
-      supportedArchitectures: [],
-      supportedTools: ["git", "node", "npm", "npx", "bash", "sh", "grep", "python", "python3"],
-      supportedServices: [],
-      // GitHub documents only a human Stop session UI, not an Agent Tasks
-      // cancellation endpoint. `cancel()` below requests unassignment and then
-      // reconciles; it deliberately fails while the exact session stays active.
-      supportsCancellation: false,
-      supportsObservation: true,
-      supportsResume: false,
-      supportsLocalInference: false,
-      requiresPaidRuntime: true,
-      providerManagedPublication: true,
-      requiredCredentials: ["github-user-token", profile.requiredCapability],
-    };
+    this.capabilities = githubManagedAgentBackendCapabilities(profile);
   }
 
   async probe(): Promise<BackendProbe> {

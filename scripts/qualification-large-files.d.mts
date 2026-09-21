@@ -82,28 +82,6 @@ export function largeFileRefusalObjectiveBody(
   namespace: string,
   scenario: "scope" | "secret" | "symlink",
 ): string;
-export function assessLargeFileExecutionPreflight(input: {
-  scenario: "scope" | "secret" | "symlink";
-  trust: "trusted_local" | "isolated" | "managed";
-  routes: Array<{
-    id: string;
-    isolation: "none" | "process" | "container" | "microvm" | "managed";
-  }>;
-}): {
-  protocol: "clockgrove.factory/large-file-execution-preflight-v1";
-  scenario: "scope" | "secret" | "symlink";
-  trust: "trusted_local" | "isolated" | "managed";
-  minimumIsolation: "process" | "container" | "managed";
-  routes: Array<{ id: string; isolation: string; compatible: boolean }>;
-  result: "passed" | "blocked";
-  violations: Array<{
-    code: "fixture-execution-isolation-unavailable";
-    item: string;
-    field: "executionIntent.trust";
-    expected: { trust: string; minimumIsolation: string };
-    observed: { routes: Array<{ id: string; isolation: string }> };
-  }>;
-};
 export function producedLfsObjectiveBody(namespace: string): string;
 export function createLargeFileFixture(input: {
   parent: string;

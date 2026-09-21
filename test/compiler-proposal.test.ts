@@ -28,6 +28,7 @@ import type { PinnedRepositoryFacts } from "../src/repository-profiles/read.js";
 import {
   parseAndValidateCompilerProposal,
   projectCompilerProposal,
+  validateCompilerRequest,
 } from "../src/compiler/proposal.js";
 import { validateCompiledObjective } from "../src/compiler/index.js";
 import {
@@ -1165,6 +1166,104 @@ describe("semantic proposal validation", () => {
     };
 
     expect(parseAndValidateCompilerProposal(request, proposal).report.status).toBe("valid");
+  });
+
+  it("accepts trusted-local intent when a process route is authorized", () => {
+    const request = semanticRequest();
+    request.executionRoutes.routes = request.executionRoutes.routes.map((route) => ({
+      ...route,
+      runtimeKind: "local-process",
+      hostExecution: true,
+      isolation: "process",
+      unavailableReasons: [],
+    }));
+    const proposal = semanticProposal(request);
+    proposal.workItems[0]!.executionIntent.trust = "trusted_local";
+
+    expect(parseAndValidateCompilerProposal(request, proposal).report.status).toBe("valid");
+  });
+
+  it.each([
+    ["isolated", "container", "requires container-or-stronger isolation"],
+    ["managed", "managed", "requires a managed runtime"],
+  ] as const)(
+    "rejects %s intent without weakening it to fit a process route",
+    (trust, minimumIsolation, reason) => {
+      const pinned = semanticPinnedFacts();
+      const request = semanticRequest(pinned);
+      request.executionRoutes.routes = request.executionRoutes.routes.map((route) => ({
+        ...route,
+        runtimeKind: "local-process",
+        hostExecution: true,
+        isolation: "process",
+        unavailableReasons: [],
+      }));
+      const proposal = semanticProposal(request);
+      proposal.workItems[0]!.executionIntent.trust = trust;
+
+      const result = parseAndValidateCompilerProposal(request, proposal);
+      expect(result.report).toMatchObject({
+        phase: "proposal",
+        status: "repairable",
+        violations: [
+          expect.objectContaining({
+            code: "execution-route-unavailable",
+            itemId: "item-1",
+            field: "/workItems/0/executionIntent/trust",
+            expected: { trust, minimumIsolation },
+            observed: {
+              routes: request.executionRoutes.routes.map(({ id }) => ({
+                id,
+                runtimeKind: "local-process",
+                hostExecution: true,
+                isolation: "process",
+                reasons: [reason],
+              })),
+            },
+          }),
+        ],
+      });
+      expect(result.proposal?.kind).toBe("work-items");
+      if (result.proposal?.kind !== "work-items") throw new Error("expected Work Item proposal");
+      expect(result.proposal.workItems[0]!.executionIntent.trust).toBe(trust);
+      expect(proposal.workItems[0]!.executionIntent.trust).toBe(trust);
+      expect(() =>
+        projectCompilerProposal({
+          request,
+          proposal,
+          pinnedFacts: pinned,
+          runPolicy: projectionPolicy(request),
+        }),
+      ).toThrow("projection received an invalid proposal");
+    },
+  );
+
+  it("rejects a compiler request before proposal validation when no route is authorized", () => {
+    const request = semanticRequest();
+    request.executionRoutes.routes = request.executionRoutes.routes.map((route) => ({
+      ...route,
+      unavailableReasons: ["paid-backend-not-authorized"],
+    }));
+
+    expect(validateCompilerRequest(request)).toMatchObject({
+      phase: "request",
+      status: "unsatisfiable",
+      violations: [
+        expect.objectContaining({
+          code: "execution-route-unavailable",
+          itemId: null,
+          field: "/executionRoutes",
+          expected: "at least one policy-authorized execution route",
+          observed: request.executionRoutes.routes.map(({ id }) => ({
+            id,
+            unavailableReasons: ["paid-backend-not-authorized"],
+          })),
+        }),
+      ],
+    });
+    const result = parseAndValidateCompilerProposal(request, semanticProposal(request));
+    expect(result.proposal).toBeUndefined();
+    expect(result.report.phase).toBe("request");
   });
 
   it("reports duplicate deliverable contracts before economic projection", () => {

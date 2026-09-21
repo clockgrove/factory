@@ -261,6 +261,7 @@ describe("installed large-file lifecycle authority", () => {
           fixtureDigest: hash(readFileSync(path, "utf8")),
         },
       });
+      expect(extension.executionTrust).toBe("trusted_local");
       expect(extension.harnessPaths).toContain("scripts/qualification-reservation-authority.mjs");
       const port = { preflight: vi.fn(), action: vi.fn() };
       const assembled = (await extension.extendPort!({

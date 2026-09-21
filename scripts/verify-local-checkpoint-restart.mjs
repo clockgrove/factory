@@ -2286,6 +2286,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
         checkout: authority.checkout,
         baseSha: evidence.base,
         policy: authority.policy,
+        ...(extension.executionTrust ? { executionTrust: extension.executionTrust } : {}),
         environment: runtimeEnvironment,
       });
       save();

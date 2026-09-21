@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   providerAuthority,
   providerPolicy,
   providerObjective,
+  providerExecutionTrust,
+  main as providerMain,
   assessProviderCompletion,
   observeManagedAgentTermination,
   observeProviderAbsence,
@@ -331,6 +333,7 @@ describe("installed provider Objective harness (no live calls)", () => {
         profile === "daytona-burst" ? "join-after-merge" : "managed profile",
       );
       const executionTrust = profile === "daytona-burst" ? "trusted_local" : "managed";
+      expect(providerExecutionTrust(profile)).toBe(executionTrust);
       const otherTrust = profile === "daytona-burst" ? "managed" : "trusted_local";
       expect(objective).toContain(
         `Every Work Item must declare ${executionTrust} execution trust.`,
@@ -339,6 +342,24 @@ describe("installed provider Objective harness (no live calls)", () => {
       expect(objective.match(/Every Work Item must declare .* execution trust\./g)).toHaveLength(1);
     },
   );
+  it.each([
+    ["daytona-burst" as const, "trusted_local" as const],
+    ["github-copilot" as const, "managed" as const],
+  ])("passes exact %s fixture trust to the shared installed preflight", async (profile, trust) => {
+    const run = vi.fn(async (_qualification: Record<string, unknown>) => undefined);
+    const repository = "fixture/provider";
+    await providerMain(
+      {
+        ...env,
+        FACTORY_LIVE_PROVIDER_PROFILE: profile,
+        FACTORY_LIVE_PROVIDER_PAID_ACK: `${profile}:${repository}`,
+        FACTORY_LIVE_PROVIDER_MAX_MANAGED_SESSIONS: profile === "daytona-burst" ? undefined : "3",
+      },
+      run,
+    );
+    expect(run).toHaveBeenCalledOnce();
+    expect(run.mock.calls[0]?.[0]).toMatchObject({ executionTrust: trust });
+  });
   it("qualifies only the explicitly bounded burst happy-path scope", () => {
     expect(assessProviderCompletion(evidence(), authority)).toMatchObject({
       result: "passed",

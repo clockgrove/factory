@@ -17,6 +17,7 @@ import {
 } from "../evaluation/compiler-eval.js";
 import { NetworkDestinationSchema, RepositoryScopePathSchema } from "../protocol/worker-packet.js";
 import { MAX_PRODUCT_FILE_BYTES } from "../protocol/limits.js";
+import { ExecutionRouteCatalogSchema } from "../execution/route-capabilities.js";
 import {
   CompilerMediaFactsSchema,
   MediaIntentSchema,
@@ -78,6 +79,7 @@ export const COMPILER_VIOLATION_CODES = [
   "operation-count-limit",
   "validation-command-limit",
   "execution-requirement-limit",
+  "execution-route-unavailable",
   "exclusive-resource-limit",
   "worker-packet-limit",
   "issue-body-limit",
@@ -144,6 +146,7 @@ export const COMPILER_TERMINAL_VIOLATION_PHASES: Readonly<
   "compiler-prompt-limit": ["request"],
   "judge-context-limit": ["request"],
   "denied-network-destination": ["request"],
+  "execution-route-unavailable": ["request"],
   "media-producer-unavailable": ["proposal"],
   "media-validation-unavailable": ["proposal"],
 };
@@ -1105,6 +1108,7 @@ export const CompilerRequestSchema = z
     inventory: CompilerPlanningInventorySchema,
     inventorySource: z.enum(["structural-source", "independent-extraction"]),
     factoryCapabilities: z.array(FactoryCompilerCapabilitySchema).max(6),
+    executionRoutes: ExecutionRouteCatalogSchema,
     repository: z
       .object({
         manifests: z.array(RepositoryScopePathSchema).max(64),
@@ -2245,6 +2249,62 @@ const jsonValidationSurface = {
     ),
   ),
 };
+const jsonExecutionRoute = {
+  ...strictObject({
+    id: {
+      type: "string",
+      minLength: 1,
+      maxLength: 160,
+      pattern: "^[A-Za-z0-9._+-]+/[A-Za-z0-9._+-]+$",
+    },
+    runtimeKind: {
+      oneOf: [{ type: "string", minLength: 1, maxLength: 80 }, { type: "null" }],
+    },
+    hostExecution: { oneOf: [{ type: "boolean" }, { type: "null" }] },
+    isolation: {
+      oneOf: [{ enum: ["none", "process", "container", "microvm", "managed"] }, { type: "null" }],
+    },
+    unavailableReasons: {
+      type: "array",
+      maxItems: 4,
+      items: {
+        enum: [
+          "not-registered",
+          "paid-backend-not-authorized",
+          "model-selection-unsupported",
+          "backend-policy-incompatible",
+        ],
+      },
+    },
+  }),
+  oneOf: [
+    {
+      properties: {
+        runtimeKind: { type: "string" },
+        hostExecution: { type: "boolean" },
+        isolation: { enum: ["none", "process", "container", "microvm", "managed"] },
+        unavailableReasons: { not: { contains: { const: "not-registered" } } },
+      },
+    },
+    {
+      properties: {
+        runtimeKind: { type: "null" },
+        hostExecution: { type: "null" },
+        isolation: { type: "null" },
+        unavailableReasons: { contains: { const: "not-registered" } },
+      },
+    },
+  ],
+};
+const jsonExecutionRouteCatalog = strictObject({
+  protocol: { const: "clockgrove.factory/execution-route-capabilities" },
+  routes: {
+    type: "array",
+    minItems: 1,
+    maxItems: 16,
+    items: jsonExecutionRoute,
+  },
+});
 
 /** Full transport schema used for parity and durable-fixture validation. */
 export const COMPILER_REQUEST_JSON_SCHEMA = {
@@ -2270,6 +2330,7 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
         authorityDigest: jsonDigest,
       }),
     },
+    executionRoutes: jsonExecutionRouteCatalog,
     repository: strictObject({
       manifests: stringArray(64, jsonScopePath),
       requiredTools: stringArray(64, jsonId),

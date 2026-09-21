@@ -3,6 +3,23 @@ import { assessPinnedCompilerPreflight } from "../src/application/compiler-prefl
 import type { PinnedRepositoryFacts } from "../src/repository-profiles/index.js";
 
 const allRegistries = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"];
+const execution = {
+  routes: {
+    protocol: "clockgrove.factory/execution-route-capabilities" as const,
+    routes: [
+      {
+        id: "fixture/process",
+        runtimeKind: "fixture",
+        hostExecution: true,
+        isolation: "process" as const,
+        unavailableReasons: [],
+      },
+    ],
+  },
+};
+
+const assess = (facts: PinnedRepositoryFacts, destinations: readonly string[]) =>
+  assessPinnedCompilerPreflight(facts, destinations, execution);
 
 function pinned(
   paths: string[],
@@ -25,6 +42,29 @@ function pinned(
 }
 
 describe("compiler qualification preflight", () => {
+  it("blocks an unreachable trust requirement independently of repository validity", () => {
+    const facts = pinned(["README.md"]);
+    const report = assessPinnedCompilerPreflight(facts, allRegistries, {
+      ...execution,
+      trust: "isolated",
+    });
+    expect(report).toMatchObject({
+      result: "blocked",
+      validation: { status: "valid" },
+      execution: {
+        result: "blocked",
+        required: { trust: "isolated", minimumIsolation: "container" },
+        routes: [
+          expect.objectContaining({
+            id: "fixture/process",
+            compatible: false,
+            reasons: ["requires container-or-stronger isolation"],
+          }),
+        ],
+      },
+    });
+  });
+
   it.each([
     {
       name: "npm",
@@ -62,7 +102,7 @@ describe("compiler qualification preflight", () => {
       }),
     },
   ])("accepts complete $name authority through $adapter", ({ adapter, facts }) => {
-    const report = assessPinnedCompilerPreflight(facts, allRegistries);
+    const report = assess(facts, allRegistries);
     expect(report.result).toBe("passed");
     expect(report.validation).toMatchObject({ status: "valid", violations: [] });
     expect(report.toolchains).toContainEqual(
@@ -76,7 +116,7 @@ describe("compiler qualification preflight", () => {
   });
 
   it("rejects npm's manifest-without-lock fixture as partial authority", () => {
-    const report = assessPinnedCompilerPreflight(
+    const report = assess(
       pinned(["package.json", "test/a.test.js"], {
         scripts: { test: "node --test" },
         documents: { "package.json": '{"scripts":{"test":"node --test"}}' },
@@ -98,7 +138,7 @@ describe("compiler qualification preflight", () => {
   });
 
   it("rejects mixed JavaScript package authority", () => {
-    const report = assessPinnedCompilerPreflight(
+    const report = assess(
       pinned(["package.json", "package-lock.json", "pnpm-lock.yaml"], {
         scripts: { test: "node --test" },
         documents: { "package.json": '{"scripts":{"test":"node --test"}}' },
@@ -113,7 +153,7 @@ describe("compiler qualification preflight", () => {
   });
 
   it("preserves eligible-deferred greenfield authority", () => {
-    const report = assessPinnedCompilerPreflight(pinned(["README.md"]), allRegistries);
+    const report = assess(pinned(["README.md"]), allRegistries);
     expect(report.result).toBe("passed");
     expect(report.validation.status).toBe("valid");
     expect(report.validationRecipeCount).toBe(0);
@@ -123,10 +163,7 @@ describe("compiler qualification preflight", () => {
   });
 
   it("keeps an unsupported existing manager eligible for a supported deferred bootstrap", () => {
-    const report = assessPinnedCompilerPreflight(
-      pinned(["Cargo.toml", "Cargo.lock", "src/lib.rs"]),
-      allRegistries,
-    );
+    const report = assess(pinned(["Cargo.toml", "Cargo.lock", "src/lib.rs"]), allRegistries);
     expect(report.result).toBe("passed");
     expect(report.validationRecipeCount).toBe(0);
     expect(report.toolchains).toContainEqual(
@@ -136,14 +173,14 @@ describe("compiler qualification preflight", () => {
   });
 
   it("distinguishes policy-blocked and unsupported states when no validation authority exists", () => {
-    const policyBlocked = assessPinnedCompilerPreflight(pinned(["README.md"]), []);
+    const policyBlocked = assess(pinned(["README.md"]), []);
     expect(policyBlocked.result).toBe("blocked");
     expect(policyBlocked.toolchains.every(({ state }) => state === "policy-blocked")).toBe(true);
     expect(policyBlocked.validation.violations.map(({ code }) => code)).toEqual(
       expect.arrayContaining(["denied-network-destination", "no-validation-capability"]),
     );
 
-    const unsupported = assessPinnedCompilerPreflight(
+    const unsupported = assess(
       pinned(["package.json", "package-lock.json", "src/example.py"], {
         documents: { "package.json": "{}" },
       }),

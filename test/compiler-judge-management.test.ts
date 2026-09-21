@@ -689,7 +689,7 @@ describe("independent compiler management boundaries", () => {
     expect(repaired.proposal.workItems).toHaveLength(1);
   });
 
-  it("reads pinned source bytes instead of changed working files and reports gaps", async () => {
+  it("reads pinned source bytes and records missing paths as exact-base absence", async () => {
     const { context } = await fixture();
     delete context.repositoryEvidence;
     execFileSync("git", ["init", "-q"], { cwd: context.repository });
@@ -716,7 +716,99 @@ describe("independent compiler management boundaries", () => {
     const evidence = await readCompilerObligationEvidence(context);
     expect(JSON.stringify(evidence)).toContain("node --test");
     expect(JSON.stringify(evidence)).not.toContain("MUTABLE_SENTINEL");
-    expect(evidence.some((entry) => entry.id === "evidence-gaps")).toBe(true);
+    const absence = evidence.find((entry) => entry.id.startsWith("absent-"));
+    expect(absence).toMatchObject({
+      kind: "repository",
+      excerpt: `Pinned base ${context.baseSha} has no file or directory at "missing.ts".`,
+    });
+    expect(absence?.identity).toBe(
+      compilerEvalDigest({ baseSha: context.baseSha, path: "missing.ts", state: "absent" }),
+    );
+    expect(evidence.some((entry) => entry.id === "evidence-gaps")).toBe(false);
+  });
+
+  it("keeps absent files, present directories, and empty blobs distinct", async () => {
+    const { context } = await fixture();
+    delete context.repositoryEvidence;
+    await mkdir(join(context.repository, "src/existing"), { recursive: true });
+    await writeFile(
+      join(context.repository, "src/existing/member.js"),
+      "export const value = 1;\n",
+    );
+    await writeFile(join(context.repository, "src/empty.js"), "");
+    execFileSync("git", ["init", "-q"], { cwd: context.repository });
+    execFileSync("git", ["add", "-A"], { cwd: context.repository });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        "absence fixture",
+      ],
+      { cwd: context.repository },
+    );
+    context.baseSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: context.repository,
+      encoding: "utf8",
+    }).trim();
+    context.repositoryFiles = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+      cwd: context.repository,
+      encoding: "utf8",
+    })
+      .trim()
+      .split("\n");
+    const absent = [
+      "src/qualification/clamp.js",
+      "src/qualification/describe.js",
+      "src/qualification/slugify.js",
+      "test/qualification/clamp.test.js",
+      "test/qualification/describe.test.js",
+      "test/qualification/slugify.test.js",
+    ];
+    context.objective.body = [
+      ...absent.map((path) => `Add \`${path}\`.`),
+      "Inspect `src/existing/` and `src/empty.js`.",
+    ].join("\n");
+
+    const forward = await readCompilerObligationEvidence(context);
+    const shuffled = await readCompilerObligationEvidence({
+      ...context,
+      repositoryFiles: [...context.repositoryFiles].reverse(),
+    });
+    expect(shuffled).toEqual(forward);
+    expect(
+      forward.filter((entry) => entry.id.startsWith("absent-")).map((entry) => entry.excerpt),
+    ).toEqual(
+      absent.map(
+        (path) =>
+          `Pinned base ${context.baseSha} has no file or directory at ${JSON.stringify(path)}.`,
+      ),
+    );
+    expect(forward.some((entry) => entry.excerpt.startsWith("src/existing/\n"))).toBe(true);
+    expect(forward.some((entry) => entry.excerpt === "src/empty.js\n")).toBe(true);
+    expect(forward.find((entry) => entry.id === "evidence-gaps")?.excerpt ?? "").not.toContain(
+      "unavailable:src/qualification",
+    );
+
+    const inconsistent = await readCompilerObligationEvidence({
+      ...context,
+      objective: { ...context.objective, body: "Inspect `src/declared-but-unreadable.js`." },
+      repositoryFiles: [...context.repositoryFiles, "src/declared-but-unreadable.js"],
+    });
+    expect(inconsistent.find((entry) => entry.id === "evidence-gaps")?.excerpt).toContain(
+      "unavailable:src/declared-but-unreadable.js",
+    );
+    expect(
+      inconsistent.some(
+        (entry) =>
+          entry.id.startsWith("absent-") &&
+          entry.excerpt.includes("src/declared-but-unreadable.js"),
+      ),
+    ).toBe(false);
   });
 
   it("builds a canonical bounded relevance closure without unrelated repository bodies", async () => {
@@ -786,7 +878,14 @@ describe("independent compiler management boundaries", () => {
     expect(serialized).not.toContain("UNRELATED_SENTINEL");
     const gaps = forward.find((entry) => entry.id === "evidence-gaps")?.excerpt ?? "";
     expect(gaps).toContain("cycle:AGENTS.md->docs/a.md->AGENTS.md");
-    expect(gaps).toContain("unavailable:docs/missing.md");
+    expect(
+      forward.some(
+        (entry) =>
+          entry.id.startsWith("absent-") &&
+          entry.excerpt ===
+            `Pinned base ${context.baseSha} has no file or directory at "docs/missing.md".`,
+      ),
+    ).toBe(true);
     expect(gaps).toContain("bound:docs/z-");
     expect(gaps).not.toContain("npm run test");
   });

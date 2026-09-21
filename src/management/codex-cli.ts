@@ -474,6 +474,16 @@ export async function readCompilerObligationEvidence(
     ...new Set(context.repositoryFiles.map((path) => RepositoryScopePathSchema.parse(path))),
   ].sort();
   const available = new Set(paths);
+  // repositoryFiles is the complete sealed pinned tree, so a missing entry and descendants prove
+  // absence. Only a failed content read for a present path is an evidence gap.
+  const pinnedTreeContains = (path: string): boolean => {
+    const directory = path.endsWith("/");
+    const normalized = directory ? path.slice(0, -1) : path;
+    return (
+      (!directory && available.has(normalized)) ||
+      paths.some((candidate) => candidate.startsWith(`${normalized}/`))
+    );
+  };
   const objectiveText = `${context.objective.title}\n${context.objective.body}`;
   const referencedPaths = (directory: string, source: string): string[] => {
     const raw = [
@@ -534,6 +544,18 @@ export async function readCompilerObligationEvidence(
     if (read.has(next.path)) continue;
     const path = next.path;
     RepositoryScopePathSchema.parse(path);
+    if (!pinnedTreeContains(path)) {
+      evidence.push(
+        CompilerEvidenceSchema.parse({
+          id: `absent-${compilerEvalDigest({ baseSha: context.baseSha, path }).slice(0, 16)}`,
+          kind: "repository",
+          identity: compilerEvalDigest({ baseSha: context.baseSha, path, state: "absent" }),
+          excerpt: `Pinned base ${context.baseSha} has no file or directory at ${JSON.stringify(path)}.`,
+        }),
+      );
+      read.add(path);
+      continue;
+    }
     const result = await runContainedProcess({
       command: "git",
       args: ["show", `${context.baseSha}:${path}`],
@@ -542,7 +564,7 @@ export async function readCompilerObligationEvidence(
       timeoutMs: 10_000,
       maxOutputBytes: 128 * 1024,
     }).catch(() => undefined);
-    if (!result || result.exitCode !== 0 || !result.stdout.trim() || result.stdout.includes("\0")) {
+    if (!result || result.exitCode !== 0 || result.stdout.includes("\0")) {
       gaps.add(`unavailable:${path}`);
       read.add(path);
       continue;

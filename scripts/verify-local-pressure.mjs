@@ -18,7 +18,6 @@ import {
   observeRegularCommits,
 } from "./verify-regular-objective.mjs";
 import { parseUnitObservation } from "./verify-local-faults.mjs";
-import { observeNativeMergeProofs } from "./qualification-sibling-refresh-proof.mjs";
 import {
   schedulingAuthority,
   installedMcpTransport,
@@ -31,6 +30,7 @@ import {
   assertSchedulingBarrier,
   isUserSystemdUnavailable,
   ownedSchedulingScopes,
+  observeRegularSchedulingMergeProofs,
 } from "./verify-local-scheduling.mjs";
 import {
   PRESSURE_BOUNDS,
@@ -49,11 +49,66 @@ import {
 } from "./local-pressure-resource.mjs";
 
 const hashFile = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+const pressureBaselineSamples = 12;
+const pressureBaselineIntervalMs = 5000;
 const instant = (value) => {
   const result = Date.parse(value);
   assert.ok(Number.isFinite(result), "missing observation timestamp");
   return result;
 };
+
+const primitive = (value) =>
+  value === null || ["string", "number", "boolean"].includes(typeof value) ? value : undefined;
+
+export function pressureQualificationFailure(error, stage) {
+  const name = /^[A-Za-z][A-Za-z0-9]*$/.test(error?.name ?? "") ? error.name : "Error";
+  const message =
+    typeof error?.message === "string" && error.message.length <= 1024
+      ? error.message
+      : "pressure qualification boundary unavailable";
+  const code = isUserSystemdUnavailable(error)
+    ? "user-systemd-local-scope-unavailable"
+    : error?.code === "PRESSURE_BASELINE_UNSETTLED"
+      ? "pressure-baseline-unsettled"
+      : error?.code === "ERR_ASSERTION"
+        ? `${stage}-assertion`
+        : `${stage}-unavailable`;
+  const actual = primitive(error?.actual);
+  const expected = primitive(error?.expected);
+  return {
+    name,
+    code,
+    message,
+    ...(actual === undefined ? {} : { actual }),
+    ...(expected === undefined ? {} : { expected }),
+    ...(["==", "===", "!=", "!==", "<", "<=", ">", ">="].includes(error?.operator)
+      ? { operator: error.operator }
+      : {}),
+    ...(Number.isSafeInteger(error?.observedBytes) ? { observedBytes: error.observedBytes } : {}),
+    ...(Number.isSafeInteger(error?.expectedMaximumBytes)
+      ? { expectedMaximumBytes: error.expectedMaximumBytes }
+      : {}),
+  };
+}
+
+export async function observePressureBaseline(sample, record, wait) {
+  let latest;
+  for (let index = 0; index < pressureBaselineSamples; index++) {
+    latest = await sample(index);
+    assert.ok(
+      Number.isSafeInteger(latest?.memoryCurrent) && latest.memoryCurrent >= 0,
+      "pressure baseline memory observation unavailable",
+    );
+    await record(latest);
+    if (latest.memoryCurrent <= PRESSURE_BOUNDS.baselineMaximumBytes) return latest;
+    if (index + 1 < pressureBaselineSamples) await wait(pressureBaselineIntervalMs);
+  }
+  throw Object.assign(Error("disposable pressure baseline did not settle below 256 MiB"), {
+    code: "PRESSURE_BASELINE_UNSETTLED",
+    observedBytes: latest.memoryCurrent,
+    expectedMaximumBytes: PRESSURE_BOUNDS.baselineMaximumBytes,
+  });
+}
 
 function cooldownDeadline(reason, message) {
   // The planner emits toISOString(), optionally followed by this exact local-only
@@ -318,6 +373,10 @@ export function createPressureQualification(authority, env = process.env, port =
                 ? "qualification-transport-unavailable"
                 : `${stage}-unavailable`,
           };
+          context.evidence.pressureQualificationFailure = pressureQualificationFailure(
+            error,
+            stage,
+          );
           context.save();
         }
         throw Error("local pressure qualification boundary unavailable; inspect private evidence");
@@ -486,8 +545,45 @@ export function createPressureQualification(authority, env = process.env, port =
         barrier: observed,
         barrierSequence: Math.max(...observed.receipts.map((receipt) => receipt.event.sequence)),
       });
-      running();
-      owned();
+      await observePressureBaseline(
+        async (index) => {
+          running();
+          if (index > 0) observed = await schedulingSnapshot(hooks);
+          owned();
+          const current = assertSchedulingBarrier(
+            {
+              ...observed,
+              unit: primary,
+              policy: authority.policy,
+              objective: hooks.evidence.objective.number,
+            },
+            false,
+          );
+          assert.ok(current, "original graph/zero-attempt barrier no longer observed");
+          assert.equal(current.runId, proof.runId, "pressure baseline run changed");
+          assert.equal(
+            current.policyDigest,
+            proof.policyDigest,
+            "pressure baseline policy changed",
+          );
+          assert.deepEqual(current.roots, proof.roots, "pressure baseline roots changed");
+          assert.equal(observeSchedulingService(resource, port).state, "absent");
+          return {
+            memoryCurrent: slice.memoryCurrent,
+            memoryMax: slice.memoryMax,
+            observedAt: slice.observedAt,
+            barrierSequence: Math.max(
+              ...observed.receipts.map((receipt) => receipt.event.sequence),
+            ),
+          };
+        },
+        async (sample) => {
+          proof.baselineSamples ??= [];
+          proof.baselineSamples.push(sample);
+          hooks.save();
+        },
+        (milliseconds) => port.wait(milliseconds),
+      );
       proof.preInjectionHeadroom = assertPressureHeadroom(slice, port);
       assert.equal(observeSchedulingService(resource, port).state, "absent");
       proof.injectionRequestedAt = port.now();
@@ -587,11 +683,7 @@ export function createPressureQualification(authority, env = process.env, port =
       }
       throw Error("same original Objective did not safely readmit within the bounded observation");
     }),
-    observeMergeProofs: (hooks) =>
-      observeNativeMergeProofs({
-        ...hooks,
-        request: (route, parameters) => schedulingRequest(hooks, route, parameters),
-      }),
+    observeMergeProofs: observeRegularSchedulingMergeProofs,
     afterRun: safe("after-run", async (hooks) => {
       artifacts(hooks.evidence);
       await observeRegularCommits({

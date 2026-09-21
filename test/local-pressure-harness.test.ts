@@ -6,6 +6,8 @@ import {
   pressureAuthority,
   assertPressureRun,
   assertPressureReadmission,
+  observePressureBaseline,
+  pressureQualificationFailure,
   pressureReadmissionDeadline,
   main,
 } from "../scripts/verify-local-pressure.mjs";
@@ -33,6 +35,46 @@ describe("pressure readmission observation deadline", () => {
     expect(Date.parse(released) + 180_000 + 15_000).toBeLessThan(deadline);
     expect(() => pressureReadmissionDeadline(released, 600)).toThrow(/unexpected accepted/);
     expect(() => pressureReadmissionDeadline("not a timestamp", 120)).toThrow(/timestamp/);
+  });
+});
+
+describe("bounded pressure baseline", () => {
+  it("waits for compiler memory to settle before allowing the one-shot allocator boundary", async () => {
+    const values = [320 * MB, 280 * MB, 200 * MB];
+    const recorded: number[] = [];
+    const wait = vi.fn(async () => {});
+    await expect(
+      observePressureBaseline(
+        async (index) => ({ memoryCurrent: values[index]! }),
+        async (sample) => {
+          recorded.push(sample.memoryCurrent);
+        },
+        wait,
+      ),
+    ).resolves.toEqual({ memoryCurrent: 200 * MB });
+    expect(recorded).toEqual(values);
+    expect(wait).toHaveBeenCalledTimes(2);
+    expect(wait).toHaveBeenCalledWith(5000);
+  });
+
+  it("fails before allocation with stable exact detail when the baseline never settles", async () => {
+    const error = await observePressureBaseline(
+      async () => ({ memoryCurrent: 300 * MB }),
+      async () => {},
+      async () => {},
+    ).catch((caught) => caught);
+    expect(error).toMatchObject({
+      code: "PRESSURE_BASELINE_UNSETTLED",
+      observedBytes: 300 * MB,
+      expectedMaximumBytes: 256 * MB,
+    });
+    expect(pressureQualificationFailure(error, "during-run")).toEqual({
+      name: "Error",
+      code: "pressure-baseline-unsettled",
+      message: "disposable pressure baseline did not settle below 256 MiB",
+      observedBytes: 300 * MB,
+      expectedMaximumBytes: 256 * MB,
+    });
   });
 });
 const primaryUnit = `clockgrove-factory-qualification-${"b".repeat(64)}.service`;

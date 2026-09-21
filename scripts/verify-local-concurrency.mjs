@@ -14,6 +14,7 @@ import {
   checkpointDeadline,
   checkpointTimeout,
   checkpointLease,
+  checkpointPoll,
   main as checkpointMain,
   assertScopeCoverage,
   assertControllerUnit,
@@ -1243,11 +1244,15 @@ export async function main(env = process.env, run = checkpointMain) {
         artifact,
         runtimeEnvironment,
         retireClient,
+        observationRead,
       }) => {
         assert.equal(typeof retireClient, "function", "owned MCP retirement boundary unavailable");
         const [owner, repo] = authority.repository.split("/");
         const deadline = () =>
           checkpointDeadline(evidence.startedAt, authority.policy.objectiveTimeoutMinutes);
+        const readObservation =
+          observationRead ??
+          ((_stage, operation) => operation(checkpointTimeout(deadline(), 120000)));
         const once = async (action, invoke) => {
           abort.signal.throwIfAborted();
           checkpointTimeout(deadline(), 1);
@@ -1401,11 +1406,13 @@ export async function main(env = process.env, run = checkpointMain) {
         };
         const readIncrementalComments = async () => {
           const since = new Date(Math.max(Date.parse(evidence.startedAt), commentCursor - 1000));
-          const comments = await list(
-            "GET /repos/{owner}/{repo}/issues/comments",
-            { since: since.toISOString(), sort: "updated", direction: "asc" },
-            1000,
-            { deadline: deadline() },
+          const comments = await readObservation("comments", (remainingMs) =>
+            list(
+              "GET /repos/{owner}/{repo}/issues/comments",
+              { since: since.toISOString(), sort: "updated", direction: "asc" },
+              1000,
+              { deadline: Date.now() + remainingMs },
+            ),
           );
           evidence.observer.incrementalCommentListings++;
           const changed = rememberComments(comments);
@@ -1414,27 +1421,40 @@ export async function main(env = process.env, run = checkpointMain) {
           save();
           return changed;
         };
-        const observeOne = async (record, full = false) => {
+        const observeOneAttempt = async (record, full = false) => {
           evidence.observer.fullObjectiveSnapshots++;
           const objective = (
-            await request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
-              issue_number: record.objective.number,
-            })
+            await readObservation("objective", (remainingMs) =>
+              request(
+                "GET /repos/{owner}/{repo}/issues/{issue_number}",
+                { issue_number: record.objective.number },
+                Math.min(15000, remainingMs),
+              ),
+            )
           ).data;
           assert.equal(objective.id, record.objective.id);
           assert.equal(objective.user.id, evidence.actor.id);
           assert.equal(hash(objective.body), record.bodyDigest);
-          const children = await list(
-            "GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues",
-            { issue_number: objective.number },
+          const children = await readObservation("children", (remainingMs) =>
+            list(
+              "GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues",
+              { issue_number: objective.number },
+              1000,
+              { deadline: Date.now() + remainingMs },
+            ),
           );
           assert.ok(children.length <= 3);
           const comments = [],
             dependencies = [];
           for (const issue of [objective, ...children]) {
-            const rows = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
-              issue_number: issue.number,
-            });
+            const rows = await readObservation("comments", (remainingMs) =>
+              list(
+                "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
+                { issue_number: issue.number },
+                1000,
+                { deadline: Date.now() + remainingMs },
+              ),
+            );
             for (const comment of rows) {
               assert.ok(
                 comment.html_url.startsWith(
@@ -1446,9 +1466,13 @@ export async function main(env = process.env, run = checkpointMain) {
             if (full && issue !== objective)
               dependencies.push({
                 workItem: issue.number,
-                blockedBy: await list(
-                  "GET /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by",
-                  { issue_number: issue.number },
+                blockedBy: await readObservation("children", (remainingMs) =>
+                  list(
+                    "GET /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by",
+                    { issue_number: issue.number },
+                    1000,
+                    { deadline: Date.now() + remainingMs },
+                  ),
                 ),
               });
           }
@@ -1456,7 +1480,14 @@ export async function main(env = process.env, run = checkpointMain) {
           const receipts = authenticatedFaultEvents(comments, evidence.actor, objective.number);
           const observation = {
             receipts,
-            status: await call("factory_status", { objectiveNumber: objective.number }),
+            status: await readObservation("status", (remainingMs) =>
+              call(
+                "factory_status",
+                { objectiveNumber: objective.number },
+                Math.min(120000, remainingMs),
+                true,
+              ),
+            ),
             children,
           };
           record.latestFreshObservation = observation;
@@ -1511,6 +1542,37 @@ export async function main(env = process.env, run = checkpointMain) {
             runResultProvenance: "derived-authenticated-terminal-status-not-captured-RPC",
           };
         };
+        const observeOne = (record, full = false) =>
+          checkpointPoll({
+            phase: "observation",
+            deadline,
+            observe: () => observeOneAttempt(record, full),
+            accept: () => true,
+            read: readObservation,
+            wait,
+            intervalMs: 1000,
+          });
+        const observePair = (full = false, staged = false) =>
+          checkpointPoll({
+            phase: "observation",
+            deadline,
+            observe: async () => {
+              const pair = [];
+              for (const [index, record] of evidence.objectives.entries())
+                pair.push(
+                  staged
+                    ? await withQualificationStage(`concurrency-final-observation-${index}`, () =>
+                        observeOneAttempt(record, full),
+                      )
+                    : await observeOneAttempt(record, full),
+                );
+              return pair;
+            },
+            accept: () => true,
+            read: readObservation,
+            wait,
+            intervalMs: 1000,
+          });
         const readOuter = async () => {
           const response = await request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
             ref: "clockgrove-factory/leases/repository-controller",
@@ -1884,8 +1946,7 @@ export async function main(env = process.env, run = checkpointMain) {
                     wait(checkpointTimeout(deadline(), 10000)).then(() => false),
                   ]);
                   if (done) break;
-                  const pair = [];
-                  for (const current of evidence.objectives) pair.push(await observeOne(current));
+                  const pair = await observePair();
                   evidence.directorContention.capacitySnapshots.push(capacitySnapshot(pair));
                   save();
                 }
@@ -2046,8 +2107,7 @@ export async function main(env = process.env, run = checkpointMain) {
             const maximumPolls = Math.ceil(
               (authority.policy.objectiveTimeoutMinutes * 60000) / 15000,
             );
-            let pair = [];
-            for (const record of evidence.objectives) pair.push(await observeOne(record));
+            let pair = await observePair();
             for (let count = 0; count < maximumPolls; count++) {
               abort.signal.throwIfAborted();
               checkpointTimeout(deadline(), 1);
@@ -2078,14 +2138,12 @@ export async function main(env = process.env, run = checkpointMain) {
               if (!changed && !adverseProgress(hinted)) continue;
               // Incremental comments are wake hints only. Every acceptance, terminal refusal and
               // subsequent action is based on a fresh complete authenticated observation pair.
-              pair = [];
-              for (const record of evidence.objectives) pair.push(await observeOne(record));
+              pair = await observePair();
             }
             throw Error("bounded scenario observation exhausted");
           },
           captureCheckpoint: async (pair, original) => {
-            pair = [];
-            for (const record of evidence.objectives) pair.push(await observeOne(record));
+            pair = await observePair();
             assertConcurrencySettlement(pair[0], policyFor(authority, 0));
             assertConcurrencySettlement(pair[1], policyFor(authority, 1), { paused: true });
             const absence = [];
@@ -2398,8 +2456,7 @@ export async function main(env = process.env, run = checkpointMain) {
           },
           finishDirectorContention: async (_pair, controller, collision) => {
             checkpointTimeout(deadline(), 1);
-            const final = [];
-            for (const record of evidence.objectives) final.push(await observeOne(record, true));
+            const final = await observePair(true);
             const peerSnapshots = final.map((entry) => structuredClone(entry));
             for (const [index, entry] of final.entries()) {
               assertConcurrencySettlement(entry, policyFor(authority, index), {
@@ -2538,14 +2595,8 @@ export async function main(env = process.env, run = checkpointMain) {
             return report;
           },
           finishThroughput: async (_pair, controller, refill) => {
-            const final = [];
-            for (const [index, record] of evidence.objectives.entries())
-              final.push(
-                await withQualificationStage(`concurrency-final-observation-${index}`, async () => {
-                  checkpointTimeout(deadline(), 1);
-                  return observeOne(record, true);
-                }),
-              );
+            checkpointTimeout(deadline(), 1);
+            const final = await observePair(true, true);
             const { generation, peerSnapshots } = await withQualificationStage(
               "concurrency-controller-generation",
               () => {
@@ -2659,8 +2710,7 @@ export async function main(env = process.env, run = checkpointMain) {
           },
           finish: async (_pair, original, replacement, refill) => {
             checkpointTimeout(deadline(), 1);
-            const final = [];
-            for (const record of evidence.objectives) final.push(await observeOne(record, true));
+            const final = await observePair(true);
             const starts = final.map((entry) =>
               one(
                 entry.events.filter((event) => event.event === "FactoryRunStarted"),

@@ -275,7 +275,7 @@ export function compilerQualificationCheckpointAuthority(env) {
   return parseCheckpointAuthority(env, true);
 }
 
-class CheckpointPending extends Error {}
+export class CheckpointPending extends Error {}
 
 const qualificationStages = new Set([
   "concurrency-final-observation-0",
@@ -2170,11 +2170,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     const response = await invoke(name, args, timeoutMs);
     if (response.isError) {
       const failure = checkpointOperatorFailure(name, args, response);
-      if (
-        retrySnapshot &&
-        observationDeadline !== undefined &&
-        checkpointStatusSnapshotRetry(name, args, failure)
-      ) {
+      if (retrySnapshot && checkpointStatusSnapshotRetry(name, args, failure)) {
         const retries = (evidence.observationRetries ??= []);
         if (retries.length >= 128) {
           retries.splice(1, 1);
@@ -3017,6 +3013,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           artifact,
           runtimeEnvironment,
           retireClient,
+          observationRead,
         })
       : port;
     evidence.result = await runner(scenarioPort, authority);

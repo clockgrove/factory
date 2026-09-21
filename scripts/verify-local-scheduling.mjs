@@ -21,7 +21,7 @@ import {
   observeRegularLocalScopeCapability,
   observeRegularCommits,
 } from "./verify-regular-objective.mjs";
-import { observeNativeMergeProofs } from "./qualification-sibling-refresh-proof.mjs";
+import { observeSettledQualificationMergeProofs } from "./qualification-settled-merge-proof.mjs";
 import {
   authenticatedFaultEvents,
   parseUnitObservation,
@@ -433,6 +433,17 @@ export async function schedulingSnapshot(hooks) {
     receipts,
     status,
   };
+}
+
+export function observeRegularSchedulingMergeProofs(
+  hooks,
+  observe = observeSettledQualificationMergeProofs,
+) {
+  return observe({
+    entry: hooks.evidence,
+    request: (route, parameters) => schedulingRequest(hooks, route, parameters),
+    repository: hooks.evidence.repository,
+  });
 }
 
 // Shared read-only observer; the original scenario retains its existing behavior.
@@ -994,11 +1005,7 @@ export function createSchedulingQualification(authority, env = process.env, port
       proof.released = await changeSchedulingService(primary, "release-cpu", port);
       hooks.save();
     }),
-    observeMergeProofs: (hooks) =>
-      observeNativeMergeProofs({
-        ...hooks,
-        request: (route, parameters) => schedulingRequest(hooks, route, parameters),
-      }),
+    observeMergeProofs: observeRegularSchedulingMergeProofs,
     afterRun: safe("after-run", async (hooks) => {
       await observeRegularCommits({
         ...hooks,

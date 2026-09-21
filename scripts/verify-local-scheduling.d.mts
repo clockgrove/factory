@@ -82,6 +82,10 @@ export function ownedSchedulingScopes(evidence: unknown, primary: unknown): stri
 export function assertSchedulingCompletion(evidence: unknown): void;
 export function assertSchedulingPipelineCompletion(evidence: unknown): void;
 export function schedulingSnapshot(hooks: unknown): Promise<unknown>;
+export function observeRegularSchedulingMergeProofs(
+  hooks: unknown,
+  observe?: (input: unknown) => unknown,
+): unknown;
 export function assertObjectiveLeaseContention(input: unknown): void;
 export function schedulingRequest<T>(
   hooks: { request: (route: string, parameters: Record<string, unknown>) => Promise<T> },

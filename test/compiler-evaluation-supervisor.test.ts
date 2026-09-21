@@ -8,6 +8,7 @@ import { parseFactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_COMPILER_EVALUATION_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { PlatformUnavailableError } from "../src/platform.js";
+import { LeaseManager } from "../src/control/lease.js";
 import { compileObjective } from "../src/compiler/index.js";
 import { parseWorkerPacketFromIssue } from "../src/graph.js";
 import { readRepositoryFacts } from "../src/repository-profiles/index.js";
@@ -1189,6 +1190,88 @@ describe("Supervisor compiler evaluation activation boundary", () => {
       expect(graph, JSON.stringify({ result, refs: [...f.refs.keys()] })).not.toBeNull();
       expect(graph?.objective.workItems[0]?.economicReview?.rationale).toContain(samples[0]);
       expect(graph?.objective.workItems[0]?.economicReview?.rationale).not.toContain(samples[1]);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("releases a failed platform writer and resumes projection without recompiling", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      compilerEvaluation: { mode: "auto-repair" },
+    });
+    try {
+      freshObjective(f);
+      const calls = configureCompiler(f);
+      let nextIssue = 8;
+      vi.spyOn(GithubOctokitGraphWriter.prototype, "createWorkItemIssue").mockImplementation(
+        async ({ title, body }) => {
+          const number = nextIssue++;
+          const id = `I_${number}`;
+          f.snapshot.workItems.push({
+            id,
+            number,
+            title,
+            body,
+            closed: false,
+            assignees: [],
+            labels: ["factory:work-item"],
+            blockedBy: [],
+            linkedPullRequests: [],
+            copilotAssignments: [],
+            factoryEvents: [],
+          });
+          return { id, number };
+        },
+      );
+      vi.spyOn(GithubOctokitGraphWriter.prototype, "addBlockedBy").mockResolvedValue(undefined);
+      const platformFailure = new PlatformUnavailableError(
+        { kind: "server_error", retryAfterMs: 1 },
+        new Error("fixture graph projection transport unavailable"),
+      );
+      let interrupted = false;
+      const createTree = vi
+        .mocked(GitHubControlStore.prototype.createTree)
+        .getMockImplementation()!;
+      vi.mocked(GitHubControlStore.prototype.createTree).mockImplementation(async function (
+        this: GitHubControlStore,
+        ...args
+      ) {
+        if (!interrupted && f.events().some((event) => event.event === "GraphProjected")) {
+          interrupted = true;
+          throw platformFailure;
+        }
+        return createTree.apply(this, args);
+      });
+      const release = vi.mocked(LeaseManager.prototype.release);
+
+      await expect(f.run()).rejects.toBe(platformFailure);
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(calls).toEqual(["inventory", "compile", "judge"]);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toEqual([]);
+      expect(
+        f
+          .events()
+          .filter((event) =>
+            ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
+              event.event,
+            ),
+          ),
+      ).toEqual([]);
+      expect(f.events().filter((event) => event.event === "GraphProjected")).toHaveLength(1);
+      const workItems = f.snapshot.workItems.map((item) => item.number);
+
+      const second = await f.run();
+      expect(second).toMatchObject({
+        status: "escalated",
+        reason: expect.stringMatching(/attempt budget exhausted/),
+      });
+      expect(release).toHaveBeenCalledTimes(2);
+      expect(calls).toEqual(["inventory", "compile", "judge"]);
+      expect(f.snapshot.workItems.map((item) => item.number)).toEqual(workItems);
+      expect(
+        f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
+      ).toEqual([8]);
     } finally {
       await f.dispose();
     }

@@ -189,7 +189,7 @@ describe("Supervisor selected outcome survives execution teardown", () => {
         else await expect(f.run(shutdown.signal)).rejects.toBe(failure);
         expect(f.events().filter((event) => terminalNames.includes(event.event))).toEqual([]);
         expect(f.events().filter((event) => event.event === "AttemptCancelled")).toEqual([]);
-        expect(LeaseManager.prototype.release).not.toHaveBeenCalled();
+        expect(LeaseManager.prototype.release).toHaveBeenCalledTimes(fault === "platform" ? 1 : 0);
         if (fault !== "cleanup") {
           expect(
             unresolvedModelInvocations(f.events()).filter((event) => event.phase === "execution"),

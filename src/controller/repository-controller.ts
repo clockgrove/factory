@@ -40,9 +40,11 @@ import {
 } from "../protocol/policy.js";
 import {
   classifyRefusal,
+  GitHubPrimaryAdmissionDeferredError,
   PlatformUnavailableError,
   MutationAdmissionStoppedError,
   definiteGitHubQuotaRejection,
+  isKnownPrimaryQuotaRefusal,
   retryGitHubQuota,
   withGitHubQuotaWait,
   githubRequestTelemetryForCredential,
@@ -766,6 +768,7 @@ export async function runGitHubRepositoryController(
         }
         const unavailable = platformFailure(error);
         if (unavailable && options.signal?.aborted) {
+          if (provenNoEffectPrimaryQuotaFailure(unavailable)) return;
           // This refusal reached us only after the admitted cohort and ownership
           // retirement settled. Unlike interrupting an already-established
           // backoff below, it may represent an in-flight write or failed cleanup.
@@ -1248,6 +1251,27 @@ function platformFailure(error: unknown): PlatformUnavailableError | undefined {
   return refusal.kind === "not_refusal" ? undefined : new PlatformUnavailableError(refusal, error);
 }
 
+/** Explicit shutdown may finish cleanly only when every retained contributor
+ * proves an authoritative primary-quota rejection before any remote effect. */
+function provenNoEffectPrimaryQuotaFailure(error: unknown, seen: Set<object> = new Set()): boolean {
+  if (!error || typeof error !== "object" || seen.has(error)) return false;
+  seen.add(error);
+  if (error instanceof AggregateError)
+    return (
+      error.errors.length > 0 &&
+      error.errors.every((contributor) => provenNoEffectPrimaryQuotaFailure(contributor, seen))
+    );
+  if (error instanceof GitHubPrimaryAdmissionDeferredError)
+    return error.refusal.kind === "rate_limit";
+  if (error instanceof PlatformUnavailableError) {
+    if (error.refusal.kind !== "rate_limit") return false;
+    if (error.cause instanceof AggregateError)
+      return provenNoEffectPrimaryQuotaFailure(error.cause, seen);
+    return definiteGitHubQuotaRejection(error) && isKnownPrimaryQuotaRefusal(error);
+  }
+  return definiteGitHubQuotaRejection(error) && isKnownPrimaryQuotaRefusal(error);
+}
+
 /** Fixed diagnostics only: never log provider request bodies, headers, or causes. */
 function controllerFailureDiagnostic(error: unknown): string {
   if (error instanceof MutationAdmissionStoppedError)
@@ -1306,7 +1330,10 @@ function ownershipFailure(original: unknown, next: unknown): unknown {
   if (first && second) {
     return new PlatformUnavailableError(
       first.retryAfterMs >= second.retryAfterMs ? first.refusal : second.refusal,
-      original,
+      new AggregateError(
+        [original, next],
+        "multiple controller ownership failures retained during settlement",
+      ),
     );
   }
   if (first && !second) return next;

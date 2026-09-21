@@ -1015,13 +1015,17 @@ export function isKnownPrimaryQuotaRefusal(error: unknown): boolean {
       message?: string;
     };
     const headers = value.response?.headers ?? value.headers;
+    const resetHeader = headers?.["x-ratelimit-reset"];
+    const resetText = typeof resetHeader === "string" ? resetHeader.trim() : resetHeader;
+    const resetEpoch = resetText === "" || resetText === undefined ? Number.NaN : Number(resetText);
     if (value.message?.toLowerCase().includes("secondary")) return false;
     if (
       headers &&
       String(headers["x-ratelimit-remaining"]) === "0" &&
       (headers["x-ratelimit-resource"] === "core" ||
         headers["x-ratelimit-resource"] === "graphql") &&
-      Number.isFinite(Number(headers["x-ratelimit-reset"]))
+      Number.isSafeInteger(resetEpoch) &&
+      resetEpoch > 0
     )
       return true;
     current = value.cause;

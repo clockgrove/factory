@@ -204,6 +204,71 @@ safe to attach to the issue: it contains only the unit, artifact identity, sourc
 candidate version, install-receipt identity, completion time, and confirmation that private evidence
 was retained; local paths stay in that file.
 
+### Installed primary-quota stop race
+
+Maintainers can separately qualify the installed controller's explicit-stop race with
+`scripts/verify-installed-controller-quota-stop.mjs`. This qualifier does not spend GitHub quota or
+change GitHub state. It installs an otherwise absent disposable controller unit from the exact
+retained candidate and briefly sets two otherwise-absent systemd user-manager variables: a
+whitespace-free `NODE_OPTIONS` file URL for the committed
+`scripts/qualification-controller-quota-stop.mjs` preload and a unique owner-private arm path.
+The preload is inert in unrelated Node services. It must match the exact installed Node and bundle
+paths, full controller argv, cgroup unit, and systemd invocation before it installs a fixed
+non-secret fixture token or replaces `fetch`. A near-match fails during preload before controller
+credential discovery. The interceptor accepts only the exact read-only REST repository-facts
+`GET`, never calls the upstream fetch, and holds that request until the installed controller stop
+operation sends `SIGTERM`. It then returns one definite primary-quota `403` with zero
+remaining and a valid future reset.
+
+The qualifier takes an exclusive private lock and requires both manager variables, the target unit,
+and its drop-in directory to be absent at preflight. It retains both inert manager variables through
+the successful explicit stop so `Restart=on-failure` cannot launch an unprotected generation, then
+removes them immediately and proves them absent before telemetry and final-state validation.
+`DropInPaths` remains
+empty, `NeedDaemonReload` remains `no`, and the regular unit fragment digest remains unchanged
+through final service observation.
+
+The private evidence binds the source commit, install receipt, installed bundle, main process,
+regular unit fragment, read-only route class, stop signal, injected response, and systemd result.
+Every validated stage is written and fsynced before the next stage; reached, explicit stop,
+manager-environment removal, sanitized telemetry, and final manager state therefore survive later cleanup
+failure. Cleanup has its own evidence record. A pass requires exit status zero, `Result=success`,
+`NRestarts=0`, an armed fuse, no safe fatal diagnostic, no upstream fetch, complete unit and
+runtime-metadata removal, and both manager variables still absent. Request URLs, repository names,
+headers, bodies, credentials, and response bodies are never retained in interceptor telemetry. The
+fixed token exists only inside the exact target process after identity authentication, so the
+service neither reads nor exposes the user's GitHub credential and unrelated services do not
+inherit it.
+
+Use a clean Linux-home checkout whose origin matches the named repository, an absent controller unit
+with no drop-ins, absent `NODE_OPTIONS` and `FACTORY_INSTALLED_QUOTA_STOP_ARM` variables in the
+systemd user manager, and a fresh owner-private evidence directory. The acknowledgement names the
+exact repository and deterministic unit:
+
+```bash
+set -euo pipefail
+umask 077
+repository=EXAMPLE/DISPOSABLE
+checkout=/home/you/Codex/disposable
+install_receipt=/home/you/Codex/factory-initial-beta/2.0.27-beta.0-COMMIT/install-identities.txt
+unit="$(REPOSITORY="$repository" CHECKOUT="$checkout" node -e 'const c=require("node:crypto");const p=require("node:path");const k=`${process.env.REPOSITORY.toLowerCase()}\0${p.resolve(process.env.CHECKOUT)}`;process.stdout.write(`clockgrove-factory-${c.createHash("sha256").update(k).digest("hex").slice(0,16)}.service`)')"
+evidence_directory=/home/you/Codex/factory-quota-stop-evidence
+mkdir "$evidence_directory"
+env -u CODEX_HOME \
+FACTORY_QUOTA_STOP_QUALIFICATION=1 \
+FACTORY_QUOTA_STOP_REPOSITORY="$repository" \
+FACTORY_QUOTA_STOP_CHECKOUT="$checkout" \
+FACTORY_QUALIFICATION_INSTALL_RECEIPT="$install_receipt" \
+FACTORY_QUOTA_STOP_ACK="$repository:$unit:installed-primary-quota-explicit-stop:no-github-transport" \
+FACTORY_QUOTA_STOP_EVIDENCE="$evidence_directory/result.json" \
+node scripts/verify-installed-controller-quota-stop.mjs
+```
+
+The installed qualifier deliberately covers the supported positive race only. Mixed server,
+permission, malformed-reset, generic pretransport, and cleanup contributors remain fatal in the
+deterministic controller matrix; manufacturing them in this service exercise would require a second
+synthetic GitHub control store and would not strengthen the installed primary-quota proof.
+
 `Restart=on-failure` restarts unexpected process crashes and signals. Fatal controller exits are a
 different contract: durable-state incompatibility (65), internal invariant (70), discovery failure
 (72), local configuration (78), and launcher execution failure (203) trip the service fuse and do

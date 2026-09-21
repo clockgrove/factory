@@ -180,6 +180,20 @@ describe("distributed operator documentation", () => {
     expect(guide).toContain("local paths stay in that file");
   });
 
+  it("documents the installed primary-quota stop race without live GitHub transport", () => {
+    const guide = readFileSync(new URL("docs/HOST-SCHEDULING.md", root), "utf8");
+    expect(guide).toContain("scripts/verify-installed-controller-quota-stop.mjs");
+    expect(guide).toContain("does not spend GitHub quota or\nchange GitHub state");
+    expect(guide).toContain("never calls the upstream fetch");
+    expect(guide).toContain("non-secret fixture token");
+    expect(guide).toContain("`DropInPaths` remains\nempty");
+    expect(guide).toContain("Every validated stage is written and fsynced");
+    expect(guide).toContain(
+      'FACTORY_QUOTA_STOP_ACK="$repository:$unit:installed-primary-quota-explicit-stop:no-github-transport"',
+    );
+    expect(guide).toContain("Mixed server,\npermission, malformed-reset");
+  });
+
   it.each([
     "docs/release-evidence/private-observation.json",
     "docs/IMPLEMENTATION-HANDOFF.md",

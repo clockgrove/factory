@@ -7874,7 +7874,11 @@ export class FactorySupervisor {
                 // A durability/cleanup hold retains its original obligation.
                 // Releasing it here would make the journal contradict the
                 // receipts and prevent the exact attempt from resuming.
-                if (!terminalizationVeto(error)) await releaseExecutionCapacity();
+                if (
+                  !terminalizationVeto(error) &&
+                  !(error instanceof RunCancellationRequestedError)
+                )
+                  await releaseExecutionCapacity();
                 throw error;
               }
               await releaseExecutionCapacity();

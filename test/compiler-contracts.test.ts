@@ -311,7 +311,7 @@ describe("adapter-owned compiler capabilities", () => {
       name: "npm",
       paths: ["package.json", "package-lock.json", "src/a.ts"],
       adapterId: "node-npm",
-      command: "npm run test",
+      command: "npm test",
     },
     {
       name: "pnpm",
@@ -443,7 +443,7 @@ describe("adapter-owned compiler capabilities", () => {
       allToolchainDestinations,
     );
     expect(selected.validationRecipes.map((entry) => entry.command)).toEqual([
-      "npm run test",
+      "npm test",
       "node --test",
     ]);
   });
@@ -740,6 +740,12 @@ describe("strict semantic compiler contracts", () => {
       obligationIds: ["explicit-contract"],
       explanation: "The projected graph exceeds the configured planning threshold.",
     };
+    expect(
+      parseAndValidateCompilerProposal(semanticRequest(), {
+        ...providerEnvelope(workItems),
+        triggers: [trigger],
+      }).proposal,
+    ).toEqual(workItems);
     const objective = (id: string, prerequisiteOutputs: Array<Record<string, string>> = []) => ({
       id,
       title: `Deliver ${id}`,

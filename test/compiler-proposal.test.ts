@@ -1015,7 +1015,7 @@ describe("semantic proposal validation", () => {
         expect.objectContaining({
           code: "issue-body-limit",
           itemId: proposal.workItems[0]!.id,
-          observed: 73_796,
+          observed: 73_782,
         }),
       ]),
     );
@@ -1401,7 +1401,7 @@ describe("media intent compilation", () => {
       proposal: fixture.proposal,
       ...fixture.projectionContext,
     }).objective.workItems[0]!;
-    expect(item.validationCommands).toEqual(["npm run test", "npm run capture"]);
+    expect(item.validationCommands).toEqual(["npm test", "npm run capture"]);
     expect(item.validation).toEqual([
       expect.objectContaining({
         tier: "mechanical",
@@ -1409,7 +1409,7 @@ describe("media intent compilation", () => {
           ordinaryCriterion.text,
           "The captured repository result matches the expected result.",
         ],
-        evidenceCommands: ["npm run test"],
+        evidenceCommands: ["npm test"],
       }),
     ]);
 
@@ -2375,7 +2375,7 @@ describe("media intent compilation", () => {
       mediaPlanning,
     });
     expect(result.objective.workItems[0]!.validationCommands).toEqual([
-      "npm run test",
+      "npm test",
       "npm run capture-a",
       "npm run capture-b",
     ]);

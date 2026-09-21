@@ -541,7 +541,9 @@ function npmCommandForOperation(
   const parsed = npmValidationCommandForOperation(operation);
   if (!parsed) return null;
   return parsed.workspace === "."
-    ? `npm run ${parsed.script}`
+    ? parsed.script === "test"
+      ? "npm test"
+      : `npm run ${parsed.script}`
     : `npm run ${parsed.script} --workspace=${parsed.workspace}`;
 }
 

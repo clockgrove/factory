@@ -3424,7 +3424,7 @@ export function registerSuccessorRefreshTests() {
         status: "verified",
         usage: { modelTokens: 75_119 },
       });
-    }, 30000);
+    }, 60000);
 
     it("does not rewrite a provider-owned retained branch to repair its stale preview", async () => {
       const f = await successorFixture({

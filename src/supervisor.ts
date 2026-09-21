@@ -16000,12 +16000,10 @@ export class FactorySupervisor {
       const releaseCapacity = () => this.#releaseCapacity(capacity.key);
       return {
         validation,
-        async finish(recorded: boolean) {
+        async finish() {
           await discardValidationResult(validation);
-          if (recorded) {
-            await recordCapacity("CapacityReconciled");
-            await releaseCapacity();
-          }
+          await recordCapacity("CapacityReconciled");
+          await releaseCapacity();
         },
       };
     };
@@ -16024,7 +16022,6 @@ export class FactorySupervisor {
     const validation: Pick<CleanValidationResult, "evidence"> = remoteRecord
       ? { evidence: remoteRecord.validation }
       : localResult!.validation;
-    let validatedAndRecorded = false;
     let repositoryCaptureBundle: ReviewContext["repositoryCaptureBundle"];
     try {
       if (!validation.evidence.passed) {
@@ -16159,13 +16156,12 @@ export class FactorySupervisor {
             rebasedReceipt,
           ),
       });
-      validatedAndRecorded = true;
     } finally {
       try {
         if (repositoryCaptureBundle)
           await rm(repositoryCaptureBundle.root, { recursive: true, force: true });
       } finally {
-        if (localResult) await localResult.finish(validatedAndRecorded);
+        if (localResult) await localResult.finish();
       }
     }
   }

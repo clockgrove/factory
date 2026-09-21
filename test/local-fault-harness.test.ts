@@ -73,11 +73,46 @@ describe("bounded local-fault progress diagnostics", () => {
     const diagnostic = JSON.parse(result.stderr.trim());
     expect(diagnostic).toMatchObject({
       result: "incomplete",
-      stage: "installed-identity",
-      code: "local-fault-installed-identity-incomplete",
+      stage: "configuration",
+      code: "local-fault-configuration-incomplete",
+      violation: {
+        code: "local-fault-phase-unsupported",
+        field: "FACTORY_LOCAL_FAULT_PHASE",
+        observed: "unsupported",
+      },
     });
     expect(`${result.stdout}${result.stderr}`).not.toContain("private-secret-sentinel");
     expect(`${result.stdout}${result.stderr}`).not.toContain("AssertionError");
+  });
+
+  it("rejects missing model configuration before retained-install inspection", () => {
+    const result = spawnSync(process.execPath, ["scripts/verify-local-faults.mjs"], {
+      cwd: process.cwd(),
+      env: {
+        PATH: process.env.PATH,
+        FACTORY_LOCAL_FAULTS: "1",
+        FACTORY_LOCAL_FAULT_PHASE: "preflight",
+        FACTORY_LOCAL_FAULT_SCENARIO: "cancel",
+        FACTORY_LOCAL_FAULT_REPOSITORY: "example/disposable",
+        FACTORY_LOCAL_FAULT_CHECKOUT: "/home/example/disposable",
+        FACTORY_LOCAL_FAULT_NAMESPACE: "configuration-fixture",
+        FACTORY_LOCAL_FAULT_MAX_MODEL_TOKENS: "250000",
+        FACTORY_LOCAL_FAULT_REASONING: "xhigh",
+        FACTORY_LOCAL_FAULT_EVIDENCE: "/tmp/configuration-fixture/evidence.json",
+      },
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stderr.trim())).toMatchObject({
+      result: "incomplete",
+      stage: "configuration",
+      violation: {
+        code: "local-fault-configuration-required",
+        field: "FACTORY_LOCAL_FAULT_MODEL",
+        observed: "missing",
+      },
+    });
   });
 });
 
@@ -661,7 +696,9 @@ describe("installed local fault qualification harness", () => {
     expect(() => assertFaultAuthenticationEnvironment({})).not.toThrow();
     for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"])
       for (const value of ["override", ""])
-        expect(() => assertFaultAuthenticationEnvironment({ [key]: value })).toThrow();
+        expect(() => assertFaultAuthenticationEnvironment({ [key]: value })).toThrow(
+          "qualification invariant failed",
+        );
     const result = spawnSync(process.execPath, ["scripts/verify-local-faults.mjs"], {
       env: { PATH: process.env.PATH, GH_TOKEN: "unused-guard-sentinel" },
       encoding: "utf8",

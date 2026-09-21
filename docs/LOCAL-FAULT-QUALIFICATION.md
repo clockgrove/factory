@@ -63,6 +63,8 @@ export FACTORY_LOCAL_FAULT_REPOSITORY=OWNER/DISPOSABLE_REPO
 export FACTORY_LOCAL_FAULT_CHECKOUT=/home/USER/Codex/disposable-repo
 export FACTORY_LOCAL_FAULT_NAMESPACE=unique-fault-20260905
 export FACTORY_LOCAL_FAULT_MAX_MODEL_TOKENS=500000
+export FACTORY_LOCAL_FAULT_MODEL=gpt-5.6-sol
+export FACTORY_LOCAL_FAULT_REASONING=xhigh
 export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
 install -d -m 700 /tmp/factory-private-restart-UNIQUE
 export FACTORY_LOCAL_FAULT_EVIDENCE=/tmp/factory-private-restart-UNIQUE/evidence.json
@@ -127,7 +129,9 @@ distinguishes failure to observe an active owned worker from
 `local-fault-resource-absence-incomplete`. These codes do not disclose raw
 exceptions, provider output, credentials, prompts, or environment values. A
 failure before evidence creation is reported through the same fixed diagnostic
-vocabulary on stderr. Diagnostics never authorize another activation, fault
+vocabulary on stderr. Deterministic configuration failures also include a bounded structured violation
+with the stable code, phase, item, field, expected invariant and safe observed value. Diagnostics never
+copy raw exception, provider, packet or environment content and never authorize another activation, fault
 injection, cleanup action, retry, or increased allowance.
 
 Preparation accepts an existing labelled Objective with no run only when the

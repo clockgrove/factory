@@ -30,6 +30,8 @@ Set these names privately; no credential values belong in evidence or commands:
 - `FACTORY_QUALIFICATION_INSTALL_RECEIPT`: the exact owner-private retained-candidate receipt from
   the [shared checkpoint preflight](LOCAL-CHECKPOINT-RESTART-QUALIFICATION.md#authority-and-preflight)
 - `FACTORY_FAILURE_MAX_MODEL_TOKENS`: a newly authorized observed-stop threshold, not a hard cap
+- `FACTORY_FAILURE_MODEL`, `FACTORY_FAILURE_REASONING`: the explicit model identifier and supported
+  reasoning effort used by every qualification phase
 - `FACTORY_FAILURE_PHASE`: `preflight` or `exercise`
 - `FACTORY_FAILURE_EVIDENCE`: a new exclusive file in an owned private directory (0700)
 - `FACTORY_FAILURE_ACK`: required only for exercise, as specified below
@@ -87,3 +89,6 @@ accounting when the provider's interrupted usage is unavailable.
 Execution requires an exclusive host/controller window. An incomplete run is never automatically
 restarted, reactivated, rearmed, cancelled or cleaned up by the error handler; inspect its exact retained
 authority and attempted-action records before any subsequent authorized operation.
+Configuration and deterministic proof failures report a bounded structured violation with a stable code,
+phase, item, field, expected invariant and safe observed value. The runner never copies raw exception,
+provider, packet or environment content into that diagnostic.

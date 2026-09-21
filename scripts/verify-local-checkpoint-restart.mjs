@@ -59,6 +59,7 @@ import {
 } from "./qualification-settled-merge-proof.mjs";
 import { boundedQualificationEvidenceText } from "./qualification-evidence-boundary.mjs";
 import { assertPhaseKillRecovery } from "./qualification-director-contention.mjs";
+import { qualificationInvariant, qualificationViolation } from "./qualification-contract.mjs";
 import {
   installedCompilerPreflight,
   installedQualificationAuthority,
@@ -71,8 +72,15 @@ const hash = (value) =>
     .digest("hex");
 const terminal = new Set(["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"]);
 const local = new Set(["codex-sdk/local-worktree", "codex-cli/local-worktree"]);
-const safePath = (value) => {
-  assert.match(value ?? "", /^\/[A-Za-z0-9_./-]+$/);
+const safePath = (value, field) => {
+  qualificationInvariant(/^\/[A-Za-z0-9_./-]+$/.test(value ?? ""), {
+    code: "checkpoint-path-invalid",
+    phase: "preflight",
+    item: "checkpoint-restart",
+    field,
+    expected: "an absolute bounded Linux path",
+    observed: value === undefined ? "missing" : "invalid",
+  });
   return value;
 };
 const unique = (items, message) => {
@@ -101,43 +109,124 @@ function parseCheckpointAuthority(
   modelTokenCeiling = 500_000,
 ) {
   const compilerRecovery = env.FACTORY_CHECKPOINT_BACKEND === "compiler";
-  assert.ok(
-    !compilerRecovery || compilerQualificationEntrypoint,
-    "compiler checkpoint mode requires scripts/verify-compiler-qualification-checkpoints.mjs",
-  );
+  qualificationInvariant(!compilerRecovery || compilerQualificationEntrypoint, {
+    code: "checkpoint-entrypoint-unsupported",
+    phase: "preflight",
+    item: "checkpoint-restart",
+    field: "FACTORY_CHECKPOINT_BACKEND",
+    expected: "compiler recovery through its dedicated entrypoint",
+    observed: "unsupported-entrypoint",
+  });
   if (env.FACTORY_LOCAL_CHECKPOINT_RESTART !== "1") return null;
   for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"])
-    assert.equal(env[key], undefined, "default Linux-home authentication required");
+    qualificationInvariant(env[key] === undefined, {
+      code: "checkpoint-auth-environment-present",
+      phase: "preflight",
+      item: "checkpoint-restart",
+      field: key,
+      expected: "unset so default Linux-home authentication remains authoritative",
+      observed: "present",
+    });
   const repository = env.FACTORY_CHECKPOINT_REPOSITORY;
-  assert.match(repository ?? "", /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/);
-  assert.notEqual(repository, "clockgrove/factory");
-  const checkout = safePath(env.FACTORY_CHECKPOINT_CHECKOUT);
-  assert.ok(!checkout.startsWith("/mnt/"));
+  qualificationInvariant(
+    /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(repository ?? "") && repository !== "clockgrove/factory",
+    {
+      code: "checkpoint-repository-invalid",
+      phase: "preflight",
+      item: "checkpoint-restart",
+      field: "FACTORY_CHECKPOINT_REPOSITORY",
+      expected: "a non-Factory owner/repository identifier",
+      observed: repository === undefined ? "missing" : "invalid",
+    },
+  );
+  const checkout = safePath(env.FACTORY_CHECKPOINT_CHECKOUT, "FACTORY_CHECKPOINT_CHECKOUT");
+  qualificationInvariant(!checkout.startsWith("/mnt/"), {
+    code: "checkpoint-checkout-not-linux-native",
+    phase: "preflight",
+    item: "checkpoint-restart",
+    field: "FACTORY_CHECKPOINT_CHECKOUT",
+    expected: "a Linux-native checkout outside /mnt",
+    observed: "windows-mounted",
+  });
   const unit = `clockgrove-factory-${hash(`${repository}\0${resolve(checkout)}`).slice(0, 16)}.service`;
-  assert.equal(env.FACTORY_CHECKPOINT_CONTROLLER_UNIT, unit, "exact installed controller required");
+  qualificationInvariant(env.FACTORY_CHECKPOINT_CONTROLLER_UNIT === unit, {
+    code: "checkpoint-controller-unit-mismatch",
+    phase: "preflight",
+    item: "checkpoint-restart",
+    field: "FACTORY_CHECKPOINT_CONTROLLER_UNIT",
+    expected: "the controller unit derived from repository and checkout identity",
+    observed: env.FACTORY_CHECKPOINT_CONTROLLER_UNIT === undefined ? "missing" : "mismatch",
+  });
   const phase = env.FACTORY_CHECKPOINT_PHASE;
   const sessionRecovery = env.FACTORY_CHECKPOINT_BACKEND === "app-server";
-  assert.ok(
+  qualificationInvariant(
     env.FACTORY_CHECKPOINT_BACKEND === undefined || sessionRecovery || compilerRecovery,
-    "unsupported checkpoint backend",
+    {
+      code: "checkpoint-backend-unsupported",
+      phase: "preflight",
+      item: "checkpoint-restart",
+      field: "FACTORY_CHECKPOINT_BACKEND",
+      expected: "absent, app-server, or compiler through its dedicated entrypoint",
+      observed: "unsupported",
+    },
   );
-  assert.ok(["preflight", "exercise"].includes(phase));
+  qualificationInvariant(["preflight", "exercise"].includes(phase), {
+    code: "checkpoint-phase-unsupported",
+    phase: "preflight",
+    item: "checkpoint-restart",
+    field: "FACTORY_CHECKPOINT_PHASE",
+    expected: "preflight or exercise",
+    observed: phase === undefined ? "missing" : "unsupported",
+  });
   if (phase === "exercise")
-    assert.equal(
-      env.FACTORY_CHECKPOINT_ACK,
-      `${repository}:${unit}:${
-        sessionRecovery
-          ? "start,arm-terminal-artifact-hold,pause,phase-kill-restart,resume,stop"
-          : compilerRecovery
-            ? "start,arm-compiler-selection,arm-graph-projection,restart,pause,restart,stop"
-            : "start,pause-drain,restart,resume,stop"
-      }`,
-      "explicit lifecycle authority required",
+    qualificationInvariant(
+      env.FACTORY_CHECKPOINT_ACK ===
+        `${repository}:${unit}:${
+          sessionRecovery
+            ? "start,arm-terminal-artifact-hold,pause,phase-kill-restart,resume,stop"
+            : compilerRecovery
+              ? "start,arm-compiler-selection,arm-graph-projection,restart,pause,restart,stop"
+              : "start,pause-drain,restart,resume,stop"
+        }`,
+      {
+        code: "checkpoint-lifecycle-ack-mismatch",
+        phase: "preflight",
+        item: "checkpoint-restart",
+        field: "FACTORY_CHECKPOINT_ACK",
+        expected: "the exact repository, unit, and lifecycle action acknowledgement",
+        observed: env.FACTORY_CHECKPOINT_ACK === undefined ? "missing" : "mismatch",
+      },
     );
-  assert.ok(env.FACTORY_CHECKPOINT_NAMESPACE, "explicit new namespace required");
+  qualificationInvariant(
+    /^[a-z](?:[a-z0-9-]{6,46}[a-z0-9])$/.test(env.FACTORY_CHECKPOINT_NAMESPACE ?? ""),
+    {
+      code: "checkpoint-namespace-invalid",
+      phase: "preflight",
+      item: "checkpoint-restart",
+      field: "FACTORY_CHECKPOINT_NAMESPACE",
+      expected: "an 8-48 character lowercase qualification namespace",
+      observed: env.FACTORY_CHECKPOINT_NAMESPACE === undefined ? "missing" : "invalid",
+    },
+  );
+  const modelTokenSetting = env.FACTORY_CHECKPOINT_MAX_MODEL_TOKENS;
+  const parsedModelTokens = Number(modelTokenSetting);
+  qualificationInvariant(
+    /^[1-9]\d*$/.test(modelTokenSetting ?? "") &&
+      Number.isSafeInteger(parsedModelTokens) &&
+      parsedModelTokens >= 250_000 &&
+      parsedModelTokens <= modelTokenCeiling,
+    {
+      code: "checkpoint-model-allowance-invalid",
+      phase: "preflight",
+      item: "checkpoint-restart",
+      field: "FACTORY_CHECKPOINT_MAX_MODEL_TOKENS",
+      expected: `an integer from 250000 through ${modelTokenCeiling}`,
+      observed: "invalid",
+    },
+  );
   const policy = boundedPolicy(
     "regular-prs",
-    modelTokenLimit(env.FACTORY_CHECKPOINT_MAX_MODEL_TOKENS, modelTokenCeiling),
+    modelTokenLimit(modelTokenSetting, modelTokenCeiling),
     modelTokenCeiling,
   );
   // These scenarios prove same-attempt continuation, not implementation retry.
@@ -148,17 +237,24 @@ function parseCheckpointAuthority(
     policy.maxParallel = 1;
     policy.capacity.local.maxWorkers = 1;
   }
-  assert.ok(
-    policy.capacity.local.maxWorkers <= policy.maxParallel,
-    "invalid qualification worker ceiling",
-  );
+  qualificationInvariant(policy.capacity.local.maxWorkers <= policy.maxParallel, {
+    code: "checkpoint-worker-capacity-invalid",
+    phase: "preflight",
+    item: "checkpoint-restart",
+    field: "policy.capacity.local.maxWorkers",
+    expected: "local worker capacity no greater than maxParallel",
+    observed: {
+      maxWorkers: policy.capacity.local.maxWorkers,
+      maxParallel: policy.maxParallel,
+    },
+  });
   return {
     repository,
     checkout,
     unit,
     phase,
     namespace: qualificationNamespace(env.FACTORY_CHECKPOINT_NAMESPACE),
-    evidence: safePath(env.FACTORY_CHECKPOINT_EVIDENCE),
+    evidence: safePath(env.FACTORY_CHECKPOINT_EVIDENCE, "FACTORY_CHECKPOINT_EVIDENCE"),
     ...(compilerRecovery
       ? {
           observationWindowMinutes: policy.objectiveTimeoutMinutes,
@@ -322,6 +418,7 @@ export function checkpointFailure(error, boundary) {
     error !== null && (typeof error === "object" || typeof error === "function")
       ? qualificationFailureStages.get(error)
       : undefined;
+  const violation = qualificationViolation(error);
   const proofFailure = qualificationProofFailureContext(error);
   const checkpointContinuationFailure = appServerCheckpointContinuationFailureContext(error);
   const classification = classifyCheckpointFailure(error);
@@ -329,6 +426,13 @@ export function checkpointFailure(error, boundary) {
     classification.category === "assertion"
       ? qualificationAssertionMessages.get(qualificationStage)
       : undefined;
+  if (violation)
+    return {
+      boundary: boundaries.has(boundary) ? boundary : "scenario",
+      category: "invariant",
+      code: violation.code,
+      violation,
+    };
   return {
     boundary: boundaries.has(boundary) ? boundary : "scenario",
     ...(qualificationStage === undefined ? {} : { qualificationStage }),
@@ -1814,6 +1918,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     ...new Set([
       harnessPath,
       "scripts/qualification-model-accounting.mjs",
+      "scripts/qualification-contract.mjs",
       "scripts/qualification-install-identity.mjs",
       "scripts/qualification-receipts.mjs",
       "scripts/qualification-sibling-refresh-proof.mjs",

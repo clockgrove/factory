@@ -13,6 +13,10 @@ export interface FailureFixture {
 export function failureHash(bytes: string | Uint8Array): string;
 export function failureBlob(bytes: string | Uint8Array): string;
 export function failureFixture(namespace: string, scenario: FailureCase): FailureFixture;
+export function assertFailureValidationCommands(
+  commands: unknown,
+  fixture: FailureFixture,
+): { manager: "npm"; script: string; form: "lifecycle" | "run" };
 export function failureObjectiveBody(namespace: string, scenario: FailureCase): string;
 export function rawFailureGit(
   repository: string,

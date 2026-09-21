@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   checkpointAuthority,
+  checkpointFailure,
   main as genericCheckpointMain,
 } from "../scripts/verify-local-checkpoint-restart.mjs";
 import {
@@ -412,16 +413,22 @@ function projectedObservation(
 
 describe("installed compiler checkpoint qualifier", () => {
   it("requires the compiler entrypoint before generic harness effects", async () => {
-    expect(() => checkpointAuthority({ FACTORY_CHECKPOINT_BACKEND: "compiler" })).toThrow(
-      "compiler checkpoint mode requires scripts/verify-compiler-qualification-checkpoints.mjs",
-    );
+    let caught: unknown;
+    try {
+      checkpointAuthority({ FACTORY_CHECKPOINT_BACKEND: "compiler" });
+    } catch (error) {
+      caught = error;
+    }
+    expect(checkpointFailure(caught)).toMatchObject({
+      category: "invariant",
+      code: "checkpoint-entrypoint-unsupported",
+      violation: { field: "FACTORY_CHECKPOINT_BACKEND" },
+    });
     const env = compilerCheckpointEnvironment();
-    expect(() => checkpointAuthority(env)).toThrow(
-      "compiler checkpoint mode requires scripts/verify-compiler-qualification-checkpoints.mjs",
-    );
+    expect(() => checkpointAuthority(env)).toThrow("qualification invariant failed");
     const runner = vi.fn();
     await expect(genericCheckpointMain(env, runner)).rejects.toThrow(
-      "compiler checkpoint mode requires scripts/verify-compiler-qualification-checkpoints.mjs",
+      "qualification invariant failed",
     );
     expect(runner).not.toHaveBeenCalled();
     expect(compilerCheckpointAuthority(env)).toMatchObject({

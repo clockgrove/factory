@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { qualificationNamespace, qualificationNamespaceMarker } from "./verify-live-objective.mjs";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
 import { qualificationModelAccounting } from "./qualification-model-accounting.mjs";
+import { qualificationInvariant } from "./qualification-contract.mjs";
 
 export const failureHash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 export const failureBlob = (bytes) =>
@@ -48,6 +49,64 @@ export function failureFixture(namespace, scenario) {
     validationCommand: "npm test",
     recipeCommand: `node ${paths.recipe}`,
   };
+}
+
+function npmScriptCommand(command) {
+  if (command === "npm test") return { manager: "npm", script: "test", form: "lifecycle" };
+  const match = /^npm run ([A-Za-z0-9][A-Za-z0-9:_.-]{0,127})$/.exec(command);
+  return match ? { manager: "npm", script: match[1], form: "run" } : null;
+}
+
+function validationCommandObservation(commands) {
+  if (!Array.isArray(commands)) return { type: typeof commands, count: 0, commands: [] };
+  return {
+    type: "array",
+    count: commands.length,
+    commands: commands.slice(0, 16).map((command) => {
+      const parsed = typeof command === "string" ? npmScriptCommand(command) : null;
+      return parsed ?? { recognized: false, type: typeof command };
+    }),
+  };
+}
+
+/** Compiler fidelity remains exact for failed-validation. The real-conflict row proves
+ * runtime conflict safety, so it accepts the two finite npm spellings of one script. */
+export function assertFailureValidationCommands(commands, fixture) {
+  const observation = validationCommandObservation(commands);
+  if (fixture.scenario === "failed-validation") {
+    qualificationInvariant(
+      Array.isArray(commands) && commands.length === 1 && commands[0] === fixture.validationCommand,
+      {
+        code: "failure-validation-command-exact",
+        phase: "verify",
+        item: fixture.scenario,
+        field: "packet.validationCommands",
+        expected: "one exact npm test command",
+        observed: observation,
+      },
+    );
+    return npmScriptCommand(commands[0]);
+  }
+  const expected = npmScriptCommand(fixture.validationCommand);
+  const actual =
+    Array.isArray(commands) && commands.length === 1 && typeof commands[0] === "string"
+      ? npmScriptCommand(commands[0])
+      : null;
+  qualificationInvariant(
+    expected !== null &&
+      actual !== null &&
+      actual.manager === expected.manager &&
+      actual.script === expected.script,
+    {
+      code: "failure-validation-command-identity",
+      phase: "verify",
+      item: fixture.scenario,
+      field: "packet.validationCommands",
+      expected: "one npm command invoking the repository test script",
+      observed: observation,
+    },
+  );
+  return actual;
 }
 
 export function failureObjectiveBody(namespace, scenario) {

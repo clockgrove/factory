@@ -6,6 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   checkpointAuthority,
   appServerHoldReady,
+  checkpointFailure,
   main as checkpointMain,
 } from "./verify-local-checkpoint-restart.mjs";
 import {
@@ -25,7 +26,9 @@ import {
   assertFailureAccounting,
   assertConflictPreserved,
   failureHash,
+  assertFailureValidationCommands,
 } from "./qualification-failure-conflict.mjs";
+import { qualificationInvariant } from "./qualification-contract.mjs";
 
 const one = (rows, message) => {
   assert.equal(rows.length, 1, message);
@@ -40,29 +43,86 @@ const actionsFor = (scenario) =>
 export function failureAuthority(env) {
   if (env.FACTORY_LOCAL_FAILURE_CONFLICT !== "1") return null;
   const scenario = env.FACTORY_FAILURE_CASE;
-  assert.ok(
-    ["failed-validation", "real-conflict"].includes(scenario),
-    "explicit negative case required",
-  );
+  qualificationInvariant(["failed-validation", "real-conflict"].includes(scenario), {
+    code: "failure-case-required",
+    phase: "preflight",
+    item: "failure-conflict",
+    field: "FACTORY_FAILURE_CASE",
+    expected: "failed-validation or real-conflict",
+    observed: scenario === undefined ? "missing" : "unsupported",
+  });
   const repository = env.FACTORY_FAILURE_REPOSITORY,
     unit = env.FACTORY_FAILURE_CONTROLLER_UNIT;
+  qualificationInvariant(["preflight", "exercise"].includes(env.FACTORY_FAILURE_PHASE), {
+    code: "failure-phase-required",
+    phase: "preflight",
+    item: scenario,
+    field: "FACTORY_FAILURE_PHASE",
+    expected: "preflight or exercise",
+    observed: env.FACTORY_FAILURE_PHASE === undefined ? "missing" : "unsupported",
+  });
   if (env.FACTORY_FAILURE_PHASE === "exercise")
-    assert.equal(
-      env.FACTORY_FAILURE_ACK,
-      `${repository}:${unit}:${scenario}:${actionsFor(scenario)}`,
-      "exact scenario/mutation acknowledgement required",
+    qualificationInvariant(
+      env.FACTORY_FAILURE_ACK === `${repository}:${unit}:${scenario}:${actionsFor(scenario)}`,
+      {
+        code: "failure-mutation-ack-mismatch",
+        phase: "preflight",
+        item: scenario,
+        field: "FACTORY_FAILURE_ACK",
+        expected: "exact repository, unit, scenario, and action acknowledgement",
+        observed: env.FACTORY_FAILURE_ACK === undefined ? "missing" : "mismatch",
+      },
     );
-  assert.match(
-    env.FACTORY_FAILURE_BASE_SHA ?? "",
-    /^[a-f0-9]{40}$/,
-    "explicit immutable fixture base required",
+  qualificationInvariant(/^[a-f0-9]{40}$/.test(env.FACTORY_FAILURE_BASE_SHA ?? ""), {
+    code: "failure-base-sha-required",
+    phase: "preflight",
+    item: scenario,
+    field: "FACTORY_FAILURE_BASE_SHA",
+    expected: "one immutable 40-character lowercase Git commit SHA",
+    observed: env.FACTORY_FAILURE_BASE_SHA === undefined ? "missing" : "invalid",
+  });
+  qualificationInvariant(/^[a-f0-9]{64}$/.test(env.FACTORY_FAILURE_FIXTURE_SHA256 ?? ""), {
+    code: "failure-fixture-digest-required",
+    phase: "preflight",
+    item: scenario,
+    field: "FACTORY_FAILURE_FIXTURE_SHA256",
+    expected: "one 64-character lowercase SHA-256 fixture digest",
+    observed: env.FACTORY_FAILURE_FIXTURE_SHA256 === undefined ? "missing" : "invalid",
+  });
+  qualificationInvariant(Boolean(env.FACTORY_FAILURE_MAX_MODEL_TOKENS), {
+    code: "failure-model-allowance-required",
+    phase: "preflight",
+    item: scenario,
+    field: "FACTORY_FAILURE_MAX_MODEL_TOKENS",
+    expected: "an explicit bounded model-token allowance",
+    observed: env.FACTORY_FAILURE_MAX_MODEL_TOKENS === undefined ? "missing" : "present",
+  });
+  qualificationInvariant(
+    typeof env.FACTORY_FAILURE_MODEL === "string" &&
+      Buffer.byteLength(env.FACTORY_FAILURE_MODEL) <= 160 &&
+      /^[A-Za-z0-9._:/+-]+$/.test(env.FACTORY_FAILURE_MODEL),
+    {
+      code: "failure-model-profile-required",
+      phase: "preflight",
+      item: scenario,
+      field: "FACTORY_FAILURE_MODEL",
+      expected: "an explicit valid qualification model identifier",
+      observed: env.FACTORY_FAILURE_MODEL === undefined ? "missing" : "invalid",
+    },
   );
-  assert.match(
-    env.FACTORY_FAILURE_FIXTURE_SHA256 ?? "",
-    /^[a-f0-9]{64}$/,
-    "explicit fixture digest required",
+  qualificationInvariant(
+    ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(
+      env.FACTORY_FAILURE_REASONING,
+    ),
+    {
+      code: "failure-reasoning-profile-required",
+      phase: "preflight",
+      item: scenario,
+      field: "FACTORY_FAILURE_REASONING",
+      expected: "an explicit supported qualification reasoning effort",
+      observed: env.FACTORY_FAILURE_REASONING === undefined ? "missing" : "unsupported",
+    },
   );
-  assert.ok(env.FACTORY_FAILURE_MAX_MODEL_TOKENS, "new scenario allowance required");
   const authority = checkpointAuthority({
     ...env,
     FACTORY_LOCAL_CHECKPOINT_RESTART: "1",
@@ -88,7 +148,17 @@ export function failureAuthority(env) {
   authority.policy.workItemTimeoutMinutes = 10;
   authority.policy.objectiveTimeoutMinutes = 40;
   const fixture = failureFixture(authority.namespace, scenario);
-  assert.equal(env.FACTORY_FAILURE_FIXTURE_SHA256, failureHash(JSON.stringify(fixture)));
+  qualificationInvariant(
+    env.FACTORY_FAILURE_FIXTURE_SHA256 === failureHash(JSON.stringify(fixture)),
+    {
+      code: "failure-fixture-digest-mismatch",
+      phase: "preflight",
+      item: scenario,
+      field: "FACTORY_FAILURE_FIXTURE_SHA256",
+      expected: "the digest of the exact generated namespace and scenario fixture",
+      observed: "mismatch",
+    },
+  );
   return {
     ...authority,
     failure: {
@@ -223,6 +293,7 @@ export function failureExtension(authority) {
     harnessPaths: [
       "scripts/verify-local-failure-conflict.mjs",
       "scripts/qualification-failure-conflict.mjs",
+      "scripts/qualification-contract.mjs",
       "scripts/qualification-receipts.mjs",
     ],
     objectiveBody: () => failureObjectiveBody(authority.namespace, authority.failure.scenario),
@@ -295,7 +366,7 @@ export function failureExtension(authority) {
         );
         const prepared = JSON.parse(proof.prepared.content);
         assert.deepEqual(prepared.packet.allowedPaths, [fixture.paths.payload]);
-        assert.deepEqual(prepared.packet.validationCommands, [fixture.validationCommand]);
+        assertFailureValidationCommands(prepared.packet.validationCommands, fixture);
         assert.equal(prepared.packet.requirements.trust, "trusted_local");
         const ready = assertQualificationCheckpoint(
           proof.ready,
@@ -483,8 +554,15 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       ),
     );
   } else
-    main().catch(() => {
+    main().catch((error) => {
       process.exitCode = 2;
-      console.error("Failure/conflict qualification unavailable; no automatic retry or cleanup.");
+      console.error(
+        JSON.stringify({
+          result: "incomplete",
+          diagnostic: checkpointFailure(error),
+          automaticRetry: false,
+          automaticCleanup: false,
+        }),
+      );
     });
 }

@@ -544,15 +544,27 @@ describe("installed large-file lifecycle authority", () => {
     );
   });
   it("rejects ambiguous or unsupported repository hosts before granting LFS egress", () => {
-    for (const host of ["github.example.com", "*.github.com", "GITHUB.COM"])
-      expect(() =>
+    for (const host of ["github.example.com", "*.github.com", "GITHUB.COM"]) {
+      let caught: unknown;
+      try {
         largeFileAuthority({
           ...env,
           FACTORY_LARGE_FILE_CASE: "produced-lfs-restart",
           FACTORY_LARGE_FILE_PHASE: "preflight",
           GH_HOST: host,
-        }),
-      ).toThrow(/default Linux-home authentication required/);
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({
+        name: "QualificationViolation",
+        violation: {
+          code: "checkpoint-auth-environment-present",
+          field: "GH_HOST",
+          observed: "present",
+        },
+      });
+    }
     for (const target of [
       "github.com/example/disposable",
       "https://github.com/example/disposable",

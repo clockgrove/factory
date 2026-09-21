@@ -14,6 +14,7 @@ import {
   assertFailedValidation,
   assertConflictPreserved,
   assertFailureAccounting,
+  assertFailureValidationCommands,
 } from "../scripts/qualification-failure-conflict.mjs";
 import {
   failureAuthority,
@@ -605,6 +606,99 @@ describe("installed failed-validation/conflict authority and evidence", () => {
 });
 
 describe("independent real Git content proof (not live worker evidence)", () => {
+  it("uses scenario-owned validation semantics without weakening exact compiler fidelity", () => {
+    const failedValidation = failureFixture(namespace, "failed-validation");
+    const realConflict = failureFixture(namespace, "real-conflict");
+
+    expect(assertFailureValidationCommands(["npm test"], failedValidation)).toEqual({
+      manager: "npm",
+      script: "test",
+      form: "lifecycle",
+    });
+    expect(() => assertFailureValidationCommands(["npm run test"], failedValidation)).toThrow(
+      "qualification invariant failed",
+    );
+
+    expect(assertFailureValidationCommands(["npm test"], realConflict)).toMatchObject({
+      manager: "npm",
+      script: "test",
+    });
+    expect(assertFailureValidationCommands(["npm run test"], realConflict)).toEqual({
+      manager: "npm",
+      script: "test",
+      form: "run",
+    });
+    for (const commands of [
+      ["npm run lint"],
+      ["npm run test -- --watch"],
+      ["pnpm test"],
+      ["npm test", "npm run test"],
+      "npm test",
+    ])
+      expect(() => assertFailureValidationCommands(commands, realConflict)).toThrow(
+        "qualification invariant failed",
+      );
+  });
+
+  it("reports missing model configuration as a stable preflight violation", () => {
+    for (const field of ["FACTORY_FAILURE_MODEL", "FACTORY_FAILURE_REASONING"] as const) {
+      const invalid = { ...env(), [field]: undefined };
+      let caught: unknown;
+      try {
+        failureAuthority(invalid);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({
+        name: "QualificationViolation",
+        violation: {
+          phase: "preflight",
+          item: "failed-validation",
+          field,
+          observed: "missing",
+        },
+      });
+    }
+  });
+
+  it("prints the structured prerequisite violation from the executable entrypoint", () => {
+    const secret = "private-model-setting";
+    const result = spawnSync(process.execPath, ["scripts/verify-local-failure-conflict.mjs"], {
+      cwd: process.cwd(),
+      env: {
+        PATH: process.env.PATH,
+        FACTORY_LOCAL_FAILURE_CONFLICT: "1",
+        FACTORY_FAILURE_CASE: "real-conflict",
+        FACTORY_FAILURE_PHASE: "preflight",
+        FACTORY_FAILURE_BASE_SHA: "b".repeat(40),
+        FACTORY_FAILURE_FIXTURE_SHA256: "a".repeat(64),
+        FACTORY_FAILURE_MAX_MODEL_TOKENS: "250000",
+        FACTORY_FAILURE_REASONING: "xhigh",
+        FACTORY_FAILURE_REPOSITORY: secret,
+      },
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stderr.trim())).toMatchObject({
+      result: "incomplete",
+      diagnostic: {
+        category: "invariant",
+        code: "failure-model-profile-required",
+        violation: {
+          phase: "preflight",
+          item: "real-conflict",
+          field: "FACTORY_FAILURE_MODEL",
+          observed: "missing",
+        },
+      },
+      automaticRetry: false,
+      automaticCleanup: false,
+    });
+    expect(`${result.stdout}${result.stderr}`).not.toContain(secret);
+    expect(`${result.stdout}${result.stderr}`).not.toContain("AssertionError");
+  });
+
   it.each([
     ["failed-validation", 1],
     ["real-conflict", 0],

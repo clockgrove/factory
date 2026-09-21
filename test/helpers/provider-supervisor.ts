@@ -641,7 +641,8 @@ wheels = [
         permittedSecretNames: [],
         trust: managed
           ? "managed"
-          : (faults.nativeStack && index === 1) || faults.isolatedValidationWorkItem === 8 + index
+          : (faults.nativeStack && index === 1 && !faults.nativeRebaseBudgetExhaustion) ||
+              faults.isolatedValidationWorkItem === 8 + index
             ? "isolated"
             : "trusted_local",
         estimatedDurationMinutes: 1,
@@ -1534,30 +1535,33 @@ wheels = [
         }
         if (number === 108) {
           if (faults.nativeRebaseBudgetExhaustion) {
-            // Supply distinct, completed provider usage before the separately
-            // admitted rebase validator; never rewrite an existing receipt.
+            // Supply distinct, completed model usage before rewritten-head
+            // validation. Validation remains admitted, but its later semantic
+            // review must observe the exhausted threshold.
             const usage = events().find(
               (entry) =>
                 entry.kind === "budget" &&
                 entry.event === "BudgetReconciled" &&
                 entry.workItem === 9 &&
-                entry.unit === "sandbox_milliseconds",
+                entry.unit === "model_tokens",
             );
-            if (!usage || usage.kind !== "budget") throw new Error("missing child sandbox usage");
+            if (!usage || usage.kind !== "budget") throw new Error("missing child model usage");
             const priorSequence = Math.max(...events().map((entry) => entry.sequence));
-            for (const [index, event] of ["BudgetReserved", "BudgetReconciled"].entries())
-              snapshot.workItems[1]!.factoryEvents!.push(
-                parseFactoryEvent({
-                  ...usage,
-                  event,
-                  writerOperationId: `fixture-completed-prior-validation-${index}`,
-                  usageId: "fixture-completed-prior-validation",
-                  phase: "validation",
-                  amount: policy.maxSandboxMinutes * 60_000,
-                  sequence: priorSequence + index + 1,
-                  at: new Date().toISOString(),
-                }),
-              );
+            snapshot.workItems[1]!.factoryEvents!.push(
+              parseFactoryEvent({
+                ...usage,
+                writerOperationId: "fixture-completed-prior-model-usage",
+                usageId: "fixture-completed-prior-model-usage",
+                modelInvocationId: undefined,
+                amount: policy.economics!.maxModelTokens,
+                reportedModelUsage: {
+                  inputTokens: policy.economics!.maxModelTokens,
+                  outputTokens: 0,
+                },
+                sequence: priorSequence + 1,
+                at: new Date().toISOString(),
+              }),
+            );
           }
           faults.nativeAfterParentMerge?.();
         }

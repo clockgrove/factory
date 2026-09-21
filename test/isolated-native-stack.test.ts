@@ -312,7 +312,31 @@ for (const fault of [
           ),
       ).toHaveLength(1);
       expect(fixture.resources.size).toBe(0);
-      if (fault === "nativeRebaseBudgetExhaustion") expect(result.reason).toMatch(/budget/);
+      if (fault === "nativeRebaseBudgetExhaustion") {
+        expect(result.reason).toMatch(/model-token|budget/);
+        expect(fixture.activity.filter((entry) => entry.operation === "rebase-review")).toEqual([]);
+        const capacity = fixture
+          .events()
+          .filter(
+            (event) =>
+              event.kind === "capacity" &&
+              event.backend.startsWith("factory/integration-validation-"),
+          );
+        expect(capacity.map((event) => event.event)).toEqual([
+          "CapacityReserved",
+          "CapacityReconciled",
+        ]);
+        expect(capacity[1]).toMatchObject({
+          runId: capacity[0]!.runId,
+          objective: capacity[0]!.objective,
+          workItem: capacity[0]!.workItem,
+          attempt: capacity[0]!.attempt,
+          phase: capacity[0]!.phase,
+          backend: capacity[0]!.backend,
+          requestedCpu: capacity[0]!.requestedCpu,
+          requestedMemoryMb: capacity[0]!.requestedMemoryMb,
+        });
+      }
     } finally {
       await fixture.dispose();
     }

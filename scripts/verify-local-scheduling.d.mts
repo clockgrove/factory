@@ -74,6 +74,7 @@ export function assertNativePriorityReadback(
 ): void;
 export function ownedSchedulingScopes(evidence: unknown, primary: unknown): string[];
 export function assertSchedulingCompletion(evidence: unknown): void;
+export function assertSchedulingPipelineCompletion(evidence: unknown): void;
 export function schedulingSnapshot(hooks: unknown): Promise<unknown>;
 export function assertRepositoryContention(input: unknown): void;
 export function schedulingRequest<T>(

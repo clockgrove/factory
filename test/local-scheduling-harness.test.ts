@@ -18,7 +18,11 @@ import {
   schedulingUnit,
   type ServiceIdentity,
 } from "../scripts/verify-local-scheduling.mjs";
-import { boundedPolicy, runQualificationCall } from "../scripts/verify-live-objective.mjs";
+import {
+  boundedPolicy,
+  qualificationModels,
+  runQualificationCall,
+} from "../scripts/verify-live-objective.mjs";
 
 const boot = "component-test-boot";
 const bootDigest = createHash("sha256").update(boot).digest("hex");
@@ -125,6 +129,8 @@ describe("explicit installed scheduling authority", () => {
     FACTORY_LIVE_OBJECTIVE_REPOSITORY: binding.repository,
     FACTORY_LIVE_OBJECTIVE_NAMESPACE: binding.namespace,
     FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "500000",
+    FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+    FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
     FACTORY_LIVE_LOCAL_SCHEDULING_ACK: `${binding.repository}:owned-cpu-priority-contention`,
   };
   it("has no effect without opt-in", async () => {
@@ -139,7 +145,9 @@ describe("explicit installed scheduling authority", () => {
     }
   });
   it("keeps the exact regular default policy and bounded original allowance", () => {
-    expect(schedulingAuthority(env)?.policy).toEqual(boundedPolicy("regular-prs", 500000));
+    const expected = boundedPolicy("regular-prs", 500000) as Record<string, unknown>;
+    expected.models = qualificationModels("gpt-5.6-sol", "xhigh");
+    expect(schedulingAuthority(env)?.policy).toEqual(expected);
     expect(
       schedulingAuthority({
         ...env,
@@ -148,6 +156,20 @@ describe("explicit installed scheduling authority", () => {
       }),
     ).not.toBeNull();
   });
+  it.each([
+    { FACTORY_LIVE_OBJECTIVE_MODEL: undefined, FACTORY_LIVE_OBJECTIVE_REASONING: undefined },
+    { FACTORY_LIVE_OBJECTIVE_MODEL: undefined },
+    { FACTORY_LIVE_OBJECTIVE_REASONING: undefined },
+    { FACTORY_LIVE_OBJECTIVE_MODEL: "bad model" },
+    { FACTORY_LIVE_OBJECTIVE_REASONING: "fashionable" },
+  ])(
+    "rejects missing, partial or malformed model authority before invocation: %j",
+    async (delta) => {
+      const run = vi.fn();
+      await expect(main({ ...env, ...delta }, run)).rejects.toThrow();
+      expect(run).not.toHaveBeenCalled();
+    },
+  );
   it.each(["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"])(
     "rejects %s before preflight or any invocation, without logging its value",
     async (key) => {

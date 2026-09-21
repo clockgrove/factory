@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   assertNativePriorityReadback,
-  assertRepositoryContention,
+  assertObjectiveLeaseContention,
   assertSchedulingBarrier,
   changeSchedulingService,
   installedMcpTransport,
@@ -16,6 +16,7 @@ import {
   schedulingRequest,
   schedulingTransport,
   schedulingUnit,
+  userSystemdEnvironment,
   type ServiceIdentity,
 } from "../scripts/verify-local-scheduling.mjs";
 import {
@@ -39,6 +40,14 @@ const descriptor: ServiceIdentity = {
   bundle: "/home/example/.codex/plugins/cache/factory/dist/mcp-server.js",
   checkout: "/home/example/disposable",
 };
+
+it("derives the exact user-systemd bus environment for host observations", () => {
+  expect(userSystemdEnvironment({ PATH: "/usr/bin:/bin" }, 1000)).toEqual({
+    PATH: "/usr/bin:/bin",
+    XDG_RUNTIME_DIR: "/run/user/1000",
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+  });
+});
 const launcher = "/home/example/.codex/plugins/cache/factory/bin/factory-mcp";
 const identity = {
   ...descriptor,
@@ -643,11 +652,13 @@ describe("bounded GitHub observations without mutation retries", () => {
 
 describe("one-shot foreground/observer coordination", () => {
   const contention = () => {
-    const record = {
+    const event = {
       protocol: "clockgrove.factory/v2",
-      kind: "repository-lease",
-      event: "RepositoryLeaseAcquired",
-      controllerId: "holder",
+      kind: "lease",
+      event: "LeaseAcquired",
+      objective: 7,
+      holder: "holder",
+      runId: "run-7",
       epoch: 3,
       policyDigest: "a".repeat(64),
       sequence: 1,
@@ -655,48 +666,49 @@ describe("one-shot foreground/observer coordination", () => {
     return {
       response: {
         isError: true,
-        content: [{ type: "text", text: "another repository controller holds the lease" }],
+        content: [{ type: "text", text: "Objective #7 is leased by holder" }],
       },
-      before: { oid: "a".repeat(40), record },
+      before: { oid: "a".repeat(40), event, parents: ["0".repeat(40)] },
       after: {
         oid: "b".repeat(40),
-        record: { ...record, event: "RepositoryLeaseRenewed", sequence: 2 },
+        event: {
+          ...event,
+          event: "LeaseRenewed",
+          sequence: 2,
+          previousOid: "a".repeat(40),
+        },
+        parents: ["a".repeat(40)],
       },
-      controller: {
-        event: "ControllerObserved",
-        controllerId: "holder",
-        epoch: 3,
-        controllerPolicyDigest: "a".repeat(64),
-      },
+      objective: 7,
+      runId: "run-7",
+      policyDigest: "a".repeat(64),
     };
   };
-  it("binds an exact refusal to the same observed repository lease incarnation", () =>
-    expect(() => assertRepositoryContention(contention())).not.toThrow());
+  it("binds an exact refusal to the unchanged active Objective lease", () =>
+    expect(() => assertObjectiveLeaseContention(contention())).not.toThrow());
   it.each([
     {
       isError: false,
-      content: [{ type: "text", text: "another repository controller holds the lease" }],
+      content: [{ type: "text", text: "Objective #7 is leased by holder" }],
     },
     {
       isError: true,
-      content: [
-        { type: "text", text: "timeout; another repository controller holds the lease possibly" },
-      ],
+      content: [{ type: "text", text: "timeout; Objective #7 might be leased" }],
     },
     { isError: true, content: [{ type: "text", text: "request timed out" }] },
   ])("never treats arbitrary errors or uncertain responses as safe contention", (response) =>
-    expect(() => assertRepositoryContention({ ...contention(), response })).toThrow(),
+    expect(() => assertObjectiveLeaseContention({ ...contention(), response })).toThrow(),
   );
   it.each([
-    { controllerId: "other" },
+    { holder: "other" },
     { epoch: 4 },
     { policyDigest: "b".repeat(64) },
-    { event: "RepositoryLeaseReleased" },
+    { event: "LeaseReleased" },
     { sequence: 0 },
   ])("rejects lease identity drift %j", (delta) => {
     const input = contention();
-    Object.assign(input.after.record, delta);
-    expect(() => assertRepositoryContention(input)).toThrow();
+    Object.assign(input.after.event, delta);
+    expect(() => assertObjectiveLeaseContention(input)).toThrow();
   });
   it("leaves the existing default call unchanged", async () => {
     const invoke = vi.fn(async () => 42);

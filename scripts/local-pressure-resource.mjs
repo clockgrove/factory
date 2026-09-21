@@ -5,7 +5,11 @@ import { createHash } from "node:crypto";
 import { readFileSync, readlinkSync, readdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { observeSchedulingService } from "./verify-local-scheduling.mjs";
+import {
+  observeSchedulingService,
+  userSystemdEnvironment,
+  userSystemdUnavailableError,
+} from "./verify-local-scheduling.mjs";
 
 export const MB = 1048576;
 export const PRESSURE_BOUNDS = Object.freeze({
@@ -26,6 +30,7 @@ export const pressurePort = {
   exec(command, args) {
     try {
       return execFileSync(command, args, {
+        env: userSystemdEnvironment(),
         encoding: "utf8",
         timeout: 15000,
         maxBuffer: 65536,
@@ -37,9 +42,11 @@ export const pressurePort = {
         args[1] === "show" &&
         error.status === 1 &&
         typeof error.stdout === "string" &&
+        error.stdout.trim().length > 0 &&
         error.stdout.length < 65536
       )
         return error.stdout.trim();
+      if (["systemctl", "systemd-run"].includes(command)) throw userSystemdUnavailableError();
       throw Error("owned pressure resource operation unavailable; no retry");
     }
   },

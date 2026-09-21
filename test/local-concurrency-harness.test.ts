@@ -1397,6 +1397,8 @@ describe("installed two-Objective qualification authority", () => {
     expect(a).not.toContain("declare managed execution trust");
     expect(b).not.toContain("declare managed execution trust");
     expect(b).toContain("Keep both roots minimal");
+    expect(a).not.toMatch(/observer records|actual overlap|actual refill/i);
+    expect(b).not.toMatch(/observer records|actual overlap|actual refill/i);
     expect(a).not.toContain(authority.namespaces[1]!);
     expect(b).not.toContain(authority.namespaces[0]!);
   });

@@ -13,9 +13,11 @@ import {
   qualificationNamespace,
 } from "./verify-live-objective.mjs";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
+import { observeRegularLocalScopeCapability } from "./verify-regular-objective.mjs";
 import {
   changeSchedulingService,
   installedMcpTransport,
+  isUserSystemdUnavailable,
   observeSchedulingService,
   schedulingRequest,
   schedulingTransport,
@@ -344,16 +346,20 @@ export function createBudgetStopQualification(authority, env = process.env, port
   let primary;
   const nonce = randomUUID();
   const safe =
-    (fn) =>
+    (stage, fn) =>
     async (...args) => {
       try {
         return await fn(...args);
-      } catch {
-        const context = args[1];
+      } catch (error) {
+        const context = args.find((value) => value?.evidence && typeof value.save === "function");
         if (context?.evidence && typeof context.save === "function") {
           context.evidence.qualificationFailure = {
-            stage: "wrap-transport",
-            code: "qualification-transport-unavailable",
+            stage: isUserSystemdUnavailable(error) ? "local-scope-observation" : stage,
+            code: isUserSystemdUnavailable(error)
+              ? "user-systemd-local-scope-unavailable"
+              : stage === "wrap-transport"
+                ? "qualification-transport-unavailable"
+                : `${stage}-unavailable`,
           };
           context.save();
         }
@@ -367,7 +373,8 @@ export function createBudgetStopQualification(authority, env = process.env, port
     policy: authority.policy,
     namespace: authority.namespace,
     privateEvidence: true,
-    wrapTransport: safe(async (parameters, context) => {
+    observePreflight: observeRegularLocalScopeCapability,
+    wrapTransport: safe("wrap-transport", async (parameters, context) => {
       const installed = installedMcpTransport(parameters, context.pluginRoot);
       const user = userInfo();
       primary = {
@@ -402,7 +409,7 @@ export function createBudgetStopQualification(authority, env = process.env, port
         ),
       };
     }),
-    beforeRun: safe(async (hooks) => {
+    beforeRun: safe("before-run", async (hooks) => {
       primary = observeSchedulingService(primary, port);
       assert.equal(primary.state, "active");
       assert.equal(primary.effectiveCpu, 4);
@@ -411,7 +418,7 @@ export function createBudgetStopQualification(authority, env = process.env, port
     }),
     // No duringRun control hook: await the original terminal without cancelling,
     // assuming queue projection, retrying admission or invoking another model.
-    afterRun: safe(async (hooks) => {
+    afterRun: safe("after-run", async (hooks) => {
       await recordBudgetStopSettlement(
         hooks.evidence,
         async () => {
@@ -436,7 +443,7 @@ export function createBudgetStopQualification(authority, env = process.env, port
         };
       }
     },
-    verifyFinalArtifact: safe(async (hooks) => {
+    verifyFinalArtifact: safe("verify-final-artifact", async (hooks) => {
       assertBudgetStopCompletion(hooks.evidence);
       const start = hooks.evidence.budgetStop.terminalObservation.start;
       assert.ok(

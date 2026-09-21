@@ -36,6 +36,7 @@ import {
   validateCompilerRequest,
 } from "../src/compiler/proposal.js";
 import {
+  semanticExecutionRoutes,
   semanticPinnedFacts,
   semanticProjectionContext,
   semanticProposal,
@@ -52,6 +53,7 @@ describe("single semantic management route", () => {
     ["generic compilePlan", false],
     ["Supervisor legacy admission compatibility", true],
   ] as const)("rejects split network authority before any %s effects", async (_name, legacy) => {
+    const runPolicy = DEFAULT_RUN_POLICY;
     const context: CompilationContext = {
       repository: process.cwd(),
       objective: { number: 404, title: "Reject split authority", body: "Do not dispatch." },
@@ -59,7 +61,8 @@ describe("single semantic management route", () => {
       baseSha: "a".repeat(40),
       repositoryFiles: [],
       allowedNetworkDestinations: [],
-      runPolicy: DEFAULT_RUN_POLICY,
+      runPolicy,
+      executionRoutes: semanticExecutionRoutes(runPolicy),
       repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
     };
     const legacyAdmission = vi.fn();
@@ -148,19 +151,22 @@ describe("single semantic management route", () => {
     const runStructured = vi.fn();
     const admission = vi.fn();
     const backend = new CodexCliManagementBackend({ runStructured });
+    const projection = semanticProjectionContext();
+    const runPolicy = { ...projection.runPolicy };
 
     expect(() => compilerProposalPrompt(request, legacy)).toThrow(
       `compiler prompt is ${targetBytes} bytes; maximum is 1048576`,
     );
     await expect(
-      backend.proposePlan(request, async () => {}, semanticProjectionContext(), admission, {
+      backend.proposePlan(request, async () => {}, projection, admission, {
         repository: process.cwd(),
         objective: request.objective,
         baseSha: request.baseSha,
         defaultBranch: "main",
         repositoryFiles: [],
         allowedNetworkDestinations: [],
-        runPolicy: { ...semanticProjectionContext().runPolicy },
+        runPolicy,
+        executionRoutes: semanticExecutionRoutes(runPolicy),
         repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
         legacyGraphConstraints: legacy,
       }),

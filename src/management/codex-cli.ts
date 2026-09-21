@@ -103,6 +103,7 @@ import {
   validateLegacyProposal,
   validateCompilerRequest,
 } from "../compiler/proposal.js";
+import { executionTrustAvailability } from "../execution/route-capabilities.js";
 import {
   boundedCompilerPriorFailure,
   buildCompilerJudgeSource,
@@ -909,6 +910,7 @@ export function renderCompilerProposalPrompt(
     "For work-items, always return mediaIntents, using [] when no media artifact materially resolves grounded ambiguity or supplies required product content. Propose only obligation-grounded media with exact Work Item and criterion bindings. Use input-to when implementation consumes the result. Put every imported or produced input in exactly one inputRoleBinding whose roleId is advertised by the selected producer capability; Factory derives flattened dependencies and descriptor bindings. Visual references, audio, motion, and models are examples; use only capability-advertised semantic roles and never infer a format or producer capability absent from the supplied facts. Keep repository-native diagrams, renderers, captures, and other code-generated outputs as ordinary repository Work Items. Never name or invent a provider, model, capability, credential, store, URL, digest, path, or network destination.",
     "When an acceptance criterion needs repository-result evidence, use an evidence-for intent and select only a satisfiable repositoryCapture recipe, comparison, scenario, and gate from the supplied capture authority. The capture validates the exact repository-change result; it never creates a producer Work Item. Factory derives commands, routes, egress, reviewer capability, and deterministic gate authority.",
     "You own goals, criteria and their stable IDs, obligation mappings, repository-relative scopes, preconditions, exclusions, conventions, dependency intent, validation intent, exclusive-resource intent, duration, trust, and non-derivable tool, service, and network needs.",
+    `Factory-derived available routes by Work Item trust: ${JSON.stringify(executionTrustAvailability(request.executionRoutes))}. Use trusted_local for ordinary work unless the Objective explicitly requires stronger isolation or a managed runtime. Preserve every explicit stronger trust requirement even when no route can satisfy it; never lower semantic trust merely to make a route fit.`,
     "Select validation evidence only through recipe IDs and finite adapter operations exposed in the request. Each criterion needs sufficient evidence; protected behavior requires mechanical or deterministic-simulation evidence. Do not reproduce commands or derive execution defaults.",
     "Factory deterministically projects identity, commands, execution requirements, repository context, change surface, economics, delivery topology, capability bindings, managed runtimes, and serialization edges after validating the proposal.",
     request.revision === 0

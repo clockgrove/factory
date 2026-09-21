@@ -450,6 +450,12 @@ describe("installed compiler checkpoint qualifier", () => {
         pinnedFactsDigest: "5".repeat(64),
         toolchains: [],
         validation: { status: "valid", violations: [] },
+        execution: {
+          protocol: "clockgrove.factory/execution-route-preflight",
+          result: "passed",
+          required: null,
+          routes: [],
+        },
       })}\n`,
       status: 0,
       signal: null,

@@ -33,6 +33,7 @@ import {
 } from "../src/evaluation/compiler-draft-loop.js";
 import { compiledGraphDigest, type CompiledObjective } from "../src/graph.js";
 import { pinFixtureRepository } from "./helpers/compiler-proposal.js";
+import { semanticExecutionRoutes } from "./helpers/semantic-compiler.js";
 const BASE_SHA = "a".repeat(40);
 const BASE_TREE = "b".repeat(40);
 
@@ -226,6 +227,13 @@ async function setup(
     JSON.stringify({ name: "draft-integration-fixture", lockfileVersion: 3, packages: {} }),
   );
   const baseSha = pinFixtureRepository(repository);
+  const runPolicy = {
+    ...DEFAULT_RUN_POLICY,
+    allowedNetworkDestinations: [],
+    compilerEvaluation: {
+      mode: options.reportOnly ? ("report-only" as const) : ("auto-repair" as const),
+    },
+  };
   const context: CompilationContext = {
     repository,
     objective: { number: 42, title: "Test", body: "Implement positive and negative values." },
@@ -233,11 +241,8 @@ async function setup(
     baseSha,
     repositoryFiles: ["package-lock.json", "package.json", "src/feature.ts"],
     allowedNetworkDestinations: [],
-    runPolicy: {
-      ...DEFAULT_RUN_POLICY,
-      allowedNetworkDestinations: [],
-      compilerEvaluation: { mode: options.reportOnly ? "report-only" : "auto-repair" },
-    },
+    runPolicy,
+    executionRoutes: semanticExecutionRoutes(runPolicy),
     repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
   };
   context.repositoryEvidence = compilerObligationEvidence(context);

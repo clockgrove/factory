@@ -10,6 +10,7 @@ import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
 import { CodexAppServerLocalBackend } from "./backends/codex-app-server.js";
 import { DaytonaBackend } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
+import { githubManagedAgentRouteCapabilities } from "./backends/github-copilot.js";
 import { resolveGitHubToken } from "./auth.js";
 import { BackendRegistry } from "./execution/registry.js";
 import { createOctokit, GitHubReader } from "./github.js";
@@ -93,7 +94,7 @@ const USAGE = [
   "  factory backends probe",
   "  factory management probe",
   "  factory validate-captures [FILE]  (canonical .factory/validation-captures.json validation)",
-  "  factory compiler-preflight --repo DIR --base-sha SHA [--policy FILE|-]  (read-only)",
+  "  factory compiler-preflight --repo DIR --base-sha SHA [--policy FILE|-] [--execution-trust trusted_local|isolated|managed]  (read-only)",
   "  factory local-scope-preflight  (read-only)",
   "  factory toolchains provision npm|pnpm|bun|uv|all",
   "  factory toolchains restore RECEIPT.json",
@@ -762,6 +763,7 @@ function executionRegistry(repository: string): BackendRegistry {
   registry.register(new CodexCliLocalBackend());
   registry.register(new DaytonaBackend({ repository }));
   registry.register(new VercelSandboxBackend({ repository }));
+  for (const capabilities of githubManagedAgentRouteCapabilities()) registry.describe(capabilities);
   return registry;
 }
 
@@ -795,21 +797,33 @@ async function validateCaptureCatalog(args: string[]): Promise<void> {
 }
 
 async function compilerPreflightCommand(args: string[]): Promise<void> {
-  if (![4, 6].includes(args.length))
-    fail("usage: factory compiler-preflight --repo DIR --base-sha SHA [--policy FILE|-]");
+  if (![4, 6, 8].includes(args.length))
+    fail(
+      "usage: factory compiler-preflight --repo DIR --base-sha SHA [--policy FILE|-] [--execution-trust trusted_local|isolated|managed]",
+    );
   const names = args.filter((_, index) => index % 2 === 0);
   if (
     new Set(names).size !== names.length ||
-    !names.every((name) => ["--repo", "--base-sha", "--policy"].includes(name)) ||
+    !names.every((name) =>
+      ["--repo", "--base-sha", "--policy", "--execution-trust"].includes(name),
+    ) ||
     !names.includes("--repo") ||
     !names.includes("--base-sha")
   )
-    fail("usage: factory compiler-preflight --repo DIR --base-sha SHA [--policy FILE|-]");
+    fail(
+      "usage: factory compiler-preflight --repo DIR --base-sha SHA [--policy FILE|-] [--execution-trust trusted_local|isolated|managed]",
+    );
   const checkout = option(args, "--repo");
   const baseSha = option(args, "--base-sha");
   const policyPath = option(args, "--policy");
+  const executionTrust = option(args, "--execution-trust");
   if (!checkout || !baseSha || !/^[a-f0-9]{40}$/.test(baseSha))
     fail("compiler-preflight requires an exact base and repository");
+  if (
+    executionTrust !== undefined &&
+    !["trusted_local", "isolated", "managed"].includes(executionTrust)
+  )
+    fail("compiler-preflight execution trust is invalid");
   let policy = DEFAULT_RUN_POLICY;
   if (policyPath) {
     let policyText: string;
@@ -824,7 +838,11 @@ async function compilerPreflightCommand(args: string[]): Promise<void> {
   const result = await inspectCompilerPreflight({
     checkout: resolve(checkout),
     baseSha,
-    allowedNetworkDestinations: policy.allowedNetworkDestinations,
+    policy,
+    registry: executionRegistry(resolve(checkout)),
+    ...(executionTrust
+      ? { executionTrust: executionTrust as "trusted_local" | "isolated" | "managed" }
+      : {}),
   });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (result.result !== "passed") process.exitCode = 2;

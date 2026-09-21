@@ -35,6 +35,7 @@ import {
   sealPinnedCompilationTreeProof,
 } from "../src/execution/pinned-compilation-tree.js";
 import {
+  semanticExecutionRoutes,
   semanticPinnedFacts,
   semanticProjectionContext,
   semanticProposal,
@@ -75,6 +76,7 @@ async function proposeWithTranscript(
       inventory: { ...request.inventory, baseSha },
     };
   }
+  const runPolicy = { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] };
   const execution: CompilationContext = {
     repository: pinned?.path ?? repository,
     objective: {
@@ -87,7 +89,8 @@ async function proposeWithTranscript(
     repositoryFiles: pinned?.files ?? ["package.json"],
     ...(pinned ? { pinnedCompilationTree: pinned.proof } : {}),
     allowedNetworkDestinations: [],
-    runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
+    runPolicy,
+    executionRoutes: semanticExecutionRoutes(runPolicy),
     repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
   };
   try {

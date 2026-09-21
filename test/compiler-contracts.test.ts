@@ -485,6 +485,23 @@ describe("adapter-owned compiler capabilities", () => {
     expect(instruction).not.toMatch(/image|raster|audio|video|archive|model|json/i);
     expect(instruction!.length).toBeLessThan(500);
   });
+
+  it("renders execution trust availability from the authoritative route matcher", () => {
+    const request = semanticRequest();
+    request.executionRoutes.routes = request.executionRoutes.routes.map((route) => ({
+      ...route,
+      hostExecution: true,
+      isolation: "process",
+    }));
+    const available = request.executionRoutes.routes.map(({ id }) => id);
+    const instruction = compilerProposalPrompt(request)
+      .split("\n")
+      .find((line) => line.startsWith("Factory-derived available routes"));
+    expect(instruction).toContain(
+      JSON.stringify({ trusted_local: available, isolated: [], managed: [] }),
+    );
+    expect(instruction).toContain("never lower semantic trust");
+  });
 });
 
 describe("strict semantic compiler contracts", () => {
@@ -666,6 +683,31 @@ describe("strict semantic compiler contracts", () => {
       expect(zod.safeParse(value).success).toBe(accepted);
       expect(json(value)).toBe(accepted);
     }
+  });
+
+  it("leaves duplicate execution route IDs to deterministic request validation", () => {
+    const request = semanticRequest();
+    const first = request.executionRoutes.routes[0]!;
+    request.executionRoutes.routes.push({
+      ...structuredClone(first),
+      runtimeKind: "distinct-fixture-runtime",
+    });
+
+    expect(CompilerRequestSchema.safeParse(request).success).toBe(true);
+    expect(jsonRequest(request), JSON.stringify(jsonRequest.errors)).toBe(true);
+    expect(validateCompilerRequest(request)).toMatchObject({
+      phase: "request",
+      status: "unsatisfiable",
+      violations: [
+        expect.objectContaining({
+          code: "schema-invalid",
+          itemId: null,
+          field: "/executionRoutes/routes",
+          expected: "unique execution route IDs",
+          observed: request.executionRoutes.routes.map(({ id }) => id),
+        }),
+      ],
+    });
   });
 
   it("accepts each strict canonical proposal variant with a required discriminator", () => {
@@ -938,6 +980,22 @@ describe("strict semantic compiler contracts", () => {
       sample: ["src/visible.ts"],
     };
     cases.push({ value: boundedSurface, accepted: true });
+
+    const unregisteredRoute = structuredClone(request);
+    unregisteredRoute.executionRoutes.routes[0] = {
+      id: unregisteredRoute.executionRoutes.routes[0]!.id,
+      runtimeKind: null,
+      hostExecution: null,
+      isolation: null,
+      unavailableReasons: ["not-registered"],
+    };
+    cases.push({ value: unregisteredRoute, accepted: true });
+    const partialRoute = structuredClone(unregisteredRoute);
+    partialRoute.executionRoutes.routes[0]!.hostExecution = true;
+    cases.push({ value: partialRoute, accepted: false });
+    const contradictoryRoute = structuredClone(request);
+    contradictoryRoute.executionRoutes.routes[0]!.unavailableReasons = ["not-registered"];
+    cases.push({ value: contradictoryRoute, accepted: false });
 
     for (const { value, accepted } of cases) {
       expect(CompilerRequestSchema.safeParse(value).success).toBe(accepted);

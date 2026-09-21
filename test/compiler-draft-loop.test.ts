@@ -220,6 +220,18 @@ function validatedObjective(graph: CompiledObjective): ValidatedCompilerDraft {
       },
       inventorySource: "independent-extraction",
       factoryCapabilities: [],
+      executionRoutes: {
+        protocol: "clockgrove.factory/execution-route-capabilities",
+        routes: [
+          {
+            id: "fixture/container",
+            runtimeKind: "fixture",
+            hostExecution: false,
+            isolation: "container",
+            unavailableReasons: [],
+          },
+        ],
+      },
       repository: {
         manifests: ["package.json"],
         requiredTools: [],

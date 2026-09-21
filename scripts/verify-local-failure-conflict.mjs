@@ -219,6 +219,7 @@ export function failureExtension(authority) {
   return {
     authority,
     scope,
+    executionTrust: "trusted_local",
     harnessPaths: [
       "scripts/verify-local-failure-conflict.mjs",
       "scripts/qualification-failure-conflict.mjs",

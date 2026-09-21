@@ -17,6 +17,7 @@ import {
 } from "../scripts/qualification-failure-conflict.mjs";
 import {
   failureAuthority,
+  failureExtension,
   assertRefusalJournal,
   runFailureScenario,
   main,
@@ -238,6 +239,7 @@ describe("installed failed-validation/conflict authority and evidence", () => {
     expect(failureObjectiveBody(namespace, "failed-validation")).toContain(
       "`npm test`, the repository-observed package validation recipe",
     );
+    expect(failureExtension(failureAuthority(env())!).executionTrust).toBe("trusted_local");
   });
 
   it("requires actual immutable-command failure, complete accounting and no publication", () => {

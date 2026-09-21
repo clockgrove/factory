@@ -6,10 +6,23 @@ import {
   type PinnedRepositoryFacts,
 } from "../repository-profiles/index.js";
 import { compilerCapabilitiesForRepository } from "../toolchains/compiler-capabilities.js";
+import type { ExecutionRequirements } from "../protocol/worker-packet.js";
+import type { RunPolicy } from "../protocol/policy.js";
+import type { BackendRegistry } from "../execution/registry.js";
+import {
+  assessExecutionRouteAvailability,
+  assessExecutionTrustRoutes,
+  executionRouteCatalog,
+  type ExecutionRouteCatalog,
+} from "../execution/route-capabilities.js";
 
 export function assessPinnedCompilerPreflight(
   pinned: PinnedRepositoryFacts,
   allowedNetworkDestinations: readonly string[],
+  execution: {
+    routes: ExecutionRouteCatalog;
+    trust?: ExecutionRequirements["trust"];
+  },
 ) {
   const capabilities = compilerCapabilitiesForRepository(pinned, allowedNetworkDestinations);
   const validation = validateCompilerRepositoryAuthority(capabilities, allowedNetworkDestinations);
@@ -27,8 +40,14 @@ export function assessPinnedCompilerPreflight(
       (recipe) => recipe.adapterId === toolchain.adapterId,
     ).length,
   }));
+  const routeAssessment = execution.trust
+    ? assessExecutionTrustRoutes(execution.routes, execution.trust)
+    : assessExecutionRouteAvailability(execution.routes);
   return {
-    result: validation.status === "valid" ? ("passed" as const) : ("blocked" as const),
+    result:
+      validation.status === "valid" && routeAssessment.result !== "blocked"
+        ? ("passed" as const)
+        : ("blocked" as const),
     baseSha: pinned.baseSha,
     pinnedFactsDigest: pinned.digest,
     validationRecipeCount: capabilities.validationRecipes.length,
@@ -37,6 +56,7 @@ export function assessPinnedCompilerPreflight(
       .map(({ adapterId }) => adapterId),
     toolchains,
     validation,
+    execution: routeAssessment,
   };
 }
 
@@ -46,7 +66,9 @@ export function assessPinnedCompilerPreflight(
 export async function inspectCompilerPreflight(input: {
   checkout: string;
   baseSha: string;
-  allowedNetworkDestinations: readonly string[];
+  policy: RunPolicy;
+  registry: Pick<BackendRegistry, "capabilities" | "get">;
+  executionTrust?: ExecutionRequirements["trust"];
 }) {
   const checkout = await inspectLocalCheckout(input.checkout);
   if (checkout.head.toLowerCase() !== input.baseSha.toLowerCase())
@@ -56,5 +78,8 @@ export async function inspectCompilerPreflight(input: {
     checkout.head.toLowerCase(),
     checkout.files,
   );
-  return assessPinnedCompilerPreflight(pinned, input.allowedNetworkDestinations);
+  return assessPinnedCompilerPreflight(pinned, input.policy.allowedNetworkDestinations, {
+    routes: executionRouteCatalog(input.registry, input.policy),
+    ...(input.executionTrust ? { trust: input.executionTrust } : {}),
+  });
 }

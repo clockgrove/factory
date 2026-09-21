@@ -68,6 +68,7 @@ import { resolveGitHubToken } from "./auth.js";
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
 import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
 import { CodexAppServerLocalBackend } from "./backends/codex-app-server.js";
+import { githubManagedAgentRouteCapabilities } from "./backends/github-copilot.js";
 import { DaytonaBackend } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { Dispatcher, GithubOctokitWriter, confirmAction } from "./dispatch.js";
@@ -257,6 +258,7 @@ function executionRegistry(repository: string): BackendRegistry {
   registry.register(new CodexCliLocalBackend());
   registry.register(new DaytonaBackend({ repository }));
   registry.register(new VercelSandboxBackend({ repository }));
+  for (const capabilities of githubManagedAgentRouteCapabilities()) registry.describe(capabilities);
   return registry;
 }
 

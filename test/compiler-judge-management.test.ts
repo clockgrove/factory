@@ -30,6 +30,7 @@ import { createCompilerValidationReport } from "../src/compiler/violations.js";
 import { compilerJudgeCandidateFromCompiled } from "../src/compiler/judge-context.js";
 import type { CompiledObjective } from "../src/graph.js";
 import {
+  semanticExecutionRoutes,
   semanticProjectionContext,
   semanticProposal,
   semanticRequest,
@@ -130,6 +131,7 @@ async function fixture() {
     join(repository, "package.json"),
     JSON.stringify({ scripts: { test: "node --test" } }),
   );
+  const runPolicy = { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] };
   const context: CompilationContext = {
     repository,
     objective: { number: 1, title: "Test", body: "Tests pass" },
@@ -137,7 +139,8 @@ async function fixture() {
     defaultBranch: "main",
     repositoryFiles: ["package.json"],
     allowedNetworkDestinations: [],
-    runPolicy: { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations: [] },
+    runPolicy,
+    executionRoutes: semanticExecutionRoutes(runPolicy),
     repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
   };
   context.repositoryEvidence = compilerObligationEvidence(context);

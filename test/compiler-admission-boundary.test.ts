@@ -31,6 +31,7 @@ import type { LeaseState } from "../src/control/lease.js";
 import { ProviderQuotaError } from "../src/providers/quota.js";
 import { pinFixtureRepository, proposalFromCompiledFixture } from "./helpers/compiler-proposal.js";
 import {
+  semanticExecutionRoutes,
   semanticPinnedFacts,
   semanticProjectionContext,
   semanticProposal,
@@ -89,6 +90,11 @@ async function fixture() {
   const tree = await materializePinnedCompilationTree(directory, baseSha);
   disposePinnedTrees.push(tree.dispose);
   await sealPinnedCompilationTreeProof(tree.proof);
+  const runPolicy = {
+    ...DEFAULT_RUN_POLICY,
+    allowedNetworkDestinations: [],
+    compilerEvaluation: { mode: "report-only" as const },
+  };
   const context: CompilationContext = {
     repository: tree.path,
     objective: { number: 42, title: golden.title, body: "Implement core behavior and tests" },
@@ -97,11 +103,8 @@ async function fixture() {
     repositoryFiles: tree.files,
     pinnedCompilationTree: tree.proof,
     allowedNetworkDestinations: [],
-    runPolicy: {
-      ...DEFAULT_RUN_POLICY,
-      allowedNetworkDestinations: [],
-      compilerEvaluation: { mode: "report-only" },
-    },
+    runPolicy,
+    executionRoutes: semanticExecutionRoutes(runPolicy),
     repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
   };
   context.repositoryEvidence = compilerObligationEvidence(context);

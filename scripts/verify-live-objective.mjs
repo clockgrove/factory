@@ -1061,9 +1061,14 @@ export async function main(
   const namespace = qualificationNamespace(
     qualification.namespace ?? env.FACTORY_LIVE_OBJECTIVE_NAMESPACE,
   );
+  const executionTrust = qualification.executionTrust ?? "trusted_local";
+  assert.ok(
+    executionTrust === "trusted_local" || executionTrust === "managed",
+    "qualification execution trust is invalid",
+  );
   const fixturePaths = qualificationPaths(namespace);
   const runObjectiveBody =
-    qualification.objectiveBody ?? objectiveBodyFor(namespace, "trusted_local");
+    qualification.objectiveBody ?? objectiveBodyFor(namespace, executionTrust);
   assert.ok(
     runObjectiveBody.includes(qualificationNamespaceMarker(namespace)) &&
       fixturePaths.files.every((path) => runObjectiveBody.includes(path)),
@@ -1151,6 +1156,7 @@ export async function main(
     checkout,
     baseSha: base,
     policy,
+    executionTrust,
     environment: runtimeEnvironment,
   });
   const preflight = {

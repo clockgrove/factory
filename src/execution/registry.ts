@@ -1,7 +1,12 @@
 import type { RunPolicy } from "../protocol/policy.js";
 import { isManagedAgentBackendId, isSandboxBackendId } from "../protocol/policy.js";
 import type { ExecutionRequirements } from "../protocol/worker-packet.js";
-import { capabilityMismatch, type BackendProbe, type ExecutionBackend } from "./backend.js";
+import {
+  capabilityMismatch,
+  type BackendProbe,
+  type ExecutionBackend,
+  type ExecutionBackendCapabilities,
+} from "./backend.js";
 
 export interface BudgetRemaining {
   sandboxMinutes: number;
@@ -33,6 +38,27 @@ export interface BackendCandidate {
   transientReasons: string[];
 }
 
+export function assessBackendPolicyCompatibility(args: {
+  backend: Pick<ExecutionBackend, "policyRejectionReasons">;
+  policy: RunPolicy;
+  requirements: ExecutionRequirements;
+  phase: "execution" | "validation";
+}): { compatible: boolean; reasons: readonly string[] } {
+  const reasons =
+    args.backend.policyRejectionReasons?.({
+      policy: args.policy,
+      requirements: args.requirements,
+      phase: args.phase,
+    }) ?? [];
+  return { compatible: reasons.length === 0, reasons };
+}
+
+function assertBackendId(id: string): void {
+  if (!/^[A-Za-z0-9._+-]+\/[A-Za-z0-9._+-]+$/.test(id)) {
+    throw new Error(`backend id must be an agent/runtime bundle: ${id}`);
+  }
+}
+
 function backendCostClass(id: string): BackendCandidate["costClass"] {
   return isManagedAgentBackendId(id) ? "managed" : isSandboxBackendId(id) ? "sandbox" : "local";
 }
@@ -53,15 +79,27 @@ export class NoExecutionBackendError extends Error {
 
 export class BackendRegistry {
   readonly #backends = new Map<string, ExecutionBackend>();
+  readonly #describedCapabilities = new Map<string, ExecutionBackendCapabilities>();
   readonly #probeCache = new Map<string, { probe: BackendProbe; expiresAt: number }>();
 
   register(backend: ExecutionBackend): void {
     const id = backend.capabilities.id;
-    if (!/^[A-Za-z0-9._+-]+\/[A-Za-z0-9._+-]+$/.test(id)) {
-      throw new Error(`backend id must be an agent/runtime bundle: ${id}`);
-    }
+    assertBackendId(id);
     if (this.#backends.has(id)) throw new Error(`duplicate backend ${id}`);
     this.#backends.set(id, backend);
+  }
+
+  /** Static route facts for compiler planning before a runtime-only backend is
+   * constructed. Runtime admission still requires a registered backend. */
+  describe(capabilities: ExecutionBackendCapabilities): void {
+    const id = capabilities.id;
+    assertBackendId(id);
+    if (this.#describedCapabilities.has(id)) throw new Error(`duplicate backend description ${id}`);
+    this.#describedCapabilities.set(id, capabilities);
+  }
+
+  capabilities(id: string): ExecutionBackendCapabilities | null {
+    return this.#backends.get(id)?.capabilities ?? this.#describedCapabilities.get(id) ?? null;
   }
 
   get(id: string): ExecutionBackend | null {
@@ -138,11 +176,12 @@ export class BackendRegistry {
         permanentReasons.push("backend cannot receive verified offline Objective assets");
       }
       permanentReasons.push(
-        ...(backend.policyRejectionReasons?.({
+        ...assessBackendPolicyCompatibility({
+          backend,
           policy: args.policy,
           requirements: args.requirements,
           phase: "execution",
-        }) ?? []),
+        }).reasons,
       );
       let probe: BackendProbe | null = null;
       if (permanentReasons.length === 0) {
@@ -236,11 +275,12 @@ export class BackendRegistry {
         permanentReasons.push("managed-session backends cannot host validation");
       }
       permanentReasons.push(
-        ...(backend.policyRejectionReasons?.({
+        ...assessBackendPolicyCompatibility({
+          backend,
           policy: args.policy,
           requirements: validationRequirements,
           phase: "validation",
-        }) ?? []),
+        }).reasons,
       );
       let probe: BackendProbe | null = null;
       if (permanentReasons.length === 0) {

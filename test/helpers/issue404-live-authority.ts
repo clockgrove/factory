@@ -16,6 +16,7 @@ import {
 import { managementJsonlEvents } from "../../src/management/transcripts.js";
 import { DEFAULT_RUN_POLICY } from "../../src/protocol/policy.js";
 import { ProviderQuotaError } from "../../src/providers/quota.js";
+import { semanticExecutionRoutes } from "./semantic-compiler.js";
 
 export interface Issue404LiveGitIdentity {
   candidateCommitSha: string;
@@ -60,6 +61,7 @@ export function issue404QualificationCompilationContext(
     defaultBranch: "main",
     allowedNetworkDestinations: [...runPolicy.allowedNetworkDestinations],
     runPolicy,
+    executionRoutes: semanticExecutionRoutes(runPolicy),
     modelSelection: {
       profile: "issue404-qualification",
       model: "gpt-5.6-sol",

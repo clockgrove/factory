@@ -351,6 +351,22 @@ const isolationRank: Record<IsolationKind, number> = {
   managed: 3,
 };
 
+export function requiredIsolationForTrust(trust: ExecutionRequirements["trust"]): IsolationKind {
+  return trust === "isolated" ? "container" : trust === "managed" ? "managed" : "none";
+}
+
+/** Shared logical trust matcher. Runtime admission may add tool, service, and
+ * resource checks, but it must never reinterpret the compiler's trust result. */
+export function executionTrustMismatch(
+  isolation: IsolationKind,
+  trust: ExecutionRequirements["trust"],
+): string | null {
+  if (trust === "isolated" && isolationRank[isolation] < isolationRank.container)
+    return "requires container-or-stronger isolation";
+  if (trust === "managed" && isolation !== "managed") return "requires a managed runtime";
+  return null;
+}
+
 export function canonicalArchitecture(value: string): string {
   const normalized = value.trim().toLowerCase();
   if (["amd64", "x86-64", "x86_64"].includes(normalized)) return "x64";
@@ -372,15 +388,8 @@ export function capabilityMismatch(
   requirements: ExecutionRequirements,
 ): string[] {
   const reasons: string[] = [];
-  if (
-    requirements.trust === "isolated" &&
-    isolationRank[capabilities.isolation] < isolationRank.container
-  ) {
-    reasons.push("requires container-or-stronger isolation");
-  }
-  if (requirements.trust === "managed" && capabilities.isolation !== "managed") {
-    reasons.push("requires a managed runtime");
-  }
+  const trustMismatch = executionTrustMismatch(capabilities.isolation, requirements.trust);
+  if (trustMismatch) reasons.push(trustMismatch);
   if (
     requirements.os.length > 0 &&
     !requirements.os.some((os) =>

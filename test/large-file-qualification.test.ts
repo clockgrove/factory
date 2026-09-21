@@ -16,7 +16,6 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   LARGE_FILE_AUDIO_BYTES,
-  assessLargeFileExecutionPreflight,
   assertLargeFileArtifact,
   assertLargeFileFinalTree,
   assertLargeFileRefusal,
@@ -28,6 +27,7 @@ import {
   renderLargeFileRecipe,
   observeLargeFilePatch,
   observeLargeFileTree,
+  producedLfsObjectiveBody,
   writeLargeFileOutput,
   type LargeFileFixture,
   type LargeFilePhase,
@@ -111,36 +111,20 @@ function fixture() {
 }
 
 describe("installed large-file qualifier fixture and proof contracts", () => {
-  it("binds the synthetic symlink fixture to reachable trusted-local execution", () => {
-    expect(largeFileRefusalObjectiveBody("large-files-test-a", "symlink")).toContain(
-      "execution trust to trusted_local",
-    );
-    expect(
-      assessLargeFileExecutionPreflight({
-        scenario: "symlink",
-        trust: "trusted_local",
-        routes: [{ id: "codex-app-server/local-worktree", isolation: "process" }],
-      }),
-    ).toMatchObject({ result: "passed", minimumIsolation: "process", violations: [] });
-    expect(
-      assessLargeFileExecutionPreflight({
-        scenario: "symlink",
-        trust: "isolated",
-        routes: [{ id: "codex-app-server/local-worktree", isolation: "process" }],
-      }),
-    ).toMatchObject({
-      result: "blocked",
-      minimumIsolation: "container",
-      violations: [
-        {
-          code: "fixture-execution-isolation-unavailable",
-          field: "executionIntent.trust",
-        },
-      ],
-    });
-    expect(largeFileRefusalObjectiveBody("large-files-test-a", "secret")).not.toContain(
-      "trusted_local",
-    );
+  it.each([
+    ["ordinary", () => largeFileObjectiveBody("large-files-objective-trust")],
+    ["scope refusal", () => largeFileRefusalObjectiveBody("large-files-scope-trust", "scope")],
+    ["secret refusal", () => largeFileRefusalObjectiveBody("large-files-secret-trust", "secret")],
+    [
+      "symlink refusal",
+      () => largeFileRefusalObjectiveBody("large-files-symlink-trust", "symlink"),
+    ],
+    ["produced LFS", () => producedLfsObjectiveBody("large-files-produced-trust")],
+  ] as const)("declares trusted-local execution for the %s objective", (_kind, objectiveBody) => {
+    const body = objectiveBody();
+    expect(body).toContain("explicitly trusted for local execution");
+    expect(body).toContain("execution trust to trusted_local");
+    expect(body.match(/trusted_local/g)).toHaveLength(1);
   });
 
   it("copies a bounded raw standalone recipe with exactly one safe namespace substitution", () => {

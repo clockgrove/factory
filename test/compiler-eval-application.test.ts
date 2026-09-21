@@ -171,6 +171,16 @@ const proposalRequest = CompilerRequestSchema.parse({
   inventory: compilerPlanningInventory(inventory),
   inventorySource: "independent-extraction",
   factoryCapabilities: factoryCompilerCapabilities(runPolicy),
+  executionRoutes: {
+    protocol: "clockgrove.factory/execution-route-capabilities",
+    routes: runPolicy.backendOrder.map((id) => ({
+      id,
+      runtimeKind: "fixture",
+      hostExecution: false,
+      isolation: "container",
+      unavailableReasons: [],
+    })),
+  },
   repository: {
     manifests: ["package.json"],
     requiredTools: [],

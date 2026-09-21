@@ -30,6 +30,7 @@ import type { PinnedCompilationTreeProof } from "../execution/pinned-compilation
 import type { ProviderQuotaCheckpoint } from "../providers/quota.js";
 import type { FindingCandidate } from "../protocol/findings.js";
 import type { RepositoryCaptureReviewerCapability } from "../validation/repository-capture.js";
+import type { ExecutionRouteCatalog } from "../execution/route-capabilities.js";
 
 export interface RepositoryCaptureReviewFile {
   payloadIdentity: string;
@@ -299,6 +300,8 @@ export interface CompilationContext {
   allowedNetworkDestinations: string[];
   /** Exact immutable policy activated for this compilation. */
   runPolicy: RunPolicy;
+  /** Stable policy-authorized logical routes derived from the execution registry. */
+  executionRoutes: ExecutionRouteCatalog;
   modelSelection?: ModelSelection;
   /** Remaining per-invocation operation-stall bound, capped by immutable policy
    * and the Objective deadline; not a hard provider token cap. */
@@ -352,6 +355,11 @@ export function assertCompilationContextPolicyAuthority(context: CompilationCont
   const policy = [...context.runPolicy.allowedNetworkDestinations].sort();
   if (JSON.stringify(requested) !== JSON.stringify(policy))
     throw new Error("compilation context network authority differs from run policy");
+  if (
+    JSON.stringify(context.executionRoutes.routes.map(({ id }) => id)) !==
+    JSON.stringify(context.runPolicy.backendOrder)
+  )
+    throw new Error("compilation context execution routes differ from run policy");
 }
 
 export interface CompilerInvocationProvenance {

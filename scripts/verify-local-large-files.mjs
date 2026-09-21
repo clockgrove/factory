@@ -32,7 +32,6 @@ import {
   LARGE_FILE_RECIPE_VERSION,
   LARGE_FILE_VALIDATION_COMMAND,
   LARGE_FILE_VALIDATION_SCRIPT,
-  assessLargeFileExecutionPreflight,
   largeFileObjectiveBody,
   largeFileRefusalObjectiveBody,
   producedLfsObjectiveBody,
@@ -892,6 +891,7 @@ export function largeFileExtension(authority) {
   return {
     authority,
     scope: "installed-large-file-qualification",
+    executionTrust: "trusted_local",
     harnessPaths: [
       "verify-local-large-files.mjs",
       "qualification-large-files.mjs",
@@ -903,17 +903,6 @@ export function largeFileExtension(authority) {
     objectiveBody,
     preflight(context) {
       context.evidence.largeFileStage = "baseline-preflight";
-      if (authority.largeFile.scenario === "symlink") {
-        assert.deepEqual(authority.policy.backendOrder, ["codex-app-server/local-worktree"]);
-        const execution = assessLargeFileExecutionPreflight({
-          scenario: "symlink",
-          trust: "trusted_local",
-          routes: [{ id: "codex-app-server/local-worktree", isolation: "process" }],
-        });
-        context.evidence.largeFileExecutionPreflight = execution;
-        context.save();
-        assert.equal(execution.result, "passed", JSON.stringify(execution.violations));
-      }
       context.save();
       fixture = verifyBaseline(context);
       context.evidence.largeFileStage = "preflight-complete";

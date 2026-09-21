@@ -52,6 +52,41 @@ function report(result: "passed" | "blocked") {
               },
             ],
     },
+    execution: {
+      protocol: "clockgrove.factory/execution-route-preflight",
+      result: "passed",
+      required: null,
+      routes: [],
+    },
+  };
+}
+
+function executionRouteReport(
+  trust: "trusted_local" | "isolated" | "managed",
+  result: "passed" | "blocked",
+) {
+  return {
+    ...report("passed"),
+    result,
+    execution: {
+      protocol: "clockgrove.factory/execution-route-preflight",
+      result,
+      required: {
+        trust,
+        minimumIsolation:
+          trust === "isolated" ? "container" : trust === "managed" ? "managed" : "none",
+      },
+      routes: [
+        {
+          id: "codex-app-server/local-worktree",
+          runtimeKind: "codex-app-server",
+          hostExecution: true,
+          isolation: "process",
+          compatible: result === "passed",
+          reasons: result === "passed" ? [] : ["requires container-or-stronger isolation"],
+        },
+      ],
+    },
   };
 }
 
@@ -103,6 +138,37 @@ describe("installed compiler qualification boundary", () => {
         () => execution(report("blocked"), 0),
       ),
     ).toThrow();
+  });
+
+  it.each([
+    ["trusted_local" as const, "passed" as const, 0],
+    ["isolated" as const, "blocked" as const, 2],
+  ])("binds %s trust to the installed route preflight", (trust, result, status) => {
+    const execute = vi.fn(() => execution(executionRouteReport(trust, result), status));
+    expect(
+      installedCompilerPreflight(
+        {
+          factoryCli: "/installed/factory.js",
+          checkout: "/home/example/repository",
+          baseSha,
+          executionTrust: trust,
+        },
+        execute,
+      ),
+    ).toMatchObject({ result, execution: { required: { trust } } });
+    expect(execute).toHaveBeenCalledWith(
+      "/installed/factory.js",
+      [
+        "compiler-preflight",
+        "--repo",
+        "/home/example/repository",
+        "--base-sha",
+        baseSha,
+        "--execution-trust",
+        trust,
+      ],
+      expect.anything(),
+    );
   });
 
   it("uses the retained CLI default without a policy option or stdin", () => {

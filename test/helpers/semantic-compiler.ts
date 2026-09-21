@@ -17,6 +17,20 @@ import { compilerCapabilitiesForRepository } from "../../src/toolchains/compiler
 import { EMPTY_REPOSITORY_CAPTURE_PLANNING } from "../../src/management/backend.js";
 import type { RepositoryCapturePlanningAuthority } from "../../src/management/backend.js";
 import type { RepositoryCaptureReviewerCapability } from "../../src/validation/repository-capture.js";
+import type { ExecutionRouteCatalog } from "../../src/execution/route-capabilities.js";
+
+export function semanticExecutionRoutes(policy: RunPolicy): ExecutionRouteCatalog {
+  return {
+    protocol: "clockgrove.factory/execution-route-capabilities",
+    routes: policy.backendOrder.map((id) => ({
+      id,
+      runtimeKind: "semantic-fixture",
+      hostExecution: false,
+      isolation: "container",
+      unavailableReasons: [],
+    })),
+  };
+}
 
 const semanticCaptureReviewer: RepositoryCaptureReviewerCapability = {
   id: "semantic-fixture-reviewer",
@@ -135,6 +149,7 @@ export function semanticRequest(
       }
     : DEFAULT_RUN_POLICY.repositoryCaptureEgress;
   const planning = semanticRepositoryCapturePlanning(pinned);
+  const runPolicy = { ...DEFAULT_RUN_POLICY, allowedNetworkDestinations };
   return {
     protocol: "clockgrove.factory/compiler-request",
     revision: 0,
@@ -163,10 +178,8 @@ export function semanticRequest(
       ],
     }),
     inventorySource: "independent-extraction",
-    factoryCapabilities: factoryCompilerCapabilities({
-      ...DEFAULT_RUN_POLICY,
-      allowedNetworkDestinations,
-    }),
+    factoryCapabilities: factoryCompilerCapabilities(runPolicy),
+    executionRoutes: semanticExecutionRoutes(runPolicy),
     repository: {
       manifests: pinned.manifests,
       requiredTools: [...new Set(pinned.repository.lfs?.requiredTools ?? [])].sort(),

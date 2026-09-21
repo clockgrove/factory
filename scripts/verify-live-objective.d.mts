@@ -52,7 +52,7 @@ export function assessCompletion(evidence: unknown): {
   reason?: string;
 };
 export function main(
-  qualification?: Record<string, unknown>,
+  qualification?: Record<string, unknown> & { executionTrust?: QualificationExecutionTrust },
   options?: {
     env?: Record<string, string | undefined>;
     candidateSourceRoot?: string;

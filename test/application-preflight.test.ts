@@ -29,9 +29,15 @@ import type { ManagementBackend } from "../src/management/backend.js";
 import type { CompilationContext } from "../src/management/backend.js";
 import { adaptFixtureCompiler } from "./helpers/compiler-proposal.js";
 import { BackendRegistry } from "../src/execution/registry.js";
+import { CodexCliLocalBackend } from "../src/backends/codex-cli-local.js";
 
 const exec = promisify(execFile);
 const roots: string[] = [];
+function executionRegistry() {
+  const registry = new BackendRegistry();
+  registry.register(new CodexCliLocalBackend());
+  return registry;
+}
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
@@ -236,7 +242,7 @@ describe("read-only checkout preflight", () => {
         snapshot,
         planning: {
           repositoryPath: f.root,
-          backendRegistry: new BackendRegistry(),
+          backendRegistry: executionRegistry(),
           management: {
             id: "test",
             proposePlan: adaptFixtureCompiler(compile),
@@ -288,7 +294,7 @@ describe("read-only checkout preflight", () => {
         snapshot,
         planning: {
           repositoryPath: f.root,
-          backendRegistry: new BackendRegistry(),
+          backendRegistry: executionRegistry(),
           management: { id: "test", compile } as unknown as ManagementBackend,
           validateCheckout: validatePlanningCheckout,
           readRepositoryLayout: (max, base) => readPlanningRepositoryLayout(f.root, max, base),

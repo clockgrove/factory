@@ -47,13 +47,18 @@ const hash = (value) => createHash("sha256").update(value).digest("hex");
  * A blocked report is returned for private evidence; callers must make it a
  * hard pre-mutation boundary. */
 export function installedCompilerPreflight(
-  { factoryCli, checkout, baseSha, policy, environment = process.env },
+  { factoryCli, checkout, baseSha, policy, executionTrust, environment = process.env },
   execute = spawnSync,
 ) {
   assert.ok(isAbsolute(factoryCli), "installed Factory CLI path must be absolute");
   assert.ok(isAbsolute(checkout), "compiler preflight checkout must be absolute");
   assert.match(baseSha, /^[a-f0-9]{40}$/, "exact compiler preflight base required");
   const explicitPolicy = policy !== undefined;
+  if (executionTrust !== undefined)
+    assert.ok(
+      ["trusted_local", "isolated", "managed"].includes(executionTrust),
+      "compiler preflight execution trust is invalid",
+    );
   const policyBytes = explicitPolicy ? `${JSON.stringify(policy)}\n` : undefined;
   if (policyBytes !== undefined)
     assert.ok(
@@ -69,6 +74,7 @@ export function installedCompilerPreflight(
       "--base-sha",
       baseSha,
       ...(explicitPolicy ? ["--policy", "-"] : []),
+      ...(executionTrust ? ["--execution-trust", executionTrust] : []),
     ],
     {
       cwd: checkout,
@@ -95,8 +101,21 @@ export function installedCompilerPreflight(
   assert.ok(
     Array.isArray(report.validation?.violations) && report.validation.violations.length <= 128,
   );
+  assert.ok(
+    report.execution?.protocol === "clockgrove.factory/execution-route-preflight" &&
+      ["passed", "blocked"].includes(report.execution.result) &&
+      Array.isArray(report.execution.routes) &&
+      report.execution.routes.length <= 16,
+    "compiler execution-route preflight is invalid",
+  );
+  if (executionTrust !== undefined) {
+    assert.equal(report.execution?.required?.trust, executionTrust);
+  }
   assert.equal(report.result === "passed", result.status === 0);
-  assert.equal(report.validation.status === "valid", report.result === "passed");
+  assert.equal(
+    report.result === "passed",
+    report.validation.status === "valid" && report.execution?.result !== "blocked",
+  );
   return report;
 }
 

@@ -35,7 +35,7 @@ import {
   pinFixtureRepository,
   validatedDraftFromCompiledFixture,
 } from "./helpers/compiler-proposal.js";
-import { semanticRequest } from "./helpers/semantic-compiler.js";
+import { semanticExecutionRoutes, semanticRequest } from "./helpers/semantic-compiler.js";
 import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
 function fixtureInvocationProvenance(baseSha: string, stage: string) {
   return {
@@ -109,6 +109,11 @@ async function fixture() {
     JSON.stringify({ name: "draft-challenge-fixture", lockfileVersion: 3, packages: {} }),
   );
   const baseSha = pinFixtureRepository(repository);
+  const runPolicy = {
+    ...DEFAULT_RUN_POLICY,
+    allowedNetworkDestinations: [],
+    compilerEvaluation: { mode: "auto-repair" as const },
+  };
   const context: CompilationContext = {
     repository,
     objective: {
@@ -123,11 +128,8 @@ async function fixture() {
       ...golden.repositoryFacts.files.map((file: { path: string }) => file.path),
     ],
     allowedNetworkDestinations: [],
-    runPolicy: {
-      ...DEFAULT_RUN_POLICY,
-      allowedNetworkDestinations: [],
-      compilerEvaluation: { mode: "auto-repair" },
-    },
+    runPolicy,
+    executionRoutes: semanticExecutionRoutes(runPolicy),
     repositoryCapturePlanning: EMPTY_REPOSITORY_CAPTURE_PLANNING,
   };
   context.repositoryEvidence = compilerObligationEvidence(context);

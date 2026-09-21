@@ -93,6 +93,34 @@ export const prImpactRules = Object.freeze([
     ],
   },
   {
+    path: "test/helpers/semantic-compiler.ts",
+    tests: [
+      "test/compiler-admission-boundary.test.ts",
+      "test/compiler-contracts.test.ts",
+      "test/compiler-corpus-coverage.test.ts",
+      "test/compiler-draft-challenges.test.ts",
+      "test/compiler-draft-integration.test.ts",
+      "test/compiler-draft-lifecycle.test.ts",
+      "test/compiler-generic.test.ts",
+      "test/compiler-judge-management.test.ts",
+      "test/compiler-judge.test.ts",
+      "test/compiler-management.test.ts",
+      "test/compiler-proposal.test.ts",
+      "test/evaluation-corpus.test.ts",
+      "test/management-transcripts.test.ts",
+      "test/repository-capture-catalog.test.ts",
+      "test/worker-packet-schema-parity.test.ts",
+    ],
+  },
+  {
+    path: "test/helpers/issue404-live-authority.ts",
+    tests: [
+      "test/compiler-issue404-authority.test.ts",
+      "test/compiler-issue404-fixture.test.ts",
+      "test/compiler-issue404-live.test.ts",
+    ],
+  },
+  {
     path: "test/helpers/qualification-install.ts",
     tests: [
       "test/phase4-qualification-install-authority.test.ts",

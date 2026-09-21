@@ -59,6 +59,7 @@ export function failureObjectiveBody(namespace, scenario) {
     `Do not edit the recipe, test, package scripts, or any other file. Do not repair intentional qualification failures. ` +
     `The independent validation plan must contain exactly \`${fixture.validationCommand}\`, the repository-observed package validation recipe. ` +
     `This is an explicitly authorized negative fixture: ${scenario === "failed-validation" ? "the unchanged validation must fail, and Factory must refuse publication" : "the completed worker output will be retained before an independently authorized competing trunk edit"}. ` +
+    `This committed synthetic fixture is explicitly trusted for local execution; set the Work Item execution trust to trusted_local. ` +
     `Do not publish, merge, call Factory tools, or change GitHub settings.\n`
   );
 }

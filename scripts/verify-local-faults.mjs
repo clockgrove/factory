@@ -837,7 +837,7 @@ export async function boundedPoll(
     wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   } = {},
 ) {
-  assert.ok(milliseconds >= 1 && milliseconds <= 600000 && interval >= 1 && interval <= 30000);
+  assert.ok(milliseconds >= 1 && milliseconds <= 900000 && interval >= 1 && interval <= 30000);
   const deadline = now() + milliseconds;
   for (let count = 0; count < 121; count++) {
     const value = await read();
@@ -846,6 +846,19 @@ export async function boundedPoll(
     await wait(Math.min(interval, deadline - now()));
   }
   throw new Error("bounded-observation-incomplete");
+}
+
+export function workerArmObservationMilliseconds(policy) {
+  const compilerMilliseconds = policy.compilerEvaluation.timeoutSeconds * 1000;
+  const objectiveMilliseconds = policy.objectiveTimeoutMinutes * 60_000;
+  assert.ok(
+    Number.isSafeInteger(compilerMilliseconds) &&
+      compilerMilliseconds >= 1 &&
+      Number.isSafeInteger(objectiveMilliseconds) &&
+      objectiveMilliseconds >= 1,
+    "fault policy has invalid observation bounds",
+  );
+  return Math.min(objectiveMilliseconds, Math.max(120_000, compilerMilliseconds + 120_000));
 }
 
 export function installedLocalFaultAuthority(
@@ -1343,64 +1356,83 @@ export async function runQualification(
       );
       const previous = await observe();
       assert.ok(
-        !previous.some((event) => event.event === "FactoryRunStarted" || terminal.has(event.event)),
-        "exercise requires the fresh prepared Objective",
+        !previous.some((event) => terminal.has(event.event)),
+        "exercise cannot attach to a terminal Objective",
       );
-      progress.stage("activation-request");
-      await call("factory_activate", {
-        objectiveNumber: evidence.objective,
-        requestId: evidence.activationRequestId,
-        repository: checkout,
-        policy,
-      });
+      const priorStart = previous.find((event) => event.event === "FactoryRunStarted");
+      if (priorStart) {
+        assert.equal(priorStart.activationRequestId, evidence.activationRequestId);
+        assert.equal(priorStart.policy.economics.maxModelTokens, maxModelTokens);
+        evidence.runId = priorStart.runId;
+        evidence.observationReattached = true;
+        save();
+      } else {
+        progress.stage("activation-request");
+        evidence.activationRequested = true;
+        save();
+        await call("factory_activate", {
+          objectiveNumber: evidence.objective,
+          requestId: evidence.activationRequestId,
+          repository: checkout,
+          policy,
+        });
+      }
       let identity;
       progress.stage("worker-arm");
-      await boundedPoll(observe, (events) => {
-        const start = events.find((event) => event.event === "FactoryRunStarted");
-        if (!start) return false;
-        assert.equal(start.activationRequestId, evidence.activationRequestId);
-        assert.equal(start.policy.economics.maxModelTokens, maxModelTokens);
-        evidence.runId = start.runId;
-        for (const event of events.filter(
-          (entry) =>
-            entry.runId === start.runId &&
-            entry.event === "AttemptReserved" &&
-            entry.localScopeBatch,
-        )) {
-          const batch = event.localScopeBatch;
-          if (batch.commandCount !== 1 || batch.identity.phase !== "execution") continue;
-          identity = batch.identity;
-          assert.equal(identity.runId, start.runId);
-          assert.equal(identity.repository, repository);
-          assert.equal(identity.objective, evidence.objective);
-          assert.equal(identity.hostIdentity, currentHost());
-          assert.equal(identity.producerUnit, controller.unit);
-          const scope = observeUnit(
-            assertScopeReceipt(event, start, repository, evidence.objective),
-          );
-          if (scope.status === "active") {
-            const producer = observeUnit(controller.unit);
-            assert.equal(
-              producer.invocationId,
-              identity.producerInvocationId,
-              "recorded producer generation differs from current controller",
+      await boundedPoll(
+        async () => {
+          const events = await observe();
+          save();
+          return events;
+        },
+        (events) => {
+          const start = events.find((event) => event.event === "FactoryRunStarted");
+          if (!start) return false;
+          assert.equal(start.activationRequestId, evidence.activationRequestId);
+          assert.equal(start.policy.economics.maxModelTokens, maxModelTokens);
+          evidence.runId = start.runId;
+          for (const event of events.filter(
+            (entry) =>
+              entry.runId === start.runId &&
+              entry.event === "AttemptReserved" &&
+              entry.localScopeBatch,
+          )) {
+            const batch = event.localScopeBatch;
+            if (batch.commandCount !== 1 || batch.identity.phase !== "execution") continue;
+            identity = batch.identity;
+            assert.equal(identity.runId, start.runId);
+            assert.equal(identity.repository, repository);
+            assert.equal(identity.objective, evidence.objective);
+            assert.equal(identity.hostIdentity, currentHost());
+            assert.equal(identity.producerUnit, controller.unit);
+            const scope = observeUnit(
+              assertScopeReceipt(event, start, repository, evidence.objective),
             );
-            evidence.before = {
-              hostIdentity: currentHost(),
-              scope,
-              controller: producer,
-              identity,
-              reservationDigest: hash(event),
-            };
-            return true;
+            if (scope.status === "active") {
+              const producer = observeUnit(controller.unit);
+              assert.equal(
+                producer.invocationId,
+                identity.producerInvocationId,
+                "recorded producer generation differs from current controller",
+              );
+              evidence.before = {
+                hostIdentity: currentHost(),
+                scope,
+                controller: producer,
+                identity,
+                reservationDigest: hash(event),
+              };
+              return true;
+            }
           }
-        }
-        assert.ok(
-          !events.some((event) => terminal.has(event.event)),
-          "run ended before fault was armed",
-        );
-        return false;
-      });
+          assert.ok(
+            !events.some((event) => terminal.has(event.event)),
+            "run ended before fault was armed",
+          );
+          return false;
+        },
+        { milliseconds: workerArmObservationMilliseconds(policy) },
+      );
       save();
       if (scenario === "restart") {
         progress.stage("pause-request");

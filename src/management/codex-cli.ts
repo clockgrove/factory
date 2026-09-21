@@ -310,6 +310,7 @@ const judgeCoverageBinding = {
       capabilityId: judgeEnum([
         "exact-activation-binding",
         "execution-network-policy",
+        "independent-semantic-review",
         "protected-pr-integration",
         "exact-integration-candidate-validation",
         "authorized-finding-reporting",

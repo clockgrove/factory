@@ -365,6 +365,13 @@ describe("semantic proposal validation", () => {
         evidenceIds: ["objective"],
         acceptanceEvidence: "The product behavior passes and Factory protects integration.",
       },
+      {
+        id: "review-only",
+        text: "Factory independently reviews the validated Work Item before publication.",
+        kind: "explicit",
+        evidenceIds: ["objective"],
+        acceptanceEvidence: "Factory records an exact-artifact semantic review checkpoint.",
+      },
     );
     const initial = semanticProposal(request);
     const lifecycle = initial.coverage.find((entry) => entry.obligationId === "lifecycle-only")!;
@@ -376,6 +383,9 @@ describe("semantic proposal validation", () => {
       kind: "factory-capability",
       capabilityId: "protected-pr-integration",
     });
+    initial.coverage.find((entry) => entry.obligationId === "review-only")!.bindings = [
+      { kind: "factory-capability", capabilityId: "independent-semantic-review" },
+    ];
 
     const invalid = parseAndValidateCompilerProposal(request, initial);
     expect(invalid.report).toMatchObject({
@@ -399,6 +409,7 @@ describe("semantic proposal validation", () => {
       throw new Error("fixture requires valid Work Items");
     expect(valid.proposal.workItems).toHaveLength(1);
     expect(valid.proposal.workItems[0]!.obligationIds).not.toContain("lifecycle-only");
+    expect(valid.proposal.workItems[0]!.obligationIds).not.toContain("review-only");
     const structuralRequest = structuredClone(request);
     structuralRequest.inventorySource = "structural-source";
     expect(parseAndValidateCompilerProposal(structuralRequest, repaired).report.status).toBe(
@@ -452,6 +463,19 @@ describe("semantic proposal validation", () => {
           ],
           evidenceIds: ["objective"],
           reason: "Both product behavior and protected integration are covered.",
+        },
+        {
+          obligationId: "review-only",
+          status: "covered" as const,
+          itemIds: [],
+          acceptanceBindings: [
+            {
+              kind: "factory-capability" as const,
+              capabilityId: "independent-semantic-review" as const,
+            },
+          ],
+          evidenceIds: ["objective"],
+          reason: "Factory owns exact-artifact semantic review before publication.",
         },
       ],
       items: [

@@ -119,6 +119,12 @@ export function factoryCompilerCapabilities(runPolicy: RunPolicy): FactoryCompil
       },
     },
     {
+      id: "independent-semantic-review",
+      description:
+        "Factory independently reviews the exact validated Work Item artifact against its acceptance criteria before publication or integration.",
+      authority: { contract: "durable-semantic-review-checkpoint" },
+    },
+    {
       id: "protected-pr-integration",
       description:
         "Factory publishes repository changes by pull request and integrates through protected repository controls.",

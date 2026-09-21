@@ -1107,7 +1107,7 @@ export const CompilerRequestSchema = z
     baseSha: z.string().regex(/^[a-f0-9]{40}$/),
     inventory: CompilerPlanningInventorySchema,
     inventorySource: z.enum(["structural-source", "independent-extraction"]),
-    factoryCapabilities: z.array(FactoryCompilerCapabilitySchema).max(6),
+    factoryCapabilities: z.array(FactoryCompilerCapabilitySchema).max(7),
     executionRoutes: ExecutionRouteCatalogSchema,
     repository: z
       .object({
@@ -1864,6 +1864,7 @@ const jsonFactoryCapabilityId = {
   enum: [
     "exact-activation-binding",
     "execution-network-policy",
+    "independent-semantic-review",
     "protected-pr-integration",
     "exact-integration-candidate-validation",
     "authorized-finding-reporting",
@@ -2323,7 +2324,7 @@ export const COMPILER_REQUEST_JSON_SCHEMA = {
     inventorySource: { enum: ["structural-source", "independent-extraction"] },
     factoryCapabilities: {
       type: "array",
-      maxItems: 6,
+      maxItems: 7,
       items: strictObject({
         id: jsonFactoryCapabilityId,
         description: jsonText,

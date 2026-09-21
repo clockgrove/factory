@@ -20,6 +20,7 @@ import {
   privateEvidenceFile,
   reservePrivateEvidenceFile,
   scopeUnit,
+  workerArmObservationMilliseconds,
 } from "../scripts/verify-local-faults.mjs";
 import { parseRunPolicy } from "../src/protocol/policy.js";
 import { localScopeUnit } from "../src/runtime/local-scope.js";
@@ -1197,6 +1198,19 @@ describe("installed local fault qualification harness", () => {
       ),
     ).rejects.toThrow("bounded-observation-incomplete");
     expect(calls).toBe(3);
+  });
+  it("keeps worker observation open for the configured compiler budget and bounded publication slack", () => {
+    const policy = {
+      compilerEvaluation: { timeoutSeconds: 600 },
+      objectiveTimeoutMinutes: 40,
+    };
+    expect(workerArmObservationMilliseconds(policy)).toBe(720_000);
+    expect(
+      workerArmObservationMilliseconds({
+        ...policy,
+        objectiveTimeoutMinutes: 5,
+      }),
+    ).toBe(300_000);
   });
   it.each([
     "foreign-status",

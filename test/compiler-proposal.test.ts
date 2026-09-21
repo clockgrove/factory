@@ -42,6 +42,7 @@ import { declaredAssetHandlerContract } from "../src/assets/handlers.js";
 import {
   semanticPinnedFacts,
   semanticProposal,
+  semanticProjectionContext,
   semanticRepositoryCapturePlanning,
   semanticRequest,
 } from "./helpers/semantic-compiler.js";
@@ -772,6 +773,136 @@ describe("semantic proposal validation", () => {
         observed: 66,
       }),
     );
+  });
+
+  it("projects one ordered scoped Node command across an authored dependency", () => {
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json"],
+      scripts: { test: "node --test" },
+    });
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request, 2);
+    const predecessorTest = "test/feature.test.js";
+    const dependentTest = "test/consumer.test.js";
+    proposal.workItems[0]!.scope = ["src/feature.js", predecessorTest];
+    proposal.workItems[0]!.criteria[0]!.validation = [
+      {
+        tier: "mechanical",
+        evidence: [{ kind: "scoped-node-test", targets: [predecessorTest] }],
+      },
+    ];
+    proposal.workItems[1]!.scope = ["src/consumer.js", dependentTest];
+    proposal.workItems[1]!.criteria[0]!.validation = [
+      {
+        tier: "mechanical",
+        evidence: [{ kind: "scoped-node-test", targets: [predecessorTest, dependentTest] }],
+      },
+    ];
+
+    const projection = semanticProjectionContext(pinned);
+    expect(parseAndValidateCompilerProposal(request, proposal, projection).report).toMatchObject({
+      status: "valid",
+      violations: [],
+    });
+    const projected = projectCompilerProposal({ request, proposal, ...projection });
+    const dependent = projected.objective.workItems.find(({ id }) => id === "item-2")!;
+    const command = `node --test ${predecessorTest} ${dependentTest}`;
+    expect(dependent.scope).toEqual(["src/consumer.js", dependentTest]);
+    expect(dependent.validationCommands).toEqual([command]);
+    expect(dependent.validation).toEqual([
+      expect.objectContaining({ tier: "mechanical", evidenceCommands: [command] }),
+    ]);
+  });
+
+  it.each([
+    {
+      name: "descendant",
+      configure(proposal: CompilerProposal) {
+        proposal.workItems[0]!.dependsOn = [];
+        proposal.workItems[1]!.dependsOn = ["item-1"];
+        return { reader: proposal.workItems[0]!, owner: proposal.workItems[1]! };
+      },
+    },
+    {
+      name: "sibling",
+      count: 3,
+      configure(proposal: CompilerProposal) {
+        proposal.workItems[1]!.dependsOn = ["item-1"];
+        proposal.workItems[2]!.dependsOn = ["item-1"];
+        return { reader: proposal.workItems[1]!, owner: proposal.workItems[2]! };
+      },
+    },
+    {
+      name: "unrelated item",
+      configure(proposal: CompilerProposal) {
+        proposal.workItems[1]!.dependsOn = [];
+        return { reader: proposal.workItems[1]!, owner: proposal.workItems[0]! };
+      },
+    },
+    {
+      name: "Factory-added serialization predecessor",
+      configure(proposal: CompilerProposal) {
+        proposal.workItems[1]!.dependsOn = [];
+        proposal.workItems[0]!.exclusiveResources = ["fixture:shared"];
+        proposal.workItems[1]!.exclusiveResources = ["fixture:shared"];
+        return { reader: proposal.workItems[1]!, owner: proposal.workItems[0]! };
+      },
+    },
+  ])("rejects a scoped Node target owned only by a $name", ({ count = 2, configure }) => {
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json"],
+      scripts: { test: "node --test" },
+    });
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request, count);
+    const { reader, owner } = configure(proposal);
+    const readerTest = `test/${reader.id}.test.js`;
+    const ownerTest = `test/${owner.id}.test.js`;
+    reader.scope = [`src/${reader.id}.js`, readerTest];
+    owner.scope = [`src/${owner.id}.js`, ownerTest];
+    reader.criteria[0]!.validation = [
+      {
+        tier: "mechanical",
+        evidence: [{ kind: "scoped-node-test", targets: [ownerTest, readerTest] }],
+      },
+    ];
+
+    expect(
+      parseAndValidateCompilerProposal(request, proposal, semanticProjectionContext(pinned)).report
+        .violations,
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "unknown-validation-recipe",
+        itemId: reader.id,
+        field: expect.stringContaining("/validation/0/evidence"),
+      }),
+    );
+  });
+
+  it("retains scoped Node read authority for a pinned test outside write scope", () => {
+    const pinnedTest = "test/existing.test.js";
+    const pinned = semanticPinnedFacts({
+      paths: ["package.json", "package-lock.json", pinnedTest],
+      scripts: { test: "node --test" },
+    });
+    const request = semanticRequest(pinned);
+    const proposal = semanticProposal(request);
+    proposal.workItems[0]!.criteria[0]!.validation = [
+      {
+        tier: "mechanical",
+        evidence: [{ kind: "scoped-node-test", targets: [pinnedTest] }],
+      },
+    ];
+
+    const projection = semanticProjectionContext(pinned);
+    expect(parseAndValidateCompilerProposal(request, proposal, projection).report).toMatchObject({
+      status: "valid",
+      violations: [],
+    });
+    expect(
+      projectCompilerProposal({ request, proposal, ...projection }).objective.workItems[0]!
+        .validationCommands,
+    ).toEqual([`node --test ${pinnedTest}`]);
   });
 
   it("counts pinned LFS tooling at the exact projected execution boundary", () => {

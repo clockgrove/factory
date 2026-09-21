@@ -62,6 +62,10 @@ export function boundedPoll<T>(
     wait?: (milliseconds: number) => Promise<void>;
   },
 ): Promise<T>;
+export function workerArmObservationMilliseconds(policy: {
+  compilerEvaluation: { timeoutSeconds: number };
+  objectiveTimeoutMinutes: number;
+}): number;
 export const localFaultHarnessPaths: string[];
 export function installedLocalFaultAuthority(
   env: Record<string, string | undefined>,

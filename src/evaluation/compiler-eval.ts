@@ -90,6 +90,7 @@ export type CompilerPlanningInventory = z.infer<typeof CompilerPlanningInventory
 export const FACTORY_COMPILER_CAPABILITY_IDS = [
   "exact-activation-binding",
   "execution-network-policy",
+  "independent-semantic-review",
   "protected-pr-integration",
   "exact-integration-candidate-validation",
   "authorized-finding-reporting",

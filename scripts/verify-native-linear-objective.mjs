@@ -42,6 +42,7 @@ import {
 } from "./verify-local-faults.mjs";
 
 const scope = "installed-local-native-linear-stack";
+const maximumNativeLinearModelTokens = 750_000;
 const cases = new Set(["cascade", "response-loss-restart", "active-cancellation"]);
 const terminal = new Set(["completed", "cancelled", "escalated"]);
 const terminalEvents = new Map([
@@ -2443,10 +2444,11 @@ export function nativeLinearQualification(env) {
     "native unavailability belongs to the separate fallback qualification",
   );
   const namespace = qualificationNamespace(env.FACTORY_LIVE_OBJECTIVE_NAMESPACE);
-  const policy = boundedPolicy(
-    "stacked-prs",
-    modelTokenLimit(env.FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS),
+  const maxModelTokens = modelTokenLimit(
+    env.FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS,
+    maximumNativeLinearModelTokens,
   );
+  const policy = boundedPolicy("stacked-prs", maxModelTokens, maximumNativeLinearModelTokens);
   policy.models = qualificationModels(
     env.FACTORY_LIVE_OBJECTIVE_MODEL,
     env.FACTORY_LIVE_OBJECTIVE_REASONING,

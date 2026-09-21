@@ -51,6 +51,8 @@ export FACTORY_LIVE_OBJECTIVE_REPOSITORY=example/disposable
 export FACTORY_LIVE_OBJECTIVE_CHECKOUT=/home/USER/Codex/disposable
 export FACTORY_LIVE_OBJECTIVE_NAMESPACE=scheduling-unique-20260905-a
 export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=500000
+export FACTORY_LIVE_OBJECTIVE_MODEL=YOUR_EXACT_MODEL_ID
+export FACTORY_LIVE_OBJECTIVE_REASONING=xhigh
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/private-evidence/scheduling-unique-20260905-a
 export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
 export FACTORY_MANAGEMENT_TRANSCRIPT_DIR=/home/USER/private-evidence/scheduling-transcripts-UNIQUE
@@ -74,9 +76,13 @@ env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
 ```
 
 Leave delivery unset or `regular-prs`, and the backend selector unset or `local-default`.
-The default native qualifier is unchanged. The initial token threshold must remain
-250,000–500,000 observed tokens, with the existing 45-minute Objective/two-attempt
-limits and zero paid backends. It is a stop-before-next-call threshold, not a provider
+Set the model to an exact model ID available on the installed host and reasoning to one of
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. Both values are required before
+preflight and must remain identical for execution. Factory records them as one immutable
+provider-neutral profile bound to compile, implement, review, and recover; this qualification does
+not change the product default model. The default native qualifier is unchanged. The initial token
+threshold must remain 250,000–500,000 observed tokens, with the existing 45-minute
+Objective/two-attempt limits and zero paid backends. It is a stop-before-next-call threshold, not a provider
 hard cap. There is no allowance increase or automatic reinjection.
 
 Create the transcript directory first with mode `0700`; it must be a canonical current-user-owned

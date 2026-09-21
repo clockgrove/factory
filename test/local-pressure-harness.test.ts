@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { boundedPolicy } from "../scripts/verify-live-objective.mjs";
+import { boundedPolicy, qualificationModels } from "../scripts/verify-live-objective.mjs";
 import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
   pressureAuthority,
@@ -147,6 +147,8 @@ describe("pressure authority and bounds", () => {
     FACTORY_LIVE_OBJECTIVE_REPOSITORY: "example/disposable",
     FACTORY_LIVE_OBJECTIVE_NAMESPACE: "pressure-test",
     FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "500000",
+    FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+    FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
     FACTORY_LIVE_LOCAL_PRESSURE_ACK:
       "example/disposable:owned-memory-pressure-cooldown-readmission",
   };
@@ -168,6 +170,20 @@ describe("pressure authority and bounds", () => {
     ).toThrow();
     expect(() => pressureAuthority({ ...env, FACTORY_LIVE_LOCAL_SCHEDULING: "1" })).toThrow();
   });
+  it.each([
+    { FACTORY_LIVE_OBJECTIVE_MODEL: undefined, FACTORY_LIVE_OBJECTIVE_REASONING: undefined },
+    { FACTORY_LIVE_OBJECTIVE_MODEL: undefined },
+    { FACTORY_LIVE_OBJECTIVE_REASONING: undefined },
+    { FACTORY_LIVE_OBJECTIVE_MODEL: "bad model" },
+    { FACTORY_LIVE_OBJECTIVE_REASONING: "fashionable" },
+  ])(
+    "rejects missing, partial or malformed model authority before invocation: %j",
+    async (delta) => {
+      const run = vi.fn();
+      await expect(main({ ...env, ...delta }, run)).rejects.toThrow();
+      expect(run).not.toHaveBeenCalled();
+    },
+  );
   it("selects a measurable cooldown and one original attempt while preserving other bounds", () => {
     const policy = boundedPolicy("regular-prs", 500000) as {
       capacity: { local: { admissionCooldownSeconds: number } };
@@ -179,6 +195,7 @@ describe("pressure authority and bounds", () => {
         ...policy.capacity,
         local: { ...policy.capacity.local, admissionCooldownSeconds: 120 },
       },
+      models: qualificationModels("gpt-5.6-sol", "xhigh"),
     };
     expect(pressureAuthority(env)?.policy).toEqual(expected);
     expect(policy.capacity.local.admissionCooldownSeconds).toBe(10);

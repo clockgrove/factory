@@ -26,6 +26,8 @@ const common = {
   FACTORY_LIVE_OBJECTIVE_REPOSITORY: "example/disposable",
   FACTORY_LIVE_OBJECTIVE_NAMESPACE: "authority-fixture",
   FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
+  FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+  FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
 };
 
 type InstallFixture = ReturnType<typeof createQualificationInstallFixture>;

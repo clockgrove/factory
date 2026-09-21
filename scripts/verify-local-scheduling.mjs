@@ -13,9 +13,13 @@ import {
   main as installedMain,
   boundedPolicy,
   modelTokenLimit,
+  qualificationModels,
   qualificationNamespace,
 } from "./verify-live-objective.mjs";
-import { assertRegularCompletion, observeRegularCommits } from "./verify-regular-objective.mjs";
+import {
+  assertRegularPipelineCompletion,
+  observeRegularCommits,
+} from "./verify-regular-objective.mjs";
 import { observeNativeMergeProofs } from "./qualification-sibling-refresh-proof.mjs";
 import {
   authenticatedFaultEvents,
@@ -90,13 +94,18 @@ export function schedulingAuthority(env) {
     !env.FACTORY_LIVE_OBJECTIVE_DELIVERY || env.FACTORY_LIVE_OBJECTIVE_DELIVERY === "regular-prs",
     "scheduling fixture cannot change native selection",
   );
+  const policy = boundedPolicy(
+    "regular-prs",
+    modelTokenLimit(env.FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS),
+  );
+  policy.models = qualificationModels(
+    env.FACTORY_LIVE_OBJECTIVE_MODEL,
+    env.FACTORY_LIVE_OBJECTIVE_REASONING,
+  );
   return {
     repository,
     namespace: qualificationNamespace(env.FACTORY_LIVE_OBJECTIVE_NAMESPACE),
-    policy: boundedPolicy(
-      "regular-prs",
-      modelTokenLimit(env.FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS),
-    ),
+    policy,
   };
 }
 
@@ -473,8 +482,22 @@ async function repositoryLease(hooks) {
   return { oid: commit.sha, record };
 }
 
+export function assertSchedulingPipelineCompletion(evidence) {
+  const profile = evidence.policy?.models?.profiles?.qualification;
+  const expected = boundedPolicy(
+    "regular-prs",
+    modelTokenLimit(String(evidence.policy?.economics?.maxModelTokens)),
+  );
+  expected.models = qualificationModels(profile?.model, profile?.reasoning);
+  assertRegularPipelineCompletion(evidence, {
+    expected,
+    scope: "installed-local-explicit-regular-objective",
+    deliveryMode: "regular-prs",
+  });
+}
+
 export function assertSchedulingCompletion(evidence) {
-  assertRegularCompletion(evidence);
+  assertSchedulingPipelineCompletion(evidence);
   const proof = evidence.scheduling;
   assert.equal(proof?.kind, "director-cgroup-native-priority-outer-lease");
   assert.equal(proof.barrier.runId, evidence.runResult.runId);
@@ -962,7 +985,7 @@ export function createSchedulingQualification(authority, env = process.env, port
         ...hooks,
         request: (route, parameters) => schedulingRequest(hooks, route, parameters),
       });
-      assertRegularCompletion(hooks.evidence);
+      assertSchedulingPipelineCompletion(hooks.evidence);
       const proof = hooks.evidence.scheduling;
       proof.cleanup.workerScopes = ownedSchedulingScopes(hooks.evidence, primary).map((unit) =>
         parseUnitObservation(

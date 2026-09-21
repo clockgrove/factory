@@ -10,6 +10,7 @@ import {
   installedBundleIdentity,
   boundedPolicy,
   modelTokenLimit,
+  qualificationModels,
 } from "./verify-live-objective.mjs";
 import {
   assertRegularPipelineCompletion,
@@ -66,8 +67,9 @@ function cooldownDeadline(reason, message) {
   return { at: match[1], milliseconds };
 }
 
-function pressurePolicy(limit) {
+function pressurePolicy(limit, model, reasoning) {
   const policy = boundedPolicy("regular-prs", limit);
+  policy.models = qualificationModels(model, reasoning);
   // Queue/readmission proves original attempts only; failure must not race the observer into retry.
   policy.maxAttemptsPerItem = 1;
   policy.capacity.local.admissionCooldownSeconds = 120;
@@ -81,8 +83,13 @@ export function pressureReadmissionDeadline(releasedAt, cooldownSeconds) {
 }
 
 function assertPressurePipeline(evidence) {
+  const profile = evidence.policy?.models?.profiles?.qualification;
   assertRegularPipelineCompletion(evidence, {
-    expected: pressurePolicy(modelTokenLimit(String(evidence.policy.economics.maxModelTokens))),
+    expected: pressurePolicy(
+      modelTokenLimit(String(evidence.policy.economics.maxModelTokens)),
+      profile?.model,
+      profile?.reasoning,
+    ),
     scope: "installed-local-explicit-regular-objective",
     deliveryMode: "regular-prs",
   });
@@ -106,7 +113,11 @@ export function pressureAuthority(env) {
   });
   // Selected before the run is accepted. The installed idle loop is 60s, so its
   // original 10s cooldown cannot yield a real observed cooldown decision here.
-  authority.policy = pressurePolicy(authority.policy.economics.maxModelTokens);
+  authority.policy = pressurePolicy(
+    authority.policy.economics.maxModelTokens,
+    env.FACTORY_LIVE_OBJECTIVE_MODEL,
+    env.FACTORY_LIVE_OBJECTIVE_REASONING,
+  );
   return authority;
 }
 

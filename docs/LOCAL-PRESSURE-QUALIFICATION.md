@@ -91,6 +91,8 @@ export FACTORY_LIVE_OBJECTIVE_REPOSITORY=example/disposable
 export FACTORY_LIVE_OBJECTIVE_CHECKOUT=/home/USER/Codex/disposable
 export FACTORY_LIVE_OBJECTIVE_NAMESPACE=pressure-unique-20260905-a
 export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=500000
+export FACTORY_LIVE_OBJECTIVE_MODEL=YOUR_EXACT_MODEL_ID
+export FACTORY_LIVE_OBJECTIVE_REASONING=xhigh
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/private-evidence/pressure-unique-20260905-a
 export FACTORY_QUALIFICATION_INSTALL_RECEIPT=/home/USER/Codex/factory-initial-beta/CANDIDATE/install-identities.txt
 export FACTORY_MANAGEMENT_TRANSCRIPT_DIR=/home/USER/private-evidence/pressure-transcripts-UNIQUE
@@ -102,6 +104,11 @@ env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
 Create the transcript directory first with mode `0700`. The shared installed-runtime builder
 validates its canonical ownership and separation from the checkout, then passes the exact path
 through the transient Director's cleared environment. Raw transcripts stay on the host.
+The model must be an exact model ID available on the installed host, and reasoning must be one of
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. Both values are required before
+preflight and must remain identical for execution. Factory records them as one immutable
+provider-neutral profile bound to compile, implement, review, and recover; this qualification does
+not change the product default model.
 
 After separately authorizing execution, leave the preflight flag unset and use:
 

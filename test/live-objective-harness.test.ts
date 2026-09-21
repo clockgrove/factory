@@ -24,7 +24,10 @@ import {
   waitForCreatedObjectiveNamespace,
 } from "../scripts/verify-live-objective.mjs";
 import { DEFAULT_COMPILER_EVALUATION_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
-import { assertSchedulingCompletion } from "../scripts/verify-local-scheduling.mjs";
+import {
+  assertSchedulingCompletion,
+  assertSchedulingPipelineCompletion,
+} from "../scripts/verify-local-scheduling.mjs";
 import {
   assertRegularCompletion,
   assessRegularCompletion,
@@ -361,8 +364,13 @@ function evidence() {
   };
 }
 
-async function regularEvidence(profile = "local-default", fallback = false) {
-  const policy = parseRunPolicy(boundedPolicy(fallback ? "stacked-prs" : "regular-prs"));
+async function regularEvidence(profile = "local-default", fallback = false, models = false) {
+  const requested = boundedPolicy(fallback ? "stacked-prs" : "regular-prs") as Record<
+    string,
+    unknown
+  >;
+  if (models) requested.models = qualificationModels("gpt-5.6-sol", "xhigh");
+  const policy = parseRunPolicy(requested);
   if (fallback) policy.delivery!.onUnavailable = "regular-prs";
   if (profile === "codex-cli") policy.backendOrder = ["codex-cli/local-worktree"];
   const f = await completeSiblingQualificationFixture({
@@ -665,10 +673,12 @@ describe("shared versioned REST merge evidence", () => {
     }
   });
   it("regular and scheduling qualification reject cross-run stored proof before accepting delivery", async () => {
-    const value = await regularEvidence();
-    value.mergeProofs[0]!.runId = "other";
-    expect(() => assertRegularCompletion(value)).toThrow(/merge commit proof missing/);
-    expect(() => assertSchedulingCompletion(value)).toThrow(/merge commit proof missing/);
+    const regular = await regularEvidence();
+    regular.mergeProofs[0]!.runId = "other";
+    expect(() => assertRegularCompletion(regular)).toThrow(/merge commit proof missing/);
+    const scheduling = await regularEvidence("local-default", false, true);
+    scheduling.mergeProofs[0]!.runId = "other";
+    expect(() => assertSchedulingCompletion(scheduling)).toThrow(/merge commit proof missing/);
   });
 });
 
@@ -784,6 +794,11 @@ describe("explicit installed regular qualification", () => {
     const wrongDefault = await regularEvidence("codex-cli");
     wrongDefault.regularBackendProfile = "local-default";
     expect(() => assertRegularCompletion(wrongDefault)).toThrow(/policy changed/);
+  });
+  it("accepts a completed scheduling pipeline with its explicit four-phase model profile", async () => {
+    const value = await regularEvidence("local-default", false, true);
+    expect(value.policy.models).toEqual(qualificationModels("gpt-5.6-sol", "xhigh"));
+    expect(() => assertSchedulingPipelineCompletion(value)).not.toThrow();
   });
   it("retains default SDK-first fallback authority without pretending SDK-only selection", async () => {
     const value = await regularEvidence("fallback-cli");

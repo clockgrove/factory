@@ -3,13 +3,13 @@
   "bundles": [
     {
       "file": "factory.js",
-      "bytes": 4925671,
-      "sha256": "ee979da2b39437fef4f7549c3d722762a39b0a420b74a03d1fe7c75a645cc40a"
+      "bytes": 4926019,
+      "sha256": "8ef249994bd1feb20aa4dca714e0cbb3783293c17144082d6d3c926987e4b434"
     },
     {
       "file": "mcp-server.js",
-      "bytes": 5031788,
-      "sha256": "b6b39487c6e6c4e539f3b4a9c22fad792d5065f2567faad19b711e102c102ad5"
+      "bytes": 5032136,
+      "sha256": "d4d4b9c3bba7d2582ced2d91a891268d5072bb5c31707f3ebe9ca871f876f9e6"
     }
   ],
   "components": [

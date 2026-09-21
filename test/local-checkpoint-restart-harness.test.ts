@@ -939,6 +939,24 @@ describe("explicit checkpoint restart authority", () => {
   ])("rejects changed authority before invocation %j", (delta) =>
     expect(() => checkpointAuthority({ ...env, ...delta })).toThrow(),
   );
+  it("retains the exact deterministic checkpoint configuration field", () => {
+    let caught: unknown;
+    try {
+      checkpointAuthority({ ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: undefined });
+    } catch (error) {
+      caught = error;
+    }
+    expect(checkpointFailure(caught)).toMatchObject({
+      category: "invariant",
+      code: "checkpoint-model-allowance-invalid",
+      violation: {
+        phase: "preflight",
+        item: "checkpoint-restart",
+        field: "FACTORY_CHECKPOINT_MAX_MODEL_TOKENS",
+        observed: "invalid",
+      },
+    });
+  });
 });
 
 describe("checkpoint observed-stop admission chronology", () => {

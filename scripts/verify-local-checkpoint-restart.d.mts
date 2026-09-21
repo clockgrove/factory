@@ -147,8 +147,10 @@ export interface CheckpointDiagnostic {
     | "assertion"
     | "deadline"
     | "filesystem"
+    | "invariant"
     | "unavailable";
   code: string;
+  violation?: import("./qualification-contract.mjs").QualificationViolationDiagnostic;
   httpStatus?: number;
   mcpCode?: number;
   rateLimitRemaining?: number;

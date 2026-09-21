@@ -156,6 +156,15 @@ describe("Phase 4 retained-install runner boundary", () => {
           {
             FACTORY_LOCAL_FAULTS: "1",
             FACTORY_QUALIFICATION_INSTALL_RECEIPT: fixture.installReceipt,
+            FACTORY_LOCAL_FAULT_PHASE: "preflight",
+            FACTORY_LOCAL_FAULT_SCENARIO: "cancel",
+            FACTORY_LOCAL_FAULT_REPOSITORY: "example/disposable",
+            FACTORY_LOCAL_FAULT_CHECKOUT: "/home/example/disposable",
+            FACTORY_LOCAL_FAULT_NAMESPACE: "install-authority-fixture",
+            FACTORY_LOCAL_FAULT_MAX_MODEL_TOKENS: "250000",
+            FACTORY_LOCAL_FAULT_MODEL: "gpt-5.6-sol",
+            FACTORY_LOCAL_FAULT_REASONING: "xhigh",
+            FACTORY_LOCAL_FAULT_EVIDENCE: "/tmp/install-authority-fixture/evidence.json",
           },
           {
             candidateSourceRoot: fixture.source,

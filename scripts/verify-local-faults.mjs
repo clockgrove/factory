@@ -39,6 +39,7 @@ import {
   installedQualificationAuthority,
   qualificationRuntimeEnvironment,
 } from "./qualification-install-identity.mjs";
+import { qualificationInvariant, qualificationViolation } from "./qualification-contract.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const hash = (value) =>
@@ -68,6 +69,7 @@ const sha = /^[a-f0-9]{64}$/;
 const evidenceByteLimit = 8 * 1024 * 1024;
 export const localFaultHarnessPaths = [
   "scripts/verify-local-faults.mjs",
+  "scripts/qualification-contract.mjs",
   "scripts/verify-live-objective.mjs",
   "scripts/qualification-model-accounting.mjs",
   "scripts/qualification-receipts.mjs",
@@ -360,11 +362,14 @@ export function authenticatedFaultEvents(comments, actor, objective) {
 
 export function assertFaultAuthenticationEnvironment(env) {
   for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"])
-    assert.equal(
-      env[key],
-      undefined,
-      "fault qualification requires existing default local authentication",
-    );
+    qualificationInvariant(env[key] === undefined, {
+      code: "local-fault-auth-environment-present",
+      phase: "preflight",
+      item: "local-fault",
+      field: key,
+      expected: "unset so default local authentication remains authoritative",
+      observed: "present",
+    });
 }
 
 export async function faultRequest(request, route, parameters = {}, signal) {
@@ -969,29 +974,110 @@ export async function runQualification(
     );
     return;
   }
+  progress.stage("configuration");
+  assertFaultAuthenticationEnvironment(env);
+  const required = (key) => {
+    const value = env[`FACTORY_LOCAL_FAULT_${key}`]?.trim();
+    qualificationInvariant(Boolean(value), {
+      code: "local-fault-configuration-required",
+      phase: "preflight",
+      item: "local-fault",
+      field: `FACTORY_LOCAL_FAULT_${key}`,
+      expected: "a non-empty explicit qualification setting",
+      observed: "missing",
+    });
+    return value;
+  };
+  const phase = required("PHASE");
+  qualificationInvariant(["preflight", "prepare", "exercise", "verify"].includes(phase), {
+    code: "local-fault-phase-unsupported",
+    phase: "preflight",
+    item: "local-fault",
+    field: "FACTORY_LOCAL_FAULT_PHASE",
+    expected: "preflight, prepare, exercise, or verify",
+    observed: "unsupported",
+  });
+  progress.phase(phase);
+  const scenario = required("SCENARIO");
+  qualificationInvariant(["cancel", "restart"].includes(scenario), {
+    code: "local-fault-scenario-unsupported",
+    phase,
+    item: "local-fault",
+    field: "FACTORY_LOCAL_FAULT_SCENARIO",
+    expected: "cancel or restart",
+    observed: "unsupported",
+  });
+  const repository = required("REPOSITORY");
+  qualificationInvariant(
+    /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(repository) && repository !== "clockgrove/factory",
+    {
+      code: "local-fault-repository-invalid",
+      phase,
+      item: scenario,
+      field: "FACTORY_LOCAL_FAULT_REPOSITORY",
+      expected: "a non-Factory owner/repository identifier",
+      observed: "invalid",
+    },
+  );
+  if (["prepare", "exercise"].includes(phase))
+    qualificationInvariant(required("MUTATION_ACK") === repository, {
+      code: "local-fault-mutation-ack-mismatch",
+      phase,
+      item: scenario,
+      field: "FACTORY_LOCAL_FAULT_MUTATION_ACK",
+      expected: "the exact authorized repository",
+      observed: "mismatch",
+    });
+  const checkoutSetting = required("CHECKOUT");
+  const namespace = qualificationNamespace(required("NAMESPACE"));
+  const modelTokenSetting = required("MAX_MODEL_TOKENS");
+  const parsedModelTokens = Number(modelTokenSetting);
+  qualificationInvariant(
+    /^[1-9]\d*$/.test(modelTokenSetting) &&
+      Number.isSafeInteger(parsedModelTokens) &&
+      parsedModelTokens >= 250_000 &&
+      parsedModelTokens <= 500_000,
+    {
+      code: "local-fault-model-allowance-invalid",
+      phase,
+      item: scenario,
+      field: "FACTORY_LOCAL_FAULT_MAX_MODEL_TOKENS",
+      expected: "an integer from 250000 through 500000",
+      observed: /^[1-9]\d*$/.test(modelTokenSetting) ? parsedModelTokens : "invalid",
+    },
+  );
+  const maxModelTokens = modelTokenLimit(modelTokenSetting);
+  const model = required("MODEL");
+  qualificationInvariant(Buffer.byteLength(model) <= 160 && /^[A-Za-z0-9._:/+-]+$/.test(model), {
+    code: "local-fault-model-profile-invalid",
+    phase,
+    item: scenario,
+    field: "FACTORY_LOCAL_FAULT_MODEL",
+    expected: "a valid explicit qualification model identifier",
+    observed: "invalid",
+  });
+  const reasoning = required("REASONING");
+  qualificationInvariant(
+    ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(reasoning),
+    {
+      code: "local-fault-reasoning-profile-invalid",
+      phase,
+      item: scenario,
+      field: "FACTORY_LOCAL_FAULT_REASONING",
+      expected: "a supported explicit qualification reasoning effort",
+      observed: "unsupported",
+    },
+  );
+  const policy = faultPolicy(maxModelTokens, scenario, model, reasoning);
+  const evidencePath = resolve(required("EVIDENCE"));
+  assert.ok(evidencePath.startsWith("/tmp/"), "private evidence must be in /tmp");
   progress.stage("installed-identity");
   const candidate = installedLocalFaultAuthority(env, {
     candidateSourceRoot,
     installAuthorityOptions,
   });
-  progress.stage("configuration");
-  assertFaultAuthenticationEnvironment(env);
-  const required = (key) => {
-    const value = env[`FACTORY_LOCAL_FAULT_${key}`]?.trim();
-    assert.ok(value, `FACTORY_LOCAL_FAULT_${key} required`);
-    return value;
-  };
-  const phase = required("PHASE");
-  assert.ok(["preflight", "prepare", "exercise", "verify"].includes(phase));
-  progress.phase(phase);
-  const scenario = required("SCENARIO");
-  assert.ok(["cancel", "restart"].includes(scenario));
-  const repository = required("REPOSITORY");
-  assert.match(repository, /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/);
-  assert.notEqual(repository, "clockgrove/factory");
-  if (["prepare", "exercise"].includes(phase)) assert.equal(required("MUTATION_ACK"), repository);
   assert.equal(process.platform, "linux");
-  const checkout = realpathSync(required("CHECKOUT"));
+  const checkout = realpathSync(checkoutSetting);
   assert.ok(!checkout.startsWith("/mnt/"));
   const runtimeEnvironment = qualificationRuntimeEnvironment(env, {
     repositoryRoot: checkout,
@@ -999,11 +1085,6 @@ export async function runQualification(
   });
   const origin = command("git", ["remote", "get-url", "origin"], checkout).replace(/\.git$/, "");
   assert.ok([`https://github.com/${repository}`, `git@github.com:${repository}`].includes(origin));
-  const namespace = qualificationNamespace(required("NAMESPACE"));
-  const maxModelTokens = modelTokenLimit(required("MAX_MODEL_TOKENS"));
-  const policy = faultPolicy(maxModelTokens, scenario, required("MODEL"), required("REASONING"));
-  const evidencePath = resolve(required("EVIDENCE"));
-  assert.ok(evidencePath.startsWith("/tmp/"), "private evidence must be in /tmp");
   const pluginRoot = candidate.installedPluginRoot;
   const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
   const artifact = candidate.pluginArtifact;
@@ -1449,8 +1530,11 @@ export async function runQualification(
     console.log(JSON.stringify(evidence.assessment));
     if (evidence.assessment.result !== "passed") process.exitCode = 2;
     else progress.stage("complete");
-  } catch {
-    const failure = progress.failure();
+  } catch (error) {
+    const failure = {
+      ...progress.failure(),
+      ...(qualificationViolation(error) ? { violation: qualificationViolation(error) } : {}),
+    };
     if (evidence) {
       evidence.assessment = {
         result: "incomplete",
@@ -1468,11 +1552,17 @@ export async function main(env = process.env, options = {}) {
   const progress = createFaultProgress({ emit: (event) => console.log(JSON.stringify(event)) });
   try {
     await runQualification(progress, env, options);
-  } catch {
+  } catch (error) {
     // Includes failures before MCP setup and failures to persist private evidence.
     // Never print raw exceptions, transport payloads, environment or credentials.
     process.exitCode = 2;
-    console.error(JSON.stringify({ result: "incomplete", ...progress.failure() }));
+    console.error(
+      JSON.stringify({
+        result: "incomplete",
+        ...progress.failure(),
+        ...(qualificationViolation(error) ? { violation: qualificationViolation(error) } : {}),
+      }),
+    );
   }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

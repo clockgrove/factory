@@ -210,6 +210,21 @@ function identities(authority, reserved) {
 function document(proof, ref, path, parents, maxBytes = 196608) {
   return assertQualificationCheckpoint(proof, { ref, path, maxBytes }, parents);
 }
+
+function directArtifactReady(proof, ref) {
+  return document(proof.ready, ref, "artifact-transfer.json", [], 1048576);
+}
+
+/** Return the artifact already authenticated by an App Server checkpoint receipt.
+ * The ready ref is a parentless direct transfer; callers do not reinterpret an
+ * obsolete intent chain or persist the full artifact in the compact receipt. */
+export function appServerCheckpointArtifact(proof, receipt) {
+  assert.equal(proof.ready.commit.oid, receipt.readyOid, "ready checkpoint identity differs");
+  const ready = directArtifactReady(proof, proof.ready.ref);
+  assert.equal(ready.artifact.digest, receipt.artifactDigest, "ready artifact identity differs");
+  return ready.artifact;
+}
+
 export function assertAppServerCheckpoint(
   observation,
   authority,
@@ -368,13 +383,7 @@ export function assertAppServerCheckpoint(
     ref: `${transferRef}/intent`,
     status: 404,
   });
-  const ready = document(
-    proof.ready,
-    `${transferRef}/ready`,
-    "artifact-transfer.json",
-    [],
-    1048576,
-  );
+  const ready = directArtifactReady(proof, `${transferRef}/ready`);
   assert.equal(ready.protocol, "clockgrove.factory/artifact-transfer");
   assert.deepEqual(ready.identity, identity);
   assert.equal(ready.retention, "repository-audit");

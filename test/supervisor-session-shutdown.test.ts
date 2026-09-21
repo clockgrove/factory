@@ -1,11 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GitHubReader } from "../src/github.js";
+import {
+  SharedCapacitySnapshotLagError,
+  sharedCapacityClaimId,
+  type SharedCapacityOwner,
+} from "../src/controller/shared-capacity.js";
 import { LifecycleRecorder } from "../src/control/events.js";
 import * as transfers from "../src/control/artifact-transfers.js";
 import { ContinuousExecutionPool } from "../src/scheduling/continuous-refill.js";
 import { SafeArtifactCheckpointHeldError } from "../src/runtime/qualification-checkpoint.js";
 import { SafeArtifactCheckpointShutdownError } from "../src/runtime/qualification-checkpoint.js";
-import { CapacityLedger } from "../src/scheduling/capacity-ledger.js";
+import {
+  CapacityLedger,
+  type CapacityLimits,
+  type CapacityReservation,
+  type OwnedCapacityReservation,
+} from "../src/scheduling/capacity-ledger.js";
 import { ObjectiveFairness } from "../src/scheduling/fairness.js";
 import { LeaseLostError, LeaseManager } from "../src/control/lease.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
@@ -57,11 +67,97 @@ function assertHeld(f: Fixture) {
   expect(f.activity.some((event) => ["review", "validate"].includes(event.operation))).toBe(false);
 }
 
+/** Production shared capacity never resurrects an exact released identity.
+ * Keep this fake separate from the Supervisor's process-local ledger so a
+ * premature release becomes the same restart barrier as the Git-backed journal. */
+function installPersistentSharedCapacity(f: Fixture) {
+  const ledger = new CapacityLedger();
+  const owned = new Map<string, OwnedCapacityReservation>();
+  const released = new Set<string>();
+  const release = vi.fn(async (_owner: SharedCapacityOwner, key: string) => {
+    if (!owned.has(key)) return;
+    ledger.release(key);
+    owned.delete(key);
+    released.add(key);
+  });
+  f.repositoryResources.sharedCapacity = {
+    snapshot: async () => ledger.snapshot(),
+    reconcile: async (
+      _owner: SharedCapacityOwner,
+      imports: readonly OwnedCapacityReservation[],
+    ) => {
+      const lag = imports
+        .filter(({ reservation }) => released.has(reservation.key))
+        .map(({ owner, reservation }) => ({
+          claimId: sharedCapacityClaimId(owner, reservation.key),
+          key: reservation.key,
+          provenance: "journal" as const,
+        }));
+      if (lag.length > 0) throw new SharedCapacitySnapshotLagError(lag);
+      ledger.reconcileObjective(
+        f.snapshot.number,
+        imports.map(({ reservation }) => reservation),
+      );
+      owned.clear();
+      for (const imported of imports) owned.set(imported.reservation.key, imported);
+      return imports;
+    },
+    reserve: async (
+      owner: SharedCapacityOwner,
+      reservation: CapacityReservation,
+      limits: CapacityLimits,
+    ) => {
+      if (released.has(reservation.key))
+        return {
+          reserved: false as const,
+          code: "released-reservation" as const,
+          generation: ledger.snapshot().generation,
+        };
+      const result = ledger.tryReserve(ledger.snapshot().generation, reservation, limits);
+      if (result.reserved) owned.set(reservation.key, { owner, reservation });
+      return result.reserved
+        ? {
+            reserved: true as const,
+            claimId: sharedCapacityClaimId(owner, reservation.key),
+            generation: result.generation,
+          }
+        : result;
+    },
+    transition: async (
+      owner: SharedCapacityOwner,
+      fromKey: string,
+      reservation: CapacityReservation,
+      limits: CapacityLimits,
+    ) => {
+      const result = ledger.transition(ledger.snapshot().generation, fromKey, reservation, limits);
+      if (result.reserved) {
+        released.add(fromKey);
+        owned.delete(fromKey);
+        owned.set(reservation.key, { owner, reservation });
+      }
+      return result.reserved
+        ? {
+            reserved: true as const,
+            claimId: sharedCapacityClaimId(owner, reservation.key),
+            generation: result.generation,
+          }
+        : result;
+    },
+    release,
+  } as unknown as NonNullable<typeof f.repositoryResources.sharedCapacity>;
+  return {
+    release,
+    outstanding: () => ledger.snapshot().reservations,
+    released,
+  };
+}
+
 describe("completed artifact shutdown before validation admission", () => {
   it.each(["none", "cleanup", "lease"] as const)(
     "retires an exact safe hold on shutdown without hiding %s failure",
     async (failure) => {
       const f = await fixture();
+      const shared = installPersistentSharedCapacity(f);
       const shutdown = new AbortController();
       const original: ReturnType<Fixture["events"]> = [];
       let interrupted = false;
@@ -122,6 +218,24 @@ describe("completed artifact shutdown before validation admission", () => {
           ),
       ).toBe(false);
       expect(release).toHaveBeenCalledTimes(failure === "cleanup" ? 0 : 1);
+      expect(shared.release.mock.calls.filter(([, key]) => key.includes(":execution:"))).toEqual(
+        [],
+      );
+      expect(shared.released).toEqual(new Set());
+      expect(shared.outstanding()).toMatchObject([
+        { objective: 7, workItem: 8, attempt: 1, phase: "execution" },
+      ]);
+      expect(
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.kind === "capacity" &&
+              event.event === "CapacityReconciled" &&
+              event.workItem === 8 &&
+              event.phase === "execution",
+          ),
+      ).toEqual([]);
       const ready = [...f.refs].filter(
         ([ref]) => ref.includes("/artifact-transfers/") && ref.endsWith("/ready"),
       );
@@ -132,6 +246,16 @@ describe("completed artifact shutdown before validation admission", () => {
         expect(
           f.events().filter((event) => event.event === "AttemptReserved" && event.workItem === 8),
         ).toHaveLength(1);
+        expect(
+          f.events().filter((event) => event.event === "AttemptStarted" && event.workItem === 8),
+        ).toHaveLength(1);
+        expect(
+          f.events().filter((event) => event.event === "AttemptSucceeded" && event.workItem === 8),
+        ).toHaveLength(1);
+        expect(
+          f.activity.filter((event) => event.operation === "launch" && event.workItem === 8),
+        ).toHaveLength(1);
+        expect(shared.outstanding()).toEqual([]);
         for (const [ref, oid] of ready) expect(f.refs.get(ref)).toBe(oid);
       }
     },

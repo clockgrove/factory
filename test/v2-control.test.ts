@@ -11,7 +11,7 @@ import {
   type GitCommitObject,
   type LeaseStore,
 } from "../src/control/lease.js";
-import { CircuitBreaker } from "../src/platform.js";
+import { CircuitBreaker, PlatformUnavailableError } from "../src/platform.js";
 import { LifecycleRecorder } from "../src/control/events.js";
 import {
   decodeEventComments,
@@ -360,6 +360,46 @@ describe("Director lease", () => {
     await expect(manager.assertCurrent(released)).rejects.toBeInstanceOf(LeaseLostError);
     const takeover = await manager.acquire({ ...identity, runId: "run-2", holder: "host-2" }, base);
     expect(takeover.epoch).toBe(2);
+  });
+
+  it("does not replay a release already attempted by the retiring owner", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const acquired = await manager.acquire(identity, await store.readCommit(BASE_SHA));
+    const controller = new LeaseController(manager, acquired, { take: () => 2 });
+    const failure = new Error("ambiguous release transport");
+    const release = vi.spyOn(manager, "release").mockRejectedValue(failure);
+
+    await expect(controller.release()).rejects.toBe(failure);
+    await expect(controller.releaseIfUnattempted()).resolves.toBeUndefined();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("releases once after platform failure but keeps lost authority fail-closed", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const acquired = await manager.acquire(identity, await store.readCommit(BASE_SHA));
+    let sequence = acquired.sequence + 1;
+    const controller = new LeaseController(manager, acquired, { take: () => sequence++ });
+    const release = vi.spyOn(manager, "release");
+
+    controller.fail(
+      new PlatformUnavailableError(
+        { kind: "server_error", retryAfterMs: 1 },
+        new Error("request failed"),
+      ),
+    );
+    await expect(controller.releaseIfUnattempted()).resolves.toBeUndefined();
+    expect(release).toHaveBeenCalledOnce();
+
+    const replacement = await manager.acquire(
+      { ...identity, holder: "replacement" },
+      await store.readCommit(BASE_SHA),
+    );
+    const lostController = new LeaseController(manager, replacement, { take: () => sequence++ });
+    lostController.fail(new LeaseLostError("stale owner"));
+    await expect(lostController.releaseIfUnattempted()).rejects.toBeInstanceOf(LeaseLostError);
+    expect(release).toHaveBeenCalledOnce();
   });
 
   it("renews while a same-generation operation is still in flight", async () => {

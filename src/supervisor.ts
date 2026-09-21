@@ -1436,6 +1436,7 @@ class SequenceAllocator {
 export class LeaseController {
   #renewalTail: Promise<void> = Promise.resolve();
   #renewalPending: Promise<void> | undefined;
+  #releaseAttempted = false;
   #fatal: unknown;
 
   constructor(
@@ -1450,8 +1451,13 @@ export class LeaseController {
     return operation(current);
   }
 
-  async #mutateLease<T>(operation: (lease: LeaseState) => Promise<T>): Promise<T> {
-    if (this.#fatal) throw this.#fatal;
+  async #mutateLease<T>(
+    operation: (lease: LeaseState) => Promise<T>,
+    allowPlatformFailure = false,
+  ): Promise<T> {
+    const canProceed = (): boolean =>
+      !this.#fatal || (allowPlatformFailure && this.#fatal instanceof PlatformUnavailableError);
+    if (!canProceed()) throw this.#fatal;
     let release!: () => void;
     const previous = this.#renewalTail;
     this.#renewalTail = new Promise<void>((resolveLock) => {
@@ -1459,7 +1465,7 @@ export class LeaseController {
     });
     await previous;
     try {
-      if (this.#fatal) throw this.#fatal;
+      if (!canProceed()) throw this.#fatal;
       return await operation(this.lease);
     } finally {
       release();
@@ -1531,10 +1537,23 @@ export class LeaseController {
   }
 
   async release(): Promise<void> {
+    this.#releaseAttempted = true;
     await retryGitHubQuota(() =>
       this.#mutateLease(async (lease) => {
         this.lease = await this.manager.release(lease, this.sequences.take());
       }),
+    );
+  }
+
+  /** Exceptional owner exit may relinquish authority only when no ordinary
+   * release was attempted. Never replay an ambiguous release mutation. */
+  async releaseIfUnattempted(): Promise<void> {
+    if (this.#releaseAttempted) return;
+    this.#releaseAttempted = true;
+    await retryGitHubQuota(() =>
+      this.#mutateLease(async (lease) => {
+        this.lease = await this.manager.release(lease, this.sequences.take());
+      }, true),
     );
   }
 
@@ -4018,6 +4037,13 @@ export class FactorySupervisor {
             withArtifactContentScope(() => this.#runWithArtifactContent()),
           ),
       );
+    } catch (error) {
+      // The inner lifecycle has synchronously settled its admitted children.
+      // A transient platform failure remains nonterminal durable work, but the
+      // failed writer must relinquish its lease so discovery can resume it now.
+      if (error instanceof PlatformUnavailableError)
+        await this.#lease?.releaseIfUnattempted().catch(() => {});
+      throw error;
     } finally {
       stopped.abort(new Error("Objective scope finished"));
       await unsubscribe().catch(() => {});

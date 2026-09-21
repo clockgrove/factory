@@ -59,8 +59,9 @@ async function signalIgnoringExecutable(root: string, name: string): Promise<str
   await writeFile(
     executable,
     `#!/bin/sh
-printf '%s' "$$" > "$STALL_PID_FILE"
 if [ -n "$STALL_CWD_FILE" ]; then pwd > "$STALL_CWD_FILE"; fi
+printf '%s' "$$" > "$STALL_PID_FILE.pending"
+mv "$STALL_PID_FILE.pending" "$STALL_PID_FILE"
 trap '' TERM
 (
   trap '' TERM

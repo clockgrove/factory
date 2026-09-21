@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   assertModelInvocationAdmission,
+  classifyModelInvocationAccounting,
   deriveBudgetUsage,
   isModelInvocationMarker,
   modelInvocationKey,
   remainingBudget,
+  terminalUnavailableModelInvocations,
   unresolvedModelInvocations,
   unreconciledBudgetReservations,
 } from "../src/control/budget.js";
@@ -14,6 +16,7 @@ import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
 
 type BudgetEvent = Extract<FactoryEvent, { kind: "budget" }>;
 const invocation = "review-artifact-a";
+const digest = "b".repeat(64);
 const policy = parseRunPolicy({
   ...DEFAULT_RUN_POLICY,
   economics: {
@@ -48,6 +51,28 @@ function budget(
   });
   if (parsed.kind !== "budget") throw new Error("fixture must be a budget event");
   return parsed;
+}
+
+function terminalUnavailable(overrides: Record<string, unknown> = {}): FactoryEvent {
+  return parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "attempt",
+    event: "AttemptCancelled",
+    objective: 7,
+    runId: "run-a",
+    sequence: 3,
+    at: "2026-09-06T00:01:00.000Z",
+    workItem: 8,
+    attempt: 1,
+    backend: "codex-sdk/local-worktree",
+    baseSha: "a".repeat(40),
+    directorEpoch: 1,
+    policyDigest: digest,
+    modelInvocationId: invocation,
+    producerState: "absent",
+    modelUsageAccounting: "terminal-unavailable",
+    ...overrides,
+  });
 }
 
 describe("durable model dispatch intent", () => {
@@ -110,6 +135,112 @@ describe("durable model dispatch intent", () => {
     expect(unreconciledBudgetReservations([marker, abandoned])).toEqual([]);
     expect(deriveBudgetUsage([marker, abandoned]).modelTokens).toBe(0);
     expect(() => assertModelInvocationAdmission([marker, abandoned], policy)).not.toThrow();
+  });
+
+  it("classifies exact, abandoned, terminal-unavailable, open, and ambiguous dispositions", () => {
+    const open = budget("BudgetReserved");
+    expect(classifyModelInvocationAccounting([open])).toMatchObject([{ status: "open" }]);
+
+    const exact = budget("BudgetReconciled");
+    expect(classifyModelInvocationAccounting([open, exact])).toMatchObject([
+      { status: "exact", disposition: exact },
+    ]);
+
+    const abandoned = budget("BudgetAbandoned", {
+      amount: 0,
+      usageId: `abandoned-${invocation}`,
+      reason: "provider boundary was not crossed",
+    });
+    expect(classifyModelInvocationAccounting([open, abandoned])).toMatchObject([
+      { status: "abandoned", disposition: abandoned },
+    ]);
+
+    const execution = budget("BudgetReserved", {
+      phase: "execution",
+      directorEpoch: 1,
+      policyDigest: digest,
+    });
+    const cancelled = terminalUnavailable();
+    expect(classifyModelInvocationAccounting([execution, cancelled])).toMatchObject([
+      { status: "terminal-unavailable", marker: execution, disposition: cancelled },
+    ]);
+    expect(terminalUnavailableModelInvocations([execution, cancelled])).toHaveLength(1);
+    expect(unresolvedModelInvocations([execution, cancelled])).toEqual([]);
+    expect(unreconciledBudgetReservations([execution, cancelled])).toEqual([]);
+    expect(deriveBudgetUsage([execution, cancelled]).modelTokens).toBe(0);
+    expect(() => assertModelInvocationAdmission([execution, cancelled], policy)).toThrow(
+      /consumption is unknown/,
+    );
+    expect(() =>
+      assertModelInvocationAdmission(
+        [execution, cancelled],
+        policy,
+        new Set([modelInvocationKey({ ...execution, modelInvocationId: invocation })]),
+      ),
+    ).toThrow(/consumption is unknown/);
+
+    const preceding = budget("BudgetReconciled", { sequence: 1 });
+    const laterMarker = budget("BudgetReserved", { sequence: 2 });
+    expect(classifyModelInvocationAccounting([preceding, laterMarker])).toMatchObject([
+      { status: "ambiguous", disposition: preceding },
+    ]);
+  });
+
+  it("rejects conflicting or inexact terminal-unavailable dispositions", () => {
+    const marker = budget("BudgetReserved", {
+      phase: "execution",
+      directorEpoch: 1,
+      policyDigest: digest,
+    });
+    const cancelled = terminalUnavailable();
+    const exact = budget("BudgetReconciled", {
+      phase: "execution",
+      directorEpoch: 1,
+      policyDigest: digest,
+    });
+    expect(() => classifyModelInvocationAccounting([marker, cancelled, exact])).toThrow(
+      /conflicting terminal accounting dispositions/,
+    );
+    expect(() => classifyModelInvocationAccounting([cancelled])).toThrow(
+      /no exact execution dispatch marker/,
+    );
+    expect(() =>
+      classifyModelInvocationAccounting([
+        marker,
+        terminalUnavailable({ policyDigest: "c".repeat(64) }),
+      ]),
+    ).toThrow(/conflicts with its dispatch binding/);
+    expect(() =>
+      classifyModelInvocationAccounting([
+        budget("BudgetReserved", {
+          sequence: 3,
+          phase: "execution",
+          directorEpoch: 1,
+          policyDigest: digest,
+        }),
+        terminalUnavailable({ sequence: 2 }),
+      ]),
+    ).toThrow(/must follow its exact execution dispatch marker/);
+    const recoveryBlocked = parseFactoryEvent({
+      ...terminalUnavailable(),
+      event: "AttemptRecoveryBlocked",
+      sequence: 2,
+      modelUsageAccounting: "unknown",
+      sameAttemptResume: "unavailable",
+      terminalEvidence: "unavailable",
+      artifactEvidence: "unavailable",
+      nextDisposition: "explicit-recovery",
+    });
+    expect(classifyModelInvocationAccounting([marker, recoveryBlocked])).toMatchObject([
+      { status: "ambiguous", disposition: recoveryBlocked },
+    ]);
+    for (const changed of [{ policyDigest: "c".repeat(64) }, { directorEpoch: 2 }])
+      expect(() =>
+        classifyModelInvocationAccounting([marker, { ...recoveryBlocked, ...changed }]),
+      ).toThrow(/recovery-blocked usage conflicts with its dispatch binding/);
+    expect(() => classifyModelInvocationAccounting([marker, recoveryBlocked, cancelled])).toThrow(
+      /conflicting terminal accounting dispositions/,
+    );
   });
 
   it.each([

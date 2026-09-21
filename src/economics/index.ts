@@ -3,7 +3,11 @@ import type { RunPolicy } from "../protocol/policy.js";
 import { modelTokenBudgetIntent, type ModelTokenBudgetIntent } from "../protocol/budget-intent.js";
 import { deduplicateFactoryEvents, latestRunReceipts } from "../control/receipts.js";
 import type { ObjectiveAuthorityObservation } from "../control/authority.js";
-import { isModelInvocationMarker, unresolvedModelInvocations } from "../control/budget.js";
+import {
+  isModelInvocationMarker,
+  terminalUnavailableModelInvocations,
+  unresolvedModelInvocations,
+} from "../control/budget.js";
 import { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
 export { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
 
@@ -312,6 +316,10 @@ export interface EconomicSummary {
   modelTokenBudgetIntent: ModelTokenBudgetIntent;
   /** Dispatch receipts without exact actual-usage closure; not a token estimate. */
   unresolvedModelInvocations: number;
+  /** Terminal invocations whose exact producer is absent but supplied no counters. */
+  terminalUnavailableModelInvocations: number;
+  terminalUnavailableModelInvocationIds: string[];
+  terminalUnavailableModelInvocationIdsTruncated: boolean;
   budgets: {
     sandboxMilliseconds: { configured: number; committed: number; remaining: number };
     managedSessions: { configured: number; committed: number; remaining: number };
@@ -400,6 +408,11 @@ export function summarizeEconomics(input: {
   const tokenCommitted = tokens.reconciled + tokens.outstanding;
   const configuredTokens = input.policy.economics?.maxModelTokens;
   const unresolvedInvocations = unresolvedModelInvocations([...input.events], input.runId).length;
+  const terminalUnavailable = terminalUnavailableModelInvocations([...input.events], input.runId);
+  const terminalUnavailableIds = terminalUnavailable
+    .map(({ marker }) => marker.modelInvocationId)
+    .sort();
+  const incompleteInvocations = unresolvedInvocations + terminalUnavailable.length;
   const unknownInvocationUsage = {
     availability: "unavailable" as const,
     reason:
@@ -410,10 +423,13 @@ export function summarizeEconomics(input: {
     modelTokenBreakdown: modelTokenBreakdown(input.events, input.runId),
     modelTokenBudgetIntent: modelTokenBudgetIntent(input.policy),
     unresolvedModelInvocations: unresolvedInvocations,
+    terminalUnavailableModelInvocations: terminalUnavailable.length,
+    terminalUnavailableModelInvocationIds: terminalUnavailableIds.slice(0, 100),
+    terminalUnavailableModelInvocationIdsTruncated: terminalUnavailableIds.length > 100,
     usage: Object.fromEntries(
       nativeUnits.map((ledger) => [
         ledger.unit,
-        ledger.unit === "model_tokens" && unresolvedInvocations > 0
+        ledger.unit === "model_tokens" && incompleteInvocations > 0
           ? unknownInvocationUsage
           : observedUsage(ledger),
       ]),
@@ -435,7 +451,7 @@ export function summarizeEconomics(input: {
               availability: "unavailable",
               reason: "the run policy has no configured model-token threshold",
             }
-          : unresolvedInvocations > 0
+          : incompleteInvocations > 0
             ? unknownInvocationUsage
             : {
                 availability: "observed",

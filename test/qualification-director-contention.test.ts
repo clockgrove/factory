@@ -425,7 +425,11 @@ describe("inner Director qualification assertions", () => {
     stalled.peer.events = [];
     expect(() => assertInnerDirectorCollision(stalled)).toThrow(/peer Objective made no progress/);
     const duplicateAccounting = collision();
-    duplicateAccounting.events.push({ ...duplicateAccounting.events[3]!, sequence: 10 });
+    const duplicateUsage = structuredClone(duplicateAccounting.events[3]!);
+    if (!("amount" in duplicateUsage)) throw new Error("fixture actual usage is missing");
+    duplicateUsage.sequence = 10;
+    duplicateUsage.amount += 1;
+    duplicateAccounting.events.push(duplicateUsage);
     expect(() => assertInnerDirectorCollision(duplicateAccounting)).toThrow(/usage repeated/);
   });
 

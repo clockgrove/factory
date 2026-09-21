@@ -398,9 +398,26 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
     { runId: "fixture", event: "ControllerObserved", controllerId: "first", sequence: 2 },
     reserved,
     {
+      protocol: "clockgrove.factory/v2",
+      kind: "budget",
+      runId: "fixture",
+      objective: identity.objective,
+      event: "BudgetReserved",
+      sequence: 4,
+      workItem: 8,
+      attempt: 1,
+      phase: "execution",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: "invocation-worker-8-1",
+      modelInvocationId: "worker-8-1",
+      directorEpoch: identity.directorEpoch,
+      policyDigest: identity.policyDigest,
+    },
+    {
       runId: "fixture",
       event: "AttemptStarted",
-      sequence: 4,
+      sequence: 5,
       workItem: 8,
       attempt: 1,
       backend: "codex-sdk/local-worktree",
@@ -409,34 +426,60 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
   ];
   if (scenario === "restart")
     events.push(
-      { runId: "fixture", event: "RunPauseRequested", requestId: "pause", sequence: 5 },
-      { runId: "fixture", event: "ControllerObserved", controllerId: "second", sequence: 6 },
+      { runId: "fixture", event: "RunPauseRequested", requestId: "pause", sequence: 6 },
+      { runId: "fixture", event: "ControllerObserved", controllerId: "second", sequence: 7 },
     );
   if (scenario === "cancel")
     events.push(
       {
         runId: "fixture",
         event: "FactoryRunCancellationRequested",
-        sequence: 7,
+        sequence: 6,
         requestId: "cancel",
       },
-      { runId: "fixture", event: "AttemptCancelled", sequence: 8, workItem: 8, attempt: 1 },
+      {
+        protocol: "clockgrove.factory/v2",
+        kind: "attempt",
+        runId: "fixture",
+        objective: identity.objective,
+        event: "AttemptCancelled",
+        sequence: 8,
+        workItem: 8,
+        attempt: 1,
+        backend: "codex-sdk/local-worktree",
+        baseSha: "b".repeat(40),
+        directorEpoch: identity.directorEpoch,
+        policyDigest: identity.policyDigest,
+      },
       { runId: "fixture", event: "FactoryRunCancelled", sequence: 9 },
     );
   else
     events.push(
-      { runId: "fixture", event: "AttemptCancelled", sequence: 7, workItem: 8, attempt: 1 },
+      {
+        protocol: "clockgrove.factory/v2",
+        kind: "attempt",
+        runId: "fixture",
+        objective: identity.objective,
+        event: "AttemptCancelled",
+        sequence: 9,
+        workItem: 8,
+        attempt: 1,
+        backend: "codex-sdk/local-worktree",
+        baseSha: "b".repeat(40),
+        directorEpoch: identity.directorEpoch,
+        policyDigest: identity.policyDigest,
+      },
       {
         runId: "fixture",
         event: "WorkItemRetryRequested",
-        sequence: 8,
+        sequence: 10,
         workItem: 8,
         requestId: "retry",
       },
-      { runId: "fixture", event: "RunResumeRequested", sequence: 9, requestId: "resume" },
+      { runId: "fixture", event: "RunResumeRequested", sequence: 11, requestId: "resume" },
       {
         ...reserved,
-        sequence: 10,
+        sequence: 12,
         attempt: 2,
         localScopeBatch: {
           ...reserved.localScopeBatch,
@@ -446,41 +489,68 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
         },
       },
       {
+        protocol: "clockgrove.factory/v2",
+        kind: "budget",
+        runId: "fixture",
+        objective: identity.objective,
+        event: "BudgetReserved",
+        sequence: 13,
+        workItem: 8,
+        attempt: 2,
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-worker-8-2",
+        modelInvocationId: "worker-8-2",
+        directorEpoch: identity.directorEpoch,
+        policyDigest: identity.policyDigest,
+      },
+      {
         runId: "fixture",
         event: "AttemptStarted",
-        sequence: 11,
+        sequence: 14,
         workItem: 8,
         attempt: 2,
         backend: "codex-sdk/local-worktree",
         providerResourceId: "retried-worker",
       },
-      { runId: "fixture", event: "AttemptIntegrated", sequence: 12, workItem: 8, attempt: 2 },
-      { runId: "fixture", event: "FactoryRunCompleted", sequence: 13 },
+      { runId: "fixture", event: "AttemptIntegrated", sequence: 16, workItem: 8, attempt: 2 },
+      { runId: "fixture", event: "FactoryRunCompleted", sequence: 17 },
     );
   events.push({
+    protocol: "clockgrove.factory/v2",
     runId: "fixture",
+    objective: identity.objective,
     kind: "budget",
     event: "BudgetReconciled",
     phase: "execution",
     unit: "model_tokens",
     usageId: "worker-8-1",
-    sequence: 6,
+    sequence: scenario === "restart" ? 8 : 7,
     workItem: 8,
     attempt: 1,
     amount: 50,
+    modelInvocationId: "worker-8-1",
+    directorEpoch: identity.directorEpoch,
+    policyDigest: identity.policyDigest,
   });
   if (scenario === "restart")
     events.push({
+      protocol: "clockgrove.factory/v2",
       runId: "fixture",
+      objective: identity.objective,
       kind: "budget",
       event: "BudgetReconciled",
       phase: "execution",
       unit: "model_tokens",
       usageId: "worker-8-2",
-      sequence: 12,
+      sequence: 15,
       workItem: 8,
       attempt: 2,
       amount: 50,
+      modelInvocationId: "worker-8-2",
+      directorEpoch: identity.directorEpoch,
+      policyDigest: identity.policyDigest,
     });
   const evidence = {
     scenario,
@@ -507,7 +577,25 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
       summary: {
         runId: "fixture",
         outcome: scenario === "restart" ? "completed" : "cancelled",
-        economics: { usage: { model_tokens: { availability: "observed", value: 100 } } },
+        economics: {
+          usage: {
+            model_tokens: { availability: "observed", value: scenario === "restart" ? 100 : 50 },
+          },
+          budgets: {
+            modelTokens: {
+              availability: "observed",
+              value: {
+                configured: 250000,
+                committed: scenario === "restart" ? 100 : 50,
+                remaining: scenario === "restart" ? 249900 : 249950,
+              },
+            },
+          },
+          unresolvedModelInvocations: 0,
+          terminalUnavailableModelInvocations: 0,
+          terminalUnavailableModelInvocationIds: [],
+          terminalUnavailableModelInvocationIdsTruncated: false,
+        },
         attempts: { active: 0 },
       },
       capacity: { activeReservations: [] },
@@ -701,8 +789,48 @@ describe("installed local fault qualification harness", () => {
     evidence.receipts = evidence.receipts.filter(({ event }) => event.unit !== "model_tokens");
     const result = assessLocalFault(evidence);
     expect(result.result).toBe("incomplete");
-    expect(result.blockers).toContain("worker-model-usage-unavailable");
+    expect(result.blockers).toContain("worker-model-accounting-not-terminal");
     expect(result.blockers).not.toContain("all-reserved-resource-absence-unproven");
+  });
+  it("accepts a bound terminal-unavailable cancellation while token totals stay unavailable", () => {
+    const { evidence } = validationRaceFixture();
+    evidence.receipts = evidence.receipts.filter(
+      ({ event }) =>
+        !(
+          event.event === "BudgetReconciled" &&
+          event.unit === "model_tokens" &&
+          event.workItem === 8 &&
+          event.attempt === 1
+        ),
+    );
+    Object.assign(
+      evidence.receipts.find(({ event }) => event.event === "AttemptCancelled")!.event,
+      {
+        modelInvocationId: "worker-8-1",
+        producerState: "absent",
+        modelUsageAccounting: "terminal-unavailable",
+      },
+    );
+    Object.assign(evidence.status.summary.economics, {
+      usage: {
+        model_tokens: {
+          availability: "unavailable",
+          reason: "one terminal invocation has no exact provider counters",
+        },
+      },
+      budgets: {
+        modelTokens: {
+          availability: "unavailable",
+          reason: "one terminal invocation has no exact provider counters",
+        },
+      },
+      unresolvedModelInvocations: 0,
+      terminalUnavailableModelInvocations: 1,
+      terminalUnavailableModelInvocationIds: ["worker-8-1"],
+      terminalUnavailableModelInvocationIdsTruncated: false,
+    });
+
+    expect(assessLocalFault(evidence)).toMatchObject({ result: "passed", blockers: [] });
   });
   it("keeps private evidence bounded, owned, nonsymlinked, and correctly truncated", () => {
     const directory = mkdtempSync("/tmp/factory-fault-harness-test-");
@@ -956,9 +1084,9 @@ describe("installed local fault qualification harness", () => {
       if (fault === "duplicate")
         evidence.receipts.push({
           event: {
-            ...evidence.receipts[3]!.event,
+            ...evidence.receipts.find(({ event }) => event.event === "AttemptStarted")!.event,
             providerResourceId: "second-worker",
-            sequence: 5,
+            sequence: 6,
           },
         });
       if (fault === "reservation")

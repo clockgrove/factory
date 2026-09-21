@@ -323,6 +323,47 @@ describe("admission settlement evidence", () => {
       }),
     ).toThrow("remains unknown");
   });
+  it("settles cleanup while retaining a terminal-unavailable invocation by exact identity", () => {
+    const marker = budget("BudgetReserved", 5, {
+      unit: "model_tokens",
+      amount: 0,
+      modelInvocationId: "worker",
+      usageId: "invocation-worker",
+    });
+    const cancelled = parseFactoryEvent({
+      ...common,
+      kind: "attempt",
+      event: "AttemptCancelled",
+      sequence: 6,
+      backend: "codex-sdk-local",
+      baseSha: sha,
+      modelInvocationId: "worker",
+      producerState: "absent",
+      modelUsageAccounting: "terminal-unavailable",
+    });
+    const observed = [events[0]!, events[1]!, events[3]!, marker, cancelled];
+    expect(
+      settle(observed, {
+        modelUsageExpected: true,
+        retainedUnknownModelInvocationId: "worker",
+      }),
+    ).toMatchObject({ accountingSettled: false, unknownModelUsageRetained: true });
+    expect(() => settle(observed, { modelUsageExpected: true })).toThrow(
+      "terminal-unavailable model usage was not retained",
+    );
+    expect(() =>
+      settle(observed, {
+        modelUsageExpected: true,
+        retainedUnknownModelInvocationId: "other",
+      }),
+    ).toThrow("already reconciled");
+    expect(() =>
+      settle([...observed, recoveryBlocked("worker", 7)], {
+        modelUsageExpected: true,
+        retainedUnknownModelInvocationId: "worker",
+      }),
+    ).toThrow("conflicting terminal accounting dispositions");
+  });
   it("binds provider-neutral recovery blocking to one exact unresolved invocation", () => {
     const marker = budget("BudgetReserved", 5, {
       unit: "model_tokens",

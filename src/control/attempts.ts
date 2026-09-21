@@ -581,6 +581,7 @@ export class AttemptManager {
     modelProfile?: string;
     reportedModelTokens?: number;
     reportedModelUsage?: ReportedModelUsage;
+    terminalUnavailableModelUsage?: { modelInvocationId: string };
     recoveryBlocked?: { modelInvocationId: string };
     allowRecovery?: boolean;
   }): Promise<AttemptEvent> {
@@ -603,6 +604,16 @@ export class AttemptManager {
       if ((args.event === "AttemptRecoveryBlocked") !== Boolean(args.recoveryBlocked))
         throw new Error(
           "AttemptRecoveryBlocked requires its exact model invocation recovery evidence",
+        );
+      if (
+        args.terminalUnavailableModelUsage &&
+        (args.event !== "AttemptCancelled" ||
+          args.reportedModelTokens !== undefined ||
+          args.reportedModelUsage !== undefined ||
+          args.recoveryBlocked)
+      )
+        throw new Error(
+          "terminal-unavailable model usage belongs only to an AttemptCancelled receipt without exact counters or recovery evidence",
         );
       if (
         args.reservation.runId !== args.lease.runId ||
@@ -655,6 +666,13 @@ export class AttemptManager {
           ? {}
           : { reportedModelTokens: args.reportedModelTokens }),
         ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
+        ...(args.terminalUnavailableModelUsage
+          ? {
+              modelInvocationId: args.terminalUnavailableModelUsage.modelInvocationId,
+              producerState: "absent" as const,
+              modelUsageAccounting: "terminal-unavailable" as const,
+            }
+          : {}),
         ...(args.recoveryBlocked
           ? {
               modelInvocationId: args.recoveryBlocked.modelInvocationId,

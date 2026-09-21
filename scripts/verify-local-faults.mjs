@@ -1,6 +1,10 @@
 /** Opt-in installed local cancellation/orderly-restart qualification; never a release-suite test. */
 import assert from "node:assert/strict";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
+import {
+  isQualificationModelMarker,
+  qualificationModelAccounting,
+} from "./qualification-model-accounting.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
 import {
@@ -511,7 +515,33 @@ export function assessLocalFault(evidence) {
   )
     blockers.push("installed-status-run-mismatch");
   const tokens = evidence.status?.summary?.economics?.usage?.model_tokens;
+  let modelAccounting;
+  try {
+    modelAccounting = qualificationModelAccounting(events, { requireMarkers: true });
+  } catch {
+    blockers.push("model-accounting-invalid");
+    modelAccounting = { usage: [], terminalUnavailable: [], unresolved: [] };
+  }
+  const terminalUnavailableIds = modelAccounting.terminalUnavailable
+    .map((event) => event.modelInvocationId)
+    .sort();
+  const economics = evidence.status?.summary?.economics;
+  if (modelAccounting.unresolved.length > 0 || economics?.unresolvedModelInvocations !== 0)
+    blockers.push("model-invocation-unresolved");
   if (
+    economics?.terminalUnavailableModelInvocations !== terminalUnavailableIds.length ||
+    economics?.terminalUnavailableModelInvocationIdsTruncated !== false ||
+    JSON.stringify([...(economics?.terminalUnavailableModelInvocationIds ?? [])].sort()) !==
+      JSON.stringify(terminalUnavailableIds)
+  )
+    blockers.push("terminal-unavailable-model-identity-mismatch");
+  if (terminalUnavailableIds.length > 0) {
+    if (
+      tokens?.availability !== "unavailable" ||
+      economics?.budgets?.modelTokens?.availability !== "unavailable"
+    )
+      blockers.push("terminal-unavailable-model-usage-not-fail-closed");
+  } else if (
     tokens?.availability !== "observed" ||
     !Number.isSafeInteger(tokens.value) ||
     tokens.value < 0
@@ -608,6 +638,7 @@ export function assessLocalFault(evidence) {
       )
     )
       continue;
+    if (isQualificationModelMarker(event)) continue;
     const key = JSON.stringify([
       event.kind,
       event.workItem,
@@ -619,6 +650,7 @@ export function assessLocalFault(evidence) {
     ]);
     reservations.set(key, event.event.endsWith("Reserved"));
   }
+  if (modelAccounting.unresolved.length > 0) blockers.push("unreconciled-model-invocation");
   if ([...reservations.values()].some(Boolean)) blockers.push("unreconciled-receipt-reservation");
   for (const event of events.filter((event) => event.event === "AttemptStarted")) {
     const amount = events.filter(
@@ -632,7 +664,14 @@ export function assessLocalFault(evidence) {
         Number.isSafeInteger(later.amount) &&
         later.amount >= 0,
     );
-    if (amount.length === 0) blockers.push("worker-model-usage-unavailable");
+    const unavailable = modelAccounting.terminalUnavailable.filter(
+      (later) =>
+        later.workItem === event.workItem &&
+        later.attempt === event.attempt &&
+        later.modelInvocationId === `worker-${event.workItem}-${event.attempt}`,
+    );
+    if (amount.length + unavailable.length !== 1)
+      blockers.push("worker-model-accounting-not-terminal");
   }
   if (evidence.scenario === "restart") {
     if (

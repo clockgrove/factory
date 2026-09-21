@@ -154,6 +154,7 @@ import {
 import {
   deriveBudgetUsage,
   remainingBudget,
+  terminalUnavailableModelInvocations,
   unreconciledBudgetReservations,
   unresolvedModelInvocations,
   assertModelInvocationAdmission,
@@ -10253,6 +10254,7 @@ export class FactorySupervisor {
         }
         const stopRequested = cancellation || error instanceof PlatformUnavailableError;
         let cancelledModelUsageObserved = false;
+        let cancelledTerminalWithoutModelUsageObserved = false;
         if (stopRequested && handle && selected && !executionCleanupConfirmed) {
           try {
             await selected.cancel(handle);
@@ -10267,11 +10269,16 @@ export class FactorySupervisor {
               // counters before cleanup discards the handle; absence stays unknown.
               const observation = await selected.observe(handle);
               if (["succeeded", "failed", "cancelled", "timed_out"].includes(observation.state)) {
-                terminalModelUsage = reportedModelUsage(observation.usage);
                 const tokens = reportedModelTokens(observation.usage);
                 if (tokens !== null) {
+                  terminalModelUsage = reportedModelUsage(observation.usage);
                   terminalModelTokens = tokens;
                   cancelledModelUsageObserved = true;
+                } else {
+                  // Partial or absent counters cannot become exact accounting and
+                  // are mutually exclusive with the bounded unavailable outcome.
+                  terminalModelUsage = undefined;
+                  cancelledTerminalWithoutModelUsageObserved = true;
                 }
               }
             } catch (observationError) {
@@ -10501,6 +10508,10 @@ export class FactorySupervisor {
               if (reconcileValidation) validationBudgetReconciled = true;
             });
           }
+          const terminalUnavailableModelInvocationId =
+            cancellation && cancelledTerminalWithoutModelUsageObserved && executionCleanupConfirmed
+              ? `worker-${item.number}-${reservation.attempt}`
+              : undefined;
           await this.#lease.use((lease) =>
             this.#attempts.record({
               ...(recovered ? { allowRecovery: true } : {}),
@@ -10523,8 +10534,17 @@ export class FactorySupervisor {
                 ? {}
                 : { reportedModelTokens: terminalModelTokens }),
               ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
+              ...(terminalUnavailableModelInvocationId
+                ? {
+                    terminalUnavailableModelUsage: {
+                      modelInvocationId: terminalUnavailableModelInvocationId,
+                    },
+                  }
+                : {}),
             }),
           );
+          if (terminalUnavailableModelInvocationId)
+            retainedUnknownModelInvocationId = terminalUnavailableModelInvocationId;
         } else {
           throw error;
         }
@@ -13995,10 +14015,22 @@ export class FactorySupervisor {
         ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
         ...(resources.size ? { providerResourceId: [...resources][0]! } : {}),
       });
+      const terminalUnavailable = terminalUnavailableModelInvocations(
+        events,
+        reservation.runId,
+      ).filter(
+        ({ marker }) =>
+          marker.workItem === reservation.workItem && marker.attempt === reservation.attempt,
+      );
+      if (terminalUnavailable.length > 1)
+        throw new Error("issue admission has multiple terminal-unavailable model invocations");
       await this.#settleIssueAdmission(item, reservation, {
         cleanupConfirmed: true,
         definitiveNonExecution: false,
         modelUsageExpected: backend.capabilities.reportsModelUsage ?? false,
+        ...(terminalUnavailable[0]
+          ? { retainedUnknownModelInvocationId: terminalUnavailable[0].marker.modelInvocationId }
+          : {}),
       });
     }
     if (this.#recoveryRuntime) {
@@ -23026,6 +23058,16 @@ export class FactorySupervisor {
           ? "AttemptTimedOut"
           : "AttemptDeferred",
     );
+    if (
+      event === "FactoryRunCancelled" &&
+      unresolvedModelInvocations(
+        deduplicateFactoryEvents([...snapshotEvents(snapshot), ...this.#budgetEvents]),
+        this.#run.runId,
+      ).some((marker) => marker.phase === "execution")
+    )
+      throw new Error(
+        "cancellation cannot become terminal while execution model accounting remains open or ambiguous",
+      );
     // Deadline-only recovery skips normal admission, but its fresh terminal
     // receipt still needs this writer's boundary. Ordinary runs reuse the
     // already-recorded boundary without another comment.

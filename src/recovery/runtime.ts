@@ -15,6 +15,7 @@ import {
   assertIsolatedCandidateReservation,
 } from "./isolated-candidate.js";
 import {
+  classifyModelInvocationAccounting,
   deriveBudgetUsage,
   remainingBudget,
   unresolvedModelInvocations,
@@ -115,7 +116,12 @@ interface RecoveryRuntimeCommon {
   remaining: ReturnType<typeof remainingBudget>;
   attemptCounts: Array<{ workItem: number; count: number; remaining: number }>;
   /** Complete observed subtotal is not a substitute for missing terminal token counters. */
-  currentUnknownModelUsage: Array<{ workItem: number; attempt: number }>;
+  currentUnknownModelUsage: Array<{
+    workItem: number;
+    attempt: number;
+    accounting: "unresolved" | "terminal-unavailable";
+    modelInvocationId?: string;
+  }>;
   /** A durable dispatch marker without its exact usage closure is unknown, including
    * management compilation/review calls that do not belong to a worker attempt. */
   currentUnknownManagementInvocations: string[];
@@ -1173,7 +1179,10 @@ export async function loadRecoveryRuntime(input: {
         )
       )
         counts.set(group[0]!.workItem, (counts.get(group[0]!.workItem) ?? 0) + 1);
-    const unknown: Array<{ workItem: number; attempt: number }> = [];
+    const executionAccounting = classifyModelInvocationAccounting([...events], input.runId).filter(
+      ({ marker }) => marker.phase === "execution",
+    );
+    const unknown: RecoveryRuntimeCommon["currentUnknownModelUsage"] = [];
     for (const group of currentAttempts.values()) {
       const finished = group.filter((event) => workerTerminals.has(event.event));
       if (!group.some((event) => event.event === "AttemptStarted") || !finished.length) continue;
@@ -1186,6 +1195,9 @@ export async function loadRecoveryRuntime(input: {
           attemptKey(event) === attemptKey(group[0]!),
       );
       const reported = finished.filter((event) => event.reportedModelTokens !== undefined);
+      const invocation = executionAccounting.find(
+        ({ marker }) => attemptKey(marker) === attemptKey(group[0]!),
+      );
       requireRuntime(
         !budget.length ||
           reported.every((event) =>
@@ -1197,12 +1209,20 @@ export async function loadRecoveryRuntime(input: {
         "conflicting-worker-usage",
       );
       if (!budget.length || !reported.length)
-        unknown.push({ workItem: group[0]!.workItem, attempt: group[0]!.attempt });
+        unknown.push({
+          workItem: group[0]!.workItem,
+          attempt: group[0]!.attempt,
+          accounting:
+            invocation?.status === "terminal-unavailable" ? "terminal-unavailable" : "unresolved",
+          ...(invocation ? { modelInvocationId: invocation.marker.modelInvocationId } : {}),
+        });
     }
     const unknownManagementInvocations = unresolvedModelInvocations([...events], input.runId)
       .filter((event) => event.phase === "management")
       .map((event) => event.modelInvocationId)
       .sort();
+    const remaining = remainingBudget(plan.acceptedPolicy, usage);
+    if (unknown.length || unknownManagementInvocations.length) remaining.modelTokens = null;
     const common: RecoveryRuntimeCommon = {
       adoptionVerified: true,
       executionAuthorized: false,
@@ -1222,7 +1242,7 @@ export async function loadRecoveryRuntime(input: {
       sourcePublications,
       historicalAccounting: chain.accounting,
       usage,
-      remaining: remainingBudget(plan.acceptedPolicy, usage),
+      remaining,
       attemptCounts: [...counts].map(([workItem, count]) => ({
         workItem,
         count,

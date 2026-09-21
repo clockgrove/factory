@@ -397,6 +397,62 @@ describe("conservative economic feedback", () => {
     });
   });
 
+  it("reports terminal-unavailable invocation identity while keeping token totals unavailable", () => {
+    const policy = {
+      ...DEFAULT_RUN_POLICY,
+      economics: {
+        maxModelTokens: 100,
+        modelTokenBudgetMode: "observed-stop" as const,
+        maxSandboxMinutes: 0,
+        maxManagedSessions: 0,
+        minCloudTimeSavedMinutes: 0,
+      },
+    };
+    const modelInvocationId = "worker-8-1";
+    const marker = event({
+      kind: "budget",
+      event: "BudgetReserved",
+      sequence: 2,
+      workItem: 8,
+      attempt: 1,
+      phase: "execution",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: `invocation-${modelInvocationId}`,
+      modelInvocationId,
+      directorEpoch: 1,
+      policyDigest: policyDigest(policy),
+    });
+    const cancelled = event({
+      kind: "attempt",
+      event: "AttemptCancelled",
+      sequence: 3,
+      workItem: 8,
+      attempt: 1,
+      backend: "codex-sdk/local-worktree",
+      baseSha: sha,
+      directorEpoch: 1,
+      policyDigest: policyDigest(policy),
+      modelInvocationId,
+      producerState: "absent",
+      modelUsageAccounting: "terminal-unavailable",
+    });
+    const summary = summarizeEconomics({
+      events: [modelReceipt(1, { amount: 40 }), marker, cancelled],
+      policy,
+    });
+    expect(summary.unresolvedModelInvocations).toBe(0);
+    expect(summary.terminalUnavailableModelInvocations).toBe(1);
+    expect(summary.terminalUnavailableModelInvocationIds).toEqual([modelInvocationId]);
+    expect(summary.terminalUnavailableModelInvocationIdsTruncated).toBe(false);
+    expect(summary.usage.model_tokens.availability).toBe("unavailable");
+    expect(summary.budgets.modelTokens.availability).toBe("unavailable");
+    expect(summary.nativeUnits.find(({ unit }) => unit === "model_tokens")).toMatchObject({
+      reconciled: 40,
+      outstanding: 0,
+    });
+  });
+
   it("counts exact provider billing receipt replays once without changing native or model ledgers", () => {
     const receipt = {
       provider: "provider-a",

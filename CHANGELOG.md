@@ -10,6 +10,13 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   gates, retain an exact-commit CI result, and reserve coverage, packaging, reproducibility,
   installation, audit, and live qualification for a stable release candidate. ([#560](https://github.com/clockgrove/factory/issues/560))
 
+### Fixed
+
+- Close actively cancelled local model invocations with exact counters when available or a typed,
+  invocation-bound terminal-unavailable receipt after proved producer absence. Status, recovery,
+  admission settlement, token budgets, and installed qualification now preserve that distinction
+  without inferring zero usage or permitting replay. ([#630](https://github.com/clockgrove/factory/issues/630))
+
 ## 2.0.27-beta.0 - 2026-09-17
 
 This is Factory's Initial Beta prerelease. Its support claim covers Windows WSL2 with repositories,

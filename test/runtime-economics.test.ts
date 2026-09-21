@@ -479,6 +479,7 @@ describe("durable runtime economics", () => {
     const sparse = summarize(concurrent().filter((value) => value.kind !== "budget"));
     expect(sparse.executionModelUsageCoverage).toEqual({
       startedAttemptsWithReceipt: 0,
+      startedAttemptsWithTerminalUnavailable: 0,
       startedAttemptsWithoutReceipt: 2,
     });
     expect(sparse.consumptionByDeliveryOutcome.availability).toBe("unavailable");
@@ -501,6 +502,7 @@ describe("durable runtime economics", () => {
     const zero = summarize(values);
     expect(zero.executionModelUsageCoverage).toEqual({
       startedAttemptsWithReceipt: 1,
+      startedAttemptsWithTerminalUnavailable: 0,
       startedAttemptsWithoutReceipt: 1,
     });
     expect(zero.consumptionByDeliveryOutcome).toMatchObject({
@@ -519,6 +521,41 @@ describe("durable runtime economics", () => {
         ),
       ).consumptionByDeliveryOutcome,
     ).toEqual(summarize(concurrent()).consumptionByDeliveryOutcome);
+  });
+
+  it("distinguishes a terminal-unavailable model invocation from an open dispatch", () => {
+    const modelInvocationId = "worker-8-1";
+    const marker = event(4, 3, {
+      kind: "budget",
+      event: "BudgetReserved",
+      workItem: 8,
+      attempt: 1,
+      phase: "execution",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: `invocation-${modelInvocationId}`,
+      modelInvocationId,
+      directorEpoch: 1,
+      policyDigest: policy,
+    });
+    const cancelled = attempt("AttemptCancelled", 5, 4, 8, {
+      modelInvocationId,
+      producerState: "absent",
+      modelUsageAccounting: "terminal-unavailable",
+    });
+    const result = summarize([
+      start(),
+      attempt("AttemptStarted", 3, 2),
+      marker,
+      cancelled,
+      terminal("FactoryRunCancelled", 6, 5),
+    ]);
+    expect(result.executionModelUsageCoverage).toEqual({
+      startedAttemptsWithReceipt: 0,
+      startedAttemptsWithTerminalUnavailable: 1,
+      startedAttemptsWithoutReceipt: 1,
+    });
+    expect(result.nativeUsageCoverage.reservedUsageIdentitiesWithoutReconciliation).toBe(0);
   });
 
   it("binds successor candidate validation without inventing a successor worker or importing predecessor cost", () => {

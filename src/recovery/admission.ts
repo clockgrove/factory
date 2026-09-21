@@ -55,6 +55,7 @@ const unknownSchema = z
         runId,
         workItem: positive.optional(),
         attempt: positive.optional(),
+        modelInvocationId: z.string().min(1).max(160).optional(),
         phase: z.string().max(100).optional(),
         reason: z.string().max(2000),
       })
@@ -186,10 +187,12 @@ export function verifyRecoveryAdmission(input: {
       observed.unknownModelUsageCount === unknown.length &&
       observed.blockerCount ===
         blockers.length, "accounting-incomplete", "Truncated or inconsistent accounting cannot establish a prospective allowance.");
+    const expectedRemaining = remainingBudget(plan.acceptedPolicy, usage);
+    if (observed.unknownModelUsageCount > 0) expectedRemaining.modelTokens = null;
     require(same(
       remaining,
-      remainingBudget(plan.acceptedPolicy, usage),
-    ), "remaining-mismatch", "Remaining amounts must derive from cumulative usage and the accepted policy.");
+      expectedRemaining,
+    ), "remaining-mismatch", "Remaining amounts must derive from cumulative usage and the accepted policy without treating unknown model spend as available allowance.");
     require(Array.isArray(observed.unreconciledReservations) &&
       observed.unreconciledReservations.length ===
         observed.unreconciledReservationCount, "reservation-count-mismatch", "Outstanding reservation identities cannot be omitted from accounting.");
@@ -301,7 +304,18 @@ export function verifyRecoveryAdmission(input: {
       else if (available !== null && requested > available)
         block(code, "Prospective demand exceeds the remaining cumulative allowance.");
     };
-    checkDemand(demand.modelTokens, usage.modelTokens, remaining.modelTokens, "model-token-limit");
+    if (demand.modelTokens > 0 && observed.unknownModelUsageCount > 0)
+      block(
+        "model-usage-unavailable",
+        "Prospective model demand is blocked because historical model consumption is unknown.",
+      );
+    else
+      checkDemand(
+        demand.modelTokens,
+        usage.modelTokens,
+        remaining.modelTokens,
+        "model-token-limit",
+      );
     checkDemand(
       demand.sandboxMinutes,
       usage.sandboxMinutesReserved,

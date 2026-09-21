@@ -203,6 +203,89 @@ describe("v2 event protocol", () => {
       parseFactoryEvent({ ...event, reportedModelUsage: { inputTokens: 120 } }),
     ).not.toHaveProperty("reportedModelTokens");
   });
+
+  it("binds terminal-unavailable model usage only to an exact cancellation bundle", () => {
+    const cancelled = {
+      protocol: PROTOCOL_V2,
+      kind: "attempt",
+      event: "AttemptCancelled",
+      objective: 42,
+      workItem: 43,
+      attempt: 1,
+      backend: "codex-sdk/local-worktree",
+      runId: "run-1",
+      sequence: 2,
+      at: "2026-09-03T00:00:00.000Z",
+      baseSha: SHA,
+      directorEpoch: 1,
+      policyDigest: "b".repeat(64),
+      modelInvocationId: "worker-43-1",
+      producerState: "absent",
+      modelUsageAccounting: "terminal-unavailable",
+    };
+    expect(parseFactoryEvent(cancelled)).toMatchObject({
+      event: "AttemptCancelled",
+      modelInvocationId: "worker-43-1",
+      producerState: "absent",
+      modelUsageAccounting: "terminal-unavailable",
+    });
+    for (const missing of ["modelInvocationId", "producerState", "modelUsageAccounting"] as const) {
+      const incomplete = { ...cancelled };
+      delete incomplete[missing];
+      expect(() => parseFactoryEvent(incomplete)).toThrow(
+        /must completely bind one absent model invocation/,
+      );
+    }
+    expect(() =>
+      parseFactoryEvent({
+        ...cancelled,
+        reportedModelTokens: 0,
+        reportedModelUsage: { inputTokens: 0, outputTokens: 0 },
+      }),
+    ).toThrow(/cannot also report exact model counters/);
+    expect(() => parseFactoryEvent({ ...cancelled, event: "AttemptFailed" })).toThrow(
+      /terminal-unavailable evidence belongs only to AttemptCancelled/,
+    );
+  });
+
+  it("preserves the distinct complete recovery-blocked unknown bundle", () => {
+    const recoveryBlocked = {
+      protocol: PROTOCOL_V2,
+      kind: "attempt",
+      event: "AttemptRecoveryBlocked",
+      objective: 42,
+      workItem: 43,
+      attempt: 1,
+      backend: "codex-sdk/local-worktree",
+      runId: "run-1",
+      sequence: 2,
+      at: "2026-09-03T00:00:00.000Z",
+      baseSha: SHA,
+      directorEpoch: 1,
+      policyDigest: "b".repeat(64),
+      modelInvocationId: "worker-43-1",
+      producerState: "absent",
+      sameAttemptResume: "unavailable",
+      terminalEvidence: "unavailable",
+      artifactEvidence: "unavailable",
+      modelUsageAccounting: "unknown",
+      nextDisposition: "explicit-recovery",
+    };
+    expect(parseFactoryEvent(recoveryBlocked)).toMatchObject({
+      event: "AttemptRecoveryBlocked",
+      modelUsageAccounting: "unknown",
+    });
+    expect(() =>
+      parseFactoryEvent({ ...recoveryBlocked, modelUsageAccounting: "terminal-unavailable" }),
+    ).toThrow(/recovery-blocked evidence must completely bind one absent producer/);
+    expect(() =>
+      parseFactoryEvent({
+        ...recoveryBlocked,
+        reportedModelTokens: 0,
+        reportedModelUsage: { inputTokens: 0, outputTokens: 0 },
+      }),
+    ).toThrow(/unknown model usage cannot also report exact model counters/);
+  });
   it("round-trips comment and commit-trailer envelopes", () => {
     const event = runStarted();
     expect(decodeEventComments(encodeEventComment("Factory started.", event))).toEqual([event]);

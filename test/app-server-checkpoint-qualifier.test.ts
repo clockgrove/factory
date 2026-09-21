@@ -452,6 +452,31 @@ describe("installed App Server checkpoint qualification", () => {
       modelTokens: 110,
     });
   });
+  it.each(["AttemptSucceeded", "RunPauseRequested"])(
+    "keeps polling while the %s receipt is not durable yet",
+    (eventName) => {
+      const f = fixture();
+      f.observation.receipts = f.observation.receipts.filter(
+        ({ event }) => event.event !== eventName,
+      );
+      expect(appServerHoldReady(f.observation, authority, { digest: f.witness.armDigest })).toBe(
+        false,
+      );
+    },
+  );
+  it("rejects repeated held worker receipts while another receipt is still pending", () => {
+    const f = fixture();
+    const succeeded = f.observation.receipts.find(
+      ({ event }) => event.event === "AttemptSucceeded",
+    )!;
+    f.observation.receipts.push(succeeded);
+    f.observation.receipts = f.observation.receipts.filter(
+      ({ event }) => event.event !== "RunPauseRequested",
+    );
+    expect(() =>
+      appServerHoldReady(f.observation, authority, { digest: f.witness.armDigest }),
+    ).toThrow("held worker receipt repeated");
+  });
   it.each(["0.153.2", "0.154.0", "1.0.0", "27.4.3-beta.1", "27.4.3+build.9"])(
     "accepts behavior-qualified App Server CLI identity %s",
     (cliVersion) => {

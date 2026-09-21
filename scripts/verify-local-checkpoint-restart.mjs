@@ -1188,17 +1188,19 @@ export function appServerHoldReady(
     ),
     "checkpoint already crossed validation or terminal boundary",
   );
-  for (const eventName of ["AttemptStarted", "AttemptSucceeded"])
-    unique(
-      events.filter((event) => event.event === eventName),
-      "held worker receipt missing or repeated",
-    );
   unique(
+    events.filter((event) => event.event === "AttemptStarted"),
+    "held worker receipt missing or repeated",
+  );
+  const heldReceipts = [
+    events.filter((event) => event.event === "AttemptSucceeded"),
     events.filter(
       (event) => event.event === "RunPauseRequested" && event.requestId === pauseRequestId,
     ),
-    "pause request missing",
-  );
+  ];
+  for (const receipts of heldReceipts)
+    assert.ok(receipts.length <= 1, "held worker receipt repeated");
+  if (heldReceipts.some((receipts) => receipts.length === 0)) return false;
   return true;
 }
 

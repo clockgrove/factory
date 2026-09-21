@@ -16,6 +16,10 @@ export function assertAppServerCheckpoint(
 export function appServerCheckpointIdentity(
   receipt: Record<string, unknown>,
 ): Record<string, unknown>;
+export function appServerCheckpointArtifact(
+  proof: Record<string, unknown>,
+  receipt: Record<string, unknown>,
+): Record<string, unknown>;
 export function assertAppServerCheckpointContinuation(
   before: Record<string, unknown>[],
   after: Record<string, unknown>[],

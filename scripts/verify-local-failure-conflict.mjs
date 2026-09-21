@@ -8,13 +8,14 @@ import {
   appServerHoldReady,
   checkpointFailure,
   main as checkpointMain,
+  withQualificationStage,
 } from "./verify-local-checkpoint-restart.mjs";
 import {
   observeAppServerCheckpoints,
   assertAppServerCheckpoint,
+  appServerCheckpointArtifact,
   appServerCheckpointIdentity,
 } from "./qualification-app-server-checkpoint.mjs";
-import { assertQualificationCheckpoint } from "./qualification-sibling-refresh-proof.mjs";
 import { qualificationModels } from "./verify-live-objective.mjs";
 import {
   failureFixture,
@@ -358,31 +359,31 @@ export function failureExtension(authority) {
         assert.equal(data.object.type, "commit");
         return data.object.sha;
       };
-      const contentProof = async (observation, witness) => {
-        const proofs = await observeAppServerCheckpoints(request, observation, authority, witness);
-        const proof = one(proofs, "one exact original session required");
-        const summary = appServerCheckpointIdentity(
-          assertAppServerCheckpoint(observation, authority, proof, witness),
-        );
-        const prepared = JSON.parse(proof.prepared.content);
-        assert.deepEqual(prepared.packet.allowedPaths, [fixture.paths.payload]);
-        assertFailureValidationCommands(prepared.packet.validationCommands, fixture);
-        assert.equal(prepared.packet.requirements.trust, "trusted_local");
-        const ready = assertQualificationCheckpoint(
-          proof.ready,
-          { ref: proof.ready.ref, path: "artifact-transfer.json", maxBytes: 1048576 },
-          [proof.intent.commit.oid],
-        );
-        const objects = proveFailureContent({
-          repository: authority.checkout,
-          baseSha: evidence.base,
-          artifact: ready.artifact,
-          fixture,
+      const contentProof = async (observation, witness) =>
+        withQualificationStage("app-server-artifact-proof", async () => {
+          const proofs = await observeAppServerCheckpoints(
+            request,
+            observation,
+            authority,
+            witness,
+          );
+          const proof = one(proofs, "one exact original session required");
+          const receipt = assertAppServerCheckpoint(observation, authority, proof, witness);
+          const summary = appServerCheckpointIdentity(receipt);
+          const prepared = JSON.parse(proof.prepared.content);
+          assert.deepEqual(prepared.packet.allowedPaths, [fixture.paths.payload]);
+          assertFailureValidationCommands(prepared.packet.validationCommands, fixture);
+          assert.equal(prepared.packet.requirements.trust, "trusted_local");
+          const objects = proveFailureContent({
+            repository: authority.checkout,
+            baseSha: evidence.base,
+            artifact: appServerCheckpointArtifact(proof, receipt),
+            fixture,
+          });
+          (evidence.failureContentObservations ??= []).push({ summary, proof, objects });
+          save();
+          return { summary, objects };
         });
-        (evidence.failureContentObservations ??= []).push({ summary, proof, objects });
-        save();
-        return { summary, objects };
-      };
       return {
         ...port,
         noPublication,

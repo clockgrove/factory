@@ -5,6 +5,7 @@ import { completeSiblingQualificationFixture } from "./helpers/sibling-qualifica
 import { boundedQualificationEvidenceText } from "../scripts/qualification-evidence-boundary.mjs";
 import {
   appServerCheckpointArm,
+  appServerCheckpointArtifact,
   appServerCheckpointIdentity,
   assertAppServerCheckpointContinuation,
   assertAppServerCheckpoint,
@@ -435,7 +436,8 @@ describe("installed App Server checkpoint qualification", () => {
     expect(appServerHoldReady(f.observation, authority, { digest: f.witness.armDigest })).toBe(
       true,
     );
-    expect(assertAppServerCheckpoint(f.observation, authority, f.proof, f.witness)).toMatchObject({
+    const receipt = assertAppServerCheckpoint(f.observation, authority, f.proof, f.witness);
+    expect(receipt).toMatchObject({
       protocol: "clockgrove.factory/app-server-checkpoint-verification",
       workItem: 8,
       runId: "run-7",
@@ -451,6 +453,16 @@ describe("installed App Server checkpoint qualification", () => {
       turnId: "turn-7",
       modelTokens: 110,
     });
+    expect(appServerCheckpointArtifact(f.proof, receipt)).toEqual(
+      JSON.parse(f.proof.ready.content).artifact,
+    );
+    expect(appServerCheckpointIdentity(receipt)).not.toHaveProperty("artifact");
+    expect(() =>
+      appServerCheckpointArtifact(f.proof, { ...receipt, readyOid: "0".repeat(40) }),
+    ).toThrow("ready checkpoint identity differs");
+    expect(() =>
+      appServerCheckpointArtifact(f.proof, { ...receipt, artifactDigest: "0".repeat(64) }),
+    ).toThrow("ready artifact identity differs");
   });
   it.each(["AttemptSucceeded", "RunPauseRequested"])(
     "keeps polling while the %s receipt is not durable yet",

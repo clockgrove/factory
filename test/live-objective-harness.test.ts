@@ -72,10 +72,18 @@ describe("qualification token intent compatibility", () => {
     expect(() => qualificationModels("bad model", "xhigh")).toThrow(/model is invalid/);
   });
 
-  it("opts new scenarios into observed stopping without rewriting historical evidence", () => {
+  it("uses the measured qualification envelope without changing the product default", () => {
     const current = parseRunPolicy(boundedPolicy());
     expect(current.economics?.modelTokenBudgetMode).toBe("observed-stop");
-    expect(current.compilerEvaluation).toEqual(DEFAULT_COMPILER_EVALUATION_POLICY);
+    expect(current.compilerEvaluation).toEqual({
+      mode: "auto-repair",
+      maxRepairs: 2,
+      maxInvocations: 7,
+      timeoutSeconds: 1_800,
+      maxObservedTokens: 500_000,
+    });
+    expect(DEFAULT_COMPILER_EVALUATION_POLICY.timeoutSeconds).toBe(600);
+    expect(current.compilerEvaluation).not.toEqual(DEFAULT_COMPILER_EVALUATION_POLICY);
     const legacy = structuredClone(current);
     delete legacy.economics!.modelTokenBudgetMode;
     const before = JSON.stringify(legacy);

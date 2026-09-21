@@ -45,7 +45,10 @@ const qualificationCompilerEvaluation = Object.freeze({
   mode: "auto-repair",
   maxRepairs: 2,
   maxInvocations: 7,
-  timeoutSeconds: 600,
+  // Installed SOL xhigh qualification measures the whole evaluation, not one
+  // provider call. Keep room for inventory, compile, judgment, and repair.
+  // The ordinary product default remains independently authoritative.
+  timeoutSeconds: 1_800,
   maxObservedTokens: 500_000,
 });
 const namespacePattern = /^[a-z](?:[a-z0-9-]{6,46}[a-z0-9])$/;

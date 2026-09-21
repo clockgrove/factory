@@ -106,10 +106,11 @@ required for both `prepare` and `exercise`.
 
 ## Evidence and interruption handling
 
-REST requests have actual abortable 15-second timeouts. Polling is mechanical and bounded:
-normally ten-second intervals, two minutes
-per active-worker/takeover/absence observation, and ten minutes for the final
-terminal observation. A worker that finishes before injection is **incomplete**,
+REST requests have actual abortable 15-second timeouts. Polling is mechanical and bounded at
+ten-second intervals. The worker-arm observation uses the configured compiler timeout plus two
+minutes of controller publication slack, capped by the Objective timeout. Takeover and resource
+absence observations remain bounded to two minutes, and the final terminal observation is bounded
+to ten minutes. A worker that finishes before injection is **incomplete**,
 not a simulated successful fault. Lifecycle injection is journaled locally before
 the call; response loss never triggers a blind second controller restart.
 
@@ -152,11 +153,13 @@ abrupt crash, phase-kill, network partition, or the entire adversarial fault gat
 
 If a call times out, a resource is unknown, a terminal state differs, or the
 process is interrupted, retain the evidence and inspect installed `factory_status`
-and the exact controller. The Objective may remain active or paused. Do not
-rerun `exercise`, delete evidence, increase allowance, kill unrelated processes,
-or revive a terminal run to turn the result green. Use the normal installed
-operator controls for any separately authorized cleanup. `verify` may recover a
-late terminal observation but cannot prove a lost, unrecorded injection result.
+and the exact controller. The Objective may remain active or paused. Before fault injection,
+`exercise` may be invoked again with the same evidence: it reattaches only to the same authenticated
+nonterminal activation request and never creates another activation or worker allowance. Once
+injection is requested, do not rerun `exercise`, delete evidence, increase allowance, kill unrelated
+processes, or revive a terminal run to turn the result green. Use the normal installed operator
+controls for any separately authorized cleanup. `verify` may recover a late terminal observation but
+cannot prove a lost, unrecorded injection result.
 
 Focused credential-free tests:
 

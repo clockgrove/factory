@@ -17,6 +17,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   admission settlement, token budgets, and installed qualification now preserve that distinction
   without inferring zero usage or permitting replay. ([#630](https://github.com/clockgrove/factory/issues/630))
 
+- Finish explicit controller shutdown cleanly when every settled contributor proves an
+  authoritative primary-quota rejection before any remote effect, while retaining mixed or
+  malformed shutdown failures as fatal. ([#314](https://github.com/clockgrove/factory/issues/314))
+
 ## 2.0.27-beta.0 - 2026-09-17
 
 This is Factory's Initial Beta prerelease. Its support claim covers Windows WSL2 with repositories,

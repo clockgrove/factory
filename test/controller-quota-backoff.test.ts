@@ -17,6 +17,7 @@ import {
   CircuitBreaker,
   classifyRefusal,
   ConcurrencyLimiter,
+  GitHubPreTransportQuotaDeferredError,
   PlatformUnavailableError,
 } from "../src/platform.js";
 import { verifyLocalRepository } from "../src/supervisor.js";
@@ -45,6 +46,23 @@ const quota = (ms = 1_842_000) =>
   new PlatformUnavailableError(
     { kind: "rate_limit", retryAfterMs: ms },
     new Error("private raw response"),
+  );
+const primaryQuota = (
+  ms = 1_842_000,
+  reset: string | number = String(Math.ceil((Date.now() + ms) / 1_000)),
+) =>
+  new PlatformUnavailableError(
+    { kind: "rate_limit", retryAfterMs: ms },
+    {
+      status: 403,
+      response: {
+        headers: {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-resource": "core",
+          "x-ratelimit-reset": reset,
+        },
+      },
+    },
   );
 const options = (signal: AbortSignal) => ({
   token: "test-only",
@@ -487,6 +505,102 @@ describe("controller quota boundary", () => {
     await task;
     expect(mock.acquire).toHaveBeenCalledTimes(2);
   });
+
+  it("finishes explicit shutdown when every settled failure is a proven primary-quota rejection", async () => {
+    const mock = ownershipMocks();
+    mock.release.mockRejectedValueOnce(primaryQuota(60_000));
+    const abort = new AbortController();
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: () => void;
+    const run = vi.fn(async () => {
+      entered();
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      throw primaryQuota(120_000);
+    });
+    const task = runGitHubRepositoryController({
+      ...options(abort.signal),
+      supervisorFactory: () => ({ run }),
+    });
+    await started;
+    abort.abort();
+    finish();
+    await expect(task).resolves.toBeUndefined();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+    expect(mock.release).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      "server refusal",
+      new PlatformUnavailableError(
+        { kind: "server_error", retryAfterMs: 120_000 },
+        { status: 503 },
+      ),
+    ],
+    [
+      "malformed primary quota response",
+      new PlatformUnavailableError(
+        { kind: "rate_limit", retryAfterMs: 120_000 },
+        {
+          status: 403,
+          response: {
+            headers: {
+              "x-ratelimit-remaining": "0",
+              "x-ratelimit-resource": "core",
+            },
+          },
+        },
+      ),
+    ],
+    ["blank primary reset", primaryQuota(120_000, "")],
+    ["whitespace primary reset", primaryQuota(120_000, "  ")],
+    ["zero primary reset", primaryQuota(120_000, "0")],
+    ["negative primary reset", primaryQuota(120_000, "-1")],
+    ["fractional primary reset", primaryQuota(120_000, "1.5")],
+    [
+      "unattributed pretransport cooldown",
+      new GitHubPreTransportQuotaDeferredError(
+        { kind: "rate_limit", retryAfterMs: 120_000 },
+        new Error("shared circuit source is not authoritative primary quota"),
+      ),
+    ],
+  ])(
+    "keeps a %s contributor fatal when shutdown also observes proven quota",
+    async (_name, failure) => {
+      const mock = ownershipMocks();
+      mock.release.mockRejectedValueOnce(primaryQuota(60_000));
+      const abort = new AbortController();
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let finish!: () => void;
+      const run = vi.fn(async () => {
+        entered();
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        throw failure;
+      });
+      const task = runGitHubRepositoryController({
+        ...options(abort.signal),
+        supervisorFactory: () => ({ run }),
+      });
+      await started;
+      abort.abort();
+      finish();
+      await expect(task).rejects.toThrow("stopped with unresolved platform failure");
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(mock.acquire).toHaveBeenCalledTimes(1);
+      expect(mock.release).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("does not release through an open shared circuit and can stop during a long cooldown", async () => {
     const mock = ownershipMocks();

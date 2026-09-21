@@ -1,7 +1,7 @@
 Factory third-party notices
 
 This file is generated from the exact bundled and external native runtime dependency inputs distributed by Factory.
-Bundle inventory SHA-256: 17ce8557ba1a234b6ef09578e5cd7288a1e374ac0a4ff84ceaeffe933354e3c2
+Bundle inventory SHA-256: 5157c6b84f12ee16e2ffe282d700c661a8dce15b2adb81534a0b23e8badc060c
 
 ================================================================================
 @borewit/text-codec@0.2.2

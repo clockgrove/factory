@@ -2405,6 +2405,26 @@ export function assessNativeLinearLifecycle(evidence) {
   }
 }
 
+export function retainNativeLinearPreterminalProofs(
+  evidence,
+  caseName = evidence.nativeLinearCase,
+) {
+  if (evidence.runResult.status === "completed" || !evidence.nativeLinearIntervention) return false;
+  assert.notEqual(caseName, "cascade", "cascade cannot arm a native intervention");
+  assert.equal(
+    evidence.nativeLinearIntervention.case,
+    caseName,
+    "native intervention case differs",
+  );
+  assert.ok(
+    evidence.nativeLinearPreterminal,
+    `${caseName} intervention lacks preterminal checkpoint proof`,
+  );
+  evidence.nativeLinearProofs = evidence.nativeLinearPreterminal.nativeLinearProofs;
+  evidence.mergeProofs = evidence.nativeLinearPreterminal.mergeProofs;
+  return true;
+}
+
 export function nativeLinearQualification(env) {
   if (env.FACTORY_LIVE_NATIVE_LINEAR_OBJECTIVE !== "1") return null;
   assert.ok(
@@ -2476,16 +2496,10 @@ export function nativeLinearQualification(env) {
       };
     },
     afterRun: async ({ evidence, save, call, checkout, owner, repo }) => {
-      assertCommittedHarness(evidence);
+      let afterRunFailure;
       try {
-        if (evidence.runResult.status !== "completed") {
-          assert.ok(
-            evidence.nativeLinearPreterminal,
-            "native cancellation lacks preterminal checkpoint proof",
-          );
-          evidence.nativeLinearProofs = evidence.nativeLinearPreterminal.nativeLinearProofs;
-          evidence.mergeProofs = evidence.nativeLinearPreterminal.mergeProofs;
-        }
+        assertCommittedHarness(evidence);
+        retainNativeLinearPreterminalProofs(evidence, caseName);
         if (caseName !== "cascade") {
           const controller = await call("factory_controller_status", {
             owner,
@@ -2502,18 +2516,37 @@ export function nativeLinearQualification(env) {
           evidence.nativeLinearUnrelatedSentinel.survived = assertNativeLinearSentinelAlive(
             evidence.nativeLinearUnrelatedSentinel.started,
           );
-        observeNativeScopes(evidence);
+      } catch (error) {
+        afterRunFailure = error;
       } finally {
+        try {
+          observeNativeScopes(evidence);
+        } catch (error) {
+          if (!afterRunFailure) afterRunFailure = error;
+          else
+            evidence.nativeScopeObservationFailure = (
+              error instanceof Error ? error.message : String(error)
+            ).slice(0, 2_000);
+        }
         if (
           caseName === "active-cancellation" &&
           evidence.nativeLinearUnrelatedSentinel?.started &&
           !evidence.nativeLinearUnrelatedSentinel.stopped
         )
-          evidence.nativeLinearUnrelatedSentinel.stopped = stopNativeLinearSentinel(
-            evidence.nativeLinearUnrelatedSentinel.started,
-          );
+          try {
+            evidence.nativeLinearUnrelatedSentinel.stopped = stopNativeLinearSentinel(
+              evidence.nativeLinearUnrelatedSentinel.started,
+            );
+          } catch (error) {
+            if (!afterRunFailure) afterRunFailure = error;
+            else
+              evidence.nativeLinearSentinelStopFailure = (
+                error instanceof Error ? error.message : String(error)
+              ).slice(0, 2_000);
+          }
         save();
       }
+      if (afterRunFailure) throw afterRunFailure;
     },
     onFailure: async ({ evidence, call, checkout, owner, repo, save }) => {
       const cleanup = (evidence.nativeLinearFailureCleanup ??= {
@@ -2564,6 +2597,18 @@ export function nativeLinearQualification(env) {
           };
         }
       }
+      if (!evidence.nativeScopeObservations) {
+        try {
+          observeNativeScopes(evidence);
+        } catch (error) {
+          cleanup.scopes = {
+            result: "unknown",
+            reason: (error instanceof Error ? error.message : String(error)).slice(0, 2_000),
+          };
+        }
+      }
+      if (evidence.nativeScopeObservations)
+        cleanup.scopeObservationResult = evidence.nativeScopeObservations.result;
       save();
     },
     observeMergeProofs: observeNativeLinearSettledProofs,

@@ -76,6 +76,10 @@ export function assessNativeLinearLifecycle(evidence: unknown): {
   scope: string;
   reason?: string;
 };
+export function retainNativeLinearPreterminalProofs(
+  evidence: unknown,
+  caseName?: NativeLinearCase,
+): boolean;
 export function main(
   env?: Record<string, string | undefined>,
   run?: (

@@ -187,6 +187,7 @@ export function observeNativeScopes(
 ) {
   const units = nativeOwnedScopes(evidence, hostIdentity);
   evidence.nativeScopeObservations = {
+    result: units.length === 0 ? "phase-not-reached" : "owned-scopes-absent",
     hostIdentity,
     units: units.map((unit) => {
       const output = observe(unit);
@@ -198,7 +199,13 @@ export function observeNativeScopes(
 }
 export function assertNativeScopes(evidence) {
   const observations = evidence.nativeScopeObservations;
+  assert.ok(observations, "native scope observation is unavailable");
   const expected = nativeOwnedScopes(evidence, observations.hostIdentity);
+  assert.equal(
+    observations.result,
+    expected.length === 0 ? "phase-not-reached" : "owned-scopes-absent",
+    "native scope observation result differs",
+  );
   const terminalAt =
     evidence.status.run.finishedAt ??
     nativeQualificationEvents(evidence).find((event) =>

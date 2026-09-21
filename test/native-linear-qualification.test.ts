@@ -15,6 +15,7 @@ import {
   assertNativeLinearSentinelAlive,
   assertNativeLinearTerminal,
   assertNoOpenLiabilities,
+  retainNativeLinearPreterminalProofs,
   executeNativeLinearControllerCase,
   main,
   nativeLinearObjectiveBody,
@@ -23,6 +24,10 @@ import {
   startNativeLinearSentinel,
   stopNativeLinearSentinel,
 } from "../scripts/verify-native-linear-objective.mjs";
+import {
+  assertNativeScopes,
+  observeNativeScopes,
+} from "../scripts/qualification-native-scopes.mjs";
 import { qualificationPaths } from "../scripts/verify-live-objective.mjs";
 
 const head = (character: string) => character.repeat(40);
@@ -513,6 +518,113 @@ function controllerInput(caseName: "response-loss-restart" | "active-cancellatio
 }
 
 describe("native linear-stack installed matrix", () => {
+  it.each(["cascade", "response-loss-restart", "active-cancellation"] as const)(
+    "records graphless %s escalation as phase-not-reached without demanding intervention proof",
+    async (caseName) => {
+      const evidence = {
+        repository: "example/fixture",
+        nativeLinearCase: caseName,
+        runResult: {
+          runId: "run",
+          status: "escalated",
+          reason: "compiler draft stopped without projection: repair-limit-unresolved",
+        },
+        actor: { id: 42, login: "operator" },
+        objective: { number: 1 },
+        children: [],
+        status: {
+          run: {
+            runId: "run",
+            state: "escalated",
+            reason: "compiler draft stopped without projection: repair-limit-unresolved",
+            finishedAt: "2026-09-21T00:00:00.000Z",
+          },
+        },
+        events: [
+          {
+            event: "FactoryRunStarted",
+            runId: "run",
+            objective: 1,
+            sequence: 1,
+            at: "2026-09-21T00:00:00.000Z",
+            receiptUrl: "https://github.com/example/fixture/issues/1#issuecomment-1",
+            author: "operator",
+            authorId: 42,
+          },
+        ],
+      };
+
+      expect(retainNativeLinearPreterminalProofs(evidence, caseName)).toBe(false);
+      const qualification = nativeLinearQualification({
+        FACTORY_LIVE_NATIVE_LINEAR_OBJECTIVE: "1",
+        FACTORY_LIVE_OBJECTIVE_PREFLIGHT: "1",
+        FACTORY_LIVE_NATIVE_LINEAR_CASE: caseName,
+        FACTORY_LIVE_OBJECTIVE_NAMESPACE: `native-linear-${caseName}`,
+        FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
+        FACTORY_LIVE_OBJECTIVE_MODEL: "gpt-5.6-sol",
+        FACTORY_LIVE_OBJECTIVE_REASONING: "xhigh",
+      }) as unknown as {
+        onFailure: (hooks: Record<string, unknown>) => Promise<void>;
+      };
+      const save = vi.fn();
+      await qualification.onFailure({
+        evidence,
+        call: vi.fn(),
+        checkout: "/home/operator/fixture",
+        owner: "example",
+        repo: "fixture",
+        save,
+      });
+      expect(evidence).toMatchObject({
+        nativeLinearFailureCleanup: {
+          run: {
+            state: "escalated",
+            reason: "compiler draft stopped without projection: repair-limit-unresolved",
+          },
+          scopeObservationResult: "phase-not-reached",
+        },
+        nativeScopeObservations: {
+          result: "phase-not-reached",
+          units: [],
+        },
+      });
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(() => assertNativeScopes(evidence)).not.toThrow();
+
+      const observe = vi.fn(() => {
+        throw new Error("zero-scope observation must not call systemd");
+      });
+      observeNativeScopes(evidence, observe, digest("a"));
+      expect(evidence).toMatchObject({
+        nativeScopeObservations: {
+          result: "phase-not-reached",
+          hostIdentity: digest("a"),
+          units: [],
+        },
+      });
+      expect(observe).not.toHaveBeenCalled();
+      expect(() => assertNativeScopes(evidence)).not.toThrow();
+    },
+  );
+
+  it.each(["response-loss-restart", "active-cancellation"] as const)(
+    "requires %s preterminal proof after its intervention is armed",
+    (caseName) => {
+      const evidence = {
+        nativeLinearCase: caseName,
+        runResult: { status: "escalated" },
+        nativeLinearIntervention: { case: caseName },
+      };
+      expect(() => retainNativeLinearPreterminalProofs(evidence, caseName)).toThrow(
+        new RegExp(`${caseName} intervention lacks preterminal checkpoint proof`),
+      );
+    },
+  );
+
+  it("reports missing native scope evidence without dereferencing it", () => {
+    expect(() => assertNativeScopes({})).toThrow("native scope observation is unavailable");
+  });
+
   it("defines one explicit linear Objective without provider or fallback scope", () => {
     const namespace = "native-linear-fixture";
     const body = nativeLinearObjectiveBody(namespace);

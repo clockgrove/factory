@@ -1522,7 +1522,16 @@ export async function main(
     }
     if (qualification.onFailure) {
       try {
-        await qualification.onFailure({ call, request, octokit, evidence, checkout, owner, repo });
+        await qualification.onFailure({
+          call,
+          request,
+          octokit,
+          evidence,
+          checkout,
+          owner,
+          repo,
+          save,
+        });
       } catch {
         evidence.cleanupObservation = {
           state: "unknown",

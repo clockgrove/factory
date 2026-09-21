@@ -14,6 +14,7 @@ import {
 } from "./verify-live-objective.mjs";
 import {
   assertRegularPipelineCompletion,
+  observeRegularLocalScopeCapability,
   observeRegularCommits,
 } from "./verify-regular-objective.mjs";
 import { parseUnitObservation } from "./verify-local-faults.mjs";
@@ -28,6 +29,7 @@ import {
   observeSchedulingService,
   changeSchedulingService,
   assertSchedulingBarrier,
+  isUserSystemdUnavailable,
   ownedSchedulingScopes,
 } from "./verify-local-scheduling.mjs";
 import {
@@ -301,16 +303,20 @@ export function createPressureQualification(authority, env = process.env, port =
   let allocatorDigest;
   const nonce = randomUUID();
   const safe =
-    (fn) =>
+    (stage, fn) =>
     async (...args) => {
       try {
         return await fn(...args);
-      } catch {
-        const context = args[1];
+      } catch (error) {
+        const context = args.find((value) => value?.evidence && typeof value.save === "function");
         if (context?.evidence && typeof context.save === "function") {
           context.evidence.qualificationFailure = {
-            stage: "wrap-transport",
-            code: "qualification-transport-unavailable",
+            stage: isUserSystemdUnavailable(error) ? "local-scope-observation" : stage,
+            code: isUserSystemdUnavailable(error)
+              ? "user-systemd-local-scope-unavailable"
+              : stage === "wrap-transport"
+                ? "qualification-transport-unavailable"
+                : `${stage}-unavailable`,
           };
           context.save();
         }
@@ -346,7 +352,8 @@ export function createPressureQualification(authority, env = process.env, port =
     policy: authority.policy,
     namespace: authority.namespace,
     privateEvidence: true,
-    wrapTransport: safe(async (parameters, context) => {
+    observePreflight: observeRegularLocalScopeCapability,
+    wrapTransport: safe("wrap-transport", async (parameters, context) => {
       pluginRoot = context.pluginRoot;
       const installed = installedMcpTransport(parameters, pluginRoot);
       const user = userInfo();
@@ -407,7 +414,7 @@ export function createPressureQualification(authority, env = process.env, port =
       );
       return transport;
     }),
-    beforeRun: async (hooks) => {
+    beforeRun: safe("before-run", async (hooks) => {
       artifacts(hooks.evidence);
       primary = observePressureDirector(primary, port);
       assert.equal(primary.state, "active");
@@ -434,8 +441,8 @@ export function createPressureQualification(authority, env = process.env, port =
       proof.slice = slice;
       proof.sliceOverrides = pressureSliceOverrides(slice, userInfo().uid, port);
       hooks.save();
-    },
-    duringRun: async (hooks) => {
+    }),
+    duringRun: safe("during-run", async (hooks) => {
       let settled = false;
       void hooks.run.then(
         () => {
@@ -579,13 +586,13 @@ export function createPressureQualification(authority, env = process.env, port =
         await port.wait(2000);
       }
       throw Error("same original Objective did not safely readmit within the bounded observation");
-    },
+    }),
     observeMergeProofs: (hooks) =>
       observeNativeMergeProofs({
         ...hooks,
         request: (route, parameters) => schedulingRequest(hooks, route, parameters),
       }),
-    afterRun: async (hooks) => {
+    afterRun: safe("after-run", async (hooks) => {
       artifacts(hooks.evidence);
       await observeRegularCommits({
         ...hooks,
@@ -642,7 +649,7 @@ export function createPressureQualification(authority, env = process.env, port =
       assert.equal(proof.cleanup.slice.state, "absent");
       hooks.save();
       assertPressureCompletion(hooks.evidence);
-    },
+    }),
     onFailure: async (hooks) => {
       const proof = (hooks.evidence.pressure ??= {});
       proof.failure = {

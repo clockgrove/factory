@@ -23,6 +23,12 @@ export type ServiceObservation = Partial<ServiceIdentity> & {
   effectiveCpu?: number;
   cgroup?: string;
 };
+export function userSystemdEnvironment(
+  environment?: Record<string, string | undefined>,
+  uid?: number,
+): Record<string, string | undefined>;
+export function isUserSystemdUnavailable(error: unknown): boolean;
+export function userSystemdUnavailableError(): Error;
 export function installedMcpTransport(
   parameters: { command: string; args: string[] },
   pluginRoot: string,
@@ -76,7 +82,7 @@ export function ownedSchedulingScopes(evidence: unknown, primary: unknown): stri
 export function assertSchedulingCompletion(evidence: unknown): void;
 export function assertSchedulingPipelineCompletion(evidence: unknown): void;
 export function schedulingSnapshot(hooks: unknown): Promise<unknown>;
-export function assertRepositoryContention(input: unknown): void;
+export function assertObjectiveLeaseContention(input: unknown): void;
 export function schedulingRequest<T>(
   hooks: { request: (route: string, parameters: Record<string, unknown>) => Promise<T> },
   route: string,

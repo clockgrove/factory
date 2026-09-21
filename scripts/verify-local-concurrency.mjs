@@ -575,7 +575,7 @@ export function concurrencyObjectiveBody(namespace, index) {
     index === 0
       ? "Make clamp the first root in native sub-issue order. Its implementation must also handle infinities and negative zero consistently with Math.min(Math.max(value,min),max). Add exactly five named edge-case assertions: +Infinity, -Infinity, negative zero, negative fractional, and inverted fractional. Do not introduce artificial delays, sleeps, services, network calls or resource pressure."
       : "Keep both roots minimal: only the specified deterministic implementation and acceptance cases. Make clamp first and slugify second in native sub-issue order."
-  }\nKeep all six new files ordinary non-executable Git mode 100644. Do not combine the roots or add Work Items. This requests useful asymmetric work, not a guarantee about model speed. The observer records an incomplete result if actual overlap/refill does not occur.`;
+  }\nKeep all six new files ordinary non-executable Git mode 100644. Do not combine the roots or add Work Items. This requests useful asymmetric work, not a guarantee about model speed.`;
 }
 
 export function directorContentionObjectiveBody(namespace, index, sharedPath, sharedResource) {
@@ -1778,7 +1778,7 @@ export async function main(env = process.env, run = checkpointMain) {
           },
           pollPeer: async () => {
             const record = evidence.objectives[1];
-            for (let attempt = 0; attempt < 48; attempt++) {
+            while (true) {
               abort.signal.throwIfAborted();
               checkpointTimeout(deadline(), 1);
               const observation = await observeOne(record);
@@ -1804,7 +1804,6 @@ export async function main(env = process.env, run = checkpointMain) {
               }
               await wait(checkpointTimeout(deadline(), 10000));
             }
-            throw Error("peer Objective did not start within the bounded observation window");
           },
           innerCasCollision: async (controller) =>
             once("inner-cas-collision", async () => {

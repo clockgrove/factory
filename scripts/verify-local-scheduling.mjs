@@ -1,4 +1,4 @@
-/** Opt-in installed Director capacity/priority/outer-lease qualification. No import-time I/O. */
+/** Opt-in installed Director capacity/priority/Objective-lease qualification. No import-time I/O. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -18,6 +18,7 @@ import {
 } from "./verify-live-objective.mjs";
 import {
   assertRegularPipelineCompletion,
+  observeRegularLocalScopeCapability,
   observeRegularCommits,
 } from "./verify-regular-objective.mjs";
 import { observeNativeMergeProofs } from "./qualification-sibling-refresh-proof.mjs";
@@ -34,10 +35,29 @@ const hash = (value) =>
 const unitPattern = /^clockgrove-factory-qualification-[a-f0-9]{64}\.service$/;
 const readProperties =
   "Id,LoadState,ActiveState,SubState,Job,InvocationID,ControlGroup,MainPID,KillMode";
+const userSystemdUnavailableCode = "FACTORY_USER_SYSTEMD_UNAVAILABLE";
+export function userSystemdEnvironment(environment = process.env, uid = process.getuid?.()) {
+  assert.ok(Number.isSafeInteger(uid) && uid > 0, "effective Linux uid unavailable");
+  const runtime = `/run/user/${uid}`;
+  return {
+    ...environment,
+    XDG_RUNTIME_DIR: runtime,
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtime}/bus`,
+  };
+}
+export function isUserSystemdUnavailable(error) {
+  return error?.code === userSystemdUnavailableCode;
+}
+export function userSystemdUnavailableError() {
+  const error = Error("reachable user systemd manager required");
+  error.code = userSystemdUnavailableCode;
+  return error;
+}
 const defaults = {
   exec: (command, args) => {
     try {
       return execFileSync(command, args, {
+        env: userSystemdEnvironment(),
         encoding: "utf8",
         timeout: 15000,
         maxBuffer: 65536,
@@ -51,9 +71,11 @@ const defaults = {
         args[1] === "show" &&
         error.status === 1 &&
         typeof error.stdout === "string" &&
+        error.stdout.trim().length > 0 &&
         error.stdout.length < 65536
       )
         return error.stdout.trim();
+      if (["systemctl", "systemd-run"].includes(command)) throw userSystemdUnavailableError();
       throw Error("owned service operation unavailable");
     }
   },
@@ -416,13 +438,14 @@ export async function schedulingSnapshot(hooks) {
 // Shared read-only observer; the original scenario retains its existing behavior.
 const snapshot = schedulingSnapshot;
 
-async function repositoryLease(hooks) {
+async function objectiveLease(hooks) {
+  const objective = hooks.evidence.objective.number;
   const ref = (
     await schedulingRequest(
       hooks,
       "GET /repos/{owner}/{repo}/git/ref/{ref}",
       {
-        ref: "clockgrove-factory/leases/repository-controller",
+        ref: `clockgrove-factory/leases/objective-${objective}`,
       },
       hooks.signal,
     )
@@ -438,48 +461,26 @@ async function repositoryLease(hooks) {
     )
   ).data;
   assert.equal(commit.sha, ref.object.sha);
+  assert.ok(Buffer.byteLength(commit.message) <= 16384);
   const trailers = commit.message
     .split(/\r?\n/)
-    .filter((line) => line.startsWith("Factory-Repository-Lease: "));
+    .filter((line) => line.startsWith("Factory-Event: "));
   assert.equal(trailers.length, 1);
-  assert.ok(trailers[0].length < 8192);
-  const record = JSON.parse(
-    Buffer.from(trailers[0].slice("Factory-Repository-Lease: ".length), "base64url").toString(
-      "utf8",
-    ),
+  const event = JSON.parse(
+    Buffer.from(trailers[0].slice("Factory-Event: ".length), "base64url").toString("utf8"),
   );
-  assert.equal(record.protocol, "clockgrove.factory/v2");
-  assert.equal(record.kind, "repository-lease");
-  assert.deepEqual(Object.keys(record.owner ?? {}).sort(), [
-    "configDigest",
-    "executableIdentity",
-    "hostIdentity",
-    "invocationId",
-    "kind",
-    "unit",
-  ]);
-  assert.equal(record.owner.kind, "managed-service");
-  assert.match(record.owner.hostIdentity, /^[a-f0-9]{64}$/);
-  assert.match(record.owner.configDigest, /^[a-f0-9]{64}$/);
-  assert.match(record.owner.executableIdentity, /^sha256:[a-f0-9]{64}$/);
-  assert.match(record.owner.unit, /^clockgrove-factory-[a-f0-9]{16}\.service$/);
-  assert.match(record.owner.invocationId, /^[a-f0-9]{32}$/);
+  assert.equal(event.protocol, "clockgrove.factory/v2");
+  assert.equal(event.kind, "lease");
+  assert.equal(event.objective, objective);
+  assert.ok(["LeaseAcquired", "LeaseRenewed"].includes(event.event));
+  assert.ok(
+    typeof event.holder === "string" && event.holder.length > 0 && event.holder.length <= 160,
+  );
+  assert.ok(Number.isSafeInteger(event.epoch) && event.epoch > 0);
+  assert.ok(Number.isSafeInteger(event.sequence) && event.sequence > 0);
+  assert.match(event.policyDigest, /^[a-f0-9]{64}$/);
   assert.match(commit.sha, /^[a-f0-9]{40}$/);
-  assert.match(record.policyDigest, /^[a-f0-9]{64}$/);
-  assert.ok(
-    typeof record.controllerId === "string" &&
-      record.controllerId.length > 0 &&
-      record.controllerId.length <= 160,
-  );
-  assert.ok(Number.isSafeInteger(record.sequence) && record.sequence > 0);
-  assert.ok(["RepositoryLeaseAcquired", "RepositoryLeaseRenewed"].includes(record.event));
-  assert.ok(
-    Number.isSafeInteger(record.epoch) &&
-      record.epoch > 0 &&
-      Date.parse(record.expiresAt) > Date.now() + 60000,
-    "repository lease too near expiry",
-  );
-  return { oid: commit.sha, record };
+  return { oid: commit.sha, event, parents: commit.parents.map((parent) => parent.sha) };
 }
 
 export function assertSchedulingPipelineCompletion(evidence) {
@@ -499,7 +500,7 @@ export function assertSchedulingPipelineCompletion(evidence) {
 export function assertSchedulingCompletion(evidence) {
   assertSchedulingPipelineCompletion(evidence);
   const proof = evidence.scheduling;
-  assert.equal(proof?.kind, "director-cgroup-native-priority-outer-lease");
+  assert.equal(proof?.kind, "director-cgroup-native-priority-objective-lease");
   assert.equal(proof.barrier.runId, evidence.runResult.runId);
   assert.deepEqual(
     assertSchedulingBarrier({
@@ -518,23 +519,13 @@ export function assertSchedulingCompletion(evidence) {
   assert.equal(proof.released.invocationId, proof.barrier.unit.invocationId);
   for (const key of ["unit", "pid", "startTicks", "bootDigest", "node", "bundle", "checkout"])
     assert.equal(proof.released[key], proof.barrier.unit[key], "released service identity changed");
-  assert.equal(proof.contention.result, "repository-lease-refused");
-  assertRepositoryContention({
+  assert.equal(proof.contention.result, "objective-lease-refused");
+  assertObjectiveLeaseContention({
     ...proof.contention,
-    controller: proof.barrier.receipts
-      .map((receipt) => receipt.event)
-      .filter((event) => event.event === "ControllerObserved")
-      .at(-1),
+    objective: evidence.objective.number,
+    runId: proof.barrier.runId,
+    policyDigest: proof.barrier.policyDigest,
   });
-  assert.equal(
-    proof.contention.before.record.controllerId,
-    proof.contention.after.record.controllerId,
-  );
-  assert.equal(proof.contention.before.record.epoch, proof.contention.after.record.epoch);
-  assert.equal(
-    proof.contention.before.record.policyDigest,
-    proof.contention.after.record.policyDigest,
-  );
   assertNativePriorityReadback(
     proof.priority.before,
     proof.priority.after,
@@ -585,28 +576,48 @@ export function assertSchedulingCompletion(evidence) {
   );
 }
 
-export function assertRepositoryContention({ response, before, after, controller }) {
+export function assertObjectiveLeaseContention({
+  response,
+  before,
+  after,
+  objective,
+  runId,
+  policyDigest,
+}) {
+  assert.equal(before.event.protocol, "clockgrove.factory/v2");
+  assert.equal(before.event.kind, "lease");
+  assert.equal(before.event.objective, objective);
+  assert.equal(before.event.runId, runId);
+  assert.equal(before.event.policyDigest, policyDigest);
+  assert.ok(["LeaseAcquired", "LeaseRenewed"].includes(before.event.event));
   assert.deepEqual(
     response,
     {
       isError: true,
-      content: [{ type: "text", text: "another repository controller holds the lease" }],
+      content: [
+        { type: "text", text: `Objective #${objective} is leased by ${before.event.holder}` },
+      ],
     },
-    "competing installed runner was not exactly refused",
+    "same-Objective contender did not stop at Objective ownership",
   );
-  assert.equal(controller?.event, "ControllerObserved");
-  for (const observation of [before, after]) {
-    assert.match(observation.oid, /^[a-f0-9]{40}$/);
-    assert.equal(observation.record.protocol, "clockgrove.factory/v2");
-    assert.equal(observation.record.kind, "repository-lease");
-    assert.ok(
-      ["RepositoryLeaseAcquired", "RepositoryLeaseRenewed"].includes(observation.record.event),
-    );
-    assert.equal(observation.record.controllerId, controller.controllerId);
-    assert.equal(observation.record.epoch, controller.epoch);
-    assert.equal(observation.record.policyDigest, controller.controllerPolicyDigest);
+  assert.match(before.oid, /^[a-f0-9]{40}$/);
+  assert.match(after.oid, /^[a-f0-9]{40}$/);
+  assert.equal(after.event.protocol, before.event.protocol);
+  assert.equal(after.event.kind, before.event.kind);
+  assert.equal(after.event.objective, before.event.objective);
+  assert.equal(after.event.holder, before.event.holder);
+  assert.equal(after.event.epoch, before.event.epoch);
+  assert.equal(after.event.policyDigest, before.event.policyDigest);
+  assert.equal(after.event.runId, before.event.runId);
+  assert.ok(["LeaseAcquired", "LeaseRenewed"].includes(after.event.event));
+  assert.ok(after.event.sequence >= before.event.sequence, "Objective lease sequence regressed");
+  if (after.oid === before.oid) {
+    assert.deepEqual(after.event, before.event);
+    assert.deepEqual(after.parents, before.parents);
+  } else {
+    assert.ok(after.event.sequence > before.event.sequence, "changed lease did not advance");
+    assert.equal(after.event.previousOid, after.parents[0], "renewed lease ancestry is malformed");
   }
-  assert.ok(after.record.sequence >= before.record.sequence, "repository lease sequence regressed");
 }
 
 export function assertNativePriorityReadback(before, after, roots, promoted) {
@@ -728,16 +739,20 @@ export function createSchedulingQualification(authority, env = process.env, port
   let managementTranscriptDirectory;
   const nonce = randomUUID();
   const safe =
-    (fn) =>
+    (stage, fn) =>
     async (...args) => {
       try {
         return await fn(...args);
-      } catch {
-        const context = args[1];
+      } catch (error) {
+        const context = args.find((value) => value?.evidence && typeof value.save === "function");
         if (context?.evidence && typeof context.save === "function") {
           context.evidence.qualificationFailure = {
-            stage: "wrap-transport",
-            code: "qualification-transport-unavailable",
+            stage: isUserSystemdUnavailable(error) ? "local-scope-observation" : stage,
+            code: isUserSystemdUnavailable(error)
+              ? "user-systemd-local-scope-unavailable"
+              : stage === "wrap-transport"
+                ? "qualification-transport-unavailable"
+                : `${stage}-unavailable`,
           };
           context.save();
         }
@@ -757,7 +772,8 @@ export function createSchedulingQualification(authority, env = process.env, port
     policy: authority.policy,
     privateEvidence: true,
     namespace: authority.namespace,
-    wrapTransport: safe(async (parameters, context) => {
+    observePreflight: observeRegularLocalScopeCapability,
+    wrapTransport: safe("wrap-transport", async (parameters, context) => {
       const installed = installedMcpTransport(parameters, context.pluginRoot);
       launcher = installed.launcher;
       managementTranscriptDirectory = parameters.env.FACTORY_MANAGEMENT_TRANSCRIPT_DIR;
@@ -781,7 +797,7 @@ export function createSchedulingQualification(authority, env = process.env, port
       );
       primary = expected;
       context.evidence.scheduling = {
-        kind: "director-cgroup-native-priority-outer-lease",
+        kind: "director-cgroup-native-priority-objective-lease",
         nonce,
         primary: expected,
       };
@@ -796,14 +812,14 @@ export function createSchedulingQualification(authority, env = process.env, port
         managementTranscriptDirectory,
       });
     }),
-    beforeRun: safe(async (hooks) => {
+    beforeRun: safe("before-run", async (hooks) => {
       primary = observeSchedulingService(primary, port);
       assert.equal(primary.state, "active");
       assert.equal(primary.effectiveCpu, 0.5);
       hooks.evidence.scheduling.primary = primary;
       hooks.save();
     }),
-    duringRun: safe(async (hooks) => {
+    duringRun: safe("during-run", async (hooks) => {
       let settled = false;
       void hooks.run.then(
         () => {
@@ -890,14 +906,8 @@ export function createSchedulingQualification(authority, env = process.env, port
       assertNativePriorityReadback(observed.children, after, barrier.roots, promoted.number);
       proof.priority = { before: observed.children, after, promoted: promoted.number };
       hooks.save();
-      const before = await repositoryLease(hooks);
-      const controller = observed.receipts
-        .map((receipt) => receipt.event)
-        .filter((event) => event.event === "ControllerObserved")
-        .at(-1);
-      assert.equal(before.record.controllerId, controller?.controllerId);
-      assert.equal(before.record.epoch, controller?.epoch);
-      assert.equal(before.record.policyDigest, controller?.controllerPolicyDigest);
+      const objective = hooks.evidence.objective.number;
+      const before = await objectiveLease(hooks);
       const user = userInfo();
       contender = {
         node: primary.node,
@@ -943,12 +953,21 @@ export function createSchedulingQualification(authority, env = process.env, port
         const refusal = { isError: response.isError, content: response.content };
         assert.deepEqual(refusal, {
           isError: true,
-          content: [{ type: "text", text: "another repository controller holds the lease" }],
+          content: [
+            { type: "text", text: `Objective #${objective} is leased by ${before.event.holder}` },
+          ],
         });
-        const afterLease = await repositoryLease(hooks);
-        assertRepositoryContention({ response: refusal, before, after: afterLease, controller });
+        const afterLease = await objectiveLease(hooks);
+        assertObjectiveLeaseContention({
+          response: refusal,
+          before,
+          after: afterLease,
+          objective,
+          runId: barrier.runId,
+          policyDigest: barrier.policyDigest,
+        });
         proof.contention = {
-          result: "repository-lease-refused",
+          result: "objective-lease-refused",
           responseDigest: hash(response),
           response: refusal,
           before,
@@ -980,7 +999,7 @@ export function createSchedulingQualification(authority, env = process.env, port
         ...hooks,
         request: (route, parameters) => schedulingRequest(hooks, route, parameters),
       }),
-    afterRun: safe(async (hooks) => {
+    afterRun: safe("after-run", async (hooks) => {
       await observeRegularCommits({
         ...hooks,
         request: (route, parameters) => schedulingRequest(hooks, route, parameters),

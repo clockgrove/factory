@@ -52,6 +52,9 @@ two attempts per Work Item, ten minutes per Work Item, and 45 minutes for the Ob
 usage stops further calls at the explicitly authorized `FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS`
 threshold, which must be between 250,000 and 500,000. Concurrent in-flight calls can overshoot this
 threshold; it is not a provider hard cap. The example uses the minimum 250,000, not spending authority.
+Installed SOL xhigh qualification uses the measured 1,800-second whole-evaluation compiler envelope.
+That bound covers inventory, compile, judgment, and up to two repairs together; it is not a per-call
+timeout. Factory's ordinary activation default remains separately authoritative at 600 seconds.
 The default route is Codex SDK local execution with Codex CLI local fallback. Paid sandbox minutes
 and managed sessions are both zero, and cloud fallback is disabled. Existing login still consumes
 local model/account quota; no new API key is required.

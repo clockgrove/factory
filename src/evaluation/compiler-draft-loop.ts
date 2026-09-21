@@ -1917,8 +1917,10 @@ export async function runCompilerDraftLoop(args: {
     tokens += usage.inputTokens + usage.outputTokens;
     await recordUsage(invocationId, stage, usage);
     if (tokens > limits.maxObservedTokens) throw new Stop("observed-token-limit");
-    if (now() - Number(first.payload.startedAt) >= limits.deadlineMs)
-      throw new Stop("deadline-exhausted");
+    // The deadline fences provider admission. Once an admitted invocation has
+    // returned inside its bounded provider timeout, retain its durable result
+    // while accounting and selection settle. Rejecting it after those writes
+    // would discard paid work because of local persistence latency.
     return result.value;
   };
   try {
@@ -2123,8 +2125,6 @@ export async function runCompilerDraftLoop(args: {
         );
         if (callbacks.accept(verdict, draft, inventory, reviewEvidence)) {
           if (tokens > limits.maxObservedTokens) throw new Stop("observed-token-limit");
-          if (now() - Number(first.payload.startedAt) >= limits.deadlineMs)
-            throw new Stop("deadline-exhausted");
           await append("selection", {
             revision,
             graphDigest,

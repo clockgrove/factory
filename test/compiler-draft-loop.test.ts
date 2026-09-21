@@ -935,6 +935,31 @@ describe("compiler draft durable repair", () => {
     ).toMatchObject({ status: "stopped", reason: "deadline-exhausted" });
     expect(args.callbacks.invoke).toHaveBeenCalledOnce();
   });
+  it("settles an accepted invocation when accounting crosses its admission deadline", async () => {
+    const args = await setup();
+    let deadlineCrossed = false;
+    const recordUsage = args.callbacks.recordUsage;
+    args.callbacks.recordUsage = vi.fn(async (invocationId, stage, usage) => {
+      await recordUsage(invocationId, stage, usage);
+      if (stage === "judge") deadlineCrossed = true;
+    });
+    args.callbacks.accept = () => true;
+
+    const outcome = await runCompilerDraftLoop({
+      ...args,
+      startedAt: 0,
+      now: () => (deadlineCrossed ? 1_000 : 0),
+      limits: { deadlineMs: 500 },
+    });
+
+    expect(outcome.status).toBe("accepted");
+    expect(vi.mocked(args.callbacks.invoke).mock.calls.map(([request]) => request.stage)).toEqual([
+      "inventory",
+      "compile",
+      "judge",
+    ]);
+    expect(outcome.records.at(-1)).toMatchObject({ kind: "selection" });
+  });
   it("does not retry a known-accounted management process failure, including restart", async () => {
     const args = await setup();
     const proposal = { version: 1, obligations: [] };

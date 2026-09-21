@@ -472,7 +472,7 @@ export function normalizeCompilerProposalProviderOutput(value: unknown): unknown
     Array.isArray(candidate.workItems) &&
     Array.isArray(candidate.coverage) &&
     Array.isArray(candidate.mediaIntents) &&
-    (!providerShape || (empty("objectives") && empty("triggers") && empty("requirements")))
+    (!providerShape || (empty("objectives") && empty("requirements")))
   )
     return {
       protocol: candidate.protocol,

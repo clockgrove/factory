@@ -10,6 +10,7 @@ import {
   changeSchedulingService,
   installedMcpTransport,
   main,
+  observeRegularSchedulingMergeProofs,
   observeSchedulingService,
   ownedSchedulingScopes,
   schedulingAuthority,
@@ -47,6 +48,33 @@ it("derives the exact user-systemd bus environment for host observations", () =>
     XDG_RUNTIME_DIR: "/run/user/1000",
     DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
   });
+});
+
+it("routes regular scheduling qualifiers through settled regular-PR merge proofs", async () => {
+  const request = vi.fn(async () => ({ data: { ok: true } }));
+  const observe = vi.fn(async (value: unknown) => {
+    const input = value as Record<string, unknown>;
+    const read = input.request as (
+      route: string,
+      parameters: Record<string, unknown>,
+    ) => Promise<unknown>;
+    await read("GET fixture", { commit_sha: "a".repeat(40) });
+    return ["regular-proof"];
+  });
+  const evidence = { repository: "example/disposable" };
+  await expect(
+    observeRegularSchedulingMergeProofs({ evidence, request }, observe),
+  ).resolves.toEqual(["regular-proof"]);
+  expect(observe).toHaveBeenCalledWith(
+    expect.objectContaining({ entry: evidence, repository: evidence.repository }),
+  );
+  expect(request).toHaveBeenCalledWith(
+    "GET fixture",
+    expect.objectContaining({
+      commit_sha: "a".repeat(40),
+      request: { signal: expect.any(AbortSignal) },
+    }),
+  );
 });
 const launcher = "/home/example/.codex/plugins/cache/factory/bin/factory-mcp";
 const identity = {

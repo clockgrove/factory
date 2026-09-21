@@ -20,6 +20,7 @@ export interface CompilerCheckpointBootstrapAuthority {
   compilerMaxModelTokens: number;
 }
 export function checkpointDeadline(startedAt: string, minutes: number): number;
+export class CheckpointPending extends Error {}
 export function checkpointObjectiveDeadline(
   observation: unknown,
   authority: CheckpointAuthority,

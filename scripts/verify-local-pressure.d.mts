@@ -16,6 +16,15 @@ export function assertPressureReadmission(
 ): Record<string, unknown>;
 export function assertPressureCompletion(evidence: unknown): void;
 export function pressureReadmissionDeadline(releasedAt: string, cooldownSeconds: number): number;
+export function pressureQualificationFailure(
+  error: unknown,
+  stage: string,
+): Record<string, unknown>;
+export function observePressureBaseline(
+  sample: (index: number) => Promise<{ memoryCurrent: number }>,
+  record: (sample: { memoryCurrent: number }) => Promise<unknown>,
+  wait: (milliseconds: number) => Promise<unknown>,
+): Promise<{ memoryCurrent: number }>;
 export function createPressureQualification(
   authority: unknown,
   env?: Record<string, string | undefined>,

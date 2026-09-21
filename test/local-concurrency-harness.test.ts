@@ -27,6 +27,10 @@ import {
 } from "../scripts/verify-local-concurrency.mjs";
 import { directorContentionResponseRecord } from "../scripts/qualification-director-contention.mjs";
 import { qualificationPaths } from "../scripts/verify-live-objective.mjs";
+import {
+  CheckpointPending,
+  checkpointObservationRead,
+} from "../scripts/verify-local-checkpoint-restart.mjs";
 
 const repository = "example/disposable";
 const checkout = "/home/example/disposable";
@@ -151,6 +155,133 @@ describe("prospective concurrency observation window", () => {
         expect(evidence.actions).toEqual([]);
         expect(evidence.startedAt).toBe(new Date(start).toISOString());
       });
+    } finally {
+      now.mockRestore();
+    }
+  });
+  it("retries eligible transient fresh-pair reads through the checkpoint observation port", async () => {
+    const current = Date.parse("2026-09-08T00:45:00.000Z");
+    const now = vi.spyOn(Date, "now").mockReturnValue(current);
+    const bodies = ["body-a", "body-b"];
+    const evidence = {
+      startedAt: new Date(current).toISOString(),
+      actions: [],
+      actor: { id: 1, login: "fixture" },
+      objectives: authority.namespaces.map((namespace, index) => ({
+        namespace,
+        objective: { number: 10 + index, id: 100 + index },
+        bodyDigest: createHash("sha256").update(bodies[index]!).digest("hex"),
+      })),
+    };
+    let objectiveReads = 0;
+    const request = vi.fn(async (_route: string, args: { issue_number: number }) => {
+      objectiveReads++;
+      if (objectiveReads === 1) throw Object.assign(Error("fixture transient"), { status: 500 });
+      const index = args.issue_number - 10;
+      return {
+        data: {
+          id: 100 + index,
+          number: args.issue_number,
+          body: bodies[index],
+          user: { id: 1 },
+        },
+      };
+    });
+    const diagnostics: Array<{ retry: boolean; httpStatus?: number }> = [];
+    const observationRead = <T>(stage: string, operation: (remainingMs: number) => Promise<T>) =>
+      checkpointObservationRead(operation, {
+        phase: "observation",
+        stage,
+        deadline: current + 60_000,
+        now: () => current,
+        wait: async () => {},
+        record: async (diagnostic) => {
+          diagnostics.push(diagnostic);
+        },
+      });
+    try {
+      await expect(
+        main(env, async (_env, _runner, extension) => {
+          if (!extension.extendPort) throw Error("missing production extension");
+          const port = (await extension.extendPort({
+            port: {},
+            evidence,
+            save: vi.fn(),
+            call: vi.fn(async () => ({ run: { state: "active" } })),
+            request,
+            list: vi.fn(async () => []),
+            observationRead,
+            retireClient: vi.fn(),
+          })) as Pick<ConcurrencyPort, "pollPair">;
+          await port.pollPair("both-started", () => true);
+        }),
+      ).resolves.toBeUndefined();
+      expect(objectiveReads).toBe(3);
+      expect(diagnostics).toEqual([expect.objectContaining({ httpStatus: 500, retry: true })]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("restarts the complete fresh observation after the exact status snapshot race", async () => {
+    const current = Date.parse("2026-09-08T00:45:00.000Z");
+    const now = vi.spyOn(Date, "now").mockReturnValue(current);
+    const bodies = ["body-a", "body-b"];
+    const evidence = {
+      startedAt: new Date(current).toISOString(),
+      actions: [],
+      actor: { id: 1, login: "fixture" },
+      objectives: authority.namespaces.map((namespace, index) => ({
+        namespace,
+        objective: { number: 10 + index, id: 100 + index },
+        bodyDigest: createHash("sha256").update(bodies[index]!).digest("hex"),
+      })),
+    };
+    const request = vi.fn(async (_route: string, args: { issue_number: number }) => {
+      const index = args.issue_number - 10;
+      return {
+        data: {
+          id: 100 + index,
+          number: args.issue_number,
+          body: bodies[index],
+          user: { id: 1 },
+        },
+      };
+    });
+    let statusReads = 0;
+    const call = vi.fn(async () => {
+      statusReads++;
+      if (statusReads === 2) throw new CheckpointPending("fixture coherent snapshot changed");
+      return { run: { state: "active" } };
+    });
+    const observationRead = <T>(stage: string, operation: (remainingMs: number) => Promise<T>) =>
+      checkpointObservationRead(operation, {
+        phase: "observation",
+        stage,
+        deadline: current + 60_000,
+        now: () => current,
+        wait: async () => {},
+        record: async () => {},
+      });
+    try {
+      await expect(
+        main(env, async (_env, _runner, extension) => {
+          if (!extension.extendPort) throw Error("missing production extension");
+          const port = (await extension.extendPort({
+            port: {},
+            evidence,
+            save: vi.fn(),
+            call,
+            request,
+            list: vi.fn(async () => []),
+            observationRead,
+            retireClient: vi.fn(),
+          })) as Pick<ConcurrencyPort, "pollPair">;
+          await port.pollPair("both-started", () => true);
+        }),
+      ).resolves.toBeUndefined();
+      expect(request).toHaveBeenCalledTimes(4);
+      expect(call).toHaveBeenCalledTimes(4);
     } finally {
       now.mockRestore();
     }

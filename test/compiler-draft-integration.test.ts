@@ -197,6 +197,75 @@ function proposal(request: CompilerRequest, repaired = false) {
     ],
   };
 }
+
+function cumulativeNodeProposal(request: CompilerRequest, repaired: boolean) {
+  if (!request.repository.validationRecipes.some(({ command }) => command === "node --test"))
+    throw new Error("cumulative Node fixture requires the bare node --test recipe");
+  const predecessorTest = "test/feature.test.js";
+  const dependentTest = "test/consumer.test.js";
+  const item = (
+    id: "feature" | "consumer",
+    dependsOn: string[],
+    testPath: string,
+    targets: string[],
+    obligationIds: string[],
+  ) => ({
+    id,
+    title: `Implement ${id}`,
+    goal: `Implement ${id} and its tests.`,
+    obligationIds,
+    criteria: [
+      {
+        id: `${id}-tests`,
+        text: `${id} behavior passes its required Node validation.`,
+        risk: "ordinary" as const,
+        validation: [
+          {
+            tier: "mechanical" as const,
+            evidence: [{ kind: "scoped-node-test" as const, targets }],
+          },
+        ],
+      },
+    ],
+    scope: [`src/${id}.js`, testPath],
+    preconditions: [],
+    outOfScope: ["Unrelated repository paths."],
+    conventions: ["Use dependency-free ESM and node:test."],
+    dependsOn,
+    exclusiveResources: [],
+    executionIntent: {
+      estimatedDurationMinutes: 10,
+      additionalTools: [],
+      services: [],
+      additionalNetworkDestinations: [],
+      trust: "isolated" as const,
+    },
+  });
+  return {
+    protocol: "clockgrove.factory/compiler-proposal" as const,
+    kind: "work-items" as const,
+    mediaIntents: [],
+    coverage: [
+      {
+        obligationId: "values",
+        bindings: [
+          { kind: "criterion" as const, itemId: "consumer", criterionId: "consumer-tests" },
+        ],
+      },
+    ],
+    workItems: [
+      item("feature", [], predecessorTest, [predecessorTest], []),
+      item(
+        "consumer",
+        ["feature"],
+        dependentTest,
+        repaired ? [predecessorTest, dependentTest] : [dependentTest],
+        ["values"],
+      ),
+    ],
+  };
+}
+
 async function setup(
   options: {
     malformedRepair?: boolean;
@@ -214,6 +283,7 @@ async function setup(
     invalidAcceptUngroundedFirst?: boolean;
     primitiveCompileFailure?: "string" | "null";
     frozenCompileFailure?: "error" | "object";
+    cumulativeNodeValidation?: boolean;
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-draft-integration-"));
@@ -236,7 +306,13 @@ async function setup(
   };
   const context: CompilationContext = {
     repository,
-    objective: { number: 42, title: "Test", body: "Implement positive and negative values." },
+    objective: {
+      number: 42,
+      title: "Test",
+      body: options.cumulativeNodeValidation
+        ? "Implement feature and consumer in order, then validate both test files together."
+        : "Implement positive and negative values.",
+    },
     defaultBranch: "main",
     baseSha,
     repositoryFiles: ["package-lock.json", "package.json", "src/feature.ts"],
@@ -299,10 +375,85 @@ async function setup(
     if (prompt.includes("independent compiler judge")) {
       stages.push("judge");
       const source = JSON.parse(prompt.split("\n\n").at(-1)!) as {
-        proposal: { workItems: Array<{ id: string; criteria: Array<{ id: string }> }> };
+        proposal: {
+          workItems: Array<{
+            id: string;
+            dependsOn: string[];
+            criteria: Array<{
+              id: string;
+              validation: Array<{
+                evidence: Array<{ kind: string; targets?: string[] }>;
+              }>;
+            }>;
+          }>;
+        };
         draftDigest: string;
         inventoryDigest: string;
       };
+      if (options.cumulativeNodeValidation) {
+        const dependent = source.proposal.workItems.find(({ id }) => id === "consumer")!;
+        const targets = dependent.criteria[0]!.validation[0]!.evidence[0]!.targets ?? [];
+        const accepted = targets.length === 2;
+        const verdict: CompilerJudgeVerdict = {
+          version: 1,
+          rubricVersion: 1,
+          draftDigest: source.draftDigest,
+          inventoryDigest: source.inventoryDigest,
+          coverage: [
+            {
+              obligationId: "values",
+              status: accepted ? "covered" : "partial",
+              itemIds: ["consumer"],
+              acceptanceBindings: [
+                { kind: "criterion", itemId: "consumer", criterionId: "consumer-tests" },
+              ],
+              evidenceIds: ["objective"],
+              reason: accepted
+                ? "The dependent validation includes both ordered test targets."
+                : "The predecessor test target is missing from cumulative validation.",
+            },
+          ],
+          items: source.proposal.workItems.map(({ id }) => ({
+            itemId: id,
+            granularity: "cohesive",
+            reason: "One bounded module and test pair.",
+            evidenceIds: ["objective"],
+          })),
+          dimensions: COMPILER_JUDGE_DIMENSIONS.map((dimension) => ({
+            dimension,
+            status: "assessed",
+            reason: "Reviewed pinned evidence.",
+            evidenceIds: ["objective"],
+          })),
+          dependencies: source.proposal.workItems.map(({ id, dependsOn }) => ({
+            itemId: id,
+            dependsOn,
+            reason: dependsOn.length ? "Authored predecessor." : "Authored root.",
+            evidenceIds: ["objective"],
+          })),
+          findings: accepted
+            ? []
+            : [
+                {
+                  id: "missing-predecessor-test",
+                  severity: "blocking",
+                  dimension: "coverage",
+                  obligationIds: ["values"],
+                  itemIds: ["consumer"],
+                  evidenceIds: ["objective"],
+                  rootCause: "The dependent validation omitted its predecessor's test target.",
+                  correction:
+                    "Restore the predecessor and current test as one ordered scoped Node validation intent.",
+                  confidence: 1,
+                  uncertainty: "",
+                },
+              ],
+          inferenceCorrections: [],
+          uncertainty: [],
+          decision: accepted ? "accept" : "repair",
+        };
+        return { value: verdict, usage };
+      }
       const accept =
         (options.acceptFirst === true ||
           options.invalidAcceptUnknownFirst === true ||
@@ -399,7 +550,12 @@ async function setup(
       repairs++;
       if (options.malformedRepair) return { value: { malformed: "preserve this proposal" }, usage };
       const request = JSON.parse(prompt.split("\n\n").at(-1)!) as CompilerRequest;
-      return { value: proposal(request, true), usage };
+      return {
+        value: options.cumulativeNodeValidation
+          ? cumulativeNodeProposal(request, true)
+          : proposal(request, true),
+        usage,
+      };
     }
     stages.push("compile");
     if (options.frozenCompileFailure)
@@ -413,7 +569,9 @@ async function setup(
     if (options.missingAccounting) throw new Error("transport outcome unknown");
     const request = JSON.parse(prompt.split("\n\n").at(-1)!) as CompilerRequest;
     if (options.schemaInvalidFirst) return { value: { unexpected: true }, usage };
-    const initial = proposal(request);
+    const initial = options.cumulativeNodeValidation
+      ? cumulativeNodeProposal(request, false)
+      : proposal(request);
     if (options.mechanicallyInvalidFirst)
       initial.coverage[0]!.bindings[0] = {
         kind: "criterion",
@@ -498,6 +656,39 @@ describe("production compiler draft adapter", () => {
         },
       },
     });
+  });
+
+  it("repairs an omitted predecessor target into one cumulative scoped Node command", async () => {
+    const f = await setup({ cumulativeNodeValidation: true });
+    const result = await compileEvaluatedDraft(f.args);
+
+    expect(result).toMatchObject({ status: "accepted", revision: 1 });
+    if (result.status !== "accepted") throw new Error("accepted graph required");
+    expect(f.stages).toEqual(["inventory", "compile", "judge", "repair", "judge"]);
+    expect(f.prompts.find((prompt) => prompt.includes("This is a repair"))).toContain(
+      "authored transitive dependencies",
+    );
+    expect(
+      result.records.find(
+        (record) =>
+          record.kind === "result" &&
+          record.payload.stage === "judge" &&
+          record.payload.revision === 0,
+      ),
+    ).toMatchObject({
+      payload: {
+        value: {
+          findings: [expect.objectContaining({ id: "missing-predecessor-test" })],
+        },
+      },
+    });
+    const dependent = result.graph.workItems.find(({ id }) => id === "consumer")!;
+    const exact = "node --test test/feature.test.js test/consumer.test.js";
+    expect(dependent.scope).toEqual(["src/consumer.js", "test/consumer.test.js"]);
+    expect(dependent.validationCommands).toEqual([exact]);
+    expect(dependent.validation).toEqual([
+      expect.objectContaining({ tier: "mechanical", evidenceCommands: [exact] }),
+    ]);
   });
 
   it("repairs known-accounted schema-invalid output with the same proposal schema", async () => {

@@ -2247,6 +2247,19 @@ export function parseAndValidateCompilerProposal(
       ),
     );
   const analysis = analyzeDependencies(proposal.workItems);
+  const pinnedPaths = new Set(projectionFacts?.files.map(({ path }) => path) ?? []);
+  // This analysis contains only model-authored dependencies. Factory-added
+  // serialization edges must not grant validation read authority.
+  const ownsScopedNodeTarget = (
+    item: CompilerProposal["workItems"][number],
+    target: string,
+  ): boolean =>
+    pinnedPaths.has(target) ||
+    proposal.workItems.some(
+      (owner) =>
+        (owner.id === item.id || analysis.hasPath(item.id, owner.id)) &&
+        scopeOwnsPath(owner.scope, target),
+    );
   for (const id of analysis.duplicates)
     violations.push(violation("duplicate-item-id", "/workItems", "unique IDs", id, id));
   for (const entry of analysis.unknownDependencies)
@@ -2609,9 +2622,7 @@ export function parseAndValidateCompilerProposal(
             const validTargets =
               scopedNodeTestCommand(reference.targets) !== null &&
               reference.targets.every(
-                (target) =>
-                  /\.(?:c|m)?js$/.test(target) &&
-                  item.scope.some((path) => scopeOwnsPath([path], target)),
+                (target) => /\.(?:c|m)?js$/.test(target) && ownsScopedNodeTarget(item, target),
               );
             if (!observedBare || !validTargets)
               violations.push(

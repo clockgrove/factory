@@ -935,6 +935,7 @@ export function renderCompilerProposalPrompt(
     "You own goals, criteria and their stable IDs, obligation mappings, repository-relative scopes, preconditions, exclusions, conventions, dependency intent, validation intent, exclusive-resource intent, duration, trust, and non-derivable tool, service, and network needs.",
     `Factory-derived available routes by Work Item trust: ${JSON.stringify(executionTrustAvailability(request.executionRoutes))}. Use trusted_local for ordinary work unless the Objective explicitly requires stronger isolation or a managed runtime. Preserve every explicit stronger trust requirement even when no route can satisfy it; never lower semantic trust merely to make a route fit.`,
     "Select validation evidence only through recipe IDs and finite adapter operations exposed in the request. Each criterion needs sufficient evidence; protected behavior requires mechanical or deterministic-simulation evidence. Do not reproduce commands or derive execution defaults.",
+    "A scoped Node test may name an ordered target already present at the pinned base, owned by the current Work Item, or owned by one of its authored transitive dependencies; this validation access never widens write scope.",
     "Factory deterministically projects identity, commands, execution requirements, repository context, change surface, economics, delivery topology, capability bindings, managed runtimes, and serialization edges after validating the proposal.",
     request.revision === 0
       ? request.inventorySource === "independent-extraction"

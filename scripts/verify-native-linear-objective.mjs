@@ -226,6 +226,7 @@ function harnessIdentity() {
       .digest("hex"),
   }));
 }
+export const nativeLinearHarnessIdentity = harnessIdentity;
 
 function command(name, arguments_, cwd, trim = true) {
   const result = spawnSync(name, arguments_, {
@@ -2389,7 +2390,102 @@ export function assertNativeLinearLifecycle(evidence, caseName = evidence.native
   }
 }
 
+function assertNativeLinearFailureCleanup(evidence) {
+  const caseName = evidence.nativeLinearCase;
+  assert.equal(caseName, "cascade", "only a foreground cascade can use terminal failure cleanup");
+  assert.equal(evidence.scope, `${scope}-${caseName}`);
+  assertQualificationNamespace(evidence);
+  assert.deepEqual(evidence.finishedInstalledArtifact, evidence.installedArtifact);
+  assert.deepEqual(evidence.nativeLinearHarness, harnessIdentity());
+  assertNativeScopes(evidence);
+
+  const events = nativeQualificationEvents(evidence);
+  const start = one(
+    events.filter((event) => event.event === "FactoryRunStarted"),
+    "native run start is missing or repeated",
+  );
+  assert.equal(start.runId, evidence.runResult.runId);
+  assert.deepEqual(start.policy, evidence.policy);
+  const delivery = one(
+    events.filter((event) => event.event === "DeliverySelected"),
+    "native delivery selection is missing or repeated",
+  );
+  assert.equal(delivery.requested, "stacked-prs");
+  assert.equal(delivery.selected, "native-stacks");
+  assert.equal(
+    events.filter((event) => event.event === "PublicationRecorded").length,
+    0,
+    "terminal failure cleanup applies only before native publication",
+  );
+
+  const model = assertNoOpenLiabilities(events);
+  assert.equal(evidence.status.summary.economics.unresolvedModelInvocations, 0);
+  assert.equal(evidence.status.summary.economics.usage.model_tokens.availability, "observed");
+  assert.equal(evidence.status.summary.economics.usage.model_tokens.value, model.total);
+  assert.ok(
+    evidence.status.summary.economics.nativeUnits.every((unit) => unit.outstanding === 0),
+    "terminal status retains outstanding native capacity or budget",
+  );
+  assert.equal(
+    evidence.status.summary.attempts.active,
+    0,
+    "terminal status retains an active attempt",
+  );
+  assert.deepEqual(
+    evidence.status.run.pendingRetries,
+    [],
+    "terminal status retains a pending retry",
+  );
+  assert.equal(
+    evidence.status.summary.runtime.execution.unresolvedCapacityIntervals,
+    0,
+    "terminal status retains unresolved execution capacity",
+  );
+  assert.equal(
+    evidence.status.summary.runtime.validation.unresolvedOrConflictingInvocations,
+    0,
+    "terminal status retains unresolved validation capacity",
+  );
+
+  assert.equal(evidence.runResult.status, "escalated");
+  assert.equal(evidence.status.run.runId, evidence.runResult.runId);
+  assert.equal(evidence.status.summary.runId, evidence.runResult.runId);
+  assert.equal(evidence.status.run.state, "escalated");
+  assert.equal(evidence.status.summary.outcome, "escalated");
+  const terminalReceipt = assertNativeLinearTerminal(events, "escalated");
+  for (const key of ["runId", "event", "sequence", "at"])
+    assert.equal(
+      evidence.status.run.terminal?.[key],
+      terminalReceipt[key],
+      "terminal status differs from its exact receipt",
+    );
+  assert.equal(evidence.status.run.finishedAt, terminalReceipt.at);
+  const terminalReason = evidence.status.run.terminal?.reason;
+  assert.ok(
+    typeof terminalReason === "string" && terminalReason.trim(),
+    "terminal escalation reason is unavailable",
+  );
+  assert.equal(terminalReceipt.reason, terminalReason);
+  assert.equal(evidence.runResult.reason, terminalReason);
+  return terminalReason;
+}
+
 export function assessNativeLinearLifecycle(evidence) {
+  if (evidence?.nativeLinearCase === "cascade" && evidence?.status?.run?.state === "escalated") {
+    try {
+      return {
+        result: "failed",
+        scope: evidence.scope,
+        reason: assertNativeLinearFailureCleanup(evidence).slice(0, 2_000),
+      };
+    } catch (error) {
+      return {
+        result: "incomplete",
+        scope: evidence?.scope ?? scope,
+        reason: (error instanceof Error ? error.message : String(error)).slice(0, 2_000),
+      };
+    }
+  }
   try {
     assertNativeLinearLifecycle(evidence);
     return { result: "passed", scope: evidence.scope };

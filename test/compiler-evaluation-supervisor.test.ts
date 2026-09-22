@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 import { CompiledGraphManager, compiledGraphProjectionRef } from "../src/control/graphs.js";
@@ -10,7 +11,7 @@ import { GitHubControlStore } from "../src/control/github-store.js";
 import { PlatformUnavailableError } from "../src/platform.js";
 import { LeaseManager } from "../src/control/lease.js";
 import { compileObjective } from "../src/compiler/index.js";
-import { parseWorkerPacketFromIssue } from "../src/graph.js";
+import { parseWorkerPacketFromIssue, type CompiledObjective } from "../src/graph.js";
 import { readRepositoryFacts } from "../src/repository-profiles/index.js";
 import { readCompilerObligationEvidence } from "../src/management/codex-cli.js";
 import { bindManagementTerminalOutcome } from "../src/management/backend.js";
@@ -32,6 +33,7 @@ import { proposalResultFromCompiledFixture } from "./helpers/compiler-proposal.j
 import { parseAndValidateCompilerProposal } from "../src/compiler/proposal.js";
 import { parseCompilerOperation } from "../src/toolchains/compiler-capabilities.js";
 import { proveCompilerSelectionQualificationBoundary } from "../src/runtime/compiler-qualification-checkpoint.js";
+import { GitHubStacks } from "../src/publication/github-stacks.js";
 
 const usage = { inputTokens: 20, outputTokens: 10, cachedInputTokens: 4 };
 const invocationProvenance = (baseSha: string) => ({
@@ -230,6 +232,192 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
   };
   return calls;
 }
+
+function configureNativeCascadeCompiler(f: Fixture) {
+  const calls: string[] = [];
+  Object.assign(f.management, { supportsCompilerAdmission: true });
+  f.management.extractObligations = async (context, checkpoint, beforeModelInvocation) => {
+    await beforeModelInvocation?.(invocationProvenance(context.baseSha));
+    calls.push("inventory");
+    const inventory: ObligationInventory = {
+      version: 1,
+      objectiveDigest: compilerEvalDigest(context.objective),
+      baseSha: context.baseSha,
+      evidence: await readCompilerObligationEvidence(context),
+      obligations: [
+        {
+          id: "cascade",
+          text: "Create the three-layer native cascade fixture",
+          kind: "explicit",
+          evidenceIds: ["objective"],
+          acceptanceEvidence: "Inspect a.txt, b.txt, and join.txt",
+        },
+      ],
+    };
+    const result = {
+      inventory,
+      provenance: invocationProvenance(context.baseSha),
+      usage,
+      responseBytes: Buffer.byteLength(JSON.stringify(inventory), "utf8"),
+      responseBytesSource: "canonical-structured-value" as const,
+    };
+    await checkpoint(result);
+    return result;
+  };
+  f.management.proposePlan = async (
+    request,
+    checkpoint,
+    _projection,
+    beforeModelInvocation,
+    execution,
+  ) => {
+    await beforeModelInvocation?.({
+      promptDigest: compilerEvalDigest(request),
+      schemaDigest: "a".repeat(64),
+      promptBytes: Buffer.byteLength(JSON.stringify(request), "utf8"),
+      schemaBytes: 1,
+      sizeSource: "provider-dispatch",
+      baseSha: request.baseSha,
+      model: null,
+      reasoning: null,
+    });
+    calls.push("compile");
+    if (!execution) throw new Error("fixture requires compilation context");
+    const item = (
+      id: "a" | "b" | "join",
+      dependsOn: string[],
+      delivery: NonNullable<CompiledObjective["workItems"][number]["delivery"]>,
+    ) => {
+      const criterion = `${id}.txt has the expected text`;
+      return {
+        id,
+        title: `Implement ${id}`,
+        goal: `Create ${id}.txt containing ${id}`,
+        acceptance: [criterion],
+        scope: [`${id}.txt`],
+        preconditions: [],
+        outOfScope: [],
+        conventions: [],
+        dependsOn,
+        baseSha: execution.baseSha,
+        validationCommands: ["node --test"],
+        criterionRisks: [{ criterion, risk: "ordinary" as const }],
+        validation: [
+          {
+            tier: "semantic" as const,
+            evidenceCommands: [],
+            criteria: [criterion],
+            rationale: `Inspect ${id}.txt in the candidate artifact`,
+          },
+        ],
+        requirements: {
+          os: ["linux"],
+          architecture: [],
+          tools: ["node"],
+          services: [],
+          networkDestinations: [],
+          permittedSecretNames: [],
+          trust: id === "b" ? ("isolated" as const) : ("trusted_local" as const),
+        },
+        deliverable: {
+          kind: "repository-change" as const,
+          contract: "clockgrove.factory/artifact" as const,
+        },
+        delivery,
+      };
+    };
+    const objective = compileObjective({
+      title: execution.objective.title,
+      baseSha: execution.baseSha,
+      runPolicy: execution.runPolicy,
+      repositoryFacts: await readRepositoryFacts(
+        execution.repository,
+        execution.repositoryFiles,
+        execution.repositoryLfs,
+      ),
+      workItems: [
+        item("a", [], { group: "a", relationship: "root" }),
+        item("b", ["a"], {
+          group: "a",
+          relationship: "continue-stack",
+          parentWorkItem: "a",
+        }),
+        item("join", ["a", "b"], { group: "join", relationship: "join-after-merge" }),
+      ],
+    });
+    const result = proposalResultFromCompiledFixture(request, objective, usage);
+    await checkpoint(result);
+    return result;
+  };
+  f.management.judgePlan = async (context, checkpoint, beforeModelInvocation) => {
+    await beforeModelInvocation?.(invocationProvenance(context.compilation.baseSha));
+    calls.push("judge");
+    const verdict: CompilerJudgeVerdict = {
+      version: 1,
+      rubricVersion: 1,
+      draftDigest: context.graphDigest,
+      inventoryDigest: compilerEvalDigest(context.inventory),
+      coverage: [
+        {
+          obligationId: "cascade",
+          status: "covered" as const,
+          itemIds: ["a"],
+          acceptanceBindings: [
+            {
+              kind: "criterion" as const,
+              itemId: "a",
+              criterionId: "criterion-1",
+            },
+          ],
+          evidenceIds: ["objective"],
+          reason: "Fixture coverage assessment",
+        },
+      ],
+      items: ["a", "b", "join"].map((itemId) => ({
+        itemId,
+        granularity: "cohesive" as const,
+        reason: "Cohesive fixture deliverable",
+        evidenceIds: ["objective"],
+      })),
+      dimensions: COMPILER_JUDGE_DIMENSIONS.map((dimension) => ({
+        dimension,
+        status: "assessed" as const,
+        reason: "Fixture evidence",
+        evidenceIds: ["objective"],
+      })),
+      dependencies: [
+        { itemId: "a", dependsOn: [], reason: "No prerequisite items", evidenceIds: ["objective"] },
+        {
+          itemId: "b",
+          dependsOn: ["a"],
+          reason: "Fixture dependency order",
+          evidenceIds: ["objective"],
+        },
+        {
+          itemId: "join",
+          dependsOn: ["a", "b"],
+          reason: "Fixture dependency order",
+          evidenceIds: ["objective"],
+        },
+      ],
+      findings: [],
+      inferenceCorrections: [],
+      uncertainty: [],
+      decision: "accept",
+    };
+    const result = {
+      verdict,
+      provenance: invocationProvenance(context.compilation.baseSha),
+      usage,
+      responseBytes: Buffer.byteLength(JSON.stringify(verdict), "utf8"),
+      responseBytesSource: "canonical-structured-value" as const,
+    };
+    await checkpoint(result);
+    return result;
+  };
+  return calls;
+}
+
 function assertNoProjection(f: Fixture) {
   expect(f.events().filter((event) => event.kind === "graph")).toEqual([]);
   expect(f.snapshot.workItems).toEqual([]);
@@ -1194,6 +1382,97 @@ describe("Supervisor compiler evaluation activation boundary", () => {
       await f.dispose();
     }
   }, 30_000);
+
+  it.each([false, true])(
+    "resumes an evaluated native stack only across its own base advance (external: %s)",
+    async (externalAdvance) => {
+      vi.spyOn(GitHubStacks.prototype, "probe").mockResolvedValue({
+        available: true,
+        observed: true,
+        version: "2026-03-10",
+        reason: "fixture observed native API",
+      });
+      const f = await providerSupervisorFixture("daytona-burst", {
+        compilerEvaluation: { mode: "auto-repair" },
+        loseIntegrationReceipt: "after",
+        maxParallel: 1,
+        nativeStack: true,
+      });
+      try {
+        freshObjective(f);
+        let nextIssue = 8;
+        vi.spyOn(GithubOctokitGraphWriter.prototype, "createWorkItemIssue").mockImplementation(
+          async ({ title, body }) => {
+            const number = nextIssue++;
+            const id = `I_${number}`;
+            f.snapshot.workItems.push({
+              id,
+              number,
+              title,
+              body,
+              closed: false,
+              assignees: [],
+              labels: ["factory:work-item"],
+              blockedBy: [],
+              linkedPullRequests: [],
+              copilotAssignments: [],
+              factoryEvents: [],
+            });
+            return { id, number };
+          },
+        );
+        vi.spyOn(GithubOctokitGraphWriter.prototype, "addBlockedBy").mockImplementation(
+          async (issueId, blockingIssueId) => {
+            const blocked = f.snapshot.workItems.find((item) => item.id === issueId)!;
+            const blocking = f.snapshot.workItems.find((item) => item.id === blockingIssueId)!;
+            blocked.blockedBy.push({ number: blocking.number, closed: false });
+          },
+        );
+        const calls = configureNativeCascadeCompiler(f);
+
+        const interruption = await f.run().catch((error) => error);
+        expect(
+          interruption,
+          JSON.stringify({ interruption, notifications: f.notifications }),
+        ).toBeInstanceOf(PlatformUnavailableError);
+        expect(calls).toEqual(["inventory", "compile", "judge"]);
+        expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(1);
+        expect(f.snapshot.workItems[0]?.closed).toBe(true);
+        const launches = f.activity.filter((entry) => entry.operation === "launch");
+        if (externalAdvance)
+          execFileSync("git", ["commit", "--allow-empty", "-qm", "external trunk advance"], {
+            cwd: f.repository,
+          });
+
+        const resumed = await f.run();
+        if (externalAdvance) {
+          expect(resumed).toMatchObject({
+            status: "escalated",
+            runId: f.runId,
+            reason: "compiler selection policy or base changed",
+          });
+          expect(calls).toEqual(["inventory", "compile", "judge"]);
+          expect(f.activity.filter((entry) => entry.operation === "launch")).toEqual(launches);
+          expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(1);
+          return;
+        }
+        expect(resumed, resumed.reason).toMatchObject({
+          status: "completed",
+          runId: f.runId,
+        });
+        expect(calls).toEqual(["inventory", "compile", "judge"]);
+        expect(f.events().filter((event) => event.event === "FactoryRunStarted")).toHaveLength(1);
+        expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(3);
+        expect(
+          f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
+        ).toEqual([8, 9, 10]);
+        expect(f.resources.size).toBe(0);
+      } finally {
+        await f.dispose();
+      }
+    },
+    30_000,
+  );
 
   it("releases a failed platform writer and resumes projection without recompiling", async () => {
     const f = await providerSupervisorFixture("daytona-burst", {

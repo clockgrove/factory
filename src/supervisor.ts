@@ -5740,9 +5740,19 @@ export class FactorySupervisor {
                   compilerMediaEgress: this.#policy.compilerMediaEgress,
                 }),
           );
+          const compilerBase = this.#run.baseSha ?? durableGraph.objective.workItems[0]?.baseSha;
+          const compilerGraphCommit = await this.#store.readCommit(durableGraph.commitOid);
           if (
-            draftRecords[0]?.binding.baseSha !== base.oid ||
-            draftRecords[0]?.binding.policyDigest !== policyDigest(this.#policy)
+            !compilerBase ||
+            compilerGraphCommit.oid !== durableGraph.commitOid ||
+            compilerGraphCommit.parentOids.length !== 1 ||
+            compilerGraphCommit.parentOids[0] !== compilerBase ||
+            durableGraph.objective.workItems.some((item) => item.baseSha !== compilerBase) ||
+            draftRecords[0]?.binding.baseSha !== compilerBase ||
+            draftRecords[0]?.binding.policyDigest !== this.#run.policyDigest ||
+            policyDigest(this.#policy) !== this.#run.policyDigest ||
+            (base.oid !== compilerBase &&
+              !(await this.#observedRunOwnsBaseAdvance(snapshot, this.#run, base.oid)))
           )
             throw new Error("compiler selection policy or base changed");
         }

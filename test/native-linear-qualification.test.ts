@@ -14,10 +14,12 @@ import {
   assertNativeLinearReview,
   assertNativeLinearSentinelAlive,
   assertNativeLinearTerminal,
+  assessNativeLinearLifecycle,
   assertNoOpenLiabilities,
   retainNativeLinearPreterminalProofs,
   executeNativeLinearControllerCase,
   main,
+  nativeLinearHarnessIdentity,
   nativeLinearObjectiveBody,
   nativeLinearQualification,
   observeNativeLinearProofs,
@@ -28,7 +30,7 @@ import {
   assertNativeScopes,
   observeNativeScopes,
 } from "../scripts/qualification-native-scopes.mjs";
-import { qualificationPaths } from "../scripts/verify-live-objective.mjs";
+import { boundedPolicy, qualificationPaths } from "../scripts/verify-live-objective.mjs";
 
 const head = (character: string) => character.repeat(40);
 const digest = (character: string) => character.repeat(64);
@@ -517,7 +519,100 @@ function controllerInput(caseName: "response-loss-restart" | "active-cancellatio
   };
 }
 
+function terminalCascadeFailureEvidence() {
+  const namespace = "native-linear-terminal-failure";
+  const repository = "example/fixture";
+  const runId = "run-terminal-failure";
+  const reason = "Work Item #2: attempt budget exhausted (2)";
+  const finishedAt = "2026-09-21T00:10:00.000Z";
+  const policy = boundedPolicy("stacked-prs");
+  const event = (sequence: number, value: Record<string, unknown>) => ({
+    objective: 1,
+    runId,
+    sequence,
+    at: finishedAt,
+    author: "operator",
+    authorId: 42,
+    receiptUrl: `https://github.com/${repository}/issues/1#issuecomment-${sequence}`,
+    ...value,
+  });
+  return {
+    repository,
+    scope: "installed-local-native-linear-stack-cascade",
+    qualificationNamespace: namespace,
+    fixturePaths: qualificationPaths(namespace),
+    preflight: {
+      qualificationNamespace: namespace,
+      namespaceIssues: [],
+    },
+    nativeLinearCase: "cascade",
+    nativeLinearHarness: nativeLinearHarnessIdentity(),
+    installedArtifact: { identity: "candidate" },
+    finishedInstalledArtifact: { identity: "candidate" },
+    actor: { id: 42, login: "operator" },
+    objective: { number: 1, body: nativeLinearObjectiveBody(namespace) },
+    children: [{ number: 2 }, { number: 3 }, { number: 4 }],
+    policy,
+    runResult: { runId, status: "escalated", reason },
+    events: [
+      event(1, { event: "FactoryRunStarted", policy }),
+      event(2, {
+        event: "DeliverySelected",
+        requested: "stacked-prs",
+        selected: "native-stacks",
+      }),
+      event(3, { event: "FactoryRunEscalated", reason }),
+    ],
+    nativeScopeObservations: {
+      result: "phase-not-reached",
+      hostIdentity: digest("a"),
+      units: [],
+    },
+    status: {
+      run: {
+        runId,
+        state: "escalated",
+        finishedAt,
+        pendingRetries: [],
+        terminal: { runId, event: "FactoryRunEscalated", sequence: 3, at: finishedAt, reason },
+      },
+      summary: {
+        runId,
+        outcome: "escalated",
+        attempts: { active: 0 },
+        economics: {
+          unresolvedModelInvocations: 0,
+          usage: { model_tokens: { availability: "observed", value: 0 } },
+          nativeUnits: [],
+        },
+        runtime: {
+          execution: { unresolvedCapacityIntervals: 0 },
+          validation: { unresolvedOrConflictingInvocations: 0 },
+        },
+      },
+    },
+  };
+}
+
 describe("native linear-stack installed matrix", () => {
+  it("retains the terminal escalation reason after exact pre-publication cleanup proof", () => {
+    expect(assessNativeLinearLifecycle(terminalCascadeFailureEvidence())).toMatchObject({
+      result: "failed",
+      reason: "Work Item #2: attempt budget exhausted (2)",
+    });
+  });
+
+  it.each(["missing", "mismatched"])("keeps %s terminal scope evidence incomplete", (kind) => {
+    const evidence = terminalCascadeFailureEvidence();
+    if (kind === "missing")
+      delete (evidence as { nativeScopeObservations?: unknown }).nativeScopeObservations;
+    else evidence.nativeScopeObservations.result = "owned-scopes-absent";
+    expect(assessNativeLinearLifecycle(evidence)).toMatchObject({
+      result: "incomplete",
+      reason: expect.stringMatching(/native scope observation is unavailable|result differs/),
+    });
+  });
+
   it.each(["cascade", "response-loss-restart", "active-cancellation"] as const)(
     "records graphless %s escalation as phase-not-reached without demanding intervention proof",
     async (caseName) => {

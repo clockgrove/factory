@@ -22,6 +22,26 @@ const fields = [
   "producerUnit",
   "producerInvocationId",
 ];
+const sameAttempt = (left, right) =>
+  ["runId", "objective", "workItem", "attempt"].every((key) => left[key] === right[key]);
+const scopeBatchDigest = (batch) => {
+  const identity = Object.fromEntries(
+    fields
+      .filter((field) => batch.identity[field] !== undefined)
+      .map((field) => [field, batch.identity[field]]),
+  );
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        identity,
+        commandCount: batch.commandCount,
+        producerPid: batch.producerPid,
+        producerStartTicks: batch.producerStartTicks,
+        deadline: batch.deadline,
+      }),
+    )
+    .digest("hex");
+};
 export function nativeScopeUnit(identity) {
   assert.ok(identity && Object.keys(identity).every((key) => fields.includes(key)));
   assert.equal(identity.protocol, "clockgrove.factory/local-scope-v1");
@@ -53,13 +73,65 @@ export function nativeOwnedScopes(evidence, hostIdentity) {
   assert.match(hostIdentity, /^[a-f0-9]{64}$/);
   const events = nativeQualificationEvents(evidence);
   const units = new Set();
-  const reservations = events.filter(
-    (event) =>
-      event.event === "AttemptReserved" ||
-      (event.event === "CapacityReserved" && event.phase === "validation"),
+  const executionReservations = events.filter((event) => event.event === "AttemptReserved");
+  const validationReservations = events.filter(
+    (event) => event.event === "CapacityReserved" && event.phase === "validation",
   );
-  assert.ok(reservations.length >= evidence.children.length * 2 && reservations.length <= 1000);
-  for (const event of reservations) {
+  const rebounds = events.filter((event) => event.event === "ValidationInvocationScopeRebound");
+  const ownershipEvents = [...executionReservations, ...validationReservations, ...rebounds];
+  assert.ok(ownershipEvents.length <= 1000);
+
+  for (const started of events.filter((event) => event.event === "AttemptStarted")) {
+    const reservations = executionReservations.filter(
+      (reserved) =>
+        sameAttempt(reserved, started) &&
+        reserved.policyDigest === started.policyDigest &&
+        reserved.directorEpoch === started.directorEpoch &&
+        reserved.sequence < started.sequence,
+    );
+    assert.equal(reservations.length, 1, "actual execution lacks its exact scope reservation");
+  }
+  for (const progressed of events.filter((event) =>
+    ["AttemptCollected", "AttemptValidated"].includes(event.event),
+  )) {
+    const reservations = validationReservations.filter(
+      (reserved) =>
+        sameAttempt(reserved, progressed) &&
+        reserved.sequence < progressed.sequence &&
+        reserved.localScopeBatch?.identity?.invocationDigest === progressed.artifactDigest,
+    );
+    assert.equal(reservations.length, 1, "validation progress lacks its exact scope reservation");
+  }
+  for (const recorded of events.filter((event) => event.event === "ValidationRecorded")) {
+    const openReservations = validationReservations.filter(
+      (reserved) =>
+        sameAttempt(reserved, recorded) &&
+        reserved.sequence < recorded.sequence &&
+        !events.some(
+          (candidate) =>
+            candidate.event === "CapacityReconciled" &&
+            candidate.phase === "validation" &&
+            sameAttempt(candidate, reserved) &&
+            candidate.backend === reserved.backend &&
+            candidate.sequence > reserved.sequence &&
+            candidate.sequence < recorded.sequence,
+        ),
+    );
+    assert.equal(openReservations.length, 1, "validation receipt lacks its admitted scope");
+  }
+  for (const rebound of rebounds) {
+    const originals = validationReservations.filter(
+      (reserved) =>
+        sameAttempt(reserved, rebound) &&
+        reserved.sequence < rebound.sequence &&
+        reserved.localScopeBatch?.identity?.invocationDigest === rebound.artifactDigest &&
+        reserved.localScopeBatch &&
+        scopeBatchDigest(reserved.localScopeBatch) === rebound.previousScopeBatchDigest,
+    );
+    assert.equal(originals.length, 1, "validation scope rebound lacks its exact original scope");
+  }
+
+  for (const event of ownershipEvents) {
     const batch = event.localScopeBatch;
     assert.ok(batch, "local reservation has no exact scope ownership");
     assert.ok(
@@ -74,9 +146,14 @@ export function nativeOwnedScopes(evidence, hostIdentity) {
     assert.equal(identity.commandIndex, 0);
     assert.equal(identity.repository, evidence.repository);
     assert.equal(identity.hostIdentity, hostIdentity, "scope belongs to another host/namespace");
-    for (const key of ["objective", "workItem", "attempt", "runId", "policyDigest"])
+    for (const key of ["objective", "workItem", "attempt", "runId"])
       assert.equal(identity[key], event[key]);
-    assert.equal(identity.directorEpoch, event.recoveryEpoch ?? event.directorEpoch);
+    const rebound = event.event === "ValidationInvocationScopeRebound";
+    assert.equal(identity.policyDigest, rebound ? event.writerPolicyDigest : event.policyDigest);
+    assert.equal(
+      identity.directorEpoch,
+      rebound ? event.writerEpoch : (event.recoveryEpoch ?? event.directorEpoch),
+    );
     assert.equal(identity.phase, event.event === "AttemptReserved" ? "execution" : "validation");
     if (identity.phase === "execution") {
       assert.equal(batch.commandCount, 1);

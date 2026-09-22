@@ -1,5 +1,6 @@
 export type NativeLinearCase = "cascade" | "response-loss-restart" | "active-cancellation";
 
+export function nativeLinearHarnessIdentity(): Array<{ file: string; sha256: string }>;
 export function nativeLinearObjectiveBody(namespace: string): string;
 export function nativeLinearQualification(
   env: Record<string, string | undefined>,

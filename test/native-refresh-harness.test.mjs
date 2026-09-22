@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { parseFactoryEvent } from "../src/protocol/events.js";
+import { localScopeBatchDigest } from "../src/protocol/local-scope.js";
 import { createValidationEvidence } from "../src/validation/evidence.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
 import { bindMergeCandidateValidation } from "../src/publication/merge-candidate.js";
@@ -1528,6 +1529,81 @@ describe("native terminal scope evidence", () => {
     expect(observe).toHaveBeenCalledTimes(11);
     f.evidence.nativeScopeObservations.units.pop();
     expect(() => assertNativeScopes(f.evidence)).toThrow();
+  });
+  it("covers only the durable scopes reached by a partial native run", () => {
+    const f = fixture();
+    const omitted = new Set([
+      "AttemptReserved",
+      "AttemptStarted",
+      "CapacityReserved",
+      "AttemptCollected",
+      "ValidationRecorded",
+      "AttemptValidated",
+    ]);
+    f.evidence.events = f.evidence.events.filter(
+      (event) => event.workItem !== 4 || !omitted.has(event.event),
+    );
+    const units = nativeOwnedScopes(f.evidence, hostIdentity);
+    expect(units.length).toBeGreaterThan(0);
+    expect(units.length).toBeLessThan(11);
+    const observe = vi.fn(absent);
+    observeNativeScopes(f.evidence, observe, hostIdentity);
+    expect(observe).toHaveBeenCalledTimes(units.length);
+    expect(() => assertNativeScopes(f.evidence)).not.toThrow();
+  });
+  it.each([
+    ["AttemptReserved", "actual execution lacks its exact scope reservation"],
+    ["CapacityReserved", "validation progress lacks its exact scope reservation"],
+  ])("rejects progress after its %s scope evidence is omitted", (eventName, reason) => {
+    const f = fixture();
+    const target = f.evidence.events.find((event) => event.event === eventName);
+    f.evidence.events = f.evidence.events.filter((event) => event !== target);
+    expect(() => nativeOwnedScopes(f.evidence, hostIdentity)).toThrow(reason);
+  });
+  it("observes both original and rebound validation scope ownership", () => {
+    const f = fixture();
+    const original = f.evidence.events.find(
+      (event) => event.event === "CapacityReserved" && event.phase === "validation",
+    );
+    const reboundBatch = structuredClone(original.localScopeBatch);
+    reboundBatch.producerPid += 1000;
+    reboundBatch.producerStartTicks = "54321";
+    reboundBatch.identity.directorEpoch += 1;
+    f.evidence.events.push({
+      ...original,
+      kind: "validation-invocation",
+      event: "ValidationInvocationScopeRebound",
+      sequence: original.sequence + 1,
+      writerEpoch: reboundBatch.identity.directorEpoch,
+      writerPolicyDigest: original.policyDigest,
+      artifactDigest: original.localScopeBatch.identity.invocationDigest,
+      previousScopeBatchDigest: localScopeBatchDigest(original.localScopeBatch),
+      localScopeBatch: reboundBatch,
+      receiptUrl: original.receiptUrl.replace(/issuecomment-[0-9]+$/, "issuecomment-999999"),
+    });
+    expect(nativeOwnedScopes(f.evidence, hostIdentity)).toHaveLength(13);
+  });
+  it("records exact empty scope coverage before any native reservation exists", () => {
+    const f = fixture();
+    const progressed = new Set([
+      "AttemptReserved",
+      "AttemptStarted",
+      "CapacityReserved",
+      "AttemptCollected",
+      "ValidationRecorded",
+      "AttemptValidated",
+      "ValidationInvocationScopeRebound",
+    ]);
+    f.evidence.events = f.evidence.events.filter((event) => !progressed.has(event.event));
+    const observe = vi.fn(absent);
+    observeNativeScopes(f.evidence, observe, hostIdentity);
+    expect(f.evidence.nativeScopeObservations).toMatchObject({
+      result: "phase-not-reached",
+      hostIdentity,
+      units: [],
+    });
+    expect(observe).not.toHaveBeenCalled();
+    expect(() => assertNativeScopes(f.evidence)).not.toThrow();
   });
   it("uses the same hash as existing controller-owned scope helper when producer identity is present", () => {
     const identity = fixture().evidence.events.find((event) => event.localScopeBatch)

@@ -527,8 +527,38 @@ describe("semantic proposal validation", () => {
     );
     expect(repairableCompilerJudgeVerdict(omittedMixedCriterion, judgeContext)).toMatchObject({
       decision: "repair",
+      coverage: [
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ status: "unknown" }),
+        expect.anything(),
+      ],
       findings: [expect.objectContaining({ id: "omitted-proposal-coverage" })],
     });
+
+    for (const obligationId of ["explicit-contract", "lifecycle-only", "mixed-delivery"] as const) {
+      const omittedAll = structuredClone(verdict);
+      const review = omittedAll.coverage.find((entry) => entry.obligationId === obligationId)!;
+      review.acceptanceBindings = [];
+      const repair = repairableCompilerJudgeVerdict(omittedAll, judgeContext);
+      expect(repair).toMatchObject({
+        decision: "repair",
+        coverage: expect.arrayContaining([
+          expect.objectContaining({
+            obligationId,
+            status: "unknown",
+            acceptanceBindings: [],
+          }),
+        ]),
+        findings: [
+          expect.objectContaining({
+            id: "omitted-proposal-coverage",
+            obligationIds: [obligationId],
+          }),
+        ],
+      });
+      expect(() => validateCompilerJudgeVerdict(repair, judgeContext)).not.toThrow();
+    }
   });
   it.each([
     {

@@ -95,3 +95,8 @@ export function applyQualificationScenarioPreflight(
 ): { result: "passed" | "blocked"; blockers: string[]; scenario?: unknown };
 export function assertMcpSurface(tools: unknown): void;
 export function qualificationFailure(evidence: unknown, error: unknown): unknown;
+export function qualificationPreflightStage<T>(stage: string, operation: () => T): T;
+export function reserveLocalQualificationPreflightFailure(input: {
+  env: Record<string, string | undefined>;
+  scenario: string;
+}): { path: string; complete(): void; fail(error: unknown): string } | null;

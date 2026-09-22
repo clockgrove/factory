@@ -20,6 +20,7 @@ import {
   readFileSync,
   realpathSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -991,6 +992,156 @@ export function qualificationFailure(evidence, error) {
   return new Error(reason, { cause: error });
 }
 
+function boundedDiagnosticValue(value) {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string")
+    return value.length <= 4_000
+      ? value
+      : {
+          bytes: Buffer.byteLength(value),
+          sha256: createHash("sha256").update(value).digest("hex"),
+        };
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized.length <= 4_000
+      ? JSON.parse(serialized)
+      : {
+          bytes: Buffer.byteLength(serialized),
+          sha256: createHash("sha256").update(serialized).digest("hex"),
+        };
+  } catch {
+    return Object.prototype.toString.call(value);
+  }
+}
+
+const preflightFields = Object.freeze({
+  "installed-authority": "/installed",
+  checkout: "/checkout",
+  "github-read": "/github",
+  "compiler-preflight": "/compiler",
+  "scenario-authority": "/authority",
+  "scenario-observation": "/scenario",
+});
+
+export function qualificationPreflightStage(stage, operation) {
+  assert.ok(Object.hasOwn(preflightFields, stage), "unknown qualification preflight stage");
+  try {
+    const result = operation();
+    return result && typeof result.then === "function"
+      ? result.catch((error) => {
+          throw tagQualificationPreflightError(error, stage);
+        })
+      : result;
+  } catch (error) {
+    throw tagQualificationPreflightError(error, stage);
+  }
+}
+
+function tagQualificationPreflightError(error, stage) {
+  const failure =
+    error && (typeof error === "object" || typeof error === "function")
+      ? error
+      : new Error(String(error), { cause: error });
+  if (!failure.factoryQualificationPreflight)
+    Object.defineProperty(failure, "factoryQualificationPreflight", {
+      value: {
+        stage,
+        code: `qualification-preflight-${stage}`,
+        field: preflightFields[stage],
+      },
+      enumerable: false,
+    });
+  return failure;
+}
+
+/** Reserve the local diagnostic before any scenario preflight work. Success
+ * removes it; failure replaces the armed record once without retrying work. */
+export function reserveLocalQualificationPreflightFailure({ env, scenario }) {
+  if (env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT !== "1") return null;
+  assert.match(scenario, /^[a-z][a-z0-9-]{2,63}$/);
+  const requestedOutput = env.FACTORY_LIVE_OBJECTIVE_EVIDENCE?.trim();
+  if (!requestedOutput) return null;
+  const output = resolve(requestedOutput);
+  mkdirSync(output, { recursive: true, mode: 0o700 });
+  const directory = statSync(output);
+  assert.ok(
+    directory.isDirectory() && directory.uid === process.getuid() && (directory.mode & 0o077) === 0,
+    "qualification evidence directory must be owner-only",
+  );
+  const evidencePath = join(output, "qualification-preflight-failure.json");
+  writeFileSync(
+    evidencePath,
+    `${JSON.stringify(
+      {
+        protocol: "clockgrove.factory/qualification-preflight-failure",
+        scenario,
+        phase: "preflight-before-evidence",
+        state: "armed",
+        objectiveCreated: false,
+        modelDispatched: false,
+        mutationPerformed: false,
+        ownedUnitStarted: false,
+        automaticRetry: false,
+      },
+      null,
+      2,
+    )}\n`,
+    { flag: "wx", mode: 0o600 },
+  );
+  let settled = false;
+  return {
+    path: evidencePath,
+    complete() {
+      assert.equal(settled, false, "qualification preflight recorder already settled");
+      settled = true;
+      unlinkSync(evidencePath);
+    },
+    fail(error) {
+      assert.equal(settled, false, "qualification preflight recorder already settled");
+      settled = true;
+      const classification = error?.factoryQualificationPreflight ?? {
+        stage: "scenario-authority",
+        code: "qualification-preflight-scenario-authority",
+        field: preflightFields["scenario-authority"],
+      };
+      const status = Number.isSafeInteger(error?.status) ? error.status : undefined;
+      const record = {
+        protocol: "clockgrove.factory/qualification-preflight-failure",
+        scenario,
+        phase: "preflight-before-evidence",
+        state: "failed",
+        failedAt: new Date().toISOString(),
+        violation: {
+          stage: classification.stage,
+          code: classification.code,
+          item: scenario,
+          field: classification.field,
+          expectedInvariant:
+            typeof error?.message === "string" && error.message.length > 0
+              ? boundedDiagnosticValue(error.message)
+              : "qualification preflight completes and reserves normal evidence",
+          observedValue: {
+            name: typeof error?.name === "string" ? error.name : typeof error,
+            code: boundedDiagnosticValue(error?.code),
+            status: status ?? null,
+            operator: boundedDiagnosticValue(error?.operator),
+            actual: boundedDiagnosticValue(error?.actual),
+            expected: boundedDiagnosticValue(error?.expected),
+          },
+        },
+        objectiveCreated: false,
+        modelDispatched: false,
+        mutationPerformed: false,
+        ownedUnitStarted: false,
+        automaticRetry: false,
+      };
+      writeFileSync(evidencePath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+      return evidencePath;
+    },
+  };
+}
+
 export async function main(
   qualification = {},
   {
@@ -1007,28 +1158,36 @@ export async function main(
     );
     return;
   }
-  assert.equal(process.platform, "linux", "live Objective harness requires Linux");
   const {
     installedQualificationAuthority,
     installedCompilerPreflight,
     qualificationRuntimeEnvironment,
-  } = await import("./qualification-install-identity.mjs");
-  assert.equal(
-    env.FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT,
-    undefined,
-    "plugin-root selection was replaced by retained install receipt authority",
+  } = await qualificationPreflightStage("installed-authority", async () => {
+    assert.equal(process.platform, "linux", "live Objective harness requires Linux");
+    assert.equal(
+      env.FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT,
+      undefined,
+      "plugin-root selection was replaced by retained install receipt authority",
+    );
+    return await import("./qualification-install-identity.mjs");
+  });
+  const candidate = qualificationPreflightStage("installed-authority", () =>
+    installedQualificationAuthority(env, {
+      ...installAuthorityOptions,
+      sourceRoot: candidateSourceRoot,
+      committedPaths: [...sharedHarnessPaths, ...(qualification.harnessPaths ?? [])],
+    }),
   );
-  const candidate = installedQualificationAuthority(env, {
-    ...installAuthorityOptions,
-    sourceRoot: candidateSourceRoot,
-    committedPaths: [...sharedHarnessPaths, ...(qualification.harnessPaths ?? [])],
-  });
-  const checkout = realpathSync(required(env, "FACTORY_LIVE_OBJECTIVE_CHECKOUT"));
-  const runtimeEnvironment = qualificationRuntimeEnvironment(env, {
-    ...runtimeEnvironmentOptions,
-    repositoryRoot: checkout,
-    requireManagementTranscripts: true,
-  });
+  const checkout = qualificationPreflightStage("checkout", () =>
+    realpathSync(required(env, "FACTORY_LIVE_OBJECTIVE_CHECKOUT")),
+  );
+  const runtimeEnvironment = qualificationPreflightStage("installed-authority", () =>
+    qualificationRuntimeEnvironment(env, {
+      ...runtimeEnvironmentOptions,
+      repositoryRoot: checkout,
+      requireManagementTranscripts: true,
+    }),
+  );
   const pluginRoot = candidate.installedPluginRoot;
   const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
   const identity = candidate.pluginIdentity;
@@ -1088,9 +1247,11 @@ export async function main(
     );
   const [owner, repo] = repository.split("/");
   assert.ok(!checkout.startsWith("/mnt/"), "checkout must reside on the Linux filesystem");
-  const checkoutClean = run("git", ["status", "--porcelain"], checkout) === "";
+  const checkoutRun = (args) =>
+    qualificationPreflightStage("checkout", () => run("git", args, checkout));
+  const checkoutClean = checkoutRun(["status", "--porcelain"]) === "";
   const fixturePathsAbsent = fixturePaths.files.every((path) => !existsSync(join(checkout, path)));
-  const origin = run("git", ["remote", "get-url", "origin"], checkout).replace(/\.git$/, "");
+  const origin = checkoutRun(["remote", "get-url", "origin"]).replace(/\.git$/, "");
   assert.ok(
     origin === `https://github.com/${repository}` || origin === `git@github.com:${repository}`,
     "checkout origin differs from approved repository",
@@ -1109,13 +1270,18 @@ export async function main(
     boundedPolicy(env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs", modelTokenCeiling);
   const mcp = manifest.mcpServers?.factory;
   assert.equal(mcp?.command, "sh");
-  const token = env.GITHUB_TOKEN || env.GH_TOKEN || run("gh", ["auth", "token"], checkout);
+  const token =
+    env.GITHUB_TOKEN ||
+    env.GH_TOKEN ||
+    qualificationPreflightStage("github-read", () => run("gh", ["auth", "token"], checkout));
   const octokit = new Octokit({
     auth: token,
     request: { headers: { "X-GitHub-Api-Version": "2026-03-10" } },
   });
   const request = (route, parameters = {}) =>
-    octokit.request(route, { owner, repo, ...parameters });
+    qualificationPreflightStage("github-read", () =>
+      octokit.request(route, { owner, repo, ...parameters }),
+    );
   const list = async (route, parameters = {}, maximumEntries = Number.MAX_SAFE_INTEGER) => {
     const results = [];
     for (let page = 1; ; page++) {
@@ -1131,13 +1297,15 @@ export async function main(
     }
   };
   const info = (await request("GET /repos/{owner}/{repo}")).data;
-  const actor = (await octokit.request("GET /user")).data;
+  const actor = (
+    await qualificationPreflightStage("github-read", () => octokit.request("GET /user"))
+  ).data;
   const base = (
     await request("GET /repos/{owner}/{repo}/commits/{ref}", {
       ref: info.default_branch,
     })
   ).data.sha;
-  const checkoutHead = run("git", ["rev-parse", "HEAD"], checkout);
+  const checkoutHead = checkoutRun(["rev-parse", "HEAD"]);
   const branch = (
     await request("GET /repos/{owner}/{repo}/branches/{branch}", { branch: info.default_branch })
   ).data;
@@ -1153,15 +1321,19 @@ export async function main(
   const openFactoryPulls = (await list("GET /repos/{owner}/{repo}/pulls", { state: "open" }))
     .filter((pull) => pull.head?.ref?.startsWith("factory/"))
     .map((pull) => ({ number: pull.number, head: pull.head.ref, title: pull.title }));
-  const rateLimit = (await octokit.request("GET /rate_limit")).data.resources;
-  const compiler = installedCompilerPreflight({
-    factoryCli: candidate.factoryCli,
-    checkout,
-    baseSha: base,
-    policy,
-    executionTrust,
-    environment: runtimeEnvironment,
-  });
+  const rateLimit = (
+    await qualificationPreflightStage("github-read", () => octokit.request("GET /rate_limit"))
+  ).data.resources;
+  const compiler = qualificationPreflightStage("compiler-preflight", () =>
+    installedCompilerPreflight({
+      factoryCli: candidate.factoryCli,
+      checkout,
+      baseSha: base,
+      policy,
+      executionTrust,
+      environment: runtimeEnvironment,
+    }),
+  );
   const preflight = {
     ...assessQualificationPreflight({
       checkout: {
@@ -1219,14 +1391,16 @@ export async function main(
   if (qualification.observePreflight) {
     applyQualificationScenarioPreflight(
       preflight,
-      await qualification.observePreflight({
-        request,
-        repository,
-        actor: { id: actor.id, login: actor.login },
-        factoryCli: candidate.factoryCli,
-        checkout,
-        environment: runtimeEnvironment,
-      }),
+      await qualificationPreflightStage("scenario-observation", () =>
+        qualification.observePreflight({
+          request,
+          repository,
+          actor: { id: actor.id, login: actor.login },
+          factoryCli: candidate.factoryCli,
+          checkout,
+          environment: runtimeEnvironment,
+        }),
+      ),
     );
   }
   const output = resolve(required(env, "FACTORY_LIVE_OBJECTIVE_EVIDENCE"));

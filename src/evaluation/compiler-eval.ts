@@ -379,8 +379,43 @@ export function repairableCompilerJudgeVerdict(
     const usedIds = new Set(verdict.findings.map((entry) => entry.id));
     let id = "omitted-proposal-coverage";
     for (let suffix = 2; usedIds.has(id); suffix++) id = `omitted-proposal-coverage-${suffix}`;
+    const omittedByObligation = new Map<string, ObligationCoverageBinding[]>();
+    for (const { entry, binding } of omittedProposalBindings) {
+      const bindings = omittedByObligation.get(entry.obligationId) ?? [];
+      bindings.push(binding);
+      omittedByObligation.set(entry.obligationId, bindings);
+    }
+    const omittedBindingDescriptions = omittedProposalBindings
+      .map(({ binding }) =>
+        binding.kind === "criterion"
+          ? `criterion ${binding.itemId}/${binding.criterionId}`
+          : `Factory capability ${binding.capabilityId}`,
+      )
+      .sort();
+    const repairCoverage = verdict.coverage.map((entry) => {
+      const omitted = omittedByObligation.get(entry.obligationId);
+      if (!omitted) return entry;
+      const descriptions = omitted
+        .map((binding) =>
+          binding.kind === "criterion"
+            ? `criterion ${binding.itemId}/${binding.criterionId}`
+            : `Factory capability ${binding.capabilityId}`,
+        )
+        .sort()
+        .join(", ");
+      return {
+        ...entry,
+        status: "unknown" as const,
+        reason:
+          `${entry.reason} The acceptance decision omitted exact proposed bindings: ${descriptions}.`.slice(
+            0,
+            4000,
+          ),
+      };
+    });
     const repair = {
       ...verdict,
+      coverage: repairCoverage,
       findings: [
         ...verdict.findings,
         {
@@ -392,9 +427,15 @@ export function repairableCompilerJudgeVerdict(
           itemIds,
           evidenceIds,
           rootCause:
-            "The acceptance decision omitted authenticated coverage bindings declared by the exact proposal.",
+            `The acceptance decision omitted authenticated coverage bindings declared by the exact proposal: ${omittedBindingDescriptions.join(", ")}.`.slice(
+              0,
+              4000,
+            ),
           correction:
-            "Reassess every declared criterion and Factory capability binding; preserve both kinds for mixed obligations.",
+            `Preserve every obligation and restore these exact proposal bindings before accepting coverage: ${omittedBindingDescriptions.join(", ")}.`.slice(
+              0,
+              4000,
+            ),
           uncertainty: "",
         },
       ],

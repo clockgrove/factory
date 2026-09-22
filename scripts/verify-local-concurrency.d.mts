@@ -21,6 +21,12 @@ export function directorContentionObjectiveBody(
 ): string;
 export function concurrencyRefill(pair: unknown[]): Record<string, unknown> | null;
 export function concurrencyReceiptProgress(phase: string, pair: unknown[]): boolean;
+export const directorContentionObservationLimits: Readonly<{
+  requiredCoreRemaining: number;
+  fullObjectiveSnapshots: number;
+  incrementalCommentListings: number;
+}>;
+export function directorContentionObservationWake(observations: unknown[]): boolean;
 export function scopedPauseObservationContract(
   settled: (observation: unknown, paused: true) => boolean,
 ): {

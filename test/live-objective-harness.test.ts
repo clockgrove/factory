@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -21,6 +21,8 @@ import {
   qualificationNamespaceMarker,
   qualificationPaths,
   qualificationFailure,
+  qualificationPreflightStage,
+  reserveLocalQualificationPreflightFailure,
   waitForCreatedObjectiveNamespace,
 } from "../scripts/verify-live-objective.mjs";
 import { DEFAULT_COMPILER_EVALUATION_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
@@ -1040,6 +1042,104 @@ describe("explicit installed regular qualification", () => {
 });
 
 describe("installed live Objective harness evidence boundary", () => {
+  it("retains exact failures that occur before normal preflight evidence is reserved", async () => {
+    const output = await mkdtemp(join(tmpdir(), "factory-preflight-failure-"));
+    await rm(output, { recursive: true });
+    const error = new Error("GitHub core quota was unavailable");
+    Object.assign(error, { status: 403 });
+    const recorder = reserveLocalQualificationPreflightFailure({
+      env: {
+        FACTORY_LIVE_OBJECTIVE_PREFLIGHT: "1",
+        FACTORY_LIVE_OBJECTIVE_EVIDENCE: output,
+      },
+      scenario: "local-scheduling",
+    });
+    const path = recorder?.fail(
+      (() => {
+        try {
+          qualificationPreflightStage("github-read", () => {
+            throw error;
+          });
+        } catch (failure) {
+          return failure;
+        }
+      })(),
+    );
+    expect(path).toBe(join(output, "qualification-preflight-failure.json"));
+    const [directory, file, record] = await Promise.all([
+      stat(output),
+      stat(path!),
+      readFile(path!, "utf8").then(JSON.parse),
+    ]);
+    expect(directory.mode & 0o077).toBe(0);
+    expect(file.mode & 0o077).toBe(0);
+    expect(record).toMatchObject({
+      protocol: "clockgrove.factory/qualification-preflight-failure",
+      scenario: "local-scheduling",
+      phase: "preflight-before-evidence",
+      state: "failed",
+      violation: {
+        stage: "github-read",
+        code: "qualification-preflight-github-read",
+        item: "local-scheduling",
+        field: "/github",
+        expectedInvariant: "GitHub core quota was unavailable",
+        observedValue: { name: "Error", status: 403 },
+      },
+      objectiveCreated: false,
+      modelDispatched: false,
+      mutationPerformed: false,
+      ownedUnitStarted: false,
+      automaticRetry: false,
+    });
+    expect(() => recorder?.fail(error)).toThrow();
+    await rm(output, { recursive: true });
+  });
+  it("classifies every fallible preflight boundary and removes the armed record on success", async () => {
+    for (const stage of [
+      "installed-authority",
+      "checkout",
+      "github-read",
+      "compiler-preflight",
+      "scenario-authority",
+      "scenario-observation",
+    ]) {
+      try {
+        await qualificationPreflightStage(stage, async () => {
+          throw new Error(`${stage} failed`);
+        });
+        throw new Error("expected tagged preflight failure");
+      } catch (error) {
+        expect(error).toMatchObject({
+          factoryQualificationPreflight: {
+            stage,
+            code: `qualification-preflight-${stage}`,
+          },
+        });
+      }
+    }
+    const output = await mkdtemp(join(tmpdir(), "factory-preflight-success-"));
+    await rm(output, { recursive: true });
+    const recorder = reserveLocalQualificationPreflightFailure({
+      env: {
+        FACTORY_LIVE_OBJECTIVE_PREFLIGHT: "1",
+        FACTORY_LIVE_OBJECTIVE_EVIDENCE: output,
+      },
+      scenario: "local-pressure",
+    });
+    expect(JSON.parse(await readFile(recorder!.path, "utf8"))).toMatchObject({ state: "armed" });
+    recorder?.complete();
+    await expect(stat(recorder!.path)).rejects.toMatchObject({ code: "ENOENT" });
+    await rm(output, { recursive: true });
+  });
+  it("does not reserve a preflight diagnostic outside the explicit preflight phase", () => {
+    expect(
+      reserveLocalQualificationPreflightFailure({
+        env: {},
+        scenario: "local-pressure",
+      }),
+    ).toBeNull();
+  });
   it("binds the documented Codex cachebuster to the canonical package and exact installed marketplace", () => {
     const input = {
       manifest: { name: "factory", version: "2.0.26+codex.20260904205148" },

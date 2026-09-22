@@ -13,8 +13,10 @@ import {
   main as installedMain,
   boundedPolicy,
   modelTokenLimit,
+  qualificationPreflightStage,
   qualificationModels,
   qualificationNamespace,
+  reserveLocalQualificationPreflightFailure,
 } from "./verify-live-objective.mjs";
 import {
   assertRegularPipelineCompletion,
@@ -1060,7 +1062,9 @@ export function createSchedulingQualification(authority, env = process.env, port
 }
 
 export async function main(env = process.env, run = installedMain) {
-  const authority = schedulingAuthority(env);
+  const authority = qualificationPreflightStage("scenario-authority", () =>
+    schedulingAuthority(env),
+  );
   if (!authority) {
     console.log("Not exercised: explicit local scheduling opt-in required.");
     return;
@@ -1068,9 +1072,20 @@ export async function main(env = process.env, run = installedMain) {
   await run(createSchedulingQualification(authority, env), { env });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  let preflightRecorder;
   try {
+    preflightRecorder = reserveLocalQualificationPreflightFailure({
+      env: process.env,
+      scenario: "local-scheduling",
+    });
     await main();
-  } catch {
+    preflightRecorder?.complete();
+  } catch (error) {
+    try {
+      preflightRecorder?.fail(error);
+    } catch {
+      // The original preflight failure remains authoritative if retention is unavailable.
+    }
     console.error(
       "Local scheduling qualification incomplete; inspect private evidence and exact owned units. No automatic reinjection.",
     );

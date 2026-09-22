@@ -79,6 +79,11 @@ const sourceRefreshReasons = new Set([
   "execution source ref changed during final dispatch validation",
 ]);
 const semanticReviewBudgetReason = "model-token budget is exhausted; refusing semantic review";
+export const directorContentionObservationLimits = Object.freeze({
+  requiredCoreRemaining: 4_000,
+  fullObjectiveSnapshots: 96,
+  incrementalCommentListings: 750,
+});
 
 function reservationWindows(events) {
   const reservations = events
@@ -335,6 +340,20 @@ export function concurrencyReceiptProgress(phase, pair) {
   throw Error(`unsupported concurrency observation phase: ${phase}`);
 }
 
+export function directorContentionObservationWake(observations) {
+  assert.ok(Array.isArray(observations) && observations.length > 0);
+  return observations.some((observation) => {
+    assert.ok(Array.isArray(observation.changedReceipts));
+    assert.ok(Array.isArray(observation.pendingReceipts));
+    return (
+      observation.topologyPending === true ||
+      observation.terminalStatusPending === true ||
+      observation.changedReceipts.length > 0 ||
+      observation.pendingReceipts.length > 0
+    );
+  });
+}
+
 export function scopedPauseObservationContract(settled) {
   assert.equal(typeof settled, "function", "scoped-pause settlement predicate unavailable");
   return {
@@ -584,8 +603,8 @@ export function directorContentionObjectiveBody(namespace, index, sharedPath, sh
   assert.match(sharedResource, /^factory-qualification-[a-z0-9-]+$/);
   return `${objectiveBodyFor(namespace, "trusted_local")}\n\nThis is one of exactly two Director-contention qualification Objectives. Keep the three modules and dependency graph above unchanged. The clamp root must additionally include ${sharedPath} in its allowed paths and add ${sharedPath}${namespace}.js exporting the string '${namespace}'; the peer Objective writes a different file in that directory. The slugify root must declare the exact exclusive resource ${sharedResource}. Preserve those exact path and exclusive-resource declarations in the Work Packets. ${
     index === 0
-      ? "Make both roots useful but smaller, with at least 12 individually named deterministic edge-case assertions each; keep the join minimal."
-      : "Make both roots materially larger with at least 48 individually named deterministic edge-case assertions each; keep the join minimal."
+      ? "Give each root exactly 8 individually named deterministic assertions; keep the join minimal."
+      : "Give each root exactly 16 individually named deterministic assertions so this peer remains larger while bounded; keep the join minimal."
   } Do not add sleeps, services, network calls, generated artifacts or unrelated dependencies. All files are ordinary mode 100644. Both Objectives edit disjoint files and must merge cleanly.`;
 }
 
@@ -1220,6 +1239,19 @@ export async function main(env = process.env, run = checkpointMain) {
         "scripts/verify-local-scheduling.mjs",
       ],
       preflight: async ({ evidence, request, list }) => {
+        if (authority.scenario === "director-contention") {
+          const rateLimit = (await request("GET /rate_limit")).data.resources;
+          evidence.directorContentionQuota = {
+            observedAt: new Date().toISOString(),
+            requiredCoreRemaining: directorContentionObservationLimits.requiredCoreRemaining,
+            core: rateLimit.core,
+          };
+          assert.ok(
+            Number.isSafeInteger(rateLimit.core?.remaining) &&
+              rateLimit.core.remaining >= directorContentionObservationLimits.requiredCoreRemaining,
+            `Director-contention qualification requires ${directorContentionObservationLimits.requiredCoreRemaining} remaining GitHub core requests before mutation`,
+          );
+        }
         const repository = (await request("GET /repos/{owner}/{repo}")).data;
         evidence.defaultBranch = repository.default_branch;
         evidence.freezeCapability = inspectFreezeCapability();
@@ -1405,6 +1437,12 @@ export async function main(env = process.env, run = checkpointMain) {
           };
         };
         const readIncrementalComments = async () => {
+          if (authority.scenario === "director-contention")
+            assert.ok(
+              evidence.observer.incrementalCommentListings <
+                directorContentionObservationLimits.incrementalCommentListings,
+              "Director-contention incremental observation bound exhausted",
+            );
           const since = new Date(Math.max(Date.parse(evidence.startedAt), commentCursor - 1000));
           const comments = await readObservation("comments", (remainingMs) =>
             list(
@@ -1422,6 +1460,12 @@ export async function main(env = process.env, run = checkpointMain) {
           return changed;
         };
         const observeOneAttempt = async (record, full = false) => {
+          if (authority.scenario === "director-contention")
+            assert.ok(
+              evidence.observer.fullObjectiveSnapshots <
+                directorContentionObservationLimits.fullObjectiveSnapshots,
+              "Director-contention fresh snapshot bound exhausted",
+            );
           evidence.observer.fullObjectiveSnapshots++;
           const objective = (
             await readObservation("objective", (remainingMs) =>
@@ -1840,10 +1884,10 @@ export async function main(env = process.env, run = checkpointMain) {
           },
           pollPeer: async () => {
             const record = evidence.objectives[1];
+            let observation = await observeOne(record);
             while (true) {
               abort.signal.throwIfAborted();
               checkpointTimeout(deadline(), 1);
-              const observation = await observeOne(record);
               evidence.latestPeer = observation;
               save();
               const events = eventsOf(observation);
@@ -1865,6 +1909,11 @@ export async function main(env = process.env, run = checkpointMain) {
                 return observation;
               }
               await wait(checkpointTimeout(deadline(), 10000));
+              const changedComments = await readIncrementalComments();
+              const hinted = hintedObservation(record, changedComments);
+              if (!directorContentionObservationWake([hinted]) && !adverseProgress([hinted]))
+                continue;
+              observation = await observeOne(record);
             }
           },
           innerCasCollision: async (controller) =>
@@ -1946,6 +1995,12 @@ export async function main(env = process.env, run = checkpointMain) {
                     wait(checkpointTimeout(deadline(), 10000)).then(() => false),
                   ]);
                   if (done) break;
+                  const changedComments = await readIncrementalComments();
+                  const hinted = evidence.objectives.map((record) =>
+                    hintedObservation(record, changedComments),
+                  );
+                  if (!directorContentionObservationWake(hinted) && !adverseProgress(hinted))
+                    continue;
                   const pair = await observePair();
                   evidence.directorContention.capacitySnapshots.push(capacitySnapshot(pair));
                   save();

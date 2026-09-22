@@ -10,7 +10,9 @@ import {
   installedBundleIdentity,
   boundedPolicy,
   modelTokenLimit,
+  qualificationPreflightStage,
   qualificationModels,
+  reserveLocalQualificationPreflightFailure,
 } from "./verify-live-objective.mjs";
 import {
   assertRegularPipelineCompletion,
@@ -777,7 +779,7 @@ export function createPressureQualification(authority, env = process.env, port =
 }
 
 export async function main(env = process.env, run = installedMain) {
-  const authority = pressureAuthority(env);
+  const authority = qualificationPreflightStage("scenario-authority", () => pressureAuthority(env));
   if (!authority) {
     console.log("Not exercised: separate explicit local pressure opt-in required.");
     return;
@@ -785,9 +787,20 @@ export async function main(env = process.env, run = installedMain) {
   await run(createPressureQualification(authority, env), { env });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  let preflightRecorder;
   try {
+    preflightRecorder = reserveLocalQualificationPreflightFailure({
+      env: process.env,
+      scenario: "local-pressure",
+    });
     await main();
-  } catch {
+    preflightRecorder?.complete();
+  } catch (error) {
+    try {
+      preflightRecorder?.fail(error);
+    } catch {
+      // The original preflight failure remains authoritative if retention is unavailable.
+    }
     console.error(
       "Local pressure qualification incomplete; preserve private evidence. No automatic reinjection.",
     );

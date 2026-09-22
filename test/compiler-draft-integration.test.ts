@@ -281,6 +281,7 @@ async function setup(
     acceptFirst?: boolean;
     invalidAcceptUnknownFirst?: boolean;
     invalidAcceptUngroundedFirst?: boolean;
+    invalidAcceptOmittedBindingFirst?: boolean;
     primitiveCompileFailure?: "string" | "null";
     frozenCompileFailure?: "error" | "object";
     cumulativeNodeValidation?: boolean;
@@ -458,6 +459,7 @@ async function setup(
         (options.acceptFirst === true ||
           options.invalidAcceptUnknownFirst === true ||
           options.invalidAcceptUngroundedFirst === true ||
+          options.invalidAcceptOmittedBindingFirst === true ||
           repairs > 0) &&
         !options.rejectAll;
       const verdict: CompilerJudgeVerdict = {
@@ -543,6 +545,8 @@ async function setup(
         if (binding.kind !== "criterion") throw new Error("fixture requires criterion binding");
         binding.criterionId = "missing-criterion";
       }
+      if (options.invalidAcceptOmittedBindingFirst && repairs === 0)
+        verdict.coverage[0]!.acceptanceBindings = [];
       return { value: verdict, usage };
     }
     if (prompt.includes("This is a repair")) {
@@ -905,6 +909,38 @@ describe("production compiler draft adapter", () => {
         evidenceIds: ["objective"],
       }),
     ]);
+    expect(() => validatePersistedCompilerDraftJournal(result.records)).not.toThrow();
+    const calls = f.runStructured.mock.calls.length;
+    await expect(compileEvaluatedDraft(f.args)).resolves.toMatchObject({
+      status: "accepted",
+      revision: 1,
+    });
+    expect(f.runStructured).toHaveBeenCalledTimes(calls);
+  });
+  it("repairs a schema-valid accept verdict that omits its exact proposal binding", async () => {
+    const f = await setup({ invalidAcceptOmittedBindingFirst: true });
+    const result = await compileEvaluatedDraft(f.args);
+    expect(result).toMatchObject({ status: "accepted", revision: 1 });
+    expect(f.stages).toEqual(["inventory", "compile", "judge", "repair", "judge"]);
+    const repairPrompt = f.prompts.find((prompt) => prompt.includes("This is a repair"))!;
+    const repairRequest = JSON.parse(repairPrompt.split("\n\n").at(-1)!) as CompilerRequest;
+    expect(repairRequest).toMatchObject({
+      revision: 1,
+      previousProposal: expect.objectContaining({
+        protocol: "clockgrove.factory/compiler-proposal",
+      }),
+      validationReport: { status: "valid", violations: [] },
+      semanticFindings: [
+        expect.objectContaining({
+          id: "omitted-proposal-coverage",
+          severity: "blocking",
+          obligationIds: ["values"],
+          itemIds: ["feature"],
+          evidenceIds: ["objective"],
+        }),
+      ],
+    });
+    expect(repairRequest.challenges).toEqual(expect.any(Array));
     expect(() => validatePersistedCompilerDraftJournal(result.records)).not.toThrow();
     const calls = f.runStructured.mock.calls.length;
     await expect(compileEvaluatedDraft(f.args)).resolves.toMatchObject({

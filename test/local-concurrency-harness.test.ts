@@ -10,6 +10,8 @@ import {
   concurrencyModelConfiguration,
   concurrencyObjectiveBody,
   directorContentionObjectiveBody,
+  directorContentionObservationLimits,
+  directorContentionObservationWake,
   concurrencyRefill,
   concurrencyReceiptProgress,
   scopedPauseObservationContract,
@@ -1533,6 +1535,32 @@ describe("installed two-Objective qualification authority", () => {
     expect(a).not.toContain(authority.namespaces[1]!);
     expect(b).not.toContain(authority.namespaces[0]!);
   });
+  it("bounds Director polling and wakes full snapshots only from incremental durable change", () => {
+    expect(directorContentionObservationLimits).toEqual({
+      requiredCoreRemaining: 4_000,
+      fullObjectiveSnapshots: 96,
+      incrementalCommentListings: 750,
+    });
+    const unchanged = {
+      changedReceipts: [],
+      pendingReceipts: [],
+      topologyPending: false,
+      terminalStatusPending: false,
+    };
+    expect(directorContentionObservationWake([unchanged, unchanged])).toBe(false);
+    expect(
+      directorContentionObservationWake([
+        unchanged,
+        {
+          ...unchanged,
+          changedReceipts: [{ event: event(2, 2, "AttemptStarted", 2, 20) }],
+        },
+      ]),
+    ).toBe(true);
+    expect(directorContentionObservationWake([{ ...unchanged, terminalStatusPending: true }])).toBe(
+      true,
+    );
+  });
 });
 
 describe("independent authenticated timing assertions", () => {
@@ -2224,8 +2252,17 @@ describe("bounded existing installed-controller composition", () => {
       `factory-qualification-${directorAuthority.namespace}`,
     );
     expect(body).toContain("exclusive resource");
+    expect(body).toContain("exactly 8 individually named deterministic assertions");
     expect(body).toContain("Every Work Item must declare trusted_local execution trust.");
     expect(body).not.toContain("declare managed execution trust");
+    const larger = directorContentionObjectiveBody(
+      directorAuthority.namespaces[1]!,
+      1,
+      `src/factory-qualification/${directorAuthority.namespace}/shared/`,
+      `factory-qualification-${directorAuthority.namespace}`,
+    );
+    expect(larger).toContain("exactly 16 individually named deterministic assertions");
+    expect(larger).not.toContain("48 individually named");
   });
   it("retains retired contender response and lease authority through final cleanup", async () => {
     const f = scenarioPort();

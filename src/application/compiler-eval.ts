@@ -260,7 +260,7 @@ const CompilerSourceEvidence = z
       })
       .strict(),
     evidence: z.array(CompilerEvidenceSchema).min(1).max(128),
-    factoryCapabilities: z.array(FactoryCompilerCapabilitySchema).max(7),
+    factoryCapabilities: z.array(FactoryCompilerCapabilitySchema).max(8),
     modelSelection: z
       .object({
         profile: z.string().min(1).max(160),

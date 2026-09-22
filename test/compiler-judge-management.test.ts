@@ -22,6 +22,7 @@ import {
   COMPILER_JUDGE_DIMENSIONS,
   CompilerCaseLabelSchema,
   compilerEvalDigest,
+  compilerPlanningInventory,
   type ObligationInventory,
   type CompilerJudgeVerdict,
 } from "../src/evaluation/compiler-eval.js";
@@ -544,6 +545,168 @@ describe("independent compiler management boundaries", () => {
       reasoning: null,
     });
     expect(runStructured).toHaveBeenCalledOnce();
+  });
+
+  it("repairs graph topology out of a qualification-shaped artifact criterion", async () => {
+    const { context } = await fixture();
+    context.objective = {
+      number: 1,
+      title: "Build a linear stack",
+      body: [
+        "Create exactly three Work Items in one root -> middle -> top stack.",
+        "The root adds only src/root.ts and test/root.test.ts.",
+      ].join("\n"),
+    };
+    context.repositoryEvidence = compilerObligationEvidence(context);
+    const inventory: ObligationInventory = {
+      version: 1,
+      objectiveDigest: compilerEvalDigest(context.objective),
+      baseSha: context.baseSha,
+      evidence: context.repositoryEvidence,
+      obligations: [
+        {
+          id: "linear-stack",
+          text: "Create the scoped change as the sole root of a three-item linear stack.",
+          kind: "explicit",
+          evidenceIds: ["objective"],
+          acceptanceEvidence:
+            "Candidate paths establish the scoped change; the admitted graph establishes topology.",
+        },
+      ],
+    };
+    const request = semanticRequest();
+    request.objective = { ...context.objective, digest: inventory.objectiveDigest };
+    request.baseSha = context.baseSha;
+    request.inventory = compilerPlanningInventory(inventory);
+    const malformed = semanticProposal(request, 3);
+    if (malformed.kind !== "work-items") throw new Error("fixture requires Work Items");
+    const [root, middle, top] = malformed.workItems;
+    if (!root || !middle || !top) throw new Error("fixture requires a three-item graph");
+    root.id = "root";
+    root.title = "Add root module";
+    root.scope = ["src/root.ts", "test/root.test.ts"];
+    root.criteria[0]!.id = "root-change";
+    root.criteria[0]!.text =
+      "This Work Item is the sole root of the three-item linear stack, has no dependencies, and adds only src/root.ts and test/root.test.ts.";
+    middle.id = "middle";
+    middle.title = "Add middle module";
+    middle.dependsOn = ["root"];
+    middle.criteria[0]!.id = "middle-behavior";
+    middle.criteria[0]!.text = "The middle module exposes its declared behavior.";
+    top.id = "top";
+    top.title = "Add top module";
+    top.dependsOn = ["middle"];
+    top.criteria[0]!.id = "top-behavior";
+    top.criteria[0]!.text = "The top module exposes its declared behavior.";
+    malformed.coverage = [
+      {
+        obligationId: "linear-stack",
+        bindings: [{ kind: "criterion", itemId: "root", criterionId: "root-change" }],
+      },
+    ];
+
+    const reviewed = verdict(inventory, malformed);
+    reviewed.coverage = [
+      {
+        obligationId: "linear-stack",
+        status: "partial",
+        itemIds: ["root"],
+        acceptanceBindings: [{ kind: "criterion", itemId: "root", criterionId: "root-change" }],
+        evidenceIds: ["objective"],
+        reason: "The criterion mixes candidate behavior with graph topology.",
+      },
+    ];
+    reviewed.items = malformed.workItems.map((item) => ({
+      itemId: item.id,
+      granularity: "cohesive" as const,
+      reason: "One bounded module change.",
+      evidenceIds: ["objective"],
+    }));
+    reviewed.dependencies = malformed.workItems.map((item) => ({
+      itemId: item.id,
+      dependsOn: [...item.dependsOn],
+      reason: "The exact linear dependency is grounded in the Objective.",
+      evidenceIds: ["objective"],
+    }));
+    reviewed.findings = [
+      {
+        id: "artifact-topology-mix",
+        dimension: "acceptance-quality",
+        severity: "blocking",
+        confidence: 1,
+        obligationIds: ["linear-stack"],
+        itemIds: ["root"],
+        evidenceIds: ["objective"],
+        rootCause: "The root criterion asks artifact review to prove whole-graph position.",
+        correction:
+          "Keep the file-scope behavior in the root criterion and bind the linear topology through dependsOn and exact-graph-admission.",
+        uncertainty: "",
+      },
+    ];
+    reviewed.decision = "repair";
+
+    const judged = await new CodexCliManagementBackend({
+      runStructured: async (_cwd, schema, prompt) => {
+        expect(schema).toEqual(CODEX_PLAN_JUDGE_SCHEMA);
+        expect(prompt).toContain("Return a blocking acceptance-quality repair");
+        expect(prompt).toContain("root, middle, top");
+        expect(prompt).toContain("sibling or join absence");
+        expect(prompt).toContain("exact-graph-admission");
+        expect(prompt).toContain(root.criteria[0]!.text);
+        return { value: reviewed, usage };
+      },
+    }).judgePlan(
+      {
+        ...judgeContext(context, inventory, malformed),
+        factoryCapabilities: request.factoryCapabilities,
+      },
+      async () => {},
+    );
+    expect(judged.verdict).toMatchObject({
+      decision: "repair",
+      findings: [{ id: "artifact-topology-mix", dimension: "acceptance-quality" }],
+    });
+
+    const repaired = structuredClone(malformed);
+    repaired.workItems[0]!.criteria[0]!.text =
+      "The candidate adds only src/root.ts and test/root.test.ts.";
+    repaired.coverage[0]!.bindings.push({
+      kind: "factory-capability",
+      capabilityId: "exact-graph-admission",
+    });
+    const repairRequest = structuredClone(request);
+    repairRequest.revision = 1;
+    repairRequest.previousProposal = malformed;
+    repairRequest.semanticFindings = judged.verdict.findings;
+    const proposed = await new CodexCliManagementBackend({
+      runStructured: async (_cwd, _schema, prompt) => {
+        expect(prompt).toContain("Every Work Item acceptance criterion must be decidable");
+        expect(prompt).toContain("Split a mixed artifact-and-topology clause");
+        expect(prompt).toContain("artifact-topology-mix");
+        expect(prompt).toContain(root.criteria[0]!.text);
+        return { value: repaired, usage };
+      },
+    }).proposePlan(repairRequest, async () => {}, semanticProjectionContext(), undefined, context);
+    expect(proposed.proposal).toMatchObject({
+      kind: "work-items",
+      coverage: [
+        {
+          obligationId: "linear-stack",
+          bindings: expect.arrayContaining([
+            { kind: "criterion", itemId: "root", criterionId: "root-change" },
+            { kind: "factory-capability", capabilityId: "exact-graph-admission" },
+          ]),
+        },
+      ],
+      workItems: [
+        expect.objectContaining({ id: "root", dependsOn: [] }),
+        expect.objectContaining({ id: "middle", dependsOn: ["root"] }),
+        expect.objectContaining({ id: "top", dependsOn: ["middle"] }),
+      ],
+    });
+    expect((proposed.proposal as CompilerProposal).workItems[0]!.criteria[0]!.text).toBe(
+      "The candidate adds only src/root.ts and test/root.test.ts.",
+    );
   });
 
   it("admits a compact 903-edge projection trace through the production judge boundary", async () => {

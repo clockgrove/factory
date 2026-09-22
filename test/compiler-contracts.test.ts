@@ -22,10 +22,12 @@ import {
   renderCompilerValidationReport,
 } from "../src/compiler/violations.js";
 import {
+  factoryCompilerCapabilities,
   parseAndValidateCompilerProposal,
   validateCompilerRequest,
 } from "../src/compiler/proposal.js";
 import { compilerProposalPrompt } from "../src/management/codex-cli.js";
+import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { readPinnedCompilerFacts } from "../src/repository-profiles/read.js";
 import { compilerCapabilitiesForRepository } from "../src/toolchains/compiler-capabilities.js";
 import {
@@ -484,6 +486,46 @@ describe("adapter-owned compiler capabilities", () => {
     expect(instruction).toContain("Factory derives commands, routes, egress, reviewer capability");
     expect(instruction).not.toMatch(/image|raster|audio|video|archive|model|json/i);
     expect(instruction!.length).toBeLessThan(500);
+  });
+
+  it("advertises exact graph admission and keeps topology out of artifact acceptance", () => {
+    const request = semanticRequest();
+    request.factoryCapabilities = factoryCompilerCapabilities({
+      ...DEFAULT_RUN_POLICY,
+      findingReporting: {
+        destinations: [
+          {
+            repository: "fixture/compiler-contracts",
+            audience: "private",
+            operations: ["read", "create-issue", "comment-evidence"],
+          },
+        ],
+        maxPublicationWrites: 1,
+      },
+    });
+    const graphAdmission = request.factoryCapabilities.find(
+      ({ id }) => id === "exact-graph-admission",
+    );
+    expect(request.factoryCapabilities).toHaveLength(8);
+    expect(graphAdmission).toMatchObject({
+      description: expect.stringContaining("exact acyclic dependency graph"),
+      authorityDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(CompilerRequestSchema.safeParse(request).success).toBe(true);
+    const providerRequest = new Ajv2020({ strict: false, allowUnionTypes: true }).compile(
+      COMPILER_REQUEST_JSON_SCHEMA,
+    );
+    expect(providerRequest(request), JSON.stringify(providerRequest.errors)).toBe(true);
+
+    const instruction = compilerProposalPrompt(request)
+      .split("\n")
+      .find((line) => line.startsWith("Every Work Item acceptance criterion"));
+    expect(instruction).toContain("pinned candidate artifact");
+    expect(instruction).toContain("root, middle, top");
+    expect(instruction).toContain("sibling or join absence");
+    expect(instruction).toContain("dependsOn");
+    expect(instruction).toContain("exact-graph-admission");
+    expect(instruction).toContain("Split a mixed artifact-and-topology clause");
   });
 
   it("renders execution trust availability from the authoritative route matcher", () => {

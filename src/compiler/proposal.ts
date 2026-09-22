@@ -110,6 +110,15 @@ export function factoryCompilerCapabilities(runPolicy: RunPolicy): FactoryCompil
       authority: { trust: runPolicy.trust },
     },
     {
+      id: "exact-graph-admission",
+      description:
+        "Factory validates and admits the exact acyclic dependency graph and delivery topology before Work Item execution.",
+      authority: {
+        graph: "clockgrove.factory/graph-v1",
+        projection: "clockgrove.factory/graph-projection-v1",
+      },
+    },
+    {
       id: "execution-network-policy",
       description: "Factory enforces execution trust, backend, and allowed network destinations.",
       authority: {

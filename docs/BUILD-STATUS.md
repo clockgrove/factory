@@ -1,13 +1,26 @@
 # Factory build status
 
+**Corrected artifact preparation:** Candidate v0.1.23 pins the accepted local
+Codex-only source through #140. Package/lock-root/manifest/marketplace versions
+and release instructions agree; no dependency or runtime change is made by the
+release metadata handoff. Version 0.1.22 remains the separate frozen unreleased
+#55 candidate. Publication, a fresh public heading-rich same-path LFS gate and a
+fresh private #26 pilot remain required. No historical failed run is reused and
+neither source acceptance nor publication constitutes adopter acceptance.
+
 **Heading-selected result review (#140):** The source correction permits repeated
 planning paths for separately selected headings and grounds each result finding
 in any one exact-path section. Authoritative evidence labels remain unique and
 cannot collide with planning paths; no cross-section quote concatenation or
 acceptance waiver is added. Focused public temporary-Git coverage includes the
 actual Work Item and final application path, later-heading quotes, invalid
-grounding and duplicate/colliding evidence. Independent review, hosted/main
-verification and source acceptance are pending. This is a #26 pilot prerequisite,
+grounding and duplicate/colliding evidence. [PR #141](https://github.com/clockgrove/factory-rebuild/pull/141)
+merged reviewed corrected head `c9968e6d5822bfeeca34ff53a08f60fa387236f4`
+at `3ca15a10fd773d1894cc42b8a6c59e39ada0eb0e`, preserving the complete reviewed
+tree `b2cb2798ea52f9fb5a0ecdd7ccf218c787b7df6f`. Independent full 156-test,
+static, actual Node22 affected 23-test and identity-free fixture gates passed,
+as did exact-head Quality and [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36272497480).
+#140 is accepted and closed. This is a #26 pilot prerequisite,
 not a qualification of the preserved failed run or immutable v0.1.21. A newly
 published corrected artifact and fresh qualifying gate/pilot remain required.
 

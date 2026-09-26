@@ -1,5 +1,12 @@
 # Public release checklist
 
+Current candidate: v0.1.23, including accepted #140 and later source leaves, not
+the deferred #55 optional harnesses. Historical v0.1.21 acceptance and the older
+release inventory below remain evidence of that artifact only. The new candidate
+needs its own code/CI/package/public-download/offline-install verification and
+fresh heading-rich same-path LFS gate before a fresh private #26 pilot. Never
+reuse the failed adopter run or treat publication as acceptance.
+
 The first release passed [#25](https://github.com/clockgrove/factory-rebuild/issues/25). Public v0.1.10 completed the fresh installed-artifact gate for [#44](https://github.com/clockgrove/factory-rebuild/issues/44), [#64](https://github.com/clockgrove/factory-rebuild/issues/64), and [#67](https://github.com/clockgrove/factory-rebuild/issues/67). Public v0.1.13 remained nonqualifying because result review lacked controller-owned capture and selection evidence, v0.1.14 remained nonqualifying after a provider stream never emitted a terminal result, v0.1.15 was superseded before a live Objective because its installed setup skill misstated the worker default, v0.1.16 preserved a validated Work Item result after reviewer capacity was converted directly into a human decision, v0.1.17 preserved a selected result whose digest-bound receipt lacked manifest provenance, v0.1.18 preserved a selected result whose capture receipt lacked controller-imported input identity, v0.1.19 preserved a fail-closed planning attempt whose response used Markdown-prefixed citation headings, and v0.1.20 preserved a validated selected result whose automatic review packet did not distinguish the worker result from controller materialization. Public v0.1.21 independently completed [#81](https://github.com/clockgrove/factory-rebuild/issues/81)'s installed-artifact gate; see [exact acceptance evidence](V0.1.21-ACCEPTANCE.md) Checking a file into the repository does not satisfy an installed-artifact or live Objective gate.
 
 ## Repository and package assets

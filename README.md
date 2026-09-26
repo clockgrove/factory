@@ -4,11 +4,13 @@
 
 Factory turns a repository development Objective into source-grounded Work Items, runs bounded coding attempts, validates their exact result trees, and delivers the changes through GitHub. It is an open-source Clockgrove plugin installed for one target repository at a time.
 
-**Version:** `v0.1.21`. Factory runs the local Codex SDK path with a source-grounded dependency DAG, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for the published artifact identity and exact Objective acceptance evidence.
+**Release candidate:** `v0.1.23`. Factory runs the local Codex SDK path with a source-grounded dependency DAG, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for publication status, artifact identity and exact Objective acceptance evidence.
 
-v0.1.21 is the immutable public release. Current-main behavior described below
-includes later accepted source changes that are not in that release. Build status
-distinguishes accepted source, published releases and unreleased qualification candidates.
+v0.1.21 remains the previously accepted immutable public artifact. v0.1.23
+contains later accepted source corrections, including heading-selected result
+review. The commands below require its matching public release to exist;
+publication is not installed-artifact or adopter acceptance. The separate
+unreleased #55 candidate 0.1.22 and Claude/Copilot qualification remain deferred.
 
 ## How it works
 
@@ -19,19 +21,19 @@ distinguishes accepted source, published releases and unreleased qualification c
 
 The target repository owns its product and runtime truth. Factory state and credentials stay outside the target checkout. Factory refuses to run against any Factory source repository.
 
-## Install v0.1.21
+## Install v0.1.23 after publication
 
-Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.21) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md):
+After publication, install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.23) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md):
 
 ```sh
-codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.21
+codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.23
 codex plugin add factory@clockgrove
-gh release download v0.1.21 --repo clockgrove/factory-rebuild \
-  --pattern clockgrove-factory-0.1.21.tgz --pattern SHA256SUMS
+gh release download v0.1.23 --repo clockgrove/factory-rebuild \
+  --pattern clockgrove-factory-0.1.23.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Compare the tarball digest with the independently recorded build status value.
 npm install --offline --ignore-scripts --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.21.tgz
+  ./clockgrove-factory-0.1.23.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```
@@ -52,7 +54,7 @@ npm run lint
 npm run format:check
 npm test
 npm pack
-npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.21.tgz
+npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.23.tgz
 ```
 
 The repository's [quality-tooling map](docs/QUALITY-TOOLING.md) records the

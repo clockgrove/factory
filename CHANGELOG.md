@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.23 — 2026-09-26
+
+- Permit result and final review to ground exact quotes across separately selected headings from the same source document, without concatenating packets or weakening authoritative evidence label checks.
+- Include accepted source corrections since v0.1.21: accurate resume messaging, compact citation schema, resource guidance, aggregate review budgets, worker usage, streaming usage summaries, bounded provider-wait retention, Node 22.0 scanner compatibility, host-tool preflight, interrupted-delivery refusal and the reviewed Biome migration with retained fallback quality coverage.
+- Preserve local Codex-only execution and the Node >=22.0 floor. Optional Claude/Copilot harness work and live qualification in #55 remain deferred and are not included.
+- Publication and fresh installed-artifact/adopter acceptance remain separate gates. The unreleased #55 candidate uses 0.1.22; this release candidate uses 0.1.23 to avoid conflating their identities.
+
 ## 0.1.21 — 2026-09-25
 
 - Bind automatic review to the immutable worker/controller Git boundary for selected media: the retained worker result changes no selected destination, and Factory's exact child commit changes every selected destination and no others.

@@ -984,18 +984,21 @@ function reviewFindingRejection(
     return { field: "verdict", reason: "invalid-verdict" };
   if (!candidate.detail?.trim())
     return { field: "detail", reason: "empty-detail" };
-  const source = groundedSources.find(
+  const sources = groundedSources.filter(
     (entry) => entry.path === candidate.source,
   );
-  if (!source) return { field: "source", reason: "unknown-source" };
-  if (candidate.verdict === "pass" && source.complete === false)
+  if (!sources.length) return { field: "source", reason: "unknown-source" };
+  if (
+    candidate.verdict === "pass" &&
+    sources.some((source) => source.complete === false)
+  )
     return { field: "source", reason: "source-truncated" };
   if (!candidate.quote?.trim())
     return { field: "quote", reason: "empty-quote" };
   if (
-    !source.content.includes(candidate.quote) &&
+    !sources.some((source) => source.content.includes(candidate.quote)) &&
     !(
-      source.path === "Exact Git change packet" &&
+      candidate.source === "Exact Git change packet" &&
       patchExcerpts.some((excerpt) => excerpt.includes(candidate.quote))
     )
   )
@@ -1043,9 +1046,13 @@ export async function reviewAcceptance(args: {
     ...(args.evidenceSources ?? []),
   ];
   const groundedSources = [...sources, ...evidenceSources];
+  // Selected headings legitimately share planning paths. Authoritative evidence
+  // labels must still be unique and cannot masquerade as planning sources.
+  const sourcePaths = new Set(sources.map((source) => source.path));
   if (
-    new Set(groundedSources.map((source) => source.path)).size !==
-    groundedSources.length
+    new Set(evidenceSources.map((source) => source.path)).size !==
+      evidenceSources.length ||
+    evidenceSources.some((source) => sourcePaths.has(source.path))
   )
     throw new Error("Result review evidence paths must be unique");
   const patchExcerpts = parseResultChangePacket(change).patches.map(

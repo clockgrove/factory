@@ -1,5 +1,16 @@
 # Factory build status
 
+**Heading-selected result review (#140):** The source correction permits repeated
+planning paths for separately selected headings and grounds each result finding
+in any one exact-path section. Authoritative evidence labels remain unique and
+cannot collide with planning paths; no cross-section quote concatenation or
+acceptance waiver is added. Focused public temporary-Git coverage includes the
+actual Work Item and final application path, later-heading quotes, invalid
+grounding and duplicate/colliding evidence. Independent review, hosted/main
+verification and source acceptance are pending. This is a #26 pilot prerequisite,
+not a qualification of the preserved failed run or immutable v0.1.21. A newly
+published corrected artifact and fresh qualifying gate/pilot remain required.
+
 **Interrupted regular delivery (#121):** The current contract refuses a running
 Work Item at `deliver` rather than reconciling publication from remote evidence.
 The accepted correction adds actionable preservation/operator guidance and focused

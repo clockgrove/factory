@@ -4,6 +4,23 @@ The clean implementation starts from the Factory plan reviewed September 22, 202
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Published v0.1.23 handoff
+
+The [public release](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.23)
+pins source `15d60c5e5cf691374e59dd7adb496b3492e0bf57`, tree
+`70e18958a4161b57edf7b3d658246bd32df3e6e6`, and tarball SHA-256
+`0602337b86913f0fc493040ebe3a9eaee99593d412044c2839969b7993172baa`.
+Accepted release metadata, independent artifact/offline-install checks, public
+download and marketplace verification supplied this documentation-only handoff.
+No runtime, dependency, license text, fixture or packaged skill is changed.
+The first fresh public plan remains nonqualifying at `needs-human`, revision 1:
+its source/graph did not clearly separate temporary media staging exceptions
+from delivered-path ownership. Installed worker and capture semantics already
+support that distinction. No override, replan or activation was performed;
+a fresh explicit-staging public target is preparation, not runtime correction
+or qualifying evidence. Historical v0.1.21 evidence and frozen #55 remain intact;
+fresh public Objective and private adopter acceptance are separate pending gates.
+
 ## Heading-selected result-review sources (#140)
 
 Accepted PR #141 corrected head `c9968e6d5822bfeeca34ff53a08f60fa387236f4`

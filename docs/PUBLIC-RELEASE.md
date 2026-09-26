@@ -4,12 +4,17 @@ This is the reusable release and installation procedure. [#25](https://github.co
 
 ## Distribution shape
 
-The [Clockgrove marketplace](../.agents/plugins/marketplace.json) names the plugin at this repository's root and pins candidate `v0.1.23`. Codex loads its manifest and use skills from that Git tag after publication. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+The [Clockgrove marketplace](../.agents/plugins/marketplace.json) names the plugin at this repository's root and pins published `v0.1.23`. Codex loads its manifest and use skills from that Git tag. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
 
-Candidate v0.1.23 includes the heading-source result-review correction and later
-accepted source leaves, not deferred #55 optional harness work. Publication,
-a fresh heading-rich same-path LFS gate and a fresh private adopter pilot remain
-required. The failed v0.1.21 adopter run is preserved without reuse. Version
+Published [v0.1.23](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.23)
+includes the heading-source result-review correction and later accepted source
+leaves, not deferred #55 optional harness work. [Build status](BUILD-STATUS.md)
+records its exact source/tree, digest and passing artifact/installation checks.
+A fresh heading-rich same-path LFS gate and a fresh private adopter pilot remain
+required. The first fresh public plan is preserved as nonqualifying after a
+temporary-staging versus delivered-ownership wording contradiction; no override,
+replan or activation occurred. A separate fresh explicit-staging target is being
+prepared. The failed v0.1.21 adopter run is preserved without reuse. Version
 0.1.22 remains reserved by the frozen unreleased #55 candidate.
 
 Publish a candidate tag and release asset only after its code, CI, packaging, and notice checks pass; then run the disposable gate from a fresh public download. Publication is not acceptance and does not authorize the Clockgrove pilot. Do not point the marketplace at a moving branch. If the candidate version changes, update the package, manifest, marketplace ref, changelog, README status, and commands here together before tagging.

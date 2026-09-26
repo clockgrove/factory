@@ -289,3 +289,18 @@ installed clean/refused/fatal scanner checks and exact required-dependency
 verification. Integrated-main Quality passed at
 `57abc0a43b605148a6b3ec191bcedb34c7cf9bc2`; #129 is closed. No immutable public
 v0.1.21 release bytes were rewritten or newly qualified by these source checks.
+
+## Required planner graph shape (#145)
+
+Public issue #145 and the credential-free audit of accepted public/installed
+v0.1.23 schema, citation decoder and deterministic scheduler supplied this
+alignment. Graph items and acceptance/nonGoals/ownedPaths/citation collections
+receive the existing nonempty lower bound; title/goal/brief receive the existing
+nonempty string bound. Generic, source-specific and production indexed schemas
+retain the same constraints. Scripted SDK tests batch all eight malformed shapes
+and preserve optional empty collections, whole-source empty headings and current
+acceptance/nonGoal entry semantics. Deterministic validators are unchanged.
+No archived/private source, provider, new target, retry/repair, installed artifact
+patch, arbitrary maximum, dependency, Node-floor or release change was used.
+The actual fields of preserved failed provider responses remain unknown;
+synthetic reproducibility is not exact causal attribution or live qualification.

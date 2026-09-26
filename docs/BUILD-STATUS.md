@@ -277,3 +277,13 @@ and [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/acti
 passed. #133 is closed independently of the deferred live-provider/pilot gates.
 
 **Explicit non-goals now:** managed-agent execution, sandbox providers, Daytona, automatic local/cloud bursting, distributed controllers, media generation providers, and private adopter-specific product work. Factory source must never be its own target. The public fixture files and Objective templates are sufficient to reproduce generic Factory acceptance in a repository the contributor controls.
+
+**Required graph-shape schema (#145):** The focused source alignment adds only
+existing lower bounds for graph items, four required Work Item collections and
+title/goal/brief. Batched generic/source-specific and production indexed-schema
+tests cover all eight previously schema-admitted empty shapes and keep runtime
+validation fail-closed. Legitimate empty optional collections and whole-source
+headings remain valid. Independent review, hosted/main checks and source
+acceptance are pending. Immutable public v0.1.23, all nonqualifying targets and
+packets, and deferred #55 remain unchanged; a later corrected immutable artifact
+and fresh installed gate are separate requirements, not waived by source tests.

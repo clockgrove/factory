@@ -112,16 +112,18 @@ export const graphSchema = {
     baseSha: { type: "string" },
     items: {
       type: "array",
+      minItems: 1,
       items: {
         type: "object",
         properties: {
           id: { type: "string" },
-          title: { type: "string" },
-          goal: { type: "string" },
-          acceptance: { type: "array", items: { type: "string" } },
-          nonGoals: { type: "array", items: { type: "string" } },
+          title: { type: "string", minLength: 1 },
+          goal: { type: "string", minLength: 1 },
+          acceptance: { type: "array", minItems: 1, items: { type: "string" } },
+          nonGoals: { type: "array", minItems: 1, items: { type: "string" } },
           citations: {
             type: "array",
+            minItems: 1,
             items: {
               type: "object",
               properties: {
@@ -133,7 +135,7 @@ export const graphSchema = {
             },
           },
           dependencies: { type: "array", items: { type: "string" } },
-          ownedPaths: { type: "array", items: { type: "string" } },
+          ownedPaths: { type: "array", minItems: 1, items: { type: "string" } },
           resources: {
             type: "array",
             items: {
@@ -158,7 +160,7 @@ export const graphSchema = {
               additionalProperties: false,
             },
           },
-          brief: { type: "string" },
+          brief: { type: "string", minLength: 1 },
           sourceAssets: {
             type: "array",
             items: {

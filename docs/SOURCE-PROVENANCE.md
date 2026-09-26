@@ -191,6 +191,21 @@ The current public issues, source contracts and fresh public v0.1.21 gate/postmo
 
 Media brief guidance and actual worker packet regressions preserve accepted requirements, immutable-byte obligations, ordinary owned code and staging declarations while excluding controller operations. Optional provider-neutral worker usage observations normalize supplied counters at the adapter seam and feed the existing private observational progress stream. Usage summaries label scope, cumulative deduplication, supplied-category coverage and matched cache denominators; they do not parse arbitrary evidence, infer charges or reconstruct execution state. The startup correction records the observation before guarded provider stream creation, without changing timeout or result authority. These source acceptances are not new installed-artifact or private-adopter qualification.
 
+## Local host executable preflight (#70)
+
+The public #70 failure, current admitted command contracts and local validator
+environment supplied this leaf. Fresh activation resolves reliably literal host
+entrypoints and reports unresolved dynamic coverage before projection or attempts.
+Lookup uses fixed non-login shell builtins, never target command text. The
+validator now uses the same non-login environment so supplied PATH is not replaced
+by login profiles. Only explicit exact pinned-base npm/pnpm `packageManager`
+versions permit host `--version` probes outside the target; unsupported policies
+stay unverified, with no invented version or provisioning policy. Source command
+authority and later-tree package script/hook checks are unchanged. Temporary-Git
+tests use task-private synthetic host tools and ordinary validation, not live
+provider qualification. No archive, private adopter material, lifecycle journal,
+fallback or retry machinery was inspected or added.
+
 ## Summary transcript retention (#127)
 
 Issue #127 and the current public diagnostic reader, correlation and usage

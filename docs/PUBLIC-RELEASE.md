@@ -56,6 +56,49 @@ factory help
 
 Verify `factory@clockgrove` appears in `codex plugin list --json` before the live Objective. The installed `director` and `setup` skills guide agent use; the `factory` CLI above supplies their documented operations. The CLI prefix, Factory configuration, state, review exports, and planning candidates must stay outside the target checkout. A target still requires GitHub CLI access and an authenticated Codex SDK environment; media Objectives require Git LFS.
 
+## Local host-toolchain check
+
+The automatic preflight below is current-source behavior, not a retrofit to
+immutable public v0.1.21. Older published artifacts still need the manual
+same-environment check; a new source candidate requires its own exact-artifact gate.
+
+An offline Factory installation does not install the target's host tools. Inspect
+all exact admitted Work Item and final commands before activation, including the
+package manager needed for package scripts that will be created by a dependency.
+Provision a task-private tool directory only under separate operator authority;
+Factory never provisions tools or invents a package-manager version. For example,
+after that directory has already been prepared:
+
+```sh
+FACTORY_TARGET_TOOLCHAIN=/absolute/private/approved-toolchain/bin
+export PATH="$FACTORY_TARGET_TOOLCHAIN:$PATH"
+sh -c 'command -v sh'
+sh -c 'command -v pnpm'
+# Check an exact version only when the pinned source/operator policy requires it.
+pnpm --version
+```
+
+Use this same explicitly supplied PATH for the subsequent `factory run`. Local
+validation and preflight now use non-login `sh -c`, not ambient login-profile
+tool setup. Fresh activation rechecks current literal executable availability
+before GitHub projection, target work or attempt state. Missing tools and
+supported exact base `packageManager` npm/pnpm version mismatches produce an
+actionable error and structured private diagnostics; status stays `not-started`.
+This is not a retry of a previously failed run, and source authorization and
+later exact-tree script/hook checks are unchanged.
+
+Read `unverified` preflight observations explicitly: dynamic or nested commands,
+target-owned lookup shells (including symlink aliases), unresolved shell PATH
+precedence,
+quoted compounds, relative PATH entries, generated target executables and
+unsupported version policies require separate operator inspection. Preflight
+does not execute their commands or bodies. Its version probe runs only a safely
+resolved host npm/pnpm `--version`, outside the target, for an exact supported
+pin; it never runs a target executable to discover a version. A ready literal
+entrypoint is not a claim that script internals, plugins, interpreter dependencies
+or all runtime prerequisites are satisfied. A planning preview does not preserve
+host readiness across environment changes.
+
 ## Fresh disposable Objective
 
 1. Create a new GitHub repository you control from the [public disposable target fixture](../test/fixtures/disposable-target/) and push its initial `main`. Create its Objective issue from the [same-path Git LFS Objective](../test/fixtures/objectives/same-path-lfs.md), which requires the existing ordinary `assets/source.png` blob to become required LFS at the same path without changing its exact bytes. Use a new repository and fresh `XDG_CONFIG_HOME` and `XDG_STATE_HOME`.

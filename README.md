@@ -135,6 +135,41 @@ Before publication, Factory checks only a Work Item's changed paths against its 
 
 Configuration lives under `$XDG_CONFIG_HOME/clockgrove-factory` (or `~/.config/clockgrove-factory`); durable run state lives under `$XDG_STATE_HOME/clockgrove-factory` (or `~/.local/state/clockgrove-factory`). Do not put either in the target repository.
 
+## Local host-tool preflight
+
+Before running any lookup, preflight inspects the selected `sh` on the effective
+PATH using filesystem checks. Target-owned shells (including symlink aliases)
+and unresolved relative precedence remain `unverified` without execution or a
+fallback shell; provide an approved host shell to qualify that toolchain.
+
+This describes current source; immutable public v0.1.21 bytes are unchanged.
+
+Factory's package supplies Factory, not the target's package manager or toolchain.
+Fresh local activation checks reliably literal Work Item and final validation
+entrypoints against the sanitized validation environment before projecting issues
+or creating an attempt. A missing executable or an explicitly pinned exact
+`packageManager` npm/pnpm version mismatch stops with command origin, source,
+item/index and redacted PATH context in the error and private diagnostics. Status
+remains `not-started`; no attempt is made retryable. A planning preview is not a
+host-readiness receipt: activation checks the current environment again.
+
+Validation now uses non-login `sh -c` with the explicitly supplied PATH. Shell
+login profiles do not provision or change that environment. Provide approved
+tools in a task-private host directory before activation; see the
+[public gate toolchain check](docs/PUBLIC-RELEASE.md#local-host-toolchain-check).
+Preflight runs only fixed host executable lookups and, for a supported explicit
+pin, the resolved host package manager's `--version` outside the target. It does
+not run target commands, scripts or hooks, install tools, choose versions or
+substitute a manager. Newly created package scripts still require the manager;
+their bodies and hooks remain subject to ordinary exact-result-tree checks.
+
+This is not a shell interpreter or complete toolchain qualification. Dynamic
+substitution, wrapper bodies, quoted compound commands, relative/worktree PATH
+entries and unsupported version policies are visibly `unverified`, not silently
+approved or newly banned. Literal lookups do not qualify script internals,
+plugins, interpreter dependencies or runtime behavior. Inspect those prerequisites
+under the target's source and operator authority before running.
+
 ## Deterministic contributor gate
 
 Run the complete credential-free gate with one command:

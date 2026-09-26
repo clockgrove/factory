@@ -36,6 +36,14 @@ neither changes nor republishes the immutable artifact. Historical v0.1.21,
 v0.1.23 failed planning evidence and frozen #55 candidate 0.1.22 remain unchanged;
 Claude/Copilot live qualification remains deferred and unaccepted.
 
+The [controlling plan](IMPLEMENTATION-PLAN.md#operator-approved-codex-only-adopter-pilot)
+records the operator-approved Codex-only execution-order exception: #55 and
+Claude/Copilot qualification do not block this separately authorized pilot.
+#55 remains OPEN/deferred and draft #62 frozen/unmerged. Overall trunk completion
+still requires its separate installed-harness/second-provider proof and actual
+adopter acceptance; public-gate acceptance or pilot deferral waives neither.
+This docs correction is not a prerequisite for independently approved execution.
+
 **Required graph shape (#145):** [PR #146](https://github.com/clockgrove/factory-rebuild/pull/146)
 merged reviewed head `35d88605d563ad44b00d99336864e9c7e265e6e1`, source tree
 `e302527bb10a8f689bcaff8259302cbed277387d`, at integration

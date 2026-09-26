@@ -10,6 +10,15 @@ Ship the trunk through one path: Objective → Work Item DAG → local execution
 
 The installed local harness seam and its second-provider proof are trunk issue #55. After trunk and the public pilot, add `ManagedExecutionDriver`, then `SandboxExecutionDriver` using the already-landed harness seam, then Daytona as the first `SandboxProvider`. Bursting, mixed modes, live migration, adaptive pressure, distributed controllers, and compounded fault matrices are leaves.
 
+The operator-approved Codex-only #26 adopter pilot is a bounded execution-order
+exception: #55 and Claude/Copilot live qualification are deferred prerequisites
+for that pilot, not accepted behavior. See the [controlling plan exception](docs/IMPLEMENTATION-PLAN.md#operator-approved-codex-only-adopter-pilot).
+Keep #55 OPEN/deferred and draft PR #62 frozen/unmerged; its live proof and the
+actual adopter acceptance remain separate requirements for overall trunk
+completion. Do not block the independently authorized pilot on #55, provider
+login or this docs handoff, and do not infer new target/source-egress authority
+from public contributor instructions.
+
 ## Scope
 
 Start from the current issue's outcome and the relevant section of the public plan. A finding is a blocker only when it prevents that path; record useful follow-ups without making them blockers. Stop when accepted behavior and focused validation pass. The target repository owns product requirements, documentation authority, commands, branch protection, and Objective exit conditions. Work Item completion does not imply Objective completion.

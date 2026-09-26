@@ -4,6 +4,19 @@ The clean implementation starts from the Factory plan reviewed September 22, 202
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Heading-selected result-review sources (#140)
+
+Public issue #140, current `src/validation.ts`, and the accepted planning-review
+grounding in `src/compiler.ts` supply this narrow correction. Selected sections
+retain their shared exact repository path and separate content. Result findings
+may quote any one matching section without concatenating packets. Generated and
+custom authoritative evidence labels remain unique and disjoint from planning
+paths; incomplete evidence, exact-tree command binding, byte budgets and
+per-criterion refusal/decision semantics are unchanged. New temporary-Git tests
+cover Work Item and final review, later headings, invalid grounding and label
+collisions. No archived code, private source, provider call, preserved failed run
+or installed v0.1.21 byte was read or changed for implementation.
+
 PR #138 accepted head `9003535a215ab9ae32eb298ddec2e22194510a75` merged at
 `32efd07c7c204fbc52844914e1863cba3ffb0bc6` with unchanged reviewed tree and
 passing integrated-main Quality. #70 is closed after independent shell-before-launch

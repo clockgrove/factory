@@ -4,9 +4,9 @@ The clean implementation starts from the Factory plan reviewed September 22, 202
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
-## v0.1.24 release metadata preparation
+## Published v0.1.24 and public gate handoff
 
-The candidate starts from #145 integration
+The metadata-only release starts from #145 integration
 `2f3d4f5a820b1001f41cff731640fc4085552630`, combined tree
 `a68c7e578d2b708ff3abdcd29e56954e69393bfe`. Public #145, accepted clean schema
 contracts and their credential-free tests supplied the required-shape correction;
@@ -15,7 +15,23 @@ package/lock-root identity, manifest/marketplace pin, release documentation,
 changelog and the generated Factory notices header. All dependency entries,
 scripts, runtime, tests, skills and license bodies are unchanged from that base.
 No archived material, provider, target or private source is needed for this work.
-No tag, public release, installed Objective or adopter acceptance is claimed.
+Accepted PR #147 normally merged at source
+`e0fc91343563e6a3b19eb92dd64d419ba03b487a`, tree
+`25f80920ebb5848db019c384fcefbce6738f562a`. The published
+[v0.1.24 artifact](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24)
+is 150176214 bytes, SHA-256
+`513f46100ce1956c481d26a6ef96f63a62035527c4437268afac3c10e322ef31`.
+Accepted full159/static/actual Node22, exact/main Quality, clean merged-source
+package/offline, public-download and marketplace evidence supplied this handoff.
+The completed [fresh public Objective](https://github.com/clockgrove/factory-v0124-gate-20260926-batched/issues/1)
+and its normal PR4/5 merges supply public installed-gate evidence at final head
+`5ed4b237d51943c52ea5d2f1f84c9eb1820bb199`, tree
+`f5d247803aa6a83599e22c7531d06affdd5900df`.
+Whole-set human selection, unchanged public fixture bytes, automatic final
+review and independent fresh-clone LFS verification are detailed in
+[BUILD-STATUS.md](BUILD-STATUS.md). No private source, paths, logs or issue
+identifiers supplied this public docs-only change. It does not alter the release
+or accept the actual #26 pilot, which remains OPEN and separately owned.
 Published v0.1.23/failure evidence, historical v0.1.21 and frozen #55 remain intact.
 
 ## Published v0.1.23 handoff
@@ -39,11 +55,12 @@ Root's credential-free installed-schema diagnostic reproduced eight schema-valid
 empty required shapes rejected by deterministic validation; it does not identify
 the field in a real failed response. [#145](https://github.com/clockgrove/factory-rebuild/issues/145)
 owns the bounded schema/validator alignment, not the v0.1.23 documentation handoff.
-Its later integration is the v0.1.24 candidate base recorded above; no qualifying
-gate is claimed by either handoff. Historical v0.1.21
+Its later integration is the v0.1.24 metadata base recorded above; v0.1.23's
+failed attempts are not requalified by the fresh v0.1.24 gate. Historical v0.1.21
 evidence and frozen #55 remain intact. #145 is now accepted and closed for source;
-v0.1.24 preparation and a fresh public installed gate remain required before the
-separately approved private adopter pilot; v0.1.23 is not patched or requalified.
+v0.1.24 publication and fresh public installed-gate acceptance are recorded above.
+The separately approved actual adopter pilot remains unaccepted;
+v0.1.23 is not patched or requalified.
 
 ## Heading-selected result-review sources (#140)
 

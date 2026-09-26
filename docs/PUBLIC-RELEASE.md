@@ -4,7 +4,14 @@ This is the reusable release and installation procedure. [#25](https://github.co
 
 ## Distribution shape
 
-The [Clockgrove marketplace](../.agents/plugins/marketplace.json) names the plugin at this repository's root and pins published `v0.1.23`. Codex loads its manifest and use skills from that Git tag. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+The [Clockgrove marketplace](../.agents/plugins/marketplace.json) names the plugin at this repository's root and pins candidate `v0.1.24`. Codex loads its manifest and use skills from that Git tag after publication. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+
+Candidate v0.1.24 carries the accepted and closed #145 required-shape correction
+from integration `2f3d4f5a820b1001f41cff731640fc4085552630`. Its metadata does
+not change runtime, tests, skills, dependencies, scripts or license bodies.
+Publication, independent public-download/offline-install verification and a fresh
+installed Objective gate remain required before a separately approved private
+pilot. The commands below require this candidate's public release to exist.
 
 Published [v0.1.23](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.23)
 includes the heading-source result-review correction and later accepted source
@@ -17,8 +24,8 @@ replan or activation occurred. A second staging-clarified plan also remains
 nonqualifying, and the third minimum-clarified invocation failed initial
 required-shape validation before a plan file or activation. The raw real failed
 field is unknown. [#145](https://github.com/clockgrove/factory-rebuild/issues/145)
-owns the bounded schema/validator correction; after independent acceptance,
-a new immutable artifact and fresh installed gate are required. Do not patch
+is now accepted and closed for its bounded source correction; v0.1.24 is the
+new metadata candidate, not an accepted artifact or Objective. Do not patch
 v0.1.23 or continue editing fixtures to evade generated-graph failures.
 The failed v0.1.21 adopter run is preserved without reuse. Version
 0.1.22 remains reserved by the frozen unreleased #55 candidate.
@@ -40,10 +47,10 @@ npm test
 mkdir -p /absolute/empty/release-directory
 npm pack --pack-destination /absolute/empty/release-directory
 cd /absolute/empty/release-directory
-sha256sum clockgrove-factory-0.1.23.tgz > SHA256SUMS
+sha256sum clockgrove-factory-0.1.24.tgz > SHA256SUMS
 ```
 
-Inspect the tarball file list for the manifest, installed skills, CLI, license, logo, notices, and bundled production dependency tree. In a separate empty prefix, install the tarball with `npm install --offline --ignore-scripts --prefix /absolute/private/check-prefix ./clockgrove-factory-0.1.23.tgz` using an empty npm cache; verify `factory help`, compare every installed bundled package version with `package-lock.json`, and check that notices cover the same tree. Record `git rev-parse HEAD`, package version, tarball SHA-256, and the passing CI run. Create a protected `v0.1.23` tag at that same commit and attach both `clockgrove-factory-0.1.23.tgz` and `SHA256SUMS` to a public GitHub Release. Record the expected SHA-256 outside the mutable Release assets, in [BUILD-STATUS.md](BUILD-STATUS.md). This procedure does not itself publish or tag anything.
+Inspect the tarball file list for the manifest, installed skills, CLI, license, logo, notices, and bundled production dependency tree. In a separate empty prefix, install the tarball with `npm install --offline --ignore-scripts --prefix /absolute/private/check-prefix ./clockgrove-factory-0.1.24.tgz` using an empty npm cache; verify `factory help`, compare every installed bundled package version with `package-lock.json`, and check that notices cover the same tree. Record `git rev-parse HEAD`, package version, tarball SHA-256, and the passing CI run. Create a protected `v0.1.24` tag at that same commit and attach both `clockgrove-factory-0.1.24.tgz` and `SHA256SUMS` to a public GitHub Release. Record the expected SHA-256 outside the mutable Release assets, in [BUILD-STATUS.md](BUILD-STATUS.md). This procedure does not itself publish or tag anything.
 
 ## Install from public artifacts
 
@@ -60,13 +67,13 @@ gh auth status
 Then install from the public tag and release assets:
 
 ```sh
-codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.23
+codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.24
 codex plugin add factory@clockgrove
-gh release download v0.1.23 --repo clockgrove/factory-rebuild \
-  --pattern clockgrove-factory-0.1.23.tgz --pattern SHA256SUMS
+gh release download v0.1.24 --repo clockgrove/factory-rebuild \
+  --pattern clockgrove-factory-0.1.24.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the digest with the independently recorded release value in BUILD-STATUS.md.
-npm install --offline --ignore-scripts --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.23.tgz
+npm install --offline --ignore-scripts --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.24.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

@@ -21,7 +21,16 @@ async function fixture(run) {
     const target = createTarget(root, { "base.txt": "public base\n" });
     writeFileSync(join(target.checkout, "result.txt"), "public result\n");
     git(target.checkout, "add", "result.txt");
-    git(target.checkout, "commit", "-m", "public result");
+    git(
+      target.checkout,
+      "-c",
+      "user.name=Factory Test",
+      "-c",
+      "user.email=factory-test@example.invalid",
+      "commit",
+      "-m",
+      "public result",
+    );
     const commit = git(target.checkout, "rev-parse", "HEAD");
     const treeSha = git(target.checkout, "rev-parse", "HEAD^{tree}");
     const evidence = await validateTree(

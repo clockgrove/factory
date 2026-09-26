@@ -1,12 +1,34 @@
 # Factory build status
 
-**Corrected artifact preparation:** Candidate v0.1.23 pins the accepted local
-Codex-only source through #140. Package/lock-root/manifest/marketplace versions
-and release instructions agree; no dependency or runtime change is made by the
-release metadata handoff. Version 0.1.22 remains the separate frozen unreleased
-#55 candidate. Publication, a fresh public heading-rich same-path LFS gate and a
-fresh private #26 pilot remain required. No historical failed run is reused and
-neither source acceptance nor publication constitutes adopter acceptance.
+**Published v0.1.23 artifact:** The [public release](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.23)
+pins accepted local Codex-only source `15d60c5e5cf691374e59dd7adb496b3492e0bf57`,
+tree `70e18958a4161b57edf7b3d658246bd32df3e6e6`, through #140. The matching
+marketplace tag, package and manifest use 0.1.23. `clockgrove-factory-0.1.23.tgz`
+is 150176054 bytes with independently verified SHA-256
+`0602337b86913f0fc493040ebe3a9eaee99593d412044c2839969b7993172baa`.
+The full 156-test/static/package gates, [exact-head Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36272970310)
+and [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36273292066)
+passed. Independent tar inspection and fresh offline installation verified the
+CLI, public package-root import, packaged skills/license/notices and all 69
+bundled lock versions; five absent packages are optional other-platform Codex
+packages. Root also verified the fresh public download/digest and marketplace
+v0.1.23 installation. Offline checks used the documented `--ignore-scripts`
+route; they do not prove live Objective acceptance. This documentation handoff
+changes no runtime or dependency. Immutable v0.1.21 and the frozen unreleased
+#55 candidate 0.1.22 remain unchanged.
+
+**Fresh public gate still pending:** The first fresh heading-selected v0.1.23
+target stopped at planning with `needs-human` after one revision. Its graph
+required temporary `.factory-media/**` and `.factory-assets.json` staging but
+forbade every non-owned path, without distinguishing staging from delivered
+repository ownership. This source/graph wording contradiction is nonqualifying,
+not evidence of a runtime ownership failure. The packet is preserved; no human
+override, replan, retry or activation was performed. A wholly fresh public target
+with explicit temporary-staging authority is being prepared, not yet accepted.
+Next: obtain a clean automatic graph and complete the fresh public heading-rich
+same-path LFS gate from this exact published artifact, before the separately
+approved fresh private #26 pilot. Source acceptance and publication do not
+qualify either Objective or authorize private activation.
 
 **Heading-selected result review (#140):** The source correction permits repeated
 planning paths for separately selected headings and grounds each result finding
@@ -21,8 +43,8 @@ tree `b2cb2798ea52f9fb5a0ecdd7ccf218c787b7df6f`. Independent full 156-test,
 static, actual Node22 affected 23-test and identity-free fixture gates passed,
 as did exact-head Quality and [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36272497480).
 #140 is accepted and closed. This is a #26 pilot prerequisite,
-not a qualification of the preserved failed run or immutable v0.1.21. A newly
-published corrected artifact and fresh qualifying gate/pilot remain required.
+not a qualification of the preserved failed run or immutable v0.1.21. The corrected
+v0.1.23 artifact is now published; its fresh qualifying gate/pilot remain required.
 
 **Interrupted regular delivery (#121):** The current contract refuses a running
 Work Item at `deliver` rather than reconciling publication from remote evidence.
@@ -195,7 +217,7 @@ These later source changes do not alter the already published v0.1.21 bytes or r
 
 **Default Node 22.0 scanner acceptance (#129):** [PR #131](https://github.com/clockgrove/factory-rebuild/pull/131) merged accepted head `eadd4dec31a8fb6fb3c902980e8ffa821d79cbc5` at `57abc0a43b605148a6b3ec191bcedb34c7cf9bc2`, with unchanged reviewed files and [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36227246935) passing. The same-version Secretlint file API replaces the unused CLI dependency path without lowering scanner coverage or raising the documented Node floor. Independent full 121-test/static gates and a fresh normal offline Node 22.0/npm 10.5.1 installation passed; installed scanner probes verified clean, masked refusal and fail-closed fatal outcomes. The locally reproduced source-candidate tarball is not the already published v0.1.21 artifact and does not qualify a new release or live provider.
 
-**Next action:** #70, #121, #127 and #133 are accepted and closed nonblocking source leaves. Complete only the remaining authorized exact-artifact live qualification and separately approved adopter pilot; accepted source tests do not waive either gate. #55/PR #62 remains open/draft and frozen at head `7bd51356b908cb43ce85d68bce12cabf1752ffeb`, tree `a71c068aad76283dcecccc5a74e5fe9c639eda36`, incorporating accepted main `a03b3902014759b21ff4abbfbca7755b97950ba5`. Independent full 145-test/static, actual Node22 focused 14-test and normal default-installed gates passed. The unreleased 0.1.22 candidate is 150210311 bytes, SHA-256 `e4b7d565cf7a0baad1aa08ecf0e63f6f2da32fc60b439c2c9537a1e0dbde129f`; it is not a published release or optional-runtime/live qualification. Remaining qualification requires authorized exact-artifact live Codex and Claude proof, plus included Copilot unless explicitly deferred. Developer login remains deferred. Do not automatically refresh the frozen candidate to later main or merge it without live proof. Later main changes do not change that candidate or immutable v0.1.21. [#26's reconciled dependency and pilot checklist](https://github.com/clockgrove/factory-rebuild/issues/26) distinguishes closed prerequisites, public fixture acceptance and the not-yet-accepted actual Clockgrove W0-001/LFS pilot. Prepare and separately approve the exact graph/live scope and source egress before target projection or execution; public source-work approval does not authorize private activation. #7/#8/#9 remain future branches. The [compilation and telemetry postmortem](V0.1.21-POSTMORTEM.md) is supporting evidence, not new acceptance blockers. `AGENTS.md` governs building Factory; packaged skills govern using the installed CLI.
+**Separate deferred #55 handoff:** #70, #121, #127 and #133 are accepted and closed nonblocking source leaves. The immediate v0.1.23 public-gate next action is recorded above; publication does not qualify that gate or the separately approved adopter pilot. #55/PR #62 remains open/draft and frozen at head `7bd51356b908cb43ce85d68bce12cabf1752ffeb`, tree `a71c068aad76283dcecccc5a74e5fe9c639eda36`, incorporating accepted main `a03b3902014759b21ff4abbfbca7755b97950ba5`. Independent full 145-test/static, actual Node22 focused 14-test and normal default-installed gates passed. The unreleased 0.1.22 candidate is 150210311 bytes, SHA-256 `e4b7d565cf7a0baad1aa08ecf0e63f6f2da32fc60b439c2c9537a1e0dbde129f`; it is not a published release or optional-runtime/live qualification and is not included in v0.1.23. Remaining #55 qualification requires authorized exact-artifact live Codex and Claude proof, plus included Copilot unless explicitly deferred. Developer login remains deferred. Do not automatically refresh the frozen candidate to later main or merge it without live proof. Later main changes do not change that candidate or immutable v0.1.21. [#26's reconciled dependency and pilot checklist](https://github.com/clockgrove/factory-rebuild/issues/26) distinguishes closed prerequisites, public fixture acceptance and the not-yet-accepted actual Clockgrove W0-001/LFS pilot. Prepare and separately approve the exact graph/live scope and source egress before target projection or execution; public source-work approval does not authorize private activation. #7/#8/#9 remain future branches. The [compilation and telemetry postmortem](V0.1.21-POSTMORTEM.md) is supporting evidence, not new acceptance blockers. `AGENTS.md` governs building Factory; packaged skills govern using the installed CLI.
 
 **Provider idle subscription correction (#130):** Callback-driven asynchronous
 progress exposed an accepted-main guard bug: replacing its timeout promise left

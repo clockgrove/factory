@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.24 — unreleased
+
+- Align planner structured-output lower bounds with existing required graph-shape validation: at least one Work Item; non-empty title, goal and brief; and non-empty acceptance, non-goals, owned paths and citations. Preserve the production indexed-citation schema/decoder seam and legitimate empty optional collections.
+- Preserve fail-closed semantic checks, source/command authority, the bounded sourced revision, local Codex execution and Node >=22. No new dependencies, arbitrary maxima, fallback/retry pipeline or manual graph repair is added.
+- Carry forward accepted v0.1.23 source corrections without rewriting its immutable artifact or qualifying its preserved failed planning attempts. The actual raw failed fields remain unknown; schema-mismatch tests do not identify those fields.
+- Release metadata only here: publication, fresh installed-artifact Objective qualification and the separately approved private adopter pilot remain required. Frozen #55 candidate 0.1.22 and optional Claude/Copilot work are not included.
+
 ## 0.1.23 — 2026-09-26
 
 - Permit result and final review to ground exact quotes across separately selected headings from the same source document, without concatenating packets or weakening authoritative evidence label checks.

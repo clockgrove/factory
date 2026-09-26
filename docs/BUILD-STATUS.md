@@ -1,5 +1,31 @@
 # Factory build status
 
+**v0.1.24 release preparation:** The metadata candidate starts from reviewed
+#145 integration `2f3d4f5a820b1001f41cff731640fc4085552630`, combined tree
+`a68c7e578d2b708ff3abdcd29e56954e69393bfe`. Package, lock-root, manifest,
+marketplace pin and current release commands agree on 0.1.24. This handoff changes
+no runtime, test, packaged skill, dependency or script; generated notices change
+only the Factory version header. Publication, independent exact-artifact/public
+download/offline installation and a fresh installed heading-rich same-path LFS
+Objective remain required before the separately approved private #26 pilot.
+No new artifact digest or Objective acceptance is claimed. Published v0.1.23,
+historical v0.1.21 evidence and frozen #55 candidate 0.1.22 remain unchanged.
+
+**Required graph shape (#145):** [PR #146](https://github.com/clockgrove/factory-rebuild/pull/146)
+merged reviewed head `35d88605d563ad44b00d99336864e9c7e265e6e1`, source tree
+`e302527bb10a8f689bcaff8259302cbed277387d`, at the integration above.
+The schema now reflects existing minimum required graph/item structure and
+retains those bounds in the indexed-citation schema/decoder seam. Optional empty
+collections remain valid; no new dependencies, maxima, source authority, runtime
+validation waiver or retry is added. Owner full 159-test/static and actual Node22
+affected 39-test gates, root's independent focused 39-test/source review, and
+[exact-head Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36275399290)
+passed. [Integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36275558157)
+also passed with the complete expected combined tree unchanged; #145 is closed
+for source acceptance only. Synthetic empty-shape coverage does not identify
+the unknown raw field in the preserved real failed responses or guarantee a
+future model produces a semantically correct plan.
+
 **Published v0.1.23 artifact:** The [public release](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.23)
 pins accepted local Codex-only source `15d60c5e5cf691374e59dd7adb496b3492e0bf57`,
 tree `70e18958a4161b57edf7b3d658246bd32df3e6e6`, through #140. The matching
@@ -43,8 +69,9 @@ bounded semantic correction: root's credential-free diagnostic reproduced eight
 schema-valid shapes rejected by existing deterministic validation (empty graph
 items; empty item title, goal, brief, acceptance, non-goals, ownership or citations).
 Those synthetic mismatches do not identify the real failed field or qualify an
-Objective. Next: review and accept #145, then prepare a new immutable public
-artifact and fresh installed heading-rich same-path LFS gate before the separately
+Objective. At that checkpoint, #145 source acceptance and a new immutable public
+artifact were next; current v0.1.24 preparation is recorded above. A fresh installed
+heading-rich same-path LFS gate remains required before the separately
 approved private #26 pilot. Do not resume the fixture-edit/fresh-target lottery,
 override a failed packet or patch immutable v0.1.23. Source acceptance and
 publication do not qualify either Objective or authorize private activation.
@@ -63,7 +90,8 @@ static, actual Node22 affected 23-test and identity-free fixture gates passed,
 as did exact-head Quality and [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36272497480).
 #140 is accepted and closed. This is a #26 pilot prerequisite,
 not a qualification of the preserved failed run or immutable v0.1.21. The corrected
-v0.1.23 artifact is now published; its fresh qualifying gate/pilot remain required.
+v0.1.23 artifact was published but its fresh planning attempts remain nonqualifying;
+current v0.1.24 preparation and fresh gate/pilot requirements are recorded above.
 
 **Interrupted regular delivery (#121):** The current contract refuses a running
 Work Item at `deliver` rather than reconciling publication from remote evidence.

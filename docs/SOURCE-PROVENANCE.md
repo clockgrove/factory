@@ -4,6 +4,20 @@ The clean implementation starts from the Factory plan reviewed September 22, 202
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## v0.1.24 release metadata preparation
+
+The candidate starts from #145 integration
+`2f3d4f5a820b1001f41cff731640fc4085552630`, combined tree
+`a68c7e578d2b708ff3abdcd29e56954e69393bfe`. Public #145, accepted clean schema
+contracts and their credential-free tests supplied the required-shape correction;
+the metadata handoff carries that source unchanged. Version 0.1.24 updates only
+package/lock-root identity, manifest/marketplace pin, release documentation,
+changelog and the generated Factory notices header. All dependency entries,
+scripts, runtime, tests, skills and license bodies are unchanged from that base.
+No archived material, provider, target or private source is needed for this work.
+No tag, public release, installed Objective or adopter acceptance is claimed.
+Published v0.1.23/failure evidence, historical v0.1.21 and frozen #55 remain intact.
+
 ## Published v0.1.23 handoff
 
 The [public release](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.23)
@@ -24,10 +38,11 @@ replanned, retried or activated. The raw real failed fields are not preserved.
 Root's credential-free installed-schema diagnostic reproduced eight schema-valid
 empty required shapes rejected by deterministic validation; it does not identify
 the field in a real failed response. [#145](https://github.com/clockgrove/factory-rebuild/issues/145)
-owns the bounded schema/validator alignment, not this documentation handoff.
-No new runtime correction or qualifying gate is claimed here. Historical v0.1.21
-evidence and frozen #55 remain intact. After independent #145 source acceptance,
-a new immutable artifact and fresh public installed gate are required before the
+owns the bounded schema/validator alignment, not the v0.1.23 documentation handoff.
+Its later integration is the v0.1.24 candidate base recorded above; no qualifying
+gate is claimed by either handoff. Historical v0.1.21
+evidence and frozen #55 remain intact. #145 is now accepted and closed for source;
+v0.1.24 preparation and a fresh public installed gate remain required before the
 separately approved private adopter pilot; v0.1.23 is not patched or requalified.
 
 ## Heading-selected result-review sources (#140)

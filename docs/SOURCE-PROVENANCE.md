@@ -6,6 +6,12 @@ The MIT license text is retained from the archived repository. Runtime code does
 
 ## Heading-selected result-review sources (#140)
 
+Accepted PR #141 corrected head `c9968e6d5822bfeeca34ff53a08f60fa387236f4`
+merged at `3ca15a10fd773d1894cc42b8a6c59e39ada0eb0e` with the complete reviewed
+tree unchanged and integrated-main Quality passing. Release metadata preparation
+for v0.1.23 changes no runtime source or dependency entries and does not rewrite
+immutable v0.1.21 or the frozen unreleased #55 candidate.
+
 Public issue #140, current `src/validation.ts`, and the accepted planning-review
 grounding in `src/compiler.ts` supply this narrow correction. Selected sections
 retain their shared exact repository path and separate content. Result findings

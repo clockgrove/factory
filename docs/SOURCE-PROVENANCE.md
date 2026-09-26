@@ -13,13 +13,22 @@ pins source `15d60c5e5cf691374e59dd7adb496b3492e0bf57`, tree
 Accepted release metadata, independent artifact/offline-install checks, public
 download and marketplace verification supplied this documentation-only handoff.
 No runtime, dependency, license text, fixture or packaged skill is changed.
-The first fresh public plan remains nonqualifying at `needs-human`, revision 1:
-its source/graph did not clearly separate temporary media staging exceptions
-from delivered-path ownership. Installed worker and capture semantics already
-support that distinction. No override, replan or activation was performed;
-a fresh explicit-staging public target is preparation, not runtime correction
-or qualifying evidence. Historical v0.1.21 evidence and frozen #55 remain intact;
-fresh public Objective and private adopter acceptance are separate pending gates.
+The preserved first heading plan is nonqualifying at `needs-human`, revision 1,
+after a staging-versus-delivered-ownership contradiction. Installed worker and
+capture semantics already support that distinction. The separate staging-clarified
+plan also remains nonqualifying: generated acceptance narrowed a minimum to exactly
+one candidate, and its attempted revision failed required policy-item structure.
+The third, minimum-clarified invocation failed initial required-shape validation
+before producing a plan file or activation. No earlier packet was overridden,
+replanned, retried or activated. The raw real failed fields are not preserved.
+Root's credential-free installed-schema diagnostic reproduced eight schema-valid
+empty required shapes rejected by deterministic validation; it does not identify
+the field in a real failed response. [#145](https://github.com/clockgrove/factory-rebuild/issues/145)
+owns the bounded schema/validator alignment, not this documentation handoff.
+No new runtime correction or qualifying gate is claimed here. Historical v0.1.21
+evidence and frozen #55 remain intact. After independent #145 source acceptance,
+a new immutable artifact and fresh public installed gate are required before the
+separately approved private adopter pilot; v0.1.23 is not patched or requalified.
 
 ## Heading-selected result-review sources (#140)
 

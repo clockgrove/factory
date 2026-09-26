@@ -110,6 +110,34 @@ export function sanitizedWorkerEnvironment(
   return env;
 }
 
+/** Validation and its read-only lookup use the supplied PATH, not login profiles. */
+export function localValidationShellArguments(command: string): string[] {
+  return ["-c", command];
+}
+
+export function localValidationEnvironment(
+  credentialDirectory: string,
+): Record<string, string> {
+  return sanitizedWorkerEnvironment(credentialDirectory);
+}
+
+export function resolveLocalExecutable(
+  executable: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  shell: string,
+) {
+  return spawnSync(
+    shell,
+    [
+      ...localValidationShellArguments('command -v "$1"'),
+      "factory-preflight",
+      executable,
+    ],
+    { cwd, env, encoding: "utf8" },
+  );
+}
+
 export function linuxProcessIdentity(
   pid: number,
 ): { group: number; startTime: string; state: string } | null {

@@ -35,7 +35,8 @@ import {
   pinnedGit,
   pinnedGitRaw,
   pinnedGitEnvironment,
-  sanitizedWorkerEnvironment,
+  localValidationEnvironment,
+  localValidationShellArguments,
 } from "./process.js";
 import { assetSelectionDigest, type HydrationReceipt } from "./media.js";
 
@@ -1362,9 +1363,9 @@ export async function validateTree(
     const evidence: ValidationEvidence = { treeSha, commands: [] };
     for (const [index, check] of commands.entries()) {
       const started = Date.now();
-      const child = spawn("sh", ["-lc", check], {
+      const child = spawn("sh", localValidationShellArguments(check), {
         cwd: worktree,
-        env: sanitizedWorkerEnvironment(emptyCredentials),
+        env: localValidationEnvironment(emptyCredentials),
       });
       let stdout = "";
       let stderr = "";

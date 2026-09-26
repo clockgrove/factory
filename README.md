@@ -4,15 +4,17 @@
 
 Factory turns a repository development Objective into source-grounded Work Items, runs bounded coding attempts, validates their exact result trees, and delivers the changes through GitHub. It is an open-source Clockgrove plugin installed for one target repository at a time.
 
-**Release candidate:** `v0.1.24`. Factory runs the local Codex SDK path with a source-grounded dependency DAG, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for source, publication and exact-artifact acceptance status.
+**Published release:** `v0.1.24`. Factory runs the local Codex SDK path with a source-grounded dependency DAG, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for source, publication and exact-artifact acceptance status.
 
 v0.1.21 retains its historical accepted-artifact evidence; published v0.1.23
 and its failed planning attempts remain immutable and nonqualifying for the
-pending fresh gate. Candidate v0.1.24 includes the reviewed
+earlier gate. Published v0.1.24 includes the reviewed
 [#145](https://github.com/clockgrove/factory-rebuild/issues/145) required-schema
-alignment. The installation commands below require its matching public release
-to exist. Source acceptance and publication do not satisfy fresh public Objective
-or private adopter acceptance. The separate
+alignment. Its fresh public same-path LFS Objective has completed with automatic
+final review and independent fresh-clone verification; exact artifact/gate
+identities are recorded in build status. This is the PUBLIC prerequisite only:
+actual adopter #26 remains OPEN/unaccepted. The immutable artifact is not changed
+by this documentation handoff. The separate
 unreleased #55 candidate 0.1.22 and Claude/Copilot qualification remain deferred.
 
 ## How it works
@@ -24,9 +26,9 @@ unreleased #55 candidate 0.1.22 and Claude/Copilot qualification remain deferred
 
 The target repository owns its product and runtime truth. Factory state and credentials stay outside the target checkout. Factory refuses to run against any Factory source repository.
 
-## Install v0.1.24 after publication
+## Install published v0.1.24
 
-After publication, install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md):
+Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md):
 
 ```sh
 codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.24

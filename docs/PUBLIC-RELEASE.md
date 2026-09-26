@@ -4,28 +4,37 @@ This is the reusable release and installation procedure. [#25](https://github.co
 
 ## Distribution shape
 
-The [Clockgrove marketplace](../.agents/plugins/marketplace.json) names the plugin at this repository's root and pins candidate `v0.1.24`. Codex loads its manifest and use skills from that Git tag after publication. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+The [Clockgrove marketplace](../.agents/plugins/marketplace.json) names the plugin at this repository's root and pins published `v0.1.24`. Codex loads its manifest and use skills from that immutable Git tag. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
 
-Candidate v0.1.24 carries the accepted and closed #145 required-shape correction
+Published [v0.1.24](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24) carries the accepted and closed #145 required-shape correction
 from integration `2f3d4f5a820b1001f41cff731640fc4085552630`. Its metadata does
 not change runtime, tests, skills, dependencies, scripts or license bodies.
-Publication, independent public-download/offline-install verification and a fresh
-installed Objective gate remain required before a separately approved private
-pilot. The commands below require this candidate's public release to exist.
+Its release source is `e0fc91343563e6a3b19eb92dd64d419ba03b487a`, tree
+`25f80920ebb5848db019c384fcefbce6738f562a`; the 150176214-byte tarball has SHA-256
+`513f46100ce1956c481d26a6ef96f63a62035527c4437268afac3c10e322ef31`.
+Publication, independent public-download/offline installation and marketplace
+verification passed. The [fresh public installed Objective](https://github.com/clockgrove/factory-v0124-gate-20260926-batched/issues/1)
+completed with whole-set human selection, automatic final review and independent
+fresh-clone LFS proof at `5ed4b237d51943c52ea5d2f1f84c9eb1820bb199`, tree
+`f5d247803aa6a83599e22c7531d06affdd5900df`.
+[Build status](BUILD-STATUS.md) records exact checks and selected-byte identity.
+This is the public prerequisite only; actual adopter #26 remains OPEN/unaccepted.
+Install the immutable published bytes below; do not rebuild or retag v0.1.24
+from this later documentation handoff.
 
 Published [v0.1.23](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.23)
 includes the heading-source result-review correction and later accepted source
 leaves, not deferred #55 optional harness work. [Build status](BUILD-STATUS.md)
 records its exact source/tree, digest and passing artifact/installation checks.
-A fresh heading-rich same-path LFS gate and a fresh private adopter pilot remain
-required. The first fresh public plan is preserved as nonqualifying after a
+Its three fresh heading-rich planning attempts remain historical and
+nonqualifying. The first fresh public plan is preserved after a
 temporary-staging versus delivered-ownership wording contradiction; no override,
 replan or activation occurred. A second staging-clarified plan also remains
 nonqualifying, and the third minimum-clarified invocation failed initial
 required-shape validation before a plan file or activation. The raw real failed
 field is unknown. [#145](https://github.com/clockgrove/factory-rebuild/issues/145)
 is now accepted and closed for its bounded source correction; v0.1.24 is the
-new metadata candidate, not an accepted artifact or Objective. Do not patch
+published artifact with its own accepted public gate recorded above. Do not patch
 v0.1.23 or continue editing fixtures to evade generated-graph failures.
 The failed v0.1.21 adopter run is preserved without reuse. Version
 0.1.22 remains reserved by the frozen unreleased #55 candidate.

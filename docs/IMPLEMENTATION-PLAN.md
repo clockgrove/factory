@@ -79,7 +79,29 @@ Pack the plugin, installed use skills, and CLI. MCP is not a first-release requi
 
 ### Trunk review checkpoint
 
-The `v0.1.0` one-immutable-package combined disposable gate passed; [BUILD-STATUS.md](BUILD-STATUS.md) records its package digest and final integrated head. The operator-approved pre-pilot trunk closure was issues [#19–#25 and #28](https://github.com/clockgrove/factory-rebuild/issues). A later audit of Clockgrove W0-001 found that its accepted base has no pnpm package or lockfile, which led to the greenfield command-authority and exact-tree receipt work in [#44](https://github.com/clockgrove/factory-rebuild/issues/44) and [#64](https://github.com/clockgrove/factory-rebuild/issues/64). The v0.1.7 combined gate completed [#46](https://github.com/clockgrove/factory-rebuild/issues/46), [#48](https://github.com/clockgrove/factory-rebuild/issues/48), and [#51](https://github.com/clockgrove/factory-rebuild/issues/51); public v0.1.8 proved [#60](https://github.com/clockgrove/factory-rebuild/issues/60)'s complete planning packet and deterministic zero-review activation. Public v0.1.10 then completed the fresh installed greenfield gate with canonical exact-tree receipts and authoritative per-Work-Item deltas, closing #44, #64, and [#67](https://github.com/clockgrove/factory-rebuild/issues/67) without a human result override or retry. [#55](https://github.com/clockgrove/factory-rebuild/issues/55) separately owns the installed BYO harness seam and second-provider proof before [#26](https://github.com/clockgrove/factory-rebuild/issues/26), the exact-public-artifact Clockgrove pilot; [#59](https://github.com/clockgrove/factory-rebuild/issues/59) owns role-specific model defaults. Later capability branches, repository cutover, and trunk-complete claims remain on hold until those gates pass. A clean refactor that wires known variation-point contracts to real behavior is welcome when it reduces a concrete gap. The first-release agent interface is the CLI plus installed skills over one application layer, with no MCP prerequisite. A later MCP adapter needs a demonstrated agent-integration need and must not duplicate lifecycle logic. This public repository, including contributor instructions, fixtures, and acceptance evidence, must remain sufficient for unrelated contributors; `AGENTS.md` guides building Factory, while packaged skills guide using it.
+The `v0.1.0` one-immutable-package combined disposable gate passed; [BUILD-STATUS.md](BUILD-STATUS.md) records its package digest and final integrated head. The operator-approved pre-pilot trunk closure was issues [#19–#25 and #28](https://github.com/clockgrove/factory-rebuild/issues). A later audit of Clockgrove W0-001 found that its accepted base has no pnpm package or lockfile, which led to the greenfield command-authority and exact-tree receipt work in [#44](https://github.com/clockgrove/factory-rebuild/issues/44) and [#64](https://github.com/clockgrove/factory-rebuild/issues/64). The v0.1.7 combined gate completed [#46](https://github.com/clockgrove/factory-rebuild/issues/46), [#48](https://github.com/clockgrove/factory-rebuild/issues/48), and [#51](https://github.com/clockgrove/factory-rebuild/issues/51); public v0.1.8 proved [#60](https://github.com/clockgrove/factory-rebuild/issues/60)'s complete planning packet and deterministic zero-review activation. Public v0.1.10 then completed the fresh installed greenfield gate with canonical exact-tree receipts and authoritative per-Work-Item deltas, closing #44, #64, and [#67](https://github.com/clockgrove/factory-rebuild/issues/67) without a human result override or retry. [#55](https://github.com/clockgrove/factory-rebuild/issues/55) separately owns the installed BYO harness seam and second-provider proof required for overall trunk completion, not a prerequisite for the operator-approved Codex-only [#26](https://github.com/clockgrove/factory-rebuild/issues/26) pilot described below; [#59](https://github.com/clockgrove/factory-rebuild/issues/59) owns role-specific model defaults. Later capability branches, repository cutover, and trunk-complete claims remain on hold until those gates pass. A clean refactor that wires known variation-point contracts to real behavior is welcome when it reduces a concrete gap. The first-release agent interface is the CLI plus installed skills over one application layer, with no MCP prerequisite. A later MCP adapter needs a demonstrated agent-integration need and must not duplicate lifecycle logic. This public repository, including contributor instructions, fixtures, and acceptance evidence, must remain sufficient for unrelated contributors; `AGENTS.md` guides building Factory, while packaged skills guide using it.
+
+### Operator-approved Codex-only adopter pilot
+
+The [public #26 operator decision](https://github.com/clockgrove/factory-rebuild/issues/26#operator-decision--codex-only-pilot)
+explicitly defers #55 and Claude/Copilot live qualification as prerequisites for
+this bounded Codex-only adopter pilot. This is an execution-order exception,
+not acceptance of #55 or permission to merge draft PR #62. That draft remains
+frozen at head `7bd51356b908cb43ce85d68bce12cabf1752ffeb`; source/default-installed
+checks do not substitute for its required authorized live-provider evidence.
+
+Published v0.1.24 and its fresh public installed gate have passed their own
+prerequisite checks, as recorded in [BUILD-STATUS.md](BUILD-STATUS.md). The
+Codex-only #26 pilot may proceed under its separately recorded target/source-egress
+and activation authority without waiting for #55, Claude/Copilot login, or this
+documentation handoff. Root retains exact source/configuration/plan verification,
+guarded delivery and exact integrated-tree acceptance. The actual pilot remains
+OPEN/unaccepted; the public fixture is not adopter acceptance.
+
+Overall trunk completion still requires both the actual adopter acceptance and
+#55's separate installed-harness/second-provider proof. Neither the deferral nor
+a successful Codex-only pilot would accept that proof or authorize later
+managed/sandbox/Daytona branches, repository cutover, or a trunk-complete claim.
 
 ## Named branches after trunk
 
@@ -111,4 +133,7 @@ The archived `clockgrove/factory` commit `994bbfcadb317aed2dfa932ec9d128e7d0d8c7
 
 ## Release and cutover
 
-The public rebuild repository stays separate until trunk acceptance and the disposable release-candidate gate. Keep the archived source read-only during implementation. Any later repository rename, archival, marketplace change, or adopter activation is a staged operator action after the new trunk is proven; it must not alter the target repository or hide the evidence behind a source-tree-only run. Public issues, PRs, and this plan remain the contributor record.
+The bounded Codex-only adopter activation exception above does not authorize
+repository rename, archival, distribution changes or overall trunk completion.
+
+The public rebuild repository stays separate until trunk acceptance and the disposable release-candidate gate. Keep the archived source read-only during implementation. Any later repository rename, archival, or marketplace change is a staged operator action after the new trunk is proven; it must not alter the target repository or hide the evidence behind a source-tree-only run. Public issues, PRs, and this plan remain the contributor record.

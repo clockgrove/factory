@@ -272,6 +272,17 @@ export function preflightLocalExecutables(input: {
           accessSync(resolved, constants.X_OK);
           if (!statSync(resolved).isFile())
             throw new Error("Not a regular file");
+          if (
+            resolve(resolved).startsWith(targetRoot) ||
+            realpathSync(resolved).startsWith(targetRoot)
+          ) {
+            report(
+              executable,
+              "unverified",
+              "The resolved executable belongs to the target checkout, not the host toolchain; target executables are not run or qualified by preflight.",
+            );
+            continue;
+          }
         } catch {
           report(
             executable,

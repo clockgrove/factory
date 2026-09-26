@@ -359,13 +359,12 @@ test("target version commands, relative PATH and unsupported policies remain unv
       `#!/bin/sh\nprintf hook > '${marker}'\nprintf '9.0.0\\n'\n`,
       { mode: 0o755 },
     );
-    const run = (candidate) => {
+    const run = (candidate, commands = ["pnpm check", "pnpm check"]) => {
       const observations = [];
       preflightLocalExecutables({
         checkout: candidate.checkout,
         baseSha: candidate.baseSha,
-        graph: descriptor(root, candidate, ["pnpm check", "pnpm check"], [])
-          .graph,
+        graph: descriptor(root, candidate, commands, []).graph,
         finalCommands: [],
         privateRoot: root,
         credentialDirectory: join(root, "empty"),
@@ -385,6 +384,30 @@ test("target version commands, relative PATH and unsupported policies remain unv
     mkdirSync(nested);
     run({ ...target, checkout: nested });
     assert.equal(existsSync(marker), false);
+    const customMarker = join(root, "target-custom-tool-ran");
+    writeFileSync(
+      join(targetBin, "custom_target_tool"),
+      `#!/bin/sh\nprintf hook > '${customMarker}'\n`,
+      { mode: 0o755 },
+    );
+    const customAlias = join(root, "custom-bin-alias");
+    symlinkSync(targetBin, customAlias, "dir");
+    for (const path of [targetBin, customAlias]) {
+      process.env.PATH = `${path}:/usr/bin:/bin`;
+      for (const checkout of [target.checkout, alias, nested]) {
+        const observations = run({ ...target, checkout }, [
+          "custom_target_tool check",
+          "custom_target_tool check",
+        ]);
+        const custom = observations.filter(
+          (entry) => entry.executable === "custom_target_tool",
+        );
+        assert.ok(custom.length > 0);
+        assert.ok(custom.every((entry) => entry.status === "unverified"));
+      }
+    }
+    assert.equal(existsSync(customMarker), false);
+    process.env.PATH = `${targetBin}:/usr/bin:/bin`;
     const shellMarker = join(root, "target-shell-hook-ran");
     writeFileSync(
       join(targetBin, "sh"),

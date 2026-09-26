@@ -22,9 +22,19 @@ target stopped at planning with `needs-human` after one revision. Its graph
 required temporary `.factory-media/**` and `.factory-assets.json` staging but
 forbade every non-owned path, without distinguishing staging from delivered
 repository ownership. This source/graph wording contradiction is nonqualifying,
-not evidence of a runtime ownership failure. The packet is preserved; no human
-override, replan, retry or activation was performed. A wholly fresh public target
-with explicit temporary-staging authority is being prepared, not yet accepted.
+not evidence of a runtime ownership failure. The [preserved heading Objective #1](https://github.com/clockgrove/factory-v0123-gate-20260926-headings/issues/1)
+has plan-file SHA-256 `c8ac08cc6bbc8c4fca90896c2ec8f5a58b43dbf9ee300d154651865c36300342`.
+The separate [preserved staging-clarified Objective #1](https://github.com/clockgrove/factory-v0123-gate-20260926-staging-headings/issues/1)
+also remains nonqualifying: generated acceptance narrowed a minimum of one
+candidate to exactly one, and the attempted complete-graph revision failed
+mandatory policy-item structural validation. Its plan-file SHA-256 is
+`d73384732c977b415e2bb00affedf7a20fb749cc8210064e008f872886068cb3`.
+Neither earlier target/packet was overridden, replanned, retried or activated.
+The [current minimum-clarified Objective #1 preparation audit](https://github.com/clockgrove/factory-v0123-gate-20260926-minimum-headings/issues/1#issuecomment-5850219881)
+batches the accumulated parser, staging, candidate-count and generated-structure
+findings with the complete public source audit. The coordinator's fresh gate is
+ongoing; preparation/source audit is not clean-plan, worker, selection, exact-tree
+validation, delivery, hydration or Objective acceptance evidence.
 Next: obtain a clean automatic graph and complete the fresh public heading-rich
 same-path LFS gate from this exact published artifact, before the separately
 approved fresh private #26 pilot. Source acceptance and publication do not

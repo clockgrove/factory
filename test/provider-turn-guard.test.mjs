@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   ProviderTurnGuard,
@@ -129,4 +130,65 @@ test("late cleanup callbacks cannot keep a completed provider process alive", ()
     outcome.elapsed < 500,
     "completed process must not await idle expiry",
   );
+});
+
+test("thousands of settled provider waits release their payloads while the guard remains live", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--expose-gc",
+      fileURLToPath(
+        new URL("./fixtures/provider-wait-retention.mjs", import.meta.url),
+      ),
+    ],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const memory = JSON.parse(result.stdout);
+  assert.equal(memory.guardStillReferenced, true);
+  // This is fixture tolerance, not a Factory event, byte or memory cap.
+  const allowance = (memory.count * memory.bytes) / 4;
+  for (const stage of ["afterWaits", "afterFinish"])
+    assert.ok(
+      memory[stage] - memory.before < allowance,
+      JSON.stringify(memory),
+    );
+});
+
+test("timeout keeps precedence over an abort-triggered provider error and later rejection", async () => {
+  const turn = new ProviderTurnGuard(20);
+  const failure = new Error("provider abort handler failed");
+  const operation = new Promise((_resolve, reject) => {
+    turn.signal.addEventListener("abort", () => reject(failure), {
+      once: true,
+    });
+  });
+  try {
+    await assert.rejects(
+      turn.race(operation),
+      (error) => error === turn.signal.reason,
+    );
+    assert.ok(turn.signal.reason instanceof ProviderTurnTimeoutError);
+    await assert.rejects(
+      turn.race(Promise.reject(failure)),
+      (error) => error === turn.signal.reason,
+    );
+    // Preserve the prior Promise.race ordering when both inputs already settled.
+    assert.equal(
+      await turn.race(Promise.resolve("cleanup completed")),
+      "cleanup completed",
+    );
+  } finally {
+    turn.finish();
+  }
+});
+
+test("finish does not replace a pending operation's eventual result", async () => {
+  const turn = new ProviderTurnGuard(20);
+  const pending = turn.race(delay(50, "finished cleanup"));
+  turn.finish();
+  assert.equal(await pending, "finished cleanup");
+  assert.equal(turn.signal.aborted, false);
 });

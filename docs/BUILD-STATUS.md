@@ -162,4 +162,31 @@ The late review finding in #133 has independently reproduced turn-lifetime
 retention of settled wait results, but no OOM or failed current gate; it remains
 a separate queued leaf, not new pilot acceptance scope.
 
+**Settled provider waits leaf (#133):** A bounded accepted-main reproduction
+with 5000 alternating fulfilled/rejected 16384-byte Buffers retained 82057467
+array-buffer bytes after forced GC, from a 137467-byte baseline; finish did not
+release them while the guard remained referenced. The isolated fix replaces
+the shared pending timeout promise with detachable per-wait subscriptions to the
+same existing timer. Each settled wait unsubscribes in finally; pending waits
+retain deadline resets and identical timeout/AbortSignal/error precedence.
+Terminal finish, cleanup and already-settled operation ordering are unchanged.
+The same fixed-runtime fixture reports 137467 bytes before, after waits and
+after finish. This is synthetic turn-lifetime retention evidence, not an OOM or
+live-provider acceptance claim. The initial Node24.20.0 gate passed all 130 tests,
+including packed install, Codex streams/capacity and worker cleanup. All nine
+focused guard tests also pass on actual Node22.0.0, whose retention fixture stays
+at its 10475-byte baseline. Typecheck, lint, format, notices, package dry-run and
+diff gates also pass. Hosted and independent exact-head gates remain required.
+No timeout policy, payload journal or provider cap is
+added; the accepted #55 draft/artifact remains frozen and live-gated separately.
+
+The final normal-base refresh onto accepted
+`7a95c9250281108d88457295df868868a6cd5552` preserves #127's streamed summaries
+and #121's whole-graph interrupted-delivery preflight. The #133 guard and tests
+remain byte-identical to the initial reviewed commit; the single provenance
+overlap retains both issue records. Fresh full Node24.20.0 checks pass 147/147;
+actual Node22.0.0 guard, streaming, preflight, scanner and engine checks pass
+28/28. Hosted and independent final-head acceptance remain required; root owns
+the consolidated source handoff after integration.
+
 **Explicit non-goals now:** managed-agent execution, sandbox providers, Daytona, automatic local/cloud bursting, distributed controllers, media generation providers, and private adopter-specific product work. Factory source must never be its own target. The public fixture files and Objective templates are sufficient to reproduce generic Factory acceptance in a repository the contributor controls.

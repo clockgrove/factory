@@ -4,6 +4,24 @@ The clean implementation starts from the Factory plan reviewed September 22, 202
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Settled provider wait subscriptions (#133)
+
+Issue #133, accepted public `src/provider-turn.ts`, and the new synthetic
+high-event-count fixture supplied this leaf correction. Per-wait timeout
+subscriptions detach in finally while one resettable timer retains the existing
+timeout/AbortSignal/error policy. A referenced guard no longer retains settled
+fulfilled or rejected Buffer payloads through a shared pending timeout promise.
+Focused tests preserve active waits, terminal finish, original failure and
+already-settled cleanup ordering. No archived source, provider credentials,
+payload diagnostics, live target or new event/byte policy was inspected or added.
+The separately accepted #55 source/artifact is not edited or requalified here.
+
+The final normal merge retains accepted #127 streaming and #121 preflight source,
+tests and documentation. A single provenance conflict kept both issue records;
+the #133 guard, focused tests, fixture and dependency identities are unchanged.
+The refreshed full gate and actual Node22 affected checks cover those accepted
+changes together without copying historical payloads or invoking providers.
+
 ## Interrupted regular-delivery contract (#121)
 
 The public #121 reproduction and current clean regular runner supplied this

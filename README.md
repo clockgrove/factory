@@ -6,6 +6,10 @@ Factory turns a repository development Objective into source-grounded Work Items
 
 **Version:** `v0.1.21`. Factory runs the local Codex SDK path with a source-grounded dependency DAG, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for the published artifact identity and exact Objective acceptance evidence.
 
+v0.1.21 is the immutable public release. Current-main behavior described below
+includes later accepted source changes that are not in that release. Build status
+distinguishes accepted source, published releases and unreleased qualification candidates.
+
 ## How it works
 
 1. A human writes an Objective as a GitHub Issue in the target repository.

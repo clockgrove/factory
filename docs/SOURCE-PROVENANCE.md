@@ -22,6 +22,10 @@ the #133 guard, focused tests, fixture and dependency identities are unchanged.
 The refreshed full gate and actual Node22 affected checks cover those accepted
 changes together without copying historical payloads or invoking providers.
 
+PR #137 accepted head `52ce30e9ed70a5e130f9f2055db975d25bc9bd55` merged at
+`87c2c2ef18d114ab44f41765a9c8c3d1332922e0` with unchanged reviewed tree and
+passing integrated-main Quality. #133 is closed; no live-provider qualification follows.
+
 ## Interrupted regular-delivery contract (#121)
 
 The public #121 reproduction and current clean regular runner supplied this
@@ -32,6 +36,10 @@ verify refusal both with and without a recorded PR, including resumable executio
 validation and selected-asset peers in either graph order. A whole-graph preflight
 refuses before any peer operation or state change. The outer controller may still record its last error. No archived
 source, historical run mutation, automatic retry or recovery journal was used.
+
+PR #136 accepted head `3fca6760d5dc612b85d6309e5a5d1a4c70e4c0a5` merged at
+`7a95c9250281108d88457295df868868a6cd5552` with unchanged reviewed tree and
+passing integrated-main Quality. #121 is closed for documented refusal only.
 
 ## Provider idle timeout subscription (#130)
 

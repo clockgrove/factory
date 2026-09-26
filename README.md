@@ -9,8 +9,10 @@ Factory turns a repository development Objective into source-grounded Work Items
 v0.1.21 remains the previously accepted immutable public artifact. v0.1.23
 contains later accepted source corrections, including heading-selected result
 review. Its matching public release is published; the fresh public Objective
-gate and private adopter acceptance remain pending. Publication does not satisfy
-either gate. The separate
+gate and private adopter acceptance remain pending. The fresh planning attempts
+are nonqualifying; [#145](https://github.com/clockgrove/factory-rebuild/issues/145)
+tracks required-schema alignment before a new immutable artifact and fresh gate.
+Publication does not satisfy either acceptance gate. The separate
 unreleased #55 candidate 0.1.22 and Claude/Copilot qualification remain deferred.
 
 ## How it works

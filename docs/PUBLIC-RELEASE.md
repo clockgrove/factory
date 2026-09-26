@@ -13,8 +13,14 @@ records its exact source/tree, digest and passing artifact/installation checks.
 A fresh heading-rich same-path LFS gate and a fresh private adopter pilot remain
 required. The first fresh public plan is preserved as nonqualifying after a
 temporary-staging versus delivered-ownership wording contradiction; no override,
-replan or activation occurred. A separate fresh explicit-staging target is being
-prepared. The failed v0.1.21 adopter run is preserved without reuse. Version
+replan or activation occurred. A second staging-clarified plan also remains
+nonqualifying, and the third minimum-clarified invocation failed initial
+required-shape validation before a plan file or activation. The raw real failed
+field is unknown. [#145](https://github.com/clockgrove/factory-rebuild/issues/145)
+owns the bounded schema/validator correction; after independent acceptance,
+a new immutable artifact and fresh installed gate are required. Do not patch
+v0.1.23 or continue editing fixtures to evade generated-graph failures.
+The failed v0.1.21 adopter run is preserved without reuse. Version
 0.1.22 remains reserved by the frozen unreleased #55 candidate.
 
 Publish a candidate tag and release asset only after its code, CI, packaging, and notice checks pass; then run the disposable gate from a fresh public download. Publication is not acceptance and does not authorize the Clockgrove pilot. Do not point the marketplace at a moving branch. If the candidate version changes, update the package, manifest, marketplace ref, changelog, README status, and commands here together before tagging.

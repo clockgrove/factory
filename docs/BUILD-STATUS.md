@@ -32,13 +32,22 @@ mandatory policy-item structural validation. Its plan-file SHA-256 is
 Neither earlier target/packet was overridden, replanned, retried or activated.
 The [current minimum-clarified Objective #1 preparation audit](https://github.com/clockgrove/factory-v0123-gate-20260926-minimum-headings/issues/1#issuecomment-5850219881)
 batches the accumulated parser, staging, candidate-count and generated-structure
-findings with the complete public source audit. The coordinator's fresh gate is
-ongoing; preparation/source audit is not clean-plan, worker, selection, exact-tree
-validation, delivery, hydration or Objective acceptance evidence.
-Next: obtain a clean automatic graph and complete the fresh public heading-rich
-same-path LFS gate from this exact published artifact, before the separately
-approved fresh private #26 pilot. Source acceptance and publication do not
-qualify either Objective or authorize private activation.
+findings with the complete public source audit. That third fresh invocation then
+failed the initial required-graph-shape guard before producing a plan file or
+activation. Preparation/source audit is not clean-plan, worker, selection,
+exact-tree validation, delivery, hydration or Objective acceptance evidence.
+The raw failed response fields are not preserved; no particular empty field is
+known to have caused either real required-shape failure.
+[Public #145](https://github.com/clockgrove/factory-rebuild/issues/145) is the sole
+bounded semantic correction: root's credential-free diagnostic reproduced eight
+schema-valid shapes rejected by existing deterministic validation (empty graph
+items; empty item title, goal, brief, acceptance, non-goals, ownership or citations).
+Those synthetic mismatches do not identify the real failed field or qualify an
+Objective. Next: review and accept #145, then prepare a new immutable public
+artifact and fresh installed heading-rich same-path LFS gate before the separately
+approved private #26 pilot. Do not resume the fixture-edit/fresh-target lottery,
+override a failed packet or patch immutable v0.1.23. Source acceptance and
+publication do not qualify either Objective or authorize private activation.
 
 **Heading-selected result review (#140):** The source correction permits repeated
 planning paths for separately selected headings and grounds each result finding

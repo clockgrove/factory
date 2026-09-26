@@ -9,6 +9,11 @@ checks do not complete the fresh heading-rich same-path LFS Objective gate or
 the separate private #26 pilot. Both remain pending. Historical v0.1.21
 acceptance remains evidence of that immutable artifact only. Never reuse a
 failed or nonqualifying run or treat publication as Objective acceptance.
+The third fresh planning invocation failed required-shape validation before a
+plan file or activation. [#145](https://github.com/clockgrove/factory-rebuild/issues/145)
+owns the bounded schema/validator alignment; after independent source acceptance,
+prepare a new immutable artifact and fresh installed gate. Do not patch v0.1.23
+or infer the real failed field from synthetic schema-mismatch reproductions.
 
 The first release passed [#25](https://github.com/clockgrove/factory-rebuild/issues/25). Public v0.1.10 completed the fresh installed-artifact gate for [#44](https://github.com/clockgrove/factory-rebuild/issues/44), [#64](https://github.com/clockgrove/factory-rebuild/issues/64), and [#67](https://github.com/clockgrove/factory-rebuild/issues/67). Public v0.1.13 remained nonqualifying because result review lacked controller-owned capture and selection evidence, v0.1.14 remained nonqualifying after a provider stream never emitted a terminal result, v0.1.15 was superseded before a live Objective because its installed setup skill misstated the worker default, v0.1.16 preserved a validated Work Item result after reviewer capacity was converted directly into a human decision, v0.1.17 preserved a selected result whose digest-bound receipt lacked manifest provenance, v0.1.18 preserved a selected result whose capture receipt lacked controller-imported input identity, v0.1.19 preserved a fail-closed planning attempt whose response used Markdown-prefixed citation headings, and v0.1.20 preserved a validated selected result whose automatic review packet did not distinguish the worker result from controller materialization. Public v0.1.21 independently completed [#81](https://github.com/clockgrove/factory-rebuild/issues/81)'s installed-artifact gate; see [exact acceptance evidence](V0.1.21-ACCEPTANCE.md) Checking a file into the repository does not satisfy an installed-artifact or live Objective gate.
 

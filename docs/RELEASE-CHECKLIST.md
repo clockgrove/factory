@@ -1,5 +1,11 @@
 # Public release checklist
 
+**Unpublished v0.1.27 candidate:** follow [candidate preparation](PUBLIC-RELEASE.md#prepare-v0127)
+for accepted #165 / PR #166. Package/manifest and future marketplace ref name
+0.1.27; current public installation remains v0.1.26. Freeze and review this
+metadata candidate before the coordinated artifact gates. No v0.1.27 release,
+installation or live acceptance is asserted here.
+
 **Published v0.1.26; live acceptance pending:** use the
 [published qualification procedure](PUBLIC-RELEASE.md#qualify-published-v0126)
 and [current artifact evidence](BUILD-STATUS.md). Publication, source/package
@@ -71,9 +77,9 @@ The first release passed [#25](https://github.com/clockgrove/factory-rebuild/iss
 | Third-party notices                            | Generated from production lock and installed package notices, including SPDX BSD-3-Clause text for `@azu/format-text` | Regenerate for final lock; obtain maintainer review of the publisher's missing copyright notice before publication |
 | Project logo                                   | SVG mark in `assets/`                                                                                                 | Review rendering and public use                                                                                    |
 | Objective issue form                           | Eight named fields and final pinned-source section in `.github/ISSUE_TEMPLATE/objective.yml`                          | Confirm form renders, submitted body parses, and target owners can copy it                                         |
-| Package and marketplace metadata               | Published 0.1.26 package/manifest and immutable v0.1.26 marketplace pin; bundled Linux x64 dependencies               | Tag the accepted commit; verify `factory@clockgrove` and an offline CLI install from that public tag               |
+| Package and marketplace metadata               | Candidate 0.1.27 package/manifest and future v0.1.27 marketplace pin; public install remains v0.1.26                  | Freeze and review candidate before artifact gates; never rewrite published v0.1.26                                 |
 | README and CONTRIBUTING                        | Public install and contribution instructions                                                                          | Recheck commands against final CLI                                                                                 |
-| CHANGELOG                                      | Published `0.1.26` changes listed; earlier entries retained                                                           | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
+| CHANGELOG                                      | Unreleased `0.1.27` changes listed; published entries retained                                                        | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
 | Installed use skills                           | `director` and `setup` packaged                                                                                       | Exercise planning, result decisions, media selection, status, and diagnostics in a fresh target                    |
 | CLI                                            | Existing commands documented                                                                                          | Recheck plan/decide/run/decide-result/status/diagnostics/logs against the final CLI                                |
 | TypeScript, formatter, test, workflow          | Existing build and deterministic CI                                                                                   | Run credential-free integration gate on merged trunk                                                               |
@@ -82,7 +88,9 @@ No required asset is intentionally omitted. MCP is not a first-release requireme
 
 ## Exact-artifact acceptance
 
-For current v0.1.26, source/publication/installation checks in steps 1–2 passed;
+For candidate v0.1.27, the full exact-artifact steps below remain pending after
+metadata review. For published v0.1.26, source/publication/installation checks
+in steps 1–2 passed;
 public installed qualification in steps 3–4 and actual adopter acceptance remain
 pending. [BUILD-STATUS.md](BUILD-STATUS.md) records the exact published identity;
 issue #26 tracks remaining acceptance. Use the approved representative foundation,

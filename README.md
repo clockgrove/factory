@@ -24,6 +24,13 @@ actual adopter #26 remains OPEN/unaccepted. The immutable artifact is not change
 by this documentation handoff. The separate
 unreleased #55 candidate 0.1.22 and Claude/Copilot qualification remain deferred.
 
+**Unpublished development candidate: v0.1.27.** This checkout prepares accepted
+[#165](https://github.com/clockgrove/factory-rebuild/issues/165) / [PR #166](https://github.com/clockgrove/factory-rebuild/pull/166).
+Package and plugin metadata name 0.1.27, and this checkout's marketplace points
+to its future tag. No v0.1.27 release or installed qualification is claimed.
+Published installation below stays pinned to immutable v0.1.26; follow the
+[candidate procedure](docs/PUBLIC-RELEASE.md#prepare-v0127) for the next artifact.
+
 ## How it works
 
 1. A human writes an Objective as a GitHub Issue in the target repository.
@@ -66,7 +73,7 @@ npm run lint
 npm run format:check
 npm test
 npm pack
-npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.26.tgz
+npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.27.tgz
 ```
 
 The repository's [quality-tooling map](docs/QUALITY-TOOLING.md) records the

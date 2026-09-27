@@ -6,6 +6,16 @@ The MIT license text is retained from the archived repository. Runtime code does
 
 ## Ignored nondelivered dependency links (#150)
 
+Metadata-only v0.1.25 preparation starts at accepted PR #151 integration
+`92ef6eeac89e792016b5f20ad69cefb707e9debb`, reviewed tree
+`60ad230af22450f46d00e2ccece8555dc883d6cb`. It changes only package/lock-root
+identity, manifest/marketplace pin, changelog, public release/status instructions
+and the generated Factory notices header. Dependency entries, runtime, tests,
+scripts, skills, Node floor and license bodies are identical to that base.
+No archived/private inputs, providers or target execution are required.
+Publication and fresh installed qualification are still pending; immutable
+v0.1.24 and the frozen unreleased #55 candidate remain unchanged.
+
 The #150 correction is separate from immutable v0.1.24. Public
 issue #150, the current staged-candidate guard and deterministic generic safety
 fixtures supply its source; no archived or private adopter inputs are needed.

@@ -6,6 +6,14 @@ Factory turns a repository development Objective into source-grounded Work Items
 
 **Published release:** `v0.1.24`. Factory runs the local Codex SDK path with a source-grounded dependency DAG, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for source, publication and exact-artifact acceptance status.
 
+**Unpublished candidate:** `v0.1.25` carries the accepted
+[#150](https://github.com/clockgrove/factory-rebuild/issues/150) contained ignored-link
+correction from [PR #151](https://github.com/clockgrove/factory-rebuild/pull/151).
+The source marketplace entry prepares its immutable tag; that tag and release
+assets do not exist yet. Metadata review, publication and a fresh installed gate
+remain pending. The published v0.1.24 installation below remains unchanged and
+does not include this correction.
+
 v0.1.21 retains its historical accepted-artifact evidence; published v0.1.23
 and its failed planning attempts remain immutable and nonqualifying for the
 earlier gate. Published v0.1.24 includes the reviewed
@@ -59,7 +67,7 @@ npm run lint
 npm run format:check
 npm test
 npm pack
-npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.24.tgz
+npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.25.tgz
 ```
 
 The repository's [quality-tooling map](docs/QUALITY-TOOLING.md) records the

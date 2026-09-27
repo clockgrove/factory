@@ -2,6 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.27 — Unreleased
+
+- Reject missing or empty recognized final acceptance before model-backed planning or activation using the existing Objective parser.
+- Supply compact exact-tree selected-LFS pointer/filter validation facts to item and final review. Separately include bounded tracked attribute text without treating effective filtering as proof of exact rule contents; retain later delivery and final hydration phases.
+- Strengthen the offline real-pnpm/Git/LFS pilot at the production serialized-review boundary, with missing-evidence negatives and early-refusal regressions. Carry accepted #165 / PR #166 integration `058bd7587aa532342ebb77488474258c90930f5d`; this metadata preparation changes no runtime or dependencies. Published v0.1.26 and its paused run remain unchanged. Publication, new-artifact qualification and actual adopter acceptance remain pending.
+
 ## 0.1.26 — 2026-09-27
 
 - Constrain compiler and independent graph-review acceptance to evidence available before the current Work Item's own delivery, including every clause of compound criteria. Preserve available completed-dependency evidence without presuming native-stack predecessors have merged; keep upload and final hydration at their existing controller phases.

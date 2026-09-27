@@ -4,6 +4,22 @@ The clean implementation starts from the Factory plan reviewed September 22, 202
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Unpublished v0.1.27 preparation
+
+Accepted #165 / PR #166 integration `058bd7587aa532342ebb77488474258c90930f5d`,
+tree `a5a4546c66263dac9359bb4ddae883b1da84e6f6`, supplies the final-criteria
+preflight, checked selected-pointer evidence and reusable offline regressions.
+The public qualification failures and fresh-context review favored reuse of
+the existing parser/validator over a fixture-specific extra command. Exact
+tracked attribute text remains separate from effective-filter evidence; no
+generic output store or changed delivery/hydration phase was introduced.
+This metadata-only preparation changes package/lock-root identity, plugin and
+future marketplace metadata, release guidance and the notices version header.
+Runtime, tests, dependency entries, skills, scripts, Node floor and license
+bodies remain identical to that accepted integration. No archived/private
+inputs are used. Source evidence does not qualify an unbuilt or unpublished
+v0.1.27 artifact; the preserved public v0.1.26 run remains unchanged.
+
 ## Published v0.1.26
 
 Accepted #159 / PR #160 integration `5aaf6feb01138ff91acc173ae5961daba8638bff`

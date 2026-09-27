@@ -1,5 +1,18 @@
 # Factory build status
 
+**Next candidate: v0.1.27, unpublished.** Accepted [#165](https://github.com/clockgrove/factory-rebuild/issues/165)
+/ [PR #166](https://github.com/clockgrove/factory-rebuild/pull/166) integrated at
+`058bd7587aa532342ebb77488474258c90930f5d`, reviewed tree
+`a5a4546c66263dac9359bb4ddae883b1da84e6f6`. Its underlying runtime passed all
+188 local tests on Node24.20 and the three new/pilot regressions on actual
+Node22.0, with typecheck and changed-file checks. Root's independent focused
+review passed; [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36298521801)
+is the exact integration check. These are source checks, not evidence for an
+unbuilt v0.1.27 artifact. Follow [candidate preparation](PUBLIC-RELEASE.md#prepare-v0127);
+publication, fresh public qualification and actual adopter acceptance remain
+separate requirements in issue #26. Published v0.1.26 and its paused run remain
+unchanged; follow-ups #167/#168 are outside this candidate.
+
 **Published v0.1.26; live acceptance pending.** [PR #161](https://github.com/clockgrove/factory-rebuild/pull/161)
 released accepted #159 / PR #160 source as immutable
 [v0.1.26](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26),

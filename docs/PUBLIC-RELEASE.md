@@ -4,7 +4,7 @@ This is the reusable release and installation procedure. [#25](https://github.co
 
 ## Distribution shape
 
-The [Clockgrove marketplace](../.agents/plugins/marketplace.json) pins the plugin at this repository's root to published `v0.1.26`, not a moving branch. Codex loads its manifest and use skills from that immutable Git tag. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+The [Clockgrove marketplace](../.agents/plugins/marketplace.json) in this preparation checkout pins the plugin at this repository's root to future `v0.1.27`, not a moving branch. That candidate tag is unpublished; public installation below uses the immutable `v0.1.26` marketplace. Codex loads its manifest and use skills from that immutable Git tag. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
 
 Published [v0.1.26](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26)
 includes the accepted #159 planning lifecycle correction. Its exact source, tree,
@@ -63,6 +63,28 @@ The failed v0.1.21 adopter run is preserved without reuse. Version
 0.1.22 remains reserved by the frozen unreleased #55 candidate.
 
 Publish a candidate tag and release asset only after its code, CI, packaging, and notice checks pass; then run the disposable gate from a fresh public download. Publication is not acceptance and does not authorize the Clockgrove pilot. Do not point the marketplace at a moving branch. If the candidate version changes, update the package, manifest, marketplace ref, changelog, README status, and commands here together before tagging.
+
+## Prepare v0.1.27
+
+This metadata-only candidate starts from accepted #165 / PR #166 integration
+`058bd7587aa532342ebb77488474258c90930f5d`, tree
+`a5a4546c66263dac9359bb4ddae883b1da84e6f6`. It adds no runtime or dependency
+changes beyond that integration. Keep public installation pinned to v0.1.26
+until the new release exists; never retag it or modify its paused run.
+
+First check metadata parity, documentation links and formatting, then freeze
+the candidate for independent review. At that stable boundary run the coordinated
+source/static/full-test/notices gates, preserve actual Node22 floor coverage,
+and pack `clockgrove-factory-0.1.27.tgz` once. Record exact source/tree, CI,
+SHA-256 and package/dependency parity; verify a normal empty-cache offline
+installation. Underlying 188-test source evidence is not new-artifact evidence.
+
+After guarded integration and verification of the reviewed tree, reproduce from
+the exact merged source before separately authorized tag/release publication.
+Independently verify its public download and install before using the separately
+reviewed full public qualification source and then the authorized actual adopter.
+No live call, release, installation or target mutation is authorized by this
+metadata preparation. Version 0.1.22 remains reserved for the separate #55 candidate.
 
 ## Qualify published v0.1.26
 

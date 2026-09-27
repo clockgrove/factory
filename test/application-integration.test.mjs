@@ -492,17 +492,23 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
             request.commands,
           );
           assert.equal(observations.work[0].validation, undefined);
-          assert.equal(request.evidence.length, 1);
+          assert.equal(request.evidence.length, 2);
+          const inventory = request.evidence.find(
+            (source) => source.path === "Exact result tree inventory",
+          );
+          assert.equal(inventory.complete, true);
+          assert.equal(JSON.parse(inventory.content).treeSha, request.treeSha);
+          const delta = request.evidence.find(
+            (source) =>
+              source.path === "Work Item Git delta: pnpm-workspace-bootstrap",
+          );
           assert.equal(
-            request.evidence[0].path,
+            delta.path,
             "Work Item Git delta: pnpm-workspace-bootstrap",
           );
-          assert.equal(request.evidence[0].complete, true);
-          assert.match(
-            request.evidence[0].content,
-            /Factory supervisor exact Git evidence/,
-          );
-          assert.doesNotMatch(request.evidence[0].content, /"criteria":/);
+          assert.equal(delta.complete, true);
+          assert.match(delta.content, /Factory supervisor exact Git evidence/);
+          assert.doesNotMatch(delta.content, /"criteria":/);
           assert.doesNotMatch(request.observations, /"criteria":/);
         }
         return {

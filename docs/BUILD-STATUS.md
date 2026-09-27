@@ -1,5 +1,22 @@
 # Factory build status
 
+**Ignored dependency-link collection (#150):** The bounded source correction
+permits only ignored, nondelivered links absent from HEAD/index whose resolved
+ordinary-file/directory destination is strictly within the worktree, excluding
+its root and Git metadata. It retains recursive ignored-directory inventory,
+special-file refusal and every delivered-path/ancestor/mode/ownership/secret
+guard. Generic scripted LocalExecutionDriver fixtures and the independent
+22-case public-only audit supply coverage; source review/integration and a new
+immutable artifact's installed gate remain separate root-owned acceptance.
+This is not a v0.1.24 retrofit, failed-run continuation or actual #26 acceptance.
+No dependency/version/Node-floor change or deletion workaround is introduced.
+Owner safety/secret/media checks pass 46/46 on Node24 and actual Node22.0;
+full suites pass 183/183 on both, with Node22 using supported npm10.9.4.
+Static/notices/package checks pass. The existing generic pnpm receipt fixture
+now explicitly declares ESM rather than relying on newer Node's detection;
+its commands and Factory's Node22 floor are unchanged. Root's exact-head review,
+protected integration and fresh installed qualification remain pending.
+
 **Published v0.1.24 and public prerequisite accepted:** [PR #147](https://github.com/clockgrove/factory-rebuild/pull/147)
 normally merged the metadata-only release at source
 `e0fc91343563e6a3b19eb92dd64d419ba03b487a`, tree

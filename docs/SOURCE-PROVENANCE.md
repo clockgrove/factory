@@ -4,6 +4,25 @@ The clean implementation starts from the Factory plan reviewed September 22, 202
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Ignored nondelivered dependency links (#150)
+
+The #150 correction is separate from immutable v0.1.24. Public
+issue #150, the current staged-candidate guard and deterministic generic safety
+fixtures supply its source; no archived or private adopter inputs are needed.
+An independent 22-case public fixture audit reproduced the baseline on actual
+Node24 and Node22. The narrow correction distinguishes Git-ignored nondelivered
+contained links from delivered changes without skipping ignored directories or
+changing staged-path/ancestor/mode/ownership/scanner enforcement. Newly owned
+ignore policy can admit safe local links, not escapes, special files, staged
+links or hidden secrets. Root retains exact-source integration, publication and
+fresh installed/adopter qualification; historical failed runs and frozen #55
+are unchanged.
+
+The actual Node22 full gate also exposed an existing generic pnpm receipt
+fixture's reliance on newer Node's implicit ESM detection. Its generated
+package manifest now declares `type: module`, matching its existing export/import
+syntax without changing Factory behavior, target commands or the Node22 floor.
+
 ## Published v0.1.24 and public gate handoff
 
 The metadata-only release starts from #145 integration

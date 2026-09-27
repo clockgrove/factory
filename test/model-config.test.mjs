@@ -101,6 +101,67 @@ test("shared worker prompt preserves exact controller validation constraints", (
   for (const check of checks) assert.ok(prompt.includes(JSON.stringify(check)));
 });
 
+test("downstream worker prompt separates selected LFS validation from owned implementation", () => {
+  const check = {
+    command: `sha256sum assets/source.png | grep -qx '${"a".repeat(64)}  assets/source.png'`,
+    provenance: "source-declared",
+    source: "OBJECTIVE",
+  };
+  const selected = {
+    fromItem: "media",
+    setId: "candidate-a",
+    role: "image",
+    ref: { digest: "a".repeat(64), bytes: 77 },
+    visibility: "repository",
+    destination: "assets/source.png",
+    path: "/tmp/factory-shared-prompt-test/.factory-inputs/selected-0",
+    provenance: { source: "assets/source.png", rights: "MIT" },
+  };
+  const prompt = workItemPrompt({
+    worktree: "/tmp/factory-shared-prompt-test",
+    selectedAssets: [selected],
+    item: {
+      id: "final-integration",
+      title: "Document the integrated result",
+      goal: "Write the usage note.",
+      acceptance: ["The note exists and the selected asset digest passes."],
+      nonGoals: ["Do not change assets/source.png."],
+      citations: [{ path: "OBJECTIVE" }],
+      dependencies: ["media"],
+      ownedPaths: ["docs/bootstrap-result.md"],
+      validation: [check],
+      brief: "Document the completed foundation and selected media.",
+    },
+  });
+
+  assert.match(prompt, /Change only the owned paths/);
+  assert.match(prompt, /Owned paths:\ndocs\/bootstrap-result\.md\nBrief:/);
+  assert.match(
+    prompt,
+    /Factory, not the worker, executes these exact commands after your turn/,
+  );
+  assert.match(prompt, /Worker checkouts can contain committed LFS pointers/);
+  assert.match(
+    prompt,
+    /verifies applicable selected required-LFS pointers and restores their selected bytes from the content store before running these commands/,
+  );
+  assert.match(
+    prompt,
+    /A pointer in the worker checkout alone does not establish impossible acceptance/,
+  );
+  assert.match(
+    prompt,
+    /Do not hydrate unowned destinations, configure LFS filters, or claim controller checks have passed/,
+  );
+  assert.match(
+    prompt,
+    /Report genuine implementation conflicts or missing required inputs/,
+  );
+  assert.match(prompt, /read-only asset inputs .*do not edit or commit them/);
+  assert.ok(prompt.includes(JSON.stringify(check)));
+  assert.ok(prompt.includes(JSON.stringify(selected)));
+});
+
 test("shared worker prompt preserves controller-owned media destinations", () => {
   const prompt = workItemPrompt({
     worktree: "/tmp/factory-shared-media-prompt-test",

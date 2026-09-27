@@ -174,7 +174,7 @@ export function writeHarnessResult(path: string, value: unknown): void {
 
 export function workItemPrompt(request: HarnessRequest): string {
   const validationInstructions = request.item.validation.length
-    ? `\n\nController-run validation constraints (authoritative): Factory, not the worker, executes these exact commands after your turn. Do not run them merely because they are listed here. Preserve the literal meaning of each command together with its provenance and source:\n${request.item.validation
+    ? `\n\nController-run validation constraints (authoritative): Factory, not the worker, executes these exact commands after your turn. Do not run them merely because they are listed here. Worker checkouts can contain committed LFS pointers. During exact-result validation, Factory verifies applicable selected required-LFS pointers and restores their selected bytes from the content store before running these commands. A pointer in the worker checkout alone does not establish impossible acceptance. Complete the owned deliverables and keep selected inputs read-only. Do not hydrate unowned destinations, configure LFS filters, or claim controller checks have passed. Report genuine implementation conflicts or missing required inputs. Preserve the literal meaning of each command together with its provenance and source:\n${request.item.validation
         .map((check) => JSON.stringify(check))
         .join("\n")}`
     : "";

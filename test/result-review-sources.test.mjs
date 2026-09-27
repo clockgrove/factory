@@ -287,6 +287,7 @@ test("authoritative evidence labels remain unique, disjoint and complete in both
       "Command pass evidence",
       "Delivery observations",
       "Controller materialization evidence",
+      "Exact result tree inventory",
     ];
     for (const reviewPhase of ["result-review", "objective-review"]) {
       let calls = 0;

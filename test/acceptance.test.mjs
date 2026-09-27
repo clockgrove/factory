@@ -1750,7 +1750,12 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
     const accepted = await reviewAcceptance({
       model: {
         async reviewResult(request) {
-          assert.deepEqual(request.evidence, objectiveEvidence.evidence);
+          assert.deepEqual(
+            request.evidence.filter(
+              (source) => source.path !== "Exact result tree inventory",
+            ),
+            objectiveEvidence.evidence,
+          );
           return {
             findings: [
               {
@@ -2422,7 +2427,13 @@ test("a reviewer pass cannot auto-accept truncated result text", async () => {
             async reviewResult(review) {
               calls++;
               const packet = JSON.parse(review.change);
-              assert.equal(packet.textBudget, 2048);
+              const inventory = review.evidence.find(
+                (source) => source.path === "Exact result tree inventory",
+              );
+              assert.equal(
+                packet.textBudget,
+                2048 - Buffer.byteLength(inventory.content),
+              );
               assert.equal(packet.changes[0].path, "result.txt");
               assert.match(packet.changes[0].newObject, /^[0-9a-f]{40}$/);
               assert.match(packet.patches[0].lineStats, /^20000\s+0\s+/);

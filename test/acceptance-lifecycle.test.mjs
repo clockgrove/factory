@@ -29,8 +29,21 @@ test("compile and independent graph review expose the pre-delivery boundary for 
     question:
       "Keep upload and final hydration at their source-declared controller phases?",
   };
+  const dependencyCriterion =
+    "The join starts from the exact integrated predecessor head.";
+  const downstreamGraph = structuredClone(graph);
+  downstreamGraph.items.push({
+    id: "summary-join",
+    dependencies: ["media"],
+    acceptance: [dependencyCriterion],
+  });
   const prompts = [];
-  const responses = [graph, { findings: [finding] }, { findings: [] }];
+  const responses = [
+    graph,
+    { findings: [finding] },
+    { findings: [] },
+    { findings: [] },
+  ];
   t.mock.method(Codex.prototype, "startThread", () => ({
     async runStreamed(prompt) {
       prompts.push(prompt);
@@ -92,8 +105,21 @@ test("compile and independent graph review expose the pre-delivery boundary for 
     }),
     { findings: [] },
   );
+  assert.deepEqual(
+    await model.reviewGraph({
+      ...request,
+      sources: [
+        ...request.sources,
+        { path: "docs/local-dag.md", content: dependencyCriterion },
+      ],
+      graph: downstreamGraph,
+      commands: [],
+      finalCommands: [],
+    }),
+    { findings: [] },
+  );
   for (const prompt of prompts) {
-    assert.match(prompt, /BEFORE delivery/);
+    assert.match(prompt, /BEFORE the current item's own delivery/);
     assert.match(prompt, /compound criteria/);
     assert.match(prompt, /upload.*before branch\/PR publication/);
     assert.match(
@@ -101,11 +127,22 @@ test("compile and independent graph review expose the pre-delivery boundary for 
       /final Objective commands.*fresh-clone exact-byte hydration/i,
     );
     assert.match(prompt, /source.*contradict/i);
+    assert.match(prompt, /supplied evidence of already-completed dependencies/);
+    assert.match(prompt, /publication or integration when actually recorded/);
+    assert.match(
+      prompt,
+      /downstream regular item may require the recorded integrated predecessor head/,
+    );
+    assert.match(
+      prompt,
+      /[Dd]o not assume a native-stack dependency has merged merely because its result is available/,
+    );
     assert.ok(prompt.includes(source));
     assert.ok(prompt.includes(JSON.stringify(request.controllerCapabilities)));
   }
   assert.ok(prompts[1].includes(badCriterion));
   assert.ok(prompts[2].includes(correctedCriterion));
+  assert.ok(prompts[3].includes(dependencyCriterion));
   assert.deepEqual(
     badGraph.items[0].acceptance,
     [badCriterion],

@@ -1,5 +1,15 @@
 # Factory build status
 
+**Next candidate: v0.1.26, unpublished.** Accepted [#159](https://github.com/clockgrove/factory-rebuild/issues/159)
+/ [PR #160](https://github.com/clockgrove/factory-rebuild/pull/160) is integrated at
+`5aaf6feb01138ff91acc173ae5961daba8638bff`. Planning prompts now keep the current
+Work Item's future delivery and Objective finalization out of its pre-delivery
+acceptance, while retaining already-available predecessor evidence. Metadata
+preparation follows [the release procedure](PUBLIC-RELEASE.md#prepare-v0126).
+The paused v0.1.25 run and packet remain unchanged. New artifact qualification
+and actual adopter acceptance remain #26 work; this source change does not
+establish live model adherence or rewrite any published artifact.
+
 **Published v0.1.25; automatic public gate pending:** [PR #152](https://github.com/clockgrove/factory-rebuild/pull/152)
 released accepted #150/PR #151 source as immutable
 [v0.1.25](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25),

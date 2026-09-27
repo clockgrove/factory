@@ -4,7 +4,7 @@ This is the reusable release and installation procedure. [#25](https://github.co
 
 ## Distribution shape
 
-The [Clockgrove marketplace](../.agents/plugins/marketplace.json) pins the plugin at this repository's root to published `v0.1.25`, not a moving branch. Codex loads its manifest and use skills from that immutable Git tag. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+The [Clockgrove marketplace](../.agents/plugins/marketplace.json) in this preparation checkout pins the plugin at this repository's root to future `v0.1.26`, not a moving branch. That tag is unpublished; the published installation below uses the immutable `v0.1.25` marketplace. Codex loads its manifest and use skills from that immutable Git tag. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
 
 Published [v0.1.25](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25) carries the accepted #150 contained ignored-link correction
 from [PR #151](https://github.com/clockgrove/factory-rebuild/pull/151), integrated
@@ -55,6 +55,38 @@ The failed v0.1.21 adopter run is preserved without reuse. Version
 0.1.22 remains reserved by the frozen unreleased #55 candidate.
 
 Publish a candidate tag and release asset only after its code, CI, packaging, and notice checks pass; then run the disposable gate from a fresh public download. Publication is not acceptance and does not authorize the Clockgrove pilot. Do not point the marketplace at a moving branch. If the candidate version changes, update the package, manifest, marketplace ref, changelog, README status, and commands here together before tagging.
+
+## Prepare v0.1.26
+
+The next immutable candidate includes accepted #159 / PR #160 at
+`5aaf6feb01138ff91acc173ae5961daba8638bff`, along with the already merged offline
+regression and host-launch guidance. Metadata preparation changes no dependency,
+Node floor or runtime beyond that accepted source. Version 0.1.22 remains
+reserved for the separate frozen #55 candidate. Do not patch v0.1.25 or rewrite
+its paused plans/runs.
+
+Freeze the reviewed preparation head, then run the contributor static, full-test,
+notice and package gates below; preserve actual Node 22 floor coverage. Record
+that exact head/tree and CI result. Pack `clockgrove-factory-0.1.26.tgz`, record
+its SHA-256, inspect its packaged metadata/skills/license/dependencies, and
+verify a normal fresh offline installation from an empty npm cache. Compare
+installed bundled dependencies to the accepted lock and source-owned packaged
+files to the same candidate. A local candidate artifact is not a published
+release or live qualification.
+
+After normal protected integration, verify the reviewed tree on main and its
+Quality result. Reproduce the artifact from that exact merged source before
+requesting separate publication authority for protected tag `v0.1.26` and its
+matching tarball/checksum assets. Then independently verify the public download,
+empty-cache offline install and pinned marketplace installation for that tag.
+Use the [host readiness procedure](#controller-host-and-worker-readiness) and
+the bounded representative public Objective to qualify the same downloaded
+artifact before the separately authorized actual adopter. Keep the public
+scenario's required coverage; do not substitute a smaller smoke or claim that
+scripted prompt tests establish live model adherence. Record exact artifact,
+source, plan, host and final result identities in #26; publication alone does
+not satisfy that issue. No publication or provider run is authorized by this
+preparation procedure.
 
 ## Build one candidate
 

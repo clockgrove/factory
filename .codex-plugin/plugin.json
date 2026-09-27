@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "description": "Run source-grounded development Objectives in a target repository.",
   "author": { "name": "Clockgrove", "url": "https://github.com/clockgrove" },
   "repository": "https://github.com/clockgrove/factory-rebuild",

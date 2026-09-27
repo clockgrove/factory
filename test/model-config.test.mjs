@@ -971,6 +971,7 @@ test("install selects the pinned optional Claude adapter without changing planni
   const root = mkdtempSync(join(tmpdir(), "factory-claude-install-"));
   try {
     const target = createTarget(root);
+    bindTarget(target.checkout, "example/claude-install");
     const configPath = join(root, "config", "factory.json");
     execFileSync(
       process.execPath,
@@ -1035,6 +1036,7 @@ test("install selects the pinned optional GitHub Copilot adapter with local auth
   const root = mkdtempSync(join(tmpdir(), "factory-copilot-install-"));
   try {
     const target = createTarget(root);
+    bindTarget(target.checkout, "example/copilot-install");
     const configPath = join(root, "config", "factory.json");
     execFileSync(
       process.execPath,

@@ -293,6 +293,7 @@ test("fresh packed artifact composes a registered harness through the package ro
         env: {
           ...credentialFreeEnvironment,
           PACKED_TARGET_CHECKOUT: target.checkout,
+          PACKED_TARGET_ORIGIN: target.origin,
           PACKED_FACTORY_CONFIG: config,
         },
       }),

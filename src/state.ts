@@ -12,6 +12,7 @@ import {
   assertAssetCaptureReceipt,
   assertHydrationReceipt,
   assetSelectionDigest,
+  finalValidationLfsMembers,
 } from "./media.js";
 
 export type WorkStatus =
@@ -809,5 +810,27 @@ export function parseFactoryState(
     throw new Error("githubClosureError is invalid");
   if (state.error !== undefined && typeof state.error !== "string")
     throw new Error("state.error is invalid");
-  return value as FactoryState;
+  const validated = value as FactoryState;
+  const selectedMembers = finalValidationLfsMembers(validated);
+  // Item validation may hydrate dependencies or selected sibling pointers already
+  // present in its tree, so compare against all selected required-LFS members.
+  for (const evidence of [
+    ...Object.values(validated.work).map((item) => item.validation),
+    validated.finalValidation,
+  ]) {
+    for (const receipt of evidence?.selectedLfs ?? []) {
+      if (
+        !selectedMembers.some(
+          (member) =>
+            member.destination === receipt.destination &&
+            member.digest === receipt.digest &&
+            member.bytes === receipt.bytes,
+        )
+      )
+        throw new Error(
+          "Selected LFS validation evidence does not match a selected member",
+        );
+    }
+  }
+  return validated;
 }

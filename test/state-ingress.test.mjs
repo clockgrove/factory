@@ -144,6 +144,31 @@ test("schemaVersion 2 state requires ordered exact-tree command receipts", () =>
   }
 
   const legacyReceipt = structuredClone(valid);
+  const selected = structuredClone(valid);
+  selected.work.asset.validation.selectedLfs = [
+    {
+      treeSha,
+      destination: "approved/image.png",
+      digest: "a".repeat(64),
+      bytes: 77,
+      filter: "lfs",
+    },
+  ];
+  parseFactoryState(selected, repository, objective);
+  for (const change of [
+    { treeSha: "d".repeat(40) },
+    { destination: "../escape" },
+    { digest: "bad" },
+    { bytes: -1 },
+    { filter: "text" },
+  ]) {
+    const invalid = structuredClone(selected);
+    Object.assign(invalid.work.asset.validation.selectedLfs[0], change);
+    assert.throws(
+      () => parseFactoryState(invalid, repository, objective),
+      /Selected LFS validation evidence/,
+    );
+  }
   legacyReceipt.work.asset.validation.commands = [
     { command: "test -s approved/image.png", passed: true },
   ];

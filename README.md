@@ -4,15 +4,17 @@
 
 Factory turns a repository development Objective into source-grounded Work Items, runs bounded coding attempts, validates their exact result trees, and delivers the changes through GitHub. It is an open-source Clockgrove plugin installed for one target repository at a time.
 
-**Published release:** `v0.1.24`. Factory runs the local Codex SDK path with a source-grounded dependency DAG, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for source, publication and exact-artifact acceptance status.
+**Published release:** [v0.1.25](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25). Factory runs the local Codex SDK path with a source-grounded dependency DAG, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for source, publication and exact-artifact acceptance status.
 
-**Unpublished candidate:** `v0.1.25` carries the accepted
+v0.1.25 carries the accepted
 [#150](https://github.com/clockgrove/factory-rebuild/issues/150) contained ignored-link
 correction from [PR #151](https://github.com/clockgrove/factory-rebuild/pull/151).
-The source marketplace entry prepares its immutable tag; that tag and release
-assets do not exist yet. Metadata review, publication and a fresh installed gate
-remain pending. The published v0.1.24 installation below remains unchanged and
-does not include this correction.
+Publication, public-download/offline installation and pinned marketplace
+verification passed. Its first combined public gate is preserved and
+nonqualifying after a reviewer idle timeout, not a product finding. The
+[wholly fresh gate](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1)
+is planning; automatic installed-gate acceptance remains pending. Publication
+does not accept the actual adopter pilot.
 
 v0.1.21 retains its historical accepted-artifact evidence; published v0.1.23
 and its failed planning attempts remain immutable and nonqualifying for the
@@ -34,19 +36,19 @@ unreleased #55 candidate 0.1.22 and Claude/Copilot qualification remain deferred
 
 The target repository owns its product and runtime truth. Factory state and credentials stay outside the target checkout. Factory refuses to run against any Factory source repository.
 
-## Install published v0.1.24
+## Install published v0.1.25
 
-Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md):
+Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md):
 
 ```sh
-codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.24
+codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.25
 codex plugin add factory@clockgrove
-gh release download v0.1.24 --repo clockgrove/factory-rebuild \
-  --pattern clockgrove-factory-0.1.24.tgz --pattern SHA256SUMS
+gh release download v0.1.25 --repo clockgrove/factory-rebuild \
+  --pattern clockgrove-factory-0.1.25.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Compare the tarball digest with the independently recorded build status value.
 npm install --offline --ignore-scripts --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.24.tgz
+  ./clockgrove-factory-0.1.25.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```
@@ -162,8 +164,8 @@ This is not a package-directory allowlist: traversal still inventories ignored
 directories and refuses special files, escaping, dangling or cyclic new links.
 Delivered links, changed tracked links, staged descendants behind symlink
 ancestors, ownership violations and staged/working-byte secrets remain refused.
-The #150 source correction requires its own newly published installed-artifact
-gate; it does not change immutable v0.1.24 or accept the actual adopter pilot.
+The #150 correction is published in v0.1.25; its automatic installed-artifact
+gate remains pending. It does not change immutable v0.1.24 or accept the actual adopter pilot.
 
 ## Local host-tool preflight
 

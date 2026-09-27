@@ -2,12 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.25 — unreleased
+## 0.1.25 — 2026-09-27
 
 - Permit new Git-ignored, nondelivered links only when absent from HEAD and the index (including staged descendants), with an existing ordinary-file/directory destination strictly inside the worktree and outside its root and Git metadata.
 - Preserve recursive ignored-directory inventory and delivered-path, symlink-ancestor, escape, special-file, mode, ownership and staged/working-byte secret guards. Add real local collection coverage for contained pnpm-style links, owned ignore policy and mixed unsafe candidates.
 - Explicitly declare ESM in the existing generic pnpm receipt test fixture for the unchanged Node 22.0 floor; no runtime dependency or packaged skill changes.
-- Carry accepted source from PR #151 without rewriting immutable v0.1.24 or frozen #55 candidate 0.1.22. Publication, a fresh installed-artifact gate and actual adopter acceptance remain separate coordinator-owned requirements.
+- Publish accepted source from PR #151 and metadata PR #152 at `b641ccdccdb969f14c64a66da751c22f6be5bd6d`, without rewriting immutable v0.1.24 or frozen #55 candidate 0.1.22. Publication and installation verification passed; automatic qualification of the wholly fresh public gate and actual adopter acceptance remain separate coordinator-owned requirements. The first combined gate is preserved/nonqualifying after a provider idle timeout, not a product finding; see [build status](docs/BUILD-STATUS.md).
 
 ## 0.1.24 — 2026-09-26
 

@@ -13,8 +13,27 @@ identity, manifest/marketplace pin, changelog, public release/status instruction
 and the generated Factory notices header. Dependency entries, runtime, tests,
 scripts, skills, Node floor and license bodies are identical to that base.
 No archived/private inputs, providers or target execution are required.
-Publication and fresh installed qualification are still pending; immutable
-v0.1.24 and the frozen unreleased #55 candidate remain unchanged.
+Metadata [PR #152](https://github.com/clockgrove/factory-rebuild/pull/152) is
+accepted and published as immutable [v0.1.25](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25),
+source `b641ccdccdb969f14c64a66da751c22f6be5bd6d`, tree
+`3569c631cdc6c878836d190e0069cd87f828d6c3`; tarball 150177209 bytes,
+SHA-256 `953324353b903624dbe2471c10310ed60fcf419538e058906b2e22b855ff5e09`.
+[Publication evidence](https://github.com/clockgrove/factory-rebuild/issues/26#issuecomment-5851413433)
+records full183/static/notices, exact-head/main CI, deep metadata parity,
+70 owned packaged files, reproduction, public download and empty-cache offline
+verification; normal pinned marketplace 0.1.25 verification also passed.
+
+This docs-only follow-up uses current public docs, accepted #150/#152 and the
+durable public #26 [gate-start](https://github.com/clockgrove/factory-rebuild/issues/26#issuecomment-5851450549)
+and [timeout](https://github.com/clockgrove/factory-rebuild/issues/26#issuecomment-5851558280)
+checkpoints, not private adopter source/logs/topology or archived implementation.
+The first combined run remains nonqualifying after a 900000 ms reviewer idle
+timeout, with no product finding or result override/retry/replay. Real pnpm
+collection and four checks are limited evidence, not Objective acceptance.
+Root's [wholly fresh public gate](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1)
+is planning under the unchanged public contract and published artifact;
+automatic installed qualification and actual #26 acceptance remain pending.
+Immutable v0.1.24 and the frozen unreleased #55 candidate remain unchanged.
 
 The #150 correction is separate from immutable v0.1.24. Public
 issue #150, the current staged-candidate guard and deterministic generic safety

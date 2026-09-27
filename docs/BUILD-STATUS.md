@@ -1,17 +1,41 @@
 # Factory build status
 
-**Unpublished v0.1.25 metadata candidate:** Package/lock-root identity,
-manifest/marketplace pin, changelog, future release commands and notices header
-prepare a new immutable artifact from accepted #150 source below. Runtime,
-tests, dependency entries, scripts, skills, Node floor and license bodies are
-unchanged from integration `92ef6eeac89e792016b5f20ad69cefb707e9debb`.
-Candidate full suites pass 183/183 on Node24 and actual Node22.0/npm10.9.4;
-serial build/typecheck/lint/format/notices and package dry-run checks pass.
-Full lock comparison preserves every dependency entry; notices differ only in
-the Factory version header. Metadata exact-head review, publication and fresh
-installed-artifact qualification remain pending and coordinator-owned. No tag/release, marketplace
-installation, Factory self-targeting or failed-run continuation occurs here.
-Published v0.1.24 evidence and frozen #55 candidate 0.1.22 remain immutable.
+**Published v0.1.25; automatic public gate pending:** [PR #152](https://github.com/clockgrove/factory-rebuild/pull/152)
+released accepted #150/PR #151 source as immutable
+[v0.1.25](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25),
+source `b641ccdccdb969f14c64a66da751c22f6be5bd6d`, tree
+`3569c631cdc6c878836d190e0069cd87f828d6c3`. The tarball is 150177209 bytes,
+SHA-256 `953324353b903624dbe2471c10310ed60fcf419538e058906b2e22b855ff5e09`.
+Owner full suites passed 183/183 on actual Node22 and Node24; root independently
+passed all 183 tests, static/notices, deep metadata/dependency parity, all 70 owned
+package-file comparisons, merged-source pack reproduction, public download,
+empty-cache offline installation (69 bundled entries; five absent other-platform
+Codex packages are optional), and normal pinned marketplace 0.1.25 verification.
+[Metadata exact-head Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36283137220)
+and [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36283534105)
+passed. [Durable publication evidence](https://github.com/clockgrove/factory-rebuild/issues/26#issuecomment-5851413433)
+records the same identity. Metadata changes preserve runtime, tests, dependency
+entries, scripts, skills, Node floor and license bodies from accepted #150.
+
+The [first combined public Objective](https://github.com/clockgrove/factory-v0125-gate-20260927-combined/issues/1),
+run `f76707a8-802f-4af9-86f7-be28a816dbc1`, is preserved and nonqualifying.
+[Its clean planning/start evidence](https://github.com/clockgrove/factory-rebuild/issues/26#issuecomment-5851450549)
+does not imply completion. Real pnpm foundation collection and all four canonical
+checks passed under controller and independent root verification, but result review
+emitted no result for 900000 ms. At 2026-09-27 01:14:36 UTC the controller recorded
+`provider-timeout` and paused for an exact-tree criterion: no product finding,
+human result override, retry, replay or automatic acceptance.
+[The preserved timeout checkpoint](https://github.com/clockgrove/factory-rebuild/issues/26#issuecomment-5851558280)
+limits what that run proves; its captured media set belongs only to that run.
+
+Next is root's [wholly fresh public Objective](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1),
+currently planning with the same published artifact, unchanged public source
+contract, seven commands and model/concurrency/delivery policy. Automatic gate
+acceptance remains pending, followed by separately authorized actual adopter
+integrated-result acceptance. #26 remains OPEN/unaccepted; #55/PR #62 stays
+deferred/frozen and is not this bounded pilot's prerequisite. #149 is a nonblocking
+follow-up, not a new acceptance dependency. Earlier releases, targets and evidence
+are immutable; this docs-only handoff neither republishes nor qualifies an artifact.
 
 **Ignored dependency-link collection (#150):** The bounded source correction
 permits only ignored, nondelivered links absent from HEAD/index whose resolved
@@ -26,8 +50,9 @@ review. Normal guarded integration is `92ef6eeac89e792016b5f20ad69cefb707e9debb`
 preserving reviewed tree `60ad230af22450f46d00e2ccece8555dc883d6cb`.
 [Exact-head Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36282425602)
 passed; [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36282767256)
-passed; #150 is accepted and closed for source behavior only. New immutable-artifact publication
-and installed qualification remain separate root-owned acceptance.
+passed; #150 is accepted and closed for source behavior. Its new immutable
+v0.1.25 publication passed; automatic installed qualification remains separate
+root-owned acceptance as recorded above.
 This is not a v0.1.24 retrofit, failed-run continuation or actual #26 acceptance.
 No dependency/version/Node-floor change or deletion workaround is introduced.
 Owner safety/secret/media checks pass 46/46 on Node24 and actual Node22.0;
@@ -402,7 +427,8 @@ existing lower bounds for graph items, four required Work Item collections and
 title/goal/brief. Batched generic/source-specific and production indexed-schema
 tests cover all eight previously schema-admitted empty shapes and keep runtime
 validation fail-closed. Legitimate empty optional collections and whole-source
-headings remain valid. Independent review, hosted/main checks and source
-acceptance are pending. Immutable public v0.1.23, all nonqualifying targets and
+headings remain valid. At this initial checkpoint, independent review, hosted/main
+checks and source acceptance were pending; the accepted #145/#146 and v0.1.24
+gate above supersede that pending status. Immutable public v0.1.23, all nonqualifying targets and
 packets, and deferred #55 remain unchanged; a later corrected immutable artifact
 and fresh installed gate are separate requirements, not waived by source tests.

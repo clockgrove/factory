@@ -90,8 +90,11 @@ not acceptance of #55 or permission to merge draft PR #62. That draft remains
 frozen at head `7bd51356b908cb43ce85d68bce12cabf1752ffeb`; source/default-installed
 checks do not substitute for its required authorized live-provider evidence.
 
-Published v0.1.24 and its fresh public installed gate have passed their own
-prerequisite checks, as recorded in [BUILD-STATUS.md](BUILD-STATUS.md). The
+Historical v0.1.24 and its fresh public installed gate passed their own
+prerequisite checks. Published v0.1.25 carries accepted #150; publication and
+installation verification passed, while its wholly fresh combined public gate
+is planning and automatic qualification remains pending, as recorded in
+[BUILD-STATUS.md](BUILD-STATUS.md). The
 Codex-only #26 pilot may proceed under its separately recorded target/source-egress
 and activation authority without waiting for #55, Claude/Copilot login, or this
 documentation handoff. Root retains exact source/configuration/plan verification,

@@ -4,6 +4,20 @@ The clean implementation starts from the Factory plan reviewed September 22, 202
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Published v0.1.26
+
+Accepted #159 / PR #160 integration `5aaf6feb01138ff91acc173ae5961daba8638bff`
+supplied the lifecycle correction described below. Metadata PR #161 published
+[v0.1.26](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26) at
+source `b20cc82c8b63ca231b1f120ce25025836ed8d75b`, tree
+`9110da2dcf06361eacae48000f8bf0cb7c3c439f`, without further runtime or dependency
+changes. [Build status](BUILD-STATUS.md) records its tarball digest, full Node22/24
+gates and independent public-download/offline installation checks. This later
+documentation handoff does not change those immutable bytes. Public live
+qualification and actual adopter acceptance remain pending in issue #26;
+publication and scripted coverage do not establish live model adherence.
+No archived implementation or private adopter source entered this release.
+
 ## Ignored nondelivered dependency links (#150)
 
 Metadata-only v0.1.25 preparation starts at accepted PR #151 integration

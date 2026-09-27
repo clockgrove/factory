@@ -71,9 +71,9 @@ The first release passed [#25](https://github.com/clockgrove/factory-rebuild/iss
 | Third-party notices                            | Generated from production lock and installed package notices, including SPDX BSD-3-Clause text for `@azu/format-text` | Regenerate for final lock; obtain maintainer review of the publisher's missing copyright notice before publication |
 | Project logo                                   | SVG mark in `assets/`                                                                                                 | Review rendering and public use                                                                                    |
 | Objective issue form                           | Eight named fields and final pinned-source section in `.github/ISSUE_TEMPLATE/objective.yml`                          | Confirm form renders, submitted body parses, and target owners can copy it                                         |
-| Package and marketplace metadata               | Package, manifest, bundled Linux x64 runtime dependencies, and pinned `clockgrove` Git marketplace entry present      | Tag the accepted commit; verify `factory@clockgrove` and an offline CLI install from that public tag               |
+| Package and marketplace metadata               | Published 0.1.26 package/manifest and immutable v0.1.26 marketplace pin; bundled Linux x64 dependencies               | Tag the accepted commit; verify `factory@clockgrove` and an offline CLI install from that public tag               |
 | README and CONTRIBUTING                        | Public install and contribution instructions                                                                          | Recheck commands against final CLI                                                                                 |
-| CHANGELOG                                      | Published `0.1.25` changes listed; earlier entries retained                                                           | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
+| CHANGELOG                                      | Published `0.1.26` changes listed; earlier entries retained                                                           | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
 | Installed use skills                           | `director` and `setup` packaged                                                                                       | Exercise planning, result decisions, media selection, status, and diagnostics in a fresh target                    |
 | CLI                                            | Existing commands documented                                                                                          | Recheck plan/decide/run/decide-result/status/diagnostics/logs against the final CLI                                |
 | TypeScript, formatter, test, workflow          | Existing build and deterministic CI                                                                                   | Run credential-free integration gate on merged trunk                                                               |
@@ -82,19 +82,20 @@ No required asset is intentionally omitted. MCP is not a first-release requireme
 
 ## Exact-artifact acceptance
 
-For v0.1.25, source/publication/installation checks in steps 1–2 passed;
-steps 3–4 remain pending for the wholly fresh combined gate. The first combined
-run is nonqualifying and will not be replayed or overridden. For historical
-v0.1.24, steps 1–4 passed for the fresh PUBLIC prerequisite under the
-exact identity above; [BUILD-STATUS.md](BUILD-STATUS.md) records the evidence.
-The separate actual #26 pilot remains unaccepted, not blocked by this docs-only
-handoff. v0.1.23 planning attempts remain nonqualifying; historical #81 closure
-must not be reopened or applied to changed bytes. The steps below remain the
-reusable procedure for a future separately authorized candidate, not permission
-to repack, retag or replay the accepted v0.1.24 gate.
+For current v0.1.26, source/publication/installation checks in steps 1–2 passed;
+public installed qualification in steps 3–4 and actual adopter acceptance remain
+pending. [BUILD-STATUS.md](BUILD-STATUS.md) records the exact published identity;
+issue #26 tracks remaining acceptance. Use the approved representative foundation,
+policy, same-path media and final-integration scenario without reducing its scope.
+
+Historical v0.1.25 publication and installation passed, but its preserved runs
+remain nonqualifying. Historical v0.1.24 steps 1–4 passed for its fresh PUBLIC
+prerequisite only; v0.1.23 planning attempts remain nonqualifying. Earlier #81
+acceptance does not qualify changed bytes. The reusable procedure below does not
+authorize repacking, retagging or replaying any published release or preserved run.
 
 1. Confirm accepted #19–#24, #28, #44, #46, #48, #51, #60, #64, #67, and #81 behavior in README, skills, and package tests; obtain review of the release candidate against the final CLI.
 2. Follow [PUBLIC-RELEASE.md](PUBLIC-RELEASE.md) to build a versioned tarball from the accepted commit, record its SHA-256 digest, and attach it to a public release at the pinned marketplace tag. Confirm the package contains manifest, CLI, use skills, license, logo, notices, and the exact bundled production dependency tree. Install it with an empty npm cache and compare installed versions with the accepted lock.
-3. Complete the [authorized host launch and model-free worker preflight](PUBLIC-RELEASE.md#controller-host-and-worker-readiness). In a clean environment and fresh third-party repository assembled from the public fixture, install only that public artifact. Use this same bounded public scenario for real worker tools, collection and delivery; a separate preliminary live smoke is unnecessary. Use the public same-path Objective to obtain an automatically clean two-item plan, select a byte-identical candidate, migrate the existing ordinary blob to required LFS, and complete final review only after exact fresh-clone hydration evidence.
+3. Complete the [authorized host launch and model-free worker preflight](PUBLIC-RELEASE.md#controller-host-and-worker-readiness). In a clean environment and fresh third-party repository assembled from the public fixture, install only that public artifact. Use this same bounded public scenario for real worker tools, collection and delivery; a separate preliminary live smoke is unnecessary. Use the approved public Objective and its complete source-defined graph, select a byte-identical candidate, migrate the existing ordinary blob to required LFS, and complete final review only after all source-defined final commands and exact fresh-clone hydration evidence.
 4. Record package identity and digest, Objective and GitHub issue/PR identities, selected-byte identity, validated tree, exact final head, pre-publication LFS object proof, hydration receipt, and operator acceptance in [BUILD-STATUS.md](BUILD-STATUS.md). Do not use a local source path, source-module import, or private instructions.
-5. Historical #81 is already closed after the v0.1.21 installed-artifact gate. That acceptance does not qualify v0.1.23. Do not substitute or mutate an older run, retag an older release, or treat source merge as product acceptance. The private adopter smoke remains a separate later gate.
+5. Historical #81 is already closed after the v0.1.21 installed-artifact gate. That acceptance does not qualify later release bytes, including v0.1.26. Do not substitute or mutate an older run, retag an older release, or treat source merge as product acceptance. The private adopter smoke remains a separate later gate.

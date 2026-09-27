@@ -4,7 +4,16 @@ This is the reusable release and installation procedure. [#25](https://github.co
 
 ## Distribution shape
 
-The [Clockgrove marketplace](../.agents/plugins/marketplace.json) in this preparation checkout pins the plugin at this repository's root to future `v0.1.26`, not a moving branch. That tag is unpublished; the published installation below uses the immutable `v0.1.25` marketplace. Codex loads its manifest and use skills from that immutable Git tag. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+The [Clockgrove marketplace](../.agents/plugins/marketplace.json) pins the plugin at this repository's root to published `v0.1.26`, not a moving branch. Codex loads its manifest and use skills from that immutable Git tag. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+
+Published [v0.1.26](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26)
+includes the accepted #159 planning lifecycle correction. Its exact source, tree,
+tarball digest, full Node 22/24 gates and independent public-download/offline
+installation proof are recorded in [build status](BUILD-STATUS.md). Public live
+qualification and actual adopter acceptance remain pending in
+[issue #26](https://github.com/clockgrove/factory-rebuild/issues/26).
+Use the [published install instructions](../README.md#install-published-v0126).
+The earlier release evidence below applies only to those immutable artifacts.
 
 Published [v0.1.25](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25) carries the accepted #150 contained ignored-link correction
 from [PR #151](https://github.com/clockgrove/factory-rebuild/pull/151), integrated
@@ -18,7 +27,6 @@ marketplace checks passed; [build status](BUILD-STATUS.md) links their durable
 evidence. The first combined gate is nonqualifying after a provider idle timeout,
 not a product finding. The [wholly fresh public gate](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1)
 has not yet qualified; automatic gate and actual #26 adopter acceptance remain pending.
-Use the [published install instructions](../README.md#install-published-v0125).
 Historical v0.1.24 evidence below remains immutable and does not qualify changed bytes.
 
 Published [v0.1.24](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24) carries the accepted and closed #145 required-shape correction
@@ -56,43 +64,27 @@ The failed v0.1.21 adopter run is preserved without reuse. Version
 
 Publish a candidate tag and release asset only after its code, CI, packaging, and notice checks pass; then run the disposable gate from a fresh public download. Publication is not acceptance and does not authorize the Clockgrove pilot. Do not point the marketplace at a moving branch. If the candidate version changes, update the package, manifest, marketplace ref, changelog, README status, and commands here together before tagging.
 
-## Prepare v0.1.26
+## Qualify published v0.1.26
 
-The next immutable candidate includes accepted #159 / PR #160 at
-`5aaf6feb01138ff91acc173ae5961daba8638bff`, along with the already merged offline
-regression and host-launch guidance. Metadata preparation changes no dependency,
-Node floor or runtime beyond that accepted source. Version 0.1.22 remains
-reserved for the separate frozen #55 candidate. Do not patch v0.1.25 or rewrite
-its paused plans/runs.
+The immutable release includes accepted #159 / PR #160 plus the merged offline
+regression and host-launch guidance. Publication and independent installation
+checks passed; do not rebuild, retag or replace its release assets from this later
+documentation checkout. Version 0.1.22 remains reserved for the separate #55
+candidate. Preserve v0.1.25 and its paused plans/runs.
 
-Freeze the reviewed preparation head, then run the contributor static, full-test,
-notice and package gates below; preserve actual Node 22 floor coverage. Record
-that exact head/tree and CI result. Pack `clockgrove-factory-0.1.26.tgz`, record
-its SHA-256, inspect its packaged metadata/skills/license/dependencies, and
-verify a normal fresh offline installation from an empty npm cache. Compare
-installed bundled dependencies to the accepted lock and source-owned packaged
-files to the same candidate. A local candidate artifact is not a published
-release or live qualification.
-
-After normal protected integration, verify the reviewed tree on main and its
-Quality result. Reproduce the artifact from that exact merged source before
-requesting separate publication authority for protected tag `v0.1.26` and its
-matching tarball/checksum assets. Then independently verify the public download,
-empty-cache offline install and pinned marketplace installation for that tag.
 Use the [host readiness procedure](#controller-host-and-worker-readiness) and
-the bounded representative public Objective to qualify the same downloaded
-artifact before the separately authorized actual adopter. Keep the public
-scenario's required coverage; do not substitute a smaller smoke or claim that
-scripted prompt tests establish live model adherence. Record exact artifact,
-source, plan, host and final result identities in #26; publication alone does
-not satisfy that issue. No publication or provider run is authorized by this
-preparation procedure.
+the bounded representative public Objective to qualify the downloaded artifact
+before the separately authorized actual adopter. Preserve the public scenario's
+full coverage; scripted prompt tests do not establish live model adherence.
+Record exact artifact, source, plan, host and final result identities in issue #26.
+Publication alone does not establish live acceptance, and this procedure does
+not authorize provider execution.
 
 ## Build one candidate
 
-For reproduction of v0.1.25, use its exact tagged source above, not later main;
+For reproduction of v0.1.26, use its exact tagged source above, not later main;
 never overwrite its tag or release assets. The following is a reusable build
-procedure, not authority to publish v0.1.25 again. A future candidate needs its
+procedure, not authority to publish v0.1.26 again. A future candidate needs its
 own separately authorized version and matching commands.
 
 From a clean Linux x64 source checkout at the accepted commit, with Node.js 22 or later, Git, Git LFS, and public npm access, confirm `git status --porcelain` is empty. Choose an empty absolute release directory outside the checkout, then run:
@@ -108,10 +100,10 @@ npm test
 mkdir -p /absolute/empty/release-directory
 npm pack --pack-destination /absolute/empty/release-directory
 cd /absolute/empty/release-directory
-sha256sum clockgrove-factory-0.1.25.tgz > SHA256SUMS
+sha256sum clockgrove-factory-0.1.26.tgz > SHA256SUMS
 ```
 
-Inspect the tarball file list for the manifest, installed skills, CLI, license, logo, notices, and bundled production dependency tree. In a separate empty prefix, install the tarball with `npm install --offline --ignore-scripts --prefix /absolute/private/check-prefix ./clockgrove-factory-0.1.25.tgz` using an empty npm cache; verify `factory help`, compare every installed bundled package version with `package-lock.json`, and check that notices cover the same tree. Record `git rev-parse HEAD`, package version, tarball SHA-256, and the passing CI run. The protected `v0.1.25` tag and both `clockgrove-factory-0.1.25.tgz` and `SHA256SUMS` assets already exist; do not recreate or replace them. For a future version, publication requires separate operator authority and a protected tag at its exact accepted commit. Record the expected SHA-256 outside mutable Release assets in [BUILD-STATUS.md](BUILD-STATUS.md). This procedure does not itself publish or tag anything.
+Inspect the tarball file list for the manifest, installed skills, CLI, license, logo, notices, and bundled production dependency tree. In a separate empty prefix, install the tarball with `npm install --offline --prefix /absolute/private/check-prefix ./clockgrove-factory-0.1.26.tgz` using an empty npm cache; verify `factory help`, compare every installed bundled package version with `package-lock.json`, and check that notices cover the same tree. Record `git rev-parse HEAD`, package version, tarball SHA-256, and the passing CI run. The protected `v0.1.26` tag and both `clockgrove-factory-0.1.26.tgz` and `SHA256SUMS` assets already exist; do not recreate or replace them. For a future version, publication requires separate operator authority and a protected tag at its exact accepted commit. Record the expected SHA-256 outside mutable Release assets in [BUILD-STATUS.md](BUILD-STATUS.md). This procedure does not itself publish or tag anything.
 
 ## Install from public artifacts
 
@@ -128,13 +120,13 @@ gh auth status
 Then install from the public tag and release assets:
 
 ```sh
-codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.25
+codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.26
 codex plugin add factory@clockgrove
-gh release download v0.1.25 --repo clockgrove/factory-rebuild \
-  --pattern clockgrove-factory-0.1.25.tgz --pattern SHA256SUMS
+gh release download v0.1.26 --repo clockgrove/factory-rebuild \
+  --pattern clockgrove-factory-0.1.26.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the digest with the independently recorded release value in BUILD-STATUS.md.
-npm install --offline --ignore-scripts --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.25.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.26.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

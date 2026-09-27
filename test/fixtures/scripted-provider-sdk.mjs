@@ -22,7 +22,15 @@ export function query({ options }) {
             model: options.model,
             permissionMode: options.permissionMode,
             effort: options.effort,
-            tools: scenario === "startup-tool" ? ["Bash"] : [],
+            tools: scenario.startsWith("startup-tool")
+              ? [
+                  scenario === "startup-tool-skill"
+                    ? "Skill"
+                    : scenario === "startup-tool-agent"
+                      ? "Agent"
+                      : "Bash",
+                ]
+              : [],
             mcp_servers:
               scenario === "startup-mcp"
                 ? [{ name: "ambient", status: "connected" }]
@@ -31,8 +39,8 @@ export function query({ options }) {
               { name: "agents-md", path: "builtin" },
               { name: "sec-default", path: "builtin" },
             ],
-            skills: [],
-            agents: [],
+            skills: ["verify"],
+            agents: ["Explore", "general-purpose"],
           },
         };
       if (scenario === "timeout") return stall();

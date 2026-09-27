@@ -443,6 +443,7 @@ test("Claude adapter configuration is exact, isolated, and bound to the pinned S
       syncClaudeAiPlugins: false,
       syncClaudeAiSkills: false,
       autoMemoryEnabled: false,
+      disableBundledSkills: true,
       claudeMdExcludes: ["**"],
     });
     assert.equal(queryOptions.env.DISABLE_TELEMETRY, "1");

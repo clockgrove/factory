@@ -196,16 +196,20 @@ mode will reuse a system-keychain login. Provider-local state does not authorize
 unselected tools, account-synced extensions, settings discovery, memory, or session persistence.
 
 Claude's bundled and administrator-managed components are part of its trusted local
-runtime. Its initialization plugin inventory is diagnostic data, not proof of
+runtime. Its initialization plugin, skill and agent inventories are diagnostic data, not proof of
 provenance or an extra permission grant. Factory does not reject a normal runtime
 merely because it implements instruction loading or managed policy as a plugin.
 It supplies no additional plugin paths, disables account-synced plugins/skills,
-auto-memory and optional telemetry per invocation, and excludes personal/project
+auto-memory, bundled skills/workflows and optional telemetry per invocation, and excludes personal/project
 instruction files (including the built-in AGENTS.md loader's inputs). Managed
 instructions and policy retain precedence. Filesystem settings sources remain an
 explicit adapter configuration choice; use `settingSources: []` for no user,
 project or local settings discovery. Selecting a source trusts its settings/hooks
 as local runtime code; it does not expand Factory's configured model tools.
+
+Empty SDK skill/agent options do not imply empty runtime inventories. The skill
+filter hides unselected model skills; the configured tools exclude `Skill` and
+`Agent`, and host hooks reject both. Built-in terminal commands may remain listed.
 
 The file-tool hooks and startup tool/MCP checks constrain model-facing operations;
 they do not sandbox trusted runtime or plugin code, hide all home-directory files,

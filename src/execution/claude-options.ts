@@ -138,6 +138,7 @@ export function claudeQueryOptions(
       syncClaudeAiPlugins: false,
       syncClaudeAiSkills: false,
       autoMemoryEnabled: false,
+      disableBundledSkills: true,
       claudeMdExcludes: ["**"],
     },
     maxTurns: config.maxTurns,

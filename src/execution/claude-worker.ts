@@ -41,12 +41,15 @@ function progressEvent(
     event.subtype = message.subtype;
   if ("session_id" in message && typeof message.session_id === "string")
     event.sessionId = message.session_id;
-  if (message.type === "system" && message.subtype === "init")
+  if (message.type === "system" && message.subtype === "init") {
+    event.skills = message.skills.map((name) => redact(name, secrets));
+    event.agents = message.agents?.map((name) => redact(name, secrets)) ?? [];
     event.plugins = message.plugins.map(({ name, path, version }) => ({
       name: redact(name, secrets),
       path: redact(path, secrets),
       ...(version && { version: redact(version, secrets) }),
     }));
+  }
   if (message.type === "result") {
     event.success = message.subtype === "success" && !message.is_error;
     event.turns = message.num_turns;
@@ -86,14 +89,10 @@ function assertInitialization(
     throw new Error(`Claude SDK exposed unconfigured tool ${unexpectedTool}`);
   if (message.mcp_servers.length)
     throw new Error("Claude SDK initialized an unconfigured MCP server");
-  // Plugin-shaped metadata includes the pinned runtime's built-in and managed
-  // components. It is an inventory, not a provenance or confinement boundary.
-  // Extension inputs are controlled at launch; model-facing capabilities below
-  // and above still have to match the configured worker contract.
-  if (message.skills.length)
-    throw new Error("Claude SDK initialized an unconfigured skill");
-  if (message.agents?.length)
-    throw new Error("Claude SDK initialized an unconfigured agent");
+  // Plugin, skill and agent lists describe runtime inventory, not permissions.
+  // In the pinned runtime, init.skills lists user-invocable commands even when
+  // skills: [] hides them from the model. Empty agents adds no custom agents;
+  // it does not remove built-ins. Explicit tools and host hooks enforce access.
 }
 
 function resultError(result: SDKResultMessage): string | undefined {

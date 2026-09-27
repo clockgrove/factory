@@ -221,9 +221,26 @@ export interface ExecutionHandle {
   identity: string;
   data?: unknown;
 }
+export interface AuthenticationRequest {
+  /** Adapter/provider whose developer-local login is missing or expired. */
+  provider: string;
+  /** Interactive command the operator runs outside the detached worker. */
+  command: string;
+}
+export class AuthenticationRequiredError extends Error {
+  override readonly name = "AuthenticationRequiredError";
+
+  constructor(
+    message: string,
+    readonly authentication: AuthenticationRequest,
+  ) {
+    super(message);
+  }
+}
 export interface ExecutionObservation {
   state: "running" | "complete" | "failed" | "cancelled";
   detail?: string;
+  authentication?: AuthenticationRequest;
 }
 export interface ExecutionResult {
   treeSha: string;
@@ -240,6 +257,7 @@ export interface ExecutionDriver {
 }
 
 export interface HarnessRequest {
+  /** Exact Factory-owned worktree. The harness may operate only inside it. */
   item: WorkItem;
   worktree: string;
   attemptId?: string;
@@ -251,18 +269,39 @@ export interface HarnessRequest {
   selectedAssets?: (SelectedAssetInput & { path: string })[];
 }
 export interface HarnessHandle {
+  /** Provider attempt identity, stable across controller restarts. */
   identity: string;
+  /** JSON-safe durable data only; no live process, closure, or credential. */
   data?: unknown;
 }
 export interface HarnessObservation {
   state: "running" | "complete" | "failed" | "cancelled";
   detail?: string;
+  /** Present when the attempt is paused on a developer-local login. */
+  authentication?: AuthenticationRequest;
 }
 export interface HarnessResult {
   assets?: ProducedAssetSet[];
   evidence?: unknown;
 }
+export interface AgentHarnessCapabilities {
+  protocolVersion: 1;
+  worktree: "factory-owned-read-write";
+  head: "preserve";
+  lifecycle: "restart-safe-durable-handle";
+  publication: "controller-only";
+  assetSets: true;
+  authentication: "local-environment" | "adapter-owned" | "none";
+}
 export interface AgentHarness {
+  /** Declared before composition; Factory rejects incompatible semantics. */
+  readonly capabilities: AgentHarnessCapabilities;
+  /**
+   * Start one attempt in the supplied worktree without moving HEAD. The
+   * harness does not commit, push, publish, or receive Factory's GitHub
+   * gateway. A returned handle must support restart-safe observation,
+   * cancellation, and collection without duplicating an ambiguous attempt.
+   */
   start(request: HarnessRequest): Promise<HarnessHandle>;
   observe(handle: HarnessHandle): Promise<HarnessObservation>;
   cancel(handle: HarnessHandle): Promise<void>;

@@ -342,6 +342,39 @@ The clean implementation extends `src/compiler.ts`, `src/validation.ts`, and the
 
 After the v0.1.6 public gate exposed ambient Codex reasoning inheritance, the archived `src/protocol/policy.ts` at commit `994bbfcadb317aed2dfa932ec9d128e7d0d8c7a8` was inspected for its named model-profile behavior. The archive bound `compile`, `implement`, `review`, and `recover` phases to explicit model/reasoning profiles, but its shipped run policy constrained new runs to one shared profile and included broader provider/economics machinery. No archived implementation was copied. The clean correction keeps model policy inside the current Codex SDK adapters, exposes independent planner, reviewer, and worker selections, writes explicit Factory defaults, and retains the generic `AgentHarness` and execution contracts unchanged.
 
+## Installed local harness seam (#55)
+
+The archived `src/backends/codex-sdk-local.ts` at commit `994bbfcadb317aed2dfa932ec9d128e7d0d8c7a8` was inspected again only for its durable local-process lifecycle boundary: one worktree-bound attempt identity, restart-safe observation and cancellation, and a normalized result. The clean `src/contracts.ts`, `src/application.ts`, `src/config.ts`, and `src/execution/` adapters reimplement that boundary as a public capability-checked package-root seam. The archive's Codex-specific configuration, scope/quota policy, recovery protocol, and backend implementation were not copied.
+
+The Claude Agent SDK and GitHub Copilot SDK adapters were designed from their current official SDK APIs and package metadata, not from the archived repository. Their provider-specific option builders, local-profile authentication, extension-surface disabling, process handles, progress normalization, and tests are new clean implementation. The credential-free packed conformance test was written from issue #55's public acceptance and imports only `@clockgrove/factory`; no archived test, fixture, transcript, or qualification protocol was inspected or copied.
+
+The September 26 refresh reconciles that historical candidate with accepted
+public main, including the existing provider-turn guard, typed usage observation
+contract, controller media/evidence changes, and #123's staging boundary. It
+retains the exact optional SDK pins and preserves public v0.1.21 history. Fresh
+tests replace only the SDK module boundary with scripted modules while running
+the production optional workers, checking terminal/idle/cleanup failures and
+honest unavailable normalized usage. No archived or private source, real
+provider login, live target, or release claim was added by this refresh.
+
+The final normal merge reconciles accepted #129's pinned Secretlint file API and
+#130's shared terminal guard. Four merge conflicts preserve both accepted-main
+scanner assertions and the package-root harness conformance surface; all 68
+accepted-main production lock entries remain exact, with optional SDK versions
+unchanged. A new scripted detach-window callback exercises the actual Copilot
+worker after it finishes its turn: the pre-merge guard held a completed process
+until idle expiry; the accepted terminal guard must permit prompt natural exit.
+The packed test excludes dev-optional tooling from required default-install
+counts while checking every actual required installed dependency individually.
+No new SDK, provider/auth call, target, archive or private source is used.
+
+Independent review of the refreshed candidate exposed two Copilot boundary
+gaps: ambient/default `gh` discovery could expose the controller publication
+store, and startup identity was checked after prompt dispatch. The correction
+keeps the existing empty `GH_CONFIG_DIR` and checks the pinned SDK's observed
+startup before dispatch, with sentinel environment and scripted event tests.
+The same callback path reproduced [#130](https://github.com/clockgrove/factory-rebuild/issues/130): progress replaced the shared watchdog promise while an active wait still observed the old one. A tiny correction in the existing guard retains one timeout promise and resets only its timer; direct and production-worker regressions prove delayed progress still ends in a durable timeout. No new timeout policy, configuration, retry, journal, provider call or archived source was introduced.
+
 ## Role-specific Factory defaults (#59)
 
 Issue #59 and the current explicit-selection implementation supplied this change. No additional archived source or provider policy was inspected or copied. Factory now resolves planner, reviewer, and worker defaults separately at installation, persists the resulting explicit values, and keeps provider-neutral harness work in issue #55. A post-merge boundary audit rejected a shared-default compatibility alias that was not required by #59; the package root exposes only the role-specific defaults.

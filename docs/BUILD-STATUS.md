@@ -1,5 +1,12 @@
 # Factory build status
 
+**Separate harness candidate:** #55 / PR #62 now uses unreleased 0.1.28
+and is undergoing its own installed Codex/Claude qualification. Its old frozen
+0.1.22 source/artifact statements below are historical, not a restriction on the
+currently authorized owner. Current identities, review and remaining acceptance
+are recorded in [issue #55](https://github.com/clockgrove/factory-rebuild/issues/55).
+The independently authorized #26 pilot remains separate.
+
 **Next candidate: v0.1.27, unpublished.** Accepted [#165](https://github.com/clockgrove/factory-rebuild/issues/165)
 / [PR #166](https://github.com/clockgrove/factory-rebuild/pull/166) integrated at
 `058bd7587aa532342ebb77488474258c90930f5d`, reviewed tree
@@ -400,6 +407,83 @@ Fresh installed [Objective #21](https://github.com/clockgrove/factory-v017-gate-
 Those final checks have now passed: all nine reviewed files are unchanged at the integrated merge and [main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36225663489) succeeded. Issue #122 is closed; the source handoff and #55 candidate reconciliation are next.
 
 These later source changes do not alter the already published v0.1.21 bytes or retroactively extend its installed-artifact evidence. A pilot artifact must identify its actual source, version, digest and normal installation evidence.
+
+**Installed harness refresh (issue #55):** Existing draft [PR #62](https://github.com/clockgrove/factory-rebuild/pull/62) is being refreshed onto accepted main, including [PR #128](https://github.com/clockgrove/factory-rebuild/pull/128)'s public handoff. The unreleased package/plugin candidate is `0.1.22`; exact optional Claude SDK `0.3.281` and Copilot SDK `1.0.13` remain unchanged. The package-root registration and identity/configuration binding retain production controller services, current media/validation/receipt behavior, #123's shared staging boundary, and typed started/terminal usage correlation. Optional workers use the existing idle guard and fail closed without a terminal; their normalized token counters are deliberately unavailable, not inferred zero or estimated cache totals. Historical PR #62 test, CI and tarball receipts do not qualify this refreshed source. Fresh deterministic, packed, hosted and independent exact-head evidence must identify the actual candidate.
+
+The pinned Copilot SDK requires Node 22.12.0 on Factory's supported Node range;
+selection below that SDK minimum fails before loading or authentication. A
+separate initial audit found a pre-existing advertised-default-Node-floor mismatch
+in accepted main: bundled `normalize-package-data@8.0.0` and
+`hosted-git-info@9.0.3` declare Node 22.9.0 or later on that range. Those production
+lock entries were unchanged in the initial refresh. Node 24 checks could not
+prove advertised Node 22.0.0 compatibility. Accepted #129 later replaced the
+unused scanner CLI with the pinned public file API, removing that CLI-only
+dependency chain without a floor waiver or dependency override.
+
+A real Node 22.0.0 probe also reproduces a scanner-runtime failure with Factory's
+existing `--no-glob`/`--no-gitignore` argument surface: Secretlint 13's use of
+`util.parseArgs` negative options is rejected before scanning. The identical
+public synthetic file and installed scanner arguments succeed on Node 24.20.0.
+That initial scanner surface was unchanged from then-accepted main. The
+subsequent accepted #129 implementation removes this CLI parse failure while
+preserving literal-byte scanning, recommended rules and fail-closed behavior.
+
+The initial refreshed head `37624f7f8596101ee4c414e60b95ff26729b1396`
+passed 133 credential-free tests on Node 24.20.0 and [hosted Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36226596693),
+including fresh empty-cache offline optional-omitted installation, package-root
+scripted harness execution through production validation/delivery/final review,
+and production optional workers behind scripted SDK modules. Sequential build,
+typecheck, Biome/fallback lint and format, notices and package checks pass. A
+real Node 22.0.0 optional-omitted root import and CLI help probe also pass; these
+narrow runtime observations do not resolve the dependency engine-policy gap or
+prove live provider acceptance. Those receipts identify that initial head,
+not the later reviewed corrections.
+
+Independent review then found that Copilot's worker reopened the controller's
+ambient/default `gh` authentication store and checked startup identity only
+after prompt dispatch. The correction retains the owned empty `GH_CONFIG_DIR`
+and waits for observed startup worktree/model/reasoning identity before sending
+the accepted Work Item, with sentinel and never-send scripted SDK regressions.
+[Issue #130](https://github.com/clockgrove/factory-rebuild/issues/130) also tracks
+the reproduced callback-watchdog gap: replacing the timeout promise on progress
+left an active provider wait detached from the new deadline. The existing guard
+now keeps one promise and resets only its timer; direct delayed-progress and
+production worker event-then-stall tests require durable timeout/terminal usage
+without an unhandled rejection. Fresh full, package, hosted and independent
+exact-head gates for these corrections remain required; no source or live
+acceptance follows from the earlier 133-test receipt.
+
+The batched corrections pass 135 credential-free tests on Node 24.20.0,
+including all Codex stream/capacity regressions, sentinel environment isolation,
+pre-prompt startup refusal and delayed callback progress followed by a durable
+worker timeout. Sequential typecheck, lint, format and notices checks also
+pass. The corrected 151,358,021-byte tarball has SHA-256
+`3f570a15c1c13c5d236173461cfe17b7b3ecd8b8ce407b847e8a074742dc04d0`;
+the initial `983d433a` artifact is retained separately and does not qualify these
+fixes. That exact head's hosted Quality passed, but this historical artifact does
+not qualify the later accepted #129/#130 reconciliation or live provider gates.
+
+The existing draft now normally merges accepted main
+`8735797c84c65abd4537c807be4b5590559a5ea9`, including the accepted #129 scanner
+and #130 stable timeout/terminal-finish fixes. All 68 accepted-main production
+lock entries remain deep-identical and optional SDK versions remain unchanged.
+A new scripted production-worker cleanup-window scenario reproduces a complete
+worker waiting 1002 ms for a configured 1000 ms idle deadline before the #130
+merge; afterward it requires durable completion, terminal usage and prompt
+natural process exit. This is the 23rd scripted optional SDK-boundary case, not
+a claim about actual provider event frequency. Default-install, full/static,
+fresh artifact and independent exact-head gates must identify this new source;
+earlier 133/135-test receipts are not substitutes. Nonblocking #133 remains
+queued, with no out-of-memory or present gate failure claimed.
+
+After correcting the packed test's dev-optional count (the first reconciled run
+passed 144/145), the fresh full suite passes 145/145 on Node24.20.0. Actual
+Node22.0.0 guard, scanner, production-engine and scripted optional-worker checks
+pass 14/14. These scripted SDK replacements do not waive Copilot's real Node
+22.12.0 adapter minimum. A separate normal lifecycle-enabled, engine-strict,
+empty-cache optional-omitted artifact installation remains part of the final
+default-floor packet; npm11 withholding Koffi's full-source install script does
+not prove optional SDK installation or live provider acceptance.
 
 **Default Node 22.0 scanner acceptance (#129):** [PR #131](https://github.com/clockgrove/factory-rebuild/pull/131) merged accepted head `eadd4dec31a8fb6fb3c902980e8ffa821d79cbc5` at `57abc0a43b605148a6b3ec191bcedb34c7cf9bc2`, with unchanged reviewed files and [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36227246935) passing. The same-version Secretlint file API replaces the unused CLI dependency path without lowering scanner coverage or raising the documented Node floor. Independent full 121-test/static gates and a fresh normal offline Node 22.0/npm 10.5.1 installation passed; installed scanner probes verified clean, masked refusal and fail-closed fatal outcomes. The locally reproduced source-candidate tarball is not the already published v0.1.21 artifact and does not qualify a new release or live provider.
 

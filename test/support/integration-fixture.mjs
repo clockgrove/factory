@@ -433,6 +433,16 @@ class ScriptedPlanningModel {
 }
 
 class ScriptedHarness {
+  capabilities = {
+    protocolVersion: 1,
+    worktree: "factory-owned-read-write",
+    head: "preserve",
+    lifecycle: "restart-safe-durable-handle",
+    publication: "controller-only",
+    assetSets: true,
+    authentication: "none",
+  };
+
   constructor(root, actions, eventsPath) {
     this.root = resolve(root);
     this.actions = actions;
@@ -856,6 +866,7 @@ export function makeApplication(descriptor) {
     harness,
     descriptor.config.execution.concurrency,
     contentStore,
+    "scripted-test@1",
   );
   return {
     application: createApplication(descriptor.config, {

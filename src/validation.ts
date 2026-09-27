@@ -113,9 +113,9 @@ export function assertSelectedLfsValidation(
 function selectedLfsReviewEvidence(
   checkout: string,
   evidence: ValidationEvidence,
-): ResultReviewEvidenceSource[] {
+): { sources: ResultReviewEvidenceSource[]; textBytes: number } {
   assertSelectedLfsValidation(evidence.selectedLfs, evidence.treeSha);
-  if (!evidence.selectedLfs?.length) return [];
+  if (!evidence.selectedLfs?.length) return { sources: [], textBytes: 0 };
   const sources: ResultReviewEvidenceSource[] = [
     {
       path: "Validated selected LFS pointers",
@@ -128,7 +128,8 @@ function selectedLfsReviewEvidence(
     for (let i = 0; i < segments.length; i++)
       paths.add([...segments.slice(0, i), ".gitattributes"].join("/"));
   }
-  let remaining = Math.floor(configuredResultReviewTextBudget() / 2);
+  const limit = Math.floor(configuredResultReviewTextBudget() / 2);
+  let remaining = limit;
   for (const path of paths) {
     const entry = pinnedGit(checkout, "ls-tree", evidence.treeSha, "--", path);
     if (!entry) continue;
@@ -162,7 +163,7 @@ function selectedLfsReviewEvidence(
       }),
     });
   }
-  return sources;
+  return { sources, textBytes: limit - remaining };
 }
 
 export type ReviewDeliveryObservation =
@@ -1121,16 +1122,18 @@ export async function reviewAcceptance(args: {
   if (observedTree !== evidence.treeSha)
     throw new Error("Acceptance result tree differs from command evidence");
   assertCommandReceipts(evidence, evidence.treeSha, "Acceptance");
+  const selectedLfsEvidence = selectedLfsReviewEvidence(checkout, evidence);
   const { change, truncatedPaths } = resultChangePacket(
     checkout,
     baseSha,
     commit,
+    // Attribute reads stay bounded, but unused space remains available to patches.
     evidence.selectedLfs?.length
-      ? Math.floor(configuredResultReviewTextBudget() / 2)
+      ? configuredResultReviewTextBudget() - selectedLfsEvidence.textBytes
       : undefined,
   );
   const suppliedEvidence = [
-    ...selectedLfsReviewEvidence(checkout, evidence),
+    ...selectedLfsEvidence.sources,
     ...(args.evidenceSources ?? []),
   ];
   const evidenceSources: ResultReviewEvidenceSource[] = [

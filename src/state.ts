@@ -1,5 +1,6 @@
 import type {
   CapturedAssetSet,
+  AuthenticationRequest,
   AssetSelectionDecision,
   ExecutionHandle,
   ResultReviewCandidate,
@@ -75,6 +76,7 @@ export interface WorkState {
   selection?: AssetSelectionDecision;
   pullRequest?: number;
   error?: string;
+  authentication?: AuthenticationRequest;
   startedAt?: string;
   completedAt?: string;
   integratedSha?: string;
@@ -134,6 +136,39 @@ function strings(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || !value.every((part) => typeof part === "string"))
     throw new Error(`${label} must be a string array`);
   return value;
+}
+
+function jsonSafe(
+  value: unknown,
+  label: string,
+  seen = new Set<unknown>(),
+): void {
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error(`${label} must be JSON-safe`);
+    return;
+  }
+  if (typeof value !== "object" || seen.has(value))
+    throw new Error(`${label} must be JSON-safe`);
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      for (const [index, entry] of value.entries())
+        jsonSafe(entry, `${label}[${index}]`, seen);
+      return;
+    }
+    if (
+      (Object.getPrototypeOf(value) !== Object.prototype &&
+        Object.getPrototypeOf(value) !== null) ||
+      Object.getOwnPropertySymbols(value).length
+    )
+      throw new Error(`${label} must contain only JSON objects`);
+    for (const [key, entry] of Object.entries(value))
+      jsonSafe(entry, `${label}.${key}`, seen);
+  } finally {
+    seen.delete(value);
+  }
 }
 
 function acceptanceDecisions(value: unknown, label: string): void {
@@ -355,6 +390,18 @@ export function parseFactoryState(
       throw new Error(`Work Item ${id} has an invalid status`);
     if (item.step !== undefined && !steps.has(item.step as WorkStep))
       throw new Error(`Work Item ${id} has an invalid step`);
+    if (item.authentication !== undefined) {
+      const authentication = record(
+        item.authentication,
+        `work.${id}.authentication`,
+      );
+      string(authentication.provider, `${id}.authentication.provider`);
+      string(authentication.command, `${id}.authentication.command`);
+      if (item.status !== "failed")
+        throw new Error(
+          `Work Item ${id} authentication request requires failed status`,
+        );
+    }
     for (const key of ["baseSha", "executionBaseSha", "treeSha", "changeRef"])
       if (item[key] !== undefined) sha(item[key], `${id}.${key}`);
     if (
@@ -661,25 +708,26 @@ export function parseFactoryState(
       )
         throw new Error(`Work Item ${id} execution identity is invalid`);
       if (execution.data !== undefined)
-        record(execution.data, `work.${id}.execution.data`);
+        jsonSafe(execution.data, `work.${id}.execution.data`);
       if (execution.provider === "local") {
         const active = record(execution.data, `work.${id}.execution.data`);
         const request = record(active.request, `work.${id}.execution.request`);
         const attemptedItem = record(request.item, `work.${id}.execution.item`);
         const handle = record(active.handle, `work.${id}.harness`);
-        const host = record(handle.data, `work.${id}.harness.data`);
         if (
           typeof active.worktree !== "string" ||
+          typeof active.adapterIdentity !== "string" ||
+          !active.adapterIdentity ||
           attemptedItem.id !== id ||
           (request.baseSha !== item.baseSha &&
             item.status !== "done" &&
             item.status !== "published") ||
           typeof handle.identity !== "string" ||
-          !Number.isSafeInteger(host.pid) ||
-          typeof host.startTime !== "string" ||
-          typeof host.resultPath !== "string"
+          !handle.identity
         )
           throw new Error(`Work Item ${id} active attempt handle is invalid`);
+        if (handle.data !== undefined)
+          jsonSafe(handle.data, `work.${id}.harness.data`);
       }
     }
   }

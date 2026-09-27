@@ -35,7 +35,7 @@ Published installation below stays pinned to immutable v0.1.26; follow the
 
 1. A human writes an Objective as a GitHub Issue in the target repository.
 2. Factory previews a pinned-source Work Item graph with owned paths, dependencies, acceptance, non-goals, source citations, and validation commands. One independent source-backed review checks the graph before run.
-3. An isolated local Codex attempt works each ready item. Independent lanes may run together; path and named-resource conflicts wait.
+3. An isolated configured local harness works each ready item. Codex is the default; the current source candidate also supports Claude Agent SDK, GitHub Copilot SDK, and a package-root registered-adapter seam. Independent lanes may run together; path and named-resource conflicts wait.
 4. Factory validates each resulting tree in a fresh worktree, opens GitHub pull requests, integrates them, and validates the complete Objective at the observed default-branch head.
 
 The target repository owns its product and runtime truth. Factory state and credentials stay outside the target checkout. Factory refuses to run against any Factory source repository.
@@ -63,7 +63,7 @@ The plugin supplies the packaged `director` and `setup` skills; the verified CLI
 
 For development, the following commands build and install the current checkout as a local candidate. A local build has its own package identity and does not count as installation of any published artifact. The [release checklist](https://github.com/clockgrove/factory-rebuild/blob/main/docs/RELEASE-CHECKLIST.md) and [public release procedure](https://github.com/clockgrove/factory-rebuild/blob/main/docs/PUBLIC-RELEASE.md) describe the exact-artifact gate.
 
-Requires Node.js 22 or later, Git, GitHub CLI authentication for the target repository, and an authenticated Codex SDK environment. Media Objectives also require Git LFS. Clone this repository, then build and install its package in an isolated prefix:
+Requires Node.js 22 or later, Git, GitHub CLI authentication for the target repository, and an authenticated Codex SDK environment for planning and review. A selected non-Codex Work Item harness also needs its own local developer login. Media Objectives require Git LFS. Clone this repository, then build and install its package in an isolated prefix:
 
 ```sh
 npm ci
@@ -73,8 +73,18 @@ npm run lint
 npm run format:check
 npm test
 npm pack
-npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.27.tgz
+npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.28.tgz
 ```
+
+The current source candidate declares the Claude Agent SDK and GitHub Copilot
+SDK as exact optional package dependencies. A normal online npm installation
+installs them; `--omit=optional` leaves the default Codex path and generic
+package-root registration seam available. See [local agent harnesses](docs/AGENT-HARNESSES.md)
+for their exact versions/licenses, configuration shapes, capability/lifecycle
+contract, local-login behavior, security boundary, CLI examples, and
+`composeWithLocalHarness` package-root API. This candidate behavior is not a
+claim about the already published `v0.1.21` artifact. The `0.1.28` draft is
+unreleased and has not completed its live provider acceptance gates.
 
 The repository's [quality-tooling map](docs/QUALITY-TOOLING.md) records the
 pinned Biome release and the exact remaining compatibility checks.
@@ -165,7 +175,7 @@ factory run --objective ISSUE_NUMBER
 
 The target owns its `.gitattributes` policy. Factory checks selected bytes against the committed LFS pointer, uploads required LFS objects before branch publication, and verifies exact selected bytes in a fresh clone after integration. Before any Work Item or final Objective validation command, Factory verifies each applicable committed pointer, restores only its selected required-LFS bytes from the verified local content store, and checks the exact SHA-256 and size; unavailable or corrupt local content stops before command zero, without a network fetch or global smudge. Selected bytes are checked again after commands and clean-tree enforcement compares against that controller-hydrated baseline. A canonical installed-artifact capability manifest tells planning and independent review which of those controller guarantees must not be reimplemented as target Work Items or invented target commands; its exact value and digest are part of the immutable plan. Successful fresh-clone hydration produces bounded exact-commit/tree evidence before final Objective review and closure. Source bindings are structured records with `path`, `role`, `mediaType`, `visibility`, and optional `kind`. `kind: repository` (the default) names a file in the pinned target checkout. When that exact source path is also a selected required-LFS destination, Factory may migrate it in place only if the selected, captured, and current bytes are identical; the worker leaves final destinations untouched. `kind: local` names an absolute private file explicitly cited in the Objective; Factory imports its bytes into the private content store. `kind: github-attachment` names a GitHub Objective attachment URL explicitly present in the issue body, in either `github.com/user-attachments/assets/UUID` or `github.com/OWNER/REPO/assets/ID/NAME` form. Factory downloads it with the GitHub CLI identity, allows redirects only to GitHub content hosts, and retains the URL, declared authorization/visibility, and immutable digest. A private source is supplied to the harness as a temporary file plus descriptor and is removed before delivery. GitHub attachment availability still depends on that identity's access to the Objective. Media contracts preserve output roles, lineage, and optional tool-supplied format metadata without interpreting the format. The [public PNG fixture](https://github.com/clockgrove/factory-rebuild/blob/main/test/fixtures/objectives/media-lfs.md) shows one source, role, and validation example; an integration test covers an opaque multi-file set consumed downstream under target-owned LFS. If you use a temporary `XDG_CONFIG_HOME` for Factory, keep the controller's GitHub CLI authentication visible through `GH_CONFIG_DIR` or its normal configuration path.
 
-`factory cancel --objective ISSUE_NUMBER` stops owned local processes. `factory retry --objective ISSUE_NUMBER --item WORK_ITEM_ID` starts a new explicit attempt for a failed or cancelled unpublished item. Managed-agent and sandbox modes are reserved contract shapes and fail preflight until their branches ship.
+`factory cancel --objective ISSUE_NUMBER` stops owned local processes. `factory retry --objective ISSUE_NUMBER --item WORK_ITEM_ID` starts a new explicit attempt for a failed or cancelled unpublished item. Built-in harnesses reuse the developer's existing local CLI/profile authentication; Factory does not store provider credentials in configuration. If a login is absent or expired, the attempt fails with `codex login`, `claude auth login`, or the interactive `copilot` sign-in as appropriate, and the operator logs in outside Factory before explicitly retrying. Managed-agent and sandbox modes are reserved contract shapes and fail preflight until their branches ship.
 
 Before publication, Factory checks only a Work Item's changed paths against its ownership, rejects newly introduced unsafe links and special files, and runs the packaged Secretlint recommended rules on changed staged content and working bytes (including LFS inputs). The isolated scanner uses the supported `@secretlint/node` file API with explicit configuration, literal paths and secret masking; target configuration discovery, globs and ignore files cannot bypass it. The scanner and default packaged dependency graph support Node 22.0 without the unused Secretlint CLI configuration-creation dependencies. A positive result stops publication and reports the rule and path without the value. Review a suspected false positive outside the worker checkout; an operator can set `FACTORY_SECRETLINT_CONFIG` to an absolute, reviewed Secretlint configuration file outside the target checkout, then explicitly retry the failed item. The default recommended rules apply when no override is set. The worker receives only basic ambient variables and secret names explicitly listed in `policy.allowedSecretNames`; GitHub, Git, and SSH credential variables stay excluded even if listed. A local worktree and filtered worker environment do not isolate hostile code from files readable by the operator's OS user.
 
@@ -225,9 +235,9 @@ Run the complete credential-free gate with one command:
 npm test
 ```
 
-In addition to the focused DAG, delivery-plan, state-ingress, content, media, and transplant tests, this runs bounded application-path scenarios against real temporary Git repositories. A scripted planning model and harness enter through the same composition boundary as the production Codex adapters, while a small stateful GitHub-domain fake records stable Issue, pull-request, and native-stack identities and integrates real commits through a local bare remote. The scenarios prove concurrent regular DAG execution and final-head validation, restart reattachment/cancel/explicit retry, a native linear stack beside an independently replayed and revalidated lane, whole-set media selection, target-owned Git LFS policy, and exact hydrated bytes.
+In addition to the focused DAG, delivery-plan, state-ingress, content, media, and transplant tests, this runs bounded application-path scenarios against real temporary Git repositories. A scripted planning model and harness enter through the same composition boundary as the production adapters, while a small stateful GitHub-domain fake records stable Issue, pull-request, and native-stack identities and integrates real commits through a local bare remote. The scenarios prove concurrent regular DAG execution and final-head validation, restart reattachment/cancel/explicit retry, a native linear stack beside an independently replayed and revalidated lane, whole-set media selection, target-owned Git LFS policy, and exact hydrated bytes.
 
-The same gate packs the current working tree, installs the tarball into an isolated prefix with isolated configuration and state, and exercises the public `install`, `status`, and application `planObjective` operations. Live Codex/GitHub disposable Objectives remain separate release evidence; deterministic CI does not replace them. The [release checklist](https://github.com/clockgrove/factory-rebuild/blob/main/docs/RELEASE-CHECKLIST.md) tracks the exact public artifact and fresh third-party run required for #25.
+The same gate packs the current working tree, installs the tarball into an isolated prefix with isolated configuration and state, imports only the package root, injects a non-Codex harness, and executes a full one-Work-Item path through the production driver, exact-tree validation, delivery, and final validation. It also exercises the public CLI status/diagnostic surface. Live Codex, Claude, GitHub Copilot, and GitHub disposable Objectives remain separate release evidence; deterministic CI does not replace them. The [release checklist](https://github.com/clockgrove/factory-rebuild/blob/main/docs/RELEASE-CHECKLIST.md) tracks exact public artifact evidence.
 
 ## Project and provenance
 

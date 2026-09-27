@@ -30,6 +30,7 @@ import type {
   HarnessRequest,
   HarnessResult,
 } from "../contracts.js";
+import { AuthenticationRequiredError } from "../contracts.js";
 import { captureAssetSets, importSourceAssets } from "../media.js";
 import { parseProducedAssetSets } from "../media.js";
 import { checkStagedCandidate } from "./staged-candidate.js";
@@ -40,11 +41,13 @@ import {
   sanitizedWorkerEnvironment,
 } from "../process.js";
 import type { CodexModelSelection } from "../config.js";
+import { parseAuthenticationRequest } from "./harness-support.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
 
 type Active = {
   request: ExecutionRequest;
   worktree: string;
+  adapterIdentity: string;
   handle: HarnessHandle;
   failure?: string;
 };
@@ -58,6 +61,16 @@ interface WorkerHandleData {
 }
 
 export class CodexHarness implements AgentHarness {
+  readonly capabilities = {
+    protocolVersion: 1,
+    worktree: "factory-owned-read-write",
+    head: "preserve",
+    lifecycle: "restart-safe-durable-handle",
+    publication: "controller-only",
+    assetSets: true,
+    authentication: "local-environment",
+  } as const;
+
   constructor(
     private credentialDirectory: string,
     private network: "host" | "off",
@@ -65,6 +78,27 @@ export class CodexHarness implements AgentHarness {
     private allowedSecretNames: string[] = [],
     private providerTurnIdleTimeoutMs = DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   ) {}
+
+  private require(handle: HarnessHandle): WorkerHandleData {
+    const data = handle.data;
+    if (!data || typeof data !== "object" || Array.isArray(data))
+      throw new Error("Invalid Codex harness handle");
+    const value = data as Partial<WorkerHandleData>;
+    const root = resolve(join(dirname(this.credentialDirectory), "harness"));
+    if (
+      !Number.isSafeInteger(value.pid) ||
+      typeof value.startTime !== "string" ||
+      !value.startTime ||
+      typeof value.requestPath !== "string" ||
+      typeof value.resultPath !== "string" ||
+      typeof value.logPath !== "string" ||
+      ![value.requestPath, value.resultPath, value.logPath].every((path) =>
+        resolve(path).startsWith(`${root}${sep}`),
+      )
+    )
+      throw new Error("Invalid Codex harness handle");
+    return value as WorkerHandleData;
+  }
 
   async start(request: HarnessRequest): Promise<HarnessHandle> {
     const identity = request.attemptId ?? randomUUID();
@@ -123,15 +157,21 @@ export class CodexHarness implements AgentHarness {
   }
 
   async observe(handle: HarnessHandle): Promise<HarnessObservation> {
-    const data = handle.data as WorkerHandleData;
+    const data = this.require(handle);
     if (existsSync(data.resultPath)) {
       const result = JSON.parse(readFileSync(data.resultPath, "utf8")) as {
         state: "complete" | "failed";
         error?: string;
+        authentication?: unknown;
       };
+      const authentication = parseAuthenticationRequest(result.authentication);
       return result.state === "complete"
         ? { state: "complete" }
-        : { state: "failed", detail: result.error };
+        : {
+            state: "failed",
+            detail: result.error,
+            ...(authentication && { authentication }),
+          };
     }
     const current = linuxProcessIdentity(data.pid);
     return current?.startTime === data.startTime &&
@@ -146,7 +186,7 @@ export class CodexHarness implements AgentHarness {
   }
 
   async cancel(handle: HarnessHandle): Promise<void> {
-    const data = handle.data as WorkerHandleData;
+    const data = this.require(handle);
     const current = linuxProcessIdentity(data.pid);
     if (current?.startTime !== data.startTime || current.group !== data.pid) {
       if (!existsSync(data.resultPath))
@@ -163,15 +203,21 @@ export class CodexHarness implements AgentHarness {
   }
 
   async collect(handle: HarnessHandle): Promise<HarnessResult> {
-    const data = handle.data as WorkerHandleData;
+    const data = this.require(handle);
     for (;;) {
       const observed = await this.observe(handle);
       if (observed.state === "running") {
         await new Promise<void>((resolve) => setTimeout(resolve, 100));
         continue;
       }
-      if (observed.state !== "complete")
+      if (observed.state !== "complete") {
+        if (observed.authentication)
+          throw new AuthenticationRequiredError(
+            observed.detail ?? "Codex authentication required",
+            observed.authentication,
+          );
         throw new Error(observed.detail ?? "Codex harness worker failed");
+      }
       const result: unknown = JSON.parse(readFileSync(data.resultPath, "utf8"));
       if (!result || typeof result !== "object" || Array.isArray(result))
         throw new Error("Harness result is not an object");
@@ -201,16 +247,14 @@ export function codexWorkerInput(
 ): {
   request: HarnessRequest;
   network: "host" | "off";
-  redactionValues: string[];
+  allowedSecretNames: string[];
   model: CodexModelSelection;
   providerTurnIdleTimeoutMs: number;
 } {
   return {
     request,
     network,
-    redactionValues: allowedSecretNames
-      .map((name) => process.env[name])
-      .filter((value): value is string => Boolean(value)),
+    allowedSecretNames: [...allowedSecretNames],
     model: {
       model: model.model,
       reasoningEffort: model.reasoningEffort,
@@ -234,6 +278,46 @@ async function verifyBoundInput(path: string, ref: ContentRef): Promise<void> {
   }
   if (bytes !== ref.bytes || hash.digest("hex") !== ref.digest)
     throw new Error("Bound asset input differs from its captured digest");
+}
+
+function assertDurableValue(
+  value: unknown,
+  name: string,
+  seen = new Set<unknown>(),
+): void {
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error(`${name} is not JSON-safe`);
+    return;
+  }
+  if (typeof value !== "object") throw new Error(`${name} is not JSON-safe`);
+  if (seen.has(value)) throw new Error(`${name} contains a cycle`);
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      for (const [index, entry] of value.entries())
+        assertDurableValue(entry, `${name}[${index}]`, seen);
+    } else {
+      if (
+        (Object.getPrototypeOf(value) !== Object.prototype &&
+          Object.getPrototypeOf(value) !== null) ||
+        Object.getOwnPropertySymbols(value).length
+      )
+        throw new Error(`${name} must contain only JSON objects`);
+      for (const [key, entry] of Object.entries(value))
+        assertDurableValue(entry, `${name}.${key}`, seen);
+    }
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function assertDurableHandle(handle: HarnessHandle): void {
+  if (!handle || typeof handle.identity !== "string" || !handle.identity)
+    throw new Error("Harness returned no durable identity");
+  if (handle.data !== undefined)
+    assertDurableValue(handle.data, "Harness handle data");
 }
 
 async function preserveControllerAssetDestinations(
@@ -280,9 +364,12 @@ export class LocalExecutionDriver implements ExecutionDriver {
       throw new Error("Unknown local execution handle");
     if (
       !resolve(active.worktree).startsWith(`${resolve(this.workRoot)}${sep}`) ||
-      active.request.attemptId !== handle.identity
+      active.request.attemptId !== handle.identity ||
+      active.adapterIdentity !== this.adapterIdentity
     )
-      throw new Error("Local execution handle is outside owned state");
+      throw new Error(
+        "Local execution handle is outside owned state or uses another adapter",
+      );
     return active;
   }
 
@@ -292,7 +379,24 @@ export class LocalExecutionDriver implements ExecutionDriver {
     private harness: AgentHarness,
     private concurrency: number,
     private contentStore: ContentStore,
-  ) {}
+    private adapterIdentity: string,
+  ) {
+    const capabilities = harness.capabilities;
+    if (
+      capabilities?.protocolVersion !== 1 ||
+      capabilities.worktree !== "factory-owned-read-write" ||
+      capabilities.head !== "preserve" ||
+      capabilities.lifecycle !== "restart-safe-durable-handle" ||
+      capabilities.publication !== "controller-only" ||
+      capabilities.assetSets !== true ||
+      !["local-environment", "adapter-owned", "none"].includes(
+        capabilities.authentication,
+      )
+    )
+      throw new Error(
+        `Harness adapter ${adapterIdentity} does not satisfy the local AgentHarness capability contract`,
+      );
+  }
 
   async availableSlots(): Promise<number> {
     return Math.max(0, this.concurrency - this.active.size);
@@ -360,9 +464,11 @@ export class LocalExecutionDriver implements ExecutionDriver {
         ),
         selectedAssets: boundSelected,
       });
+      assertDurableHandle(handle);
       const active = {
         request: { ...request, sourceAssets },
         worktree,
+        adapterIdentity: this.adapterIdentity,
         handle,
       };
       this.active.set(identity, active);

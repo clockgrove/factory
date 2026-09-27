@@ -972,6 +972,18 @@ export function statusDocument(
       lastError: current.error
         ? redactDiagnosticDetail(current.error, secrets)
         : null,
+      authentication: current.authentication
+        ? {
+            provider: redactDiagnosticDetail(
+              current.authentication.provider,
+              secrets,
+            ),
+            command: redactDiagnosticDetail(
+              current.authentication.command,
+              secrets,
+            ),
+          }
+        : null,
     };
   });
   return {

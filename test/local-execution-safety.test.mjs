@@ -148,6 +148,15 @@ async function runCandidate(change, options = {}) {
       baseSha = git(checkout, "rev-parse", "HEAD");
     }
     const harness = {
+      capabilities: {
+        protocolVersion: 1,
+        worktree: "factory-owned-read-write",
+        head: "preserve",
+        lifecycle: "restart-safe-durable-handle",
+        publication: "controller-only",
+        assetSets: true,
+        authentication: "none",
+      },
       async start(request) {
         change(request.worktree, root);
         return { identity: request.attemptId, data: {} };
@@ -166,6 +175,7 @@ async function runCandidate(change, options = {}) {
       harness,
       1,
       new LocalContentStore(join(root, "content")),
+      "scripted-test@1",
     );
     const item = {
       id: "safety",
@@ -506,6 +516,59 @@ test("unrelated existing symlink, submodule, and .gitmodules do not block an own
   assert.match(result.changeRef, /^[a-f0-9]{40}$/);
 });
 
+test("missing adapter identities fail closed on local reattach", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-local-missing-adapter-"));
+  try {
+    const worktree = join(root, "worktrees", "attempt");
+    mkdirSync(worktree, { recursive: true });
+    const harness = {
+      capabilities: {
+        protocolVersion: 1,
+        worktree: "factory-owned-read-write",
+        head: "preserve",
+        lifecycle: "restart-safe-durable-handle",
+        publication: "controller-only",
+        assetSets: true,
+        authentication: "local-environment",
+      },
+      async start() {
+        throw new Error("not used");
+      },
+      async observe(handle) {
+        void handle;
+        return { state: "running" };
+      },
+      async cancel() {},
+      async collect() {
+        return {};
+      },
+    };
+    const driver = new LocalExecutionDriver(
+      root,
+      join(root, "worktrees"),
+      harness,
+      1,
+      new LocalContentStore(join(root, "content")),
+      "codex-sdk",
+    );
+    const active = {
+      request: { attemptId: "attempt", baseSha: "a".repeat(40), item: {} },
+      worktree,
+      handle: { identity: "worker-1", data: {} },
+    };
+    await assert.rejects(
+      driver.observe({
+        provider: "local",
+        identity: "attempt",
+        data: active,
+      }),
+      /uses another adapter/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("new symlink and path escape stop collection", async () => {
   await assert.rejects(
     runCandidate((worktree, root) => {
@@ -608,6 +671,15 @@ test("a media worker cannot mutate a controller-owned final destination", async 
       "LFS policy",
     );
     const harness = {
+      capabilities: {
+        protocolVersion: 1,
+        worktree: "factory-owned-read-write",
+        head: "preserve",
+        lifecycle: "restart-safe-durable-handle",
+        publication: "controller-only",
+        assetSets: true,
+        authentication: "none",
+      },
       async start(request) {
         writeFileSync(
           join(request.worktree, "approved/original.bin"),
@@ -653,6 +725,7 @@ test("a media worker cannot mutate a controller-owned final destination", async 
       harness,
       1,
       new LocalContentStore(join(root, "content")),
+      "scripted-media-test@1",
     );
     const item = {
       id: "media",

@@ -61,13 +61,6 @@ export function readState(
       if (work.execution.provider !== "local") continue;
       const active = work.execution.data as {
         worktree?: unknown;
-        handle?: {
-          data?: {
-            requestPath?: unknown;
-            resultPath?: unknown;
-            logPath?: unknown;
-          };
-        };
       };
       if (
         typeof active.worktree !== "string" ||
@@ -76,15 +69,6 @@ export function readState(
         throw new Error(
           `Work Item ${id} attempt worktree is outside Factory state`,
         );
-      const harness = active.handle?.data;
-      for (const key of ["requestPath", "resultPath", "logPath"] as const)
-        if (
-          typeof harness?.[key] !== "string" ||
-          !resolve(harness[key]).startsWith(`${join(root, "harness")}${sep}`)
-        )
-          throw new Error(
-            `Work Item ${id} harness ${key} is outside Factory state`,
-          );
     }
     return state;
   } catch (error) {

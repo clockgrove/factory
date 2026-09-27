@@ -10,7 +10,11 @@ import {
   verifyPlanCandidate,
 } from "../dist/compiler.js";
 import { LocalContentStore } from "../dist/content/local.js";
-import { reviewAcceptance, validateTree } from "../dist/validation.js";
+import {
+  AcceptanceDecisionRequired,
+  reviewAcceptance,
+  validateTree,
+} from "../dist/validation.js";
 import {
   createTarget,
   factoryConfig,
@@ -18,6 +22,91 @@ import {
   makeApplication,
   readEvents,
 } from "./support/integration-fixture.mjs";
+
+for (const attributes of [undefined, "*.bin filter=lfs # café\n"])
+  test(`selected LFS review reclaims unused attribute budget (${attributes ? "tiny" : "absent"} attributes)`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "factory-review-budget-"));
+    const oldBudget = process.env.FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES;
+    delete process.env.FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES;
+    try {
+      const target = createTarget(root, {
+        "asset.bin": `version https://git-lfs.github.com/spec/v1\noid sha256:${"a".repeat(64)}\nsize 1\n`,
+        ...(attributes ? { ".gitattributes": attributes } : {}),
+      });
+      for (const bytes of [32_000, 60_000]) {
+        writeFileSync(join(target.checkout, "notes.txt"), "x".repeat(bytes));
+        git(target.checkout, "add", "notes.txt");
+        git(
+          target.checkout,
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.invalid",
+          "commit",
+          "-m",
+          "notes",
+        );
+        const head = git(target.checkout, "rev-parse", "HEAD");
+        const treeSha = git(target.checkout, "rev-parse", "HEAD^{tree}");
+        let packet;
+        const review = reviewAcceptance({
+          checkout: target.checkout,
+          baseSha: target.baseSha,
+          commit: head,
+          evidence: {
+            treeSha,
+            commands: [],
+            selectedLfs: [
+              {
+                treeSha,
+                destination: "asset.bin",
+                digest: "a".repeat(64),
+                bytes: 1,
+                filter: "lfs",
+              },
+            ],
+          },
+          criteria: ["notes complete"],
+          sources: [{ path: "OBJECTIVE", content: "notes complete" }],
+          model: {
+            async reviewResult(request) {
+              packet = JSON.parse(request.change);
+              return {
+                findings: [
+                  {
+                    criterion: "notes complete",
+                    verdict: "pass",
+                    source: "OBJECTIVE",
+                    quote: "notes complete",
+                    detail: "fixture pass",
+                    question: "",
+                  },
+                ],
+              };
+            },
+          },
+        });
+        if (bytes === 32_000) {
+          const result = await review;
+          assert.equal(result.criteria[0].verdict, "pass");
+          assert.equal(packet.patches[0].truncated, false);
+          assert.ok(Buffer.byteLength(packet.patches[0].excerpt) > 24_000);
+        } else {
+          await assert.rejects(review, AcceptanceDecisionRequired);
+          assert.equal(packet.patches[0].truncated, true);
+        }
+        assert.equal(
+          packet.textBudget,
+          48_000 - Buffer.byteLength(attributes ?? ""),
+        );
+      }
+    } finally {
+      if (oldBudget === undefined)
+        delete process.env.FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES;
+      else process.env.FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES = oldBudget;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
 test("missing or empty final criteria refuse preview and activation before models or projection", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-final-criteria-"));

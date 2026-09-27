@@ -705,7 +705,10 @@ test("GitHub Copilot adapter uses local auth with a bounded empty-mode capabilit
       validated.execution.harness.adapter,
       GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
     );
-    assert.ok(compose(config));
+    const [major, minor] = process.versions.node.split(".").map(Number);
+    if (major === 22 && minor < 12)
+      assert.throws(() => compose(config), /requires Node >=22\.12\.0/);
+    else assert.ok(compose(config));
     const request = {
       attemptId: "attempt-copilot",
       worktree: target.checkout,

@@ -223,7 +223,7 @@ class GitHubFake {
     const number = 201;
     const headSha = git(
       "--git-dir",
-      git("remote", "get-url", "origin"),
+      process.env.PACKED_TARGET_ORIGIN,
       "rev-parse",
       `refs/heads/${request.branch}`,
     );

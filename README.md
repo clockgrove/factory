@@ -89,6 +89,17 @@ unreleased and has not completed its live provider acceptance gates.
 The repository's [quality-tooling map](docs/QUALITY-TOOLING.md) records the
 pinned Biome release and the exact remaining compatibility checks.
 
+The current source requires `origin` to resolve to `OWNER/REPO` for both fetch
+and every push destination, including explicit `pushurl` settings and Git URL
+rewrites. Use the repository's GitHub HTTPS or SSH clone URL; local paths,
+missing origins and mismatched destinations are refused before planning or work.
+Custom LFS endpoint, alternate-remote and transfer-routing overrides are also
+refused: use the default GitHub LFS route derived from `origin`. The check reads
+Git configuration and working/staged/committed `.lfsconfig` without rewriting
+settings. Correct the reported binding before retrying setup; ordinary LFS
+storage and filtering settings remain supported. These source checks do not
+change previously published artifacts.
+
 Bind one target checkout, inspect a read-only plan, and run that exact candidate with the installed CLI:
 
 ```sh

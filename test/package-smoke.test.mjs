@@ -13,13 +13,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { createTarget } from "./support/integration-fixture.mjs";
+import { bindTarget, createTarget } from "./support/integration-fixture.mjs";
 
 test("fresh packed artifact composes a registered harness through the package root", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-package-smoke-"));
   const previousStateRoot = process.env.XDG_STATE_HOME;
   try {
     const target = createTarget(root);
+    bindTarget(target.checkout, "example/package-smoke");
     const pack = join(root, "pack");
     const prefix = join(root, "prefix");
     const config = join(root, "config", "factory.json");
@@ -292,6 +293,7 @@ test("fresh packed artifact composes a registered harness through the package ro
         env: {
           ...credentialFreeEnvironment,
           PACKED_TARGET_CHECKOUT: target.checkout,
+          PACKED_TARGET_ORIGIN: target.origin,
           PACKED_FACTORY_CONFIG: config,
         },
       }),

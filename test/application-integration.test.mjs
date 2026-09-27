@@ -2724,7 +2724,13 @@ test("hydration failure is URL-free and blocks final review, evidence, and closu
 
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt)
-        git(target.checkout, "remote", "set-url", "origin", target.origin);
+        git(
+          target.checkout,
+          "remote",
+          "set-url",
+          "origin",
+          `https://github.com/${descriptor.config.repository}.git`,
+        );
       await assert.rejects(application.runObjective(objective), (error) => {
         assert.equal(
           error.message,

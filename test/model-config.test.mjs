@@ -43,7 +43,11 @@ import { FACTORY_VERSION } from "../dist/package-metadata.js";
 import { runCodexWorker } from "../dist/execution/worker.js";
 import { summarizeDiagnosticUsage } from "../dist/diagnostics.js";
 import * as publicModule from "../dist/index.js";
-import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
+import {
+  bindTarget,
+  createTarget,
+  factoryConfig,
+} from "./support/integration-fixture.mjs";
 
 const {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
@@ -908,6 +912,7 @@ test("install flags persist independent planner, reviewer, and worker selections
   const root = mkdtempSync(join(tmpdir(), "factory-model-install-"));
   try {
     const target = createTarget(root);
+    bindTarget(target.checkout, "example/model-install");
     const configPath = join(root, "config", "factory.json");
     execFileSync(
       process.execPath,
@@ -966,6 +971,7 @@ test("install selects the pinned optional Claude adapter without changing planni
   const root = mkdtempSync(join(tmpdir(), "factory-claude-install-"));
   try {
     const target = createTarget(root);
+    bindTarget(target.checkout, "example/claude-install");
     const configPath = join(root, "config", "factory.json");
     execFileSync(
       process.execPath,
@@ -1030,6 +1036,7 @@ test("install selects the pinned optional GitHub Copilot adapter with local auth
   const root = mkdtempSync(join(tmpdir(), "factory-copilot-install-"));
   try {
     const target = createTarget(root);
+    bindTarget(target.checkout, "example/copilot-install");
     const configPath = join(root, "config", "factory.json");
     execFileSync(
       process.execPath,
@@ -1116,6 +1123,7 @@ test("install resolves Factory-owned role defaults and isolates one-role overrid
       const scenarioRoot = join(root, scenario.name);
       mkdirSync(scenarioRoot, { recursive: true });
       const target = createTarget(scenarioRoot);
+      bindTarget(target.checkout, `example/model-${scenario.name}`);
       const configPath = join(scenarioRoot, "config", "factory.json");
       execFileSync(
         process.execPath,

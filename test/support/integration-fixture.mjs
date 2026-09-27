@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -62,12 +63,54 @@ export function createTarget(root, files = {}) {
   return { checkout, origin, baseSha: git(checkout, "rev-parse", "HEAD") };
 }
 
+let transportRoot;
+const transportRoutes = {};
+
+/** Give offline targets a real GitHub binding and stub only transport to that host. */
+export function bindTarget(checkout, repository) {
+  if (!transportRoot) {
+    transportRoot = mkdtempSync(join(tmpdir(), "factory-test-transport-"));
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+    const helper = resolve(import.meta.dirname, "fixture-git.mjs");
+    const routesFile = join(transportRoot, "routes.json");
+    const script = join(transportRoot, "git");
+    writeFileSync(
+      script,
+      `#!/bin/sh
+for argument in "$@"; do
+  case "$argument" in
+    push|fetch|clone|pull|checkout) exec ${quote(process.execPath)} ${quote(helper)} ${quote(realGit)} ${quote(routesFile)} "$@" ;;
+  esac
+done
+exec ${quote(realGit)} "$@"
+`,
+    );
+    chmodSync(script, 0o755);
+    process.on("exit", () =>
+      rmSync(transportRoot, { recursive: true, force: true }),
+    );
+  }
+  if (!process.env.PATH.split(":").includes(transportRoot))
+    process.env.PATH = `${transportRoot}:${process.env.PATH}`;
+  const original = git(checkout, "remote", "get-url", "origin");
+  const origin = transportRoutes[original] ?? original;
+  const url = `https://github.com/${repository}.git`;
+  transportRoutes[url] = origin;
+  writeFileSync(
+    join(transportRoot, "routes.json"),
+    JSON.stringify(transportRoutes),
+  );
+  git(checkout, "remote", "set-url", "origin", url);
+}
+
 export function factoryConfig(
   checkout,
   repository,
   delivery = "regular",
   concurrency = 2,
 ) {
+  bindTarget(checkout, repository);
   return {
     schemaVersion: 1,
     repository,

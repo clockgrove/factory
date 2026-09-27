@@ -4,15 +4,15 @@
 
 Factory turns a repository development Objective into source-grounded Work Items, runs bounded coding attempts, validates their exact result trees, and delivers the changes through GitHub. It is an open-source Clockgrove plugin installed for one target repository at a time.
 
-**Published release:** [v0.1.28](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28). Factory runs a source-grounded dependency DAG through local agent harnesses, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. The offline tarball bundles the default Codex path; Claude and Copilot SDKs are optional and installed separately. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for exact source, publication and acceptance evidence.
+**Published release:** [v0.1.29](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.29). Factory runs a source-grounded dependency DAG through local agent harnesses, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. The offline tarball bundles the default Codex path; Claude and Copilot SDKs are optional and installed separately. See [release evidence](https://github.com/clockgrove/factory-rebuild/pull/183) and [qualification issue #26](https://github.com/clockgrove/factory-rebuild/issues/26) for exact publication and acceptance claims.
 
-**Successor candidate: v0.1.29.** Accepted [#179 / PR #181](https://github.com/clockgrove/factory-rebuild/pull/181)
+**v0.1.29:** accepted [#179 / PR #181](https://github.com/clockgrove/factory-rebuild/pull/181)
 adds exact-tree tracked-path inventory to acceptance review; accepted #170 / PR #178
-corrects the optional Copilot editor tool. Package, plugin and future marketplace
-metadata name v0.1.29. Follow [candidate preparation](docs/PUBLIC-RELEASE.md#prepare-v0129)
-for exact-artifact gates; public installation stays pinned to v0.1.28 until the
-successor is published. Neither source integration nor earlier provider proof
-qualifies the successor's fresh automatic gate.
+corrects the optional Copilot editor tool. The immutable release uses reviewed
+source `401d74da56d234ba6958a3b1ce9e0b7b5f5eeecb`, excluding concurrent #180
+usage changes present in later main. Package, plugin and marketplace tag agree;
+never rebuild this release from later main. Fresh automatic qualification and
+actual-adopter acceptance remain separate in #26.
 
 v0.1.28 includes the accepted shared harness, delivery-origin and review
 corrections, plus [#174 / PR #175](https://github.com/clockgrove/factory-rebuild/pull/175)'s
@@ -54,19 +54,19 @@ replace its bytes or resume its waiting public run.
 
 The target repository owns its product and runtime truth. Factory state and credentials stay outside the target checkout. Factory refuses to run against any Factory source repository.
 
-## Install published v0.1.28
+## Install published v0.1.29
 
-Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md):
+Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.29) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [PR #183](https://github.com/clockgrove/factory-rebuild/pull/183):
 
 ```sh
-codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.28
+codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.29
 codex plugin add factory@clockgrove
-gh release download v0.1.28 --repo clockgrove/factory-rebuild \
-  --pattern clockgrove-factory-0.1.28.tgz --pattern SHA256SUMS
+gh release download v0.1.29 --repo clockgrove/factory-rebuild \
+  --pattern clockgrove-factory-0.1.29.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
-# Compare the tarball digest with the independently recorded build status value.
+# Compare the tarball digest with the independently recorded PR #183 value.
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.28.tgz
+  ./clockgrove-factory-0.1.29.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

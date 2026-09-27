@@ -4,16 +4,20 @@ This is the reusable release and installation procedure. [#25](https://github.co
 
 ## Distribution shape
 
-The current source prepares v0.1.29 from accepted main `111400a14529b116bd77b698c37dffee49c7c2d0`.
-Its future marketplace ref is v0.1.29; public installation below remains pinned
-to immutable v0.1.28 until the successor is published. See [preparation](#prepare-v0129).
+Published [v0.1.29](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.29)
+uses frozen reviewed source `401d74da56d234ba6958a3b1ce9e0b7b5f5eeecb`, tree
+`63f2471e0acba681f5c5c2f831543bc7d424af33`. The 150224627-byte tarball's SHA-256 is
+`e59163f5c69f7002f3efd7274fdf724e95453de187df051d29cd0d41983748ec`.
+[PR #183](https://github.com/clockgrove/factory-rebuild/pull/183) records exact
+source/artifact and separate metadata integration evidence. Concurrent #180 is
+excluded from these release bytes even though it is present in main.
 
-The published v0.1.28 [Clockgrove marketplace](https://github.com/clockgrove/factory-rebuild/blob/v0.1.28/.agents/plugins/marketplace.json) pins the plugin at this repository's root to that immutable tag. Public installation below uses that published marketplace. Codex loads its manifest and use skills from the Git tag. The TypeScript CLI and its bundled production dependency tree are supplied in a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled Codex path installs offline and needs no npm publishing account. Optional Claude/Copilot SDK installation is separate. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+The published v0.1.29 [Clockgrove marketplace](https://github.com/clockgrove/factory-rebuild/blob/v0.1.29/.agents/plugins/marketplace.json) pins the plugin at this repository's root to that immutable tag. Public installation below uses that published marketplace. Codex loads its manifest and use skills from the Git tag. The TypeScript CLI and its bundled production dependency tree are supplied in a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled Codex path installs offline and needs no npm publishing account. Optional Claude/Copilot SDK installation is separate. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
 
 Published [v0.1.28](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28)
 uses source `dc7097b487701cab94aa1d3f5aa561faa3416998`. Exact source/artifact
 checks and byte-identical reproduction are recorded in [build status](BUILD-STATUS.md).
-Follow [published installation](../README.md#install-published-v0128); fresh
+For those historical bytes, follow [their tagged installation](https://github.com/clockgrove/factory-rebuild/blob/v0.1.28/README.md#install-published-v0128); fresh
 public live qualification and actual adopter acceptance remain separate in #26.
 
 Published [v0.1.27](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.27)
@@ -22,7 +26,7 @@ Its representative public Objective remains failed after the final note-only
 worker refused its pointer checkout in the original attempt and one explicit
 retry. Preserve that run and artifact; source correction #174 / PR #175 belongs
 to the new candidate. See [build status](BUILD-STATUS.md) for exact identities.
-Current published installation uses v0.1.28 as described above.
+Current published installation uses v0.1.29 as described above.
 
 Published [v0.1.26](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26)
 includes the accepted #159 planning lifecycle correction. Its exact source, tree,
@@ -30,7 +34,7 @@ tarball digest, full Node 22/24 gates and independent public-download/offline
 installation proof are recorded in [build status](BUILD-STATUS.md). Public live
 qualification and actual adopter acceptance remain pending in
 [issue #26](https://github.com/clockgrove/factory-rebuild/issues/26).
-Current published installation uses v0.1.28 as described above.
+Current published installation uses v0.1.29 as described above.
 The earlier release evidence below applies only to those immutable artifacts.
 
 Published [v0.1.25](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25) carries the accepted #150 contained ignored-link correction
@@ -84,9 +88,16 @@ Publish a candidate tag and release asset only after its code, CI, packaging, an
 
 ## Prepare v0.1.29
 
-This candidate includes accepted #179 / PR #181 exact-tree inventory evidence
+This completed procedure is historical. v0.1.29 is published; do not repeat
+publication or replace its tag/assets. The release source is the reviewed
+`401d74d` commit, which is in main's ancestry. Metadata merge `e324b4c` contains
+concurrent #180 and is not the release source. Reproduction from `401d74d` was
+byte-identical. Normal controls accepted fresh human approval for this exact
+publication after the initial approval-control stop; #26 preserves that history.
+
+This release includes accepted #179 / PR #181 exact-tree inventory evidence
 and #170 / PR #178's Copilot editor correction. The metadata-only release change
-adds no runtime, dependency, skill or accounting scope. Ongoing #180 is excluded.
+adds no runtime, dependency, skill or accounting scope. Concurrent #180 is excluded.
 
 Freeze and independently review the exact candidate, then run source/static/full
 test/notices gates, including the supported Node22 floor and exact-head CI.
@@ -190,16 +201,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-Then install from the public tag and release assets:
+Then install from the current public tag and release assets:
 
 ```sh
-codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.28
+codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.29
 codex plugin add factory@clockgrove
-gh release download v0.1.28 --repo clockgrove/factory-rebuild \
-  --pattern clockgrove-factory-0.1.28.tgz --pattern SHA256SUMS
+gh release download v0.1.29 --repo clockgrove/factory-rebuild \
+  --pattern clockgrove-factory-0.1.29.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
-# Also compare the digest with the independently recorded release value in BUILD-STATUS.md.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.28.tgz
+# Also compare the digest with the independently recorded release value in PR #183.
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.29.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

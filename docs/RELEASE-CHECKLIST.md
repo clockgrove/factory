@@ -1,11 +1,11 @@
 # Public release checklist
 
-**Successor candidate v0.1.29:** follow [candidate preparation](PUBLIC-RELEASE.md#prepare-v0129)
-from accepted main `111400a14529b116bd77b698c37dffee49c7c2d0`. Freeze one reviewed
-source/artifact identity, run its exact gates and normal installation/parity,
-then publish under standing human release delegation through normal controls.
-Independent public-download verification precedes any separately authorized
-fresh automatic gate. Preserve v0.1.28 and its waiting run; #180 is excluded.
+**Published v0.1.29:** use the [immutable installation](../README.md#install-published-v0129)
+and exact evidence in [PR #183](https://github.com/clockgrove/factory-rebuild/pull/183).
+The frozen release source excludes concurrent #180 even though metadata integration
+includes it. Never rebuild or replace the release from later main. Independent
+public-download verification precedes separately authorized fresh automatic
+qualification in #26; preserve v0.1.28 and its waiting run.
 
 **Published v0.1.28:** reviewed source, artifact, installation and reproduction
 gates passed; exact identities are in [build status](BUILD-STATUS.md). Fresh public

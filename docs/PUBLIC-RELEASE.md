@@ -17,7 +17,7 @@ The published v0.1.29 [Clockgrove marketplace](https://github.com/clockgrove/fac
 Published [v0.1.28](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28)
 uses source `dc7097b487701cab94aa1d3f5aa561faa3416998`. Exact source/artifact
 checks and byte-identical reproduction are recorded in [build status](BUILD-STATUS.md).
-For those historical bytes, follow [their tagged installation](https://github.com/clockgrove/factory-rebuild/blob/v0.1.28/README.md#install-published-v0128); fresh
+For those historical bytes, follow [their immutable publication instructions](https://github.com/clockgrove/factory-rebuild/blob/79abc5784164da4c6de133074fdce0dceb06261b/README.md#install-published-v0128); fresh
 public live qualification and actual adopter acceptance remain separate in #26.
 
 Published [v0.1.27](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.27)

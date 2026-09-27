@@ -22,7 +22,11 @@ import { codexWorkerInput } from "../dist/execution/local.js";
 import { runCodexWorker } from "../dist/execution/worker.js";
 import { summarizeDiagnosticUsage } from "../dist/diagnostics.js";
 import * as publicModule from "../dist/index.js";
-import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
+import {
+  bindTarget,
+  createTarget,
+  factoryConfig,
+} from "./support/integration-fixture.mjs";
 
 const {
   DEFAULT_PLANNER_MODEL_SELECTION,
@@ -117,6 +121,7 @@ test("install flags persist independent planner, reviewer, and worker selections
   const root = mkdtempSync(join(tmpdir(), "factory-model-install-"));
   try {
     const target = createTarget(root);
+    bindTarget(target.checkout, "example/model-install");
     const configPath = join(root, "config", "factory.json");
     execFileSync(
       process.execPath,
@@ -208,6 +213,7 @@ test("install resolves Factory-owned role defaults and isolates one-role overrid
       const scenarioRoot = join(root, scenario.name);
       mkdirSync(scenarioRoot, { recursive: true });
       const target = createTarget(scenarioRoot);
+      bindTarget(target.checkout, `example/model-${scenario.name}`);
       const configPath = join(scenarioRoot, "config", "factory.json");
       execFileSync(
         process.execPath,

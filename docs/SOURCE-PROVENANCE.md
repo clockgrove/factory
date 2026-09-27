@@ -435,3 +435,28 @@ ordering and final hydration evidence; existing hydration failure remains
 fail-closed. These checks do not prove live model adherence or qualify a new
 published artifact. No archived implementation or private adopter source was
 copied.
+
+## Effective target binding (#149)
+
+The public local-origin/push-URL failure and current Git/Git LFS configuration
+contracts supplied this configuration-layer correction. Git resolves every
+fetch and push URL, including URL rewrites, before Factory compares strict
+GitHub repository identities. Missing, local, unsupported or mismatched origins
+fail before planning or execution. Raw URLs and configuration output never
+appear in binding errors.
+
+The existing application/runner preflights also reject explicit custom LFS
+routing, including working, staged and committed `.lfsconfig`; ordinary LFS
+storage/filtering policy is retained. This deliberately uses Git's configuration
+parser and the default origin-derived LFS route instead of duplicating LFS
+endpoint precedence or treating `git lfs env` as upload evidence. Binding is a
+configuration preflight, not attestation of later configuration changes or
+arbitrary SSH/proxy behavior.
+
+Fresh temporary-Git regressions exercise real target validation. Existing
+application and installed tests assign canonical GitHub identities and route
+only test transport operations to local bare repositories; configuration
+inspection remains real and production has no test exemption. Real Git objects,
+LFS bytes, validation and delivery continue through the existing paths. No
+archived code, private adopter material, new runtime dependency, provider call
+or frozen release artifact is part of this correction.

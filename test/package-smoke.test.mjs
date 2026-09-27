@@ -12,13 +12,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { createTarget } from "./support/integration-fixture.mjs";
+import { bindTarget, createTarget } from "./support/integration-fixture.mjs";
 
 test("fresh packed artifact installs and exposes documented install/status/plan operations", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-package-smoke-"));
   const previousStateRoot = process.env.XDG_STATE_HOME;
   try {
     const target = createTarget(root);
+    bindTarget(target.checkout, "example/package-smoke");
     const pack = join(root, "pack");
     const prefix = join(root, "prefix");
     const config = join(root, "config", "factory.json");

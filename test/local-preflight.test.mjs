@@ -147,6 +147,7 @@ test("missing work-item/final tools stop activation before projection, attempt o
     ];
     process.env.PATH = "/usr/bin:/bin";
     const setup = makeApplication(descriptor(root, target, commands));
+    process.env.PATH = "/usr/bin:/bin";
     const plan = await setup.application.planObjective(1);
     assert.equal(plan.review.status, "clean");
     await assert.rejects(

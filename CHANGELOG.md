@@ -2,6 +2,21 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.28 — Unreleased
+
+- Accept the pinned Claude runtime's bundled/managed components without treating plugin inventory as a security attestation. Disable optional telemetry, account sync, auto-memory and personal/project instruction loading per invocation; retain configured model-tool, managed-policy and controller lifecycle boundaries.
+- Reconcile current main including early Objective acceptance preflight and validated selected-LFS review evidence. Earlier 0.1.22 artifacts and live evidence remain historical; this candidate requires its own installed proof.
+
+- Keep Copilot workers on Factory's owned empty GitHub CLI authentication directory instead of exposing ambient or default controller publication stores; retain separately selected Copilot-local authentication and explicit session settings.
+- Validate observed Copilot startup identity before dispatching the Work Item prompt, with the existing bounded event wait and no fallback. Keep one stable provider-turn timeout promise across progress resets so callback-driven stalls fail durably (#130).
+
+- Expose a capability-checked package-root local `AgentHarness` registration seam with stable adapter identity, adapter-owned configuration, durable lifecycle handles, and a packed full-path conformance test.
+- Add pinned optional Claude Agent SDK 0.3.281 and GitHub Copilot SDK 1.0.13 Work Item adapters while preserving Codex as the default and planning/review provider.
+- Reuse developer-local provider authentication, fail with actionable login-and-retry guidance when it is absent, and keep controller GitHub publication credentials out of worker environments.
+- Preserve every exact Work Item validation command with its provenance and source in the common Codex, Claude, and GitHub Copilot worker prompt while retaining controller-only command execution and validation authority.
+- Derive Claude and GitHub Copilot client telemetry versions from the installed Factory package metadata instead of a stale release literal.
+- Refresh the harness candidate onto accepted main, preserving controller capabilities, media receipts, shared staging/stop boundaries, exact validation constraints, terminal/idle guards, worker-usage correlation, and the Biome/Node 22 quality gate. Claude and Copilot normalized token counters remain explicitly unavailable rather than estimated.
+
 ## 0.1.27 — Unreleased
 
 - Reject missing or empty recognized final acceptance before model-backed planning or activation using the existing Objective parser.

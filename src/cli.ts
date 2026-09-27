@@ -3,10 +3,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import type { PlanCandidate } from "./compiler.js";
 import {
+  CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   configPath,
   DEFAULT_PLANNER_MODEL_SELECTION,
   DEFAULT_REVIEWER_MODEL_SELECTION,
   DEFAULT_WORKER_MODEL_SELECTION,
+  GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
   readConfig,
   stateRoot,
   validateConfig,
@@ -39,7 +41,7 @@ function options(args: string[], name: string): string[] {
 
 function help(): void {
   console.log(
-    `Factory CLI\n\nCommands:\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--worker-model MODEL] [--worker-reasoning EFFORT] [--config PATH]\n  plan --objective N [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  run --objective N [--plan PLAN_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  cancel --objective N [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
+    `Factory CLI\n\nCommands:\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  run --objective N [--plan PLAN_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  cancel --objective N [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
   );
 }
 
@@ -56,6 +58,35 @@ async function main(): Promise<void> {
         "install requires --repository, --checkout, and --concurrency",
       );
     }
+    const harness = option(args, "harness") ?? "codex-sdk";
+    if (
+      harness !== "codex-sdk" &&
+      harness !== "claude-agent-sdk" &&
+      harness !== "github-copilot-sdk"
+    )
+      throw new Error(
+        "install --harness must be codex-sdk, claude-agent-sdk, or github-copilot-sdk",
+      );
+    if (
+      harness === "claude-agent-sdk" &&
+      (!option(args, "worker-model") || !option(args, "claude-max-turns"))
+    )
+      throw new Error(
+        "Claude installation requires --worker-model and --claude-max-turns",
+      );
+    if (
+      harness === "github-copilot-sdk" &&
+      (!option(args, "worker-model") ||
+        !option(args, "copilot-timeout-seconds"))
+    )
+      throw new Error(
+        "GitHub Copilot installation requires --worker-model and --copilot-timeout-seconds",
+      );
+    const claudeTools = options(args, "claude-tool");
+    const claudeAllowedTools = options(args, "claude-allow-tool");
+    const defaultClaudeTools = ["Read", "Edit", "Write", "Glob", "Grep"];
+    const copilotTools = options(args, "copilot-tool");
+    const defaultCopilotTools = ["view", "create", "edit", "grep", "glob"];
     const config = validateConfig({
       schemaVersion: 1,
       repository,
@@ -82,15 +113,51 @@ async function main(): Promise<void> {
       execution: {
         kind: "local",
         concurrency,
-        harness: {
-          kind: "codex-sdk",
-          model:
-            option(args, "worker-model") ??
-            DEFAULT_WORKER_MODEL_SELECTION.model,
-          reasoningEffort:
-            option(args, "worker-reasoning") ??
-            DEFAULT_WORKER_MODEL_SELECTION.reasoningEffort,
-        },
+        harness:
+          harness === "claude-agent-sdk"
+            ? {
+                kind: "claude-agent-sdk",
+                adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
+                model: option(args, "worker-model"),
+                reasoningEffort: option(args, "worker-reasoning") ?? "medium",
+                permissionMode:
+                  option(args, "claude-permission") ?? "acceptEdits",
+                session: "new-per-attempt",
+                settingSources: options(args, "claude-setting-source"),
+                tools: claudeTools.length ? claudeTools : defaultClaudeTools,
+                allowedTools: claudeAllowedTools.length
+                  ? claudeAllowedTools
+                  : claudeTools.length
+                    ? claudeTools
+                    : defaultClaudeTools,
+                maxTurns: Number(option(args, "claude-max-turns")),
+                authentication: "local",
+              }
+            : harness === "github-copilot-sdk"
+              ? {
+                  kind: "github-copilot-sdk",
+                  adapter: GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
+                  model: option(args, "worker-model"),
+                  reasoningEffort: option(args, "worker-reasoning") ?? "medium",
+                  session: "new-per-attempt",
+                  availableTools: copilotTools.length
+                    ? copilotTools
+                    : defaultCopilotTools,
+                  permissionKinds: ["read", "write"],
+                  timeoutSeconds: Number(
+                    option(args, "copilot-timeout-seconds"),
+                  ),
+                  authentication: "local",
+                }
+              : {
+                  kind: "codex-sdk",
+                  model:
+                    option(args, "worker-model") ??
+                    DEFAULT_WORKER_MODEL_SELECTION.model,
+                  reasoningEffort:
+                    option(args, "worker-reasoning") ??
+                    DEFAULT_WORKER_MODEL_SELECTION.reasoningEffort,
+                },
       },
       delivery: { kind: option(args, "delivery") ?? "regular" },
       contentStore: { kind: "local" },
@@ -196,7 +263,9 @@ async function main(): Promise<void> {
     );
     return;
   }
-  const application = compose(config);
+  let application: ReturnType<typeof compose> | undefined;
+  const requireApplication = (): ReturnType<typeof compose> =>
+    (application ??= compose(config));
   if (command === "status") {
     const state = readState(config.repository, objective);
     if (args.includes("--json")) {
@@ -252,6 +321,10 @@ async function main(): Promise<void> {
         `Objective #${objective}: ${state.graph.items.map((item) => describe(item.id)).join(", ")}; final validation ${state.finalValidation?.passed ? "passed" : state.cancelledAt ? "cancelled" : state.error ? "failed" : "pending"}${state.finalValidation?.passed && state.objectiveClosure !== "complete" ? "; Objective GitHub close pending" : ""}${state.error ? `; error: ${state.error}` : ""}${state.githubClosureError ? `; GitHub: ${state.githubClosureError}` : ""}`,
       );
       for (const [id, work] of Object.entries(state.work)) {
+        if (work.authentication)
+          console.log(
+            `Work Item ${id} requires ${work.authentication.provider} authentication; run \`${work.authentication.command}\` in the developer environment, then retry it.`,
+          );
         if (
           work.status === "waiting" &&
           work.step === "approve-result" &&
@@ -354,12 +427,12 @@ async function main(): Promise<void> {
         process.once("SIGTERM", stop);
       });
   } else if (command === "cancel") {
-    const result = await application.cancelObjective(objective);
+    const result = await requireApplication().cancelObjective(objective);
     console.log(`Objective #${objective} cancellation ${result}`);
   } else if (command === "retry") {
     const item = option(args, "item");
     if (!item) throw new Error("retry requires --item ID");
-    application.retryWorkItem(objective, item);
+    requireApplication().retryWorkItem(objective, item);
     console.log(`Work Item ${item} is pending for a new explicit attempt`);
   } else if (command === "decide-result") {
     const treeSha = option(args, "tree");
@@ -375,7 +448,7 @@ async function main(): Promise<void> {
       throw new Error(
         "decide-result requires --tree, --outcome, --actor, and --reason",
       );
-    application.decideResult(objective, {
+    requireApplication().decideResult(objective, {
       item: option(args, "item"),
       treeSha,
       actor,
@@ -410,14 +483,22 @@ async function main(): Promise<void> {
     const output = option(args, "output");
     if (!item || !set || !output)
       throw new Error("review requires --item, --set, and --output");
-    await application.exportAssetSetForReview(objective, item, set, output);
+    await requireApplication().exportAssetSetForReview(
+      objective,
+      item,
+      set,
+      output,
+    );
     console.log(`Exported AssetSet ${set} to ${output} for review`);
   } else {
     const planPath = option(args, "plan");
     const acceptedPlan = planPath
       ? (JSON.parse(readFileSync(planPath, "utf8")) as PlanCandidate)
       : undefined;
-    const state = await application.runObjective(objective, acceptedPlan);
+    const state = await requireApplication().runObjective(
+      objective,
+      acceptedPlan,
+    );
     console.log(
       state.finalValidation?.passed
         ? `Objective #${objective} completed at ${state.integratedSha}; final validation passed`

@@ -89,6 +89,22 @@ test("persisted state validates identities and graph/work keys before use", () =
     () => parseFactoryState(invalidIntegratedStart, repository, objective),
     /integratedShaAtStart must be a SHA-1/,
   );
+  const authenticationRequired = state();
+  authenticationRequired.work.asset = {
+    status: "failed",
+    error: "Authentication required",
+    authentication: { provider: "codex", command: "codex login" },
+  };
+  assert.deepEqual(
+    parseFactoryState(authenticationRequired, repository, objective).work.asset
+      .authentication,
+    { provider: "codex", command: "codex login" },
+  );
+  authenticationRequired.work.asset.status = "pending";
+  assert.throws(
+    () => parseFactoryState(authenticationRequired, repository, objective),
+    /authentication request requires failed status/,
+  );
 });
 
 test("schemaVersion 2 state requires ordered exact-tree command receipts", () => {
@@ -810,6 +826,7 @@ test("completed replayed item can retain its original worker base in legacy stat
       identity: "attempt-1",
       data: {
         request: { item: { id: "asset" }, baseSha: sha },
+        adapterIdentity: "scripted-test@1",
         handle: {
           identity: "worker-1",
           data: { pid: 123, startTime: "1", resultPath: "/tmp/result" },
@@ -830,7 +847,7 @@ test("completed replayed item can retain its original worker base in legacy stat
   );
 });
 
-test("persisted asset and active process identities fail closed", () => {
+test("persisted asset and active harness identities fail closed", () => {
   const waiting = state();
   waiting.work.asset = {
     status: "waiting",
@@ -869,8 +886,9 @@ test("persisted asset and active process identities fail closed", () => {
       identity: "attempt-1",
       data: {
         request: { item: { id: "asset" }, baseSha: sha },
+        adapterIdentity: "scripted-test@1",
         handle: {
-          identity: "worker-1",
+          identity: "",
           data: { pid: "bad", startTime: "1", resultPath: "/tmp/result" },
         },
         worktree: "/tmp/worktree",
@@ -880,6 +898,21 @@ test("persisted asset and active process identities fail closed", () => {
   assert.throws(
     () => parseFactoryState(running, repository, objective),
     /active attempt handle/,
+  );
+  running.work.asset.execution.data.handle = {
+    identity: "worker-1",
+    data: "opaque-json-handle",
+  };
+  assert.equal(
+    parseFactoryState(running, repository, objective).work.asset.execution.data
+      .handle.data,
+    "opaque-json-handle",
+  );
+  const missingAdapter = structuredClone(running);
+  delete missingAdapter.work.asset.execution.data.adapterIdentity;
+  assert.throws(
+    () => parseFactoryState(missingAdapter, repository, objective),
+    /active attempt handle is invalid/,
   );
 });
 
@@ -898,6 +931,7 @@ test("state ingress rejects an attempt handle pointing outside Factory state", (
         identity: "attempt-1",
         data: {
           request: { item: { id: "asset" }, baseSha: sha },
+          adapterIdentity: "scripted-test@1",
           worktree: "/tmp/foreign-worktree",
           handle: {
             identity: "worker-1",

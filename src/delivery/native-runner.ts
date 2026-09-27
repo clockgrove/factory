@@ -11,6 +11,7 @@ import type {
   PlanningModel,
   NativeStackLayer,
 } from "../contracts.js";
+import { AuthenticationRequiredError } from "../contracts.js";
 import { git } from "../process.js";
 import {
   AcceptanceDecisionRequired,
@@ -132,6 +133,12 @@ export async function runNativeGraph(args: {
         } catch (error) {
           work.status = args.cancelled() ? "cancelled" : "failed";
           work.error = error instanceof Error ? error.message : String(error);
+          if (
+            error instanceof AuthenticationRequiredError &&
+            work.status === "failed"
+          )
+            work.authentication = error.authentication;
+          else delete work.authentication;
           save();
           throw error;
         }
@@ -437,6 +444,12 @@ export async function runNativeGraph(args: {
         if (work.status !== "done" && work.status !== "published") {
           work.status = args.cancelled() ? "cancelled" : "failed";
           work.error = error instanceof Error ? error.message : String(error);
+          if (
+            error instanceof AuthenticationRequiredError &&
+            work.status === "failed"
+          )
+            work.authentication = error.authentication;
+          else delete work.authentication;
           save();
         }
         throw error;

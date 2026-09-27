@@ -28,9 +28,17 @@ test("ordinary pilot combines real pnpm collection, LFS selection and complete f
   const saved = { ...process.env };
   process.env.XDG_STATE_HOME = join(root, "state");
   process.env.XDG_DATA_HOME = join(root, "data");
+  process.env.XDG_CONFIG_HOME = join(root, "config");
   process.env.FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES = "512000";
   process.env.CI = "true";
   try {
+    // The supported bootstrap command is exact; configure offline mode in
+    // this disposable host configuration, which survives validation's env filter.
+    mkdirSync(join(root, "config/pnpm"), { recursive: true });
+    writeFileSync(
+      join(root, "config/pnpm/rc"),
+      "offline=true\nupdate-notifier=false\n",
+    );
     const pnpm =
       process.env.FACTORY_TEST_PNPM ??
       resolve("node_modules/pnpm/bin/pnpm.cjs");
@@ -85,6 +93,7 @@ import { resolve, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { value } from 'pilot-dependency';
 assert.equal(value, 'pilot');
+assert.equal(execFileSync('pnpm', ['config', 'get', 'offline'], {encoding:'utf8'}).trim(), 'true');
 assert.ok(lstatSync('node_modules/pilot-dependency').isSymbolicLink());
 assert.ok(realpathSync('node_modules/pilot-dependency').startsWith(resolve('node_modules/.pnpm') + sep));
 assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency'], {encoding:'utf8'}).trim(), 'node_modules/pilot-dependency');
@@ -354,6 +363,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
     for (const key of [
       "XDG_STATE_HOME",
       "XDG_DATA_HOME",
+      "XDG_CONFIG_HOME",
       "FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES",
       "CI",
       "PATH",

@@ -6,6 +6,14 @@ Factory turns a repository development Objective into source-grounded Work Items
 
 **Published release:** [v0.1.28](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28). Factory runs a source-grounded dependency DAG through local agent harnesses, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. The offline tarball bundles the default Codex path; Claude and Copilot SDKs are optional and installed separately. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for exact source, publication and acceptance evidence.
 
+**Successor candidate: v0.1.29.** Accepted [#179 / PR #181](https://github.com/clockgrove/factory-rebuild/pull/181)
+adds exact-tree tracked-path inventory to acceptance review; accepted #170 / PR #178
+corrects the optional Copilot editor tool. Package, plugin and future marketplace
+metadata name v0.1.29. Follow [candidate preparation](docs/PUBLIC-RELEASE.md#prepare-v0129)
+for exact-artifact gates; public installation stays pinned to v0.1.28 until the
+successor is published. Neither source integration nor earlier provider proof
+qualifies the successor's fresh automatic gate.
+
 v0.1.28 includes the accepted shared harness, delivery-origin and review
 corrections, plus [#174 / PR #175](https://github.com/clockgrove/factory-rebuild/pull/175)'s
 worker guidance for selected-LFS validation. Publication does not establish
@@ -30,11 +38,12 @@ final review and independent fresh-clone verification; exact artifact/gate
 identities are recorded in build status. This is the PUBLIC prerequisite only:
 actual adopter #26 remains OPEN/unaccepted. The immutable artifact is not changed
 by this documentation handoff. Accepted #55 / PR #62 separately proved installed
-Codex and Claude on its own unreleased artifact. Copilot live proof remains
-deferred in #170; it does not block the bounded Codex-only pilot.
+Codex and Claude on its own unreleased artifact. #170 separately qualified
+Copilot on its exact unpublished artifact; none of that evidence transfers to
+the successor or the bounded Codex-only pilot.
 
-Package, plugin and marketplace metadata name the immutable v0.1.28 release.
-This documentation handoff does not rebuild, retag or replace its published bytes.
+Published v0.1.28 remains immutable; this successor does not rebuild, retag or
+replace its bytes or resume its waiting public run.
 
 ## How it works
 
@@ -78,7 +87,7 @@ npm run lint
 npm run format:check
 npm test
 npm pack
-npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.28.tgz
+npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.29.tgz
 ```
 
 The current source candidate declares the Claude Agent SDK and GitHub Copilot
@@ -90,7 +99,8 @@ contract, local-login behavior, security boundary, CLI examples, and
 `composeWithLocalHarness` package-root API. This candidate behavior is not a
 claim about the earlier `v0.1.27` artifact. The combined `0.1.28` release has its
 own distribution evidence; earlier #55 Codex/Claude live evidence belongs only
-to that earlier exact artifact, and Copilot live qualification remains deferred.
+to that earlier exact artifact. #170's Copilot proof likewise belongs only to its
+separately identified artifact.
 
 The repository's [quality-tooling map](docs/QUALITY-TOOLING.md) records the
 pinned Biome release and the exact remaining compatibility checks.

@@ -4,7 +4,11 @@ This is the reusable release and installation procedure. [#25](https://github.co
 
 ## Distribution shape
 
-The [Clockgrove marketplace](../.agents/plugins/marketplace.json) pins the plugin at this repository's root to published `v0.1.28`, not a moving branch. Public installation below uses that immutable marketplace. Codex loads its manifest and use skills from the Git tag. The TypeScript CLI and its bundled production dependency tree are supplied in a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled Codex path installs offline and needs no npm publishing account. Optional Claude/Copilot SDK installation is separate. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+The current source prepares v0.1.29 from accepted main `111400a14529b116bd77b698c37dffee49c7c2d0`.
+Its future marketplace ref is v0.1.29; public installation below remains pinned
+to immutable v0.1.28 until the successor is published. See [preparation](#prepare-v0129).
+
+The published v0.1.28 [Clockgrove marketplace](https://github.com/clockgrove/factory-rebuild/blob/v0.1.28/.agents/plugins/marketplace.json) pins the plugin at this repository's root to that immutable tag. Public installation below uses that published marketplace. Codex loads its manifest and use skills from the Git tag. The TypeScript CLI and its bundled production dependency tree are supplied in a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled Codex path installs offline and needs no npm publishing account. Optional Claude/Copilot SDK installation is separate. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
 
 Published [v0.1.28](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28)
 uses source `dc7097b487701cab94aa1d3f5aa561faa3416998`. Exact source/artifact
@@ -77,6 +81,32 @@ The failed v0.1.21 adopter run is preserved without reuse. Version
 0.1.22 remains reserved by the frozen unreleased #55 candidate.
 
 Publish a candidate tag and release asset only after its code, CI, packaging, and notice checks pass; then run the disposable gate from a fresh public download. Publication is not acceptance and does not authorize the Clockgrove pilot. Do not point the marketplace at a moving branch. If the candidate version changes, update the package, manifest, marketplace ref, changelog, README status, and commands here together before tagging.
+
+## Prepare v0.1.29
+
+This candidate includes accepted #179 / PR #181 exact-tree inventory evidence
+and #170 / PR #178's Copilot editor correction. The metadata-only release change
+adds no runtime, dependency, skill or accounting scope. Ongoing #180 is excluded.
+
+Freeze and independently review the exact candidate, then run source/static/full
+test/notices gates, including the supported Node22 floor and exact-head CI.
+Pack `clockgrove-factory-0.1.29.tgz` once at the stable candidate; record its
+source/tree, SHA-256, size and source/tar/install parity. Use a normal empty-cache
+offline installation and verify bundled dependencies and CLI/scanner behavior.
+After guarded merge, verify the integrated tree and byte-identical reproduction.
+
+Standing human Factory release delegation covers readiness and publication
+after these checks through normal controls; the earlier source-only #179 assignment
+did not itself authorize publication. If controls require renewed consent, pause
+for the exact request rather than bypassing them. Publish a new v0.1.29 tag and
+release, preserving v0.1.28, then independently verify its public download and
+normal installation. Record concise exact evidence in #26 and the release/PR.
+
+Only then prepare one artifact-bound fresh public qualification approval retaining
+the four outcomes, concurrency 2, seven commands, public source/image bytes and
+stop conditions. No live execution, old-run continuation, retry or override is
+authorized by release publication. Earlier provider qualification belongs to its
+own artifact; the offline install proves the bundled Codex path only.
 
 ## Prepare v0.1.28
 

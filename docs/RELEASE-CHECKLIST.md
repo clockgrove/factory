@@ -1,5 +1,12 @@
 # Public release checklist
 
+**Successor candidate v0.1.29:** follow [candidate preparation](PUBLIC-RELEASE.md#prepare-v0129)
+from accepted main `111400a14529b116bd77b698c37dffee49c7c2d0`. Freeze one reviewed
+source/artifact identity, run its exact gates and normal installation/parity,
+then publish under standing human release delegation through normal controls.
+Independent public-download verification precedes any separately authorized
+fresh automatic gate. Preserve v0.1.28 and its waiting run; #180 is excluded.
+
 **Published v0.1.28:** reviewed source, artifact, installation and reproduction
 gates passed; exact identities are in [build status](BUILD-STATUS.md). Fresh public
 live qualification and actual adopter acceptance remain pending in #26. Do not

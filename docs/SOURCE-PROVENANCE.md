@@ -31,8 +31,15 @@ The first combined run remains nonqualifying after a 900000 ms reviewer idle
 timeout, with no product finding or result override/retry/replay. Real pnpm
 collection and four checks are limited evidence, not Objective acceptance.
 Root's [wholly fresh public gate](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1)
-is planning under the unchanged public contract and published artifact;
-automatic installed qualification and actual #26 acceptance remain pending.
+activated run `9169cda3-9e64-420e-8181-b9fb01c6ca68` under the unchanged public
+contract and published artifact. Its policy result review paused because the
+criterion asks for absence of transient asset changes and worker LFS-filter
+configuration that the final Git delta cannot establish. Root observed a narrow
+`.gitattributes` delta and unchanged ordinary asset; that does not prove the
+missing operation/environment history or establish a product defect. No result
+override, retry, replay or further target was introduced at this checkpoint.
+Root batches remaining foundation evidence before a source-contract-only
+correction; automatic installed qualification and actual #26 acceptance remain pending.
 Immutable v0.1.24 and the frozen unreleased #55 candidate remain unchanged.
 
 The #150 correction is separate from immutable v0.1.24. Public

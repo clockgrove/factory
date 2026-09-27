@@ -13,7 +13,7 @@ Publication, public-download/offline installation and pinned marketplace
 verification passed. Its first combined public gate is preserved and
 nonqualifying after a reviewer idle timeout, not a product finding. The
 [wholly fresh gate](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1)
-is planning; automatic installed-gate acceptance remains pending. Publication
+has not yet qualified; automatic installed-gate acceptance remains pending. Publication
 does not accept the actual adopter pilot.
 
 v0.1.21 retains its historical accepted-artifact evidence; published v0.1.23

@@ -17,7 +17,7 @@ Metadata/CI, reproduction, public download, offline installation and pinned
 marketplace checks passed; [build status](BUILD-STATUS.md) links their durable
 evidence. The first combined gate is nonqualifying after a provider idle timeout,
 not a product finding. The [wholly fresh public gate](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1)
-is planning; automatic gate and actual #26 adopter acceptance remain pending.
+has not yet qualified; automatic gate and actual #26 adopter acceptance remain pending.
 Use the [published install instructions](../README.md#install-published-v0125).
 Historical v0.1.24 evidence below remains immutable and does not qualify changed bytes.
 

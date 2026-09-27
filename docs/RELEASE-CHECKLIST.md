@@ -17,7 +17,7 @@ The first combined gate is preserved/nonqualifying after a 900000 ms provider
 idle timeout, with no product finding, result override, retry or replay. Its real
 pnpm collection and four passing checks are limited evidence, not acceptance.
 The [wholly fresh public gate](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1)
-is planning; automatic installed-gate acceptance remains pending. No v0.1.24
+has not yet qualified; automatic installed-gate acceptance remains pending. No v0.1.24
 evidence transfers to changed bytes. Actual #26 remains OPEN/unaccepted;
 frozen/deferred #55 remains unchanged and is not this bounded pilot's prerequisite.
 

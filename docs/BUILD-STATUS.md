@@ -28,10 +28,17 @@ human result override, retry, replay or automatic acceptance.
 [The preserved timeout checkpoint](https://github.com/clockgrove/factory-rebuild/issues/26#issuecomment-5851558280)
 limits what that run proves; its captured media set belongs only to that run.
 
-Next is root's [wholly fresh public Objective](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1),
-currently planning with the same published artifact, unchanged public source
-contract, seven commands and model/concurrency/delivery policy. Automatic gate
-acceptance remains pending, followed by separately authorized actual adopter
+Root's [wholly fresh public Objective](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1)
+activated run `9169cda3-9e64-420e-8181-b9fb01c6ca68` with the same published artifact,
+unchanged public source contract, seven commands and model/concurrency/delivery
+policy. Its policy result review paused on a criterion requiring proof of no
+transient asset changes and no worker LFS-filter configuration: a final Git delta
+cannot prove operation/environment history. Root observed only the narrow
+`.gitattributes` change and an unchanged ordinary asset in that result. This is
+an acceptance-observability pause, not a reproduced product defect. No result
+override, retry, replay or further target was introduced at this checkpoint;
+root is batching remaining foundation evidence before a source-contract-only
+correction. Automatic gate acceptance remains pending, followed by separately authorized actual adopter
 integrated-result acceptance. #26 remains OPEN/unaccepted; #55/PR #62 stays
 deferred/frozen and is not this bounded pilot's prerequisite. #149 is a nonblocking
 follow-up, not a new acceptance dependency. Earlier releases, targets and evidence

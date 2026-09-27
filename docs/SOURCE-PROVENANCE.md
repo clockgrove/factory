@@ -4,7 +4,18 @@ The clean implementation starts from the Factory plan reviewed September 22, 202
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
-## Selected-LFS worker phase guidance and v0.1.28 preparation
+## Published v0.1.28
+
+Metadata PR #176 published source `dc7097b487701cab94aa1d3f5aa561faa3416998`,
+tree `6f552925f9a6f2e464f9a46af1236a16537305df`, from the accepted corrections
+below. [Build status](BUILD-STATUS.md) records exact artifact and gate identities.
+The merged source reproduced the passing candidate tarball byte-for-byte.
+This documentation handoff changes no runtime, dependency, packaged skill,
+script or license body and does not replace any published bytes. Live acceptance
+of this combined release remains unproven; earlier #55 provider evidence stays
+bound to its own artifact.
+
+## Selected-LFS worker phase guidance and historical v0.1.28 preparation
 
 Accepted #174 / PR #175 integrated at `2948de665f7d0abc9c98df701b2a03178fcea773`,
 tree `1767b32283cb61d49bb353fe0eda94219f518ce4`. Two public v0.1.27 attempts

@@ -1,6 +1,38 @@
 # Factory build status
 
-**Current candidate: v0.1.28, unpublished.** Accepted
+**Published v0.1.28; fresh live qualification pending.** [PR #176](https://github.com/clockgrove/factory-rebuild/pull/176)
+published [v0.1.28](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28)
+from `dc7097b487701cab94aa1d3f5aa561faa3416998`, tree
+`6f552925f9a6f2e464f9a46af1236a16537305df`, identical to independently reviewed
+candidate `7b422819d7dfd71765730ff904009af9c422b64b`.
+Tarball: 150223634 bytes, SHA-256
+`a082f50219937e59c41a0367e9580a411358a9769cdc7c626b27eccecf5812fe`.
+Full220 actualNode22 tests, static/notices gates,
+[exact-head Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36338723925)
+and [main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36339035732)
+passed. Normal empty-cache offline Node22 installation, 89 source/tar/install
+file comparisons, 69 installed dependency versions, CLI and scanner checks passed.
+Independent artifact review passed; merged-source reproduction was byte-identical.
+The offline install covers the bundled Codex path. Optional Claude/Copilot SDKs
+are unbundled; their installation and live provider proof remain separate.
+
+Publication succeeded through normal controls after renewed explicit human
+approval answered the exact pending release request. The earlier tool-control
+denial is resolved. No prior release, artifact or failed run was replaced.
+Public live qualification of these bytes and actual adopter acceptance remain
+outstanding in [#26](https://github.com/clockgrove/factory-rebuild/issues/26).
+No successor live call is authorized by publication alone.
+
+Independent unauthenticated public download verified the tag's source/tree,
+tarball digest/size, checksum asset and matching marketplace/manifest versions.
+Normal Node24 installation with a fresh empty npm cache in offline mode passed,
+and the installed CLI works. No local candidate tarball was substituted and no
+global plugin installation was changed. These checks establish public distribution
+and bundled Codex installation, not live qualification or optional-provider acceptance.
+
+## Historical candidate preparation
+
+**Historical candidate: v0.1.28.** Accepted
 [#174 / PR #175](https://github.com/clockgrove/factory-rebuild/pull/175) integrated
 at `2948de665f7d0abc9c98df701b2a03178fcea773`, reviewed tree
 `1767b32283cb61d49bb353fe0eda94219f518ce4`. The shared worker prompt now explains

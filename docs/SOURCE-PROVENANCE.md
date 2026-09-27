@@ -391,3 +391,17 @@ No archived/private source, provider, new target, retry/repair, installed artifa
 patch, arbitrary maximum, dependency, Node-floor or release change was used.
 The actual fields of preserved failed provider responses remain unknown;
 synthetic reproducibility is not exact causal attribution or live qualification.
+
+## Pre-delivery acceptance lifecycle (#159)
+
+The public #159 failure, existing controller capabilities and lifecycle, and
+fresh-context architecture review supplied the narrow compile/graph-review
+prompt correction in PR #160. Current-item delivery and Objective finalization
+remain later phases; already-recorded predecessor evidence remains usable.
+Production changes add no state, receipt, verdict or recovery mechanism and do
+not alter result-review refusal. Scripted SDK prompt capture and real temporary
+Git/LFS application tests cover compound criteria, both delivery routes, upload
+ordering and final hydration evidence; existing hydration failure remains
+fail-closed. These checks do not prove live model adherence or qualify a new
+published artifact. No archived implementation or private adopter source was
+copied.

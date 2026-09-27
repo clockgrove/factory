@@ -27,6 +27,13 @@ actual adopter #26 remains OPEN/unaccepted. The immutable artifact is not change
 by this documentation handoff. The separate
 unreleased #55 candidate 0.1.22 and Claude/Copilot qualification remain deferred.
 
+**Unpublished development candidate: v0.1.26.** This checkout prepares the accepted
+[#159](https://github.com/clockgrove/factory-rebuild/issues/159) planning lifecycle
+correction. Its package, manifest and future marketplace tag agree on 0.1.26;
+it is not yet published or qualified. The published installation commands below
+remain pinned to immutable v0.1.25. See the [candidate procedure](docs/PUBLIC-RELEASE.md#prepare-v0126)
+for the source-to-artifact gates before any new live qualification.
+
 ## How it works
 
 1. A human writes an Objective as a GitHub Issue in the target repository.

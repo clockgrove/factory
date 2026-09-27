@@ -1,5 +1,11 @@
 # Public release checklist
 
+**Unpublished v0.1.26 preparation:** follow [the candidate procedure](PUBLIC-RELEASE.md#prepare-v0126)
+for accepted #159 / PR #160. Source/static/package checks, publication, public
+installed qualification and actual adopter acceptance remain distinct. No
+v0.1.26 tag or release is asserted here; the v0.1.25 identities below remain
+historical evidence for their own bytes.
+
 **Published v0.1.25; automatic gate pending.** Metadata PR #152 carries accepted #150
 from [PR #151](https://github.com/clockgrove/factory-rebuild/pull/151), integration
 `92ef6eeac89e792016b5f20ad69cefb707e9debb`, reviewed tree

@@ -106,15 +106,35 @@ Overall trunk completion still requires both the actual adopter acceptance and
 a successful Codex-only pilot would accept that proof or authorize later
 managed/sandbox/Daytona branches, repository cutover, or a trunk-complete claim.
 
+## Trunk foundations and provider branches
+
+Trunk owns the shared execution and result contracts, the atomic continuation snapshot, independent validation and delivery boundaries, and the installed harness seam and second-provider proof in [#55](https://github.com/clockgrove/factory-rebuild/issues/55). These foundations let the local path use the same orchestration boundaries as later execution modes. They do not require working cloud or sandbox execution before trunk acceptance.
+
+| Trunk foundation                                             | Branch implementation                                         |
+| ------------------------------------------------------------ | ------------------------------------------------------------- |
+| `ExecutionDriver` lifecycle and exact result contract        | Managed cloud tasks and their first SDK adapter (#7)          |
+| Installed `AgentHarness` selection and conformance (#55)     | Sandbox transport and lifecycle around that harness seam (#8) |
+| Shared snapshot, content, validation and delivery boundaries | Daytona behind the sandbox provider boundary (#9)             |
+
+The named contracts and configuration shapes are architectural seams, not claims of available execution. Unsupported mode selections must fail explicitly until their implementation is accepted. A scripted provider fixture proves the exercised contract; a real provider requires its own installed evidence. One provider does not establish portability across all SDKs, vendors or harness/provider combinations.
+
+Working managed execution belongs to #7. It establishes a reusable execution mode with Copilot cloud sessions as the first concrete SDK adapter. Further cloud-session SDKs are separate capability issues behind the same driver lifecycle and result boundary. Keep SDK types, authentication, configuration and result transport inside adapters; extract shared machinery only when concrete implementations demonstrate a need.
+
+Working sandbox execution belongs to #8. One `SandboxExecutionDriver` composes a `SandboxProvider` for infrastructure with the configured `AgentHarness` for agent behavior. #9 depends on #8 and adds Daytona as the first concrete provider. Later sandbox vendors are sibling adapter capabilities depending on #8, not on Daytona. Do not create a driver for every vendor/harness pairing. #7 is not a technical dependency of #8 or #9; the planned delivery order remains managed execution, sandbox execution, then Daytona.
+
+A branch may change shared code to satisfy its accepted behavior without becoming a trunk prerequisite. Move a correction earlier only when a demonstrated current trunk requirement needs it. Do not add speculative registries, generic SDK wrappers or remote lifecycle state merely to advertise extensibility. Selecting among supported providers remains a project-level execution configuration; multiple adapters do not imply mixed modes, per-Objective switching, ranking or fallback.
+
+This boundary preserves the full-trunk and actual-pilot start gates and the bounded Codex-only pilot exception above. It does not expand provider spending, source-egress, target or publication authority. [Decision #157](https://github.com/clockgrove/factory-rebuild/issues/157) records the approved documentation scope.
+
 ## Named branches after trunk
 
 ![Planning, harness, and execution-driver layering](architecture/execution-drivers.png)
 
 `PlanningModel` compiles and reviews the Work Item graph. `AgentHarness` performs one Work Item under a Factory-operated local or sandbox driver. The three peer `ExecutionDriver` implementations differ in placement and lifecycle ownership: trunk's `LocalExecutionDriver` operates a local worktree; Branch 1's `ManagedExecutionDriver` submits and tracks a provider-owned agent task; Branch 2's `SandboxExecutionDriver` operates a `SandboxProvider` and invokes the configured harness inside it. An SDK name alone does not determine whether an agent is local or managed.
 
-- [ManagedExecutionDriver, issue #7](https://github.com/clockgrove/factory-rebuild/issues/7): evaluate GitHub Copilot SDK [cloud sessions](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/cloud-sessions) as the initial GitHub-hosted candidate, then implement only if its durable task, authorization, cancellation, exact-change, and result semantics fit the `ExecutionDriver` contract. Copilot SDK local CLI/runtime mode is not a managed task. Persist provider identity, observe/cancel/collect, and feed unchanged validation and delivery. Prove the same disposable Objective with this driver.
-- [SandboxExecutionDriver, issue #8](https://github.com/clockgrove/factory-rebuild/issues/8): after trunk issue #55 lands, compose `SandboxProvider` with that installed harness seam. Prove transfer, execution, observation, cancellation, collection, and destruction with a provider-neutral fixture; do not redefine BYO harness installation or configuration in this branch.
-- [Daytona SandboxProvider, issue #9](https://github.com/clockgrove/factory-rebuild/issues/9): add the first concrete provider behind `SandboxExecutionDriver` and run the Branch 2 scenario unchanged. Keep Daytona details within its adapter.
+- [Managed cloud execution, starting with Copilot sessions, issue #7](https://github.com/clockgrove/factory-rebuild/issues/7): evaluate GitHub Copilot SDK [cloud sessions](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/cloud-sessions) as the initial GitHub-hosted candidate, then implement only if its durable task, authorization, cancellation, exact-change, and result semantics fit the `ExecutionDriver` contract. Copilot SDK local CLI/runtime mode is not a managed task. Persist provider identity, observe/cancel/collect, and feed unchanged validation and delivery. Prove the same disposable Objective with this driver.
+- [Configured harnesses in Factory-managed sandboxes, issue #8](https://github.com/clockgrove/factory-rebuild/issues/8): after trunk issue #55 lands, compose `SandboxProvider` with that installed harness seam. Prove transfer, execution, observation, cancellation, collection, and destruction with a provider-neutral fixture; do not redefine BYO harness installation or configuration in this branch.
+- [Daytona sandbox provider, issue #9](https://github.com/clockgrove/factory-rebuild/issues/9): add the first concrete provider behind `SandboxExecutionDriver` and run the Branch 2 scenario unchanged. Keep Daytona details within its adapter.
 
 ## Test reset and representative gates
 

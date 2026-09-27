@@ -603,6 +603,62 @@ function configuredResultReviewTextBudget(): number {
     : 48_000;
 }
 
+/** Inventory Git paths, not checkout files, blob contents or submodule contents. */
+function resultTreeInventory(
+  checkout: string,
+  treeSha: string,
+  limit: number,
+): ResultReviewEvidenceSource {
+  const source = { path: "Exact result tree inventory", complete: false };
+  const paths: string[] = [];
+  let bytes = Buffer.byteLength(
+    JSON.stringify({ treeSha, complete: false, paths }),
+  );
+  if (bytes > limit) return { ...source, content: "" };
+  const result = spawnSync(
+    "git",
+    ["-C", checkout, "ls-tree", "-r", "--name-only", "-z", treeSha],
+    { env: pinnedGitEnvironment(), maxBuffer: limit },
+  );
+  if (
+    result.error &&
+    (result.error as NodeJS.ErrnoException).code !== "ENOBUFS"
+  )
+    throw result.error;
+  if (!result.error && result.status !== 0)
+    throw new Error(
+      "Cannot inventory exact result tree for independent review",
+    );
+  const output = (result.stdout ?? Buffer.alloc(0)).subarray(0, limit);
+  const end = output.lastIndexOf(0) + 1;
+  let complete = !result.error && end === output.length;
+  let names: string[];
+  try {
+    names = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
+      .decode(output.subarray(0, end))
+      .split("\0")
+      .slice(0, -1);
+  } catch {
+    names = [];
+    complete = false;
+  }
+  for (const path of names) {
+    const size =
+      Buffer.byteLength(JSON.stringify(path)) + (paths.length ? 1 : 0);
+    if (bytes + size > limit) {
+      complete = false;
+      break;
+    }
+    paths.push(path);
+    bytes += size;
+  }
+  return {
+    ...source,
+    complete,
+    content: JSON.stringify({ treeSha, complete, paths }),
+  };
+}
+
 interface ResultChangePacket {
   changes: {
     path: string;
@@ -1123,16 +1179,22 @@ export async function reviewAcceptance(args: {
     throw new Error("Acceptance result tree differs from command evidence");
   assertCommandReceipts(evidence, evidence.treeSha, "Acceptance");
   const selectedLfsEvidence = selectedLfsReviewEvidence(checkout, evidence);
+  const remainingBudget =
+    configuredResultReviewTextBudget() - selectedLfsEvidence.textBytes;
+  const inventory = resultTreeInventory(
+    checkout,
+    evidence.treeSha,
+    Math.floor(remainingBudget / 2),
+  );
   const { change, truncatedPaths } = resultChangePacket(
     checkout,
     baseSha,
     commit,
-    // Attribute reads stay bounded, but unused space remains available to patches.
-    evidence.selectedLfs?.length
-      ? configuredResultReviewTextBudget() - selectedLfsEvidence.textBytes
-      : undefined,
+    // Only emitted inventory and attribute bytes reduce patch capacity.
+    remainingBudget - Buffer.byteLength(inventory.content),
   );
   const suppliedEvidence = [
+    inventory,
     ...selectedLfsEvidence.sources,
     ...(args.evidenceSources ?? []),
   ];

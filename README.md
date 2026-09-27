@@ -4,7 +4,13 @@
 
 Factory turns a repository development Objective into source-grounded Work Items, runs bounded coding attempts, validates their exact result trees, and delivers the changes through GitHub. It is an open-source Clockgrove plugin installed for one target repository at a time.
 
-**Published release:** [v0.1.27](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.27). Factory runs the local Codex SDK path with a source-grounded dependency DAG, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for source, publication and exact-artifact acceptance status.
+**Published release:** [v0.1.28](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28). Factory runs a source-grounded dependency DAG through local agent harnesses, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. The offline tarball bundles the default Codex path; Claude and Copilot SDKs are optional and installed separately. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for exact source, publication and acceptance evidence.
+
+v0.1.28 includes the accepted shared harness, delivery-origin and review
+corrections, plus [#174 / PR #175](https://github.com/clockgrove/factory-rebuild/pull/175)'s
+worker guidance for selected-LFS validation. Publication does not establish
+fresh public live qualification or actual adopter acceptance; both remain
+separate in [#26](https://github.com/clockgrove/factory-rebuild/issues/26).
 
 v0.1.27 includes the accepted [#165](https://github.com/clockgrove/factory-rebuild/issues/165)
 Objective preflight and selected-LFS review evidence correction.
@@ -27,13 +33,8 @@ by this documentation handoff. Accepted #55 / PR #62 separately proved installed
 Codex and Claude on its own unreleased artifact. Copilot live proof remains
 deferred in #170; it does not block the bounded Codex-only pilot.
 
-**Unpublished development candidate: v0.1.28.** This checkout includes accepted
-shared harness, delivery-origin and review corrections, plus
-[#174 / PR #175](https://github.com/clockgrove/factory-rebuild/pull/175)'s worker
-guidance for selected-LFS validation. Package, plugin and future marketplace
-metadata name 0.1.28. No release or live qualification of these combined bytes
-is claimed. Published installation stays pinned to immutable v0.1.27; follow the
-[candidate procedure](docs/PUBLIC-RELEASE.md#prepare-v0128) for the next artifact.
+Package, plugin and marketplace metadata name the immutable v0.1.28 release.
+This documentation handoff does not rebuild, retag or replace its published bytes.
 
 ## How it works
 
@@ -44,19 +45,19 @@ is claimed. Published installation stays pinned to immutable v0.1.27; follow the
 
 The target repository owns its product and runtime truth. Factory state and credentials stay outside the target checkout. Factory refuses to run against any Factory source repository.
 
-## Install published v0.1.27
+## Install published v0.1.28
 
-Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.27) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md):
+Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md):
 
 ```sh
-codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.27
+codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.28
 codex plugin add factory@clockgrove
-gh release download v0.1.27 --repo clockgrove/factory-rebuild \
-  --pattern clockgrove-factory-0.1.27.tgz --pattern SHA256SUMS
+gh release download v0.1.28 --repo clockgrove/factory-rebuild \
+  --pattern clockgrove-factory-0.1.28.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Compare the tarball digest with the independently recorded build status value.
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.27.tgz
+  ./clockgrove-factory-0.1.28.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```
@@ -87,9 +88,9 @@ package-root registration seam available. See [local agent harnesses](docs/AGENT
 for their exact versions/licenses, configuration shapes, capability/lifecycle
 contract, local-login behavior, security boundary, CLI examples, and
 `composeWithLocalHarness` package-root API. This candidate behavior is not a
-claim about the already published `v0.1.27` artifact. The combined `0.1.28`
-candidate is unreleased; earlier #55 Codex/Claude evidence belongs only to that
-earlier exact artifact, and Copilot live qualification remains deferred.
+claim about the earlier `v0.1.27` artifact. The combined `0.1.28` release has its
+own distribution evidence; earlier #55 Codex/Claude live evidence belongs only
+to that earlier exact artifact, and Copilot live qualification remains deferred.
 
 The repository's [quality-tooling map](docs/QUALITY-TOOLING.md) records the
 pinned Biome release and the exact remaining compatibility checks.

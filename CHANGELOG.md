@@ -2,7 +2,9 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.28 — Unreleased
+## 0.1.28 — 2026-09-27
+
+- Publish reviewed PR #176 source `dc7097b487701cab94aa1d3f5aa561faa3416998`, tree `6f552925f9a6f2e464f9a46af1236a16537305df`. Full220 actualNode22 and hostedNode24 gates, independent artifact review, normal offline installation and byte-identical merged-source reproduction passed. Fresh public live qualification and actual adopter acceptance remain separate in #26; publication does not inherit earlier provider evidence.
 
 - Explain selected required-LFS pointer checkouts and subsequent controller byte restoration in the shared worker prompt. Preserve owned deliverables, read-only inputs and exact commands; no worker hydration or acceptance override. Accepted #174 / PR #175 at `2948de665f7d0abc9c98df701b2a03178fcea773`; live adherence remains unqualified.
 - Include accepted delivery-origin binding (#149), aggregate review-budget reuse (#167), and exact selected-LFS receipt binding (#168). Prepare the combined public candidate without inheriting live acceptance from earlier #55 artifacts.

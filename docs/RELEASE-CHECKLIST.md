@@ -1,6 +1,12 @@
 # Public release checklist
 
-**Unpublished v0.1.28 candidate:** follow [candidate preparation](PUBLIC-RELEASE.md#prepare-v0128)
+**Published v0.1.28:** reviewed source, artifact, installation and reproduction
+gates passed; exact identities are in [build status](BUILD-STATUS.md). Fresh public
+live qualification and actual adopter acceptance remain pending in #26. Do not
+rebuild from later main, retag or replace the release. Publication does not
+authorize live execution.
+
+**Historical v0.1.28 candidate:** follow [candidate preparation](PUBLIC-RELEASE.md#prepare-v0128)
 from accepted #174 / PR #175, including accepted #55, #149, #167 and #168.
 Package/manifest and future marketplace ref name 0.1.28; current public
 installation remains v0.1.27. Freeze and review this metadata candidate before
@@ -88,9 +94,9 @@ The first release passed [#25](https://github.com/clockgrove/factory-rebuild/iss
 | Third-party notices                            | Generated from production lock and installed package notices, including SPDX BSD-3-Clause text for `@azu/format-text` | Regenerate for final lock; obtain maintainer review of the publisher's missing copyright notice before publication |
 | Project logo                                   | SVG mark in `assets/`                                                                                                 | Review rendering and public use                                                                                    |
 | Objective issue form                           | Eight named fields and final pinned-source section in `.github/ISSUE_TEMPLATE/objective.yml`                          | Confirm form renders, submitted body parses, and target owners can copy it                                         |
-| Package and marketplace metadata               | Candidate 0.1.28 package/manifest and future v0.1.28 marketplace pin; public install remains v0.1.27                  | Freeze and review candidate before artifact gates; never rewrite published artifacts                               |
+| Package and marketplace metadata               | Published 0.1.28 package/manifest and immutable v0.1.28 marketplace pin                                               | Independent public identity and installation verification passed; never rewrite published artifacts                |
 | README and CONTRIBUTING                        | Public install and contribution instructions                                                                          | Recheck commands against final CLI                                                                                 |
-| CHANGELOG                                      | Unreleased `0.1.28` changes listed; published entries retained                                                        | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
+| CHANGELOG                                      | Published `0.1.28` changes listed; historical entries retained                                                        | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
 | Installed use skills                           | `director` and `setup` packaged                                                                                       | Exercise planning, result decisions, media selection, status, and diagnostics in a fresh target                    |
 | CLI                                            | Existing commands documented                                                                                          | Recheck plan/decide/run/decide-result/status/diagnostics/logs against the final CLI                                |
 | TypeScript, formatter, test, workflow          | Existing build and deterministic CI                                                                                   | Run credential-free integration gate on merged trunk                                                               |
@@ -99,9 +105,8 @@ No required asset is intentionally omitted. MCP is not a first-release requireme
 
 ## Exact-artifact acceptance
 
-For candidate v0.1.28, the full exact-artifact steps below remain pending after
-metadata review. For published v0.1.27, source/publication/installation checks
-in steps 1–2 passed, but the public gate failed. New-artifact installed
+For published v0.1.28, source/publication/installation checks in steps 1–2 passed.
+For historical v0.1.27 those checks passed, but the public gate failed. New-artifact installed
 qualification in steps 3–4 and actual adopter acceptance remain required.
 [BUILD-STATUS.md](BUILD-STATUS.md) records the exact published identity;
 issue #26 tracks remaining acceptance. Use the approved representative foundation,

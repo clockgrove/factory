@@ -4,7 +4,13 @@ This is the reusable release and installation procedure. [#25](https://github.co
 
 ## Distribution shape
 
-The [Clockgrove marketplace](../.agents/plugins/marketplace.json) in this preparation checkout pins the plugin at this repository's root to future `v0.1.28`, not a moving branch. That candidate tag is unpublished; public installation below uses the immutable `v0.1.27` marketplace. Codex loads its manifest and use skills from that immutable Git tag. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+The [Clockgrove marketplace](../.agents/plugins/marketplace.json) pins the plugin at this repository's root to published `v0.1.28`, not a moving branch. Public installation below uses that immutable marketplace. Codex loads its manifest and use skills from the Git tag. The TypeScript CLI and its bundled production dependency tree are supplied in a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled Codex path installs offline and needs no npm publishing account. Optional Claude/Copilot SDK installation is separate. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+
+Published [v0.1.28](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28)
+uses source `dc7097b487701cab94aa1d3f5aa561faa3416998`. Exact source/artifact
+checks and byte-identical reproduction are recorded in [build status](BUILD-STATUS.md).
+Follow [published installation](../README.md#install-published-v0128); fresh
+public live qualification and actual adopter acceptance remain separate in #26.
 
 Published [v0.1.27](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.27)
 passed publication and independent public-download/offline installation checks.
@@ -12,7 +18,7 @@ Its representative public Objective remains failed after the final note-only
 worker refused its pointer checkout in the original attempt and one explicit
 retry. Preserve that run and artifact; source correction #174 / PR #175 belongs
 to the new candidate. See [build status](BUILD-STATUS.md) for exact identities.
-Use the [published install instructions](../README.md#install-published-v0127).
+Current published installation uses v0.1.28 as described above.
 
 Published [v0.1.26](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26)
 includes the accepted #159 planning lifecycle correction. Its exact source, tree,
@@ -20,7 +26,7 @@ tarball digest, full Node 22/24 gates and independent public-download/offline
 installation proof are recorded in [build status](BUILD-STATUS.md). Public live
 qualification and actual adopter acceptance remain pending in
 [issue #26](https://github.com/clockgrove/factory-rebuild/issues/26).
-Current published installation uses v0.1.27 as described above.
+Current published installation uses v0.1.28 as described above.
 The earlier release evidence below applies only to those immutable artifacts.
 
 Published [v0.1.25](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25) carries the accepted #150 contained ignored-link correction
@@ -74,6 +80,9 @@ Publish a candidate tag and release asset only after its code, CI, packaging, an
 
 ## Prepare v0.1.28
 
+This section records the completed candidate procedure. v0.1.28 is now published;
+do not repeat publication, rebuild it from later main or replace its assets.
+
 This metadata-only candidate starts from accepted #174 / PR #175 integration
 `2948de665f7d0abc9c98df701b2a03178fcea773`, tree
 `1767b32283cb61d49bb353fe0eda94219f518ce4`, including accepted #55, #149, #167 and
@@ -117,9 +126,9 @@ not authorize provider execution.
 
 ## Build one candidate
 
-For the new v0.1.28 candidate, use its exact reviewed source. For historical
-reproduction use that release's exact tag, never later main or replacement
-release assets. The following commands build the new candidate only.
+For historical v0.1.28 reproduction, use its exact published tag, never later
+main or replacement release assets. The following commands retain that version
+as an example; a future release must use its own reviewed version and identity.
 
 From a clean Linux x64 source checkout at the accepted commit, with Node.js 22 or later, Git, Git LFS, and public npm access, confirm `git status --porcelain` is empty. Choose an empty absolute release directory outside the checkout, then run:
 
@@ -154,13 +163,13 @@ gh auth status
 Then install from the public tag and release assets:
 
 ```sh
-codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.27
+codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.28
 codex plugin add factory@clockgrove
-gh release download v0.1.27 --repo clockgrove/factory-rebuild \
-  --pattern clockgrove-factory-0.1.27.tgz --pattern SHA256SUMS
+gh release download v0.1.28 --repo clockgrove/factory-rebuild \
+  --pattern clockgrove-factory-0.1.28.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the digest with the independently recorded release value in BUILD-STATUS.md.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.27.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.28.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

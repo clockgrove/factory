@@ -4,6 +4,9 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 
 ## 0.1.28 — Unreleased
 
+- Explain selected required-LFS pointer checkouts and subsequent controller byte restoration in the shared worker prompt. Preserve owned deliverables, read-only inputs and exact commands; no worker hydration or acceptance override. Accepted #174 / PR #175 at `2948de665f7d0abc9c98df701b2a03178fcea773`; live adherence remains unqualified.
+- Include accepted delivery-origin binding (#149), aggregate review-budget reuse (#167), and exact selected-LFS receipt binding (#168). Prepare the combined public candidate without inheriting live acceptance from earlier #55 artifacts.
+
 - Accept the pinned Claude runtime's bundled/managed components without treating plugin inventory as a security attestation. Disable optional telemetry, account sync, auto-memory and personal/project instruction loading per invocation; retain configured model-tool, managed-policy and controller lifecycle boundaries.
 - Reconcile current main including early Objective acceptance preflight and validated selected-LFS review evidence. Earlier 0.1.22 artifacts and live evidence remain historical; this candidate requires its own installed proof.
 
@@ -17,11 +20,11 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 - Derive Claude and GitHub Copilot client telemetry versions from the installed Factory package metadata instead of a stale release literal.
 - Refresh the harness candidate onto accepted main, preserving controller capabilities, media receipts, shared staging/stop boundaries, exact validation constraints, terminal/idle guards, worker-usage correlation, and the Biome/Node 22 quality gate. Claude and Copilot normalized token counters remain explicitly unavailable rather than estimated.
 
-## 0.1.27 — Unreleased
+## 0.1.27 — 2026-09-27
 
 - Reject missing or empty recognized final acceptance before model-backed planning or activation using the existing Objective parser.
 - Supply compact exact-tree selected-LFS pointer/filter validation facts to item and final review. Separately include bounded tracked attribute text without treating effective filtering as proof of exact rule contents; retain later delivery and final hydration phases.
-- Strengthen the offline real-pnpm/Git/LFS pilot at the production serialized-review boundary, with missing-evidence negatives and early-refusal regressions. Carry accepted #165 / PR #166 integration `058bd7587aa532342ebb77488474258c90930f5d`; this metadata preparation changes no runtime or dependencies. Published v0.1.26 and its paused run remain unchanged. Publication, new-artifact qualification and actual adopter acceptance remain pending.
+- Strengthen the offline real-pnpm/Git/LFS pilot at the production serialized-review boundary, with missing-evidence negatives and early-refusal regressions. Carry accepted #165 / PR #166 integration `058bd7587aa532342ebb77488474258c90930f5d` through published metadata PR #169, source `7d4e926b99cf2446b0d9a3e53a17e270a820b7fb`. Publication and independent public-download/offline installation passed. The public gate remains nonqualifying after a final-integration worker refusal and one explicit retry; actual adopter acceptance remains separate. Preserve all published artifacts and prior runs.
 
 ## 0.1.26 — 2026-09-27
 

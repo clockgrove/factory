@@ -1,5 +1,51 @@
 # Factory build status
 
+**Current candidate: v0.1.28, unpublished.** Accepted
+[#174 / PR #175](https://github.com/clockgrove/factory-rebuild/pull/175) integrated
+at `2948de665f7d0abc9c98df701b2a03178fcea773`, reviewed tree
+`1767b32283cb61d49bb353fe0eda94219f518ce4`. The shared worker prompt now explains
+selected required-LFS byte restoration during controller validation, preserving
+ownership, read-only inputs, literal commands and failure reporting. Independent
+full-diff review round 1 had no findings; build/typecheck, changed-file checks
+and all 37 affected regressions passed. [Exact-head Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36338092879)
+passed; [integration Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36338273279)
+records main verification. This preparation changes only release metadata and
+documentation. Follow [candidate preparation](PUBLIC-RELEASE.md#prepare-v0128)
+for exact-artifact checks; no new artifact or live qualification is asserted.
+
+The combined source includes accepted #55 / PR #62, #149 / PR #173, #167 / PR #171
+and #168 / PR #172. #55's earlier installed Codex/Claude proof belongs only to its
+own artifact; [#170](https://github.com/clockgrove/factory-rebuild/issues/170)
+retains deferred Copilot live qualification. None establishes actual adopter
+acceptance in [#26](https://github.com/clockgrove/factory-rebuild/issues/26).
+
+**Published v0.1.27; public gate failed.** [PR #169](https://github.com/clockgrove/factory-rebuild/pull/169)
+published immutable [v0.1.27](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.27)
+from `7d4e926b99cf2446b0d9a3e53a17e270a820b7fb`, tree
+`bc8acbd547c593782910a26b7a20a4135acfc130`. Tarball: 150180509 bytes,
+SHA-256 `8c8dc94ebf55c96c8ee9d420a46ccb58380e98bb1248726d5df0737970ce7976`.
+Actual Node22 full188 and hosted Node24/static/notices/package checks passed,
+as did byte-identical merged-source reproduction and independent public download,
+normal empty-cache offline installation, dependency parity and pinned marketplace
+verification. [Public checkpoint](https://github.com/clockgrove/factory-rebuild/issues/26)
+retains exact evidence.
+
+The [public Objective](https://github.com/clockgrove/factory-v0127-gate-20260927-trunk/issues/1)
+integrated policy, foundation and selected media through PR6/7/8 at
+`1a87ea3f0ee55defae3f7fe099ed337e4ada9ca2`. The final note-only worker then
+refused its pointer checkout; one supported explicit retry reproduced the refusal.
+Both attempts produced no repository change. Final validation and automatic
+Objective acceptance remain absent. Preserve the failed run, attempts and original
+accounting; no further identical retry or acceptance override. Retain the fixture
+under the release/qualification owner until the corrected-artifact qualification
+decision, then review retirement. Publication and partial integration do not
+qualify this release or accept the separate actual adopter.
+
+## Historical preparation and release evidence
+
+The following checkpoints describe their dated candidates and do not supersede
+the current candidate and public release above.
+
 **Separate harness candidate:** #55 / PR #62 now uses unreleased 0.1.28
 and is undergoing its own installed Codex/Claude qualification. Its old frozen
 0.1.22 source/artifact statements below are historical, not a restriction on the
@@ -15,7 +61,7 @@ The independently authorized #26 pilot remains separate.
 Node22.0, with typecheck and changed-file checks. Root's independent focused
 review passed; [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36298521801)
 is the exact integration check. These are source checks, not evidence for an
-unbuilt v0.1.27 artifact. Follow [candidate preparation](PUBLIC-RELEASE.md#prepare-v0127);
+unbuilt v0.1.27 artifact. Current [candidate preparation](PUBLIC-RELEASE.md#prepare-v0128) supersedes these historical instructions;
 publication, fresh public qualification and actual adopter acceptance remain
 separate requirements in issue #26. Published v0.1.26 and its paused run remain
 unchanged; follow-ups #167/#168 are outside this candidate.

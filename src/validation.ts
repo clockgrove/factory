@@ -68,8 +68,101 @@ export class AcceptanceDecisionRequired extends Error {
 export interface ValidationEvidence {
   treeSha: string;
   commands: ValidationCommandReceipt[];
+  selectedLfs?: SelectedLfsValidation[];
   hydrationReceipt?: HydrationReceipt;
   criteria?: CriterionEvidence[];
+}
+
+export interface SelectedLfsValidation {
+  treeSha: string;
+  destination: string;
+  digest: string;
+  bytes: number;
+  filter: "lfs";
+}
+
+export function assertSelectedLfsValidation(
+  value: unknown,
+  treeSha: string,
+): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value))
+    throw new Error("Invalid selected LFS validation evidence");
+  const destinations = new Set<string>();
+  for (const receipt of value) {
+    if (
+      !receipt ||
+      receipt.treeSha !== treeSha ||
+      typeof receipt.destination !== "string" ||
+      !safeValidationPath(receipt.destination) ||
+      destinations.has(receipt.destination) ||
+      typeof receipt.digest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(receipt.digest) ||
+      !Number.isSafeInteger(receipt.bytes) ||
+      receipt.bytes < 0 ||
+      receipt.filter !== "lfs"
+    )
+      throw new Error(
+        "Selected LFS validation evidence differs from the exact tree or member",
+      );
+    destinations.add(receipt.destination);
+  }
+}
+
+/** Read only tracked attribute files on selected paths, never arbitrary tree blobs. */
+function selectedLfsReviewEvidence(
+  checkout: string,
+  evidence: ValidationEvidence,
+): ResultReviewEvidenceSource[] {
+  assertSelectedLfsValidation(evidence.selectedLfs, evidence.treeSha);
+  if (!evidence.selectedLfs?.length) return [];
+  const sources: ResultReviewEvidenceSource[] = [
+    {
+      path: "Validated selected LFS pointers",
+      content: JSON.stringify(evidence.selectedLfs),
+    },
+  ];
+  const paths = new Set<string>();
+  for (const receipt of evidence.selectedLfs) {
+    const segments = receipt.destination.split("/");
+    for (let i = 0; i < segments.length; i++)
+      paths.add([...segments.slice(0, i), ".gitattributes"].join("/"));
+  }
+  let remaining = Math.floor(configuredResultReviewTextBudget() / 2);
+  for (const path of paths) {
+    const entry = pinnedGit(checkout, "ls-tree", evidence.treeSha, "--", path);
+    if (!entry) continue;
+    const [mode, kind, oid] = entry.split(/[\s\t]+/);
+    const bytes = Number(pinnedGit(checkout, "cat-file", "-s", oid!));
+    let content: string | undefined;
+    if (
+      kind === "blob" &&
+      (mode === "100644" || mode === "100755") &&
+      bytes <= remaining
+    ) {
+      try {
+        content = new TextDecoder("utf-8", { fatal: true }).decode(
+          pinnedGitRaw(checkout, "cat-file", "blob", oid!),
+        );
+      } catch {
+        content = undefined;
+      }
+    }
+    if (content !== undefined) remaining -= bytes;
+    sources.push({
+      path: `Selected LFS tracked attributes: ${path}`,
+      complete: content !== undefined,
+      content: JSON.stringify({
+        treeSha: evidence.treeSha,
+        path,
+        oid,
+        bytes,
+        complete: content !== undefined,
+        ...(content !== undefined ? { text: content } : {}),
+      }),
+    });
+  }
+  return sources;
 }
 
 export type ReviewDeliveryObservation =
@@ -1032,7 +1125,14 @@ export async function reviewAcceptance(args: {
     checkout,
     baseSha,
     commit,
+    evidence.selectedLfs?.length
+      ? Math.floor(configuredResultReviewTextBudget() / 2)
+      : undefined,
   );
+  const suppliedEvidence = [
+    ...selectedLfsReviewEvidence(checkout, evidence),
+    ...(args.evidenceSources ?? []),
+  ];
   const evidenceSources: ResultReviewEvidenceSource[] = [
     { path: "Exact Git change packet", content: change },
     {
@@ -1043,7 +1143,7 @@ export async function reviewAcceptance(args: {
       path: "Delivery observations",
       content: args.observations ?? "",
     },
-    ...(args.evidenceSources ?? []),
+    ...suppliedEvidence,
   ];
   const groundedSources = [...sources, ...evidenceSources];
   // Selected headings legitimately share planning paths. Authoritative evidence
@@ -1073,9 +1173,7 @@ export async function reviewAcceptance(args: {
         sources,
         change,
         commands: evidence.commands,
-        ...(args.evidenceSources?.length
-          ? { evidence: args.evidenceSources }
-          : {}),
+        ...(suppliedEvidence.length ? { evidence: suppliedEvidence } : {}),
         ...(args.observations ? { observations: args.observations } : {}),
         invocation: args.invocation,
       });
@@ -1221,7 +1319,7 @@ function safeValidationPath(path: string): boolean {
 function assertSelectedLfsPointer(
   worktree: string,
   member: ValidationLfsMember,
-): void {
+): SelectedLfsValidation {
   if (!safeValidationPath(member.destination))
     throw new Error("Validation LFS destination is invalid");
   if (
@@ -1260,6 +1358,13 @@ function assertSelectedLfsPointer(
     throw new Error(
       `Validation LFS pointer differs from selected bytes: ${member.destination}`,
     );
+  return {
+    treeSha: pinnedGit(worktree, "rev-parse", "HEAD^{tree}"),
+    destination: member.destination,
+    digest: member.digest,
+    bytes: member.bytes,
+    filter: "lfs",
+  };
 }
 
 function assertSelectedLfsBytes(
@@ -1301,8 +1406,8 @@ async function hydrateSelectedLfsBytes(
   worktree: string,
   members: ValidationLfsMember[],
   contentStore?: ContentStore,
-): Promise<void> {
-  if (!members.length) return;
+): Promise<SelectedLfsValidation[]> {
+  if (!members.length) return [];
   if (!contentStore)
     throw new Error("Validation LFS content store is unavailable");
   const byDestination = new Map<string, ValidationLfsMember>();
@@ -1318,7 +1423,9 @@ async function hydrateSelectedLfsBytes(
     byDestination.set(member.destination, member);
   }
   const selected = [...byDestination.values()];
-  for (const member of selected) assertSelectedLfsPointer(worktree, member);
+  const receipts = selected.map((member) =>
+    assertSelectedLfsPointer(worktree, member),
+  );
   for (const member of selected) {
     const path = join(worktree, member.destination);
     try {
@@ -1339,6 +1446,7 @@ async function hydrateSelectedLfsBytes(
     }
     assertSelectedLfsBytes(worktree, member);
   }
+  return receipts;
 }
 
 export async function validateTree(
@@ -1365,9 +1473,17 @@ export async function validateTree(
       );
     if (pinnedGit(worktree, "status", "--porcelain"))
       throw new Error("Validation worktree is not initially clean");
-    await hydrateSelectedLfsBytes(worktree, lfsMembers, contentStore);
+    const selectedLfs = await hydrateSelectedLfsBytes(
+      worktree,
+      lfsMembers,
+      contentStore,
+    );
     const hydratedStatus = pinnedGit(worktree, "status", "--porcelain");
-    const evidence: ValidationEvidence = { treeSha, commands: [] };
+    const evidence: ValidationEvidence = {
+      treeSha,
+      commands: [],
+      ...(selectedLfs.length ? { selectedLfs } : {}),
+    };
     for (const [index, check] of commands.entries()) {
       const started = Date.now();
       const child = spawn("sh", localValidationShellArguments(check), {
@@ -1429,7 +1545,10 @@ export async function validateTree(
         treeSha,
       });
     }
-    for (const member of lfsMembers) assertSelectedLfsBytes(worktree, member);
+    for (const member of lfsMembers) {
+      assertSelectedLfsPointer(worktree, member);
+      assertSelectedLfsBytes(worktree, member);
+    }
     if (pinnedGit(worktree, "status", "--porcelain") !== hydratedStatus)
       throw new Error("Validation command modified the result tree");
     return evidence;

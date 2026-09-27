@@ -16,10 +16,10 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { createApplication } from "../../dist/application.js";
+import { stateRoot } from "../../dist/config.js";
 import { LocalContentStore } from "../../dist/content/local.js";
 import { RegularDelivery } from "../../dist/delivery/regular.js";
 import { LocalExecutionDriver } from "../../dist/execution/local.js";
-import { stateRoot } from "../../dist/config.js";
 
 export function git(path, ...args) {
   return execFileSync("git", ["-C", path, ...args], {
@@ -171,9 +171,10 @@ export async function waitForFile(check, path, message, timeout = 10_000) {
 }
 
 class ScriptedPlanningModel {
-  constructor(graph, logPath) {
+  constructor(graph, logPath, resultReviewer) {
     this.graph = graph;
     this.logPath = logPath;
+    this.resultReviewer = resultReviewer;
   }
 
   observe(request) {
@@ -234,6 +235,7 @@ class ScriptedPlanningModel {
         : null,
       evidence: request.evidence ?? [],
     });
+    if (this.resultReviewer) return this.resultReviewer(request);
     const source = request.sources.find((item) => item.path === "OBJECTIVE");
     return {
       findings: request.criteria.map((criterion) => {
@@ -816,7 +818,11 @@ export function makeApplication(descriptor) {
     application: createApplication(descriptor.config, {
       planningModel:
         descriptor.planningModel ??
-        new ScriptedPlanningModel(descriptor.graph, planningPath),
+        new ScriptedPlanningModel(
+          descriptor.graph,
+          planningPath,
+          descriptor.resultReviewer,
+        ),
       driver,
       github,
       delivery: new RegularDelivery(descriptor.config.checkout, github),

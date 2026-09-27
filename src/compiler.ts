@@ -723,6 +723,7 @@ export class CodexPlanningModel implements PlanningModel {
     const promptSources = [...request.sources, ...(request.evidence ?? [])];
     request = { ...request, sources: promptSources };
     const identityInstructions =
+      "Validated selected LFS pointers are controller evidence emitted only after exact-tree validation checked each selected destination's effective filter=lfs and exact canonical pointer oid/size against its selected digest and byte count. They prove neither exact tracked attribute text nor upload, publication or hydration. Selected LFS tracked attributes sources separately contain bounded exact-tree text of tracked .gitattributes files on those destination paths; absent or incomplete text proves no missing rule facts. " +
       "The result identity is a Git tree. Delivery observations separately name every Git commit and Git tree; never compare them as the same object type. Command pass evidence is an ordered array of canonical receipts. Each receipt names its stable zero-based index, command, successful exit code 0, and exact result tree, produced only after Factory verified the result commit resolves to that tree. A selectedAsset's descriptive, provenance, production, and format metadata fields are harness-declared; they are not controller authority. Asset capture receipts inside Delivery observations are controller-generated only after Factory imports each named source input into its content store, verifies each complete declared AssetSet member beneath .factory-media/, and imports the member's exact bytes. Each capture-receipt input binds the controller-imported source kind, path, role, media type, visibility, digest, and byte count; comparing that input ref with a captured member's digest, byte count, and media type proves byte identity between those exact imported bytes. A capture receipt proves .factory-assets.json origin only when its declarationPath, declarationDigest, and declarationProvenance fields are present; those fields mean Factory independently parsed that regular manifest, matched it to the harness AssetSets, and bound the exact manifest-declared provenance to the receipt. Asset selection receipts are controller-generated from validated atomic state and bind the selected set digest, recorded actor (the OS username when the caller omitted one), controller-derived invocation surface, time, destinations, downstream bindings, and an optional reason only when present. An absent receipt, absent input receipt, absent declaration fields, unrecorded selection surface, or absent reason proves nothing about that missing fact. Sources whose path begins with Work Item Git delta are supervisor-generated exact result evidence. An ordinary Work Item delta binds accepted path ownership and that item's execution base, actual result base, result commit/tree, integrated commit/tree, changed paths, and raw patch excerpts. A controller-materialization delta binds the selected set and digest, exact destinations, the worker result retained as the materialization commit's sole parent, an empty list of delivered worker destination changes, and the exact controller-only change from that parent to the reviewed result. The empty delivered delta is not a trace of transient filesystem operations; use it with the controller capture and destination-guard contract, not as a claim that every transient write was observed. \"Controller hydration receipt\" is supervisor-generated evidence that Factory completed fresh-clone hydration and exact selected-byte verification before this review. Treat each such path as an allowed supplied source path. Use those sources only for criteria their exact content proves. Copy quotes exactly as serialized; never decode an escaped string into a quote. ";
     const prompt =
       identityInstructions +
@@ -964,6 +965,7 @@ export function objectiveCriteria(body: string): string[] {
     for (const line of paragraph.split("\n")) {
       const text = line.trim();
       if (!text) continue;
+      if (/^(?:[-*]|\d+[.)])\s*$/.test(text)) continue;
       const list = text.match(/^(?:[-*]|\d+[.)])\s+(.+)$/);
       if (list) criteria.push(list[1]!);
       else if (criteria.length) criteria[criteria.length - 1] += ` ${text}`;
@@ -971,6 +973,13 @@ export function objectiveCriteria(body: string): string[] {
     }
     return criteria;
   });
+}
+
+export function assertObjectiveCriteria(body: string): void {
+  if (!objectiveCriteria(body).some((criterion) => criterion.trim()))
+    throw new Error(
+      "Objective requires nonempty final criteria under Acceptance, What must be true, Goal, or Outcome before planning or activation",
+    );
 }
 
 function objectiveSection(body: string, names: string[]): string {
@@ -1273,6 +1282,7 @@ export async function compileObjective(
   reviewFindings: { source: string; quote: string; detail: string }[] = [],
   invocation?: ModelInvocationContext,
 ): Promise<WorkGraph> {
+  assertObjectiveCriteria(body);
   const sources = planningSources(body, baseSha, checkout);
   sources.push(...extraSources);
   const prompt = `Objective #${objective}\n${body}${reviewFindings.length ? `\n\nOne independent review found these sourced defects. Revise the complete graph once; do not expand scope or invent authority:\n${JSON.stringify(reviewFindings)}` : ""}`;
@@ -1652,6 +1662,7 @@ export function verifyPlanCandidate(
   configDigest = digest("unbound-test-configuration"),
   allowPending = false,
 ): void {
+  assertObjectiveCriteria(body);
   assertInstalledControllerCapabilities(
     candidate.controllerCapabilities,
     candidate.controllerCapabilitiesDigest,

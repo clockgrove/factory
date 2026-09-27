@@ -12,6 +12,7 @@ import {
 } from "./completion.js";
 import {
   compilePlan,
+  assertObjectiveCriteria,
   finalObjectiveCommands,
   objectiveCriteria,
   planningSources,
@@ -236,6 +237,7 @@ export async function runObjective(
   try {
     diagnostics.emit({ operation: "objective-run", outcome: "started" });
     const issue = await github.objective(objective);
+    assertObjectiveCriteria(issue.body);
     const installationConfigDigest = configDigest(config);
     let state = readState(config.repository, objective);
     if (state) {

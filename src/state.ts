@@ -6,6 +6,7 @@ import type {
   WorkGraph,
 } from "./contracts.js";
 import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
+import { assertSelectedLfsValidation } from "./validation.js";
 import {
   assertAssetCaptureReceipt,
   assertHydrationReceipt,
@@ -202,6 +203,7 @@ function acceptancePending(value: unknown, label: string): void {
 function validationEvidence(value: unknown, label: string): string[] {
   const evidence = record(value, label);
   const treeSha = sha(evidence.treeSha, `${label}.treeSha`);
+  assertSelectedLfsValidation(evidence.selectedLfs, treeSha);
   if (!Array.isArray(evidence.commands))
     throw new Error(`${label}.commands must be an array`);
   for (const [index, raw] of evidence.commands.entries()) {

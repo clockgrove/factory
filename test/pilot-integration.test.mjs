@@ -12,6 +12,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { Codex } from "@openai/codex-sdk";
+import { CodexPlanningModel } from "../dist/compiler.js";
 import { selectAssetSetFromCli } from "../dist/runner.js";
 import { objectiveReviewEvidence } from "../dist/validation.js";
 import {
@@ -26,6 +28,7 @@ import {
 test("ordinary pilot combines real pnpm collection, LFS selection and complete final evidence", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-pilot-regression-"));
   const saved = { ...process.env };
+  const startThread = Codex.prototype.startThread;
   process.env.XDG_STATE_HOME = join(root, "state");
   process.env.XDG_DATA_HOME = join(root, "data");
   process.env.XDG_CONFIG_HOME = join(root, "config");
@@ -93,6 +96,7 @@ import { resolve, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { value } from 'pilot-dependency';
 assert.equal(value, 'pilot');
+assert.equal(process.versions.node.split('.')[0], '${process.versions.node.split(".")[0]}');
 assert.equal(execFileSync('pnpm', ['config', 'get', 'offline'], {encoding:'utf8'}).trim(), 'true');
 assert.ok(lstatSync('node_modules/pilot-dependency').isSymbolicLink());
 assert.ok(realpathSync('node_modules/pilot-dependency').startsWith(resolve('node_modules/.pnpm') + sep));
@@ -114,9 +118,11 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
       ),
     );
     const digest = createHash("sha256").update(source).digest("hex");
+    const toolchain = `# Approved toolchain\nThis offline fixture uses the local pilot-dependency 1.0.0 tarball and asserts Node major ${process.versions.node.split(".")[0]} in check.mjs. No external maintenance claim is inferred from installation.\n`;
     const target = createTarget(root, {
       "assets/source.png": source,
       "vendor/dependency.tgz": readFileSync(tarball),
+      "docs/toolchain.md": toolchain,
     });
     const policyCommand =
       "git check-attr filter -- assets/source.png | grep -qx 'assets/source.png: filter: lfs'";
@@ -158,7 +164,13 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
       [],
       commands.slice(0, 2),
     );
+    foundation.acceptance = [
+      "Foundation preserves source-approved toolchain facts and validates the real ignored dependency link.",
+    ];
     const policy = item("policy", [".gitattributes"], [], [policyCommand]);
+    policy.acceptance = [
+      "Only the narrow source-image LFS rule is added and its attribute command passes.",
+    ];
     const media = item(
       "media",
       ["assets/source.png"],
@@ -178,6 +190,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
     media.minimumAssetSets = 1;
     media.requiredLfsRoles = ["image"];
     media.acceptance = [
+      "Exact selected pointer digest/size and inherited tracked LFS rule are proved on the reviewed tree.",
       "The candidate is copied byte-for-byte from the repository source assets/source.png and bound back to that destination.",
       "The selected set's source, rights basis, repository visibility, and lineage are declared in .factory-assets.json.",
       "The worker does not write, remove, or change the final destination; Factory materializes only the human-selected candidate to assets/source.png.",
@@ -188,6 +201,9 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
       ["foundation", "media"],
       commands,
     );
+    final.acceptance = [
+      "The usage note is the only delivered change and recorded foundation/media predecessors are integrated.",
+    ];
     const descriptor = {
       config: factoryConfig(target.checkout, "example/ordinary-pilot"),
       graph: {
@@ -195,7 +211,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
         baseSha: target.baseSha,
         items: [foundation, policy, media, final],
       },
-      objectiveBody: `# Ordinary pilot\n\n## Acceptance\n- Fresh-clone hydration preserves the selected bytes at assets/source.png.\n${commands.map((c) => `- \`${c}\``).join("\n")}\n\n## Final validation\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`,
+      objectiveBody: `# Ordinary pilot\n\n## Planning sources\n- \`docs/toolchain.md#Approved toolchain\`\n\n## Acceptance\n- Exact selected pointer digest/size and inherited tracked LFS rule are proved on the reviewed tree.\n- Fresh-clone hydration preserves the selected bytes at assets/source.png.\n${commands.map((c) => `- \`${c}\``).join("\n")}\n\n## Final validation\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`,
       fakeRoot: join(root, "fake"),
       actions: {
         foundation: {
@@ -245,6 +261,184 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
         },
       },
     };
+    // Exercise the production serializer. This fixture refuses missing facts
+    // instead of using the generic scripted model's fallback pass.
+    const prompts = [];
+    function reviewSerialized(prompt) {
+      const line = (label) => prompt.split(`\n${label}: `)[1].split("\n")[0];
+      const tree = line("Result tree");
+      const criteria = JSON.parse(line("Criteria"));
+      const receipts = JSON.parse(line("Commands"));
+      assert.ok(
+        receipts.every(
+          (r) => r.treeSha === tree && r.passed && r.exitCode === 0,
+        ),
+      );
+      const observations = JSON.parse(line("Delivery observations"));
+      const sourceText = prompt
+        .split("\nSources: ")[1]
+        .split("\nChange packet:\n")[0];
+      const sources = new Map(
+        [
+          ...sourceText.matchAll(/--- ([^\n]+) ---\n([\s\S]*?)(?=\n--- |$)/g),
+        ].map((m) => [m[1], m[2]]),
+      );
+      const change = JSON.parse(prompt.split("\nChange packet:\n")[1]);
+      const proven = (criterion, name, quote) => {
+        const text =
+          name === "Command pass evidence"
+            ? JSON.stringify(receipts)
+            : name === "Delivery observations"
+              ? JSON.stringify(observations)
+              : name === "Exact Git change packet"
+                ? JSON.stringify(change)
+                : sources.get(name);
+        assert.ok(text?.includes(quote), `missing source/quote ${name}`);
+        return {
+          criterion,
+          verdict: "pass",
+          source: name,
+          quote,
+          detail:
+            "The concrete serialized evidence proves this fixture criterion.",
+          question: "",
+        };
+      };
+      return {
+        findings: criteria.map((criterion) => {
+          if (criterion.startsWith("Exact selected pointer")) {
+            const selected = JSON.parse(
+              sources.get("Validated selected LFS pointers"),
+            );
+            assert.deepEqual(selected, [
+              {
+                treeSha: tree,
+                destination: "assets/source.png",
+                digest,
+                bytes: source.length,
+                filter: "lfs",
+              },
+            ]);
+            const rule = JSON.parse(
+              sources.get("Selected LFS tracked attributes: .gitattributes"),
+            );
+            assert.equal(rule.treeSha, tree);
+            assert.equal(rule.complete, true);
+            assert.equal(
+              rule.text,
+              "assets/source.png filter=lfs diff=lfs merge=lfs -text\n",
+            );
+            return proven(criterion, "Validated selected LFS pointers", digest);
+          }
+          if (criterion.startsWith("Fresh-clone hydration")) {
+            const receipt = JSON.parse(
+              sources.get("Controller hydration receipt"),
+            );
+            assert.equal(receipt.integratedTreeSha, tree);
+            assert.equal(receipt.passed, true);
+            assert.equal(receipt.members[0].observedDigest, digest);
+            assert.equal(receipt.members[0].observedBytes, source.length);
+            return proven(criterion, "Controller hydration receipt", digest);
+          }
+          if (criterion.startsWith("Foundation preserves")) {
+            assert.equal(
+              sources.get("docs/toolchain.md")?.trimEnd(),
+              toolchain.trimEnd(),
+            );
+            const check = change.patches.find((p) => p.path === "check.mjs");
+            assert.ok(
+              check &&
+                !check.truncated &&
+                check.excerpt.includes("process.versions.node.split"),
+            );
+            assert.deepEqual(
+              receipts.map((r) => r.command),
+              commands.slice(0, 2),
+            );
+            return proven(
+              criterion,
+              "docs/toolchain.md",
+              `Node major ${process.versions.node.split(".")[0]}`,
+            );
+          }
+          if (observations.reviewedItemId === "media") {
+            assert.equal(observations.assetSelectionReceipt.setId, "original");
+            const capture = observations.assetCaptureReceipts[0];
+            assert.equal(capture.inputs[0].ref.digest, digest);
+            assert.equal(capture.members[0].digest, digest);
+            assert.equal(capture.declarationPath, ".factory-assets.json");
+            const boundary = JSON.parse(
+              sources.get(
+                "Work Item Git delta: media controller materialization",
+              ),
+            );
+            assert.deepEqual(boundary.workerDestinationChanges, []);
+            assert.equal(boundary.materializationTreeSha, tree);
+            return proven(criterion, "Delivery observations", digest);
+          }
+          if (observations.reviewedItemId === "policy") {
+            assert.deepEqual(
+              change.changes.map((c) => c.path),
+              [".gitattributes"],
+            );
+            assert.equal(receipts[0].command, policyCommand);
+            return proven(
+              criterion,
+              "Command pass evidence",
+              JSON.stringify(receipts[0]),
+            );
+          }
+          if (observations.reviewedItemId === "integration") {
+            assert.deepEqual(
+              change.changes.map((c) => c.path),
+              ["result.md"],
+            );
+            assert.ok(
+              observations.attempts
+                .filter((a) => ["foundation", "media"].includes(a.id))
+                .every((a) => a.integratedCommitSha),
+            );
+            return proven(criterion, "Exact Git change packet", "result.md");
+          }
+          const receipt = receipts.find(
+            (r) => r.command === criterion.replace(/^`|`$/g, ""),
+          );
+          assert.ok(receipt, `No concrete receipt for ${criterion}`);
+          return proven(
+            criterion,
+            "Command pass evidence",
+            JSON.stringify(receipt),
+          );
+        }),
+      };
+    }
+    Codex.prototype.startThread = function () {
+      return {
+        async runStreamed(prompt) {
+          prompts.push(prompt);
+          const result = reviewSerialized(prompt);
+          return {
+            events: (async function* () {
+              yield {
+                type: "item.completed",
+                item: {
+                  id: "review",
+                  type: "agent_message",
+                  text: JSON.stringify(result),
+                },
+              };
+              yield { type: "turn.completed", usage: null };
+            })(),
+          };
+        },
+      };
+    };
+    const reviewer = new CodexPlanningModel(
+      target.checkout,
+      { model: "gpt-5.6-sol", reasoningEffort: "medium" },
+      { model: "gpt-5.6-sol", reasoningEffort: "medium" },
+    );
+    descriptor.resultReviewer = (request) => reviewer.reviewResult(request);
     const { application, contentStore, planningPath, eventsPath } =
       makeApplication(descriptor);
     const waiting = await application.runObjective(1);
@@ -253,7 +447,11 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
       "approve-asset",
       JSON.stringify(waiting),
     );
-    assert.equal(waiting.work.foundation.status, "done");
+    assert.equal(
+      waiting.work.foundation.status,
+      "done",
+      JSON.stringify(waiting.work.foundation.acceptancePending),
+    );
     await selectAssetSetFromCli(
       descriptor.config,
       1,
@@ -274,6 +472,45 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
     );
     assert.equal(completed.finalValidation.passed, true);
     assert.equal(completed.finalValidation.hydrationReceipt.passed, true);
+    const selectedPrompt = prompts.find((p) =>
+      p.includes('"reviewedItemId":"media"'),
+    );
+    assert.ok(selectedPrompt.includes("Binary files"));
+    for (const missing of [
+      "Validated selected LFS pointers",
+      "Selected LFS tracked attributes: .gitattributes",
+    ]) {
+      assert.throws(() =>
+        reviewSerialized(
+          selectedPrompt.replace(
+            `--- ${missing} ---`,
+            `--- omitted ${missing} ---`,
+          ),
+        ),
+      );
+    }
+    const finalPrompt = prompts.find((p) =>
+      p.includes("--- Controller hydration receipt ---"),
+    );
+    assert.throws(() =>
+      reviewSerialized(
+        finalPrompt.replace(
+          "--- Controller hydration receipt ---",
+          "--- omitted hydration ---",
+        ),
+      ),
+    );
+    const foundationPrompt = prompts.find((p) =>
+      p.includes('"reviewedItemId":"foundation"'),
+    );
+    assert.throws(() =>
+      reviewSerialized(
+        foundationPrompt.replace(
+          "--- docs/toolchain.md ---",
+          "--- omitted toolchain ---",
+        ),
+      ),
+    );
     for (const work of Object.values(completed.work))
       assert.ok(work.validation.commands.every((receipt) => receipt.passed));
     const reviews = readEvents(planningPath).filter(
@@ -360,6 +597,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
     );
     assert.equal(git(clone, "status", "--porcelain"), "");
   } finally {
+    Codex.prototype.startThread = startThread;
     for (const key of [
       "XDG_STATE_HOME",
       "XDG_DATA_HOME",

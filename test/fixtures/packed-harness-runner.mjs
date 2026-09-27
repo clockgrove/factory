@@ -121,9 +121,14 @@ for (const harness of [
     execution: { ...config.execution, harness },
     policy: { ...config.policy, network: "host" },
   });
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  const belowCopilotFloor =
+    harness.kind === "github-copilot-sdk" && major === 22 && minor < 12;
   assert.throws(
     () => compose(omitted),
-    /is not installed; install optional dependency/,
+    belowCopilotFloor
+      ? /requires Node >=22\.12\.0/
+      : /is not installed; install optional dependency/,
   );
 }
 writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, {

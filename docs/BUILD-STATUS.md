@@ -1,5 +1,12 @@
 # Factory build status
 
+**Separate harness candidate:** #55 / PR #62 now uses unreleased 0.1.28
+and is undergoing its own installed Codex/Claude qualification. Its old frozen
+0.1.22 source/artifact statements below are historical, not a restriction on the
+currently authorized owner. Current identities, review and remaining acceptance
+are recorded in [issue #55](https://github.com/clockgrove/factory-rebuild/issues/55).
+The independently authorized #26 pilot remains separate.
+
 **Next candidate: v0.1.27, unpublished.** Accepted [#165](https://github.com/clockgrove/factory-rebuild/issues/165)
 / [PR #166](https://github.com/clockgrove/factory-rebuild/pull/166) integrated at
 `058bd7587aa532342ebb77488474258c90930f5d`, reviewed tree

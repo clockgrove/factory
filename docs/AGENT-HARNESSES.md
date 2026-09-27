@@ -8,8 +8,8 @@ Copilot SDK adapters and a package-root registration seam for another adapter.
 Planning and independent result review remain on the configured Codex SDK
 models. Selecting Claude or GitHub Copilot changes only Work Item execution.
 
-This is the unreleased `0.1.22` candidate interface, not a capability claim for
-the immutable public `v0.1.21` package. Credential-free checks do not qualify a
+This is the unreleased `0.1.28` candidate interface, not a capability claim for
+earlier immutable public packages. Credential-free checks do not qualify a
 real provider or authorize a live attempt.
 
 ## Capability contract

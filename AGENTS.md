@@ -15,7 +15,8 @@ Additional cloud-session SDKs and sandbox providers are separate adapter capabil
 The operator-approved Codex-only #26 adopter pilot is a bounded execution-order
 exception: #55 and Claude/Copilot live qualification are deferred prerequisites
 for that pilot, not accepted behavior. See the [controlling plan exception](docs/IMPLEMENTATION-PLAN.md#operator-approved-codex-only-adopter-pilot).
-Keep #55 OPEN/deferred and draft PR #62 frozen/unmerged; its live proof and the
+Keep #55 and draft PR #62 open until their separate live proof passes; the
+harness owner may refresh its candidate and complete authorized qualification. Its live proof and the
 actual adopter acceptance remain separate requirements for overall trunk
 completion. Do not block the independently authorized pilot on #55, provider
 login or this docs handoff, and do not infer new target/source-egress authority

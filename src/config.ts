@@ -147,7 +147,14 @@ const claudeSettingSources = new Set<ClaudeSettingSource>([
   "local",
 ]);
 const claudeFileTools = new Set(["Read", "Edit", "Write", "Glob", "Grep"]);
-const copilotFileTools = new Set(["view", "create", "edit", "grep", "glob"]);
+const copilotFileTools = new Set([
+  "view",
+  "create",
+  "edit",
+  "apply_patch",
+  "grep",
+  "glob",
+]);
 
 const factoryRepositories = new Set([
   "clockgrove/factory",
@@ -567,7 +574,7 @@ export function validateConfig(value: unknown): FactoryConfig {
     );
     if (unsupportedTool)
       throw new Error(
-        `execution.harness.availableTools supports only view, create, edit, grep, and glob; received ${unsupportedTool}`,
+        `execution.harness.availableTools supports only view, create, edit, apply_patch, grep, and glob; received ${unsupportedTool}`,
       );
     const permissionKinds = assertUniqueStrings(
       value.execution.harness.permissionKinds,

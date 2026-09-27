@@ -86,7 +86,14 @@ async function main(): Promise<void> {
     const claudeAllowedTools = options(args, "claude-allow-tool");
     const defaultClaudeTools = ["Read", "Edit", "Write", "Glob", "Grep"];
     const copilotTools = options(args, "copilot-tool");
-    const defaultCopilotTools = ["view", "create", "edit", "grep", "glob"];
+    const defaultCopilotTools = [
+      "view",
+      "create",
+      "edit",
+      "apply_patch",
+      "grep",
+      "glob",
+    ];
     const config = validateConfig({
       schemaVersion: 1,
       repository,

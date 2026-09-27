@@ -936,7 +936,7 @@ test("GitHub Copilot adapter uses local auth with a bounded empty-mode capabilit
       unsafeTool.execution.harness.availableTools.push(tool);
       assert.throws(
         () => validateConfig(unsafeTool),
-        /supports only view, create, edit, grep, and glob/,
+        /supports only view, create, edit, apply_patch, grep, and glob/,
       );
     }
     const unknownPermission = structuredClone(config);
@@ -1122,6 +1122,8 @@ test("install selects the pinned optional GitHub Copilot adapter with local auth
         "view",
         "--copilot-tool",
         "edit",
+        "--copilot-tool",
+        "apply_patch",
         "--config",
         configPath,
       ],
@@ -1137,7 +1139,7 @@ test("install selects the pinned optional GitHub Copilot adapter with local auth
       model: "copilot-explicit-model",
       reasoningEffort: "high",
       session: "new-per-attempt",
-      availableTools: ["view", "edit"],
+      availableTools: ["view", "edit", "apply_patch"],
       permissionKinds: ["read", "write"],
       timeoutSeconds: 600,
       authentication: "local",

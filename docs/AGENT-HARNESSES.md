@@ -268,11 +268,26 @@ factory install \
 ```
 
 Claude defaults to `Read`, `Edit`, `Write`, `Glob`, and `Grep`. GitHub Copilot
-defaults to `view`, `create`, `edit`, `grep`, and `glob`. Repeated
+defaults to `view`, `create`, `edit`, `apply_patch`, `grep`, and `glob`. Repeated
 `--claude-tool`, `--claude-allow-tool`, and `--copilot-tool` flags make those
 sets explicit. Claude setting sources are empty by default; each allowed source
 requires a repeated `--claude-setting-source` flag. Provider-specific fields do
 not cross adapters.
+
+Copilot resolves editing tools per model. With the pinned runtime, a
+`gpt-5.6-luna` session uses `apply_patch`; listing `create` and `edit` alone
+leaves that session without an editor even though the general tool catalog
+lists both. Use the default file-tool set, or explicitly include `apply_patch`
+when selecting that model. Existing explicit configurations are not rewritten:
+change the configuration before creating a new plan, since the plan binds its
+configuration digest. The patch tool uses the same worktree-only read/write
+permission callback; shell and GitHub tools remain unavailable.
+
+The credential-free `test/copilot-tools.test.mjs` checks the resolved session
+metadata and invokes the real patch tool against disposable local files. It
+creates no model turn and uses no provider login. A tool catalog or configured
+allowlist alone is not evidence of the model's resolved session capabilities.
+Live qualification and provider usage accounting remain separate checks.
 
 ## Security boundary and acceptance
 

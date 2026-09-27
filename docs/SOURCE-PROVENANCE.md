@@ -4,7 +4,37 @@ The clean implementation starts from the Factory plan reviewed September 22, 202
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
-## Unpublished v0.1.27 preparation
+## Selected-LFS worker phase guidance and v0.1.28 preparation
+
+Accepted #174 / PR #175 integrated at `2948de665f7d0abc9c98df701b2a03178fcea773`,
+tree `1767b32283cb61d49bb353fe0eda94219f518ce4`. Two public v0.1.27 attempts
+refused to write an owned usage note because the worker checkout retained an
+LFS pointer. Fresh-context architecture review selected clarification in the
+existing shared prompt: applicable selected required-LFS bytes are restored by
+the existing exact-result validator before commands run. No worker hydration,
+new state, interface, fallback or changed authorization was introduced.
+The focused regression uses an ordinary note-only item with a read-only selected
+input; existing real Git/LFS integration verifies the promised lifecycle.
+No archived implementation, private adopter source or raw model transcript was
+copied. The combined source also carries accepted #55, #149, #167 and #168;
+their earlier artifact evidence is not transferred to this candidate.
+
+This v0.1.28 metadata preparation aligns the future marketplace tag with the
+existing package/manifest version and updates public release instructions.
+Runtime, tests, dependencies, scripts, skills and license bodies remain identical
+to the accepted integration above. Exact-artifact gates and new live qualification
+remain separate requirements.
+
+## Published v0.1.27
+
+Metadata PR #169 published source `7d4e926b99cf2446b0d9a3e53a17e270a820b7fb`,
+tree `bc8acbd547c593782910a26b7a20a4135acfc130`.
+[Build status](BUILD-STATUS.md) records publication and independent installation
+proof, plus the nonqualifying public gate. The failed original final-integration
+attempt and one explicit retry remain preserved; this successor preparation
+does not change the published tag, bytes or evidence.
+
+## Historical v0.1.27 preparation
 
 Accepted #165 / PR #166 integration `058bd7587aa532342ebb77488474258c90930f5d`,
 tree `a5a4546c66263dac9359bb4ddae883b1da84e6f6`, supplies the final-criteria

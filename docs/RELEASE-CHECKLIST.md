@@ -1,10 +1,21 @@
 # Public release checklist
 
-**Unpublished v0.1.27 candidate:** follow [candidate preparation](PUBLIC-RELEASE.md#prepare-v0127)
-for accepted #165 / PR #166. Package/manifest and future marketplace ref name
-0.1.27; current public installation remains v0.1.26. Freeze and review this
-metadata candidate before the coordinated artifact gates. No v0.1.27 release,
-installation or live acceptance is asserted here.
+**Unpublished v0.1.28 candidate:** follow [candidate preparation](PUBLIC-RELEASE.md#prepare-v0128)
+from accepted #174 / PR #175, including accepted #55, #149, #167 and #168.
+Package/manifest and future marketplace ref name 0.1.28; current public
+installation remains v0.1.27. Freeze and review this metadata candidate before
+the coordinated artifact gates. Earlier #55 installed provider evidence belongs
+only to its earlier artifact. No combined v0.1.28 release or live acceptance is
+asserted here.
+
+**Published v0.1.27; public gate failed:** publication and independent public
+download/offline installation passed. The final-integration worker refused its
+pointer checkout twice, before writing its note or reaching final validation.
+Three integrated lanes remain partial evidence; no automatic Objective acceptance
+occurred. Preserve the original run and its one explicit retry. Exact artifact
+identity and retained-fixture disposition appear in [build status](BUILD-STATUS.md).
+
+## Historical release checkpoints
 
 **Published v0.1.26; live acceptance pending:** use the
 [published qualification procedure](PUBLIC-RELEASE.md#qualify-published-v0126)
@@ -77,9 +88,9 @@ The first release passed [#25](https://github.com/clockgrove/factory-rebuild/iss
 | Third-party notices                            | Generated from production lock and installed package notices, including SPDX BSD-3-Clause text for `@azu/format-text` | Regenerate for final lock; obtain maintainer review of the publisher's missing copyright notice before publication |
 | Project logo                                   | SVG mark in `assets/`                                                                                                 | Review rendering and public use                                                                                    |
 | Objective issue form                           | Eight named fields and final pinned-source section in `.github/ISSUE_TEMPLATE/objective.yml`                          | Confirm form renders, submitted body parses, and target owners can copy it                                         |
-| Package and marketplace metadata               | Candidate 0.1.27 package/manifest and future v0.1.27 marketplace pin; public install remains v0.1.26                  | Freeze and review candidate before artifact gates; never rewrite published v0.1.26                                 |
+| Package and marketplace metadata               | Candidate 0.1.28 package/manifest and future v0.1.28 marketplace pin; public install remains v0.1.27                  | Freeze and review candidate before artifact gates; never rewrite published artifacts                               |
 | README and CONTRIBUTING                        | Public install and contribution instructions                                                                          | Recheck commands against final CLI                                                                                 |
-| CHANGELOG                                      | Unreleased `0.1.27` changes listed; published entries retained                                                        | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
+| CHANGELOG                                      | Unreleased `0.1.28` changes listed; published entries retained                                                        | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
 | Installed use skills                           | `director` and `setup` packaged                                                                                       | Exercise planning, result decisions, media selection, status, and diagnostics in a fresh target                    |
 | CLI                                            | Existing commands documented                                                                                          | Recheck plan/decide/run/decide-result/status/diagnostics/logs against the final CLI                                |
 | TypeScript, formatter, test, workflow          | Existing build and deterministic CI                                                                                   | Run credential-free integration gate on merged trunk                                                               |
@@ -88,11 +99,11 @@ No required asset is intentionally omitted. MCP is not a first-release requireme
 
 ## Exact-artifact acceptance
 
-For candidate v0.1.27, the full exact-artifact steps below remain pending after
-metadata review. For published v0.1.26, source/publication/installation checks
-in steps 1–2 passed;
-public installed qualification in steps 3–4 and actual adopter acceptance remain
-pending. [BUILD-STATUS.md](BUILD-STATUS.md) records the exact published identity;
+For candidate v0.1.28, the full exact-artifact steps below remain pending after
+metadata review. For published v0.1.27, source/publication/installation checks
+in steps 1–2 passed, but the public gate failed. New-artifact installed
+qualification in steps 3–4 and actual adopter acceptance remain required.
+[BUILD-STATUS.md](BUILD-STATUS.md) records the exact published identity;
 issue #26 tracks remaining acceptance. Use the approved representative foundation,
 policy, same-path media and final-integration scenario without reducing its scope.
 

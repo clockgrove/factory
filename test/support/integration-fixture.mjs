@@ -491,6 +491,12 @@ class ScriptedHarness {
         file.base64 ? Buffer.from(file.base64, "base64") : file.text,
       );
     }
+    for (const [command, ...args] of action.commands ?? []) {
+      execFileSync(command, args, {
+        cwd: data.worktree,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    }
     if (action.consumeSelected) {
       const request = readJson(data.requestPath);
       const selected = request.selectedAssets ?? [];

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import type { HarnessRequest, WorkerUsageObservation } from "../contracts.js";
-import { codexTokenUsage } from "../usage.js";
+import { codexTokenUsage, codexRawTokenUsage } from "../usage.js";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import {
   harnessFailure,
@@ -41,7 +41,8 @@ function progressEvent(
     attemptId,
     operation: event.type,
   };
-  if (event.type === "turn.completed") base.usage = event.usage;
+  if (event.type === "turn.completed")
+    base.usage = codexRawTokenUsage(event.usage);
   if (event.type === "turn.failed")
     base.detail = redact(event.error.message, secrets);
   if (event.type === "error") base.detail = redact(event.message, secrets);
@@ -166,7 +167,10 @@ export async function runCodexWorker(
           redactionValues,
           commandOffsets,
         );
-        observe(observation);
+        observe({
+          ...observation,
+          threadId: thread.id ? redact(thread.id, redactionValues) : undefined,
+        });
         if (
           (event.type === "item.started" ||
             event.type === "item.updated" ||
@@ -176,7 +180,7 @@ export async function runCodexWorker(
           finalResponse = event.item.text;
         if (event.type === "turn.completed") {
           turnCompleted = true;
-          usage = event.usage;
+          usage = codexRawTokenUsage(event.usage);
           observeUsage("progress");
         }
         if (event.type === "turn.failed") throw new Error(event.error.message);

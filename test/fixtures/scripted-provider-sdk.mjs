@@ -43,6 +43,83 @@ export function query({ options }) {
             agents: ["Explore", "general-purpose"],
           },
         };
+      if (scenario.startsWith("claude-usage")) {
+        if (step <= 4)
+          return {
+            done: false,
+            value: {
+              type: "assistant",
+              uuid: `frame-${step}`,
+              session_id: "scripted-claude",
+              parent_tool_use_id: null,
+              message: {
+                id: step < 4 ? "call-one" : "call-two",
+                content: [{ type: "text", text: "private-payload" }],
+                usage: {
+                  input_tokens: 10,
+                  output_tokens: 9999,
+                  cache_read_input_tokens: 20,
+                  cache_creation_input_tokens: 5,
+                  private: "private-payload",
+                },
+              },
+            },
+          };
+        if (scenario === "claude-usage-no-result")
+          throw new Error("provider stream failed after usage");
+        const crash = scenario === "claude-usage-crash";
+        return {
+          done: false,
+          value: {
+            type: "result",
+            subtype: crash
+              ? "error_during_execution"
+              : scenario === "claude-usage-failure"
+                ? "error_max_turns"
+                : "success",
+            is_error: crash || scenario === "claude-usage-failure",
+            errors: ["authoritative provider failure"],
+            uuid: "result-frame",
+            result: "scripted completion",
+            session_id: "scripted-claude",
+            usage: {
+              input_tokens: 1,
+              output_tokens: 1,
+              private: "private-payload",
+            },
+            modelUsage: crash
+              ? {
+                  main: {
+                    inputTokens: 0,
+                    outputTokens: 0,
+                    cacheReadInputTokens: 0,
+                    cacheCreationInputTokens: 0,
+                  },
+                }
+              : {
+                  main: {
+                    inputTokens: 10,
+                    outputTokens: 8,
+                    cacheReadInputTokens: 20,
+                    cacheCreationInputTokens: 5,
+                    thinkingTokens: 2,
+                    contextWindow: 1000000,
+                    private: "private-payload",
+                  },
+                  helper: {
+                    inputTokens: 2,
+                    outputTokens: 3,
+                    cacheReadInputTokens: 4,
+                    ...(scenario === "claude-usage-missing"
+                      ? {}
+                      : { cacheCreationInputTokens: 1 }),
+                    thinkingTokens: 1,
+                  },
+                },
+            total_cost_usd: 0,
+          },
+        };
+      }
       if (scenario === "timeout") return stall();
       if (scenario === "nonterminal") return { done: true };
       return {
@@ -121,6 +198,47 @@ export class CopilotClient {
           return stall();
         }
         if (scenario === "timeout") return stall();
+        if (scenario.startsWith("usage")) {
+          const first = {
+            type: "assistant.usage",
+            id: "usage-first",
+            timestamp: new Date().toISOString(),
+            data: {
+              model: options.model,
+              apiCallId: "call-1",
+              inputTokens: 10,
+              outputTokens: 3,
+              cacheReadTokens: 5,
+              prompt: "private-payload",
+            },
+          };
+          options.onEvent(first);
+          options.onEvent(first);
+          options.onEvent({ ...first, id: "usage-duplicate" });
+          options.onEvent({
+            ...first,
+            id: "usage-second",
+            data: {
+              model: options.model,
+              apiCallId: "call-2",
+              ...(scenario !== "usage-partial" && scenario !== "usage-missing"
+                ? { inputTokens: 20 }
+                : {}),
+              ...(scenario !== "usage-missing" ? { outputTokens: 4 } : {}),
+            },
+          });
+          event("session.usage_info", {
+            conversationTokens: 1000,
+            inputTokens: 500,
+            outputTokens: 500,
+          });
+          if (scenario === "usage-failure") {
+            event("session.error", {
+              message: "authoritative provider failure after usage",
+            });
+            return;
+          }
+        }
         if (scenario === "failure") {
           event("session.error", { message: "authoritative provider failure" });
           return;

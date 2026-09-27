@@ -45,3 +45,33 @@ export function codexTokenUsage(value: unknown): ModelInvocationUsage {
     totalTokens: usage.total_tokens,
   });
 }
+
+/** Safe raw counters only; never retain arbitrary provider usage payloads. */
+export function pickTokenCounters(
+  value: unknown,
+  fields: readonly string[],
+): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const supplied = value as Record<string, unknown>;
+  return Object.fromEntries(
+    fields.flatMap((field) => {
+      const count = supplied[field];
+      return typeof count === "number" &&
+        Number.isSafeInteger(count) &&
+        count >= 0
+        ? [[field, count]]
+        : [];
+    }),
+  );
+}
+
+export function codexRawTokenUsage(value: unknown): Record<string, number> {
+  return pickTokenCounters(value, [
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+  ]);
+}

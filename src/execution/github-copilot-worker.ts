@@ -19,6 +19,7 @@ import {
   githubCopilotSessionOptions,
 } from "./github-copilot-options.js";
 import { cleanupCopilotClient } from "./github-copilot-lifecycle.js";
+import { CopilotUsage } from "./github-copilot-usage.js";
 import type { WorkerUsageObservation } from "../contracts.js";
 import {
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
@@ -64,6 +65,7 @@ async function main(): Promise<void> {
     ".progress.ndjson",
   );
   let progressLost = false;
+  const usage = new CopilotUsage(redactionValues);
   const turn = new ProviderTurnGuard(
     input.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   );
@@ -80,7 +82,7 @@ async function main(): Promise<void> {
       provider: "github-copilot",
       model: input.config.model,
       reasoningEffort: input.config.reasoningEffort,
-      usage: {},
+      usage: type === "started" ? {} : usage.totals(),
     };
     try {
       privateProgress(progressPath, {
@@ -138,14 +140,19 @@ async function main(): Promise<void> {
             observeStartup(event);
           if (!progressLost)
             try {
-              privateProgress(
-                progressPath,
-                progressEvent(
+              const observedUsage = usage.observe(
+                event,
+                session?.sessionId ?? sessionStart?.sessionId,
+              );
+              if (event.type === "assistant.usage" && !observedUsage) return;
+              privateProgress(progressPath, {
+                ...progressEvent(
                   event,
                   input.request.attemptId ?? "",
                   redactionValues,
                 ),
-              );
+                ...observedUsage,
+              });
             } catch (error) {
               progressLost = true;
               process.stderr.write(

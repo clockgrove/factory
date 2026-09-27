@@ -2,7 +2,7 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.29 — 2026-09-27
+## 0.1.29 — Unreleased
 
 - Supply a bounded recursive inventory of the exact validated Git tree to item and final acceptance review, including unchanged tracked paths. Preserve completeness, configured text budgets and path-only proof limits (#179 / PR #181).
 - Include the accepted Copilot session-editor correction to use the pinned runtime's `apply_patch` tool (#170 / PR #178). Its earlier installed qualification belongs to that exact artifact; this release does not inherit provider or public-gate acceptance.

@@ -87,7 +87,7 @@ npm run lint
 npm run format:check
 npm test
 npm pack
-npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.28.tgz
+npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.29.tgz
 ```
 
 The current source candidate declares the Claude Agent SDK and GitHub Copilot

@@ -1,8 +1,17 @@
 # Public release checklist
 
+**Unpublished candidate: v0.1.25.** Metadata preparation carries accepted #150
+from [PR #151](https://github.com/clockgrove/factory-rebuild/pull/151), integration
+`92ef6eeac89e792016b5f20ad69cefb707e9debb`, reviewed tree
+`60ad230af22450f46d00e2ccece8555dc883d6cb`. Package/lock-root, manifest,
+marketplace tag and future release commands name this new identity. Metadata
+review, publication, public download/offline/marketplace verification and a fresh
+installed-artifact gate are pending; no v0.1.24 evidence transfers to changed
+bytes. Actual #26 remains OPEN/unaccepted; frozen #55 remains unchanged.
+
 Current published artifact: [v0.1.24](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24), carrying the accepted and closed #145 required-shape correction
 from integration `2f3d4f5a820b1001f41cff731640fc4085552630`, without #55 optional
-harness work. Version/manifest/marketplace and current instructions agree;
+harness work. Its tagged version/manifest/marketplace and install instructions agree;
 metadata review, full159/static/actual Node22, exact-head/main gates, publication,
 independent public download, fresh offline installation and marketplace verification
 passed under its own identity. Source is `e0fc91343563e6a3b19eb92dd64d419ba03b487a`,
@@ -45,7 +54,7 @@ The first release passed [#25](https://github.com/clockgrove/factory-rebuild/iss
 | Objective issue form                           | Eight named fields and final pinned-source section in `.github/ISSUE_TEMPLATE/objective.yml`                          | Confirm form renders, submitted body parses, and target owners can copy it                                         |
 | Package and marketplace metadata               | Package, manifest, bundled Linux x64 runtime dependencies, and pinned `clockgrove` Git marketplace entry present      | Tag the accepted commit; verify `factory@clockgrove` and an offline CLI install from that public tag               |
 | README and CONTRIBUTING                        | Public install and contribution instructions                                                                          | Recheck commands against final CLI                                                                                 |
-| CHANGELOG                                      | `0.1.24` release changes listed; earlier entries retained                                                             | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
+| CHANGELOG                                      | `0.1.25` candidate changes listed; earlier entries retained                                                           | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
 | Installed use skills                           | `director` and `setup` packaged                                                                                       | Exercise planning, result decisions, media selection, status, and diagnostics in a fresh target                    |
 | CLI                                            | Existing commands documented                                                                                          | Recheck plan/decide/run/decide-result/status/diagnostics/logs against the final CLI                                |
 | TypeScript, formatter, test, workflow          | Existing build and deterministic CI                                                                                   | Run credential-free integration gate on merged trunk                                                               |

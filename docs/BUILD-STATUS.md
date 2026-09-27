@@ -1,21 +1,41 @@
 # Factory build status
 
+**Unpublished v0.1.25 metadata candidate:** Package/lock-root identity,
+manifest/marketplace pin, changelog, future release commands and notices header
+prepare a new immutable artifact from accepted #150 source below. Runtime,
+tests, dependency entries, scripts, skills, Node floor and license bodies are
+unchanged from integration `92ef6eeac89e792016b5f20ad69cefb707e9debb`.
+Candidate full suites pass 183/183 on Node24 and actual Node22.0/npm10.9.4;
+serial build/typecheck/lint/format/notices and package dry-run checks pass.
+Full lock comparison preserves every dependency entry; notices differ only in
+the Factory version header. Metadata exact-head review, publication and fresh
+installed-artifact qualification remain pending and coordinator-owned. No tag/release, marketplace
+installation, Factory self-targeting or failed-run continuation occurs here.
+Published v0.1.24 evidence and frozen #55 candidate 0.1.22 remain immutable.
+
 **Ignored dependency-link collection (#150):** The bounded source correction
 permits only ignored, nondelivered links absent from HEAD/index whose resolved
 ordinary-file/directory destination is strictly within the worktree, excluding
 its root and Git metadata. It retains recursive ignored-directory inventory,
 special-file refusal and every delivered-path/ancestor/mode/ownership/secret
 guard. Generic scripted LocalExecutionDriver fixtures and the independent
-22-case public-only audit supply coverage; source review/integration and a new
-immutable artifact's installed gate remain separate root-owned acceptance.
+22-case public-only audit supply coverage. Root accepted exact PR #151 head
+`356d9bf908bd8373532edf12d46e77e8986b3ad8` after independent full183/focused46,
+static and diff review, plus the separate actual Node22 22-case/46-test security
+review. Normal guarded integration is `92ef6eeac89e792016b5f20ad69cefb707e9debb`,
+preserving reviewed tree `60ad230af22450f46d00e2ccece8555dc883d6cb`.
+[Exact-head Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36282425602)
+passed; [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36282767256)
+passed; #150 is accepted and closed for source behavior only. New immutable-artifact publication
+and installed qualification remain separate root-owned acceptance.
 This is not a v0.1.24 retrofit, failed-run continuation or actual #26 acceptance.
 No dependency/version/Node-floor change or deletion workaround is introduced.
 Owner safety/secret/media checks pass 46/46 on Node24 and actual Node22.0;
 full suites pass 183/183 on both, with Node22 using supported npm10.9.4.
 Static/notices/package checks pass. The existing generic pnpm receipt fixture
 now explicitly declares ESM rather than relying on newer Node's detection;
-its commands and Factory's Node22 floor are unchanged. Root's exact-head review,
-protected integration and fresh installed qualification remain pending.
+its commands and Factory's Node22 floor are unchanged. Source review and
+protected integration are accepted; fresh installed qualification remains pending.
 
 **Published v0.1.24 and public prerequisite accepted:** [PR #147](https://github.com/clockgrove/factory-rebuild/pull/147)
 normally merged the metadata-only release at source

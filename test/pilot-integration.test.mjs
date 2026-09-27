@@ -321,13 +321,22 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
       ),
       [digest],
     );
-    const starts = readEvents(eventsPath).filter(
-      (event) => event.type === "start",
-    );
+    const events = readEvents(eventsPath);
+    const starts = events.filter((event) => event.type === "start");
     assert.deepEqual(
       new Set(starts.slice(0, 2).map((event) => event.item)),
       new Set(["foundation", "policy"]),
     );
+    const firstComplete = events.findIndex(
+      (event) => event.type === "complete",
+    );
+    for (const id of ["foundation", "policy"])
+      assert.ok(
+        events.findIndex(
+          (event) => event.type === "start" && event.item === id,
+        ) < firstComplete,
+        `${id} starts before either lane completes`,
+      );
     const clone = join(root, "hydrated");
     execFileSync("git", ["clone", "--no-checkout", target.origin, clone], {
       stdio: "pipe",

@@ -49,6 +49,7 @@ for (const attributes of [undefined, "*.bin filter=lfs # café\n"])
         const head = git(target.checkout, "rev-parse", "HEAD");
         const treeSha = git(target.checkout, "rev-parse", "HEAD^{tree}");
         let packet;
+        let inventoryBytes;
         const review = reviewAcceptance({
           checkout: target.checkout,
           baseSha: target.baseSha,
@@ -71,6 +72,11 @@ for (const attributes of [undefined, "*.bin filter=lfs # café\n"])
           model: {
             async reviewResult(request) {
               packet = JSON.parse(request.change);
+              inventoryBytes = Buffer.byteLength(
+                request.evidence.find(
+                  (source) => source.path === "Exact result tree inventory",
+                ).content,
+              );
               return {
                 findings: [
                   {
@@ -97,7 +103,7 @@ for (const attributes of [undefined, "*.bin filter=lfs # café\n"])
         }
         assert.equal(
           packet.textBudget,
-          48_000 - Buffer.byteLength(attributes ?? ""),
+          48_000 - Buffer.byteLength(attributes ?? "") - inventoryBytes,
         );
       }
     } finally {

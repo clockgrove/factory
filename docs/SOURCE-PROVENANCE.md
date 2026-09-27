@@ -534,3 +534,15 @@ inspection remains real and production has no test exemption. Real Git objects,
 LFS bytes, validation and delivery continue through the existing paths. No
 archived code, private adopter material, new runtime dependency, provider call
 or frozen release artifact is part of this correction.
+
+## Exact result-tree inventory (#179)
+
+The public #26 foundation review exposed a missing unchanged-path inventory for
+a repository-wide absence criterion. This correction reads a bounded recursive
+path listing directly from the validated Git tree and supplies it through the
+existing result-review evidence seam. It reuses completeness checks and the
+configured text budget, with no new state, package-specific policy or recovery.
+Fresh real-Git tests capture the serialized item/final review request, including
+unchanged paths and a checkout that differs from the result tree. This is source
+evidence plumbing, not live-model or installed qualification. No archived code,
+private adopter source or published artifact is changed.

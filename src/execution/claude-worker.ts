@@ -26,6 +26,13 @@ import {
   closeProviderEventStream,
 } from "../provider-turn.js";
 
+import {
+  ClaudeUsage,
+  claudeCost,
+  claudeRawTokenUsage,
+  claudeModelUsage,
+} from "./claude-usage.js";
+
 function progressEvent(
   message: SDKMessage,
   attemptId: string,
@@ -40,7 +47,7 @@ function progressEvent(
   if ("subtype" in message && typeof message.subtype === "string")
     event.subtype = message.subtype;
   if ("session_id" in message && typeof message.session_id === "string")
-    event.sessionId = message.session_id;
+    event.sessionId = redact(message.session_id, secrets);
   if (message.type === "system" && message.subtype === "init") {
     event.skills = message.skills.map((name) => redact(name, secrets));
     event.agents = message.agents?.map((name) => redact(name, secrets)) ?? [];
@@ -53,9 +60,9 @@ function progressEvent(
   if (message.type === "result") {
     event.success = message.subtype === "success" && !message.is_error;
     event.turns = message.num_turns;
-    event.usage = message.usage;
-    event.modelUsage = message.modelUsage;
-    event.totalCostUsd = message.total_cost_usd;
+    event.usage = claudeRawTokenUsage(message.usage);
+    event.modelUsage = claudeModelUsage(message.modelUsage, secrets);
+    event.totalCostUsd = claudeCost(message.total_cost_usd);
     if (message.subtype !== "success")
       event.detail = redact(message.errors.join("; "), secrets);
   }
@@ -125,6 +132,7 @@ async function main(): Promise<void> {
   let events: AsyncIterator<SDKMessage> | undefined;
   let closeStarted = false;
   let progressLost = false;
+  const usage = new ClaudeUsage(redactionValues);
   const observeUsage = (type: WorkerUsageObservation["type"]): void => {
     if (progressLost) return;
     const workerUsage: WorkerUsageObservation = {
@@ -136,7 +144,7 @@ async function main(): Promise<void> {
       provider: "claude",
       model: input.config.model,
       reasoningEffort: input.config.reasoningEffort,
-      usage: {},
+      usage: type === "started" ? {} : usage.totals(),
     };
     try {
       privateProgress(progressPath, {
@@ -169,16 +177,17 @@ async function main(): Promise<void> {
       const message = next.value;
       turn.progress();
       if (message.type === "result") result = message;
+      const observedUsage = usage.observe(message);
       if (!progressLost)
         try {
-          privateProgress(
-            progressPath,
-            progressEvent(
+          privateProgress(progressPath, {
+            ...progressEvent(
               message,
               input.request.attemptId ?? "",
               redactionValues,
             ),
-          );
+            ...observedUsage,
+          });
         } catch (error) {
           progressLost = true;
           process.stderr.write(
@@ -218,9 +227,9 @@ async function main(): Promise<void> {
           ...(version && { version: redact(version, redactionValues) }),
         })),
         finalResponse: result.subtype === "success" ? result.result : "",
-        usage: result.usage,
-        modelUsage: result.modelUsage,
-        totalCostUsd: result.total_cost_usd,
+        usage: claudeRawTokenUsage(result.usage),
+        modelUsage: claudeModelUsage(result.modelUsage, redactionValues),
+        totalCostUsd: claudeCost(result.total_cost_usd),
       },
     });
     observeUsage("completed");

@@ -173,11 +173,46 @@ model and any supplied reasoning effort before sending the accepted Work Item
 prompt; missing startup evidence or a mismatch fails before dispatch. Progress
 resets only the idle timer, retaining the timeout promise observed by any active
 provider operation. These guards do not add a retry or execution-time budget.
-Codex exposes only its supplied normalized counters. Claude and Copilot deliberately report normalized
-worker token usage as unavailable in this candidate: Claude's cache/input
-semantics differ from Codex, and Copilot conversation/context counters are not
-API usage. Safe provider-reported raw fields may remain in private evidence;
-summaries do not infer totals, cache ratios, or zero usage from those fields.
+Usage stays provider-specific at the adapter boundary. Every private usage record
+is correlated to the attempt and available provider session/event identities;
+only allowlisted nonnegative safe-integer token fields are retained.
+
+- **Codex:** the SDK exposes a completed-turn usage snapshot, not per-API-call
+  counters. Preserve its supplied input, cache, output and reasoning categories
+  once; repeated summary reads and the terminal observation do not add them again.
+- **Claude:** retain deduplicated assistant-message counters for debugging, but
+  normalize only the final result's `modelUsage` snapshot across models. The
+  pinned SDK includes the fresh query's main loop and other query-pipeline calls
+  there; `result.usage` is main-loop-only and assistant output can be a placeholder.
+  SDK `inputTokens` excludes its cache read/write fields, so the common input
+  denominator is their sum when all three categories are supplied. Cache reads
+  and writes remain subsets, not additional tokens added to that denominator.
+  Read the snapshot once, never sum it with assistant observations. Missing model
+  categories stay unknown. No result, or `error_during_execution` results that
+  can contain SDK-reset zeroes, leave normalized usage unavailable while retaining
+  observed private fields. Other error results preserve supplied model counters.
+- **Copilot:** retain `assistant.usage` per-call input/output/cache/reasoning
+  fields, deduplicate event/call identities, and sum input/output independently
+  across observed unique calls. A missing/invalid category or overflowing sum
+  leaves that category unknown. Cache and reasoning fields remain private raw
+  observations until their normalization semantics are established. Context and
+  conversation counters never become consumed tokens.
+
+Claude and Copilot publish normalized counters only at worker termination; an
+earlier partial sum cannot survive a later missing category. No observations
+means unknown, not zero. No adapter derives a total or billing estimate.
+These observations describe SDK-reported scope, not a complete billing ledger;
+Claude helpers outside its query pipeline are excluded by the SDK. Telemetry
+never authorizes execution, retry or recovery and cannot reconstruct old runs or
+relabel qualified artifacts.
+
+Claude's mapping follows the pinned SDK `ModelUsage`/`SDKResultMessage` contract
+and [usage scope and duplicate-message guidance](https://code.claude.com/docs/en/agent-sdk/cost-tracking),
+with [separate input/cache components](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
+The native pinned runtime accumulates `ModelUsage.inputTokens` from
+`usage.input_tokens` separately from cache reads/writes. Copilot's pinned
+`AssistantUsageData` describes its optional per-call API token fields; its
+conversation size is a separate metric.
 
 All three built-in harnesses reuse the developer's local authentication. Factory
 does not add tokens to its configuration file. For example, an existing `codex`

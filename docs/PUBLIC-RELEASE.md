@@ -4,17 +4,22 @@ This is the reusable release and installation procedure. [#25](https://github.co
 
 ## Distribution shape
 
-The [Clockgrove marketplace](../.agents/plugins/marketplace.json) names the plugin at this repository's root and prepares candidate `v0.1.25`, not a moving branch. That tag and its release assets are not published yet. Codex loads its manifest and use skills from the immutable Git tag after publication. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+The [Clockgrove marketplace](../.agents/plugins/marketplace.json) pins the plugin at this repository's root to published `v0.1.25`, not a moving branch. Codex loads its manifest and use skills from that immutable Git tag. The TypeScript CLI and its production dependency tree are built into a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled tree makes the release install independent of later npm dependency resolution and needs no npm publishing account. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
 
-Unpublished v0.1.25 carries the accepted #150 contained ignored-link correction
+Published [v0.1.25](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25) carries the accepted #150 contained ignored-link correction
 from [PR #151](https://github.com/clockgrove/factory-rebuild/pull/151), integrated
 at `92ef6eeac89e792016b5f20ad69cefb707e9debb`, reviewed tree
-`60ad230af22450f46d00e2ccece8555dc883d6cb`. Metadata review, publication and a
-fresh installed-artifact gate remain pending and coordinator-owned. The build
-and future-install procedure below names v0.1.25; run its install section only
-after the release exists. For the currently published v0.1.24 installation, use
-the [README instructions](../README.md#install-published-v0124). Historical
-v0.1.24 evidence below remains immutable and does not qualify changed bytes.
+`60ad230af22450f46d00e2ccece8555dc883d6cb`. Metadata PR #152 produced release
+source `b641ccdccdb969f14c64a66da751c22f6be5bd6d`, tree
+`3569c631cdc6c878836d190e0069cd87f828d6c3`; the 150177209-byte tarball has
+SHA-256 `953324353b903624dbe2471c10310ed60fcf419538e058906b2e22b855ff5e09`.
+Metadata/CI, reproduction, public download, offline installation and pinned
+marketplace checks passed; [build status](BUILD-STATUS.md) links their durable
+evidence. The first combined gate is nonqualifying after a provider idle timeout,
+not a product finding. The [wholly fresh public gate](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1)
+has not yet qualified; automatic gate and actual #26 adopter acceptance remain pending.
+Use the [published install instructions](../README.md#install-published-v0125).
+Historical v0.1.24 evidence below remains immutable and does not qualify changed bytes.
 
 Published [v0.1.24](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24) carries the accepted and closed #145 required-shape correction
 from integration `2f3d4f5a820b1001f41cff731640fc4085552630`. Its metadata does
@@ -53,6 +58,11 @@ Publish a candidate tag and release asset only after its code, CI, packaging, an
 
 ## Build one candidate
 
+For reproduction of v0.1.25, use its exact tagged source above, not later main;
+never overwrite its tag or release assets. The following is a reusable build
+procedure, not authority to publish v0.1.25 again. A future candidate needs its
+own separately authorized version and matching commands.
+
 From a clean Linux x64 source checkout at the accepted commit, with Node.js 22 or later, Git, Git LFS, and public npm access, confirm `git status --porcelain` is empty. Choose an empty absolute release directory outside the checkout, then run:
 
 ```sh
@@ -69,7 +79,7 @@ cd /absolute/empty/release-directory
 sha256sum clockgrove-factory-0.1.25.tgz > SHA256SUMS
 ```
 
-Inspect the tarball file list for the manifest, installed skills, CLI, license, logo, notices, and bundled production dependency tree. In a separate empty prefix, install the tarball with `npm install --offline --ignore-scripts --prefix /absolute/private/check-prefix ./clockgrove-factory-0.1.25.tgz` using an empty npm cache; verify `factory help`, compare every installed bundled package version with `package-lock.json`, and check that notices cover the same tree. Record `git rev-parse HEAD`, package version, tarball SHA-256, and the passing CI run. Under separate operator authority, create a protected `v0.1.25` tag at that same commit and attach both `clockgrove-factory-0.1.25.tgz` and `SHA256SUMS` to a public GitHub Release. Record the expected SHA-256 outside the mutable Release assets, in [BUILD-STATUS.md](BUILD-STATUS.md). This procedure does not itself publish or tag anything.
+Inspect the tarball file list for the manifest, installed skills, CLI, license, logo, notices, and bundled production dependency tree. In a separate empty prefix, install the tarball with `npm install --offline --ignore-scripts --prefix /absolute/private/check-prefix ./clockgrove-factory-0.1.25.tgz` using an empty npm cache; verify `factory help`, compare every installed bundled package version with `package-lock.json`, and check that notices cover the same tree. Record `git rev-parse HEAD`, package version, tarball SHA-256, and the passing CI run. The protected `v0.1.25` tag and both `clockgrove-factory-0.1.25.tgz` and `SHA256SUMS` assets already exist; do not recreate or replace them. For a future version, publication requires separate operator authority and a protected tag at its exact accepted commit. Record the expected SHA-256 outside mutable Release assets in [BUILD-STATUS.md](BUILD-STATUS.md). This procedure does not itself publish or tag anything.
 
 ## Install from public artifacts
 

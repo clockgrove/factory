@@ -1,15 +1,27 @@
 # Public release checklist
 
-**Unpublished candidate: v0.1.25.** Metadata preparation carries accepted #150
+**Published v0.1.25; automatic gate pending.** Metadata PR #152 carries accepted #150
 from [PR #151](https://github.com/clockgrove/factory-rebuild/pull/151), integration
 `92ef6eeac89e792016b5f20ad69cefb707e9debb`, reviewed tree
 `60ad230af22450f46d00e2ccece8555dc883d6cb`. Package/lock-root, manifest,
-marketplace tag and future release commands name this new identity. Metadata
-review, publication, public download/offline/marketplace verification and a fresh
-installed-artifact gate are pending; no v0.1.24 evidence transfers to changed
-bytes. Actual #26 remains OPEN/unaccepted; frozen #55 remains unchanged.
+marketplace tag name this identity. Release source is
+`b641ccdccdb969f14c64a66da751c22f6be5bd6d`, tree
+`3569c631cdc6c878836d190e0069cd87f828d6c3`; the
+[published tarball](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25)
+is 150177209 bytes, SHA-256
+`953324353b903624dbe2471c10310ed60fcf419538e058906b2e22b855ff5e09`.
+Metadata review, full183 Node22/24 and static/notices gates, exact-head/main CI,
+pack reproduction, public download, empty-cache offline installation and pinned
+marketplace verification passed. [Build status](BUILD-STATUS.md) records evidence.
+The first combined gate is preserved/nonqualifying after a 900000 ms provider
+idle timeout, with no product finding, result override, retry or replay. Its real
+pnpm collection and four passing checks are limited evidence, not acceptance.
+The [wholly fresh public gate](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1)
+has not yet qualified; automatic installed-gate acceptance remains pending. No v0.1.24
+evidence transfers to changed bytes. Actual #26 remains OPEN/unaccepted;
+frozen/deferred #55 remains unchanged and is not this bounded pilot's prerequisite.
 
-Current published artifact: [v0.1.24](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24), carrying the accepted and closed #145 required-shape correction
+Historical published artifact: [v0.1.24](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24), carrying the accepted and closed #145 required-shape correction
 from integration `2f3d4f5a820b1001f41cff731640fc4085552630`, without #55 optional
 harness work. Its tagged version/manifest/marketplace and install instructions agree;
 metadata review, full159/static/actual Node22, exact-head/main gates, publication,
@@ -54,7 +66,7 @@ The first release passed [#25](https://github.com/clockgrove/factory-rebuild/iss
 | Objective issue form                           | Eight named fields and final pinned-source section in `.github/ISSUE_TEMPLATE/objective.yml`                          | Confirm form renders, submitted body parses, and target owners can copy it                                         |
 | Package and marketplace metadata               | Package, manifest, bundled Linux x64 runtime dependencies, and pinned `clockgrove` Git marketplace entry present      | Tag the accepted commit; verify `factory@clockgrove` and an offline CLI install from that public tag               |
 | README and CONTRIBUTING                        | Public install and contribution instructions                                                                          | Recheck commands against final CLI                                                                                 |
-| CHANGELOG                                      | `0.1.25` candidate changes listed; earlier entries retained                                                           | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
+| CHANGELOG                                      | Published `0.1.25` changes listed; earlier entries retained                                                           | Record exact artifact identity and acceptance evidence in BUILD-STATUS                                             |
 | Installed use skills                           | `director` and `setup` packaged                                                                                       | Exercise planning, result decisions, media selection, status, and diagnostics in a fresh target                    |
 | CLI                                            | Existing commands documented                                                                                          | Recheck plan/decide/run/decide-result/status/diagnostics/logs against the final CLI                                |
 | TypeScript, formatter, test, workflow          | Existing build and deterministic CI                                                                                   | Run credential-free integration gate on merged trunk                                                               |
@@ -63,7 +75,10 @@ No required asset is intentionally omitted. MCP is not a first-release requireme
 
 ## Exact-artifact acceptance
 
-For v0.1.24, steps 1–4 have passed for the fresh PUBLIC prerequisite under the
+For v0.1.25, source/publication/installation checks in steps 1–2 passed;
+steps 3–4 remain pending for the wholly fresh combined gate. The first combined
+run is nonqualifying and will not be replayed or overridden. For historical
+v0.1.24, steps 1–4 passed for the fresh PUBLIC prerequisite under the
 exact identity above; [BUILD-STATUS.md](BUILD-STATUS.md) records the evidence.
 The separate actual #26 pilot remains unaccepted, not blocked by this docs-only
 handoff. v0.1.23 planning attempts remain nonqualifying; historical #81 closure

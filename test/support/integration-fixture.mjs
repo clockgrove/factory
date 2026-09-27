@@ -228,6 +228,7 @@ class ScriptedPlanningModel {
     this.observe(request);
     appendEvent(this.logPath, {
       type: "result-review",
+      criteria: request.criteria,
       observations: request.observations
         ? JSON.parse(request.observations)
         : null,

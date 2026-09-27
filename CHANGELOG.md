@@ -2,11 +2,11 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.26 — Unreleased
+## 0.1.26 — 2026-09-27
 
 - Constrain compiler and independent graph-review acceptance to evidence available before the current Work Item's own delivery, including every clause of compound criteria. Preserve available completed-dependency evidence without presuming native-stack predecessors have merged; keep upload and final hydration at their existing controller phases.
 - Include the offline real-pnpm/Git/LFS regression and selected-LFS lifecycle coverage, plus ordinary-host controller launch and worker-preflight guidance. Scripted tests establish instruction delivery and lifecycle ordering, not live model adherence.
-- Carry accepted #159 / PR #160 at `5aaf6feb01138ff91acc173ae5961daba8638bff`. Keep published v0.1.25, its paused runs and plans, and frozen #55/PR #62 candidate 0.1.22 unchanged. Publication, fresh exact-artifact public qualification and actual adopter #26 acceptance remain separate requirements.
+- Carry accepted #159 / PR #160 at `5aaf6feb01138ff91acc173ae5961daba8638bff`. Keep published v0.1.25, its paused runs and plans, and frozen #55/PR #62 candidate 0.1.22 unchanged. Publish through metadata PR #161 at `b20cc82c8b63ca231b1f120ce25025836ed8d75b`. Publication and independent public-download/offline installation passed; fresh exact-artifact public qualification and actual adopter acceptance remain pending in issue #26.
 
 ## 0.1.25 — 2026-09-27
 

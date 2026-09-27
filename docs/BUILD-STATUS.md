@@ -1,14 +1,26 @@
 # Factory build status
 
-**Next candidate: v0.1.26, unpublished.** Accepted [#159](https://github.com/clockgrove/factory-rebuild/issues/159)
-/ [PR #160](https://github.com/clockgrove/factory-rebuild/pull/160) is integrated at
-`5aaf6feb01138ff91acc173ae5961daba8638bff`. Planning prompts now keep the current
-Work Item's future delivery and Objective finalization out of its pre-delivery
-acceptance, while retaining already-available predecessor evidence. Metadata
-preparation follows [the release procedure](PUBLIC-RELEASE.md#prepare-v0126).
-The paused v0.1.25 run and packet remain unchanged. New artifact qualification
-and actual adopter acceptance remain #26 work; this source change does not
-establish live model adherence or rewrite any published artifact.
+**Published v0.1.26; live acceptance pending.** [PR #161](https://github.com/clockgrove/factory-rebuild/pull/161)
+released accepted #159 / PR #160 source as immutable
+[v0.1.26](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26),
+source `b20cc82c8b63ca231b1f120ce25025836ed8d75b`, tree
+`9110da2dcf06361eacae48000f8bf0cb7c3c439f`. The tarball is 150178894 bytes,
+SHA-256 `778a925a7610d345228e162771a91e22a4634938403711eeb53b3208289057fb`.
+Full 186-test gates passed on actual Node 22.0 and Node 24.20, along with
+static/notices/package checks and [integrated-main Quality](https://github.com/clockgrove/factory-rebuild/actions/runs/36295296155).
+Candidate and merged-source tarballs were byte-identical. Independent public
+download, checksum verification and normal empty-cache offline installation
+passed: all 70 source-owned package files and 69 bundled dependency versions
+matched, with five other-platform optional packages absent. Installed scanner
+clean, masked-refusal and fail-closed checks passed; the public tagged marketplace
+pins v0.1.26. This does not claim a new global plugin installation.
+[Publication evidence](https://github.com/clockgrove/factory-rebuild/issues/26#issuecomment-5852732502)
+records the release identity. Planning now keeps the current Work Item's future
+delivery and Objective finalization out of its pre-delivery acceptance while
+retaining already-available predecessor evidence. Public live qualification and
+actual adopter acceptance remain pending in [issue #26](https://github.com/clockgrove/factory-rebuild/issues/26);
+these checks do not establish live model adherence. Earlier artifacts and paused
+runs remain unchanged. Follow the [published qualification procedure](PUBLIC-RELEASE.md#qualify-published-v0126).
 
 **Published v0.1.25; automatic public gate pending:** [PR #152](https://github.com/clockgrove/factory-rebuild/pull/152)
 released accepted #150/PR #151 source as immutable

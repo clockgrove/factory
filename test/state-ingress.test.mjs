@@ -7,6 +7,7 @@ import { parseFactoryState } from "../dist/state.js";
 import { readState, statePath } from "../dist/state-store.js";
 import { workItemReviewObservations } from "../dist/validation.js";
 import { assetSelectionDigest } from "../dist/media.js";
+import { CONTROLLER_CAPABILITIES_DIGEST } from "../dist/controller-capabilities.js";
 
 const repository = "example/disposable";
 const objective = 42;
@@ -52,6 +53,96 @@ function state() {
     issueByItemId: { asset: 43 },
     work: { asset: { status: "pending" } },
   };
+}
+
+function selectedLfsState() {
+  const selected = state();
+  const treeSha = "c".repeat(40);
+  const digest = "a".repeat(64);
+  const set = {
+    id: "candidate-a",
+    members: [
+      {
+        role: "image",
+        destination: "approved/image.png",
+        ref: { digest, bytes: 77, mediaType: "image/png" },
+      },
+    ],
+    provenance: {
+      source: "public fixture",
+      rights: "public",
+      visibility: "repository",
+      lineage: [],
+    },
+    evidence: { harnessIdentity: "test", resultDigest: "e".repeat(64) },
+  };
+  selected.graph.items[0].requiredLfsRoles = ["image"];
+  selected.work.asset = {
+    status: "running",
+    step: "deliver",
+    baseSha: sha,
+    treeSha,
+    assets: [set],
+    selectedAssetSet: set.id,
+    selectionDigest: assetSelectionDigest(set),
+    selection: {
+      actor: "test",
+      at: "2026-09-27T00:00:00Z",
+      destinations: [{ role: "image", path: "approved/image.png", digest }],
+      downstreamItems: [],
+    },
+    validation: {
+      treeSha,
+      commands: [
+        {
+          index: 0,
+          command: "test -s approved/image.png",
+          passed: true,
+          exitCode: 0,
+          treeSha,
+        },
+      ],
+      selectedLfs: [
+        {
+          treeSha,
+          destination: "approved/image.png",
+          digest,
+          bytes: 77,
+          filter: "lfs",
+        },
+      ],
+    },
+  };
+  return selected;
+}
+
+function withFinalValidation(selected) {
+  selected.integratedSha = "d".repeat(40);
+  selected.objectiveCommands = ["test -s approved/image.png"];
+  const set = selected.work.asset.assets[0];
+  selected.finalValidation = {
+    ...structuredClone(selected.work.asset.validation),
+    hydrationReceipt: {
+      schemaVersion: 1,
+      controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+      integratedSha: selected.integratedSha,
+      integratedTreeSha: selected.work.asset.treeSha,
+      members: set.members.map((member) => ({
+        itemId: "asset",
+        setId: set.id,
+        role: member.role,
+        destination: member.destination,
+        expectedBytes: member.ref.bytes,
+        observedBytes: member.ref.bytes,
+        expectedDigest: member.ref.digest,
+        observedDigest: member.ref.digest,
+        passed: true,
+      })),
+      passed: true,
+    },
+    passed: true,
+  };
+  return selected;
 }
 
 test("persisted state validates identities and graph/work keys before use", () => {
@@ -160,16 +251,7 @@ test("schemaVersion 2 state requires ordered exact-tree command receipts", () =>
   }
 
   const legacyReceipt = structuredClone(valid);
-  const selected = structuredClone(valid);
-  selected.work.asset.validation.selectedLfs = [
-    {
-      treeSha,
-      destination: "approved/image.png",
-      digest: "a".repeat(64),
-      bytes: 77,
-      filter: "lfs",
-    },
-  ];
+  const selected = selectedLfsState();
   parseFactoryState(selected, repository, objective);
   for (const change of [
     { treeSha: "d".repeat(40) },
@@ -239,6 +321,78 @@ test("schemaVersion 2 state requires ordered exact-tree command receipts", () =>
     () => parseFactoryState(substitutedFinalCommand, repository, objective),
     /Final validation receipts differ from declared Objective commands/,
   );
+});
+
+test("selected LFS item and final receipts must match selected required members", () => {
+  for (const scope of ["item", "final"]) {
+    const valid =
+      scope === "final"
+        ? withFinalValidation(selectedLfsState())
+        : selectedLfsState();
+    if (scope === "final") delete valid.work.asset.validation.selectedLfs;
+    const receipt = (value) =>
+      scope === "final" ? value.finalValidation : value.work.asset.validation;
+    assert.deepEqual(parseFactoryState(valid, repository, objective), valid);
+    for (const change of [
+      { destination: "approved/other.png" },
+      { digest: "f".repeat(64) },
+      { bytes: 78 },
+    ]) {
+      const invalid = structuredClone(valid);
+      Object.assign(receipt(invalid).selectedLfs[0], change);
+      assert.throws(
+        () => parseFactoryState(invalid, repository, objective),
+        /Selected LFS validation evidence.*selected member/,
+        `${scope}: ${JSON.stringify(change)}`,
+      );
+    }
+    for (const missing of ["selection", "required-role"]) {
+      const invalid = structuredClone(valid);
+      if (missing === "selection") {
+        delete invalid.work.asset.selectedAssetSet;
+        delete invalid.work.asset.selectionDigest;
+        delete invalid.work.asset.selection;
+        if (scope === "final") delete invalid.finalValidation.hydrationReceipt;
+      } else invalid.graph.items[0].requiredLfsRoles = [];
+      assert.throws(
+        () => parseFactoryState(invalid, repository, objective),
+        /Selected LFS validation evidence.*selected member/,
+        `${scope}: ${missing}`,
+      );
+    }
+    // Older states without these optional receipts retain their existing meaning.
+    delete receipt(valid).selectedLfs;
+    assert.doesNotThrow(() => parseFactoryState(valid, repository, objective));
+  }
+});
+
+test("item receipts may reference selected dependency or already-present sibling members", () => {
+  for (const dependencies of [["asset"], []]) {
+    const valid = selectedLfsState();
+    valid.graph.items.push({
+      ...structuredClone(valid.graph.items[0]),
+      id: "consumer",
+      dependencies,
+      ownedPaths: ["consumer.txt"],
+      requiredLfsRoles: [],
+      expectedOutputRoles: [],
+      minimumAssetSets: 0,
+    });
+    valid.issueByItemId.consumer = 44;
+    valid.work.consumer = {
+      status: "running",
+      step: "deliver",
+      baseSha: sha,
+      treeSha: valid.work.asset.treeSha,
+      validation: structuredClone(valid.work.asset.validation),
+    };
+    assert.deepEqual(parseFactoryState(valid, repository, objective), valid);
+    valid.work.consumer.validation.selectedLfs[0].bytes++;
+    assert.throws(
+      () => parseFactoryState(valid, repository, objective),
+      /Selected LFS validation evidence.*selected member/,
+    );
+  }
 });
 
 test("schemaVersion 2 state rejects legacy source paths and accepts explicit bindings", () => {

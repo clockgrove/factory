@@ -539,6 +539,7 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
                 {
                   name: "factory-pnpm-receipt-fixture",
                   private: true,
+                  type: "module",
                   scripts: {
                     check: "node --check src/index.js",
                     test: "node --test",
@@ -2338,62 +2339,64 @@ test("regular and native asset selection preserve a complete set and hydrate tar
     });
 });
 
-test("the exact two-item same-path LFS gate auto-proves every controller-owned boundary", async () => {
-  await fixture("same-path-lfs-release-gate", async (root) => {
-    const source = readFileSync(
-      join(
-        import.meta.dirname,
-        "fixtures",
-        "disposable-target",
-        "assets",
-        "source.png",
-      ),
-    );
-    const digest = createHash("sha256").update(source).digest("hex");
-    assert.equal(
-      digest,
-      "886eca293713dd0dc77ee8c492c64e81359f6e0286b79d5f6df20c506466d1e2",
-    );
-    const target = createTarget(root, { "assets/source.png": source });
-    const policyCommand =
-      "grep -Fxq 'assets/source.png filter=lfs diff=lfs merge=lfs -text' .gitattributes";
-    const hashCommand = `sha256sum assets/source.png | grep -qx '${digest}  assets/source.png'`;
-    const lfsCommand = "git lfs ls-files | grep -q 'assets/source.png'";
-    const policy = item("same-path-lfs-policy", {
-      path: ".gitattributes",
-      command: policyCommand,
-    });
-    const migration = item("same-path-lfs-migration", {
-      path: "assets/source.png",
-      command: hashCommand,
-      dependencies: ["same-path-lfs-policy"],
-      sourceAssets: [
-        {
-          kind: "repository",
-          path: "assets/source.png",
-          role: "image",
-          mediaType: "image/png",
-          visibility: "repository",
-        },
-      ],
-      expectedOutputRoles: ["image"],
-      minimumAssetSets: 1,
-      requiredLfsRoles: ["image"],
-    });
-    migration.validation.push({
-      command: lfsCommand,
-      provenance: "source-declared",
-      source: "OBJECTIVE",
-    });
-    migration.acceptance.push(
-      "The candidate is copied byte-for-byte from the repository source assets/source.png and bound back to that destination.",
-      "The selected set's source, rights basis, repository visibility, and lineage are declared in .factory-assets.json.",
-      "The worker does not write, remove, or change the final destination; Factory materializes only the human-selected candidate to assets/source.png.",
-    );
-    const materializationCriterion = migration.acceptance.at(-1);
-    const objectiveBody = `# Same-path LFS release gate
+for (const delivery of ["regular", "native-stack"])
+  test(`${delivery} selected-LFS acceptance keeps delivery and final hydration after Work Item review`, async () => {
+    await fixture("same-path-lfs-release-gate", async (root) => {
+      const source = readFileSync(
+        join(
+          import.meta.dirname,
+          "fixtures",
+          "disposable-target",
+          "assets",
+          "source.png",
+        ),
+      );
+      const digest = createHash("sha256").update(source).digest("hex");
+      assert.equal(
+        digest,
+        "886eca293713dd0dc77ee8c492c64e81359f6e0286b79d5f6df20c506466d1e2",
+      );
+      const target = createTarget(root, { "assets/source.png": source });
+      const policyCommand =
+        "grep -Fxq 'assets/source.png filter=lfs diff=lfs merge=lfs -text' .gitattributes";
+      const hashCommand = `sha256sum assets/source.png | grep -qx '${digest}  assets/source.png'`;
+      const lfsCommand = "git lfs ls-files | grep -q 'assets/source.png'";
+      const policy = item("same-path-lfs-policy", {
+        path: ".gitattributes",
+        command: policyCommand,
+      });
+      const migration = item("same-path-lfs-migration", {
+        path: "assets/source.png",
+        command: hashCommand,
+        dependencies: ["same-path-lfs-policy"],
+        sourceAssets: [
+          {
+            kind: "repository",
+            path: "assets/source.png",
+            role: "image",
+            mediaType: "image/png",
+            visibility: "repository",
+          },
+        ],
+        expectedOutputRoles: ["image"],
+        minimumAssetSets: 1,
+        requiredLfsRoles: ["image"],
+      });
+      migration.validation.push({
+        command: lfsCommand,
+        provenance: "source-declared",
+        source: "OBJECTIVE",
+      });
+      migration.acceptance.push(
+        "The candidate is copied byte-for-byte from the repository source assets/source.png and bound back to that destination.",
+        "The selected set's source, rights basis, repository visibility, and lineage are declared in .factory-assets.json.",
+        "The worker does not write, remove, or change the final destination; Factory materializes only the human-selected candidate to assets/source.png.",
+      );
+      const materializationCriterion = migration.acceptance.at(-1);
+      const objectiveBody = `# Same-path LFS release gate
 
 ## Acceptance
+Work Item acceptance uses the selected materialized bytes and exact validation before delivery. Required-object upload belongs to delivery before publication; fresh-clone hydration belongs after integration and final commands, before final Objective acceptance. Preserve each obligation at its actual phase.
 - ${materializationCriterion}
 - Fresh-clone hydration preserves the selected bytes at assets/source.png.
 - \`${hashCommand}\`
@@ -2404,105 +2407,226 @@ test("the exact two-item same-path LFS gate auto-proves every controller-owned b
 - \`${hashCommand}\`
 - \`${lfsCommand}\`
 `;
-    const descriptor = {
-      config: factoryConfig(
-        target.checkout,
-        "example/same-path-lfs-release-gate",
-        "native-stack",
-      ),
-      graph: {
-        objective,
-        baseSha: target.baseSha,
-        items: [policy, migration],
-      },
-      objectiveBody,
-      fakeRoot: join(root, "fake"),
-      actions: {
-        "same-path-lfs-policy": {
-          files: [
-            {
-              path: ".gitattributes",
-              text: "assets/source.png filter=lfs diff=lfs merge=lfs -text\n",
-            },
-          ],
+      const descriptor = {
+        config: factoryConfig(
+          target.checkout,
+          "example/same-path-lfs-release-gate",
+          delivery,
+        ),
+        graph: {
+          objective,
+          baseSha: target.baseSha,
+          items: [policy, migration],
         },
-        "same-path-lfs-migration": {
-          assets: [
-            {
-              id: "candidate-a",
-              members: [
-                {
-                  role: "image",
-                  file: "source.png",
-                  mediaType: "image/png",
-                  destination: "assets/source.png",
-                  base64: source.toString("base64"),
-                },
-              ],
-              provenance: {
-                source: "assets/source.png",
-                rights: "public repository fixture",
-                visibility: "repository",
-                lineage: ["assets/source.png"],
+        objectiveBody,
+        fakeRoot: join(root, "fake"),
+        actions: {
+          "same-path-lfs-policy": {
+            files: [
+              {
+                path: ".gitattributes",
+                text: "assets/source.png filter=lfs diff=lfs merge=lfs -text\n",
               },
-            },
-          ],
+            ],
+          },
+          "same-path-lfs-migration": {
+            assets: [
+              {
+                id: "candidate-a",
+                members: [
+                  {
+                    role: "image",
+                    file: "source.png",
+                    mediaType: "image/png",
+                    destination: "assets/source.png",
+                    base64: source.toString("base64"),
+                  },
+                ],
+                provenance: {
+                  source: "assets/source.png",
+                  rights: "public repository fixture",
+                  visibility: "repository",
+                  lineage: ["assets/source.png"],
+                },
+              },
+            ],
+          },
         },
-      },
-    };
-    const { application, planningPath, contentStore } =
-      makeApplication(descriptor);
-    const waiting = await application.runObjective(objective);
-    assert.equal(waiting.work["same-path-lfs-migration"].step, "approve-asset");
-    await selectAssetSetFromCli(
-      descriptor.config,
-      objective,
-      "same-path-lfs-migration",
-      "candidate-a",
-      contentStore,
-      {
-        actor: "test-operator",
-        reason: "verified complete exact-byte candidate",
-        downstreamItems: [],
-      },
-    );
-    const completed = await application.runObjective(objective);
-    assert.equal(completed.objectiveClosure, "complete");
-    assert.equal(completed.finalValidation.passed, true);
-    assert.equal(completed.finalValidation.hydrationReceipt.passed, true);
-    const reviews = readEvents(planningPath).filter(
-      (event) => event.type === "result-review",
-    );
-    const workReview = reviews.find(
-      (event) =>
-        event.observations?.reviewedItemId === "same-path-lfs-migration",
-    );
-    const finalReview = reviews.find(
-      (event) => event.observations?.integratedCommitSha,
-    );
-    for (const review of [workReview, finalReview]) {
-      const evidence = review.evidence.find((entry) =>
-        entry.path.endsWith("controller materialization"),
+      };
+      // The bare remote rejects the branch unless its selected LFS bytes have
+      // already arrived, so the PR fake cannot conceal reversed upload ordering.
+      const uploadBeforeBranch = join(root, "upload-before-branch");
+      const receiveHook = join(target.origin, "hooks/pre-receive");
+      writeFileSync(
+        receiveHook,
+        `#!/bin/sh
+set -eu
+while read old new ref; do
+  pointer=$(git show "$new:assets/source.png")
+  case "$pointer" in
+    *"oid sha256:${digest}"*)
+      test "$(sha256sum 'lfs/objects/${digest.slice(0, 2)}/${digest.slice(2, 4)}/${digest}' | cut -d ' ' -f 1)" = '${digest}'
+      touch '${uploadBeforeBranch}'
+      ;;
+  esac
+done
+`,
       );
-      assert.equal(evidence.complete, true);
-      const packet = JSON.parse(evidence.content);
-      assert.deepEqual(packet.workerDestinationChanges, []);
+      chmodSync(receiveHook, 0o755);
+      const { application, planningPath, contentStore, github } =
+        makeApplication(descriptor);
+      let mediaPublished = false;
+      const publish = github.publish.bind(github);
+      github.publish = async (request) => {
+        if (
+          git(
+            target.checkout,
+            "show",
+            `origin/${request.branch}:assets/source.png`,
+          ).includes(`oid sha256:${digest}`)
+        ) {
+          const review = readEvents(planningPath).find(
+            (event) =>
+              event.type === "result-review" &&
+              event.observations?.reviewedItemId === migration.id,
+          );
+          assert.ok(review, "media acceptance precedes publication");
+          assert.equal(
+            review.evidence.some(
+              (entry) => entry.path === "Controller hydration receipt",
+            ),
+            false,
+          );
+          assert.deepEqual(
+            readFileSync(
+              join(
+                target.origin,
+                "lfs/objects",
+                digest.slice(0, 2),
+                digest.slice(2, 4),
+                digest,
+              ),
+            ),
+            source,
+            "exact selected object uploaded before PR publication",
+          );
+          mediaPublished = true;
+        }
+        return publish(request);
+      };
+      const waiting = await application.runObjective(objective);
+      assert.equal(
+        waiting.work["same-path-lfs-migration"].step,
+        "approve-asset",
+      );
+      await selectAssetSetFromCli(
+        descriptor.config,
+        objective,
+        "same-path-lfs-migration",
+        "candidate-a",
+        contentStore,
+        {
+          actor: "test-operator",
+          reason: "verified complete exact-byte candidate",
+          downstreamItems: [],
+        },
+      );
+      const completed = await application.runObjective(objective);
+      assert.equal(completed.objectiveClosure, "complete");
+      assert.equal(completed.finalValidation.passed, true);
+      assert.equal(completed.finalValidation.hydrationReceipt.passed, true);
+      const reviews = readEvents(planningPath).filter(
+        (event) => event.type === "result-review",
+      );
+      const workReview = reviews.find(
+        (event) =>
+          event.observations?.reviewedItemId === "same-path-lfs-migration",
+      );
+      const finalReview = reviews.find(
+        (event) => event.observations?.integratedCommitSha,
+      );
+      assert.equal(mediaPublished, true);
+      assert.equal(existsSync(uploadBeforeBranch), true);
+      assert.deepEqual(workReview.criteria, migration.acceptance);
+      assert.equal(
+        workReview.criteria.some((criterion) =>
+          /upload|publication|hydration/.test(criterion),
+        ),
+        false,
+      );
+      assert.equal(
+        workReview.evidence.some(
+          (entry) => entry.path === "Controller hydration receipt",
+        ),
+        false,
+      );
+      const hydration = finalReview.evidence.find(
+        (entry) => entry.path === "Controller hydration receipt",
+      );
+      assert.ok(hydration);
       assert.deepEqual(
-        packet.materializationChange.changes.map((entry) => entry.path),
-        ["assets/source.png"],
+        JSON.parse(hydration.content),
+        completed.finalValidation.hydrationReceipt,
       );
-      assert.deepEqual(
-        packet.destinations.map((entry) => entry.digest),
-        [digest],
+      assert.equal(
+        completed.finalValidation.hydrationReceipt.integratedSha,
+        completed.integratedSha,
       );
-    }
-    assert.ok(
-      completed.finalValidation.criteria.some(
-        (entry) => entry.criterion === materializationCriterion,
-      ),
-    );
+      const timeline = readDiagnostics(descriptor.config.repository, objective);
+      const operations = [
+        ["media-materialization", "completed"],
+        ["validation-command", "completed"],
+        ["acceptance-review", "completed"],
+        ["github-publication", "completed"],
+        ["github-merge", "completed"],
+        ["objective-validation-command", "completed"],
+        ["media-hydration-verification", "completed"],
+        ["objective-acceptance-review", "started"],
+      ];
+      // Native-stack diagnostics use their own publication operation; the real
+      // publication hook above checks upload/review ordering for both routes.
+      if (delivery === "regular") {
+        let previous = -1;
+        for (const [operation, outcome] of operations) {
+          const index = timeline.findIndex(
+            (event, index) =>
+              index > previous &&
+              event.operation === operation &&
+              event.outcome === outcome &&
+              (operation.startsWith("objective-") ||
+                operation === "media-hydration-verification" ||
+                event.itemId === migration.id),
+          );
+          assert.ok(
+            index > previous,
+            `${operation} follows prior lifecycle boundary`,
+          );
+          previous = index;
+        }
+      }
+      for (const review of [workReview, finalReview]) {
+        const evidence = review.evidence.find((entry) =>
+          entry.path.endsWith("controller materialization"),
+        );
+        assert.equal(evidence.complete, true);
+        const packet = JSON.parse(evidence.content);
+        assert.deepEqual(packet.workerDestinationChanges, []);
+        assert.deepEqual(
+          packet.materializationChange.changes.map((entry) => entry.path),
+          ["assets/source.png"],
+        );
+        assert.deepEqual(
+          packet.destinations.map((entry) => entry.digest),
+          [digest],
+        );
+      }
+      assert.ok(
+        completed.finalValidation.criteria.some(
+          (entry) => entry.criterion === materializationCriterion,
+        ),
+      );
+    });
   });
-});
 
 test("hydration failure is URL-free and blocks final review, evidence, and closure on replay", async () => {
   await fixture("hydration-failure", async (root) => {

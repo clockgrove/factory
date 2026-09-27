@@ -22,9 +22,15 @@ export function query({ options }) {
             model: options.model,
             permissionMode: options.permissionMode,
             effort: options.effort,
-            tools: [],
-            mcp_servers: [],
-            plugins: [],
+            tools: scenario === "startup-tool" ? ["Bash"] : [],
+            mcp_servers:
+              scenario === "startup-mcp"
+                ? [{ name: "ambient", status: "connected" }]
+                : [],
+            plugins: [
+              { name: "agents-md", path: "builtin" },
+              { name: "sec-default", path: "builtin" },
+            ],
             skills: [],
             agents: [],
           },

@@ -4,6 +4,210 @@ The clean implementation starts from the Factory plan reviewed September 22, 202
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Unpublished v0.1.27 preparation
+
+Accepted #165 / PR #166 integration `058bd7587aa532342ebb77488474258c90930f5d`,
+tree `a5a4546c66263dac9359bb4ddae883b1da84e6f6`, supplies the final-criteria
+preflight, checked selected-pointer evidence and reusable offline regressions.
+The public qualification failures and fresh-context review favored reuse of
+the existing parser/validator over a fixture-specific extra command. Exact
+tracked attribute text remains separate from effective-filter evidence; no
+generic output store or changed delivery/hydration phase was introduced.
+This metadata-only preparation changes package/lock-root identity, plugin and
+future marketplace metadata, release guidance and the notices version header.
+Runtime, tests, dependency entries, skills, scripts, Node floor and license
+bodies remain identical to that accepted integration. No archived/private
+inputs are used. Source evidence does not qualify an unbuilt or unpublished
+v0.1.27 artifact; the preserved public v0.1.26 run remains unchanged.
+
+## Published v0.1.26
+
+Accepted #159 / PR #160 integration `5aaf6feb01138ff91acc173ae5961daba8638bff`
+supplied the lifecycle correction described below. Metadata PR #161 published
+[v0.1.26](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26) at
+source `b20cc82c8b63ca231b1f120ce25025836ed8d75b`, tree
+`9110da2dcf06361eacae48000f8bf0cb7c3c439f`, without further runtime or dependency
+changes. [Build status](BUILD-STATUS.md) records its tarball digest, full Node22/24
+gates and independent public-download/offline installation checks. This later
+documentation handoff does not change those immutable bytes. Public live
+qualification and actual adopter acceptance remain pending in issue #26;
+publication and scripted coverage do not establish live model adherence.
+No archived implementation or private adopter source entered this release.
+
+## Ignored nondelivered dependency links (#150)
+
+Metadata-only v0.1.25 preparation starts at accepted PR #151 integration
+`92ef6eeac89e792016b5f20ad69cefb707e9debb`, reviewed tree
+`60ad230af22450f46d00e2ccece8555dc883d6cb`. It changes only package/lock-root
+identity, manifest/marketplace pin, changelog, public release/status instructions
+and the generated Factory notices header. Dependency entries, runtime, tests,
+scripts, skills, Node floor and license bodies are identical to that base.
+No archived/private inputs, providers or target execution are required.
+Metadata [PR #152](https://github.com/clockgrove/factory-rebuild/pull/152) is
+accepted and published as immutable [v0.1.25](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25),
+source `b641ccdccdb969f14c64a66da751c22f6be5bd6d`, tree
+`3569c631cdc6c878836d190e0069cd87f828d6c3`; tarball 150177209 bytes,
+SHA-256 `953324353b903624dbe2471c10310ed60fcf419538e058906b2e22b855ff5e09`.
+[Publication evidence](https://github.com/clockgrove/factory-rebuild/issues/26#issuecomment-5851413433)
+records full183/static/notices, exact-head/main CI, deep metadata parity,
+70 owned packaged files, reproduction, public download and empty-cache offline
+verification; normal pinned marketplace 0.1.25 verification also passed.
+
+This docs-only follow-up uses current public docs, accepted #150/#152 and the
+durable public #26 [gate-start](https://github.com/clockgrove/factory-rebuild/issues/26#issuecomment-5851450549)
+and [timeout](https://github.com/clockgrove/factory-rebuild/issues/26#issuecomment-5851558280)
+checkpoints, not private adopter source/logs/topology or archived implementation.
+The first combined run remains nonqualifying after a 900000 ms reviewer idle
+timeout, with no product finding or result override/retry/replay. Real pnpm
+collection and four checks are limited evidence, not Objective acceptance.
+Root's [wholly fresh public gate](https://github.com/clockgrove/factory-v0125-gate-20260927-fresh/issues/1)
+activated run `9169cda3-9e64-420e-8181-b9fb01c6ca68` under the unchanged public
+contract and published artifact. Its policy result review paused because the
+criterion asks for absence of transient asset changes and worker LFS-filter
+configuration that the final Git delta cannot establish. Root observed a narrow
+`.gitattributes` delta and unchanged ordinary asset; that does not prove the
+missing operation/environment history or establish a product defect. No result
+override, retry, replay or further target was introduced at this checkpoint.
+Root batches remaining foundation evidence before a source-contract-only
+correction; automatic installed qualification and actual #26 acceptance remain pending.
+Immutable v0.1.24 and the frozen unreleased #55 candidate remain unchanged.
+
+The #150 correction is separate from immutable v0.1.24. Public
+issue #150, the current staged-candidate guard and deterministic generic safety
+fixtures supply its source; no archived or private adopter inputs are needed.
+An independent 22-case public fixture audit reproduced the baseline on actual
+Node24 and Node22. The narrow correction distinguishes Git-ignored nondelivered
+contained links from delivered changes without skipping ignored directories or
+changing staged-path/ancestor/mode/ownership/scanner enforcement. Newly owned
+ignore policy can admit safe local links, not escapes, special files, staged
+links or hidden secrets. Root retains exact-source integration, publication and
+fresh installed/adopter qualification; historical failed runs and frozen #55
+are unchanged.
+
+The actual Node22 full gate also exposed an existing generic pnpm receipt
+fixture's reliance on newer Node's implicit ESM detection. Its generated
+package manifest now declares `type: module`, matching its existing export/import
+syntax without changing Factory behavior, target commands or the Node22 floor.
+
+## Published v0.1.24 and public gate handoff
+
+The metadata-only release starts from #145 integration
+`2f3d4f5a820b1001f41cff731640fc4085552630`, combined tree
+`a68c7e578d2b708ff3abdcd29e56954e69393bfe`. Public #145, accepted clean schema
+contracts and their credential-free tests supplied the required-shape correction;
+the metadata handoff carries that source unchanged. Version 0.1.24 updates only
+package/lock-root identity, manifest/marketplace pin, release documentation,
+changelog and the generated Factory notices header. All dependency entries,
+scripts, runtime, tests, skills and license bodies are unchanged from that base.
+No archived material, provider, target or private source is needed for this work.
+Accepted PR #147 normally merged at source
+`e0fc91343563e6a3b19eb92dd64d419ba03b487a`, tree
+`25f80920ebb5848db019c384fcefbce6738f562a`. The published
+[v0.1.24 artifact](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24)
+is 150176214 bytes, SHA-256
+`513f46100ce1956c481d26a6ef96f63a62035527c4437268afac3c10e322ef31`.
+Accepted full159/static/actual Node22, exact/main Quality, clean merged-source
+package/offline, public-download and marketplace evidence supplied this handoff.
+The completed [fresh public Objective](https://github.com/clockgrove/factory-v0124-gate-20260926-batched/issues/1)
+and its normal PR4/5 merges supply public installed-gate evidence at final head
+`5ed4b237d51943c52ea5d2f1f84c9eb1820bb199`, tree
+`f5d247803aa6a83599e22c7531d06affdd5900df`.
+Whole-set human selection, unchanged public fixture bytes, automatic final
+review and independent fresh-clone LFS verification are detailed in
+[BUILD-STATUS.md](BUILD-STATUS.md). No private source, paths, logs or issue
+identifiers supplied this public docs-only change. It does not alter the release
+or accept the actual #26 pilot, which remains OPEN and separately owned.
+Published v0.1.23/failure evidence, historical v0.1.21 and frozen #55 remain intact.
+
+## Published v0.1.23 handoff
+
+The [public release](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.23)
+pins source `15d60c5e5cf691374e59dd7adb496b3492e0bf57`, tree
+`70e18958a4161b57edf7b3d658246bd32df3e6e6`, and tarball SHA-256
+`0602337b86913f0fc493040ebe3a9eaee99593d412044c2839969b7993172baa`.
+Accepted release metadata, independent artifact/offline-install checks, public
+download and marketplace verification supplied this documentation-only handoff.
+No runtime, dependency, license text, fixture or packaged skill is changed.
+The preserved first heading plan is nonqualifying at `needs-human`, revision 1,
+after a staging-versus-delivered-ownership contradiction. Installed worker and
+capture semantics already support that distinction. The separate staging-clarified
+plan also remains nonqualifying: generated acceptance narrowed a minimum to exactly
+one candidate, and its attempted revision failed required policy-item structure.
+The third, minimum-clarified invocation failed initial required-shape validation
+before producing a plan file or activation. No earlier packet was overridden,
+replanned, retried or activated. The raw real failed fields are not preserved.
+Root's credential-free installed-schema diagnostic reproduced eight schema-valid
+empty required shapes rejected by deterministic validation; it does not identify
+the field in a real failed response. [#145](https://github.com/clockgrove/factory-rebuild/issues/145)
+owns the bounded schema/validator alignment, not the v0.1.23 documentation handoff.
+Its later integration is the v0.1.24 metadata base recorded above; v0.1.23's
+failed attempts are not requalified by the fresh v0.1.24 gate. Historical v0.1.21
+evidence and frozen #55 remain intact. #145 is now accepted and closed for source;
+v0.1.24 publication and fresh public installed-gate acceptance are recorded above.
+The separately approved actual adopter pilot remains unaccepted;
+v0.1.23 is not patched or requalified.
+
+## Heading-selected result-review sources (#140)
+
+Accepted PR #141 corrected head `c9968e6d5822bfeeca34ff53a08f60fa387236f4`
+merged at `3ca15a10fd773d1894cc42b8a6c59e39ada0eb0e` with the complete reviewed
+tree unchanged and integrated-main Quality passing. Release metadata preparation
+for v0.1.23 changes no runtime source or dependency entries and does not rewrite
+immutable v0.1.21 or the frozen unreleased #55 candidate.
+
+Public issue #140, current `src/validation.ts`, and the accepted planning-review
+grounding in `src/compiler.ts` supply this narrow correction. Selected sections
+retain their shared exact repository path and separate content. Result findings
+may quote any one matching section without concatenating packets. Generated and
+custom authoritative evidence labels remain unique and disjoint from planning
+paths; incomplete evidence, exact-tree command binding, byte budgets and
+per-criterion refusal/decision semantics are unchanged. New temporary-Git tests
+cover Work Item and final review, later headings, invalid grounding and label
+collisions. No archived code, private source, provider call, preserved failed run
+or installed v0.1.21 byte was read or changed for implementation.
+
+PR #138 accepted head `9003535a215ab9ae32eb298ddec2e22194510a75` merged at
+`32efd07c7c204fbc52844914e1863cba3ffb0bc6` with unchanged reviewed tree and
+passing integrated-main Quality. #70 is closed after independent shell-before-launch
+and general target-path-before-ready review corrections; no provider or target gate was qualified.
+
+## Settled provider wait subscriptions (#133)
+
+Issue #133, accepted public `src/provider-turn.ts`, and the new synthetic
+high-event-count fixture supplied this leaf correction. Per-wait timeout
+subscriptions detach in finally while one resettable timer retains the existing
+timeout/AbortSignal/error policy. A referenced guard no longer retains settled
+fulfilled or rejected Buffer payloads through a shared pending timeout promise.
+Focused tests preserve active waits, terminal finish, original failure and
+already-settled cleanup ordering. No archived source, provider credentials,
+payload diagnostics, live target or new event/byte policy was inspected or added.
+The separately accepted #55 source/artifact is not edited or requalified here.
+
+The final normal merge retains accepted #127 streaming and #121 preflight source,
+tests and documentation. A single provenance conflict kept both issue records;
+the #133 guard, focused tests, fixture and dependency identities are unchanged.
+The refreshed full gate and actual Node22 affected checks cover those accepted
+changes together without copying historical payloads or invoking providers.
+
+PR #137 accepted head `52ce30e9ed70a5e130f9f2055db975d25bc9bd55` merged at
+`87c2c2ef18d114ab44f41765a9c8c3d1332922e0` with unchanged reviewed tree and
+passing integrated-main Quality. #133 is closed; no live-provider qualification follows.
+
+## Interrupted regular-delivery contract (#121)
+
+The public #121 reproduction and current clean regular runner supplied this
+contract. Ambiguous active `deliver` state still refuses rather than replaying
+workers or inferring continuation from remote publication. The refusal now names
+the unsupported recovery window and preservation/bypass guidance; focused tests
+verify refusal both with and without a recorded PR, including resumable execution,
+validation and selected-asset peers in either graph order. A whole-graph preflight
+refuses before any peer operation or state change. The outer controller may still record its last error. No archived
+source, historical run mutation, automatic retry or recovery journal was used.
+
+PR #136 accepted head `3fca6760d5dc612b85d6309e5a5d1a4c70e4c0a5` merged at
+`7a95c9250281108d88457295df868868a6cd5552` with unchanged reviewed tree and
+passing integrated-main Quality. #121 is closed for documented refusal only.
+
 ## Provider idle timeout subscription (#130)
 
 Issue #130 and the accepted public `src/provider-turn.ts` supplied the
@@ -193,7 +397,37 @@ Issue #111, the preserved fresh installed v0.1.20 result-review packet, and the 
 
 The current public issues, source contracts and fresh public v0.1.21 gate/postmortem supplied these changes; no additional archived source, tests, operational journal or private adopter requirements were inspected or copied. Exact resource-name guidance preserves whitespace-sensitive scheduler identities. Resume messages follow the existing state branch rather than adding a second lifecycle read. Final review shares its existing text budget across ordinary and materialization packets without weakening truncated-evidence rejection. The Codex citation adapter uses bounded integer choices mapped back to exact canonical source/heading pairs; strict semantic validation remains authoritative.
 
-Media brief guidance and actual worker packet regressions preserve accepted requirements, immutable-byte obligations, ordinary owned code and staging declarations while excluding controller operations. Optional provider-neutral worker usage observations normalize supplied counters at the adapter seam and feed the existing private observational progress stream. Usage summaries label scope, cumulative deduplication, supplied-category coverage and matched cache denominators; they do not parse arbitrary evidence, infer charges or reconstruct execution state. The startup correction records the observation before guarded provider stream creation, without changing timeout or result authority. Memory scaling from retaining unrelated progress transcripts remains the queued leaf #127. These source acceptances are not new installed-artifact or private-adopter qualification.
+Media brief guidance and actual worker packet regressions preserve accepted requirements, immutable-byte obligations, ordinary owned code and staging declarations while excluding controller operations. Optional provider-neutral worker usage observations normalize supplied counters at the adapter seam and feed the existing private observational progress stream. Usage summaries label scope, cumulative deduplication, supplied-category coverage and matched cache denominators; they do not parse arbitrary evidence, infer charges or reconstruct execution state. The startup correction records the observation before guarded provider stream creation, without changing timeout or result authority. These source acceptances are not new installed-artifact or private-adopter qualification.
+
+## Local host executable preflight (#70)
+
+The public #70 failure, current admitted command contracts and local validator
+environment supplied this leaf. Fresh activation resolves reliably literal host
+entrypoints and reports unresolved dynamic coverage before projection or attempts.
+Lookup uses fixed non-login shell builtins, never target command text. The
+validator now uses the same non-login environment so supplied PATH is not replaced
+by login profiles. Only explicit exact pinned-base npm/pnpm `packageManager`
+versions permit host `--version` probes outside the target; unsupported policies
+stay unverified, with no invented version or provisioning policy. Source command
+authority and later-tree package script/hook checks are unchanged. Temporary-Git
+tests use task-private synthetic host tools and ordinary validation, not live
+provider qualification. No archive, private adopter material, lifecycle journal,
+fallback or retry machinery was inspected or added.
+
+## Summary transcript retention (#127)
+
+Issue #127 and the current public diagnostic reader, correlation and usage
+aggregation contracts supplied this focused leaf. The summary-only reader parses
+private NDJSON incrementally, validates every complete record and discards
+unrelated transcript fields before retention or sorting. It preserves restrictive
+regular-file/no-follow checks, ignores the final unterminated record, and retains
+the existing controller and snapshot correlation precedence. Ordinary timeline,
+follow, logs and usage aggregation remain unchanged. Memory still depends on the
+largest current record, selected usage observations and correlation identities;
+this is not a fixed memory cap or a streaming JSON-field parser. Synthetic public
+transcript parity and isolated retained-heap probes demonstrate the difference
+without claiming an observed OOM, lifecycle authority or live provider proof.
+No archived or private material, provider calls, new limits or journals were used.
 
 ## Default Node 22.0 scanner compatibility (#129)
 
@@ -205,3 +439,32 @@ installed clean/refused/fatal scanner checks and exact required-dependency
 verification. Integrated-main Quality passed at
 `57abc0a43b605148a6b3ec191bcedb34c7cf9bc2`; #129 is closed. No immutable public
 v0.1.21 release bytes were rewritten or newly qualified by these source checks.
+
+## Required planner graph shape (#145)
+
+Public issue #145 and the credential-free audit of accepted public/installed
+v0.1.23 schema, citation decoder and deterministic scheduler supplied this
+alignment. Graph items and acceptance/nonGoals/ownedPaths/citation collections
+receive the existing nonempty lower bound; title/goal/brief receive the existing
+nonempty string bound. Generic, source-specific and production indexed schemas
+retain the same constraints. Scripted SDK tests batch all eight malformed shapes
+and preserve optional empty collections, whole-source empty headings and current
+acceptance/nonGoal entry semantics. Deterministic validators are unchanged.
+No archived/private source, provider, new target, retry/repair, installed artifact
+patch, arbitrary maximum, dependency, Node-floor or release change was used.
+The actual fields of preserved failed provider responses remain unknown;
+synthetic reproducibility is not exact causal attribution or live qualification.
+
+## Pre-delivery acceptance lifecycle (#159)
+
+The public #159 failure, existing controller capabilities and lifecycle, and
+fresh-context architecture review supplied the narrow compile/graph-review
+prompt correction in PR #160. Current-item delivery and Objective finalization
+remain later phases; already-recorded predecessor evidence remains usable.
+Production changes add no state, receipt, verdict or recovery mechanism and do
+not alter result-review refusal. Scripted SDK prompt capture and real temporary
+Git/LFS application tests cover compound criteria, both delivery routes, upload
+ordering and final hydration evidence; existing hydration failure remains
+fail-closed. These checks do not prove live model adherence or qualify a new
+published artifact. No archived implementation or private adopter source was
+copied.

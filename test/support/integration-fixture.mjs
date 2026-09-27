@@ -16,10 +16,10 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { createApplication } from "../../dist/application.js";
+import { stateRoot } from "../../dist/config.js";
 import { LocalContentStore } from "../../dist/content/local.js";
 import { RegularDelivery } from "../../dist/delivery/regular.js";
 import { LocalExecutionDriver } from "../../dist/execution/local.js";
-import { stateRoot } from "../../dist/config.js";
 
 export function git(path, ...args) {
   return execFileSync("git", ["-C", path, ...args], {
@@ -171,9 +171,10 @@ export async function waitForFile(check, path, message, timeout = 10_000) {
 }
 
 class ScriptedPlanningModel {
-  constructor(graph, logPath) {
+  constructor(graph, logPath, resultReviewer) {
     this.graph = graph;
     this.logPath = logPath;
+    this.resultReviewer = resultReviewer;
   }
 
   observe(request) {
@@ -228,11 +229,13 @@ class ScriptedPlanningModel {
     this.observe(request);
     appendEvent(this.logPath, {
       type: "result-review",
+      criteria: request.criteria,
       observations: request.observations
         ? JSON.parse(request.observations)
         : null,
       evidence: request.evidence ?? [],
     });
+    if (this.resultReviewer) return this.resultReviewer(request);
     const source = request.sources.find((item) => item.path === "OBJECTIVE");
     return {
       findings: request.criteria.map((criterion) => {
@@ -500,6 +503,12 @@ class ScriptedHarness {
         destination,
         file.base64 ? Buffer.from(file.base64, "base64") : file.text,
       );
+    }
+    for (const [command, ...args] of action.commands ?? []) {
+      execFileSync(command, args, {
+        cwd: data.worktree,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
     }
     if (action.consumeSelected) {
       const request = readJson(data.requestPath);
@@ -820,7 +829,11 @@ export function makeApplication(descriptor) {
     application: createApplication(descriptor.config, {
       planningModel:
         descriptor.planningModel ??
-        new ScriptedPlanningModel(descriptor.graph, planningPath),
+        new ScriptedPlanningModel(
+          descriptor.graph,
+          planningPath,
+          descriptor.resultReviewer,
+        ),
       driver,
       github,
       delivery: new RegularDelivery(descriptor.config.checkout, github),

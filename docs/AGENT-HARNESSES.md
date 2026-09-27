@@ -132,12 +132,12 @@ automatic fallback are intentionally unsupported.
 
 ## Built-in adapter matrix
 
-| Harness             | Package and license                                                                                                                                                                                                                | Local runtime                                     | Explicit Factory boundary                                                                                                                                                                                             | Authentication                                                                                         |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| Codex SDK (default) | bundled `@openai/codex-sdk@0.156.0`; Apache-2.0                                                                                                                                                                                    | local SDK worker                                  | explicit model/reasoning, workspace-write, approval prompts disabled                                                                                                                                                  | existing Codex local login/profile                                                                     |
-| Claude Agent SDK    | optional [`@anthropic-ai/claude-agent-sdk@0.3.281`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk); [Anthropic proprietary license](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/LICENSE.md) | local SDK worker process                          | exact model/reasoning, tool and allowed-tool lists, permission mode, setting sources, turn limit; MCP, plugins, skills, subagents, and session persistence disabled unless the adapter shape is deliberately extended | standard Claude local profile or named Claude/Anthropic auth environment                               |
-| GitHub Copilot SDK  | optional [`@github/copilot-sdk@1.0.13`](https://www.npmjs.com/package/@github/copilot-sdk); MIT                                                                                                                                    | bundled local Copilot CLI/runtime in `empty` mode | exact model/reasoning/timeout, explicit file tools and read/write permissions; shell, task, web, GitHub, MCP, memory, skills, plugins, host-Git operations, remote sessions, and config discovery disabled            | Copilot-local profile or named Copilot auth environment; controller `gh` authentication store excluded |
-| Registered adapter  | adopter package                                                                                                                                                                                                                    | adapter-defined local process                     | exact capability declaration, stable identity, opaque JSON-safe config                                                                                                                                                | `local-environment`, `adapter-owned`, or `none`, as declared                                           |
+| Harness             | Package and license                                                                                                                                                                                                                | Local runtime                                     | Explicit Factory boundary                                                                                                                                                                                                                   | Authentication                                                                                         |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Codex SDK (default) | bundled `@openai/codex-sdk@0.156.0`; Apache-2.0                                                                                                                                                                                    | local SDK worker                                  | explicit model/reasoning, workspace-write, approval prompts disabled                                                                                                                                                                        | existing Codex local login/profile                                                                     |
+| Claude Agent SDK    | optional [`@anthropic-ai/claude-agent-sdk@0.3.281`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk); [Anthropic proprietary license](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/LICENSE.md) | local SDK worker process                          | exact model/reasoning, tool and allowed-tool lists, permission mode, setting sources, turn limit; MCP, model skills, subagents and session persistence disabled; pinned runtime/managed components trusted; no additional plugins requested | standard Claude local profile or named Claude/Anthropic auth environment                               |
+| GitHub Copilot SDK  | optional [`@github/copilot-sdk@1.0.13`](https://www.npmjs.com/package/@github/copilot-sdk); MIT                                                                                                                                    | bundled local Copilot CLI/runtime in `empty` mode | exact model/reasoning/timeout, explicit file tools and read/write permissions; shell, task, web, GitHub, MCP, memory, skills, plugins, host-Git operations, remote sessions, and config discovery disabled                                  | Copilot-local profile or named Copilot auth environment; controller `gh` authentication store excluded |
+| Registered adapter  | adopter package                                                                                                                                                                                                                    | adapter-defined local process                     | exact capability declaration, stable identity, opaque JSON-safe config                                                                                                                                                                      | `local-environment`, `adapter-owned`, or `none`, as declared                                           |
 
 Factory names the shared selection `reasoningEffort` for all three built-ins.
 The Claude adapter maps that field to the Claude SDK's provider-native `effort`
@@ -193,7 +193,37 @@ named Copilot auth environment; missing login fails with the existing actionable
 login-and-explicit-retry request rather than restoring the controller's store.
 The pinned SDK's `empty` mode disables keytar; Factory does not claim that this
 mode will reuse a system-keychain login. Provider-local state does not authorize
-ambient tools, plugins, settings discovery, memory, or session persistence.
+unselected tools, account-synced extensions, settings discovery, memory, or session persistence.
+
+Claude's bundled and administrator-managed components are part of its trusted local
+runtime. Its initialization plugin inventory is diagnostic data, not proof of
+provenance or an extra permission grant. Factory does not reject a normal runtime
+merely because it implements instruction loading or managed policy as a plugin.
+It supplies no additional plugin paths, disables account-synced plugins/skills,
+auto-memory and optional telemetry per invocation, and excludes personal/project
+instruction files (including the built-in AGENTS.md loader's inputs). Managed
+instructions and policy retain precedence. Filesystem settings sources remain an
+explicit adapter configuration choice; use `settingSources: []` for no user,
+project or local settings discovery. Selecting a source trusts its settings/hooks
+as local runtime code; it does not expand Factory's configured model tools.
+
+The file-tool hooks and startup tool/MCP checks constrain model-facing operations;
+they do not sandbox trusted runtime or plugin code, hide all home-directory files,
+or prevent arbitrary host-code network access. Factory supplies an empty controller
+GitHub credential directory and strips publication tokens, while retaining local
+provider authentication. Scheduling, Git publication, exact validation and final
+acceptance remain controller-owned. An API for individually selected developer
+plugins is separate follow-up work; the registered harness interface already keeps
+adapter-owned customization outside shared orchestration.
+
+On Windows with a WSL2 controller, verify the selected CLI/runtime and authenticate
+inside that same WSL distribution and user account. A Windows desktop-app login
+does not establish WSL CLI readiness. Check `claude auth status` using the selected
+runtime; verify Copilot CLI availability and its own local login separately from
+`gh auth status`. Optional native installation warnings are not successful runtime
+qualification. Launch the controller from the ordinary authorized WSL host as
+explained in `docs/PUBLIC-RELEASE.md`; retain the worker's managed sandbox settings.
+An outer chat sandbox failure is not permission to weaken worker safeguards.
 
 If a profile is missing or expired, the attempt fails durably with a specific
 request to authenticate in the developer environment:

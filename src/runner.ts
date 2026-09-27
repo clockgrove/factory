@@ -12,6 +12,7 @@ import {
 } from "./completion.js";
 import {
   compilePlan,
+  assertObjectiveCriteria,
   finalObjectiveCommands,
   objectiveCriteria,
   planningSources,
@@ -44,6 +45,7 @@ import {
   validateTree,
 } from "./validation.js";
 import { DiagnosticEmitter, StateDiagnostics } from "./diagnostics.js";
+import { preflightLocalExecutables } from "./local-preflight.js";
 import {
   acquireControllerLock,
   readControllerOwner,
@@ -231,6 +233,7 @@ export async function runObjective(
   try {
     diagnostics.emit({ operation: "objective-run", outcome: "started" });
     const issue = await github.objective(objective);
+    assertObjectiveCriteria(issue.body);
     const installationConfigDigest = factoryConfigDigest(config);
     let state = readState(config.repository, objective);
     if (state) {
@@ -348,6 +351,33 @@ export async function runObjective(
         (candidate) => ({ itemCount: candidate.graph.items.length }),
       );
       const graph = plan.graph;
+      preflightLocalExecutables({
+        checkout: config.checkout,
+        baseSha,
+        graph,
+        finalCommands: plan.finalCommands,
+        privateRoot: root,
+        credentialDirectory: join(root, "empty-gh-config"),
+        secrets: configuredDiagnosticSecrets(config),
+        observe: (entry) =>
+          diagnostics.emit({
+            itemId: entry.itemId,
+            operation: "local-executable-preflight",
+            outcome:
+              entry.status === "missing" || entry.status === "version-mismatch"
+                ? "failed"
+                : "observed",
+            metadata: {
+              origin: entry.origin,
+              source: entry.source,
+              commandIndex: entry.commandIndex,
+              executable: entry.executable,
+              preflightStatus: entry.status,
+              pathContext: entry.pathContext,
+            },
+            detail: entry.detail,
+          }),
+      });
       const projected = await diagnostics.span(
         {
           operation: "github-projection",

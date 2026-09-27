@@ -41,6 +41,12 @@ function progressEvent(
     event.subtype = message.subtype;
   if ("session_id" in message && typeof message.session_id === "string")
     event.sessionId = message.session_id;
+  if (message.type === "system" && message.subtype === "init")
+    event.plugins = message.plugins.map(({ name, path, version }) => ({
+      name: redact(name, secrets),
+      path: redact(path, secrets),
+      ...(version && { version: redact(version, secrets) }),
+    }));
   if (message.type === "result") {
     event.success = message.subtype === "success" && !message.is_error;
     event.turns = message.num_turns;
@@ -80,8 +86,10 @@ function assertInitialization(
     throw new Error(`Claude SDK exposed unconfigured tool ${unexpectedTool}`);
   if (message.mcp_servers.length)
     throw new Error("Claude SDK initialized an unconfigured MCP server");
-  if (message.plugins.length)
-    throw new Error("Claude SDK initialized an unconfigured plugin");
+  // Plugin-shaped metadata includes the pinned runtime's built-in and managed
+  // components. It is an inventory, not a provenance or confinement boundary.
+  // Extension inputs are controlled at launch; model-facing capabilities below
+  // and above still have to match the configured worker contract.
   if (message.skills.length)
     throw new Error("Claude SDK initialized an unconfigured skill");
   if (message.agents?.length)
@@ -161,10 +169,6 @@ async function main(): Promise<void> {
       if (next.done) break;
       const message = next.value;
       turn.progress();
-      if (message.type === "system" && message.subtype === "init") {
-        assertInitialization(message, input);
-        initialization = message;
-      }
       if (message.type === "result") result = message;
       if (!progressLost)
         try {
@@ -182,6 +186,10 @@ async function main(): Promise<void> {
             `Factory Claude worker progress unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
           );
         }
+      if (message.type === "system" && message.subtype === "init") {
+        assertInitialization(message, input);
+        initialization = message;
+      }
       if (message.type === "result") break;
     }
     if (!initialization)
@@ -205,6 +213,11 @@ async function main(): Promise<void> {
         reasoningEffort: input.config.reasoningEffort,
         permissionMode: initialization.permissionMode,
         settingSources: input.config.settingSources,
+        plugins: initialization.plugins.map(({ name, path, version }) => ({
+          name: redact(name, redactionValues),
+          path: redact(path, redactionValues),
+          ...(version && { version: redact(version, redactionValues) }),
+        })),
         finalResponse: result.subtype === "success" ? result.result : "",
         usage: result.usage,
         modelUsage: result.modelUsage,

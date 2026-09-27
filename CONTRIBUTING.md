@@ -21,6 +21,22 @@ npm run notices:check
 
 The [Quality workflow](.github/workflows/quality.yml) runs this local gate on pull requests and main. Live GitHub and Codex acceptance remains an explicit disposable-target run.
 
+For Objective preflight and selected-media review changes, use the focused offline
+integration gate first:
+
+```sh
+npm run build
+node --test test/review-preflight.test.mjs test/pilot-integration.test.mjs test/result-review-sources.test.mjs test/acceptance.test.mjs
+```
+
+These tests use real temporary Git/LFS repositories and offline pnpm installation,
+capture the production serialized review request at a scripted SDK boundary, and
+reject missing pointer, rule, toolchain or hydration evidence. They also verify
+that malformed final acceptance stops before model calls or GitHub projection.
+They run in ordinary `npm test`/CI. They prove deterministic evidence and lifecycle
+behavior, not live model adherence, public-host delivery or adopter acceptance;
+those remain one separately authorized stable-artifact qualification checkpoint.
+
 [Quality tooling](docs/QUALITY-TOOLING.md) documents the pinned Biome version,
 the old/new lint rule mapping, and the narrow ESLint and Prettier fallbacks that
 preserve checks Biome does not cover.

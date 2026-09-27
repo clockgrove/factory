@@ -2,7 +2,10 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## Unreleased
+## 0.1.28 — Unreleased
+
+- Accept the pinned Claude runtime's bundled/managed components without treating plugin inventory as a security attestation. Disable optional telemetry, account sync, auto-memory and personal/project instruction loading per invocation; retain configured model-tool, managed-policy and controller lifecycle boundaries.
+- Reconcile current main including early Objective acceptance preflight and validated selected-LFS review evidence. Earlier 0.1.22 artifacts and live evidence remain historical; this candidate requires its own installed proof.
 
 - Keep Copilot workers on Factory's owned empty GitHub CLI authentication directory instead of exposing ambient or default controller publication stores; retain separately selected Copilot-local authentication and explicit session settings.
 - Validate observed Copilot startup identity before dispatching the Work Item prompt, with the existing bounded event wait and no fallback. Keep one stable provider-turn timeout promise across progress resets so callback-driven stalls fail durably (#130).
@@ -12,7 +15,40 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 - Reuse developer-local provider authentication, fail with actionable login-and-retry guidance when it is absent, and keep controller GitHub publication credentials out of worker environments.
 - Preserve every exact Work Item validation command with its provenance and source in the common Codex, Claude, and GitHub Copilot worker prompt while retaining controller-only command execution and validation authority.
 - Derive Claude and GitHub Copilot client telemetry versions from the installed Factory package metadata instead of a stale release literal.
-- Refresh the unreleased `0.1.22` harness candidate onto accepted main, preserving controller capabilities, media receipts, shared staging/stop boundaries, exact validation constraints, terminal/idle guards, worker-usage correlation, and the Biome/Node 22 quality gate. Claude and Copilot normalized token counters remain explicitly unavailable rather than estimated.
+- Refresh the harness candidate onto accepted main, preserving controller capabilities, media receipts, shared staging/stop boundaries, exact validation constraints, terminal/idle guards, worker-usage correlation, and the Biome/Node 22 quality gate. Claude and Copilot normalized token counters remain explicitly unavailable rather than estimated.
+
+## 0.1.27 — Unreleased
+
+- Reject missing or empty recognized final acceptance before model-backed planning or activation using the existing Objective parser.
+- Supply compact exact-tree selected-LFS pointer/filter validation facts to item and final review. Separately include bounded tracked attribute text without treating effective filtering as proof of exact rule contents; retain later delivery and final hydration phases.
+- Strengthen the offline real-pnpm/Git/LFS pilot at the production serialized-review boundary, with missing-evidence negatives and early-refusal regressions. Carry accepted #165 / PR #166 integration `058bd7587aa532342ebb77488474258c90930f5d`; this metadata preparation changes no runtime or dependencies. Published v0.1.26 and its paused run remain unchanged. Publication, new-artifact qualification and actual adopter acceptance remain pending.
+
+## 0.1.26 — 2026-09-27
+
+- Constrain compiler and independent graph-review acceptance to evidence available before the current Work Item's own delivery, including every clause of compound criteria. Preserve available completed-dependency evidence without presuming native-stack predecessors have merged; keep upload and final hydration at their existing controller phases.
+- Include the offline real-pnpm/Git/LFS regression and selected-LFS lifecycle coverage, plus ordinary-host controller launch and worker-preflight guidance. Scripted tests establish instruction delivery and lifecycle ordering, not live model adherence.
+- Carry accepted #159 / PR #160 at `5aaf6feb01138ff91acc173ae5961daba8638bff`. Keep published v0.1.25, its paused runs and plans, and frozen #55/PR #62 candidate 0.1.22 unchanged. Publish through metadata PR #161 at `b20cc82c8b63ca231b1f120ce25025836ed8d75b`. Publication and independent public-download/offline installation passed; fresh exact-artifact public qualification and actual adopter acceptance remain pending in issue #26.
+
+## 0.1.25 — 2026-09-27
+
+- Permit new Git-ignored, nondelivered links only when absent from HEAD and the index (including staged descendants), with an existing ordinary-file/directory destination strictly inside the worktree and outside its root and Git metadata.
+- Preserve recursive ignored-directory inventory and delivered-path, symlink-ancestor, escape, special-file, mode, ownership and staged/working-byte secret guards. Add real local collection coverage for contained pnpm-style links, owned ignore policy and mixed unsafe candidates.
+- Explicitly declare ESM in the existing generic pnpm receipt test fixture for the unchanged Node 22.0 floor; no runtime dependency or packaged skill changes.
+- Publish accepted source from PR #151 and metadata PR #152 at `b641ccdccdb969f14c64a66da751c22f6be5bd6d`, without rewriting immutable v0.1.24 or frozen #55 candidate 0.1.22. Publication and installation verification passed; automatic qualification of the wholly fresh public gate and actual adopter acceptance remain separate coordinator-owned requirements. The first combined gate is preserved/nonqualifying after a provider idle timeout, not a product finding; see [build status](docs/BUILD-STATUS.md).
+
+## 0.1.24 — 2026-09-26
+
+- Align planner structured-output lower bounds with existing required graph-shape validation: at least one Work Item; non-empty title, goal and brief; and non-empty acceptance, non-goals, owned paths and citations. Preserve the production indexed-citation schema/decoder seam and legitimate empty optional collections.
+- Preserve fail-closed semantic checks, source/command authority, the bounded sourced revision, local Codex execution and Node >=22. No new dependencies, arbitrary maxima, fallback/retry pipeline or manual graph repair is added.
+- Carry forward accepted v0.1.23 source corrections without rewriting its immutable artifact or qualifying its preserved failed planning attempts. The actual raw failed fields remain unknown; schema-mismatch tests do not identify those fields.
+- Release metadata only here: publication, fresh installed-artifact Objective qualification and the separately approved private adopter pilot remain required. Frozen #55 candidate 0.1.22 and optional Claude/Copilot work are not included.
+
+## 0.1.23 — 2026-09-26
+
+- Permit result and final review to ground exact quotes across separately selected headings from the same source document, without concatenating packets or weakening authoritative evidence label checks.
+- Include accepted source corrections since v0.1.21: accurate resume messaging, compact citation schema, resource guidance, aggregate review budgets, worker usage, streaming usage summaries, bounded provider-wait retention, Node 22.0 scanner compatibility, host-tool preflight, interrupted-delivery refusal and the reviewed Biome migration with retained fallback quality coverage.
+- Preserve local Codex-only execution and the Node >=22.0 floor. Optional Claude/Copilot harness work and live qualification in #55 remain deferred and are not included.
+- Publication and fresh installed-artifact/adopter acceptance remain separate gates. The unreleased #55 candidate uses 0.1.22; this release candidate uses 0.1.23 to avoid conflating their identities.
 
 ## 0.1.21 — 2026-09-25
 

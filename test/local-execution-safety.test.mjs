@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -130,7 +131,22 @@ function target(root, legacy = false, lfs = false) {
 async function runCandidate(change, options = {}) {
   const root = mkdtempSync(join(tmpdir(), "factory-local-safety-"));
   try {
-    const { checkout, baseSha } = target(root, options.legacy, options.lfs);
+    let { checkout, baseSha } = target(root, options.legacy, options.lfs);
+    if (options.prepareBase) {
+      options.prepareBase(checkout, root);
+      git(checkout, "add", "-A");
+      git(
+        checkout,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-m",
+        "fixture policy",
+      );
+      baseSha = git(checkout, "rev-parse", "HEAD");
+    }
     const harness = {
       capabilities: {
         protocolVersion: 1,
@@ -167,11 +183,330 @@ async function runCandidate(change, options = {}) {
       ownedPaths: options.ownedPaths ?? ["safe.txt"],
     };
     const handle = await driver.start({ attemptId: "attempt", baseSha, item });
-    return await driver.collect(handle);
+    const result = await driver.collect(handle);
+    options.inspectResult?.(result, checkout, baseSha);
+    return result;
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+function ignoredDependencies(worktree) {
+  const packageRoot = join(
+    worktree,
+    "node_modules/.pnpm/tool@1/node_modules/tool",
+  );
+  mkdirSync(join(packageRoot, "bin"), { recursive: true });
+  mkdirSync(join(worktree, "node_modules/.bin"), { recursive: true });
+  writeFileSync(join(packageRoot, "bin/tool.js"), "console.log('fixture');\n");
+  symlinkSync(
+    ".pnpm/tool@1/node_modules/tool",
+    join(worktree, "node_modules/tool"),
+  );
+  symlinkSync("../tool/bin/tool.js", join(worktree, "node_modules/.bin/tool"));
+  symlinkSync("../README.md", join(worktree, "node_modules/readme"));
+}
+
+const dependencyPolicy = (checkout) =>
+  writeFileSync(join(checkout, ".gitignore"), "node_modules/\n");
+
+test("local collection permits ignored in-root dependency and executable links without delivering them", async () => {
+  await runCandidate(
+    (worktree) => {
+      ignoredDependencies(worktree);
+      writeFileSync(join(worktree, "safe.txt"), "owned regular change\n");
+    },
+    {
+      prepareBase: dependencyPolicy,
+      inspectResult(result, checkout, baseSha) {
+        assert.equal(
+          git(checkout, "diff", "--name-only", baseSha, result.changeRef),
+          "safe.txt",
+        );
+        assert.equal(
+          git(
+            checkout,
+            "ls-tree",
+            "-r",
+            result.changeRef,
+            "--",
+            "node_modules",
+          ),
+          "",
+        );
+      },
+    },
+  );
+});
+
+test("an owned in-place ignore-policy change can accompany generated links", async () => {
+  await runCandidate(
+    (worktree) => {
+      writeFileSync(
+        join(worktree, ".gitignore"),
+        "__pycache__/\nnode_modules/\n",
+      );
+      ignoredDependencies(worktree);
+      writeFileSync(join(worktree, "safe.txt"), "safe\n");
+    },
+    {
+      prepareBase: (checkout) =>
+        writeFileSync(join(checkout, ".gitignore"), "__pycache__/\n"),
+      ownedPaths: ["safe.txt", ".gitignore"],
+      inspectResult(result, checkout, baseSha) {
+        assert.equal(
+          git(checkout, "diff", "--name-only", baseSha, result.changeRef),
+          ".gitignore\nsafe.txt",
+        );
+      },
+    },
+  );
+});
+
+test("ignored generated links do not bypass the collection safety matrix", async (t) => {
+  const cases = [
+    [
+      "nonignored link",
+      (worktree) => symlinkSync("README.md", join(worktree, "new-link")),
+      /unsafe symlink/,
+    ],
+    [
+      "escaping ignored link",
+      (worktree, root) =>
+        symlinkSync(root, join(worktree, "node_modules/escape")),
+      /unsafe symlink/,
+    ],
+    [
+      "dangling ignored link",
+      (worktree) =>
+        symlinkSync("missing", join(worktree, "node_modules/dangling")),
+      /unsafe symlink/,
+    ],
+    [
+      "cyclic ignored link",
+      (worktree) => symlinkSync("cycle", join(worktree, "node_modules/cycle")),
+      /unsafe symlink/,
+    ],
+    [
+      "Git metadata target",
+      (worktree) =>
+        symlinkSync("../.git", join(worktree, "node_modules/git-link")),
+      /unsafe symlink/,
+    ],
+    [
+      "forced staged ignored link",
+      (worktree) => git(worktree, "add", "-f", "node_modules/.bin/tool"),
+      /unsafe symlink|unsafe Git entry/,
+    ],
+    [
+      "ignored FIFO",
+      (worktree) =>
+        execFileSync("mkfifo", [join(worktree, "node_modules/pipe")]),
+      /special file/,
+    ],
+    [
+      "link to ignored FIFO",
+      (worktree) => {
+        execFileSync("mkfifo", [join(worktree, "node_modules/z-pipe")]);
+        symlinkSync("z-pipe", join(worktree, "node_modules/a-link"));
+      },
+      /unsafe symlink|special file/,
+    ],
+    [
+      "unowned regular change",
+      (worktree) => writeFileSync(join(worktree, "other.txt"), "not owned\n"),
+      /outside ownership/,
+    ],
+    [
+      "unowned ignore change",
+      (worktree) =>
+        writeFileSync(join(worktree, ".gitignore"), "node_modules/\nextra/\n"),
+      /outside ownership/,
+    ],
+    [
+      "link to worktree root",
+      (worktree) => symlinkSync("..", join(worktree, "node_modules/root")),
+      /unsafe symlink/,
+    ],
+    [
+      "changed gitmodules",
+      (worktree) =>
+        writeFileSync(
+          join(worktree, ".gitmodules"),
+          '[submodule "new"]\npath = module\n',
+        ),
+      /unsafe Git entry/,
+    ],
+    [
+      "working-byte secret",
+      (worktree) =>
+        writeFileSync(
+          join(worktree, "safe.txt"),
+          "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n",
+        ),
+      /Secretlint found suspected secret/,
+    ],
+  ];
+  for (const [name, change, expected] of cases) {
+    await t.test(name, async () => {
+      await assert.rejects(
+        runCandidate(
+          (worktree, root) => {
+            ignoredDependencies(worktree);
+            writeFileSync(join(worktree, "safe.txt"), "safe\n");
+            change(worktree, root);
+          },
+          {
+            prepareBase: dependencyPolicy,
+            ownedPaths: ["safe.txt", ".gitmodules"],
+          },
+        ),
+        expected,
+      );
+    });
+  }
+});
+
+test("staged regular bytes behind an ignored symlink ancestor still fail", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-ignored-ancestor-"));
+  try {
+    const { checkout } = target(root);
+    dependencyPolicy(checkout);
+    mkdirSync(join(checkout, "real"));
+    writeFileSync(join(checkout, "real/entry.txt"), "safe\n");
+    symlinkSync("real", join(checkout, "node_modules"));
+    const blob = git(checkout, "hash-object", "-w", "real/entry.txt");
+    git(
+      checkout,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `100644,${blob},node_modules/entry.txt`,
+    );
+    assert.throws(
+      () =>
+        checkStagedCandidate(checkout, checkout, ["node_modules/entry.txt"]),
+      /unsafe filesystem entry|unsafe symlink/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ignored links preserve staged mode and staged/working secret checks", async (t) => {
+  for (const kind of ["submodule", "staged secret", "working secret"]) {
+    await t.test(kind, () => {
+      const root = mkdtempSync(join(tmpdir(), "factory-ignored-staged-"));
+      try {
+        const { checkout } = target(root);
+        dependencyPolicy(checkout);
+        ignoredDependencies(checkout);
+        writeFileSync(join(checkout, "safe.txt"), "clean\n");
+        if (kind === "submodule") {
+          git(
+            checkout,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            `160000,${git(checkout, "rev-parse", "HEAD")},safe.txt`,
+          );
+          assert.throws(
+            () => checkStagedCandidate(checkout, checkout, ["safe.txt"]),
+            /unsafe Git entry/,
+          );
+        } else {
+          const secret =
+            "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n";
+          if (kind === "staged secret") {
+            writeFileSync(join(checkout, "safe.txt"), secret);
+            git(checkout, "add", "safe.txt");
+            writeFileSync(join(checkout, "safe.txt"), "clean\n");
+          } else {
+            git(checkout, "add", "safe.txt");
+            writeFileSync(join(checkout, "safe.txt"), secret);
+          }
+          assert.throws(
+            () => checkStagedCandidate(checkout, checkout, ["safe.txt"]),
+            /Secretlint found suspected secret/,
+          );
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("changed tracked links cannot be hidden by an owned ignore change", async () => {
+  await assert.rejects(
+    runCandidate(
+      (worktree) => {
+        writeFileSync(
+          join(worktree, ".gitignore"),
+          "node_modules/\nold-link\nold-link-backup\n",
+        );
+        ignoredDependencies(worktree);
+        writeFileSync(join(worktree, "safe.txt"), "safe\n");
+        renameSync(
+          join(worktree, "old-link"),
+          join(worktree, "old-link-backup"),
+        );
+        symlinkSync("safe.txt", join(worktree, "old-link"));
+      },
+      {
+        legacy: true,
+        prepareBase: dependencyPolicy,
+        ownedPaths: ["safe.txt", ".gitignore", "old-link"],
+      },
+    ),
+    /unsafe filesystem entry|unsafe Git entry/,
+  );
+});
+
+test("a newly owned ignore rule cannot authorize an escaping link", async () => {
+  await assert.rejects(
+    runCandidate(
+      (worktree, root) => {
+        writeFileSync(
+          join(worktree, ".gitignore"),
+          "node_modules/\nnew-link\n",
+        );
+        ignoredDependencies(worktree);
+        writeFileSync(join(worktree, "safe.txt"), "safe\n");
+        symlinkSync(root, join(worktree, "new-link"));
+      },
+      { prepareBase: dependencyPolicy, ownedPaths: ["safe.txt", ".gitignore"] },
+    ),
+    /unsafe symlink/,
+  );
+});
+
+test("ignored workspace links can accompany owned package source", async () => {
+  await runCandidate(
+    (worktree) => {
+      ignoredDependencies(worktree);
+      mkdirSync(join(worktree, "packages/tool"), { recursive: true });
+      writeFileSync(
+        join(worktree, "packages/tool/index.js"),
+        "export const fixture = true;\n",
+      );
+      symlinkSync(
+        "../packages/tool",
+        join(worktree, "node_modules/workspace-tool"),
+      );
+    },
+    {
+      prepareBase: dependencyPolicy,
+      ownedPaths: ["packages/"],
+      inspectResult(result, checkout, baseSha) {
+        assert.equal(
+          git(checkout, "diff", "--name-only", baseSha, result.changeRef),
+          "packages/tool/index.js",
+        );
+      },
+    },
+  );
+});
 
 test("unrelated existing symlink, submodule, and .gitmodules do not block an owned change", async () => {
   const result = await runCandidate(

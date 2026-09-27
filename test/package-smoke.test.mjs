@@ -331,6 +331,14 @@ test("fresh packed artifact composes a registered harness through the package ro
       { encoding: "utf8", env: environment },
     );
     assert.match(timeline, /"operation":"harness"/);
+    const followed = spawnSync(
+      cli,
+      ["diagnostics", "--objective", "1", "--follow", "--config", config],
+      { encoding: "utf8", env: environment, timeout: 1_500 },
+    );
+    assert.equal(followed.error?.code, "ETIMEDOUT");
+    assert.equal(followed.stdout, timeline);
+    assert.equal(followed.stderr, "");
     const diagnosticEvents = timeline.trim().split("\n").map(JSON.parse);
     const completed = diagnosticEvents.filter(
       (event) =>

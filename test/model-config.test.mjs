@@ -439,6 +439,13 @@ test("Claude adapter configuration is exact, isolated, and bound to the pinned S
     assert.equal(queryOptions.strictMcpConfig, true);
     assert.deepEqual(queryOptions.settingSources, []);
     assert.deepEqual(queryOptions.plugins, []);
+    assert.deepEqual(queryOptions.settings, {
+      syncClaudeAiPlugins: false,
+      syncClaudeAiSkills: false,
+      autoMemoryEnabled: false,
+      claudeMdExcludes: ["**"],
+    });
+    assert.equal(queryOptions.env.DISABLE_TELEMETRY, "1");
     assert.deepEqual(queryOptions.agents, {});
     assert.deepEqual(queryOptions.skills, []);
     assert.deepEqual(queryOptions.mcpServers, {});

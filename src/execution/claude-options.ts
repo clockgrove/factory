@@ -131,8 +131,17 @@ export function claudeQueryOptions(
       return { behavior: "allow", toolUseID: permission.toolUseID };
     },
     settingSources: [...config.settingSources],
+    // Filesystem sources remain an explicit operator choice. Account sync,
+    // personal/project instructions and auto-memory are not worker inputs.
+    // Managed policy retains precedence and cannot be excluded by these settings.
+    settings: {
+      syncClaudeAiPlugins: false,
+      syncClaudeAiSkills: false,
+      autoMemoryEnabled: false,
+      claudeMdExcludes: ["**"],
+    },
     maxTurns: config.maxTurns,
-    env: { ...environment },
+    env: { ...environment, DISABLE_TELEMETRY: "1" },
     mcpServers: {},
     strictMcpConfig: true,
     agents: {},

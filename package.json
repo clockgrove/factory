@@ -1,6 +1,6 @@
 {
   "name": "@clockgrove/factory",
-  "version": "0.1.22",
+  "version": "0.1.28",
   "description": "Objective-driven development plugin for a target repository",
   "homepage": "https://github.com/clockgrove/factory-rebuild#readme",
   "repository": {
@@ -62,6 +62,7 @@
     "@biomejs/biome": "2.5.14",
     "@types/node": "^24.5.2",
     "eslint": "9.39.5",
+    "pnpm": "10.34.5",
     "prettier": "^3.6.2",
     "typescript": "^5.9.2",
     "typescript-eslint": "8.44.1"

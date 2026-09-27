@@ -8,7 +8,9 @@ import {
   constants,
   fstatSync,
   readdirSync,
+  readSync,
 } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { stateRoot } from "./config.js";
@@ -737,6 +739,131 @@ export function readAgentTimeline(
       }
     }
   }
+  return events.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+}
+
+/** Parse every complete record, retaining at most the current record text. */
+function* privateRecords(path: string): Generator<Record<string, unknown>> {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0)
+      throw new Error(
+        "Private diagnostic file is not a restricted regular file",
+      );
+    const buffer = Buffer.alloc(64 * 1024);
+    const decoder = new StringDecoder("utf8");
+    let pending = "";
+    for (;;) {
+      const bytes = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytes === 0) break;
+      pending += decoder.write(buffer.subarray(0, bytes));
+      let start = 0;
+      for (;;) {
+        const end = pending.indexOf("\n", start);
+        if (end < 0) break;
+        const line = pending.slice(start, end);
+        if (line) yield { ...JSON.parse(line) } as Record<string, unknown>;
+        start = end + 1;
+      }
+      pending = pending.slice(start);
+    }
+    // Like completeLines, ignore the final unterminated record, even if valid.
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function usageEvent(
+  event: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const { at, operation, attemptId, runId, workItemId } = event;
+  if (operation === "harness") return { at, operation, attemptId };
+  if (operation === "model-invocation") {
+    const metadata = event.metadata as DiagnosticEvent["metadata"];
+    return {
+      at,
+      operation,
+      metadata:
+        metadata &&
+        Object.fromEntries(
+          [
+            "invocationId",
+            "providerAttempt",
+            "phase",
+            "scopeId",
+            "observationType",
+            "usageAvailable",
+            ...tokenCategories,
+          ].map((key) => [key, metadata[key]]),
+        ),
+    };
+  }
+  if (operation !== "worker-usage") return;
+  const value = event.workerUsage;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const observation = value as Record<string, unknown>;
+  return {
+    at,
+    operation,
+    attemptId,
+    runId,
+    workItemId,
+    workerUsage: {
+      type: observation.type,
+      role: observation.role,
+      phase: observation.phase,
+      invocationId: observation.invocationId,
+      providerAttempt: observation.providerAttempt,
+      usage: normalizeTokenUsage(observation.usage),
+    },
+  };
+}
+
+/** Summary input only: stream private files without retaining command detail. */
+export function readUsageSummaryEvents(
+  repository: string,
+  objective: number,
+  state?: FactoryState,
+): Record<string, unknown>[] {
+  const events: Record<string, unknown>[] = [];
+  const itemByAttempt = new Map<string, string>();
+  const runByAttempt = new Map<string, string>();
+  const path = diagnosticPath(repository, objective);
+  if (existsSync(path))
+    for (const event of privateRecords(path)) {
+      // Match timeline correlation from all controller records, in file order.
+      if (typeof event.attemptId === "string") {
+        if (typeof event.itemId === "string")
+          itemByAttempt.set(event.attemptId, event.itemId);
+        if (typeof event.runId === "string")
+          runByAttempt.set(event.attemptId, event.runId);
+      }
+      const selected = usageEvent(event);
+      if (selected) events.push(selected);
+    }
+  for (const [id, work] of Object.entries(state?.work ?? {}))
+    if (work.attempt) {
+      itemByAttempt.set(work.attempt, id);
+      if (state?.runId) runByAttempt.set(work.attempt, state.runId);
+    }
+  const root = join(stateRoot(repository), "harness");
+  if (existsSync(root))
+    for (const name of readdirSync(root).filter((name) =>
+      /^[0-9a-f-]{36}\.progress\.ndjson$/.test(name),
+    )) {
+      const attemptId = name.slice(0, 36);
+      if (!itemByAttempt.has(attemptId)) continue;
+      for (const event of privateRecords(join(root, name))) {
+        const selected = usageEvent({
+          ...event,
+          attemptId,
+          runId: runByAttempt.get(attemptId),
+          workItemId: itemByAttempt.get(attemptId),
+        });
+        if (selected) events.push(selected);
+      }
+    }
   return events.sort((a, b) => String(a.at).localeCompare(String(b.at)));
 }
 

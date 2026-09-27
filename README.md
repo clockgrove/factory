@@ -4,7 +4,32 @@
 
 Factory turns a repository development Objective into source-grounded Work Items, runs bounded coding attempts, validates their exact result trees, and delivers the changes through GitHub. It is an open-source Clockgrove plugin installed for one target repository at a time.
 
-**Version:** `v0.1.21`. Factory runs the local Codex SDK path with a source-grounded dependency DAG, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for the published artifact identity and exact Objective acceptance evidence.
+**Published release:** [v0.1.26](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26). Factory runs the local Codex SDK path with a source-grounded dependency DAG, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. See [current build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md) for source, publication and exact-artifact acceptance status.
+
+v0.1.26 includes the accepted [#159](https://github.com/clockgrove/factory-rebuild/issues/159)
+planning lifecycle correction and the earlier #150 contained ignored-link fix.
+Publication, independent public-download verification and normal empty-cache
+offline installation passed. The representative public installed gate and
+actual adopter acceptance remain pending; [issue #26](https://github.com/clockgrove/factory-rebuild/issues/26)
+tracks that work. Historical v0.1.25 artifacts and paused runs remain unchanged.
+
+v0.1.21 retains its historical accepted-artifact evidence; published v0.1.23
+and its failed planning attempts remain immutable and nonqualifying for the
+earlier gate. Published v0.1.24 includes the reviewed
+[#145](https://github.com/clockgrove/factory-rebuild/issues/145) required-schema
+alignment. Its fresh public same-path LFS Objective has completed with automatic
+final review and independent fresh-clone verification; exact artifact/gate
+identities are recorded in build status. This is the PUBLIC prerequisite only:
+actual adopter #26 remains OPEN/unaccepted. The immutable artifact is not changed
+by this documentation handoff. The separate
+unreleased #55 candidate 0.1.22 and Claude/Copilot qualification remain deferred.
+
+**Unpublished development candidate: v0.1.27.** This checkout prepares accepted
+[#165](https://github.com/clockgrove/factory-rebuild/issues/165) / [PR #166](https://github.com/clockgrove/factory-rebuild/pull/166).
+Package and plugin metadata name 0.1.27, and this checkout's marketplace points
+to its future tag. No v0.1.27 release or installed qualification is claimed.
+Published installation below stays pinned to immutable v0.1.26; follow the
+[candidate procedure](docs/PUBLIC-RELEASE.md#prepare-v0127) for the next artifact.
 
 ## How it works
 
@@ -15,19 +40,19 @@ Factory turns a repository development Objective into source-grounded Work Items
 
 The target repository owns its product and runtime truth. Factory state and credentials stay outside the target checkout. Factory refuses to run against any Factory source repository.
 
-## Install v0.1.21
+## Install published v0.1.26
 
-Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.21) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md):
+Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [build status](https://github.com/clockgrove/factory-rebuild/blob/main/docs/BUILD-STATUS.md):
 
 ```sh
-codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.21
+codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.26
 codex plugin add factory@clockgrove
-gh release download v0.1.21 --repo clockgrove/factory-rebuild \
-  --pattern clockgrove-factory-0.1.21.tgz --pattern SHA256SUMS
+gh release download v0.1.26 --repo clockgrove/factory-rebuild \
+  --pattern clockgrove-factory-0.1.26.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Compare the tarball digest with the independently recorded build status value.
-npm install --offline --ignore-scripts --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.21.tgz
+npm install --offline --prefix /absolute/private/factory-prefix \
+  ./clockgrove-factory-0.1.26.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```
@@ -36,7 +61,7 @@ The plugin supplies the packaged `director` and `setup` skills; the verified CLI
 
 ## Build from source
 
-For development, the following commands build and install the current checkout as a local candidate. A local build has its own package identity and does not count as installation of the published `v0.1.21` artifact. The [release checklist](https://github.com/clockgrove/factory-rebuild/blob/main/docs/RELEASE-CHECKLIST.md) and [public release procedure](https://github.com/clockgrove/factory-rebuild/blob/main/docs/PUBLIC-RELEASE.md) describe the exact-artifact gate.
+For development, the following commands build and install the current checkout as a local candidate. A local build has its own package identity and does not count as installation of any published artifact. The [release checklist](https://github.com/clockgrove/factory-rebuild/blob/main/docs/RELEASE-CHECKLIST.md) and [public release procedure](https://github.com/clockgrove/factory-rebuild/blob/main/docs/PUBLIC-RELEASE.md) describe the exact-artifact gate.
 
 Requires Node.js 22 or later, Git, GitHub CLI authentication for the target repository, and an authenticated Codex SDK environment for planning and review. A selected non-Codex Work Item harness also needs its own local developer login. Media Objectives require Git LFS. Clone this repository, then build and install its package in an isolated prefix:
 
@@ -48,7 +73,7 @@ npm run lint
 npm run format:check
 npm test
 npm pack
-npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.22.tgz
+npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.28.tgz
 ```
 
 The current source candidate declares the Claude Agent SDK and GitHub Copilot
@@ -58,7 +83,7 @@ package-root registration seam available. See [local agent harnesses](docs/AGENT
 for their exact versions/licenses, configuration shapes, capability/lifecycle
 contract, local-login behavior, security boundary, CLI examples, and
 `composeWithLocalHarness` package-root API. This candidate behavior is not a
-claim about the already published `v0.1.21` artifact. The `0.1.22` draft is
+claim about the already published `v0.1.21` artifact. The `0.1.28` draft is
 unreleased and has not completed its live provider acceptance gates.
 
 The repository's [quality-tooling map](docs/QUALITY-TOOLING.md) records the
@@ -117,6 +142,12 @@ Factory then independently checks each stated Work Item and Objective acceptance
 
 Use `--delivery native-stack` at install time to deliver maximal linear chains through GitHub's native stacked pull requests. The default is regular PR delivery.
 
+### Interrupted regular delivery
+
+An ordinary restart may reattach to an identifiable worker or continue a supported validation or decision pause. It does not guarantee recovery from every controller interruption. If a regular Work Item remains `running` at `deliver`, `run` refuses ambiguous active state, even when its exact result branch or PR already exists. Repeating `run`, supplying the same plan, or accepting a result criterion cannot reconcile that publication window. The refusal may be recorded as the controller's last error; it is not a promise of zero snapshot writes.
+
+Stop and preserve the original private snapshot, plan/configuration identities, attempt, validated result commit/tree, validation/review evidence, and exact remote branch/PR heads. Inspect `status --json` and read-only GitHub evidence under target authority; keep private captures outside the target checkout. Do not edit state, republish, replay a worker, or use `retry`/`decide-result` to bypass the refusal. There is currently no supported automatic continuation for this ambiguous regular-delivery state. Any manual target disposition requires a separate explicit operator decision and does not complete the original Factory Objective. A new disposable qualification must use a separately approved fresh target/run; the interrupted run remains nonqualifying evidence.
+
 The historical `clockgrove/objective-fixture` target is private, so its linked Issues and PRs are available only to maintainers. To reproduce the combined release gate without any Clockgrove private material, start with [the public target fixture](https://github.com/clockgrove/factory-rebuild/tree/main/test/fixtures/disposable-target/) in a new GitHub repository you control. Copy its files into an empty directory, initialize and push `main`, then create a GitHub issue from [the release-candidate Objective template](https://github.com/clockgrove/factory-rebuild/blob/main/test/fixtures/objectives/release-candidate.md). Install this package with `--delivery native-stack --concurrency 2` and that target checkout, then run the new issue number. Use a fresh `XDG_CONFIG_HOME` and `XDG_STATE_HOME` for an isolated installation. The Objective owns its requirements; Factory derives the Work Item graph and validation commands from the issue and target checkout.
 
 For a media Work Item, the harness returns complete candidate AssetSets and Factory stops for human review. `factory status --objective ISSUE_NUMBER` lists their IDs and digests. Export a candidate outside the target checkout, inspect its image and sidecar, then select the whole set and resume:
@@ -138,6 +169,52 @@ The target owns its `.gitattributes` policy. Factory checks selected bytes again
 Before publication, Factory checks only a Work Item's changed paths against its ownership, rejects newly introduced unsafe links and special files, and runs the packaged Secretlint recommended rules on changed staged content and working bytes (including LFS inputs). The isolated scanner uses the supported `@secretlint/node` file API with explicit configuration, literal paths and secret masking; target configuration discovery, globs and ignore files cannot bypass it. The scanner and default packaged dependency graph support Node 22.0 without the unused Secretlint CLI configuration-creation dependencies. A positive result stops publication and reports the rule and path without the value. Review a suspected false positive outside the worker checkout; an operator can set `FACTORY_SECRETLINT_CONFIG` to an absolute, reviewed Secretlint configuration file outside the target checkout, then explicitly retry the failed item. The default recommended rules apply when no override is set. The worker receives only basic ambient variables and secret names explicitly listed in `policy.allowedSecretNames`; GitHub, Git, and SSH credential variables stay excluded even if listed. A local worktree and filtered worker environment do not isolate hostile code from files readable by the operator's OS user.
 
 Configuration lives under `$XDG_CONFIG_HOME/clockgrove-factory` (or `~/.config/clockgrove-factory`); durable run state lives under `$XDG_STATE_HOME/clockgrove-factory` (or `~/.local/state/clockgrove-factory`). Do not put either in the target repository.
+
+Ignored generated links may remain as nondelivered local material only when
+absent from HEAD and the index, proven Git-ignored, and resolved to an ordinary
+file or directory strictly inside the worktree (not its root or Git metadata).
+An owned ignore-policy change can establish that policy during foundation work.
+This is not a package-directory allowlist: traversal still inventories ignored
+directories and refuses special files, escaping, dangling or cyclic new links.
+Delivered links, changed tracked links, staged descendants behind symlink
+ancestors, ownership violations and staged/working-byte secrets remain refused.
+The #150 correction is published in v0.1.25; its automatic installed-artifact
+gate remains pending. It does not change immutable v0.1.24 or accept the actual adopter pilot.
+
+## Local host-tool preflight
+
+Before running any lookup, preflight inspects the selected `sh` on the effective
+PATH using filesystem checks. Target-owned shells (including symlink aliases)
+and unresolved relative precedence remain `unverified` without execution or a
+fallback shell; provide an approved host shell to qualify that toolchain.
+
+This describes current source; immutable public v0.1.21 bytes are unchanged.
+
+Factory's package supplies Factory, not the target's package manager or toolchain.
+Fresh local activation checks reliably literal Work Item and final validation
+entrypoints against the sanitized validation environment before projecting issues
+or creating an attempt. A missing executable or an explicitly pinned exact
+`packageManager` npm/pnpm version mismatch stops with command origin, source,
+item/index and redacted PATH context in the error and private diagnostics. Status
+remains `not-started`; no attempt is made retryable. A planning preview is not a
+host-readiness receipt: activation checks the current environment again.
+
+Validation now uses non-login `sh -c` with the explicitly supplied PATH. Shell
+login profiles do not provision or change that environment. Provide approved
+tools in a task-private host directory before activation; see the
+[public gate toolchain check](docs/PUBLIC-RELEASE.md#local-host-toolchain-check).
+Preflight runs only fixed host executable lookups and, for a supported explicit
+pin, the resolved host package manager's `--version` outside the target. It does
+not run target commands, scripts or hooks, install tools, choose versions or
+substitute a manager. Newly created package scripts still require the manager;
+their bodies and hooks remain subject to ordinary exact-result-tree checks.
+
+This is not a shell interpreter or complete toolchain qualification. Dynamic
+substitution, wrapper bodies, quoted compound commands, relative/worktree PATH
+entries and unsupported version policies are visibly `unverified`, not silently
+approved or newly banned. Literal lookups do not qualify script internals,
+plugins, interpreter dependencies or runtime behavior. Inspect those prerequisites
+under the target's source and operator authority before running.
 
 ## Deterministic contributor gate
 

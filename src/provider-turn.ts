@@ -19,16 +19,13 @@ export class ProviderTurnGuard {
   private timer: NodeJS.Timeout | undefined;
   private ended = false;
   private timeoutError: ProviderTurnTimeoutError | undefined;
-  private readonly timeout: Promise<never>;
-  private rejectTimeout: (error: ProviderTurnTimeoutError) => void = () =>
-    undefined;
+  private readonly timeoutWaiters = new Set<
+    (error: ProviderTurnTimeoutError) => void
+  >();
 
   constructor(private readonly idleTimeoutMs: number) {
     if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs <= 0)
       throw new Error("Provider turn idle timeout must be a positive integer");
-    this.timeout = new Promise<never>((_resolve, reject) => {
-      this.rejectTimeout = reject;
-    });
     this.reset();
   }
 
@@ -43,10 +40,18 @@ export class ProviderTurnGuard {
   }
 
   async race<T>(operation: Promise<T>): Promise<T> {
+    let unsubscribe: () => void = () => undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      this.timeoutWaiters.add(reject);
+      unsubscribe = () => this.timeoutWaiters.delete(reject);
+      if (this.timeoutError) reject(this.timeoutError);
+    });
     try {
-      return await Promise.race([operation, this.timeout]);
+      return await Promise.race([operation, timeout]);
     } catch (error) {
       throw this.timeoutError ?? error;
+    } finally {
+      unsubscribe();
     }
   }
 
@@ -57,12 +62,13 @@ export class ProviderTurnGuard {
   }
 
   private reset(): void {
-    // Progress reschedules the deadline, not the promise observed by a race
-    // already waiting on a callback-driven provider operation.
+    // Progress reschedules the shared deadline without detaching active waits.
+    // Settled waits remove their subscription instead of retaining payloads.
     this.timer = setTimeout(() => {
       this.timeoutError = new ProviderTurnTimeoutError(this.idleTimeoutMs);
       this.controller.abort(this.timeoutError);
-      this.rejectTimeout(this.timeoutError);
+      for (const reject of this.timeoutWaiters) reject(this.timeoutError);
+      this.timeoutWaiters.clear();
     }, this.idleTimeoutMs);
   }
 }

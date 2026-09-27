@@ -81,7 +81,52 @@ Pack the plugin, installed use skills, and CLI. MCP is not a first-release requi
 
 ### Trunk review checkpoint
 
-The `v0.1.0` one-immutable-package combined disposable gate passed; [BUILD-STATUS.md](BUILD-STATUS.md) records its package digest and final integrated head. The operator-approved pre-pilot trunk closure was issues [#19–#25 and #28](https://github.com/clockgrove/factory-rebuild/issues). A later audit of Clockgrove W0-001 found that its accepted base has no pnpm package or lockfile, which led to the greenfield command-authority and exact-tree receipt work in [#44](https://github.com/clockgrove/factory-rebuild/issues/44) and [#64](https://github.com/clockgrove/factory-rebuild/issues/64). The v0.1.7 combined gate completed [#46](https://github.com/clockgrove/factory-rebuild/issues/46), [#48](https://github.com/clockgrove/factory-rebuild/issues/48), and [#51](https://github.com/clockgrove/factory-rebuild/issues/51); public v0.1.8 proved [#60](https://github.com/clockgrove/factory-rebuild/issues/60)'s complete planning packet and deterministic zero-review activation. Public v0.1.10 then completed the fresh installed greenfield gate with canonical exact-tree receipts and authoritative per-Work-Item deltas, closing #44, #64, and [#67](https://github.com/clockgrove/factory-rebuild/issues/67) without a human result override or retry. [#55](https://github.com/clockgrove/factory-rebuild/issues/55) separately owns the installed BYO harness seam and real local Codex, Claude, and GitHub Copilot adapter proofs before [#26](https://github.com/clockgrove/factory-rebuild/issues/26), the exact-public-artifact Clockgrove pilot; [#59](https://github.com/clockgrove/factory-rebuild/issues/59) owns role-specific model defaults. Later capability branches, repository cutover, and trunk-complete claims remain on hold until those gates pass. A clean refactor that wires known variation-point contracts to real behavior is welcome when it reduces a concrete gap. The first-release agent interface is the CLI plus installed skills over one application layer, with no MCP prerequisite. A later MCP adapter needs a demonstrated agent-integration need and must not duplicate lifecycle logic. This public repository, including contributor instructions, fixtures, and acceptance evidence, must remain sufficient for unrelated contributors; `AGENTS.md` guides building Factory, while packaged skills guide using it.
+The `v0.1.0` one-immutable-package combined disposable gate passed; [BUILD-STATUS.md](BUILD-STATUS.md) records its package digest and final integrated head. The operator-approved pre-pilot trunk closure was issues [#19–#25 and #28](https://github.com/clockgrove/factory-rebuild/issues). A later audit of Clockgrove W0-001 found that its accepted base has no pnpm package or lockfile, which led to the greenfield command-authority and exact-tree receipt work in [#44](https://github.com/clockgrove/factory-rebuild/issues/44) and [#64](https://github.com/clockgrove/factory-rebuild/issues/64). The v0.1.7 combined gate completed [#46](https://github.com/clockgrove/factory-rebuild/issues/46), [#48](https://github.com/clockgrove/factory-rebuild/issues/48), and [#51](https://github.com/clockgrove/factory-rebuild/issues/51); public v0.1.8 proved [#60](https://github.com/clockgrove/factory-rebuild/issues/60)'s complete planning packet and deterministic zero-review activation. Public v0.1.10 then completed the fresh installed greenfield gate with canonical exact-tree receipts and authoritative per-Work-Item deltas, closing #44, #64, and [#67](https://github.com/clockgrove/factory-rebuild/issues/67) without a human result override or retry. [#55](https://github.com/clockgrove/factory-rebuild/issues/55) separately owns the installed BYO harness seam and second-provider proof required for overall trunk completion, not a prerequisite for the operator-approved Codex-only [#26](https://github.com/clockgrove/factory-rebuild/issues/26) pilot described below; [#59](https://github.com/clockgrove/factory-rebuild/issues/59) owns role-specific model defaults. Later capability branches, repository cutover, and trunk-complete claims remain on hold until those gates pass. A clean refactor that wires known variation-point contracts to real behavior is welcome when it reduces a concrete gap. The first-release agent interface is the CLI plus installed skills over one application layer, with no MCP prerequisite. A later MCP adapter needs a demonstrated agent-integration need and must not duplicate lifecycle logic. This public repository, including contributor instructions, fixtures, and acceptance evidence, must remain sufficient for unrelated contributors; `AGENTS.md` guides building Factory, while packaged skills guide using it.
+
+### Operator-approved Codex-only adopter pilot
+
+The [public #26 operator decision](https://github.com/clockgrove/factory-rebuild/issues/26#operator-decision--codex-only-pilot)
+explicitly defers #55 and Claude/Copilot live qualification as prerequisites for
+this bounded Codex-only adopter pilot. This is an execution-order exception,
+not acceptance of #55 or permission to merge draft PR #62. That draft remains
+frozen at head `7bd51356b908cb43ce85d68bce12cabf1752ffeb`; source/default-installed
+checks do not substitute for its required authorized live-provider evidence.
+
+Historical v0.1.24 and its fresh public installed gate passed their own
+prerequisite checks. Published v0.1.25 carries accepted #150; publication and
+installation verification passed, while its wholly fresh combined public gate
+has not yet qualified and automatic gate acceptance remains pending, as recorded in
+[BUILD-STATUS.md](BUILD-STATUS.md). The
+Codex-only #26 pilot may proceed under its separately recorded target/source-egress
+and activation authority without waiting for #55, Claude/Copilot login, or this
+documentation handoff. Root retains exact source/configuration/plan verification,
+guarded delivery and exact integrated-tree acceptance. The actual pilot remains
+OPEN/unaccepted; the public fixture is not adopter acceptance.
+
+Overall trunk completion still requires both the actual adopter acceptance and
+#55's separate installed-harness/second-provider proof. Neither the deferral nor
+a successful Codex-only pilot would accept that proof or authorize later
+managed/sandbox/Daytona branches, repository cutover, or a trunk-complete claim.
+
+## Trunk foundations and provider branches
+
+Trunk owns the shared execution and result contracts, the atomic continuation snapshot, independent validation and delivery boundaries, and the installed harness seam and second-provider proof in [#55](https://github.com/clockgrove/factory-rebuild/issues/55). These foundations let the local path use the same orchestration boundaries as later execution modes. They do not require working cloud or sandbox execution before trunk acceptance.
+
+| Trunk foundation                                             | Branch implementation                                         |
+| ------------------------------------------------------------ | ------------------------------------------------------------- |
+| `ExecutionDriver` lifecycle and exact result contract        | Managed cloud tasks and their first SDK adapter (#7)          |
+| Installed `AgentHarness` selection and conformance (#55)     | Sandbox transport and lifecycle around that harness seam (#8) |
+| Shared snapshot, content, validation and delivery boundaries | Daytona behind the sandbox provider boundary (#9)             |
+
+The named contracts and configuration shapes are architectural seams, not claims of available execution. Unsupported mode selections must fail explicitly until their implementation is accepted. A scripted provider fixture proves the exercised contract; a real provider requires its own installed evidence. One provider does not establish portability across all SDKs, vendors or harness/provider combinations.
+
+Working managed execution belongs to #7. It establishes a reusable execution mode with Copilot cloud sessions as the first concrete SDK adapter. Further cloud-session SDKs are separate capability issues behind the same driver lifecycle and result boundary. Keep SDK types, authentication, configuration and result transport inside adapters; extract shared machinery only when concrete implementations demonstrate a need.
+
+Working sandbox execution belongs to #8. One `SandboxExecutionDriver` composes a `SandboxProvider` for infrastructure with the configured `AgentHarness` for agent behavior. #9 depends on #8 and adds Daytona as the first concrete provider. Later sandbox vendors are sibling adapter capabilities depending on #8, not on Daytona. Do not create a driver for every vendor/harness pairing. #7 is not a technical dependency of #8 or #9; the planned delivery order remains managed execution, sandbox execution, then Daytona.
+
+A branch may change shared code to satisfy its accepted behavior without becoming a trunk prerequisite. Move a correction earlier only when a demonstrated current trunk requirement needs it. Do not add speculative registries, generic SDK wrappers or remote lifecycle state merely to advertise extensibility. Selecting among supported providers remains a project-level execution configuration; multiple adapters do not imply mixed modes, per-Objective switching, ranking or fallback.
+
+This boundary preserves the full-trunk and actual-pilot start gates and the bounded Codex-only pilot exception above. It does not expand provider spending, source-egress, target or publication authority. [Decision #157](https://github.com/clockgrove/factory-rebuild/issues/157) records the approved documentation scope.
 
 ## Named branches after trunk
 
@@ -89,9 +134,9 @@ The `v0.1.0` one-immutable-package combined disposable gate passed; [BUILD-STATU
 
 `PlanningModel` compiles and reviews the Work Item graph. `AgentHarness` performs one Work Item under a Factory-operated local or sandbox driver. The three peer `ExecutionDriver` implementations differ in placement and lifecycle ownership: trunk's `LocalExecutionDriver` operates a local worktree; Branch 1's `ManagedExecutionDriver` submits and tracks a provider-owned agent task; Branch 2's `SandboxExecutionDriver` operates a `SandboxProvider` and invokes the configured harness inside it. An SDK name alone does not determine whether an agent is local or managed.
 
-- [ManagedExecutionDriver, issue #7](https://github.com/clockgrove/factory-rebuild/issues/7): evaluate GitHub Copilot SDK [cloud sessions](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/cloud-sessions) as the initial GitHub-hosted candidate, then implement only if its durable task, authorization, cancellation, exact-change, and result semantics fit the `ExecutionDriver` contract. Copilot SDK local CLI/runtime mode is not a managed task. Persist provider identity, observe/cancel/collect, and feed unchanged validation and delivery. Prove the same disposable Objective with this driver.
-- [SandboxExecutionDriver, issue #8](https://github.com/clockgrove/factory-rebuild/issues/8): after trunk issue #55 lands, compose `SandboxProvider` with that installed harness seam. Prove transfer, execution, observation, cancellation, collection, and destruction with a provider-neutral fixture; do not redefine BYO harness installation or configuration in this branch.
-- [Daytona SandboxProvider, issue #9](https://github.com/clockgrove/factory-rebuild/issues/9): add the first concrete provider behind `SandboxExecutionDriver` and run the Branch 2 scenario unchanged. Keep Daytona details within its adapter.
+- [Managed cloud execution, starting with Copilot sessions, issue #7](https://github.com/clockgrove/factory-rebuild/issues/7): evaluate GitHub Copilot SDK [cloud sessions](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/cloud-sessions) as the initial GitHub-hosted candidate, then implement only if its durable task, authorization, cancellation, exact-change, and result semantics fit the `ExecutionDriver` contract. Copilot SDK local CLI/runtime mode is not a managed task. Persist provider identity, observe/cancel/collect, and feed unchanged validation and delivery. Prove the same disposable Objective with this driver.
+- [Configured harnesses in Factory-managed sandboxes, issue #8](https://github.com/clockgrove/factory-rebuild/issues/8): after trunk issue #55 lands, compose `SandboxProvider` with that installed harness seam. Prove transfer, execution, observation, cancellation, collection, and destruction with a provider-neutral fixture; do not redefine BYO harness installation or configuration in this branch.
+- [Daytona sandbox provider, issue #9](https://github.com/clockgrove/factory-rebuild/issues/9): add the first concrete provider behind `SandboxExecutionDriver` and run the Branch 2 scenario unchanged. Keep Daytona details within its adapter.
 
 ## Test reset and representative gates
 
@@ -113,4 +158,7 @@ The archived `clockgrove/factory` commit `994bbfcadb317aed2dfa932ec9d128e7d0d8c7
 
 ## Release and cutover
 
-The public rebuild repository stays separate until trunk acceptance and the disposable release-candidate gate. Keep the archived source read-only during implementation. Any later repository rename, archival, marketplace change, or adopter activation is a staged operator action after the new trunk is proven; it must not alter the target repository or hide the evidence behind a source-tree-only run. Public issues, PRs, and this plan remain the contributor record.
+The bounded Codex-only adopter activation exception above does not authorize
+repository rename, archival, distribution changes or overall trunk completion.
+
+The public rebuild repository stays separate until trunk acceptance and the disposable release-candidate gate. Keep the archived source read-only during implementation. Any later repository rename, archival, or marketplace change is a staged operator action after the new trunk is proven; it must not alter the target repository or hide the evidence behind a source-tree-only run. Public issues, PRs, and this plan remain the contributor record.

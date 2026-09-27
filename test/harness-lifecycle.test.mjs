@@ -96,7 +96,7 @@ test("optional production workers bound turns, require terminals and report unav
               "progress-timeout",
               "cleanup-progress",
             ]
-          : []),
+          : ["startup-tool", "startup-mcp"]),
       ]) {
         const attemptId = `${provider}-${scenario}`;
         const input = join(root, `${attemptId}.request.json`);
@@ -204,6 +204,15 @@ test("optional production workers bound turns, require terminals and report unav
           (provider === "claude" && scenario === "cleanup")
         )
           assert.match(outcome.error, /no progress/);
+        if (provider === "claude" && complete)
+          assert.deepEqual(outcome.evidence.plugins, [
+            { name: "agents-md", path: "builtin" },
+            { name: "sec-default", path: "builtin" },
+          ]);
+        if (scenario === "startup-tool")
+          assert.match(outcome.error, /unconfigured tool Bash/);
+        if (scenario === "startup-mcp")
+          assert.match(outcome.error, /unconfigured MCP server/);
         if (scenario === "failure")
           assert.match(outcome.error, /authoritative provider failure/);
         assert.doesNotMatch(

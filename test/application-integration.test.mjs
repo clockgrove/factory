@@ -539,6 +539,7 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
                 {
                   name: "factory-pnpm-receipt-fixture",
                   private: true,
+                  type: "module",
                   scripts: {
                     check: "node --check src/index.js",
                     test: "node --test",

@@ -146,6 +146,17 @@ Before publication, Factory checks only a Work Item's changed paths against its 
 
 Configuration lives under `$XDG_CONFIG_HOME/clockgrove-factory` (or `~/.config/clockgrove-factory`); durable run state lives under `$XDG_STATE_HOME/clockgrove-factory` (or `~/.local/state/clockgrove-factory`). Do not put either in the target repository.
 
+Ignored generated links may remain as nondelivered local material only when
+absent from HEAD and the index, proven Git-ignored, and resolved to an ordinary
+file or directory strictly inside the worktree (not its root or Git metadata).
+An owned ignore-policy change can establish that policy during foundation work.
+This is not a package-directory allowlist: traversal still inventories ignored
+directories and refuses special files, escaping, dangling or cyclic new links.
+Delivered links, changed tracked links, staged descendants behind symlink
+ancestors, ownership violations and staged/working-byte secrets remain refused.
+The #150 source correction requires its own newly published installed-artifact
+gate; it does not change immutable v0.1.24 or accept the actual adopter pilot.
+
 ## Local host-tool preflight
 
 Before running any lookup, preflight inspects the selected `sh` on the effective

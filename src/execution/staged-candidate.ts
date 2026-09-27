@@ -104,7 +104,40 @@ function checkChangedPath(worktree: string, path: string): void {
     );
 }
 
-/** A Git tree cannot contain special files; any such entry appeared during this attempt. */
+/** Ignored links are not delivery candidates, but must still resolve safely. */
+function safeIgnoredLink(worktree: string, path: string): boolean {
+  if (pinnedGitRaw(worktree, "ls-files", "--stage", "-z", "--", path).length)
+    return false; // A staged entry or descendant cannot use this exception.
+  const env = pinnedGitEnvironment();
+  // check-ignore accepts literal filenames, not pathspecs; that switch is unsupported.
+  delete env.GIT_LITERAL_PATHSPECS;
+  const ignored = spawnSync(
+    "git",
+    ["-C", worktree, "check-ignore", "-q", "--", path],
+    {
+      env,
+    },
+  );
+  if (ignored.error) throw ignored.error;
+  if (ignored.status === 1) return false;
+  if (ignored.status !== 0)
+    throw new Error(`Cannot verify ignored entry at ${JSON.stringify(path)}`);
+  try {
+    const destination = realpathSync(join(worktree, path));
+    if (
+      destination === resolve(worktree) ||
+      !inside(destination, worktree) ||
+      inside(destination, join(worktree, ".git"))
+    )
+      return false;
+    const type = lstatSync(destination);
+    return type.isFile() || type.isDirectory();
+  } catch {
+    return false; // Missing, cyclic or unreadable targets are not safe generated links.
+  }
+}
+
+/** Recurse even through ignored directories: special files and unsafe links still fail. */
 function checkWorktreeEntries(worktree: string): void {
   const inspect = (directory: string, relative: string): void => {
     for (const name of readdirSync(directory)) {
@@ -124,7 +157,8 @@ function checkWorktreeEntries(worktree: string): void {
         ).toString("utf8");
         if (
           !base.startsWith("120000 blob\t") &&
-          !base.startsWith("120000 blob ")
+          !base.startsWith("120000 blob ") &&
+          !(base.length === 0 && safeIgnoredLink(worktree, path))
         )
           throw new Error(
             `Worker introduced unsafe symlink at ${JSON.stringify(path)}`,

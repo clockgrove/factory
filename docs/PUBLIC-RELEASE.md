@@ -152,10 +152,61 @@ entrypoint is not a claim that script internals, plugins, interpreter dependenci
 or all runtime prerequisites are satisfied. A planning preview does not preserve
 host readiness across environment changes.
 
+## Controller host and worker readiness
+
+Launch the Factory controller through an operator-authorized ordinary host
+terminal or approved host execution mechanism. A controller started inside an
+agent command sandbox passes that enclosing filesystem and mount namespace to
+its workers. Backgrounding, `nohup`, or detaching the child does not escape it.
+Keep the worker's own sandbox, approval policy, credential filtering, network
+policy and target ownership checks in force. Host launch authority does not
+waive those safeguards or authorize new target access or provider spending.
+
+Before model-backed work, use the exact installed harness's supported model-free
+sandbox diagnostic from that same host launch context, with the intended worker
+policy and managed requirements retained. In disposable paths, prove shell
+execution, an allowed workspace write and refusal of an out-of-scope write;
+record the executable/version, launch context, effective policy and results.
+Check the installed CLI help rather than assuming another version's syntax.
+For bundled Codex 0.156.0 the command is `codex sandbox -- COMMAND`, with no
+`linux` subcommand; its named workspace diagnostic is
+`codex sandbox --permission-profile :workspace --include-managed-config --cd ABSOLUTE_DISPOSABLE_DIRECTORY -- COMMAND`.
+Use the bundled executable, and reconcile its effective permissions and network
+policy with the worker configuration before treating the probe as comparable.
+Do not change security policy to make a probe pass.
+
+If Codex reports `app-server socket directory must be a user-owned directory
+with mode 0700`, stop and inspect host versus enclosing-sandbox metadata before
+another model call. In Codex 0.156.0, the shared socket directory is the
+canonical `/tmp/codex-daemon-<effective-uid>`, independent of `CODEX_HOME` and
+`TMPDIR`. An outer Codex sandbox deliberately masks it with read-only mode
+`000`; the underlying host directory may already be correctly owned and `0700`.
+Do not chmod, unmask, bind-mount, relocate or bypass that protection, move
+credentials, or retry a failed worker to test host readiness. Correct the
+controller launch context under explicit host authority and repeat only the
+model-free preflight. Preserve failed run identities and evidence; any new
+worker attempt still needs its existing explicit authority. The matching
+[upstream directory check](https://github.com/openai/codex/blob/rust-v0.156.0/codex-rs/uds/src/daemon_directory.rs)
+and [sandbox mask](https://github.com/openai/codex/blob/rust-v0.156.0/codex-rs/linux-sandbox/src/bwrap.rs)
+explain this version's behavior.
+
+Successful installation, login, planning or model replies do not prove worker
+tools can run. After the model-free check, use the already required bounded
+public installed Objective to prove a real worker's shell/file tools,
+collection, exact-tree validation and GitHub delivery before private execution.
+When that same scenario covers these paths, do not add another preliminary live
+smoke or another fixture. The public scenario must still finish its declared
+integration, media and hydration acceptance; the preflight alone is not
+qualification. Keep evidence specific to the artifact, harness/provider, host,
+policy and scenario actually exercised. Codex proof does not qualify Claude or
+Copilot; unavailable or deferred provider proof remains separately pending
+under its existing milestone rather than blocking an independently authorized
+Codex-only pilot.
+
 ## Fresh disposable Objective
 
 1. Create a new GitHub repository you control from the [public disposable target fixture](../test/fixtures/disposable-target/) and push its initial `main`. Create its Objective issue from the [same-path Git LFS Objective](../test/fixtures/objectives/same-path-lfs.md), which requires the existing ordinary `assets/source.png` blob to become required LFS at the same path without changing its exact bytes. Use a new repository and fresh `XDG_CONFIG_HOME` and `XDG_STATE_HOME`.
-2. Follow only public instructions and the installed interface. Use `factory install --repository OWNER/REPO --checkout /absolute/target --concurrency 2 --delivery native-stack --planning-model gpt-5.6-sol --planning-reasoning medium --review-model gpt-5.6-sol --review-reasoning medium --worker-model gpt-5.6-luna --worker-reasoning medium` (or record other explicit operator-selected Codex values); run `factory plan --objective N --output /absolute/private/plan.json`; inspect the exact two-item graph, source and command-authority receipts, the canonical controller-capability value and digest, and every validation command. A clean review must not add a target Work Item or command solely to reimplement the supplied controller guarantees. Resolve any genuine named review question; then run `factory run --objective N --plan /absolute/private/plan.json`.
+2. Complete the model-free preflight in [controller host and worker readiness](#controller-host-and-worker-readiness); this Objective supplies its real-worker qualification. Follow only public instructions and the installed interface. Use `factory install --repository OWNER/REPO --checkout /absolute/target --concurrency 2 --delivery native-stack --planning-model gpt-5.6-sol --planning-reasoning medium --review-model gpt-5.6-sol --review-reasoning medium --worker-model gpt-5.6-luna --worker-reasoning medium` (or record other explicit operator-selected Codex values); run `factory plan --objective N --output /absolute/private/plan.json`; inspect the exact two-item graph, source and command-authority receipts, the canonical controller-capability value and digest, and every validation command. A clean review must not add a target Work Item or command solely to reimplement the supplied controller guarantees. Resolve any genuine named review question; then run `factory run --objective N --plan /absolute/private/plan.json`.
 3. Use `factory status --objective N` and `factory status --objective N --json` for the current atomic snapshot. Use `factory diagnostics --objective N` for a private timeline and `factory logs --objective N --item ID` for a recorded attempt's worker output; add `--follow` only while observation is needed. These outputs can include private target content and never authorize continuation by themselves. When requested, use `factory review` and `factory select` with the complete chosen AssetSet and explicit `--bind` for each dependent. Resume with `factory run --objective N`. If status pauses on a result criterion, inspect its named evidence and exact tree; a bounded text excerpt or opaque blob descriptor is not a complete large file. A truncated text excerpt requires exact-tree operator decision even if the reviewer reported pass; inspect the full tree or repeat review with a larger `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` and reviewer context. Ask the operator to accept or refuse that criterion, record `factory decide-result --objective N [--item ID] --tree EXACT_TREE_SHA --outcome accept|refuse --actor NAME --reason TEXT`, then resume `factory run --objective N` after acceptance. Include `--item` for a Work Item and omit it for final Objective acceptance. Inspect the final validation result, GitHub issues/PRs, merged default-branch head, and hydrated media bytes.
 4. Record the release URL, tag and commit, tarball digest, marketplace source and installed version, target Objective and PR identities, selected AssetSet and same-path LFS evidence, validated tree, exact final head, final commands, pre-publication object proof, hydration receipt, and operator acceptance in [BUILD-STATUS.md](BUILD-STATUS.md). The target repository may be private, but the public report must omit its sensitive content, worker logs, and diagnostic details.
 

@@ -10,7 +10,7 @@ The complete capability, lifecycle, authentication, SDK-extension, and local-pro
 
 ## Report a vulnerability
 
-Use [private vulnerability reporting](https://github.com/clockgrove/factory-rebuild/security/advisories/new) for a suspected security issue. Include the affected version or commit, reproduction steps, expected and observed behavior, and potential impact. Do not include live credentials or private repository content. Please allow maintainers time to assess and coordinate a fix before public disclosure.
+Use [private vulnerability reporting](https://github.com/clockgrove/factory/security/advisories/new) for a suspected security issue. Include the affected version or commit, reproduction steps, expected and observed behavior, and potential impact. Do not include live credentials or private repository content. Please allow maintainers time to assess and coordinate a fix before public disclosure.
 
 The maintainers will acknowledge a report and communicate the next steps in the private advisory. Public issues are appropriate for ordinary bugs that do not expose a security concern.
 

@@ -24,7 +24,7 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same version. These v0.1.31 commands apply once its [release](https://github.com/clockgrove/factory/releases/tag/v0.1.31) is published; until then use the [v0.1.30 instructions](https://github.com/clockgrove/factory/blob/v0.1.30/README.md#install-published-v0130):
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same version. These v0.1.31 commands apply once its [release](https://github.com/clockgrove/factory/releases/tag/v0.1.31) is published; until then use the [v0.1.30 instructions](https://github.com/clockgrove/factory/blob/1b7d517a0ada4054027bea8a166dce4cb1fe297e/README.md#install-published-v0130):
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.31

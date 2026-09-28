@@ -1,6 +1,12 @@
 # Public release checklist
 
-**Published v0.1.29:** use the [immutable installation](../README.md#install-published-v0129)
+**Published v0.1.30:** use the [immutable installation](../README.md#install-published-v0130)
+and [PR #188](https://github.com/clockgrove/factory/pull/188) for exact source,
+artifact and non-live verification. Public download/offline installation passed;
+fresh public model-backed qualification and adopter acceptance remain separate
+in #26. Preserve earlier releases and terminal runs.
+
+**Published v0.1.29:** use the [historical immutable installation](https://github.com/clockgrove/factory/blob/91da54b25275a7c32990833fb90da84dc72b6844/README.md#install-published-v0129)
 and exact evidence in [PR #183](https://github.com/clockgrove/factory/pull/183).
 The frozen release source excludes concurrent #180 even though metadata integration
 includes it. Never rebuild or replace the release from later main. Independent

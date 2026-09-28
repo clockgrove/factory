@@ -1,5 +1,20 @@
 # Factory build status
 
+## Immutable v0.1.30 artifact record
+
+[Release v0.1.30](https://github.com/clockgrove/factory/releases/tag/v0.1.30)
+uses reviewed source `7bcc6388cbef75721033f550b59127273487c430`, tree
+`14e1524e45f61e45a3d67d3f451c9ce8fd931ba0`. Tarball: 150230063 bytes,
+SHA-256 `cac13bc37ca7c23d3c19b97ed6c4731b25312467b4e38850658fee32a0eb91e8`.
+[PR #188](https://github.com/clockgrove/factory/pull/188) records independent
+review, source/artifact checks, byte-identical reproduction and public download
+verification. Later repository-rename metadata is outside these immutable bytes.
+Node22.0 runtime/tests used dependencies prepared on Node24; clean Node22.0
+source bootstrap did not pass and is tracked in #190. Keep live qualification
+and adopter status in #26; publication does not establish those outcomes.
+
+## Historical v0.1.28 publication record
+
 **Published v0.1.28; fresh live qualification pending.** [PR #176](https://github.com/clockgrove/factory-rebuild/pull/176)
 published [v0.1.28](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28)
 from `dc7097b487701cab94aa1d3f5aa561faa3416998`, tree

@@ -2,7 +2,7 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.30 — candidate
+## 0.1.30 — 2026-09-28
 
 - Require self-contained source-backed implementation briefs and independent worker-input completeness review (#185 / PR #186). Preserve ownership, dependencies and later validation timing. Synthetic coverage does not establish live model adherence.
 - Include the already-integrated local-harness usage normalization (#180 / PR #182), which was excluded from immutable v0.1.29. Missing usage remains unknown.

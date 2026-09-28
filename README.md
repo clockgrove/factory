@@ -4,7 +4,7 @@
 
 Factory turns a repository development Objective into source-grounded Work Items, runs bounded coding attempts, validates their exact result trees, and delivers the changes through GitHub. It is an open-source Clockgrove plugin installed for one target repository at a time.
 
-**Published release:** [v0.1.29](https://github.com/clockgrove/factory/releases/tag/v0.1.29). Factory runs a source-grounded dependency DAG through local agent harnesses, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. The offline tarball bundles the default Codex path; Claude and Copilot SDKs are optional and installed separately. See [release evidence](https://github.com/clockgrove/factory/pull/183) and [qualification issue #26](https://github.com/clockgrove/factory/issues/26) for exact publication and acceptance claims.
+**Published release:** [v0.1.30](https://github.com/clockgrove/factory/releases/tag/v0.1.30). Factory runs a source-grounded dependency DAG through local agent harnesses, regular pull requests or native linear stacks, human-selected AssetSets, Git LFS, and private diagnostics. The offline tarball bundles the default Codex path; Claude and Copilot SDKs are optional and installed separately. See [release evidence](https://github.com/clockgrove/factory/pull/188) and [qualification issue #26](https://github.com/clockgrove/factory/issues/26) for exact publication and acceptance claims.
 
 **v0.1.29:** accepted [#179 / PR #181](https://github.com/clockgrove/factory/pull/181)
 adds exact-tree tracked-path inventory to acceptance review; accepted #170 / PR #178
@@ -45,11 +45,12 @@ the successor or the bounded Codex-only pilot.
 Published v0.1.28 remains immutable; this successor does not rebuild, retag or
 replace its bytes or resume its waiting public run.
 
-**Next candidate: v0.1.30.** Includes accepted [#185 / PR #186](https://github.com/clockgrove/factory/pull/186)
+**v0.1.30:** includes accepted [#185 / PR #186](https://github.com/clockgrove/factory/pull/186)
 worker-input completeness and the already-integrated #180 usage normalization.
-It is not yet published or live-qualified. Keep using the immutable v0.1.29
-installation below until publication is verified. See the
-[candidate procedure](docs/PUBLIC-RELEASE.md#prepare-v0130).
+Its frozen release source is `7bcc6388cbef75721033f550b59127273487c430`;
+later repository-rename metadata is excluded. Public download and normal offline
+installation are verified; fresh live qualification and adopter acceptance remain
+separate in #26. Preserve prior artifacts and terminal runs.
 
 ## How it works
 
@@ -60,19 +61,19 @@ installation below until publication is verified. See the
 
 The target repository owns its product and runtime truth. Factory state and credentials stay outside the target checkout. Factory refuses to run against any Factory source repository.
 
-## Install published v0.1.29
+## Install published v0.1.30
 
-Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory/releases/tag/v0.1.29) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [PR #183](https://github.com/clockgrove/factory/pull/183):
+Install the plugin from the pinned Clockgrove marketplace and its bundled CLI from the matching [release page](https://github.com/clockgrove/factory/releases/tag/v0.1.30) on Linux x64 with Node.js 22 or later. Compare the tarball digest with the independent value in [PR #188](https://github.com/clockgrove/factory/pull/188):
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.29
+codex plugin marketplace add clockgrove/factory --ref v0.1.30
 codex plugin add factory@clockgrove
-gh release download v0.1.29 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.29.tgz --pattern SHA256SUMS
+gh release download v0.1.30 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.30.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
-# Compare the tarball digest with the independently recorded PR #183 value.
+# Compare the tarball digest with the independently recorded PR #188 value.
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.29.tgz
+  ./clockgrove-factory-0.1.30.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

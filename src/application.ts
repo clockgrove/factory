@@ -327,9 +327,14 @@ export function composeWithLocalProfiles(
   for (const [id, profile] of Object.entries(config.execution.profiles)) {
     profiles.set(id, {
       binding: profileBinding(id, profile, config.policy),
+      environment: profile.environment,
       createHarness: () => {
         if (profile.harness.kind !== "registered")
-          return builtInHarness(config, profile.harness);
+          return builtInHarness(
+            config,
+            profile.harness,
+            Boolean(profile.environment?.mcp),
+          );
         const registration = registrations[id];
         if (
           !registration ||
@@ -360,12 +365,14 @@ export function composeWithLocalProfiles(
 function builtInHarness(
   config: FactoryConfig,
   harness: LocalHarnessConfig,
+  worktreeMcp = false,
 ): AgentHarness {
   if (harness.kind === "claude-agent-sdk") {
     requireOptionalHarness(
       "@anthropic-ai/claude-agent-sdk",
       CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
     );
+    if (worktreeMcp) requireOptionalHarness("zod", "factory-worktree-read@1");
     return new ClaudeAgentSdkHarness(
       join(stateRoot(config.repository), "harness"),
       harness,

@@ -1,3 +1,8 @@
+import {
+  factoryMcpServerName,
+  factoryMcpToolAllowed,
+  type PreparedClaudeEnvironment,
+} from "./claude-environment.js";
 import { isAbsolute } from "node:path";
 import type { HookJSONOutput, Options } from "@anthropic-ai/claude-agent-sdk";
 import type { ClaudeWorkerInput } from "./claude.js";
@@ -44,7 +49,19 @@ function claudeToolAllowed(
   toolName: string,
   toolInput: unknown,
   mcpServer: unknown,
+  prepared?: PreparedClaudeEnvironment,
 ): boolean {
+  if (input.request.environment?.mcp) {
+    // Readiness is an attempt-wide gate, including native reads and writes.
+    if (!prepared?.isReady()) return false;
+    if (toolName.startsWith("mcp__") || mcpServer)
+      return factoryMcpToolAllowed(
+        { worktree: input.request.worktree, config: input.config },
+        toolName,
+        toolInput,
+        mcpServer,
+      );
+  }
   if (
     !toolInput ||
     typeof toolInput !== "object" ||
@@ -75,6 +92,7 @@ function preToolUseDecision(
       NonNullable<Options["hooks"]>["PreToolUse"]
     >[number]["hooks"][number]
   >[0],
+  prepared?: PreparedClaudeEnvironment,
 ): HookJSONOutput {
   const allowed =
     hookInput.hook_event_name === "PreToolUse" &&
@@ -83,6 +101,7 @@ function preToolUseDecision(
       hookInput.tool_name,
       hookInput.tool_input,
       hookInput.mcp_server,
+      prepared,
     );
   return {
     hookSpecificOutput: {
@@ -98,6 +117,7 @@ export function claudeQueryOptions(
   input: ClaudeWorkerInput,
   environment: NodeJS.ProcessEnv,
   abortController: AbortController,
+  prepared?: PreparedClaudeEnvironment,
 ): Options {
   const { config, request } = input;
   return {
@@ -116,12 +136,22 @@ export function claudeQueryOptions(
     hooks: {
       PreToolUse: [
         {
-          hooks: [async (hookInput) => preToolUseDecision(input, hookInput)],
+          hooks: [
+            async (hookInput) => preToolUseDecision(input, hookInput, prepared),
+          ],
         },
       ],
     },
     canUseTool: async (toolName, toolInput, permission) => {
-      if (!claudeToolAllowed(input, toolName, toolInput, permission.mcpServer))
+      if (
+        !claudeToolAllowed(
+          input,
+          toolName,
+          toolInput,
+          permission.mcpServer,
+          prepared,
+        )
+      )
         return {
           behavior: "deny",
           message: deniedMessage,
@@ -143,7 +173,7 @@ export function claudeQueryOptions(
     },
     maxTurns: config.maxTurns,
     env: { ...environment, DISABLE_TELEMETRY: "1" },
-    mcpServers: {},
+    mcpServers: prepared ? { [factoryMcpServerName]: prepared.server } : {},
     strictMcpConfig: true,
     agents: {},
     plugins: [],

@@ -9,8 +9,10 @@ The v0.1.34 public scenario was subsequently accepted; actual adopter acceptance
 Issue #162 implements compile-time assigned local profiles through independent
 plan review, immutable binding, normal delivery and restart-safe lifecycle.
 Deterministic tests are source evidence only; mixed-provider installed-artifact
-qualification is still pending in #162. Dependent environment preparation belongs
-to #164. This contributor work does not alter or qualify the v0.1.35 pilot artifact.
+qualification is still pending in #162. Issue #164 adds private additive instructions for built-in workers and the
+bounded Claude in-process worktree-read environment. Real SDK protocol and
+production-process tests prove preparation, permissions, readiness, isolation and
+cleanup; installed-artifact/live environment qualification remains pending in #164. This contributor work does not alter or qualify the v0.1.35 pilot artifact.
 
 ## Immutable v0.1.35 artifact record
 

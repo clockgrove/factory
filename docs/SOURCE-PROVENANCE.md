@@ -15,7 +15,25 @@ atomic graph/configuration snapshot remain authoritative. Focused deterministic
 tests cover same-adapter distinct settings and ordinary mixed-DAG delivery. No
 archived code, tests, private prompts or private evidence were copied. This source
 capability is not a release or live mixed-provider qualification; exact-artifact
-acceptance remains in the issue. Environment preparation is separate #164 work.
+acceptance remains in the issue. The dependent #164 source capability is recorded below.
+
+## Assigned profile environment preparation (#164)
+
+New adapter-owned preparation extends #162's profile definition and digest. The
+private HarnessRequest carries additive instructions through the existing shared
+worker prompt. The optional Claude SDK creates one versioned, in-process MCP
+regular-file reader; both host permission callbacks enforce SDK provenance and an
+attempt-wide readiness gate. Opened descriptors are verified inside the worktree,
+and lifecycle cleanup belongs to the existing worker. No separate controller,
+configuration registry, installation workflow or durable journal was introduced.
+
+Protocol tests call the real pinned Claude SDK/MCP server. Narrow scripted-query
+fixtures exercise production workers, temporary Git worktrees, concurrent
+same-adapter profiles, restart/cancel/collect, readiness rejection and cleanup.
+Inspection of pinned CLI 2.1.281 confirms status tool names use MCP's original
+`toolName`, with server information and provenance. No archived implementation,
+private material or live provider output was copied. Installed-artifact live
+qualification and release evidence remain separate gates.
 
 ## Explicit pending-result re-review
 

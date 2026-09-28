@@ -1,4 +1,5 @@
-import { writeFileSync } from "node:fs";
+import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const scenario = process.env.FACTORY_SCRIPTED_PROVIDER_SCENARIO;
 const stall = () => new Promise(() => undefined);
@@ -185,7 +186,18 @@ export class CopilotClient {
     if (scenario === "startup-idle") event("session.idle");
     return {
       sessionId: "scripted-copilot",
-      async sendAndWait() {
+      async sendAndWait(message) {
+        if (scenario === "profile-instructions") {
+          const input = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          assert.ok(
+            message.prompt.includes(input.request.environment.instructions),
+          );
+          assert.match(
+            message.prompt,
+            /subordinate to required Factory worker constraints/,
+          );
+          assert.match(message.prompt, /Do not commit, push/);
+        }
         writeFileSync(process.env.FACTORY_SCRIPTED_PROVIDER_SENT, "sent");
         if (scenario === "progress-timeout") {
           setTimeout(

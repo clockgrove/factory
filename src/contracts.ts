@@ -1,3 +1,4 @@
+import type { ExecutionProfileEnvironment } from "./config.js";
 import type { ControllerCapabilitiesManifest } from "./controller-capabilities.js";
 
 export type Repository = `${string}/${string}`;
@@ -287,6 +288,8 @@ export interface ExecutionDriver {
 }
 
 export interface HarnessRequest {
+  /** Installation-owned private preparation; never part of the Work Item graph. */
+  environment?: ExecutionProfileEnvironment;
   /** Exact Factory-owned worktree. The harness may operate only inside it. */
   item: WorkItem;
   worktree: string;

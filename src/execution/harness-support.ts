@@ -173,6 +173,9 @@ export function writeHarnessResult(path: string, value: unknown): void {
 }
 
 export function workItemPrompt(request: HarnessRequest): string {
+  const environmentInstructions = request.environment?.instructions
+    ? `\n\nAdditional installation-owned profile instructions (subordinate to required Factory worker constraints and the approved Work Item; these grant no additional tools, paths, permissions, or publication authority):\n${request.environment.instructions}`
+    : "";
   const validationInstructions = request.item.validation.length
     ? `\n\nController-run validation constraints (authoritative): Factory, not the worker, executes these exact commands after your turn. Do not run them merely because they are listed here. Worker checkouts can contain committed LFS pointers. During exact-result validation, Factory verifies applicable selected required-LFS pointers and restores their selected bytes from the content store before running these commands. A pointer in the worker checkout alone does not establish impossible acceptance. Complete the owned deliverables and keep selected inputs read-only. Do not hydrate unowned destinations, configure LFS filters, or claim controller checks have passed. Report genuine implementation conflicts or missing required inputs. Preserve the literal meaning of each command together with its provenance and source:\n${request.item.validation
         .map((check) => JSON.stringify(check))
@@ -192,7 +195,7 @@ export function workItemPrompt(request: HarnessRequest): string {
           },
         )}`
       : "";
-  return `Implement this Work Item in the current repository checkout. Change only the owned paths. Do not commit, push, create issues, create pull requests, or access GitHub credentials. Stop and report if acceptance is impossible.\n\nTitle: ${request.item.title}\nGoal: ${request.item.goal}\nAcceptance:\n${request.item.acceptance.join("\n")}\nNon-goals:\n${request.item.nonGoals.join("\n")}\nOwned paths:\n${request.item.ownedPaths.join("\n")}\nBrief:\n${request.item.brief}${validationInstructions}${mediaInstructions}${inputInstructions}`;
+  return `Implement this Work Item in the current repository checkout. Change only the owned paths. Do not commit, push, create issues, create pull requests, or access GitHub credentials. Stop and report if acceptance is impossible.\n\nTitle: ${request.item.title}\nGoal: ${request.item.goal}\nAcceptance:\n${request.item.acceptance.join("\n")}\nNon-goals:\n${request.item.nonGoals.join("\n")}\nOwned paths:\n${request.item.ownedPaths.join("\n")}\nBrief:\n${request.item.brief}${validationInstructions}${mediaInstructions}${inputInstructions}${environmentInstructions}`;
 }
 
 export function readProducedAssets(

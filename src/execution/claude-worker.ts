@@ -1,3 +1,9 @@
+import {
+  createFactoryWorktreeMcp,
+  factoryMcpServerName,
+  factoryMcpToolName,
+  type PreparedClaudeEnvironment,
+} from "./claude-environment.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -89,12 +95,22 @@ function assertInitialization(
       `Claude SDK selected reasoning effort ${String(message.effort)}, expected ${config.reasoningEffort}`,
     );
   const configuredTools = new Set(config.tools);
+  if (request.environment?.mcp) configuredTools.add(factoryMcpToolName);
   const unexpectedTool = message.tools.find(
     (tool) => !configuredTools.has(tool),
   );
   if (unexpectedTool)
     throw new Error(`Claude SDK exposed unconfigured tool ${unexpectedTool}`);
-  if (message.mcp_servers.length)
+  if (request.environment?.mcp) {
+    if (
+      message.mcp_servers.length !== 1 ||
+      message.mcp_servers[0]?.name !== factoryMcpServerName ||
+      message.mcp_servers[0]?.source !== "sdk"
+    )
+      throw new Error(
+        "Claude SDK initialized an unexpected profile MCP inventory",
+      );
+  } else if (message.mcp_servers.length)
     throw new Error("Claude SDK initialized an unconfigured MCP server");
   // Plugin, skill and agent lists describe runtime inventory, not permissions.
   // In the pinned runtime, init.skills lists user-invocable commands even when
@@ -129,6 +145,7 @@ async function main(): Promise<void> {
     () => controller.abort(turn.signal.reason),
     { once: true },
   );
+  let prepared: PreparedClaudeEnvironment | undefined;
   let events: AsyncIterator<SDKMessage> | undefined;
   let closeStarted = false;
   let progressLost = false;
@@ -170,9 +187,23 @@ async function main(): Promise<void> {
   try {
     observeUsage("started");
     const { query } = await turn.race(import("@anthropic-ai/claude-agent-sdk"));
+    if (input.request.environment?.mcp) {
+      prepared = await turn.race(
+        createFactoryWorktreeMcp({
+          worktree: input.request.worktree,
+          config: input.config,
+        }).then(async (environment) => {
+          if (controller.signal.aborted) {
+            await environment.close();
+            throw new Error("Claude environment preparation interrupted");
+          }
+          return environment;
+        }),
+      );
+    }
     const stream = query({
       prompt: workItemPrompt(input.request),
-      options: claudeQueryOptions(input, process.env, controller),
+      options: claudeQueryOptions(input, process.env, controller, prepared),
     });
     let result: SDKResultMessage | undefined;
     let initialization: SDKSystemMessage | undefined;
@@ -202,6 +233,8 @@ async function main(): Promise<void> {
         }
       if (message.type === "system" && message.subtype === "init") {
         assertInitialization(message, input);
+        if (prepared)
+          prepared.markReady(await turn.race(stream.mcpServerStatus()));
         initialization = message;
       }
       if (message.type === "result") break;
@@ -213,6 +246,7 @@ async function main(): Promise<void> {
     if (error) throw new Error(error);
     closeStarted = true;
     await closeProviderEventStream(events, turn, true);
+    if (prepared) await turn.race(prepared.close());
     turn.finish();
     const assets = readProducedAssets(input.request);
     writeHarnessResult(resultPath, {
@@ -220,6 +254,7 @@ async function main(): Promise<void> {
       assets,
       evidence: {
         harness: "claude-agent-sdk",
+        ...(prepared && { environment: prepared.evidence() }),
         adapter: input.config.adapter,
         sessionId: result.session_id,
         configuredModel: input.config.model,
@@ -257,6 +292,16 @@ async function main(): Promise<void> {
   } finally {
     if (events && !closeStarted)
       void closeProviderEventStream(events, turn, false);
+    if (prepared) {
+      const closing = prepared.close();
+      if (!turn.signal.aborted) {
+        try {
+          await turn.race(closing);
+        } catch {
+          /* Preserve the attempt failure. */
+        }
+      } else void closing.catch(() => undefined);
+    }
     turn.finish();
   }
 }

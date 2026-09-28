@@ -44,11 +44,15 @@ import {
   processGroupExists,
   sanitizedWorkerEnvironment,
 } from "../process.js";
-import type { CodexModelSelection } from "../config.js";
+import type {
+  CodexModelSelection,
+  ExecutionProfileEnvironment,
+} from "../config.js";
 import { parseAuthenticationRequest } from "./harness-support.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
 
 export interface LocalProfileRegistration {
+  environment?: ExecutionProfileEnvironment;
   binding: ExecutionBinding;
   createHarness: () => AgentHarness;
 }
@@ -431,7 +435,11 @@ export class LocalExecutionDriver implements ExecutionDriver {
       this.profiles = new Map(
         [...profiles].map(([id, registration]) => [
           id,
-          { ...registration, binding: structuredClone(registration.binding) },
+          {
+            ...registration,
+            binding: structuredClone(registration.binding),
+            environment: structuredClone(registration.environment),
+          },
         ]),
       );
     else if (harness) this.assertCapabilities(harness, adapterIdentity);
@@ -519,7 +527,11 @@ export class LocalExecutionDriver implements ExecutionDriver {
           return { ...asset, path };
         }),
       );
+      const environment = request.item.executionProfile
+        ? this.profiles?.get(request.item.executionProfile.id)?.environment
+        : undefined;
       const handle = await harness.start({
+        ...(environment && { environment: structuredClone(environment) }),
         item: request.item,
         worktree,
         attemptId: identity,

@@ -133,12 +133,12 @@ Items. Automatic fallback remains unsupported.
 
 ## Built-in adapter matrix
 
-| Harness             | Package and license                                                                                                                                                                                                                | Local runtime                                     | Explicit Factory boundary                                                                                                                                                                                                                   | Authentication                                                                                         |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| Codex SDK (default) | bundled `@openai/codex-sdk@0.156.0`; Apache-2.0                                                                                                                                                                                    | local SDK worker                                  | explicit model/reasoning, workspace-write, approval prompts disabled                                                                                                                                                                        | existing Codex local login/profile                                                                     |
-| Claude Agent SDK    | optional [`@anthropic-ai/claude-agent-sdk@0.3.281`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk); [Anthropic proprietary license](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/LICENSE.md) | local SDK worker process                          | exact model/reasoning, tool and allowed-tool lists, permission mode, setting sources, turn limit; MCP, model skills, subagents and session persistence disabled; pinned runtime/managed components trusted; no additional plugins requested | standard Claude local profile or named Claude/Anthropic auth environment                               |
-| GitHub Copilot SDK  | optional [`@github/copilot-sdk@1.0.13`](https://www.npmjs.com/package/@github/copilot-sdk); MIT                                                                                                                                    | bundled local Copilot CLI/runtime in `empty` mode | exact model/reasoning/timeout, explicit file tools and read/write permissions; shell, task, web, GitHub, MCP, memory, skills, plugins, host-Git operations, remote sessions, and config discovery disabled                                  | Copilot-local profile or named Copilot auth environment; controller `gh` authentication store excluded |
-| Registered adapter  | adopter package                                                                                                                                                                                                                    | adapter-defined local process                     | exact capability declaration, stable identity, opaque JSON-safe config                                                                                                                                                                      | `local-environment`, `adapter-owned`, or `none`, as declared                                           |
+| Harness             | Package and license                                                                                                                                                                                                                | Local runtime                                     | Explicit Factory boundary                                                                                                                                                                                                                                                        | Authentication                                                                                         |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Codex SDK (default) | bundled `@openai/codex-sdk@0.156.0`; Apache-2.0                                                                                                                                                                                    | local SDK worker                                  | explicit model/reasoning, workspace-write, approval prompts disabled                                                                                                                                                                                                             | existing Codex local login/profile                                                                     |
+| Claude Agent SDK    | optional [`@anthropic-ai/claude-agent-sdk@0.3.281`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk); [Anthropic proprietary license](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/LICENSE.md) | local SDK worker process                          | exact model/reasoning, tool and allowed-tool lists, permission mode, setting sources, turn limit; optional fixed profile worktree-read MCP; model skills, subagents and session persistence disabled; pinned runtime/managed components trusted; no additional plugins requested | standard Claude local profile or named Claude/Anthropic auth environment                               |
+| GitHub Copilot SDK  | optional [`@github/copilot-sdk@1.0.13`](https://www.npmjs.com/package/@github/copilot-sdk); MIT                                                                                                                                    | bundled local Copilot CLI/runtime in `empty` mode | exact model/reasoning/timeout, explicit file tools and read/write permissions; shell, task, web, GitHub, MCP, memory, skills, plugins, host-Git operations, remote sessions, and config discovery disabled                                                                       | Copilot-local profile or named Copilot auth environment; controller `gh` authentication store excluded |
+| Registered adapter  | adopter package                                                                                                                                                                                                                    | adapter-defined local process                     | exact capability declaration, stable identity, opaque JSON-safe config                                                                                                                                                                                                           | `local-environment`, `adapter-owned`, or `none`, as declared                                           |
 
 Factory names the shared selection `reasoningEffort` for all three built-ins.
 The Claude adapter maps that field to the Claude SDK's provider-native `effort`
@@ -408,8 +408,8 @@ For registered adapters, use `composeWithLocalProfiles(config, registrations)`
 from the package export. Key `registrations` by profile ID; each value has the same
 `identity`, `config` and `harness` fields as `composeWithLocalHarness`. Configuration
 must exactly match the assigned registered profile. Built-in profiles require no
-registration. Arbitrary instructions, MCP and plugin provisioning are outside this
-assignment capability and belong to #164.
+registration. Registered adapter environments remain adapter-owned; the profile
+environment extension below supports only the built-in adapters.
 
 This capability has deterministic temporary-Git coverage for mixed assignments,
 review/projection, dependencies, ordinary delivery/final validation, same-adapter
@@ -417,3 +417,68 @@ restart/cancel/collection and fail-closed drift. It is **not live-qualified** by
 those tests or earlier single-harness qualification. Exact-artifact mixed-provider
 qualification remains a separately authorized gate in #162; no new release is
 implied by this documentation.
+
+## Assigned profile environment preparation
+
+Issue #164 extends the existing installation-owned profile with an optional
+`environment`. Additive `instructions` are supported by Codex, Claude and Copilot.
+Factory appends them to the private worker prompt, explicitly subordinate to its
+mandatory worker constraints and approved Work Item. They cannot replace the
+system prompt, grant permissions or change the assigned model. Instructions are
+not copied into the graph, compiler/reviewer metadata, issue body or diagnostics.
+Do not put credentials into instructions or any other profile value.
+
+The first MCP capability is **Claude only**:
+
+```json
+{
+  "instructions": "Explain any incomplete acceptance in your final response.",
+  "mcp": { "kind": "factory-worktree-read", "version": 1 }
+}
+```
+
+Place this object in a profile's `environment`, beside `harness`. Omit `mcp` for
+instructions alone. The MCP capability requires `Read` in both that Claude
+profile's existing `tools` and `allowedTools`; it never grants Read implicitly.
+Unknown environment fields, component names or versions fail validation. MCP on
+Codex/Copilot and any environment on registered profiles are rejected. Arbitrary
+MCP endpoints, commands, plugins, package installation and shared settings changes
+are not supported. No provider credentials or additional data destinations are
+introduced.
+
+Preparation loads the pinned optional Claude SDK 0.3.281 and Zod 4.6.5 already
+installed with Factory. Missing selected dependencies fail preflight; component
+construction failure stops before the provider query. It creates only the
+in-process `factory-worktree` server at version `1.0.0`, exposing `read_file`
+with a path argument. Strict MCP configuration excludes ambient servers. Both
+permission callbacks require the exact tool name and SDK-supplied
+`{name: "factory-worktree", source: "sdk"}` provenance; names alone never grant
+access. The SDK's permission-bypassing `allowedTools` list stays empty.
+
+All worker tools remain denied until the actual query reports exactly that
+connected server, version, SDK provenance and tool inventory. Missing provenance,
+extra servers/tools and readiness timeout fail the attempt. The adapter inspects
+the opened descriptor before reading: only regular files whose actual opened
+path is inside this worker's worktree are permitted. Escapes, final symlinks,
+dangling links, directories, devices, FIFOs and NUL paths are denied. This grants
+read access to the whole worktree and its materialized inputs, not only owned
+write paths. Existing host-account/runtime trust limitations still apply.
+
+The full profile/configuration digest binds instructions and component settings.
+Private requests contain the assigned environment; public identities contain only
+its digest. Every worker owns a separate server and readiness state. Restart
+reattaches to the original process/binding, without reinstalling or preparing a
+second worker. Completion, preparation failure and cancellation use the existing
+worker lifecycle and close owned resources. Evidence contains only component
+kind/version and successful-read count; file contents and tool arguments are not
+logged by this component. Missing provider usage remains unavailable.
+
+Deterministic tests exercise the real pinned SDK server through MCP in-memory
+transport, including concurrent roots, descriptor escape races and denied file
+types. Production-worker tests replace only the provider query and verify actual
+MCP reads, both permission callbacks, readiness failures, cleanup and two
+same-adapter profiles across restart/cancel/collect in temporary Git worktrees.
+The installed CLI 2.1.281 status implementation reports original MCP tool names
+(`read_file`) and server information, matching the readiness check. These checks
+do not qualify a live model or installed release. Exact-artifact disposable
+qualification remains separately gated in #164; the v0.1.35 pilot is unchanged.

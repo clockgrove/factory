@@ -86,6 +86,45 @@ The failed v0.1.21 adopter run is preserved without reuse. Version
 
 Publish a candidate tag and release asset only after its code, CI, packaging, and notice checks pass; then run the disposable gate from a fresh public download. Publication is not acceptance and does not authorize the Clockgrove pilot. Do not point the marketplace at a moving branch. If the candidate version changes, update the package, manifest, marketplace ref, changelog, README status, and commands here together before tagging.
 
+## Prepare v0.1.30
+
+This candidate starts from #185 / PR #186 integration
+`b13247bfeefeb2a85ddbb4b9db8b33b4b079dad4`. It includes the already-integrated
+#180 usage normalization, absent from immutable v0.1.29. This release metadata
+adds no runtime, dependency or skill changes. Keep the current published
+installation at v0.1.29 until the successor is available; preserve all earlier
+artifacts, evidence and terminal runs.
+
+Freeze the candidate, obtain independent exact-head review, and pass source,
+static, full-test, notices and hosted Quality gates, including actual Node22
+floor coverage. Pack `clockgrove-factory-0.1.30.tgz` once at that stable boundary.
+Record the source/tree, SHA-256 and size; verify source/tar/install parity,
+bundled dependency versions, normal empty-cache offline installation, CLI and
+scanner behavior. After guarded integration, verify the intended tree and
+byte-identical reproduction from the exact release source.
+
+Publish only a new `v0.1.30` tag and matching release assets under standing
+contributor release authority and normal controls. Independently download the
+public bytes, compare the recorded digest and verify normal offline installation.
+After publication, the matching installation commands are:
+
+```sh
+codex plugin marketplace add clockgrove/factory --ref v0.1.30
+codex plugin add factory@clockgrove
+gh release download v0.1.30 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.30.tgz --pattern SHA256SUMS
+sha256sum --check SHA256SUMS
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.30.tgz
+export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
+factory help
+```
+
+Publication and installation do not qualify model behavior or authorize another
+public/adopter attempt. Before any model-backed work, record an artifact-bound
+qualification decision with the existing approved target/provider/resource
+limits, preserved unknown accounting and explicit replacement-run authority.
+#26 owns acceptance; #162/#164 remain deferred.
+
 ## Prepare v0.1.29
 
 This completed procedure is historical. v0.1.29 is published; do not repeat

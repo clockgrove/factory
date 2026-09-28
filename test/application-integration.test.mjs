@@ -2183,6 +2183,44 @@ test("regular and native asset selection preserve a complete set and hydrate tar
             event.observations?.reviewedItemId === "media",
         )
         .at(-1);
+      const consumerReview = readEvents(planningPath).find(
+        (event) =>
+          event.type === "result-review" &&
+          event.observations?.reviewedItemId === "consumer",
+      );
+      const dependencyProof = JSON.parse(
+        consumerReview.evidence.find(
+          (entry) => entry.path === "Completed dependency results",
+        ).content,
+      );
+      assert.equal(dependencyProof.work.length, 1);
+      const priorMedia = dependencyProof.work[0];
+      assert.equal(priorMedia.id, "media");
+      assert.equal(priorMedia.resultTreeSha, completed.work.media.treeSha);
+      assert.equal(
+        priorMedia.validationCommands[0].treeSha,
+        priorMedia.resultTreeSha,
+      );
+      assert.equal(
+        priorMedia.integratedCommitSha,
+        delivery === "regular" ? completed.work.media.integratedSha : null,
+      );
+      assert.equal(
+        priorMedia.status,
+        delivery === "regular" ? "done" : "published",
+      );
+      assert.ok(
+        consumerReview.evidence.some(
+          (entry) => entry.path === "Work Item Git delta: media",
+        ),
+      );
+      assert.ok(
+        consumerReview.evidence.some(
+          (entry) =>
+            entry.path ===
+            "Work Item Git delta: media controller materialization",
+        ),
+      );
       assert.equal(mediaReview.observations.delivery.kind, delivery);
       assert.equal(mediaReview.observations.assetCaptureReceipts.length, 2);
       assert.ok(

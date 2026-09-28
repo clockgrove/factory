@@ -17,7 +17,7 @@ import {
   AcceptanceDecisionRequired,
   reviewAcceptance,
   validateWorkItem,
-  workItemMaterializationEvidence,
+  workItemReviewEvidence,
   workItemReviewObservations,
 } from "../validation.js";
 import { planningSources } from "../compiler.js";
@@ -350,10 +350,11 @@ export async function runNativeGraph(args: {
               config.checkout,
             ),
             decisions: work.acceptanceDecisions,
-            evidenceSources: workItemMaterializationEvidence({
+            evidenceSources: workItemReviewEvidence({
               state,
               item,
               checkout: config.checkout,
+              delivery: "native-stack",
             }),
             observations: workItemReviewObservations(
               state,

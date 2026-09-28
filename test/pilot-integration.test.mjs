@@ -167,7 +167,12 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
     foundation.acceptance = [
       "Foundation preserves source-approved toolchain facts and validates the real ignored dependency link.",
     ];
-    const policy = item("policy", [".gitattributes"], [], [policyCommand]);
+    const policyCommands = [
+      policyCommand,
+      `test "$(wc -c < assets/source.png)" -eq ${source.length}`,
+      hashCommand,
+    ];
+    const policy = item("policy", [".gitattributes"], [], policyCommands);
     policy.acceptance = [
       "Only the narrow source-image LFS rule is added and its attribute command passes.",
     ];
@@ -211,7 +216,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
         baseSha: target.baseSha,
         items: [foundation, policy, media, final],
       },
-      objectiveBody: `# Ordinary pilot\n\n## Planning sources\n- \`docs/toolchain.md#Approved toolchain\`\n\n## Acceptance\n- Exact selected pointer digest/size and inherited tracked LFS rule are proved on the reviewed tree.\n- Fresh-clone hydration preserves the selected bytes at assets/source.png.\n${commands.map((c) => `- \`${c}\``).join("\n")}\n\n## Final validation\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`,
+      objectiveBody: `# Ordinary pilot\n\n## Planning sources\n- \`docs/toolchain.md#Approved toolchain\`\n\n## Policy validation\n${policyCommands.map((c) => `- \`${c}\``).join("\n")}\n\n## Acceptance\n- Exact selected pointer digest/size and inherited tracked LFS rule are proved on the reviewed tree.\n- Fresh-clone hydration preserves the selected bytes at assets/source.png.\n${commands.map((c) => `- \`${c}\``).join("\n")}\n\n## Final validation\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`,
       fakeRoot: join(root, "fake"),
       actions: {
         foundation: {
@@ -280,10 +285,59 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
         .split("\nChange packet:\n")[0];
       const sources = new Map(
         [
-          ...sourceText.matchAll(/--- ([^\n]+) ---\n([\s\S]*?)(?=\n--- |$)/g),
+          ...sourceText.matchAll(
+            /--- (?!Exact patch )([^\n]+) ---\n([\s\S]*?)(?=\n--- (?!Exact patch )[^\n]+ ---\n|$)/g,
+          ),
         ].map((m) => [m[1], m[2]]),
       );
       const change = JSON.parse(prompt.split("\nChange packet:\n")[1]);
+      if (["media", "integration"].includes(observations.reviewedItemId)) {
+        const prior = JSON.parse(sources.get("Completed dependency results"));
+        const expected =
+          observations.reviewedItemId === "media"
+            ? ["policy"]
+            : ["foundation", "policy", "media"];
+        assert.deepEqual(
+          prior.work.map((entry) => entry.id),
+          expected,
+        );
+        for (const entry of prior.work) {
+          assert.notEqual(entry.resultTreeSha, tree);
+          assert.equal(entry.validationTreeSha, entry.resultTreeSha);
+          assert.ok(
+            entry.validationCommands.every(
+              (receipt) => receipt.treeSha === entry.resultTreeSha,
+            ),
+          );
+          assert.ok(entry.integratedCommitSha);
+          assert.ok(sources.has(entry.evidenceSource));
+          assert.equal(entry.validation, undefined);
+        }
+        const policyProof = prior.work.find((entry) => entry.id === "policy");
+        assert.deepEqual(
+          policyProof.validationCommands.map((entry) => entry.command),
+          policyCommands,
+        );
+        assert.match(
+          sources.get(policyProof.evidenceSource),
+          /assets\/source.png filter=lfs diff=lfs merge=lfs -text/,
+        );
+        if (observations.reviewedItemId === "integration") {
+          const foundationProof = prior.work.find(
+            (entry) => entry.id === "foundation",
+          );
+          const delta = sources.get(foundationProof.evidenceSource);
+          for (const literal of [
+            "package.json",
+            "check.mjs",
+            "process.versions.node.split",
+            "isSymbolicLink",
+            "pnpm-lock.yaml",
+          ])
+            assert.ok(delta.includes(literal));
+        }
+      }
+
       const proven = (criterion, name, quote) => {
         const text =
           name === "Command pass evidence"

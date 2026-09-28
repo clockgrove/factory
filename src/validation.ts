@@ -844,8 +844,8 @@ function workItemDeltaContent(args: {
   resultBaseSha: string;
   resultCommitSha: string;
   resultTreeSha: string;
-  integratedCommitSha: string;
-  integratedTreeSha: string;
+  integratedCommitSha: string | null;
+  integratedTreeSha: string | null;
   change: string;
 }): string {
   const packet = parseResultChangePacket(args.change);
@@ -886,6 +886,264 @@ function workItemDeltaContent(args: {
   return `${JSON.stringify(identity)}\n${patches}`;
 }
 
+/** Project one established result without copying prior model verdicts. */
+function workItemResultEvidence(args: {
+  state: FactoryState;
+  item: WorkItem;
+  checkout: string;
+  perPatchTextBudget: number;
+}) {
+  const { state, item, checkout, perPatchTextBudget } = args;
+  const current = state.work[item.id];
+  if (
+    !current?.executionBaseSha ||
+    !current.baseSha ||
+    !current.changeRef ||
+    !current.treeSha ||
+    !current.validation
+  )
+    throw new Error(
+      `Work Item ${item.id} lacks complete result-review identity`,
+    );
+  const evidence: ResultReviewEvidenceSource[] = [];
+  assertCommitTree(
+    checkout,
+    current.changeRef,
+    current.treeSha,
+    `Work Item ${item.id} result`,
+  );
+  assertAncestor(
+    checkout,
+    current.baseSha,
+    current.changeRef,
+    `Work Item ${item.id} result base`,
+  );
+  assertAncestor(
+    checkout,
+    current.executionBaseSha,
+    current.baseSha,
+    `Work Item ${item.id} execution base`,
+  );
+  const startSnapshot = current.integratedShaAtStart ?? state.baseSha;
+  const dependencyResults = item.dependencies.map(
+    (dependency) => state.work[dependency]?.changeRef,
+  );
+  if (
+    current.executionBaseSha !== startSnapshot &&
+    !dependencyResults.includes(current.executionBaseSha)
+  )
+    throw new Error(
+      `Work Item ${item.id} execution base is not bound to its recorded start snapshot or a declared dependency result`,
+    );
+  if (
+    current.executionBaseSha !== current.baseSha &&
+    current.executionBaseSha !== startSnapshot
+  )
+    throw new Error(
+      `Work Item ${item.id} replay base is not bound to its recorded start snapshot`,
+    );
+  assertResultCommitShape(checkout, item, {
+    ...current,
+    executionBaseSha: current.executionBaseSha,
+    baseSha: current.baseSha,
+    changeRef: current.changeRef,
+  });
+  assertCommandReceipts(
+    current.validation,
+    current.treeSha,
+    `Work Item ${item.id} validation`,
+  );
+  const { change, truncatedPaths } = resultChangePacket(
+    checkout,
+    current.baseSha,
+    current.changeRef,
+    perPatchTextBudget,
+  );
+  const changePacket = parseResultChangePacket(change);
+  const unownedChanges = changePacket.changes
+    .map((entry) => entry.path)
+    .filter((path) => !itemOwnsPath(item, path));
+  if (unownedChanges.length)
+    throw new Error(
+      `Work Item ${item.id} final delta contains paths outside accepted ownership: ${unownedChanges.join(", ")}`,
+    );
+
+  if (
+    current.validation.commands.length !== item.validation.length ||
+    current.validation.commands.some(
+      (receipt, index) => receipt.command !== item.validation[index]?.command,
+    )
+  )
+    throw new Error(
+      `Work Item ${item.id} validation commands differ from the accepted item`,
+    );
+  const itemIntegratedTreeSha = current.integratedSha
+    ? pinnedGit(checkout, "rev-parse", `${current.integratedSha}^{tree}`)
+    : null;
+  const evidencePath = `Work Item Git delta: ${item.id}`;
+  evidence.push({
+    path: evidencePath,
+    complete: truncatedPaths.length === 0,
+    content: workItemDeltaContent({
+      item,
+      state,
+      executionBaseSha: current.executionBaseSha,
+      resultBaseSha: current.baseSha,
+      resultCommitSha: current.changeRef,
+      resultTreeSha: current.treeSha,
+      integratedCommitSha: current.integratedSha ?? null,
+      integratedTreeSha: itemIntegratedTreeSha,
+      change,
+    }),
+  });
+  evidence.push(
+    ...workItemMaterializationEvidence({
+      state,
+      item,
+      checkout,
+      textBudgetPerBoundary: perPatchTextBudget,
+    }),
+  );
+  const record = {
+    id: item.id,
+    status: current.status,
+    executionBaseCommitSha: current.executionBaseSha,
+    resultBaseCommitSha: current.baseSha,
+    resultCommitSha: current.changeRef,
+    resultTreeSha: current.treeSha,
+    validationTreeSha: current.validation.treeSha,
+    validationCommands: current.validation.commands,
+    pullRequest: current.pullRequest,
+    integratedCommitSha: current.integratedSha ?? null,
+    integratedTreeSha: itemIntegratedTreeSha,
+    evidenceSource: evidencePath,
+    selectedAssetSet: current.selectedAssetSet,
+    selectedAsset: current.assets?.find(
+      (set) => set.id === current.selectedAssetSet,
+    ),
+    selection: current.selection,
+  };
+  return { record, evidence };
+}
+
+/** Current materialization and declared dependency ancestry, never unrelated work. */
+export function workItemReviewEvidence(args: {
+  state: FactoryState;
+  item: WorkItem;
+  checkout: string;
+  delivery: "regular" | "native-stack";
+}): ResultReviewEvidenceSource[] {
+  const { state, item, checkout, delivery } = args;
+  const current = state.work[item.id];
+  if (!current?.baseSha || !current.changeRef || !current.treeSha)
+    throw new Error(`Work Item ${item.id} lacks a reviewed result identity`);
+  assertCommitTree(
+    checkout,
+    current.changeRef,
+    current.treeSha,
+    `Work Item ${item.id} result`,
+  );
+  assertAncestor(
+    checkout,
+    current.baseSha,
+    current.changeRef,
+    `Work Item ${item.id} result base`,
+  );
+  const dependencies: WorkItem[] = [];
+  const seen = new Set<string>();
+  const visit = (id: string) => {
+    if (seen.has(id)) return;
+    if (id === item.id)
+      throw new Error("Dependency ancestry contains the reviewed item");
+    const dependency = state.graph.items.find((entry) => entry.id === id);
+    if (!dependency) throw new Error(`Unknown dependency ${id}`);
+    seen.add(id);
+    for (const parent of dependency.dependencies) visit(parent);
+    dependencies.push(dependency);
+  };
+  for (const id of item.dependencies) visit(id);
+  const selectedCount = [...dependencies, item].filter(
+    (entry) => state.work[entry.id]?.selectedAssetSet,
+  ).length;
+  const perPatchTextBudget = Math.floor(
+    configuredResultReviewTextBudget() /
+      Math.max(1, dependencies.length + selectedCount * 2),
+  );
+  const evidence = workItemMaterializationEvidence({
+    state,
+    item,
+    checkout,
+    textBudgetPerBoundary: perPatchTextBudget,
+  });
+  const records = dependencies.map((dependency) => {
+    const work = state.work[dependency.id];
+    if (
+      !work ||
+      (work.status !== "done" &&
+        !(delivery === "native-stack" && work.status === "published")) ||
+      !work.changeRef ||
+      (work.status === "done" && !work.integratedSha) ||
+      (work.status === "published" && (!work.pullRequest || work.integratedSha))
+    )
+      throw new Error(
+        `Dependency ${dependency.id} lacks a completed delivery result`,
+      );
+    assertAncestor(
+      checkout,
+      work.changeRef,
+      current.baseSha!,
+      `Dependency ${dependency.id} result in reviewed base`,
+    );
+    if (work.integratedSha) {
+      assertAncestor(
+        checkout,
+        work.changeRef,
+        work.integratedSha,
+        `Dependency ${dependency.id} integration`,
+      );
+      assertAncestor(
+        checkout,
+        work.integratedSha,
+        current.baseSha!,
+        `Dependency ${dependency.id} integration in reviewed base`,
+      );
+    }
+    const proof = workItemResultEvidence({
+      state,
+      item: dependency,
+      checkout,
+      perPatchTextBudget,
+    });
+    evidence.push(...proof.evidence);
+    return proof.record;
+  });
+  assertIntegrationBindings(
+    checkout,
+    dependencies.flatMap((dependency) => {
+      const work = state.work[dependency.id]!;
+      return work.integratedSha
+        ? [
+            {
+              item: dependency,
+              resultBaseSha: work.baseSha!,
+              resultCommitSha: work.changeRef!,
+              integratedCommitSha: work.integratedSha,
+            },
+          ]
+        : [];
+    }),
+  );
+  if (records.length)
+    evidence.push({
+      path: "Completed dependency results",
+      content: JSON.stringify({
+        reviewedItemId: item.id,
+        reviewedBaseCommitSha: current.baseSha,
+        work: records,
+      }),
+    });
+  return evidence;
+}
 /**
  * Build final-review authority from supervisor state and exact Git objects.
  * Previous model verdicts and quotes are intentionally excluded.
@@ -943,53 +1201,12 @@ export function objectiveReviewEvidence(args: {
       throw new Error(
         `Work Item ${item.id} lacks complete final-review identity`,
       );
-    assertCommitTree(
+    const proof = workItemResultEvidence({
+      state,
+      item,
       checkout,
-      current.changeRef,
-      current.treeSha,
-      `Work Item ${item.id} result`,
-    );
-    assertAncestor(
-      checkout,
-      current.baseSha,
-      current.changeRef,
-      `Work Item ${item.id} result base`,
-    );
-    assertAncestor(
-      checkout,
-      current.executionBaseSha,
-      current.baseSha,
-      `Work Item ${item.id} execution base`,
-    );
-    const startSnapshot = current.integratedShaAtStart ?? state.baseSha;
-    const dependencyResults = item.dependencies.map(
-      (dependency) => state.work[dependency]?.changeRef,
-    );
-    if (
-      current.executionBaseSha !== startSnapshot &&
-      !dependencyResults.includes(current.executionBaseSha)
-    )
-      throw new Error(
-        `Work Item ${item.id} execution base is not bound to its recorded start snapshot or a declared dependency result`,
-      );
-    if (
-      current.executionBaseSha !== current.baseSha &&
-      current.executionBaseSha !== startSnapshot
-    )
-      throw new Error(
-        `Work Item ${item.id} replay base is not bound to its recorded start snapshot`,
-      );
-    assertResultCommitShape(checkout, item, {
-      ...current,
-      executionBaseSha: current.executionBaseSha,
-      baseSha: current.baseSha,
-      changeRef: current.changeRef,
+      perPatchTextBudget,
     });
-    const itemIntegratedTreeSha = pinnedGit(
-      checkout,
-      "rev-parse",
-      `${current.integratedSha}^{tree}`,
-    );
     assertAncestor(
       checkout,
       current.changeRef,
@@ -1002,74 +1219,14 @@ export function objectiveReviewEvidence(args: {
       integratedCommitSha,
       `Work Item ${item.id} integration`,
     );
-    assertCommandReceipts(
-      current.validation,
-      current.treeSha,
-      `Work Item ${item.id} validation`,
-    );
-    const { change, truncatedPaths } = resultChangePacket(
-      checkout,
-      current.baseSha,
-      current.changeRef,
-      perPatchTextBudget,
-    );
-    const changePacket = parseResultChangePacket(change);
-    const unownedChanges = changePacket.changes
-      .map((entry) => entry.path)
-      .filter((path) => !itemOwnsPath(item, path));
-    if (unownedChanges.length)
-      throw new Error(
-        `Work Item ${item.id} final delta contains paths outside accepted ownership: ${unownedChanges.join(", ")}`,
-      );
     integrationRecords.push({
       item,
       resultBaseSha: current.baseSha,
       resultCommitSha: current.changeRef,
       integratedCommitSha: current.integratedSha,
     });
-    const evidencePath = `Work Item Git delta: ${item.id}`;
-    evidence.push({
-      path: evidencePath,
-      complete: truncatedPaths.length === 0,
-      content: workItemDeltaContent({
-        item,
-        state,
-        executionBaseSha: current.executionBaseSha,
-        resultBaseSha: current.baseSha,
-        resultCommitSha: current.changeRef,
-        resultTreeSha: current.treeSha,
-        integratedCommitSha: current.integratedSha,
-        integratedTreeSha: itemIntegratedTreeSha,
-        change,
-      }),
-    });
-    evidence.push(
-      ...workItemMaterializationEvidence({
-        state,
-        item,
-        checkout,
-        textBudgetPerBoundary: perPatchTextBudget,
-      }),
-    );
-    return {
-      id: item.id,
-      status: current.status,
-      executionBaseCommitSha: current.executionBaseSha,
-      resultBaseCommitSha: current.baseSha,
-      resultCommitSha: current.changeRef,
-      resultTreeSha: current.treeSha,
-      validationTreeSha: current.validation.treeSha,
-      validationCommands: current.validation.commands,
-      pullRequest: current.pullRequest,
-      integratedCommitSha: current.integratedSha,
-      integratedTreeSha: itemIntegratedTreeSha,
-      evidenceSource: evidencePath,
-      selectedAssetSet: current.selectedAssetSet,
-      selectedAsset: current.assets?.find(
-        (set) => set.id === current.selectedAssetSet,
-      ),
-      selection: current.selection,
-    };
+    evidence.push(...proof.evidence);
+    return proof.record;
   });
   assertIntegrationBindings(checkout, integrationRecords);
   return {

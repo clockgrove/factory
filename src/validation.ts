@@ -1313,6 +1313,21 @@ function reviewFindingRejection(
   return undefined;
 }
 
+/** One transient, directly quotable presentation for prompt and citation grounding. */
+export function commandPassEvidence(
+  commands: ValidationCommandReceipt[],
+): ResultReviewEvidenceSource {
+  return {
+    path: "Command pass evidence",
+    content: commands
+      .map(
+        ({ command, ...identity }) =>
+          `Receipt: ${JSON.stringify(identity)}\nCommand:\n${command}`,
+      )
+      .join("\n\n"),
+  };
+}
+
 /** A separate read-only review evaluates each criterion on an exact-tree packet. */
 export async function reviewAcceptance(args: {
   model: PlanningModel;
@@ -1357,10 +1372,7 @@ export async function reviewAcceptance(args: {
   ];
   const evidenceSources: ResultReviewEvidenceSource[] = [
     { path: "Exact Git change packet", content: change },
-    {
-      path: "Command pass evidence",
-      content: JSON.stringify(evidence.commands),
-    },
+    commandPassEvidence(evidence.commands),
     {
       path: "Delivery observations",
       content: args.observations ?? "",

@@ -1167,7 +1167,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
                 criterion: "The declared validation succeeds.",
                 verdict: "pass",
                 source: "Command pass evidence",
-                quote: `"index":0,"command":"test -f result.txt","passed":true,"exitCode":0,"treeSha":"${treeSha}"`,
+                quote: "test -f result.txt",
                 detail: "The exact-tree command completed successfully.",
                 question: "",
               },

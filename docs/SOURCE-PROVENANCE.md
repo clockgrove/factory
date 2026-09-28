@@ -552,3 +552,13 @@ Fresh real-Git tests capture the serialized item/final review request, including
 unchanged paths and a checkout that differs from the result tree. This is source
 evidence plumbing, not live-model or installed qualification. No archived code,
 private adopter source or published artifact is changed.
+
+## Literal command receipt citations (#208)
+
+New shared result-review rendering exposes each existing receipt's literal
+command alongside its index, exact tree, pass status and exit code. The model
+prompt and exact-source citation check use the same transient text; receipt
+validation, source matching and quote matching are unchanged. Fresh public
+Git fixtures reproduce shell-quote escaping and exercise item/final review
+without provider calls. No archived code, private source, new durable evidence,
+lifecycle behavior or release qualification is introduced.

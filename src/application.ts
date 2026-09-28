@@ -1,7 +1,9 @@
+import { profileBinding } from "./execution-profiles.js";
+import type { LocalProfileRegistration } from "./execution/local.js";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import type { FactoryConfig, JsonValue } from "./config.js";
+import type { FactoryConfig, JsonValue, LocalHarnessConfig } from "./config.js";
 import {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
@@ -229,9 +231,10 @@ function normalizedJson(
 
 function composeLocal(
   config: FactoryConfig,
-  harness: AgentHarness,
+  harness: AgentHarness | undefined,
   adapterIdentity: string,
   options: LocalHarnessCompositionOptions = {},
+  profiles?: ReadonlyMap<string, LocalProfileRegistration>,
 ): FactoryApplication {
   const root = stateRoot(config.repository);
   const contentStore = new LocalContentStore(join(root, "content"));
@@ -248,6 +251,7 @@ function composeLocal(
     config.execution.concurrency,
     contentStore,
     adapterIdentity,
+    profiles,
   );
   return createApplication(config, {
     planningModel:
@@ -280,7 +284,7 @@ export function composeWithLocalHarness(
     throw new Error(
       `Execution mode ${config.execution.kind} is not implemented`,
     );
-  if (config.execution.harness.kind !== "registered")
+  if (config.execution.harness?.kind !== "registered")
     throw new Error(
       "composeWithLocalHarness requires execution.harness.kind registered",
     );
@@ -310,66 +314,100 @@ export function composeWithLocalHarness(
   );
 }
 
-/** The single production composition point for the installed application. */
-export function compose(input: FactoryConfig): FactoryApplication {
+/** Profile-keyed registration permits distinct settings for the same adapter. */
+export function composeWithLocalProfiles(
+  input: FactoryConfig,
+  registrations: Record<string, LocalHarnessRegistration> = {},
+  options: LocalHarnessCompositionOptions = {},
+): FactoryApplication {
   const config = cloneAndValidateConfig(input);
-  validateTarget(config.repository, config.checkout);
-  if (config.execution.kind !== "local")
-    throw new Error(
-      `Execution mode ${config.execution.kind} is not implemented`,
-    );
-  if (config.execution.harness.kind === "claude-agent-sdk") {
-    if (config.policy.network !== "host")
-      throw new Error(
-        "Claude Agent SDK requires policy.network host; no fallback is available",
-      );
+  if (config.execution.kind !== "local" || !config.execution.profiles)
+    throw new Error("Local execution profiles are required");
+  const profiles = new Map<string, LocalProfileRegistration>();
+  for (const [id, profile] of Object.entries(config.execution.profiles)) {
+    profiles.set(id, {
+      binding: profileBinding(id, profile, config.policy),
+      createHarness: () => {
+        if (profile.harness.kind !== "registered")
+          return builtInHarness(config, profile.harness);
+        const registration = registrations[id];
+        if (
+          !registration ||
+          registration.identity !== profile.harness.adapter ||
+          JSON.stringify(
+            normalizedJson(
+              registration.config,
+              "Registered harness configuration",
+            ),
+          ) !==
+            JSON.stringify(
+              normalizedJson(
+                profile.harness.config,
+                "Configured harness configuration",
+              ),
+            )
+        )
+          throw new Error(
+            `Assigned execution profile ${id} is unavailable or changed; no fallback is available`,
+          );
+        return registration.harness;
+      },
+    });
+  }
+  return composeLocal(config, undefined, "profiles", options, profiles);
+}
+
+function builtInHarness(
+  config: FactoryConfig,
+  harness: LocalHarnessConfig,
+): AgentHarness {
+  if (harness.kind === "claude-agent-sdk") {
     requireOptionalHarness(
       "@anthropic-ai/claude-agent-sdk",
       CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
     );
-    return composeLocal(
-      config,
-      new ClaudeAgentSdkHarness(
-        join(stateRoot(config.repository), "harness"),
-        config.execution.harness,
-      ),
-      CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
+    return new ClaudeAgentSdkHarness(
+      join(stateRoot(config.repository), "harness"),
+      harness,
     );
   }
-  if (config.execution.harness.kind === "github-copilot-sdk") {
+  if (harness.kind === "github-copilot-sdk") {
     requireCopilotRuntime();
-    if (config.policy.network !== "host")
-      throw new Error(
-        "GitHub Copilot SDK requires policy.network host; no fallback is available",
-      );
     requireOptionalHarness(
       "@github/copilot-sdk",
       GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
     );
-    return composeLocal(
-      config,
-      new GitHubCopilotSdkHarness(
-        join(stateRoot(config.repository), "harness"),
-        config.execution.harness,
-      ),
-      GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
+    return new GitHubCopilotSdkHarness(
+      join(stateRoot(config.repository), "harness"),
+      harness,
     );
   }
-  if (config.execution.harness.kind !== "codex-sdk")
+  if (harness.kind !== "codex-sdk")
     throw new Error(
-      `Harness adapter ${config.execution.harness.adapter} is not registered; use composeWithLocalHarness`,
+      `Harness adapter ${harness.adapter} is not registered; use composeWithLocalHarness or composeWithLocalProfiles`,
     );
-  const root = stateRoot(config.repository);
-  const credentials = join(root, "empty-gh-config");
+  const credentials = join(stateRoot(config.repository), "empty-gh-config");
   mkdirSync(credentials, { recursive: true, mode: 0o700 });
+  return new CodexHarness(
+    credentials,
+    config.policy.network,
+    harness,
+    config.policy.allowedSecretNames,
+  );
+}
+
+/** The single production composition point for the installed application. */
+export function compose(input: FactoryConfig): FactoryApplication {
+  const config = cloneAndValidateConfig(input);
+  if (config.execution.kind !== "local")
+    throw new Error(
+      `Execution mode ${config.execution.kind} is not implemented`,
+    );
+  if (config.execution.profiles) return composeWithLocalProfiles(config);
+  const harness = config.execution.harness!;
   return composeLocal(
     config,
-    new CodexHarness(
-      credentials,
-      config.policy.network,
-      config.execution.harness,
-      config.policy.allowedSecretNames,
-    ),
-    "codex-sdk",
+    builtInHarness(config, harness),
+    harness.kind === "codex-sdk" ? harness.kind : harness.adapter,
   );
 }

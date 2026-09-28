@@ -11,7 +11,32 @@ export interface SourceAssetBinding {
   visibility: "private" | "repository";
 }
 
+export interface ExecutionBinding {
+  id: string;
+  adapter: string;
+  model?: string;
+  reasoningEffort?: string;
+  digest: string;
+}
+
+export interface ExecutionProfileSummary extends ExecutionBinding {
+  description: string;
+  selectionHints: string[];
+  constraints: {
+    network: "host" | "off";
+    tools?: string[];
+    permissions?: string[];
+  };
+}
+export interface ExecutionProfileChoices {
+  defaultProfile: string;
+  profiles: ExecutionProfileSummary[];
+}
+
 export interface WorkItem {
+  executionProfile?: { id: string; reason: string };
+  /** Controller-generated exact configuration identity; never model settings. */
+  executionBinding?: ExecutionBinding;
   id: string;
   title: string;
   goal: string;
@@ -57,6 +82,8 @@ export interface ModelInvocationUsage {
 /** Cumulative provider counters for one worker invocation/provider attempt.
  * This is optional telemetry, never execution or recovery authority. */
 export interface WorkerUsageObservation {
+  profileId?: string;
+  adapter?: string;
   type: "started" | "progress" | "completed" | "failed";
   invocationId: string;
   providerAttempt: number;
@@ -128,6 +155,7 @@ export interface PlanningRequest<T> {
   sources: { path: string; content: string; heading?: string }[];
   controllerCapabilities: ControllerCapabilitiesManifest;
   controllerCapabilitiesDigest: string;
+  executionProfiles?: ExecutionProfileChoices;
   schema: unknown;
   resultType?: T;
   invocation?: ModelInvocationContext;
@@ -148,6 +176,7 @@ export interface PlanReviewRequest {
   sources: { path: string; content: string; heading?: string }[];
   controllerCapabilities: ControllerCapabilitiesManifest;
   controllerCapabilitiesDigest: string;
+  executionProfiles?: ExecutionProfileChoices;
   graph: WorkGraph;
   commands: PlanCommandAuthorization[];
   finalCommands: string[];
@@ -249,6 +278,7 @@ export interface ExecutionResult {
   evidence?: unknown;
 }
 export interface ExecutionDriver {
+  preflight?(graph: WorkGraph): Promise<void>;
   availableSlots(): Promise<number | "unknown">;
   start(request: ExecutionRequest): Promise<ExecutionHandle>;
   observe(handle: ExecutionHandle): Promise<ExecutionObservation>;

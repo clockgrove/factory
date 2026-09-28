@@ -4,6 +4,14 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.34 public scenario was subsequently accepted; actual adopter acceptance remains pending. This does not qualify changed v0.1.35 bytes. Historical observations below retain their original scope; current execution and final acceptance are tracked in #206 and #207.
 
+## Assigned execution profiles source capability
+
+Issue #162 implements compile-time assigned local profiles through independent
+plan review, immutable binding, normal delivery and restart-safe lifecycle.
+Deterministic tests are source evidence only; mixed-provider installed-artifact
+qualification is still pending in #162. Dependent environment preparation belongs
+to #164. This contributor work does not alter or qualify the v0.1.35 pilot artifact.
+
 ## Immutable v0.1.35 artifact record
 
 [Release v0.1.35](https://github.com/clockgrove/factory/releases/tag/v0.1.35)

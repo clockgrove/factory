@@ -475,6 +475,10 @@ export function summarizeDiagnosticUsage(events: Record<string, unknown>[]) {
       attemptId: string;
       invocationId: string;
       providerAttempt: number;
+      profileId?: string;
+      adapter?: string;
+      model?: string;
+      reasoningEffort?: string;
       runId?: string;
       itemId?: string;
     }
@@ -514,6 +518,11 @@ export function summarizeDiagnosticUsage(events: Record<string, unknown>[]) {
       attemptId: event.attemptId,
       invocationId: observation.invocationId,
       providerAttempt: observation.providerAttempt,
+      ...Object.fromEntries(
+        ["profileId", "adapter", "model", "reasoningEffort"].flatMap((key) =>
+          typeof observation[key] === "string" ? [[key, observation[key]]] : [],
+        ),
+      ),
       ...(typeof event.runId === "string" ? { runId: event.runId } : {}),
       ...(typeof event.workItemId === "string"
         ? { itemId: event.workItemId }
@@ -815,6 +824,11 @@ function usageEvent(
       phase: observation.phase,
       invocationId: observation.invocationId,
       providerAttempt: observation.providerAttempt,
+      ...Object.fromEntries(
+        ["profileId", "adapter", "model", "reasoningEffort"].flatMap((key) =>
+          typeof observation[key] === "string" ? [[key, observation[key]]] : [],
+        ),
+      ),
       usage: normalizeTokenUsage(observation.usage),
     },
   };
@@ -950,6 +964,17 @@ export function statusDocument(
       ready: current.status === "pending" && !blockedReason ? null : false,
       blockedReason: blockedReason ?? null,
       attemptId: current.attempt ?? null,
+      ...(item.executionBinding
+        ? {
+            assignedExecution: item.executionBinding,
+            actualExecution:
+              (
+                current.execution?.data as
+                  | { executionBinding?: unknown }
+                  | undefined
+              )?.executionBinding ?? null,
+          }
+        : {}),
       providerProgress:
         current.attempt &&
         existsSync(
@@ -1072,6 +1097,43 @@ export class StateDiagnostics {
               ? Math.max(0, Date.now() - Date.parse(work.startedAt))
               : undefined,
           metadata: {
+            ...(() => {
+              const assigned = this.state.graph.items.find(
+                (item) => item.id === id,
+              )?.executionBinding;
+              const actual = (
+                (work.execution ?? before?.execution)?.data as
+                  | {
+                      executionBinding?: {
+                        id: string;
+                        adapter: string;
+                        model?: string;
+                        reasoningEffort?: string;
+                        digest: string;
+                      };
+                    }
+                  | undefined
+              )?.executionBinding;
+              return {
+                ...(assigned
+                  ? {
+                      assignedProfile: assigned.id,
+                      assignedAdapter: assigned.adapter,
+                      profileDigest: assigned.digest,
+                    }
+                  : {}),
+                ...(actual
+                  ? {
+                      actualProfile: actual.id,
+                      actualAdapter: actual.adapter,
+                      ...(actual.model ? { actualModel: actual.model } : {}),
+                      ...(actual.reasoningEffort
+                        ? { actualReasoningEffort: actual.reasoningEffort }
+                        : {}),
+                    }
+                  : {}),
+              };
+            })(),
             provider:
               work.execution?.provider ??
               before?.execution?.provider ??

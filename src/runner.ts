@@ -1,3 +1,7 @@
+import {
+  executionProfileChoices,
+  verifyExecutionProfiles,
+} from "./execution-profiles.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readdirSync, existsSync, mkdirSync } from "node:fs";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
@@ -100,6 +104,7 @@ export async function planObjective(
       services.planningModel,
       factoryConfigDigest(config),
       diagnostics.modelObserver({ scopeId: planningScopeId }),
+      executionProfileChoices(config),
     );
     diagnostics.emit({
       operation: "planning-preview",
@@ -247,6 +252,13 @@ export async function runObjective(
         );
       }
       if (acceptedPlan) {
+        if (
+          JSON.stringify(acceptedPlan.executionProfiles) !==
+          JSON.stringify(executionProfileChoices(config))
+        )
+          throw new Error(
+            "Accepted plan execution profile policy differs from installation",
+          );
         verifyPlanCandidate(
           acceptedPlan,
           objective,
@@ -336,6 +348,7 @@ export async function runObjective(
               planningModel,
               installationConfigDigest,
               diagnostics.modelObserver({ scopeId: planningScopeId }),
+              executionProfileChoices(config),
             );
           }
           verifyPlanCandidate(
@@ -350,7 +363,16 @@ export async function runObjective(
         },
         (candidate) => ({ itemCount: candidate.graph.items.length }),
       );
+      if (
+        JSON.stringify(plan.executionProfiles) !==
+        JSON.stringify(executionProfileChoices(config))
+      )
+        throw new Error(
+          "Accepted plan execution profile policy differs from installation",
+        );
       const graph = plan.graph;
+      verifyExecutionProfiles(graph, executionProfileChoices(config));
+      await driver.preflight?.(graph);
       preflightLocalExecutables({
         checkout: config.checkout,
         baseSha,
@@ -410,6 +432,8 @@ export async function runObjective(
       );
     }
     const graph = state.graph;
+    verifyExecutionProfiles(graph, executionProfileChoices(config));
+    await driver.preflight?.(graph);
     validateCommandProvenance(
       graph,
       planningSources(issue.body, state.baseSha, config.checkout),

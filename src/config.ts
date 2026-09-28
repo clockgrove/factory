@@ -91,11 +91,19 @@ export type LocalHarnessConfig =
       config: { [key: string]: JsonValue };
     };
 
+export interface ExecutionProfile {
+  description: string;
+  selectionHints?: string[];
+  harness: LocalHarnessConfig;
+}
+
 export type ExecutionConfig =
   | {
       kind: "local";
       concurrency: number;
-      harness: LocalHarnessConfig;
+      harness?: LocalHarnessConfig;
+      defaultProfile?: string;
+      profiles?: Record<string, ExecutionProfile>;
     }
   | { kind: "managed-agent"; concurrency: number; provider: string }
   | {
@@ -443,176 +451,44 @@ export function validateConfig(value: unknown): FactoryConfig {
       "execution.concurrency must be a positive operator-selected integer",
     );
   }
-  assertObject(value.execution.harness, "execution.harness");
-  if (value.execution.harness.kind === "codex-sdk") {
-    assertOnlyKeys(
-      value.execution.harness,
-      ["kind", "model", "reasoningEffort"],
-      "execution.harness",
-    );
-    assertCodexModelSelection(value.execution.harness, "execution.harness");
-  } else if (value.execution.harness.kind === "claude-agent-sdk") {
-    assertOnlyKeys(
-      value.execution.harness,
-      [
-        "kind",
-        "adapter",
-        "model",
-        "reasoningEffort",
-        "permissionMode",
-        "session",
-        "settingSources",
-        "tools",
-        "allowedTools",
-        "maxTurns",
-        "authentication",
-      ],
-      "execution.harness",
-    );
-    if (value.execution.harness.adapter !== CLAUDE_AGENT_SDK_ADAPTER_IDENTITY)
-      throw new Error("execution.harness.adapter is not the pinned Claude SDK");
-    if (
-      typeof value.execution.harness.model !== "string" ||
-      value.execution.harness.model.trim().length === 0
-    )
-      throw new Error("execution.harness.model must be a non-empty string");
-    if (
-      typeof value.execution.harness.reasoningEffort !== "string" ||
-      !harnessReasoningEfforts.has(
-        value.execution.harness.reasoningEffort as HarnessReasoningEffort,
+  if (value.execution.profiles !== undefined) {
+    if (value.execution.harness !== undefined)
+      throw new Error(
+        "execution.harness and execution.profiles are mutually exclusive",
+      );
+    assertObject(value.execution.profiles, "execution.profiles");
+    const entries = Object.entries(value.execution.profiles);
+    if (!entries.length)
+      throw new Error("execution.profiles must not be empty");
+    for (const [id, profile] of entries) {
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(id))
+        throw new Error("Invalid execution profile identifier");
+      assertObject(profile, `execution.profiles.${id}`);
+      assertOnlyKeys(
+        profile,
+        ["description", "selectionHints", "harness"],
+        `execution.profiles.${id}`,
+      );
+      if (
+        typeof profile.description !== "string" ||
+        !profile.description.trim()
       )
-    )
-      throw new Error("execution.harness.reasoningEffort is unsupported");
+        throw new Error("Execution profile description is required");
+      if (profile.selectionHints !== undefined)
+        assertUniqueStrings(profile.selectionHints, "profile.selectionHints");
+      validateLocalHarness(profile.harness);
+    }
     if (
-      value.execution.harness.permissionMode !== "acceptEdits" &&
-      value.execution.harness.permissionMode !== "dontAsk"
+      typeof value.execution.defaultProfile !== "string" ||
+      !Object.hasOwn(value.execution.profiles, value.execution.defaultProfile)
     )
-      throw new Error("execution.harness.permissionMode is unsupported");
-    if (value.execution.harness.session !== "new-per-attempt")
-      throw new Error("execution.harness.session is unsupported");
-    const settings = assertUniqueStrings(
-      value.execution.harness.settingSources,
-      "execution.harness.settingSources",
-    );
-    if (
-      settings.some(
-        (source) => !claudeSettingSources.has(source as ClaudeSettingSource),
-      )
-    )
-      throw new Error("execution.harness.settingSources is unsupported");
-    const tools = assertUniqueStrings(
-      value.execution.harness.tools,
-      "execution.harness.tools",
-    );
-    if (!tools.length)
-      throw new Error("execution.harness.tools must name bounded SDK tools");
-    if (tools.some((tool) => !claudeFileTools.has(tool)))
-      throw new Error(
-        "execution.harness.tools supports only Read, Edit, Write, Glob, and Grep",
-      );
-    const allowedTools = assertUniqueStrings(
-      value.execution.harness.allowedTools,
-      "execution.harness.allowedTools",
-    );
-    if (allowedTools.some((tool) => !tools.includes(tool)))
-      throw new Error(
-        "execution.harness.allowedTools must be a subset of execution.harness.tools",
-      );
-    if (
-      !Number.isSafeInteger(value.execution.harness.maxTurns) ||
-      (value.execution.harness.maxTurns as number) <= 0
-    )
-      throw new Error(
-        "execution.harness.maxTurns must be a positive operator-selected integer",
-      );
-    if (value.execution.harness.authentication !== "local")
-      throw new Error("execution.harness.authentication must be local");
-  } else if (value.execution.harness.kind === "github-copilot-sdk") {
-    assertOnlyKeys(
-      value.execution.harness,
-      [
-        "kind",
-        "adapter",
-        "model",
-        "reasoningEffort",
-        "session",
-        "availableTools",
-        "permissionKinds",
-        "timeoutSeconds",
-        "authentication",
-      ],
-      "execution.harness",
-    );
-    if (value.execution.harness.adapter !== GITHUB_COPILOT_SDK_ADAPTER_IDENTITY)
-      throw new Error(
-        "execution.harness.adapter is not the pinned GitHub Copilot SDK",
-      );
-    if (
-      typeof value.execution.harness.model !== "string" ||
-      value.execution.harness.model.trim().length === 0
-    )
-      throw new Error("execution.harness.model must be a non-empty string");
-    if (
-      typeof value.execution.harness.reasoningEffort !== "string" ||
-      !harnessReasoningEfforts.has(
-        value.execution.harness.reasoningEffort as HarnessReasoningEffort,
-      )
-    )
-      throw new Error("execution.harness.reasoningEffort is unsupported");
-    if (value.execution.harness.session !== "new-per-attempt")
-      throw new Error("execution.harness.session is unsupported");
-    const availableTools = assertUniqueStrings(
-      value.execution.harness.availableTools,
-      "execution.harness.availableTools",
-    );
-    if (!availableTools.length)
-      throw new Error(
-        "execution.harness.availableTools must name bounded SDK tools",
-      );
-    const unsupportedTool = availableTools.find(
-      (tool) => !copilotFileTools.has(tool),
-    );
-    if (unsupportedTool)
-      throw new Error(
-        `execution.harness.availableTools supports only view, create, edit, apply_patch, grep, and glob; received ${unsupportedTool}`,
-      );
-    const permissionKinds = assertUniqueStrings(
-      value.execution.harness.permissionKinds,
-      "execution.harness.permissionKinds",
-    );
-    if (
-      !permissionKinds.length ||
-      permissionKinds.some((kind) => kind !== "read" && kind !== "write")
-    )
-      throw new Error(
-        "execution.harness.permissionKinds supports only read and write",
-      );
-    if (
-      !Number.isSafeInteger(value.execution.harness.timeoutSeconds) ||
-      (value.execution.harness.timeoutSeconds as number) <= 0
-    )
-      throw new Error(
-        "execution.harness.timeoutSeconds must be a positive operator-selected integer",
-      );
-    if (value.execution.harness.authentication !== "local")
-      throw new Error("execution.harness.authentication must be local");
-  } else if (value.execution.harness.kind === "registered") {
-    assertOnlyKeys(
-      value.execution.harness,
-      ["kind", "adapter", "config"],
-      "execution.harness",
-    );
-    if (
-      typeof value.execution.harness.adapter !== "string" ||
-      value.execution.harness.adapter.trim().length === 0 ||
-      value.execution.harness.adapter !== value.execution.harness.adapter.trim()
-    )
-      throw new Error(
-        "execution.harness.adapter must be a non-empty stable identity",
-      );
-    assertObject(value.execution.harness.config, "execution.harness.config");
-    assertJsonValue(value.execution.harness.config, "execution.harness.config");
-  } else throw new Error("Unsupported local harness");
+      throw new Error("execution.defaultProfile must name an eligible profile");
+  } else {
+    if (value.execution.defaultProfile !== undefined)
+      throw new Error("execution.defaultProfile requires profiles");
+    validateLocalHarness(value.execution.harness);
+  }
+
   assertObject(value.delivery, "delivery");
   if (
     value.delivery.kind !== "regular" &&
@@ -626,14 +502,21 @@ export function validateConfig(value: unknown): FactoryConfig {
   assertObject(value.policy, "policy");
   if (value.policy.network !== "host" && value.policy.network !== "off")
     throw new Error("Unsupported network policy");
-  if (
-    (value.execution.harness.kind === "claude-agent-sdk" ||
-      value.execution.harness.kind === "github-copilot-sdk") &&
-    value.policy.network !== "host"
-  )
-    throw new Error(
-      `${value.execution.harness.kind} requires policy.network host; no fallback is available`,
-    );
+  const harnesses = value.execution.profiles
+    ? Object.values(
+        value.execution.profiles as Record<string, ExecutionProfile>,
+      ).map((p) => p.harness)
+    : [value.execution.harness as LocalHarnessConfig];
+  for (const harness of harnesses) {
+    if (
+      (harness.kind === "claude-agent-sdk" ||
+        harness.kind === "github-copilot-sdk") &&
+      value.policy.network !== "host"
+    )
+      throw new Error(
+        `${harness.kind} requires policy.network host; no fallback is available`,
+      );
+  }
   if (
     !Array.isArray(value.policy.allowedSecretNames) ||
     !value.policy.allowedSecretNames.every(
@@ -669,4 +552,166 @@ export function stateRoot(repository: string): string {
 
 export function readConfig(path = configPath()): FactoryConfig {
   return validateConfig(JSON.parse(readFileSync(path, "utf8")) as unknown);
+}
+
+export function validateLocalHarness(
+  harness: unknown,
+): asserts harness is LocalHarnessConfig {
+  assertObject(harness, "execution.harness");
+  if (harness.kind === "codex-sdk") {
+    assertOnlyKeys(
+      harness,
+      ["kind", "model", "reasoningEffort"],
+      "execution.harness",
+    );
+    assertCodexModelSelection(harness, "execution.harness");
+  } else if (harness.kind === "claude-agent-sdk") {
+    assertOnlyKeys(
+      harness,
+      [
+        "kind",
+        "adapter",
+        "model",
+        "reasoningEffort",
+        "permissionMode",
+        "session",
+        "settingSources",
+        "tools",
+        "allowedTools",
+        "maxTurns",
+        "authentication",
+      ],
+      "execution.harness",
+    );
+    if (harness.adapter !== CLAUDE_AGENT_SDK_ADAPTER_IDENTITY)
+      throw new Error("execution.harness.adapter is not the pinned Claude SDK");
+    if (typeof harness.model !== "string" || harness.model.trim().length === 0)
+      throw new Error("execution.harness.model must be a non-empty string");
+    if (
+      typeof harness.reasoningEffort !== "string" ||
+      !harnessReasoningEfforts.has(
+        harness.reasoningEffort as HarnessReasoningEffort,
+      )
+    )
+      throw new Error("execution.harness.reasoningEffort is unsupported");
+    if (
+      harness.permissionMode !== "acceptEdits" &&
+      harness.permissionMode !== "dontAsk"
+    )
+      throw new Error("execution.harness.permissionMode is unsupported");
+    if (harness.session !== "new-per-attempt")
+      throw new Error("execution.harness.session is unsupported");
+    const settings = assertUniqueStrings(
+      harness.settingSources,
+      "execution.harness.settingSources",
+    );
+    if (
+      settings.some(
+        (source) => !claudeSettingSources.has(source as ClaudeSettingSource),
+      )
+    )
+      throw new Error("execution.harness.settingSources is unsupported");
+    const tools = assertUniqueStrings(harness.tools, "execution.harness.tools");
+    if (!tools.length)
+      throw new Error("execution.harness.tools must name bounded SDK tools");
+    if (tools.some((tool) => !claudeFileTools.has(tool)))
+      throw new Error(
+        "execution.harness.tools supports only Read, Edit, Write, Glob, and Grep",
+      );
+    const allowedTools = assertUniqueStrings(
+      harness.allowedTools,
+      "execution.harness.allowedTools",
+    );
+    if (allowedTools.some((tool) => !tools.includes(tool)))
+      throw new Error(
+        "execution.harness.allowedTools must be a subset of execution.harness.tools",
+      );
+    if (
+      !Number.isSafeInteger(harness.maxTurns) ||
+      (harness.maxTurns as number) <= 0
+    )
+      throw new Error(
+        "execution.harness.maxTurns must be a positive operator-selected integer",
+      );
+    if (harness.authentication !== "local")
+      throw new Error("execution.harness.authentication must be local");
+  } else if (harness.kind === "github-copilot-sdk") {
+    assertOnlyKeys(
+      harness,
+      [
+        "kind",
+        "adapter",
+        "model",
+        "reasoningEffort",
+        "session",
+        "availableTools",
+        "permissionKinds",
+        "timeoutSeconds",
+        "authentication",
+      ],
+      "execution.harness",
+    );
+    if (harness.adapter !== GITHUB_COPILOT_SDK_ADAPTER_IDENTITY)
+      throw new Error(
+        "execution.harness.adapter is not the pinned GitHub Copilot SDK",
+      );
+    if (typeof harness.model !== "string" || harness.model.trim().length === 0)
+      throw new Error("execution.harness.model must be a non-empty string");
+    if (
+      typeof harness.reasoningEffort !== "string" ||
+      !harnessReasoningEfforts.has(
+        harness.reasoningEffort as HarnessReasoningEffort,
+      )
+    )
+      throw new Error("execution.harness.reasoningEffort is unsupported");
+    if (harness.session !== "new-per-attempt")
+      throw new Error("execution.harness.session is unsupported");
+    const availableTools = assertUniqueStrings(
+      harness.availableTools,
+      "execution.harness.availableTools",
+    );
+    if (!availableTools.length)
+      throw new Error(
+        "execution.harness.availableTools must name bounded SDK tools",
+      );
+    const unsupportedTool = availableTools.find(
+      (tool) => !copilotFileTools.has(tool),
+    );
+    if (unsupportedTool)
+      throw new Error(
+        `execution.harness.availableTools supports only view, create, edit, apply_patch, grep, and glob; received ${unsupportedTool}`,
+      );
+    const permissionKinds = assertUniqueStrings(
+      harness.permissionKinds,
+      "execution.harness.permissionKinds",
+    );
+    if (
+      !permissionKinds.length ||
+      permissionKinds.some((kind) => kind !== "read" && kind !== "write")
+    )
+      throw new Error(
+        "execution.harness.permissionKinds supports only read and write",
+      );
+    if (
+      !Number.isSafeInteger(harness.timeoutSeconds) ||
+      (harness.timeoutSeconds as number) <= 0
+    )
+      throw new Error(
+        "execution.harness.timeoutSeconds must be a positive operator-selected integer",
+      );
+    if (harness.authentication !== "local")
+      throw new Error("execution.harness.authentication must be local");
+  } else if (harness.kind === "registered") {
+    assertOnlyKeys(harness, ["kind", "adapter", "config"], "execution.harness");
+    if (
+      typeof harness.adapter !== "string" ||
+      harness.adapter.trim().length === 0 ||
+      harness.adapter !== harness.adapter.trim()
+    )
+      throw new Error(
+        "execution.harness.adapter must be a non-empty stable identity",
+      );
+    assertObject(harness.config, "execution.harness.config");
+    assertJsonValue(harness.config, "execution.harness.config");
+  } else throw new Error("Unsupported local harness");
 }

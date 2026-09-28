@@ -127,8 +127,9 @@ await factory.runObjective(123);
 
 The adapter owns the meaning and validation of its opaque JSON-safe config. A
 behavior-changing adapter release should use a new stable identity. Factory
-schema version 1 selects one harness for an Objective; mixed harnesses and
-automatic fallback are intentionally unsupported.
+schema version 1 retains this single-harness path. Named local profiles optionally
+allow compilation to assign different approved harness configurations to Work
+Items. Automatic fallback remains unsupported.
 
 ## Built-in adapter matrix
 
@@ -342,3 +343,77 @@ separate: Codex, Claude, and GitHub Copilot must run the same bounded disposable
 target from the exact packed artifact. Those live calls require explicit
 operator authorization and available provider access; deterministic CI does not
 claim that proof.
+
+## Compile-time assigned execution profiles
+
+Instead of `execution.harness`, configure a nonempty `execution.profiles` map
+and an eligible `execution.defaultProfile`. These two configuration forms are
+mutually exclusive. Each profile has a description, optional `selectionHints`,
+and one complete existing `harness` configuration:
+
+```json
+{
+  "kind": "local",
+  "concurrency": 2,
+  "defaultProfile": "standard",
+  "profiles": {
+    "standard": {
+      "description": "General implementation and debugging.",
+      "selectionHints": ["Default when no stronger supported match exists."],
+      "harness": {
+        "kind": "codex-sdk",
+        "model": "gpt-5.6-luna",
+        "reasoningEffort": "medium"
+      }
+    },
+    "deep": {
+      "description": "Complex changes needing additional reasoning.",
+      "harness": {
+        "kind": "codex-sdk",
+        "model": "gpt-5.6-sol",
+        "reasoningEffort": "high"
+      }
+    }
+  }
+}
+```
+
+Map membership is the operator's approval for that profile's provider to access
+**the complete worktree and supplied materialized inputs**. Owned paths constrain
+writes; they do not limit reads or private-source exposure. Do not add a profile
+without that authority. Installed SDKs and logins do not make a profile eligible.
+Keep descriptions and hints free of credentials and private configuration paths;
+they are supplied to the compiler and independent reviewer. Opaque registered
+adapter configuration and secret allowlists are never included in that metadata.
+
+The compiler honors compatible explicit assignments, then concrete requirements
+and supplied preferences. It uses the eligible default only when suitable. Hints
+do not grant tools, network or permissions, and Factory does not infer quality or
+pricing from provider names. Each accepted Work Item contains a concrete profile
+ID, reason, resolved adapter/model/reasoning when available, and definition digest.
+The issue projects the same binding. Editing the issue cannot change execution.
+Compiler and reviewer model selection stays in `planning`.
+
+Selected adapters are checked before issue projection or work launch. Missing
+adapters and configuration drift fail explicitly; Factory does not install,
+substitute or retry them. A single local driver enforces the shared concurrency
+limit and uses the original binding for start, observe, cancel and collect,
+including controller restart. Two profiles may use the same adapter with distinct
+settings. The full installation digest still fences configuration changes during
+an active Objective. Status reports assigned and actual bindings; worker usage
+reports include profile/adapter/model identity when observed. Missing token
+counters remain unavailable.
+
+For registered adapters, use `composeWithLocalProfiles(config, registrations)`
+from the package export. Key `registrations` by profile ID; each value has the same
+`identity`, `config` and `harness` fields as `composeWithLocalHarness`. Configuration
+must exactly match the assigned registered profile. Built-in profiles require no
+registration. Arbitrary instructions, MCP and plugin provisioning are outside this
+assignment capability and belong to #164.
+
+This capability has deterministic temporary-Git coverage for mixed assignments,
+review/projection, dependencies, ordinary delivery/final validation, same-adapter
+restart/cancel/collection and fail-closed drift. It is **not live-qualified** by
+those tests or earlier single-harness qualification. Exact-artifact mixed-provider
+qualification remains a separately authorized gate in #162; no new release is
+implied by this documentation.

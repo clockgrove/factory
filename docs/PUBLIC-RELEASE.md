@@ -200,7 +200,7 @@ For historical v0.1.28 reproduction, use its exact published tag, never later
 main or replacement release assets. The following commands retain that version
 as an example; a future release must use its own reviewed version and identity.
 
-From a clean Linux x64 source checkout at the accepted commit, with Node.js 22 or later, Git, Git LFS, and public npm access, confirm `git status --porcelain` is empty. Choose an empty absolute release directory outside the checkout, then run:
+From a clean Linux x64 source checkout at the accepted commit, with Node.js 22.12.0 or later, Git, Git LFS, and public npm access, confirm `git status --porcelain` is empty. Keep optional dependencies enabled for `npm ci`; this [source-build floor](../CONTRIBUTING.md#local-checks) is separate from the bundled Codex runtime's Node 22.0 minimum. Choose an empty absolute release directory outside the checkout, then run:
 
 ```sh
 npm ci

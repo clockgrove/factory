@@ -6,7 +6,13 @@ For a development Objective in another repository, its owner can adapt the [Obje
 
 ## Local checks
 
-Use Node.js 22 or later. From a clean checkout:
+Use Node.js 22.12.0 or later for a clean source install and build. Keep optional
+dependencies enabled for `npm ci`: the TypeScript build imports the optional
+Copilot SDK's types, and its locked version requires Node 22.12.0 or later within
+Factory's supported Node range. On Node 22.0, npm omits that SDK and the clean
+build fails. The published bundled Codex runtime still supports Node 22.0;
+selected optional harnesses retain their own [runtime requirements](docs/AGENT-HARNESSES.md).
+From a clean checkout:
 
 ```sh
 npm ci

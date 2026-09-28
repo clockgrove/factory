@@ -84,7 +84,7 @@ The plugin supplies the packaged `director` and `setup` skills; the verified CLI
 
 For development, the following commands build and install the current checkout as a local candidate. A local build has its own package identity and does not count as installation of any published artifact. The [release checklist](https://github.com/clockgrove/factory/blob/main/docs/RELEASE-CHECKLIST.md) and [public release procedure](https://github.com/clockgrove/factory/blob/main/docs/PUBLIC-RELEASE.md) describe the exact-artifact gate.
 
-Requires Node.js 22 or later, Git, GitHub CLI authentication for the target repository, and an authenticated Codex SDK environment for planning and review. A selected non-Codex Work Item harness also needs its own local developer login. Media Objectives require Git LFS. Clone this repository, then build and install its package in an isolated prefix:
+Requires Node.js 22.12.0 or later for the clean source build, Git, GitHub CLI authentication for the target repository, and an authenticated Codex SDK environment for planning and review. Keep optional dependencies enabled for `npm ci`; see the [source-build requirements](CONTRIBUTING.md#local-checks). The published bundled Codex runtime retains its Node 22.0 minimum. A selected non-Codex Work Item harness also needs its own local developer login. Media Objectives require Git LFS. Clone this repository, then build and install its package in an isolated prefix:
 
 ```sh
 npm ci

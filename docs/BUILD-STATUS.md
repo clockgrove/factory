@@ -4,15 +4,21 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.34 public scenario was subsequently accepted; actual adopter acceptance remains pending. This does not qualify changed v0.1.35 bytes. Historical observations below retain their original scope; current execution and final acceptance are tracked in #206 and #207.
 
-## Assigned execution profiles source capability
+## Accepted execution profiles and bounded environment
 
-Issue #162 implements compile-time assigned local profiles through independent
-plan review, immutable binding, normal delivery and restart-safe lifecycle.
-Deterministic tests are source evidence only; mixed-provider installed-artifact
-qualification is still pending in #162. Issue #164 adds private additive instructions for built-in workers and the
-bounded Claude in-process worktree-read environment. Real SDK protocol and
-production-process tests prove preparation, permissions, readiness, isolation and
-cleanup; installed-artifact/live environment qualification remains pending in #164. This contributor work does not alter or qualify the v0.1.35 pilot artifact.
+[#162](https://github.com/clockgrove/factory/issues/162) and
+[#164](https://github.com/clockgrove/factory/issues/164) are closed after independent
+installed-artifact acceptance on v0.1.36. Compile-time assignments, immutable
+profile bindings and normal local delivery were exercised with mixed Codex/Claude
+workers. Both Claude attempts successfully invoked the fixed worktree-read v1 MCP
+environment under distinct frozen instructions and bindings. Invocation counters
+prove actual tool use, not exact read paths or returned bytes. Live same-adapter
+concurrency is not claimed; retained deterministic tests cover that isolation,
+readiness rejection and restart/cancel/collect behavior.
+
+This feature acceptance does not satisfy the full public release gate or authorize
+private pilot advancement. The separate unproven collection-history obligation is
+recorded below and remains under #206.
 
 ## Immutable v0.1.36 artifact record
 
@@ -32,13 +38,30 @@ and scanner checks passed. Actual pinned marketplace/plugin installation in
 an isolated Codex home reports `factory@clockgrove` version `0.1.36`.
 
 The combined [public Objective #1](https://github.com/clockgrove/factory-profiles-proof-20260928-v0136-e7d1cec/issues/1)
-preserves the representative workspace, narrow policy, original-byte media and
-final-integration gate while assigning distinct Codex/Claude profiles and
-requiring real bounded MCP invocation. Live acceptance remains pending in #162
-and #164; public acceptance and independent audit precede the private Codex-only
-pilot on the same artifact under #206/#207. Distribution evidence is not live
-qualification. Current-main documentation never changes published bytes or
-transfers earlier artifact acceptance.
+completed four original implementation attempts through guarded regular delivery
+at public head `925c1b9446df7228c78e531c9901d431c7575e7e`, tree
+`9b08ab78f6800487e5319384cc188c18bf6b8cf1`. All 16 item and seven final
+command receipts and automatic Objective acceptance passed, without an
+implementation retry or acceptance override. An independent fresh public clone
+passed all seven final commands and hydrated the exact original 77-byte LFS image,
+SHA-256 `886eca293713dd0dc77ee8c492c64e81359f6e0286b79d5f6df20c506466d1e2`.
+Independent terminal review accepted the narrower #162/#164 feature outcomes.
+
+**The full public release gate is not accepted.** Evidence did not establish
+that ordinary ignored pnpm dependency links remained in the original foundation
+worker through collection. Sampled observations do not prove universal absence;
+dependencies recreated by validation or a fresh clone do not establish that
+historical obligation. Diagnosis and a supported correction remain under
+[#206](https://github.com/clockgrove/factory/issues/206); private pilot advancement
+is blocked pending full public acceptance and independent audit. Feature closure
+does not waive this gate or the separate #207 final acceptance.
+
+Original evidence and accounting, including auxiliary SDK model usage and
+unavailable Codex/total monetary cost, are retained. Owned workers, controller,
+leases and MCP lifecycle are settled. The contributor qualification lane retains
+the fixture for audit, with review at full pilot acceptance or an explicit disposal
+decision. These documentation records do not change published bytes or transfer
+acceptance to another artifact or scenario.
 
 ## Immutable v0.1.35 artifact record
 

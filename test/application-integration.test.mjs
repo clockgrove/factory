@@ -2259,7 +2259,20 @@ test("regular and native asset selection preserve a complete set and hydrate tar
         entry.path.endsWith("controller materialization"),
       );
       assert.equal(materializationEvidence.complete, true);
-      const materializationPacket = JSON.parse(materializationEvidence.content);
+      assert.ok(
+        materializationEvidence.content.includes(
+          "\n--- Worker result patches ---\n",
+        ),
+      );
+      assert.ok(
+        materializationEvidence.content.includes(
+          "\n--- Controller materialization patches ---\n",
+        ),
+      );
+      assert.ok(materializationEvidence.content.includes("\ndiff --git "));
+      const materializationPacket = JSON.parse(
+        materializationEvidence.content.split("\n")[0],
+      );
       assert.equal(
         materializationPacket.authority,
         "Factory supervisor controller materialization evidence",
@@ -2653,7 +2666,13 @@ done
           entry.path.endsWith("controller materialization"),
         );
         assert.equal(evidence.complete, true);
-        const packet = JSON.parse(evidence.content);
+        assert.ok(
+          evidence.content.includes(
+            "\n--- Controller materialization patches ---\n",
+          ),
+        );
+        assert.ok(evidence.content.includes("\ndiff --git "));
+        const packet = JSON.parse(evidence.content.split("\n")[0]);
         assert.deepEqual(packet.workerDestinationChanges, []);
         assert.deepEqual(
           packet.materializationChange.changes.map((entry) => entry.path),

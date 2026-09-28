@@ -562,3 +562,14 @@ validation, source matching and quote matching are unchanged. Fresh public
 Git fixtures reproduce shell-quote escaping and exercise item/final review
 without provider calls. No archived code, private source, new durable evidence,
 lifecycle behavior or release qualification is introduced.
+
+## Literal Git patch review evidence (#212)
+
+Current-result and controller-materialization review sources now use the same
+identity-plus-literal-patch presentation as ordinary Work Item deltas. Existing
+Git collection, excerpt budgets, identity/ownership checks and truncation gates
+are retained. Prompt and grounding use the same current-result rendering, making
+the separate raw-excerpt matching exception unnecessary. Public temporary-Git
+regressions cover exact literal citations and rejection of mixed JSON/text quotes,
+with regular/native media fixtures checking distinct worker/controller boundaries.
+No archived source, private fixture, new state or live qualification is included.

@@ -299,7 +299,8 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
           ),
         ].map((m) => [m[1], m[2]]),
       );
-      const change = JSON.parse(prompt.split("\nChange packet:\n")[1]);
+      const changeText = prompt.split("\nChange packet:\n")[1];
+      const change = JSON.parse(changeText.split("\n")[0]);
       if (["media", "integration"].includes(observations.reviewedItemId)) {
         const prior = JSON.parse(sources.get("Completed dependency results"));
         const expected =
@@ -354,7 +355,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
             : name === "Delivery observations"
               ? JSON.stringify(observations)
               : name === "Exact Git change packet"
-                ? JSON.stringify(change)
+                ? changeText
                 : sources.get(name);
         assert.ok(text?.includes(quote), `missing source/quote ${name}`);
         return {
@@ -412,7 +413,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
             assert.ok(
               check &&
                 !check.truncated &&
-                check.excerpt.includes("process.versions.node.split"),
+                changeText.includes("process.versions.node.split"),
             );
             assert.deepEqual(
               receipts.map((r) => r.command),
@@ -431,9 +432,9 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
             assert.equal(capture.members[0].digest, digest);
             assert.equal(capture.declarationPath, ".factory-assets.json");
             const boundary = JSON.parse(
-              sources.get(
-                "Work Item Git delta: media controller materialization",
-              ),
+              sources
+                .get("Work Item Git delta: media controller materialization")
+                .split("\n")[0],
             );
             assert.deepEqual(boundary.workerDestinationChanges, []);
             assert.equal(boundary.materializationTreeSha, tree);
@@ -621,11 +622,12 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
       entry.path.endsWith("controller materialization"),
     );
     assert.deepEqual(
-      JSON.parse(materialization.content).workerDestinationChanges,
+      JSON.parse(materialization.content.split("\n")[0])
+        .workerDestinationChanges,
       [],
     );
     assert.deepEqual(
-      JSON.parse(materialization.content).destinations.map(
+      JSON.parse(materialization.content.split("\n")[0]).destinations.map(
         (entry) => entry.digest,
       ),
       [digest],

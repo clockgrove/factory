@@ -2243,7 +2243,7 @@ test("final review shares one text budget across ordinary and materialization pa
               source.path ===
               `Work Item Git delta: ${id} controller materialization`,
           );
-          const packet = JSON.parse(materialization.content);
+          const packet = JSON.parse(materialization.content.split("\n")[0]);
           assert.equal(packet.workItemId, id);
           assert.equal(packet.resultBaseCommitSha, expected.base);
           assert.equal(packet.workerResultCommitSha, expected.worker.sha);

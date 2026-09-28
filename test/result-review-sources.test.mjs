@@ -450,3 +450,74 @@ test("quoted command citations use identical literal evidence in item and final 
     }
   });
 });
+
+test("Git patch citations expose literal lines and reject hybrid JSON quotes in both phases", async () => {
+  await fixture(async (request) => {
+    for (const reviewPhase of ["result-review", "objective-review"]) {
+      const model = new CodexPlanningModel(request.checkout);
+      let quote = '+public result\n","truncated":false';
+      let literalPresented = false;
+      let source = "Exact Git change packet";
+      model.runStructured = async ({ prompt }) => {
+        const text = prompt.split("\nChange packet:\n")[1];
+        literalPresented = text.includes("\n+public result\n");
+        const metadata = JSON.parse(text.split("\n")[0]);
+        assert.equal(metadata.changes[0].path, "result.txt");
+        assert.equal(metadata.changes[0].status, "A");
+        assert.equal(metadata.changes[0].newMode, "100644");
+        assert.equal(
+          metadata.changes[0].newObject,
+          git(request.checkout, "rev-parse", "HEAD:result.txt"),
+        );
+        assert.equal(
+          metadata.changes[0].newBytes,
+          Buffer.byteLength("public result\n"),
+        );
+        assert.equal(metadata.patches[0].truncated, false);
+        assert.ok(metadata.textBudget > 0);
+        assert.match(metadata.patches[0].lineStats, /^1\t0\tresult.txt$/);
+        return {
+          findings: [
+            {
+              criterion: "Public result exists",
+              verdict: "pass",
+              source,
+              quote,
+              detail: "The exact patch adds the public result.",
+              question: "",
+            },
+          ],
+        };
+      };
+      const args = {
+        ...request,
+        reviewPhase,
+        criteria: ["Public result exists"],
+        model,
+      };
+      await assert.rejects(reviewAcceptance(args), (error) => {
+        assert.ok(error instanceof AcceptanceDecisionRequired);
+        assert.deepEqual(error.pending.reviewRejection, {
+          field: "quote",
+          reason: "quote-not-found",
+        });
+        return true;
+      });
+      quote = "\n+public result\n";
+      assert.equal((await reviewAcceptance(args)).criteria[0].verdict, "pass");
+      source = "docs/unique.md";
+      await assert.rejects(reviewAcceptance(args), (error) => {
+        assert.deepEqual(error.pending.reviewRejection, {
+          field: "quote",
+          reason: "quote-not-found",
+        });
+        return true;
+      });
+      assert.equal(
+        literalPresented,
+        true,
+        "production prompt exposes literal patch bytes",
+      );
+    }
+  });
+});

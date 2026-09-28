@@ -14,6 +14,32 @@ bounded Claude in-process worktree-read environment. Real SDK protocol and
 production-process tests prove preparation, permissions, readiness, isolation and
 cleanup; installed-artifact/live environment qualification remains pending in #164. This contributor work does not alter or qualify the v0.1.35 pilot artifact.
 
+## Immutable v0.1.36 artifact record
+
+[Release v0.1.36](https://github.com/clockgrove/factory/releases/tag/v0.1.36)
+is tagged at integrated source `e7d1cec56f950763eefb80410af7de8284d1f8c2`,
+with reviewed candidate `d2ca726d5823ddda4a5ea740927e5398d6863916` sharing tree
+`3b14c5e371739c846ac1fe71e3ea8e7cf2c04ddb`. Tarball: 150232435 bytes, SHA-256
+`738a13ba7ea4e8e5ad953af3580f4fc18a457d96480134d457982b18e150e013`.
+[PR #223](https://github.com/clockgrove/factory/pull/223) records independent
+source/artifact review and passing exact-head CI; integrated main CI and
+byte-identical source reproduction passed. The explicitly approved tag rule
+prevents updates and deletion only for `v0.1.36`, with no bypass actors.
+Independent unauthenticated public download and normal empty-cache offline
+Node 22.23.3 installation passed. All 3144 installed files, 97 Factory-owned
+files and 69 production dependency identities/notices match. Installed CLI
+and scanner checks passed. Actual pinned marketplace/plugin installation in
+an isolated Codex home reports `factory@clockgrove` version `0.1.36`.
+
+The combined [public Objective #1](https://github.com/clockgrove/factory-profiles-proof-20260928-v0136-e7d1cec/issues/1)
+preserves the representative workspace, narrow policy, original-byte media and
+final-integration gate while assigning distinct Codex/Claude profiles and
+requiring real bounded MCP invocation. Live acceptance remains pending in #162
+and #164; public acceptance and independent audit precede the private Codex-only
+pilot on the same artifact under #206/#207. Distribution evidence is not live
+qualification. Current-main documentation never changes published bytes or
+transfers earlier artifact acceptance.
+
 ## Immutable v0.1.35 artifact record
 
 [Release v0.1.35](https://github.com/clockgrove/factory/releases/tag/v0.1.35)

@@ -15,7 +15,10 @@ import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel } from "../dist/compiler.js";
 import { selectAssetSetFromCli } from "../dist/runner.js";
-import { objectiveReviewEvidence } from "../dist/validation.js";
+import {
+  commandPassEvidence,
+  objectiveReviewEvidence,
+} from "../dist/validation.js";
 import {
   createTarget,
   factoryConfig,
@@ -273,7 +276,13 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
       const line = (label) => prompt.split(`\n${label}: `)[1].split("\n")[0];
       const tree = line("Result tree");
       const criteria = JSON.parse(line("Criteria"));
-      const receipts = JSON.parse(line("Commands"));
+      const commandText = prompt
+        .split("\nCommand pass evidence:\n")[1]
+        .split("\nDelivery observations:")[0];
+      const receipts = commandText.split("\n\n").map((entry) => {
+        const [identity, command] = entry.split("\nCommand:\n");
+        return { ...JSON.parse(identity.slice("Receipt: ".length)), command };
+      });
       assert.ok(
         receipts.every(
           (r) => r.treeSha === tree && r.passed && r.exitCode === 0,
@@ -341,7 +350,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
       const proven = (criterion, name, quote) => {
         const text =
           name === "Command pass evidence"
-            ? JSON.stringify(receipts)
+            ? commandText
             : name === "Delivery observations"
               ? JSON.stringify(observations)
               : name === "Exact Git change packet"
@@ -439,7 +448,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
             return proven(
               criterion,
               "Command pass evidence",
-              JSON.stringify(receipts[0]),
+              commandPassEvidence([receipts[0]]).content,
             );
           }
           if (observations.reviewedItemId === "integration") {
@@ -461,7 +470,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
           return proven(
             criterion,
             "Command pass evidence",
-            JSON.stringify(receipt),
+            commandPassEvidence([receipt]).content,
           );
         }),
       };

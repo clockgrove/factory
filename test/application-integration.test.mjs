@@ -516,7 +516,7 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
             criterion: reviewedCriterion,
             verdict: "pass",
             source: "Command pass evidence",
-            quote: JSON.stringify(request.commands[0]),
+            quote: request.commands[0].command,
             detail:
               "The canonical receipts prove the ordered commands passed at the exact result tree.",
             question: "",

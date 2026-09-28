@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { CodexPlanningModel } from "../dist/compiler.js";
 import {
   AcceptanceDecisionRequired,
   reviewAcceptance,
@@ -354,6 +355,98 @@ test("authoritative evidence labels remain unique, disjoint and complete in both
             return true;
           });
       }
+    }
+  });
+});
+
+test("quoted command citations use identical literal evidence in item and final review", async () => {
+  await fixture(async (request) => {
+    const command =
+      'test "$(git rev-parse HEAD:result.txt)" = ' +
+      git(request.checkout, "rev-parse", "HEAD:result.txt");
+    const evidence = await validateTree(
+      request.checkout,
+      join(request.checkout, "..", "quoted-validation"),
+      request.commit,
+      request.evidence.treeSha,
+      [command],
+    );
+    assert.equal(JSON.stringify(evidence.commands).includes(command), false);
+    for (const reviewPhase of ["result-review", "objective-review"]) {
+      const model = new CodexPlanningModel(request.checkout);
+      let calls = 0;
+      let override = {};
+      model.runStructured = async ({ prompt, defaultPhase }) => {
+        calls++;
+        assert.equal(defaultPhase, reviewPhase);
+        const rendered = prompt
+          .split("\nCommand pass evidence:\n")[1]
+          .split("\nDelivery observations:")[0];
+        assert.equal(
+          rendered,
+          `Receipt: ${JSON.stringify({
+            index: 0,
+            passed: true,
+            exitCode: 0,
+            treeSha: evidence.treeSha,
+          })}\nCommand:\n${command}`,
+        );
+        return {
+          findings: [
+            {
+              criterion: "The original blob is preserved.",
+              verdict: "pass",
+              source: "Command pass evidence",
+              quote: command,
+              detail: "The exact committed blob assertion passed.",
+              question: "",
+              ...override,
+            },
+          ],
+        };
+      };
+      const args = {
+        ...request,
+        evidence,
+        reviewPhase,
+        criteria: ["The original blob is preserved."],
+        model,
+      };
+      const result = await reviewAcceptance(args);
+      assert.equal(result.criteria[0].verdict, "pass");
+      assert.deepEqual(result.commands, evidence.commands);
+      for (const rejected of [
+        { source: "docs/unique.md" },
+        { quote: command.replace("result.txt", "invented.txt") },
+        { quote: JSON.stringify(command) },
+      ]) {
+        override = rejected;
+        await assert.rejects(reviewAcceptance(args), (error) => {
+          assert.ok(error instanceof AcceptanceDecisionRequired);
+          assert.deepEqual(error.pending.reviewRejection, {
+            field: "quote",
+            reason: "quote-not-found",
+          });
+          return true;
+        });
+      }
+      const before = calls;
+      for (const invalid of [
+        { ...evidence, treeSha: "0".repeat(40) },
+        { ...evidence, commands: [undefined] },
+        { ...evidence, commands: [{ ...evidence.commands[0], passed: false }] },
+        {
+          ...evidence,
+          commands: [{ ...evidence.commands[0], treeSha: "0".repeat(40) }],
+        },
+      ]) {
+        await assert.rejects(reviewAcceptance({ ...args, evidence: invalid }));
+      }
+      assert.equal(
+        calls,
+        before,
+        "invalid receipt identities never reach reviewer",
+      );
     }
   });
 });

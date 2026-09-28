@@ -1,5 +1,7 @@
 # Public release checklist
 
+**Candidate v0.1.31** ships the accepted PR #194 plugin and onboarding guidance with matching package, manifest and marketplace metadata. Source/artifact review, candidate gates, publication and independent public installation must complete before its fresh public and adopter qualification. No runtime or dependency changes are added; earlier evidence does not qualify the successor.
+
 Published [v0.1.30](https://github.com/clockgrove/factory/releases/tag/v0.1.30) has passed source, artifact, reproduction, public-download and offline-installation checks. Its fresh model-backed public qualification and actual Clockgrove acceptance remain open in [#26](https://github.com/clockgrove/factory/issues/26). See the [immutable artifact record](BUILD-STATUS.md#immutable-v0130-artifact-record) and [PR #188](https://github.com/clockgrove/factory/pull/188) for exact evidence.
 
 Use this checklist for a new release without rebuilding or retagging existing artifacts. The [public release procedure](PUBLIC-RELEASE.md) supplies the commands and operational requirements. Each claim must identify the exact artifact and scenario it proves.

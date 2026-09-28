@@ -2,6 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.31 — candidate
+
+- Ship the accepted plugin onboarding from PR #194: setup and director distinguish ordinary target-repository operation from Factory development and contributor release fixtures. Director confirms the configured repository and checkout before every Objective command.
+- Present separate user and contributor entrypoints, a plugin user guide, copyable target Objective form, and clear support and release documentation. Preserve exact historical release evidence.
+- Align package, plugin and marketplace identity for this successor. Runtime, dependency versions, provider boundaries and release gates are unchanged. Source/artifact checks, publication, fresh installed public qualification and actual adopter acceptance remain separately required; earlier artifacts stay immutable.
+
 ## 0.1.30 — 2026-09-28
 
 - Require self-contained source-backed implementation briefs and independent worker-input completeness review (#185 / PR #186). Preserve ownership, dependencies and later validation timing. Synthetic coverage does not establish live model adherence.

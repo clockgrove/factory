@@ -6,7 +6,9 @@ Start with the [published installation instructions](../README.md#install). Use 
 
 ## Published plugin compatibility
 
-The published v0.1.30 skills still refer to Factory's maintainer qualification workflow. The skill edits that separate that workflow from ordinary plugin use are in source for a subsequent release; installing v0.1.30 does not include those edits. When using v0.1.30, explicitly ask your agent to follow this guide for ordinary target-repository work rather than create release fixtures. Retain host/worker readiness, target authority, sandbox and spending boundaries. Maintainers qualifying a release must still follow the full [release procedure](PUBLIC-RELEASE.md).
+The v0.1.31 candidate includes the setup and director skill guidance described here: ordinary plugin use is separate from contributor release fixtures, and the director checks the target repository binding before Objective commands. Its publication and live qualification remain separate requirements in [#26](https://github.com/clockgrove/factory/issues/26).
+
+If you remain on immutable v0.1.30, its older skills still refer to the maintainer qualification workflow. Explicitly ask your agent to follow this guide for ordinary target-repository work rather than create release fixtures. Retain host/worker readiness, target authority, sandbox and spending boundaries. Maintainers qualifying any release must still follow the full [release procedure](PUBLIC-RELEASE.md).
 
 ## Ask the plugin
 

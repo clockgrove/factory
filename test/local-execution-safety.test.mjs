@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   renameSync,
@@ -9,7 +10,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import test from "node:test";
 import { LocalContentStore } from "../dist/content/local.js";
 import { LocalExecutionDriver } from "../dist/execution/local.js";
@@ -166,7 +168,10 @@ async function runCandidate(change, options = {}) {
       },
       async cancel() {},
       async collect() {
-        return { evidence: { harness: "scripted" } };
+        return {
+          evidence: options.evidence ?? { harness: "scripted" },
+          collection: { acceptedIgnoredLinks: ["provider-forged"] },
+        };
       },
     };
     const driver = new LocalExecutionDriver(
@@ -184,6 +189,10 @@ async function runCandidate(change, options = {}) {
     };
     const handle = await driver.start({ attemptId: "attempt", baseSha, item });
     const result = await driver.collect(handle);
+    assert.deepEqual(
+      result.evidence,
+      options.evidence ?? { harness: "scripted" },
+    );
     options.inspectResult?.(result, checkout, baseSha);
     return result;
   } finally {
@@ -219,6 +228,13 @@ test("local collection permits ignored in-root dependency and executable links w
     {
       prepareBase: dependencyPolicy,
       inspectResult(result, checkout, baseSha) {
+        assert.deepEqual(result.collection, {
+          acceptedIgnoredLinks: [
+            "node_modules/.bin/tool",
+            "node_modules/readme",
+            "node_modules/tool",
+          ],
+        });
         assert.equal(
           git(checkout, "diff", "--name-only", baseSha, result.changeRef),
           "safe.txt",
@@ -514,6 +530,7 @@ test("unrelated existing symlink, submodule, and .gitmodules do not block an own
     { legacy: true },
   );
   assert.match(result.changeRef, /^[a-f0-9]{40}$/);
+  assert.deepEqual(result.collection, { acceptedIgnoredLinks: [] });
 });
 
 test("missing adapter identities fail closed on local reattach", async () => {
@@ -844,5 +861,100 @@ test("worker receives only declared ambient values and an empty GitHub credentia
     assert.equal(declared.GH_TOKEN, undefined);
   } finally {
     process.env = original;
+  }
+});
+
+test("real offline pnpm TypeScript installation is observed in original collection", async () => {
+  let originalWorktree;
+  const require = createRequire(import.meta.url);
+  const typescriptRoot = dirname(require.resolve("typescript/package.json"));
+  await runCandidate(
+    (worktree, root) => {
+      originalWorktree = worktree;
+      const archive = join(root, "typescript.tgz");
+      execFileSync("tar", [
+        "-czf",
+        archive,
+        "--transform",
+        "s,^typescript,package,",
+        "-C",
+        dirname(typescriptRoot),
+        "typescript",
+      ]);
+      writeFileSync(
+        join(worktree, "package.json"),
+        JSON.stringify({
+          private: true,
+          devDependencies: { typescript: `file:${archive}` },
+        }),
+      );
+      execFileSync(
+        process.execPath,
+        [
+          resolve("node_modules/pnpm/bin/pnpm.cjs"),
+          "install",
+          "--offline",
+          "--ignore-scripts",
+          "--store-dir",
+          join(root, "store"),
+        ],
+        { cwd: worktree, stdio: "pipe", env: { ...process.env, CI: "true" } },
+      );
+      writeFileSync(
+        join(worktree, "safe.txt"),
+        "real dependency setup complete\n",
+      );
+    },
+    {
+      prepareBase: dependencyPolicy,
+      ownedPaths: ["safe.txt", "package.json", "pnpm-lock.yaml"],
+      inspectResult(result) {
+        assert.ok(
+          result.collection.acceptedIgnoredLinks.includes(
+            "node_modules/typescript",
+          ),
+        );
+        assert.equal(
+          existsSync(originalWorktree),
+          false,
+          "returned evidence survives original worktree removal",
+        );
+      },
+    },
+  );
+});
+
+test("late secret and commit failures never return completed collection observations", async () => {
+  for (const failure of ["secret", "commit"]) {
+    let completed = false;
+    await assert.rejects(
+      runCandidate(
+        (worktree, root) => {
+          ignoredDependencies(worktree);
+          writeFileSync(
+            join(worktree, "safe.txt"),
+            failure === "secret"
+              ? "ghp_abcdefghijklmnopqrstuvwxyz0123456789\n"
+              : "safe\n",
+          );
+          if (failure === "commit") {
+            const hook = join(root, "hooks");
+            mkdirSync(hook);
+            writeFileSync(join(hook, "pre-commit"), "#!/bin/sh\nexit 1\n", {
+              mode: 0o755,
+            });
+            git(worktree, "config", "core.hooksPath", hook);
+          }
+        },
+        {
+          prepareBase: dependencyPolicy,
+          inspectResult() {
+            completed = true;
+          },
+        },
+      ),
+      failure === "secret" ? /Secretlint/ : /git.*commit|Command failed/s,
+    );
+    assert.equal(completed, false);
   }
 });

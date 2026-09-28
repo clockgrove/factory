@@ -138,7 +138,10 @@ function safeIgnoredLink(worktree: string, path: string): boolean {
 }
 
 /** Recurse even through ignored directories: special files and unsafe links still fail. */
-function checkWorktreeEntries(worktree: string): void {
+function checkWorktreeEntries(
+  worktree: string,
+  acceptedIgnoredLinks?: string[],
+): void {
   const inspect = (directory: string, relative: string): void => {
     for (const name of readdirSync(directory)) {
       if (!relative && name === ".git") continue;
@@ -157,12 +160,15 @@ function checkWorktreeEntries(worktree: string): void {
         ).toString("utf8");
         if (
           !base.startsWith("120000 blob\t") &&
-          !base.startsWith("120000 blob ") &&
-          !(base.length === 0 && safeIgnoredLink(worktree, path))
-        )
-          throw new Error(
-            `Worker introduced unsafe symlink at ${JSON.stringify(path)}`,
-          );
+          !base.startsWith("120000 blob ")
+        ) {
+          if (base.length === 0 && safeIgnoredLink(worktree, path))
+            acceptedIgnoredLinks?.push(path);
+          else
+            throw new Error(
+              `Worker introduced unsafe symlink at ${JSON.stringify(path)}`,
+            );
+        }
       } else if (!type.isFile()) {
         throw new Error(
           `Worker introduced special file at ${JSON.stringify(path)}`,
@@ -246,8 +252,9 @@ export function checkStagedCandidate(
   worktree: string,
   checkout: string,
   ownedPaths: string[],
+  acceptedIgnoredLinks?: string[],
 ): string[] {
-  checkWorktreeEntries(worktree);
+  checkWorktreeEntries(worktree, acceptedIgnoredLinks);
   const paths = changedPaths(worktree);
   const unowned = paths.filter((path) => !owns(path, ownedPaths));
   if (unowned.length)

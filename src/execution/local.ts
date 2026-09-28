@@ -642,10 +642,12 @@ export class LocalExecutionDriver implements ExecutionDriver {
       pinnedGit(active.worktree, "add", "-A");
       if (assetDestinations.length)
         pinnedGit(active.worktree, "reset", "HEAD", "--", ...assetDestinations);
+      const acceptedIgnoredLinks: string[] = [];
       const paths = checkStagedCandidate(
         active.worktree,
         this.checkout,
         active.request.item.ownedPaths,
+        acceptedIgnoredLinks,
       );
       if (!paths.length && !assets.length)
         throw new Error("Worker produced no repository change");
@@ -666,6 +668,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
         changeRef: commit,
         treeSha,
         evidence: result.evidence,
+        collection: { acceptedIgnoredLinks },
         assets,
       };
     } finally {

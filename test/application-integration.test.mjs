@@ -2977,3 +2977,138 @@ test("close failures replay after merge and final validation without worker or P
     assert.equal(github.state().issueComments[objective].length, 1);
   });
 });
+
+for (const strategy of ["regular", "native-stack"]) {
+  test(`${strategy} collection diagnostics distinguish positive, empty and unavailable original observations`, async () => {
+    await fixture(`collection-${strategy}`, async (root) => {
+      const target = createTarget(root, { ".gitignore": "node_modules/\n" });
+      const items = [
+        item("positive", { path: "positive.txt" }),
+        item("unavailable", { path: "unavailable.txt" }),
+        item("empty", { path: "empty.txt", dependencies: ["positive"] }),
+      ];
+      const descriptor = {
+        config: factoryConfig(
+          target.checkout,
+          `example/collection-${strategy}`,
+          strategy,
+          2,
+        ),
+        graph: { objective, baseSha: target.baseSha, items },
+        objectiveBody: body(
+          items.flatMap((entry) => entry.validation.map((v) => v.command)),
+        ),
+        fakeRoot: join(root, "fake"),
+        actions: {
+          positive: {
+            files: [
+              { path: "positive.txt", text: "positive\n" },
+              { path: "node_modules/value", text: "ignored\n" },
+            ],
+            commands: [
+              ["ln", "-s", "value", 'node_modules/private-"name'],
+              [
+                "ln",
+                "-s",
+                "value",
+                "node_modules/ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+              ],
+            ],
+          },
+          unavailable: {
+            files: [{ path: "unavailable.txt", text: "unavailable\n" }],
+          },
+          empty: { files: [{ path: "empty.txt", text: "empty\n" }] },
+        },
+      };
+      const { application, driver } = makeApplication(descriptor);
+      const collect = driver.collect.bind(driver);
+      const originals = new Map();
+      driver.collect = async (handle) => {
+        const result = await collect(handle);
+        originals.set(handle.identity, {
+          treeSha: result.treeSha,
+          changeRef: result.changeRef,
+        });
+        // A custom driver is allowed not to supply collection observations.
+        if (handle.data.request.item.id === "unavailable")
+          delete result.collection;
+        return result;
+      };
+      const state = await application.runObjective(objective);
+      assert.equal(state.finalValidation.passed, true);
+      const events = readDiagnostics(
+        descriptor.config.repository,
+        objective,
+      ).filter((event) => event.operation === "collection-ignored-links");
+      assert.deepEqual(events.map((event) => event.itemId).sort(), [
+        "empty",
+        "positive",
+      ]);
+      for (const event of events) {
+        assert.equal(event.runId, state.runId);
+        assert.equal(event.attemptId, state.work[event.itemId].attempt);
+        assert.equal(
+          event.metadata.treeSha,
+          originals.get(event.attemptId).treeSha,
+        );
+        assert.equal(
+          event.metadata.headSha,
+          originals.get(event.attemptId).changeRef,
+        );
+        assert.equal(event.metadata.observation, "original-worktree-scan");
+        assert.equal(event.outcome, "completed");
+        const paths =
+          event.itemId === "positive"
+            ? ["node_modules/[REDACTED]", 'node_modules/private-"name']
+            : [];
+        assert.deepEqual(JSON.parse(event.detail), {
+          acceptedIgnoredLinks: paths,
+        });
+        assert.equal(event.metadata.acceptedIgnoredLinkCount, paths.length);
+        assert.ok(!JSON.stringify(event.metadata).includes("node_modules"));
+      }
+    });
+  });
+
+  test(`${strategy} failed collection emits no completed link observation`, async () => {
+    await fixture(`failed-collection-${strategy}`, async (root) => {
+      const target = createTarget(root, { ".gitignore": "node_modules/\n" });
+      const work = item("failed", { path: "safe.txt" });
+      const descriptor = {
+        config: factoryConfig(
+          target.checkout,
+          `example/failed-collection-${strategy}`,
+          strategy,
+        ),
+        graph: { objective, baseSha: target.baseSha, items: [work] },
+        objectiveBody: body([work.validation[0].command]),
+        fakeRoot: join(root, "fake"),
+        actions: {
+          failed: {
+            files: [
+              { path: "safe.txt", text: "safe\n" },
+              { path: "node_modules/value", text: "ignored\n" },
+              { path: "unowned.txt", text: "refuse\n" },
+            ],
+            commands: [["ln", "-s", "value", "node_modules/link"]],
+          },
+        },
+      };
+      const { application } = makeApplication(descriptor);
+      await assert.rejects(
+        application.runObjective(objective),
+        /outside ownership/,
+      );
+      const state = readState(descriptor.config.repository, objective);
+      assert.equal(state.work.failed.status, "failed");
+      assert.match(state.work.failed.error, /outside ownership/);
+      assert.equal(
+        readDiagnostics(descriptor.config.repository, objective).filter(
+          (event) => event.operation === "collection-ignored-links",
+        ).length,
+        0,
+      );
+    });
+  });
+}

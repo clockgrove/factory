@@ -1,6 +1,6 @@
 # Public release checklist
 
-Published v0.1.33 carries [PR #203](https://github.com/clockgrove/factory/pull/203) explicit exact-tree Work Item re-review. Its source/artifact gates, public download and offline installation are verified in the [immutable artifact record](BUILD-STATUS.md#immutable-v0133-artifact-record). Fresh public qualification and actual Clockgrove acceptance remain pending in [#26](https://github.com/clockgrove/factory/issues/26).
+Candidate v0.1.34 carries [PR #209](https://github.com/clockgrove/factory/pull/209) directly quotable command receipt evidence. Publication and exact-artifact public/adopter qualification remain pending in [#206](https://github.com/clockgrove/factory/issues/206); final acceptance is tracked in [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
 
 Earlier published artifacts and their evidence remain intact. Distribution checks do not establish live qualification.
 
@@ -27,9 +27,9 @@ No required asset is intentionally omitted. MCP is not a first-release requireme
 
 1. Freeze the candidate's capabilities, owner and acceptance. Complete independent review and the applicable source and CI gates.
 2. Build one versioned tarball, record source/tree and SHA-256, verify its contents and dependency licenses, and install normally offline from an empty cache. Publish under the matching protected tag through normal controls. Independently download and verify public bytes, installation and marketplace identity.
-3. Complete the [host and worker preflight](PUBLIC-RELEASE.md#controller-host-and-worker-readiness), then the approved [public Objective qualification](PUBLIC-RELEASE.md#fresh-disposable-objective) on those exact bytes. For #26, preserve the representative foundation, policy, same-path media and final-integration scope. Do not substitute an earlier two-item example or a preliminary smoke.
+3. Complete the [host and worker preflight](PUBLIC-RELEASE.md#controller-host-and-worker-readiness), then the approved [public Objective qualification](PUBLIC-RELEASE.md#fresh-disposable-objective) on those exact bytes. For #206, preserve the representative foundation, policy, same-path media and final-integration scope. Do not substitute an earlier two-item example or a preliminary smoke.
 4. Record exact delivery, selected-byte, final-validation, fresh-clone hydration, automatic acceptance, accounting and fixture-disposition evidence. Keep private data in its authorized destination. Public success proves only the tested artifact, host and scenario.
-5. Complete the actual Clockgrove adopter pilot after public acceptance and independent audit, using the same artifact. Keep #26 open until actual adopter acceptance; publication, source merge and individual PR success are insufficient.
+5. Complete the actual Clockgrove adopter pilot after public acceptance and independent audit, using the same artifact. Keep #207 open until actual adopter acceptance; publication, source merge and individual PR success are insufficient.
 
 Earlier artifacts and failed or superseded runs remain intact. Source changes invalidate candidate evidence; diagnose failures before a bounded corrected successor rather than rerunning an unchanged failure. Optional-provider evidence remains tied to its own artifact and scope.
 

@@ -1,6 +1,8 @@
 # Release artifact records
 
-Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and [qualification issue #26](https://github.com/clockgrove/factory/issues/26). This document records immutable distribution evidence, not a second work queue.
+Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and [execution gates #206](https://github.com/clockgrove/factory/issues/206) and [final acceptance #207](https://github.com/clockgrove/factory/issues/207). This document records immutable distribution evidence, not a second work queue.
+
+The v0.1.33 public scenario was subsequently accepted; this does not qualify changed v0.1.34 bytes. Historical observations below retain their original scope; current execution and final acceptance are tracked in #206 and #207.
 
 ## Immutable v0.1.33 artifact record
 

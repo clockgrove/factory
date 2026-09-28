@@ -2,6 +2,11 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.34 — 2026-09-28 (candidate)
+
+- Make successful command receipts directly quotable during automatic result review (#208 / PR #209). Share literal command rendering between model input and citation grounding while preserving exact-source matching and receipt index, tree and success identities.
+- Dependencies, providers, worker authority and lifecycle behavior are unchanged. Publication and exact-artifact public/adopter qualification remain pending in [#206](https://github.com/clockgrove/factory/issues/206), with final acceptance in [#207](https://github.com/clockgrove/factory/issues/207). Previous artifacts and evidence remain immutable.
+
 ## 0.1.33 — 2026-09-28
 
 - Add explicit `rereview` for an exact pending Work Item result (#202 / PR #203), followed by `run` to repeat validation and automatic review without restarting implementation or recording acceptance. Preserve earlier decisions, result identities and unknown usage. Final Objective review retains its existing `run` continuation.

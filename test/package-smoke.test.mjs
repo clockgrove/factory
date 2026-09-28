@@ -61,6 +61,7 @@ test("fresh packed artifact composes a registered harness through the package ro
     assert.deepEqual(installedManifest.optionalDependencies, {
       "@anthropic-ai/claude-agent-sdk": "0.3.281",
       "@github/copilot-sdk": "1.0.13",
+      zod: "4.6.5",
     });
     const scanner = join(installedRoot, "dist", "execution", "secret-scan.js");
     const descriptor = JSON.stringify({

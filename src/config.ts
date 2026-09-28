@@ -91,10 +91,16 @@ export type LocalHarnessConfig =
       config: { [key: string]: JsonValue };
     };
 
+export interface ExecutionProfileEnvironment {
+  instructions?: string;
+  mcp?: { kind: "factory-worktree-read"; version: 1 };
+}
+
 export interface ExecutionProfile {
   description: string;
   selectionHints?: string[];
   harness: LocalHarnessConfig;
+  environment?: ExecutionProfileEnvironment;
 }
 
 export type ExecutionConfig =
@@ -466,7 +472,7 @@ export function validateConfig(value: unknown): FactoryConfig {
       assertObject(profile, `execution.profiles.${id}`);
       assertOnlyKeys(
         profile,
-        ["description", "selectionHints", "harness"],
+        ["description", "selectionHints", "harness", "environment"],
         `execution.profiles.${id}`,
       );
       if (
@@ -477,6 +483,49 @@ export function validateConfig(value: unknown): FactoryConfig {
       if (profile.selectionHints !== undefined)
         assertUniqueStrings(profile.selectionHints, "profile.selectionHints");
       validateLocalHarness(profile.harness);
+      if (profile.environment !== undefined) {
+        const environment = profile.environment;
+        assertObject(environment, "profile.environment");
+        assertOnlyKeys(
+          environment,
+          ["instructions", "mcp"],
+          "profile.environment",
+        );
+        if (profile.harness.kind === "registered")
+          throw new Error(
+            "Registered harness profile environments are not supported",
+          );
+        if (
+          environment.instructions !== undefined &&
+          (typeof environment.instructions !== "string" ||
+            !environment.instructions.trim() ||
+            environment.instructions.includes("\0"))
+        )
+          throw new Error(
+            "Profile environment instructions must be nonempty text without NUL",
+          );
+        if (environment.mcp !== undefined) {
+          assertObject(environment.mcp, "profile.environment.mcp");
+          assertOnlyKeys(
+            environment.mcp,
+            ["kind", "version"],
+            "profile.environment.mcp",
+          );
+          if (
+            environment.mcp.kind !== "factory-worktree-read" ||
+            environment.mcp.version !== 1
+          )
+            throw new Error("Unsupported profile MCP capability or version");
+          if (
+            profile.harness.kind !== "claude-agent-sdk" ||
+            !profile.harness.tools.includes("Read") ||
+            !profile.harness.allowedTools.includes("Read")
+          )
+            throw new Error(
+              "Factory worktree MCP requires a Claude profile with existing Read authority",
+            );
+        }
+      }
     }
     if (
       typeof value.execution.defaultProfile !== "string" ||

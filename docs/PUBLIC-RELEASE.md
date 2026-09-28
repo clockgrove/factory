@@ -4,7 +4,7 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-[Published v0.1.34](https://github.com/clockgrove/factory/releases/tag/v0.1.34) carries [PR #209](https://github.com/clockgrove/factory/pull/209) directly quotable command receipt evidence. Independent public-download and offline-installation verification passed; [PR #210](https://github.com/clockgrove/factory/pull/210) records release gates and reproduction. Exact-artifact public/adopter qualification remains in [#206](https://github.com/clockgrove/factory/issues/206), with final acceptance in [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
+Candidate v0.1.35 carries [PR #213](https://github.com/clockgrove/factory/pull/213): literal Git patch evidence shared by review prompts and exact citation grounding. Publication, distribution verification and exact-artifact qualification are pending. The earlier v0.1.34 public scenario was accepted; its evidence does not qualify changed bytes. Execution remains in [#206](https://github.com/clockgrove/factory/issues/206), with final adopter acceptance in [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
 
 Earlier published artifacts and their evidence remain unchanged. Publication and installation checks do not establish Objective qualification.
 
@@ -47,16 +47,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-After publication, install the v0.1.34 tag and matching release assets:
+After publication, install the v0.1.35 tag and matching release assets:
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.34
+codex plugin marketplace add clockgrove/factory --ref v0.1.35
 codex plugin add factory@clockgrove
-gh release download v0.1.34 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.34.tgz --pattern SHA256SUMS
+gh release download v0.1.35 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.35.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the digest with the independent value in the release preparation PR.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.34.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.35.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

@@ -1,6 +1,6 @@
 # Public release checklist
 
-[Published v0.1.34](https://github.com/clockgrove/factory/releases/tag/v0.1.34) carries [PR #209](https://github.com/clockgrove/factory/pull/209) directly quotable command receipt evidence. Independent public-download and offline-installation verification passed; [PR #210](https://github.com/clockgrove/factory/pull/210) records release gates and reproduction. Exact-artifact public/adopter qualification remains in [#206](https://github.com/clockgrove/factory/issues/206), with final acceptance in [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
+Candidate v0.1.35 carries [PR #213](https://github.com/clockgrove/factory/pull/213): literal Git patch evidence shared by review prompts and exact citation grounding. Publication, distribution verification and exact-artifact qualification are pending. The earlier v0.1.34 public scenario was accepted; its evidence does not qualify changed bytes. Execution remains in [#206](https://github.com/clockgrove/factory/issues/206), with final adopter acceptance in [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
 
 Earlier published artifacts and their evidence remain intact. Distribution checks do not establish live qualification.
 

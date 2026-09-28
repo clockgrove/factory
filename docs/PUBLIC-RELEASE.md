@@ -4,9 +4,9 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-**Candidate v0.1.31** carries accepted [PR #194](https://github.com/clockgrove/factory/pull/194) plugin/onboarding guidance without new runtime or dependency changes. Freeze and review its exact metadata candidate, complete the source/artifact gates, publish and independently verify installation, then qualify the public and adopter scenarios on those same bytes. Do not qualify v0.1.30 as a substitute or mix the new skills with its CLI.
+[Published v0.1.31](https://github.com/clockgrove/factory/releases/tag/v0.1.31) carries accepted [PR #194](https://github.com/clockgrove/factory/pull/194) plugin/onboarding guidance without new runtime or dependency changes. Source, artifact reproduction, independent public-download and offline-installation checks passed; [PR #195](https://github.com/clockgrove/factory/pull/195) records that evidence. The [artifact record](BUILD-STATUS.md#immutable-v0131-artifact-record) names its exact source, tree and SHA-256.
 
-[Published v0.1.30](https://github.com/clockgrove/factory/releases/tag/v0.1.30) has passed source, artifact reproduction, public-download and offline-installation checks. Fresh public model-backed qualification and actual Clockgrove acceptance remain open in [#26](https://github.com/clockgrove/factory/issues/26). The [artifact record](BUILD-STATUS.md#immutable-v0130-artifact-record) names its exact source, tree and SHA-256. Publication is distinct from successful Objective qualification.
+Fresh public model-backed qualification and actual Clockgrove acceptance remain open in [#26](https://github.com/clockgrove/factory/issues/26). Use the same published v0.1.31 plugin and CLI for both gates. Publication does not establish Objective qualification, and earlier v0.1.30 evidence does not qualify these changed bytes.
 
 The pinned Git marketplace supplies the plugin manifest and use skills. The matching GitHub Release supplies a separate Linux x64 CLI tarball with the default Codex dependency tree bundled for offline installation. Optional Claude and Copilot SDKs are installed separately; consult [local harnesses](AGENT-HARNESSES.md). Installed default runtime requires Node.js 22 or later. Building from source has separate tooling requirements below. npm registry publication and a universal Plugins Directory listing are not part of this distribution route.
 
@@ -14,7 +14,7 @@ Keep tag, package version, plugin version, marketplace ref and artifact identity
 
 ## Build one candidate
 
-For a new release, freeze the reviewed candidate and its version before running the coordinated gates. v0.1.31 is the selected successor; preserve already published v0.1.30 and its evidence.
+For a new release, freeze the reviewed candidate and its version before running the coordinated gates. v0.1.31 is already published; use its existing artifact for qualification and preserve all published releases and their evidence.
 
 From a clean Linux x64 source checkout at the accepted commit, with Node.js 22.12 or later, Git, Git LFS, and public npm access, with optional dependencies enabled for source checks and notice generation, confirm `git status --porcelain` is empty. Choose an empty absolute release directory outside the checkout, then run:
 
@@ -47,7 +47,7 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-After v0.1.31 publication and independent artifact verification, install its matching tag and release assets:
+Install the verified v0.1.31 tag and matching release assets:
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.31

@@ -2,11 +2,11 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.31 — candidate
+## 0.1.31 — 2026-09-28
 
 - Ship the accepted plugin onboarding from PR #194: setup and director distinguish ordinary target-repository operation from Factory development and contributor release fixtures. Director confirms the configured repository and checkout before every Objective command.
 - Present separate user and contributor entrypoints, a plugin user guide, copyable target Objective form, and clear support and release documentation. Preserve exact historical release evidence.
-- Align package, plugin and marketplace identity for this successor. Runtime, dependency versions, provider boundaries and release gates are unchanged. Source/artifact checks, publication, fresh installed public qualification and actual adopter acceptance remain separately required; earlier artifacts stay immutable.
+- Align package, plugin and marketplace identity. Runtime, dependency versions, provider boundaries and release gates are unchanged. Publication and independent public-download/offline-installation verification passed; [PR #195](https://github.com/clockgrove/factory/pull/195) records source/artifact checks and reproduction. Fresh public qualification and actual adopter acceptance remain pending in [#26](https://github.com/clockgrove/factory/issues/26); earlier artifacts stay immutable.
 
 ## 0.1.30 — 2026-09-28
 

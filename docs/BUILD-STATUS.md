@@ -2,6 +2,22 @@
 
 Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and [qualification issue #26](https://github.com/clockgrove/factory/issues/26). This document records immutable distribution evidence, not a second work queue.
 
+## Immutable v0.1.31 artifact record
+
+[Release v0.1.31](https://github.com/clockgrove/factory/releases/tag/v0.1.31)
+uses reviewed source `8e2c3f4c3c2b83d3b325e9944f30498979eec29b`, tree
+`0b38285db10579f3b0cbd175e48190cec3baf199`, integrated on main as
+`9eb18feb6754aefe76f8f120fd338011d1792b57` with the same tree. Tarball:
+150219245 bytes, SHA-256
+`9a2161f2a14316c15defa57323ddb5851c3d57283749d5f742e7930fd230d3a2`.
+[PR #195](https://github.com/clockgrove/factory/pull/195) records independent
+source/artifact review, passing source and CI gates, byte-identical reproduction,
+and independent public download and normal empty-cache offline Node22 installation.
+The installation audit matched all 93 package-owned files and 69 production
+dependency versions. This proves distribution and installation, not fresh live
+Objective qualification or actual adopter acceptance; those remain in #26.
+Current-main publication documentation does not alter the immutable tag or package.
+
 ## Immutable v0.1.30 artifact record
 
 [Release v0.1.30](https://github.com/clockgrove/factory/releases/tag/v0.1.30)
@@ -27,4 +43,4 @@ See the [preserved candidate record](history/BUILD-STATUS-2026-09-28.md#historic
 
 The [historical ledger](history/BUILD-STATUS-2026-09-28.md#historical-preparation-and-release-evidence) preserves previous source, artifact, run, accounting and acceptance identities, including failed and superseded candidates. Its pending-work statements are historical; consult the linked issues for current status. [PR #183](https://github.com/clockgrove/factory/pull/183) retains the exact v0.1.29 release record.
 
-Earlier success establishes only that artifact's tested scenario. It does not qualify v0.1.30 or the Clockgrove adopter pilot. Published tags, release assets and terminal runs remain unchanged.
+Earlier success establishes only that artifact's tested scenario. It does not qualify a later artifact or the Clockgrove adopter pilot. Published tags, release assets and terminal runs remain unchanged.

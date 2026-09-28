@@ -6,7 +6,7 @@
     "name": "Clockgrove",
     "url": "https://github.com/clockgrove"
   },
-  "repository": "https://github.com/clockgrove/factory-rebuild",
+  "repository": "https://github.com/clockgrove/factory",
   "license": "MIT",
   "skills": "./skills/",
   "interface": {

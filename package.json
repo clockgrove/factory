@@ -2,13 +2,13 @@
   "name": "@clockgrove/factory",
   "version": "0.1.30",
   "description": "Objective-driven development plugin for a target repository",
-  "homepage": "https://github.com/clockgrove/factory-rebuild#readme",
+  "homepage": "https://github.com/clockgrove/factory#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/clockgrove/factory-rebuild.git"
+    "url": "git+https://github.com/clockgrove/factory.git"
   },
   "bugs": {
-    "url": "https://github.com/clockgrove/factory-rebuild/issues"
+    "url": "https://github.com/clockgrove/factory/issues"
   },
   "keywords": [
     "codex",

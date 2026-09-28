@@ -1,26 +1,26 @@
 # Public release and third-party installation
 
-This is the reusable release and installation procedure. [#25](https://github.com/clockgrove/factory-rebuild/issues/25) accepted `v0.1.0`, the v0.1.7 gate completed [#46](https://github.com/clockgrove/factory-rebuild/issues/46), [#48](https://github.com/clockgrove/factory-rebuild/issues/48), and [#51](https://github.com/clockgrove/factory-rebuild/issues/51), and v0.1.8 proved [#60](https://github.com/clockgrove/factory-rebuild/issues/60)'s deterministic activation. The fresh installed v0.1.10 gate completed and closed [#44](https://github.com/clockgrove/factory-rebuild/issues/44), [#64](https://github.com/clockgrove/factory-rebuild/issues/64), and [#67](https://github.com/clockgrove/factory-rebuild/issues/67). The public v0.1.13 gate remained nonqualifying when result review lacked controller-owned capture and selection evidence, v0.1.14 remained nonqualifying after a provider stream never emitted a terminal result, v0.1.15 was superseded before a live Objective because its installed setup skill misstated the worker default, v0.1.16 preserved a validated Work Item result after reviewer capacity was converted directly into a human decision, v0.1.17 preserved a selected result whose digest-bound receipt lacked manifest provenance, v0.1.18 preserved a selected result whose capture receipt lacked controller-imported input identity, v0.1.19 preserved a fail-closed planning attempt whose response used Markdown-prefixed citation headings, and v0.1.20 preserved a validated selected result whose automatic review packet did not distinguish the worker result from controller materialization. Public v0.1.21 independently completed [#81](https://github.com/clockgrove/factory-rebuild/issues/81)'s installed-artifact gate; see [exact acceptance evidence](V0.1.21-ACCEPTANCE.md) Keep every tag, marketplace entry, tarball, and evidence record tied to the same source commit. The [build status](BUILD-STATUS.md) distinguishes publication from installed Objective acceptance. Do not run Factory against this repository.
+This is the reusable release and installation procedure. [#25](https://github.com/clockgrove/factory/issues/25) accepted `v0.1.0`, the v0.1.7 gate completed [#46](https://github.com/clockgrove/factory/issues/46), [#48](https://github.com/clockgrove/factory/issues/48), and [#51](https://github.com/clockgrove/factory/issues/51), and v0.1.8 proved [#60](https://github.com/clockgrove/factory/issues/60)'s deterministic activation. The fresh installed v0.1.10 gate completed and closed [#44](https://github.com/clockgrove/factory/issues/44), [#64](https://github.com/clockgrove/factory/issues/64), and [#67](https://github.com/clockgrove/factory/issues/67). The public v0.1.13 gate remained nonqualifying when result review lacked controller-owned capture and selection evidence, v0.1.14 remained nonqualifying after a provider stream never emitted a terminal result, v0.1.15 was superseded before a live Objective because its installed setup skill misstated the worker default, v0.1.16 preserved a validated Work Item result after reviewer capacity was converted directly into a human decision, v0.1.17 preserved a selected result whose digest-bound receipt lacked manifest provenance, v0.1.18 preserved a selected result whose capture receipt lacked controller-imported input identity, v0.1.19 preserved a fail-closed planning attempt whose response used Markdown-prefixed citation headings, and v0.1.20 preserved a validated selected result whose automatic review packet did not distinguish the worker result from controller materialization. Public v0.1.21 independently completed [#81](https://github.com/clockgrove/factory/issues/81)'s installed-artifact gate; see [exact acceptance evidence](V0.1.21-ACCEPTANCE.md) Keep every tag, marketplace entry, tarball, and evidence record tied to the same source commit. The [build status](BUILD-STATUS.md) distinguishes publication from installed Objective acceptance. Do not run Factory against this repository.
 
 ## Distribution shape
 
-Published [v0.1.29](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.29)
+Published [v0.1.29](https://github.com/clockgrove/factory/releases/tag/v0.1.29)
 uses frozen reviewed source `401d74da56d234ba6958a3b1ce9e0b7b5f5eeecb`, tree
 `63f2471e0acba681f5c5c2f831543bc7d424af33`. The 150224627-byte tarball's SHA-256 is
 `e59163f5c69f7002f3efd7274fdf724e95453de187df051d29cd0d41983748ec`.
-[PR #183](https://github.com/clockgrove/factory-rebuild/pull/183) records exact
+[PR #183](https://github.com/clockgrove/factory/pull/183) records exact
 source/artifact and separate metadata integration evidence. Concurrent #180 is
 excluded from these release bytes even though it is present in main.
 
-The published v0.1.29 [Clockgrove marketplace](https://github.com/clockgrove/factory-rebuild/blob/v0.1.29/.agents/plugins/marketplace.json) pins the plugin at this repository's root to that immutable tag. Public installation below uses that published marketplace. Codex loads its manifest and use skills from the Git tag. The TypeScript CLI and its bundled production dependency tree are supplied in a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled Codex path installs offline and needs no npm publishing account. Optional Claude/Copilot SDK installation is separate. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
+The published v0.1.29 [Clockgrove marketplace](https://github.com/clockgrove/factory/blob/v0.1.29/.agents/plugins/marketplace.json) pins the plugin at this repository's root to that immutable tag. Public installation below uses that published marketplace. Codex loads its manifest and use skills from the Git tag. The TypeScript CLI and its bundled production dependency tree are supplied in a separate npm tarball attached to the matching public GitHub Release; marketplace installation does not build the CLI. The bundled Codex path installs offline and needs no npm publishing account. Optional Claude/Copilot SDK installation is separate. The tarball targets Linux x64 with Node.js 22 or later. The repo marketplace is a public distribution source for people who add it; a listing in the universal Plugins Directory would require a separate submission and review.
 
-Published [v0.1.28](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.28)
+Published [v0.1.28](https://github.com/clockgrove/factory/releases/tag/v0.1.28)
 uses source `dc7097b487701cab94aa1d3f5aa561faa3416998`. Exact source/artifact
 checks and byte-identical reproduction are recorded in [build status](BUILD-STATUS.md).
-For those historical bytes, follow [their immutable publication instructions](https://github.com/clockgrove/factory-rebuild/blob/79abc5784164da4c6de133074fdce0dceb06261b/README.md#install-published-v0128); fresh
+For those historical bytes, follow [their immutable publication instructions](https://github.com/clockgrove/factory/blob/79abc5784164da4c6de133074fdce0dceb06261b/README.md#install-published-v0128); fresh
 public live qualification and actual adopter acceptance remain separate in #26.
 
-Published [v0.1.27](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.27)
+Published [v0.1.27](https://github.com/clockgrove/factory/releases/tag/v0.1.27)
 passed publication and independent public-download/offline installation checks.
 Its representative public Objective remains failed after the final note-only
 worker refused its pointer checkout in the original attempt and one explicit
@@ -28,17 +28,17 @@ retry. Preserve that run and artifact; source correction #174 / PR #175 belongs
 to the new candidate. See [build status](BUILD-STATUS.md) for exact identities.
 Current published installation uses v0.1.29 as described above.
 
-Published [v0.1.26](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26)
+Published [v0.1.26](https://github.com/clockgrove/factory/releases/tag/v0.1.26)
 includes the accepted #159 planning lifecycle correction. Its exact source, tree,
 tarball digest, full Node 22/24 gates and independent public-download/offline
 installation proof are recorded in [build status](BUILD-STATUS.md). Public live
 qualification and actual adopter acceptance remain pending in
-[issue #26](https://github.com/clockgrove/factory-rebuild/issues/26).
+[issue #26](https://github.com/clockgrove/factory/issues/26).
 Current published installation uses v0.1.29 as described above.
 The earlier release evidence below applies only to those immutable artifacts.
 
-Published [v0.1.25](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.25) carries the accepted #150 contained ignored-link correction
-from [PR #151](https://github.com/clockgrove/factory-rebuild/pull/151), integrated
+Published [v0.1.25](https://github.com/clockgrove/factory/releases/tag/v0.1.25) carries the accepted #150 contained ignored-link correction
+from [PR #151](https://github.com/clockgrove/factory/pull/151), integrated
 at `92ef6eeac89e792016b5f20ad69cefb707e9debb`, reviewed tree
 `60ad230af22450f46d00e2ccece8555dc883d6cb`. Metadata PR #152 produced release
 source `b641ccdccdb969f14c64a66da751c22f6be5bd6d`, tree
@@ -51,7 +51,7 @@ not a product finding. The [wholly fresh public gate](https://github.com/clockgr
 has not yet qualified; automatic gate and actual #26 adopter acceptance remain pending.
 Historical v0.1.24 evidence below remains immutable and does not qualify changed bytes.
 
-Published [v0.1.24](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.24) carries the accepted and closed #145 required-shape correction
+Published [v0.1.24](https://github.com/clockgrove/factory/releases/tag/v0.1.24) carries the accepted and closed #145 required-shape correction
 from integration `2f3d4f5a820b1001f41cff731640fc4085552630`. Its metadata does
 not change runtime, tests, skills, dependencies, scripts or license bodies.
 Its release source is `e0fc91343563e6a3b19eb92dd64d419ba03b487a`, tree
@@ -67,7 +67,7 @@ This is the public prerequisite only; actual adopter #26 remains OPEN/unaccepted
 Install only its immutable published bytes; do not rebuild or retag v0.1.24
 from this later documentation handoff.
 
-Published [v0.1.23](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.23)
+Published [v0.1.23](https://github.com/clockgrove/factory/releases/tag/v0.1.23)
 includes the heading-source result-review correction and later accepted source
 leaves, not deferred #55 optional harness work. [Build status](BUILD-STATUS.md)
 records its exact source/tree, digest and passing artifact/installation checks.
@@ -77,7 +77,7 @@ temporary-staging versus delivered-ownership wording contradiction; no override,
 replan or activation occurred. A second staging-clarified plan also remains
 nonqualifying, and the third minimum-clarified invocation failed initial
 required-shape validation before a plan file or activation. The raw real failed
-field is unknown. [#145](https://github.com/clockgrove/factory-rebuild/issues/145)
+field is unknown. [#145](https://github.com/clockgrove/factory/issues/145)
 is now accepted and closed for its bounded source correction; v0.1.24 is the
 published artifact with its own accepted public gate recorded above. Do not patch
 v0.1.23 or continue editing fixtures to evade generated-graph failures.
@@ -243,9 +243,9 @@ gh auth status
 Then install from the current public tag and release assets:
 
 ```sh
-codex plugin marketplace add clockgrove/factory-rebuild --ref v0.1.29
+codex plugin marketplace add clockgrove/factory --ref v0.1.29
 codex plugin add factory@clockgrove
-gh release download v0.1.29 --repo clockgrove/factory-rebuild \
+gh release download v0.1.29 --repo clockgrove/factory \
   --pattern clockgrove-factory-0.1.29.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the digest with the independently recorded release value in PR #183.

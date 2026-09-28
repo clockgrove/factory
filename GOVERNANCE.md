@@ -14,4 +14,4 @@ Factory provides a delivery tool. Each target repository retains authority over 
 
 ## Concerns
 
-Use the [issue tracker](https://github.com/clockgrove/factory-rebuild/issues) for project decisions and ordinary concerns. Use the private route in [SECURITY.md](SECURITY.md) for vulnerabilities and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for conduct reports.
+Use the [issue tracker](https://github.com/clockgrove/factory/issues) for project decisions and ordinary concerns. Use the private route in [SECURITY.md](SECURITY.md) for vulnerabilities and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for conduct reports.

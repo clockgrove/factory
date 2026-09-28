@@ -306,7 +306,7 @@ class ScriptedPlanningModel {
               item.path.endsWith("controller materialization"),
           );
           const packet = materialization
-            ? JSON.parse(materialization.content)
+            ? JSON.parse(materialization.content.split("\n")[0])
             : null;
           if (
             materialization?.complete === true &&

@@ -1349,7 +1349,7 @@ test("Codex adapter passes phase selections to every planning and review thread"
       baseSha,
       treeSha,
       sources: [],
-      change: "{}",
+      change: JSON.stringify({ changes: [], textBudget: 48_000, patches: [] }),
       evidence: [
         {
           path: "Work Item Git delta: one",
@@ -2055,7 +2055,11 @@ test("Codex adapter exhausts bounded capacity retries for final review without c
         baseSha: "a".repeat(40),
         treeSha,
         sources: [{ path: "OBJECTIVE", content: "Criterion" }],
-        change: "{}",
+        change: JSON.stringify({
+          changes: [],
+          textBudget: 48_000,
+          patches: [],
+        }),
         commands: [],
         invocation: {
           invocationId: "exhausted-capacity",

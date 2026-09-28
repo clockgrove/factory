@@ -460,7 +460,7 @@ export function workItemMaterializationEvidence(args: {
       complete:
         worker.truncatedPaths.length === 0 &&
         materialization.truncatedPaths.length === 0,
-      content: JSON.stringify({
+      content: `${JSON.stringify({
         authority: "Factory supervisor controller materialization evidence",
         workItemId: item.id,
         selectedSetId: selected.id,
@@ -472,9 +472,9 @@ export function workItemMaterializationEvidence(args: {
         materializationCommitSha: current.changeRef,
         materializationTreeSha: current.treeSha,
         workerDestinationChanges,
-        workerChange: workerPacket,
-        materializationChange: materializationPacket,
-      }),
+        workerChange: gitChangeMetadata(workerPacket),
+        materializationChange: gitChangeMetadata(materializationPacket),
+      })}\n--- Worker result patches ---\n${literalGitPatches(workerPacket)}\n--- Controller materialization patches ---\n${literalGitPatches(materializationPacket)}`,
     },
   ];
 }
@@ -683,6 +683,33 @@ function parseResultChangePacket(change: string): ResultChangePacket {
   return JSON.parse(change) as ResultChangePacket;
 }
 
+function gitChangeMetadata(packet: ResultChangePacket) {
+  return {
+    changes: packet.changes,
+    textBudget: packet.textBudget,
+    patches: packet.patches.map(({ path, lineStats, truncated }) => ({
+      path,
+      lineStats,
+      truncated,
+    })),
+  };
+}
+
+function literalGitPatches(packet: ResultChangePacket): string {
+  return packet.patches
+    .map(
+      (patch) =>
+        `--- Exact patch ${JSON.stringify({ path: patch.path, lineStats: patch.lineStats, truncated: patch.truncated })} ---\n${patch.excerpt}`,
+    )
+    .join("\n");
+}
+
+/** Same transient current-result text for the prompt and exact citation source. */
+export function gitChangeEvidence(change: string): string {
+  const packet = parseResultChangePacket(change);
+  return `${JSON.stringify(gitChangeMetadata(packet))}\n${literalGitPatches(packet)}`;
+}
+
 function assertCommitTree(
   checkout: string,
   commit: string,
@@ -869,21 +896,9 @@ function workItemDeltaContent(args: {
         workItemId: item.id,
         ownedPaths: item.ownedPaths,
       })),
-    changes: packet.changes,
-    textBudget: packet.textBudget,
-    patches: packet.patches.map(({ path, lineStats, truncated }) => ({
-      path,
-      lineStats,
-      truncated,
-    })),
+    ...gitChangeMetadata(packet),
   };
-  const patches = packet.patches
-    .map(
-      (patch) =>
-        `--- Exact patch ${JSON.stringify({ path: patch.path, lineStats: patch.lineStats, truncated: patch.truncated })} ---\n${patch.excerpt}`,
-    )
-    .join("\n");
-  return `${JSON.stringify(identity)}\n${patches}`;
+  return `${JSON.stringify(identity)}\n${literalGitPatches(packet)}`;
 }
 
 /** Project one established result without copying prior model verdicts. */
@@ -1271,7 +1286,6 @@ function reviewFindingRejection(
   candidate: ResultReviewFinding | undefined,
   criterion: string,
   groundedSources: ResultReviewEvidenceSource[],
-  patchExcerpts: string[],
 ):
   | {
       field:
@@ -1302,13 +1316,7 @@ function reviewFindingRejection(
     return { field: "source", reason: "source-truncated" };
   if (!candidate.quote?.trim())
     return { field: "quote", reason: "empty-quote" };
-  if (
-    !sources.some((source) => source.content.includes(candidate.quote)) &&
-    !(
-      candidate.source === "Exact Git change packet" &&
-      patchExcerpts.some((excerpt) => excerpt.includes(candidate.quote))
-    )
-  )
+  if (!sources.some((source) => source.content.includes(candidate.quote)))
     return { field: "quote", reason: "quote-not-found" };
   return undefined;
 }
@@ -1371,7 +1379,7 @@ export async function reviewAcceptance(args: {
     ...(args.evidenceSources ?? []),
   ];
   const evidenceSources: ResultReviewEvidenceSource[] = [
-    { path: "Exact Git change packet", content: change },
+    { path: "Exact Git change packet", content: gitChangeEvidence(change) },
     commandPassEvidence(evidence.commands),
     {
       path: "Delivery observations",
@@ -1389,9 +1397,6 @@ export async function reviewAcceptance(args: {
     evidenceSources.some((source) => sourcePaths.has(source.path))
   )
     throw new Error("Result review evidence paths must be unique");
-  const patchExcerpts = parseResultChangePacket(change).patches.map(
-    (patch) => patch.excerpt,
-  );
   let findings: Awaited<
     ReturnType<NonNullable<PlanningModel["reviewResult"]>>
   >["findings"] = [];
@@ -1446,7 +1451,6 @@ export async function reviewAcceptance(args: {
       candidate,
       criterion,
       groundedSources,
-      patchExcerpts,
     );
     if (rejection && reviewFindingsAvailable)
       observeInvalidReview(args.invocation, rejection.field, rejection.reason);

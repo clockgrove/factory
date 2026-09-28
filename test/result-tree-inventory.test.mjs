@@ -90,7 +90,9 @@ for (const inheritedConfig of [false, true])
                 ...(inheritedConfig ? [".npmrc"] : []),
               ].toSorted(),
             );
-            const delta = JSON.parse(prompt.split("Change packet:\n")[1]);
+            const delta = JSON.parse(
+              prompt.split("Change packet:\n")[1].split("\n")[0],
+            );
             assert.deepEqual(
               delta.changes.map((change) => change.path),
               ["package.json"],

@@ -87,9 +87,9 @@ The `v0.1.0` one-immutable-package combined disposable gate passed; [BUILD-STATU
 
 ### Operator-approved Codex-only adopter pilot
 
-The approved [#26 pilot](https://github.com/clockgrove/factory/issues/26) uses the published plugin and matching CLI artifact with local Codex. Its execution-order exception allowed the bounded pilot before #55's separate installed-harness proof. #55 and PR #62 are now accepted and closed; their provider evidence retains its own exact artifact and scenario identity.
+The approved [adopter execution gate](https://github.com/clockgrove/factory/issues/206), continued from historical [#26](https://github.com/clockgrove/factory/issues/26), uses the published plugin and matching CLI artifact with local Codex. Its execution-order exception allowed the bounded pilot before #55's separate installed-harness proof. #55 and PR #62 are now accepted and closed; their provider evidence retains its own exact artifact and scenario identity.
 
-The remaining first-adopter milestone requires fresh public qualification of the selected artifact, independent terminal audit, and then actual Clockgrove acceptance on that same artifact. Earlier accepted public runs do not qualify changed bytes. See [the release checklist](RELEASE-CHECKLIST.md) for the procedure and #26 for current status. Optional-provider logins, managed execution, sandboxes, and deferred profile enhancements do not become prerequisites for this Codex-only pilot.
+The remaining first-adopter milestone requires fresh public qualification of the selected artifact, independent terminal audit, and then actual Clockgrove acceptance on that same artifact. Earlier accepted public runs do not qualify changed bytes. See [the release checklist](RELEASE-CHECKLIST.md) for the procedure and [execution #206](https://github.com/clockgrove/factory/issues/206) / [final acceptance #207](https://github.com/clockgrove/factory/issues/207) for current acceptance. Optional-provider logins, managed execution, sandboxes, and deferred profile enhancements do not become prerequisites for this Codex-only pilot.
 
 Overall trunk completion requires both the accepted installed-harness foundation and actual adopter acceptance. Contributor procedures do not grant an adopter new target, provider, source-egress, or spending authority.
 

@@ -4,7 +4,7 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Candidate v0.1.34 carries [PR #209](https://github.com/clockgrove/factory/pull/209) directly quotable command receipt evidence. Publication and exact-artifact public/adopter qualification remain pending in [#206](https://github.com/clockgrove/factory/issues/206); final acceptance is tracked in [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
+[Published v0.1.34](https://github.com/clockgrove/factory/releases/tag/v0.1.34) carries [PR #209](https://github.com/clockgrove/factory/pull/209) directly quotable command receipt evidence. Independent public-download and offline-installation verification passed; [PR #210](https://github.com/clockgrove/factory/pull/210) records release gates and reproduction. Exact-artifact public/adopter qualification remains in [#206](https://github.com/clockgrove/factory/issues/206), with final acceptance in [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
 
 Earlier published artifacts and their evidence remain unchanged. Publication and installation checks do not establish Objective qualification.
 

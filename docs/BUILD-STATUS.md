@@ -4,6 +4,22 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.33 public scenario was subsequently accepted; this does not qualify changed v0.1.34 bytes. Historical observations below retain their original scope; current execution and final acceptance are tracked in #206 and #207.
 
+## Immutable v0.1.34 artifact record
+
+[Release v0.1.34](https://github.com/clockgrove/factory/releases/tag/v0.1.34)
+is tagged at integrated source `fa263d291e4abce210ed24e82f8998200782309a`,
+with reviewed candidate `ff3d9063266d882d43ea967ec4d64d8b16ba2c23` sharing tree
+`30f4fd3518659495ea554f7e5d682fe364fb8789`. Tarball: 150221022 bytes, SHA-256
+`3cefb3fd616b6c1a12950370e556f7cc3856b9350c4a51da53f1fbac5a5e4892`.
+[PR #210](https://github.com/clockgrove/factory/pull/210) records independent
+source/artifact review, passing required CI and byte-identical integrated-source
+reproduction. Independent unauthenticated public download and normal empty-cache
+offline Node22 installation passed, with all 93 package-owned files and 69
+production dependency versions matching. Installed CLI and scanner exit-code
+0/1/2 checks passed. This proves distribution and installation; exact-artifact
+live qualification and adopter execution remain with #206, and final acceptance
+with #207. Current-main documentation does not alter the release tag or artifact.
+
 ## Immutable v0.1.33 artifact record
 
 [Release v0.1.33](https://github.com/clockgrove/factory/releases/tag/v0.1.33)

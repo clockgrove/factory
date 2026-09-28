@@ -2,10 +2,10 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.34 — 2026-09-28 (candidate)
+## 0.1.34 — 2026-09-28
 
 - Make successful command receipts directly quotable during automatic result review (#208 / PR #209). Share literal command rendering between model input and citation grounding while preserving exact-source matching and receipt index, tree and success identities.
-- Dependencies, providers, worker authority and lifecycle behavior are unchanged. Publication and exact-artifact public/adopter qualification remain pending in [#206](https://github.com/clockgrove/factory/issues/206), with final acceptance in [#207](https://github.com/clockgrove/factory/issues/207). Previous artifacts and evidence remain immutable.
+- Dependencies, providers, worker authority and lifecycle behavior are unchanged. Publication and independent public-download/offline-installation verification passed; [PR #210](https://github.com/clockgrove/factory/pull/210) records release gates and reproduction. Exact-artifact public/adopter qualification remains pending in [#206](https://github.com/clockgrove/factory/issues/206), with final acceptance in [#207](https://github.com/clockgrove/factory/issues/207). Previous artifacts and evidence remain immutable.
 
 ## 0.1.33 — 2026-09-28
 

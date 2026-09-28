@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** v0.1.34 is a release candidate for directly quotable command evidence. Publication, exact-artifact public qualification and adopter acceptance are pending; see [execution gates](https://github.com/clockgrove/factory/issues/206) and [final acceptance](https://github.com/clockgrove/factory/issues/207). For the published v0.1.33 installation, use its [release instructions](https://github.com/clockgrove/factory/blob/7e49421d09cc303236b999b58380b795bfb3e062/README.md#install). Start with a disposable repository and supervise initial use. Some interrupted delivery states require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
+**Status:** [v0.1.34](https://github.com/clockgrove/factory/releases/tag/v0.1.34) is published, and public download and offline installation are verified. Live qualification and adopter acceptance remain pending; see [execution gates](https://github.com/clockgrove/factory/issues/206) and [final acceptance](https://github.com/clockgrove/factory/issues/207). Start with a disposable repository and supervise initial use. Some interrupted delivery states require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
 
 ## Requirements
 
@@ -24,7 +24,7 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. After candidate publication, install both from the same published version:
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version:
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.34

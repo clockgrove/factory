@@ -12,7 +12,7 @@ Shared execution/result contracts, snapshot and validation/delivery boundaries, 
 
 Additional cloud-session SDKs and sandbox providers are separate adapter capabilities that reuse the appropriate execution mode. Keep provider-specific APIs and configuration inside adapters. A declared interface or scripted fixture does not qualify a real provider. Improve shared code in the branch that demonstrates the need; move a correction into trunk only for a demonstrated current trunk requirement. Bursting, mixed modes, live migration, adaptive pressure, distributed controllers, and compounded fault matrices remain leaves.
 
-The #26 adopter pilot is Codex-only. #55 and PR #62 are accepted and closed with their own installed harness evidence; that evidence does not qualify a later artifact or optional provider for this pilot. Current release qualification and actual adopter acceptance remain in [#26](https://github.com/clockgrove/factory/issues/26). Do not infer new target or source-egress authority from contributor instructions.
+The approved adopter pilot is Codex-only. #55 and PR #62 are accepted and closed with their own installed harness evidence; that evidence does not qualify a later artifact or optional provider for this pilot. Current execution gates belong to [#206](https://github.com/clockgrove/factory/issues/206), with independent final acceptance in [#207](https://github.com/clockgrove/factory/issues/207). Historical #26 is closed as superseded tracking. Do not infer new target or source-egress authority from contributor instructions.
 
 ## Scope
 

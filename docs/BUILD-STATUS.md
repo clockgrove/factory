@@ -20,6 +20,18 @@ This feature acceptance does not satisfy the full public release gate or authori
 private pilot advancement. The separate unproven collection-history obligation is
 recorded below and remains under #206.
 
+## Collection observation correction (#225)
+
+The source correction for [#225](https://github.com/clockgrove/factory/issues/225)
+adds positive ignored-link observations to the existing original-worker safety
+scan and private regular/native diagnostics. An empty completed observation is
+distinct from unavailable evidence; provider evidence and collection refusals are
+unchanged. It proves presence during that scan, not continuous retention or how a
+link was created. Source tests include real offline pnpm-generated dependencies.
+Independent implementation review and the changed artifact's distribution/public
+gates remain required. The v0.1.36 historical gap and private-pilot block remain
+unchanged; published bytes and terminal evidence are preserved.
+
 ## Immutable v0.1.36 artifact record
 
 [Release v0.1.36](https://github.com/clockgrove/factory/releases/tag/v0.1.36)

@@ -273,6 +273,8 @@ export interface ExecutionObservation {
   authentication?: AuthenticationRequest;
 }
 export interface ExecutionResult {
+  /** Driver observation during successful original-worktree collection, not continuous retention. */
+  collection?: { acceptedIgnoredLinks: string[] };
   treeSha: string;
   changeRef: string;
   assets?: CapturedAssetSet[];

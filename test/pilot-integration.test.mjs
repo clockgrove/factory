@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel } from "../dist/compiler.js";
+import { readDiagnostics } from "../dist/diagnostics.js";
 import { selectAssetSetFromCli } from "../dist/runner.js";
 import {
   commandPassEvidence,
@@ -535,6 +536,19 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
       JSON.stringify(completed),
     );
     assert.equal(completed.finalValidation.passed, true);
+    const collected = readDiagnostics(descriptor.config.repository, 1).filter(
+      (event) =>
+        event.operation === "collection-ignored-links" &&
+        event.itemId === "foundation",
+    );
+    assert.equal(collected.length, 1);
+    assert.equal(collected[0].attemptId, completed.work.foundation.attempt);
+    assert.ok(
+      JSON.parse(collected[0].detail).acceptedIgnoredLinks.includes(
+        "node_modules/pilot-dependency",
+      ),
+    );
+
     assert.equal(completed.finalValidation.hydrationReceipt.passed, true);
     const selectedPrompt = prompts.find((p) =>
       p.includes('"reviewedItemId":"media"'),

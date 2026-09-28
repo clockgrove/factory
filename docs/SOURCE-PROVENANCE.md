@@ -59,6 +59,26 @@ remain with the contributor qualification owner after owned-resource cleanup.
 This documentation update changes no runtime or published artifact and creates no
 successor run or retry.
 
+## Original-worker collection observations (#225)
+
+The public v0.1.36 qualification gap and existing ignored-link safety seam supplied
+this bounded correction. The existing original-worktree scan records a relative
+path only after its ignored, untracked, in-root regular-file/directory link checks
+succeed. Successful local collection returns these driver-owned observations
+separately from unchanged provider evidence; empty observations differ from an
+unavailable optional field. Regular and native delivery forward the completed
+observation through existing private diagnostics, correlated with run, item,
+attempt and result identities. Counts remain metadata; target paths stay in
+redacted private detail. Diagnostic loss does not control execution or acceptance.
+
+Focused real-Git tests preserve the unsafe-link and special-entry refusals, cover
+late secret/commit failures and both delivery routes, and exercise actual offline
+pnpm-generated TypeScript links. No extra scan, installation, required-link policy,
+state/store, permission change or continuous-retention claim is introduced. This
+source evidence cannot repair the terminal v0.1.36 history; a corrected setup
+source and a newly qualified immutable artifact remain necessary for #206. No
+archived or private adopter material was copied.
+
 ## Explicit pending-result re-review
 
 [PR #203](https://github.com/clockgrove/factory/pull/203), resolving [#202](https://github.com/clockgrove/factory/issues/202), adds the newly written explicit Work Item re-review transition, application/CLI entry point, regular/native continuation regressions and operator guidance. It reuses the existing exact-result validation path and preserves final review's existing continuation. Reviewed source `ba013fd20f8e1f319a5043b9b6ada0a645139ffb` integrated as `08b3d826fb80156f273a97e98122b61bfdd52c8e`, tree `c68af733bf555d1bb8e0d7298d4d5e1ada553c52`. No archived implementation, tests, private source or model transcripts were copied. Source integration does not establish installed release qualification; that evidence remains in #26.

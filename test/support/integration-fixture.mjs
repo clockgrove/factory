@@ -883,6 +883,7 @@ export function makeApplication(descriptor) {
       contentStore,
       reportRunStatus: descriptor.reportRunStatus,
     }),
+    driver,
     eventsPath,
     planningPath,
     github,

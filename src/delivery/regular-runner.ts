@@ -128,6 +128,22 @@ export async function runRegularGraph(args: {
           throw new Error("Objective cancelled");
         }
         const result = await driver.collect(handle);
+        if (result.collection)
+          args.diagnostics?.emit({
+            runId: state.runId,
+            itemId: item.id,
+            attemptId: work.attempt,
+            operation: "collection-ignored-links",
+            outcome: "completed",
+            metadata: {
+              observation: "original-worktree-scan",
+              acceptedIgnoredLinkCount:
+                result.collection.acceptedIgnoredLinks.length,
+              treeSha: result.treeSha,
+              headSha: result.changeRef,
+            },
+            detail: JSON.stringify(result.collection),
+          });
         if (args.cancelled()) throw new Error("Objective cancelled");
         work.changeRef = result.changeRef;
         work.treeSha = result.treeSha;

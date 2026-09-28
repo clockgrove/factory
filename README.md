@@ -45,6 +45,12 @@ the successor or the bounded Codex-only pilot.
 Published v0.1.28 remains immutable; this successor does not rebuild, retag or
 replace its bytes or resume its waiting public run.
 
+**Next candidate: v0.1.30.** Includes accepted [#185 / PR #186](https://github.com/clockgrove/factory/pull/186)
+worker-input completeness and the already-integrated #180 usage normalization.
+It is not yet published or live-qualified. Keep using the immutable v0.1.29
+installation below until publication is verified. See the
+[candidate procedure](docs/PUBLIC-RELEASE.md#prepare-v0130).
+
 ## How it works
 
 1. A human writes an Objective as a GitHub Issue in the target repository.
@@ -87,7 +93,7 @@ npm run lint
 npm run format:check
 npm test
 npm pack
-npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.29.tgz
+npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.30.tgz
 ```
 
 The current source candidate declares the Claude Agent SDK and GitHub Copilot

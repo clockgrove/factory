@@ -2,6 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.30 — candidate
+
+- Require self-contained source-backed implementation briefs and independent worker-input completeness review (#185 / PR #186). Preserve ownership, dependencies and later validation timing. Synthetic coverage does not establish live model adherence.
+- Include the already-integrated local-harness usage normalization (#180 / PR #182), which was excluded from immutable v0.1.29. Missing usage remains unknown.
+- This metadata-only successor changes no runtime, dependencies or skills beyond those accepted source changes. Public installed qualification and adopter acceptance remain separate in #26. Preserve all previous artifacts and terminal runs.
+
 ## 0.1.29 — 2026-09-27
 
 - Supply a bounded recursive inventory of the exact validated Git tree to item and final acceptance review, including unchanged tracked paths. Preserve completeness, configured text budgets and path-only proof limits (#179 / PR #181).

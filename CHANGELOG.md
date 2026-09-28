@@ -2,6 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.36 — candidate
+
+- Assign installation-approved execution profiles during Objective compilation and preserve exact bindings through review, issue projection and local lifecycle (#162 / PR #221).
+- Prepare private additive worker instructions and the bounded Claude in-process worktree-read MCP capability, with explicit Read authority, runtime provenance/readiness verification and descriptor confinement (#164 / PR #222).
+- Align package, plugin and marketplace candidate identity. Existing published artifacts remain immutable. Exact-artifact mixed-provider/environment qualification is pending in #162 and #164; this candidate does not replace or qualify the separate v0.1.35 pilot.
+
 ## 0.1.35 — 2026-09-28
 
 - Present bounded Git patch excerpts literally for current-result and controller-materialization review (#212 / PR #213), reusing ordinary Work Item delta rendering. Review prompts and citation grounding share the same text; exact-source matching, identity, ownership and truncation checks remain intact.

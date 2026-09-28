@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** [v0.1.30](https://github.com/clockgrove/factory/releases/tag/v0.1.30) is an early release with verified public download and installation. Fresh end-to-end qualification and first-adopter acceptance remain pending in [#26](https://github.com/clockgrove/factory/issues/26). Start with a disposable repository and supervise initial use. Some interrupted delivery states require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
+**Status:** This checkout prepares **v0.1.31**, including the improved plugin onboarding and target-binding guidance. Publication and fresh end-to-end qualification are pending; [#26](https://github.com/clockgrove/factory/issues/26) tracks qualification and first-adopter acceptance. The previous [v0.1.30 release](https://github.com/clockgrove/factory/releases/tag/v0.1.30) remains available with verified public download and installation. Start with a disposable repository and supervise initial use. Some interrupted delivery states require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
 
 ## Requirements
 
@@ -24,28 +24,24 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same version:
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same version. These v0.1.31 commands apply once its [release](https://github.com/clockgrove/factory/releases/tag/v0.1.31) is published; until then use the [v0.1.30 instructions](https://github.com/clockgrove/factory/blob/v0.1.30/README.md#install-published-v0130):
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.30
+codex plugin marketplace add clockgrove/factory --ref v0.1.31
 codex plugin add factory@clockgrove
 
-gh release download v0.1.30 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.30.tgz --pattern SHA256SUMS
+gh release download v0.1.31 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.31.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independently recorded value in [PR #188](https://github.com/clockgrove/factory/pull/188):
-
-```text
-cac13bc37ca7c23d3c19b97ed6c4731b25312467b4e38850658fee32a0eb91e8
-```
+Before installing, compare the tarball's SHA-256 with the independent artifact digest recorded in the release preparation PR linked from the release notes. A checksum downloaded beside the tarball is not the independent record. Do not install until that record and public-download verification are available.
 
 Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.30.tgz
+  ./clockgrove-factory-0.1.31.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```
@@ -54,9 +50,9 @@ Keep that CLI on the PATH of the terminal or agent that will operate Factory, an
 
 ## Use the plugin
 
-For the published v0.1.30 skills, first read the brief [compatibility note](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#published-plugin-compatibility). Open your target repository in Codex after loading the plugin, and ask:
+Open your target repository in Codex after loading the v0.1.31 plugin, and ask:
 
-> Use Factory to set up this repository with a concurrency limit of two, following the plugin user guide for ordinary repository use. Do not start work.
+> Use Factory to set up this repository with a concurrency limit of two. Do not start work.
 
 Factory's setup skill binds the checkout and reports the configuration. The target must be a trusted GitHub repository with committed requirements and available validation tools. Factory cannot run against its own source repository.
 

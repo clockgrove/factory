@@ -758,6 +758,82 @@ export function retryWorkItem(
   }
 }
 
+/** Request validation and automatic review again without deciding a criterion. */
+export function rereviewWorkItem(
+  config: FactoryConfig,
+  objective: number,
+  input: { item: string; treeSha: string; actor: string; reason: string },
+): void {
+  const lock = join(stateRoot(config.repository), "controller.lock");
+  const handle = acquireControllerLock(lock, objective);
+  try {
+    const state = readState(config.repository, objective);
+    if (
+      !state ||
+      state.error ||
+      state.cancelRequested ||
+      state.cancelledAt ||
+      state.finalValidation?.passed
+    )
+      throw new Error("Objective is not awaiting result re-review");
+    if (state.configDigest !== factoryConfigDigest(config))
+      throw new Error(
+        "Installation configuration changed before result re-review",
+      );
+    const work = state.work[input.item];
+    if (
+      !work ||
+      work.status !== "waiting" ||
+      work.step !== "approve-result" ||
+      !work.acceptancePending ||
+      !work.baseSha ||
+      !work.changeRef ||
+      !work.treeSha ||
+      work.pullRequest ||
+      work.integratedSha
+    )
+      throw new Error(
+        "Work Item has no unpublished pending result to re-review",
+      );
+    if (
+      work.acceptanceDecisions?.some(
+        (decision) => decision.outcome === "refuse",
+      )
+    )
+      throw new Error("Refused acceptance cannot be reopened by re-review");
+    const observedTree = pinnedGit(
+      config.checkout,
+      "rev-parse",
+      `${work.changeRef}^{tree}`,
+    );
+    if (
+      input.treeSha !== work.acceptancePending.treeSha ||
+      input.treeSha !== work.treeSha ||
+      observedTree !== input.treeSha
+    )
+      throw new Error(
+        "Result re-review tree differs from the pending exact result",
+      );
+    if (!input.actor.trim() || !input.reason.trim())
+      throw new Error("Result re-review requires actor and reason");
+    work.status = "running";
+    work.step = "validate";
+    delete work.acceptancePending;
+    saveState(statePath(config.repository, objective), state);
+    new DiagnosticEmitter(config.repository, objective).emit({
+      runId: state.runId,
+      itemId: input.item,
+      attemptId: work.attempt,
+      operation: "result-rereview-request",
+      outcome: "completed",
+      metadata: { treeSha: input.treeSha, actor: input.actor },
+      detail: input.reason,
+    });
+  } finally {
+    releaseControllerLock(lock, handle);
+  }
+}
+
 /** Record one explicit result decision against the exact pending tree. */
 export function decideResult(
   config: FactoryConfig,

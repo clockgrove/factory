@@ -33,6 +33,7 @@ import {
   exportAssetSetForReview,
   planObjective,
   retryWorkItem,
+  rereviewWorkItem,
   runObjective,
   selectAssetSet,
   type ApplicationServices,
@@ -56,6 +57,10 @@ export interface FactoryApplication {
   ): Promise<FactoryState>;
   cancelObjective(objective: number): Promise<"requested" | "cancelled">;
   retryWorkItem(objective: number, itemId: string): void;
+  rereviewWorkItem(
+    objective: number,
+    input: { item: string; treeSha: string; actor: string; reason: string },
+  ): void;
   decideResult(
     objective: number,
     input: {
@@ -129,6 +134,8 @@ export function createApplication(
       cancelObjective(config, objective, services.driver),
     retryWorkItem: (objective, itemId) =>
       retryWorkItem(config, objective, itemId),
+    rereviewWorkItem: (objective, input) =>
+      rereviewWorkItem(config, objective, input),
     decideResult: (objective, input) => decideResult(config, objective, input),
     selectAssetSet: (objective, itemId, setId, decision) =>
       selectAssetSet(

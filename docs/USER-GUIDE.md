@@ -150,6 +150,20 @@ factory run --objective ISSUE_NUMBER
 
 Omit `--item` for final Objective acceptance. Use `--outcome refuse` to reject the criterion. The decision applies only to that criterion and tree; it does not bypass branch protection, authorize another attempt, or repair ambiguous delivery.
 
+## Request automatic review again
+
+If an independent Work Item review did not complete or could not read sufficient evidence, inspect the pending tree and failure before requesting another review:
+
+```sh
+factory rereview --objective ISSUE_NUMBER --item WORK_ITEM_ID \
+  --tree EXACT_TREE_SHA --actor NAME --reason "Review failure inspected"
+factory run --objective ISSUE_NUMBER
+```
+
+`rereview` only schedules the preserved result for validation and automatic review. It makes no model call, records no acceptance decision, and does not restart implementation. The following `run` repeats exact-tree validation and review under the existing configuration and delivery guards. Previous decisions and usage records remain intact; missing usage remains unknown. A stale tree, terminal Objective, refused result or published Work Item cannot use this action. Diagnose another failure before any further explicit request; this is not an automatic retry loop.
+
+For a pending **final Objective** review, `factory run --objective ISSUE_NUMBER` already repeats final validation, hydration and automatic review of the exact integrated result, while checking that the default branch has not moved. No Work Item re-review request is needed. Neither path accepts a criterion on the operator's behalf. Use `decide-result` only when an actual acceptance or refusal is intended; use `retry` for a separately authorized new implementation attempt.
+
 ## Select media and deliver LFS assets
 
 A media worker produces complete candidate AssetSets. When Factory pauses, status lists their IDs and digests. Export a whole set outside the checkout for human inspection:

@@ -4,9 +4,9 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-[Published v0.1.31](https://github.com/clockgrove/factory/releases/tag/v0.1.31) carries accepted [PR #194](https://github.com/clockgrove/factory/pull/194) plugin/onboarding guidance without new runtime or dependency changes. Source, artifact reproduction, independent public-download and offline-installation checks passed; [PR #195](https://github.com/clockgrove/factory/pull/195) records that evidence. The [artifact record](BUILD-STATUS.md#immutable-v0131-artifact-record) names its exact source, tree and SHA-256.
+The v0.1.32 candidate adds accepted [PR #199](https://github.com/clockgrove/factory/pull/199) dependency-result evidence to Work Item review. It requires its own source/artifact gates, publication and independent public-download verification before fresh public qualification and actual Clockgrove acceptance in [#26](https://github.com/clockgrove/factory/issues/26). Use the same verified successor plugin and CLI for both gates.
 
-Fresh public model-backed qualification and actual Clockgrove acceptance remain open in [#26](https://github.com/clockgrove/factory/issues/26). Use the same published v0.1.31 plugin and CLI for both gates. Publication does not establish Objective qualification, and earlier v0.1.30 evidence does not qualify these changed bytes.
+Published v0.1.31 and its [immutable artifact record](BUILD-STATUS.md#immutable-v0131-artifact-record) remain unchanged. Its distribution checks do not qualify the changed runtime bytes; publication alone does not establish Objective qualification.
 
 The pinned Git marketplace supplies the plugin manifest and use skills. The matching GitHub Release supplies a separate Linux x64 CLI tarball with the default Codex dependency tree bundled for offline installation. Optional Claude and Copilot SDKs are installed separately; consult [local harnesses](AGENT-HARNESSES.md). Installed default runtime requires Node.js 22 or later. Building from source has separate tooling requirements below. npm registry publication and a universal Plugins Directory listing are not part of this distribution route.
 
@@ -14,7 +14,7 @@ Keep tag, package version, plugin version, marketplace ref and artifact identity
 
 ## Build one candidate
 
-For a new release, freeze the reviewed candidate and its version before running the coordinated gates. v0.1.31 is already published; use its existing artifact for qualification and preserve all published releases and their evidence.
+For a new release, freeze the reviewed candidate and its version before running the coordinated gates. Preserve all published releases and their evidence; never rebuild them to include later source changes.
 
 From a clean Linux x64 source checkout at the accepted commit, with Node.js 22.12 or later, Git, Git LFS, and public npm access, with optional dependencies enabled for source checks and notice generation, confirm `git status --porcelain` is empty. Choose an empty absolute release directory outside the checkout, then run:
 
@@ -47,16 +47,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-Install the verified v0.1.31 tag and matching release assets:
+After v0.1.32 publication and independent verification, install its matching tag and release assets:
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.31
+codex plugin marketplace add clockgrove/factory --ref v0.1.32
 codex plugin add factory@clockgrove
-gh release download v0.1.31 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.31.tgz --pattern SHA256SUMS
+gh release download v0.1.32 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.32.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the digest with the independent value in the release preparation PR.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.31.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.32.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

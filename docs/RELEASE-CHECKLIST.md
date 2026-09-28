@@ -1,8 +1,8 @@
 # Public release checklist
 
-Published [v0.1.31](https://github.com/clockgrove/factory/releases/tag/v0.1.31) ships the accepted PR #194 plugin and onboarding guidance with matching package, manifest and marketplace metadata. Source/artifact review, coordinated gates, byte-identical reproduction, publication and independent public-download/offline-installation verification passed. See the [immutable artifact record](BUILD-STATUS.md#immutable-v0131-artifact-record) and [PR #195](https://github.com/clockgrove/factory/pull/195) for exact evidence.
+The v0.1.32 candidate carries accepted [PR #199](https://github.com/clockgrove/factory/pull/199) dependency-result evidence for Work Item review. Its coordinated source/artifact gates, publication and independent public-download verification must precede fresh public qualification and actual Clockgrove acceptance in [#26](https://github.com/clockgrove/factory/issues/26).
 
-Fresh model-backed public qualification and actual Clockgrove acceptance remain open in [#26](https://github.com/clockgrove/factory/issues/26). No runtime or dependency changes were added; earlier evidence does not qualify these changed bytes.
+Published v0.1.31 and [its immutable evidence](BUILD-STATUS.md#immutable-v0131-artifact-record) remain intact. Earlier distribution and scenario evidence does not qualify this changed runtime.
 
 Use this checklist for a new release without rebuilding or retagging existing artifacts. The [public release procedure](PUBLIC-RELEASE.md) supplies the commands and operational requirements. Each claim must identify the exact artifact and scenario it proves.
 

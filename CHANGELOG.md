@@ -2,6 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.37 — candidate
+
+- Record accepted ignored relative link paths during the existing original-worker collection safety scan, preserving provider evidence and carrying completed observations through existing regular/native private diagnostics with attempt and result-tree identities (#225 / PR #227).
+- Keep collection safety and lifecycle rules unchanged. Observations prove presence during the scan; missing or truncated detail cannot prove an exact path, and later validation installations do not establish original-worker history.
+- Align candidate package, plugin and marketplace identity. Publication and fresh full public qualification remain pending under #206 before private pilot advancement and #207 final acceptance. Prior artifacts, runs and scoped feature acceptance remain intact; no full release-gate acceptance is claimed.
+
 ## 0.1.36 — 2026-09-28
 
 - Assign installation-approved execution profiles during Objective compilation and preserve exact bindings through review, issue projection and local lifecycle (#162 / PR #221).

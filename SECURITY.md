@@ -16,4 +16,4 @@ The maintainers will acknowledge a report and communicate the next steps in the 
 
 ## Supported versions
 
-This repository is preparing its first public release. No published version is currently designated as supported. After a release, this section will name the supported line and update policy.
+Factory has published 0.1.x releases and is still completing release qualification. No published version is currently designated as a supported line, and no security maintenance or backport policy has been established. Suspected vulnerabilities in published versions can be reported through the private route above.

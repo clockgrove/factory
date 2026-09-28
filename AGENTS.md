@@ -12,15 +12,7 @@ Shared execution/result contracts, snapshot and validation/delivery boundaries, 
 
 Additional cloud-session SDKs and sandbox providers are separate adapter capabilities that reuse the appropriate execution mode. Keep provider-specific APIs and configuration inside adapters. A declared interface or scripted fixture does not qualify a real provider. Improve shared code in the branch that demonstrates the need; move a correction into trunk only for a demonstrated current trunk requirement. Bursting, mixed modes, live migration, adaptive pressure, distributed controllers, and compounded fault matrices remain leaves.
 
-The operator-approved Codex-only #26 adopter pilot is a bounded execution-order
-exception: #55 and Claude/Copilot live qualification are deferred prerequisites
-for that pilot, not accepted behavior. See the [controlling plan exception](docs/IMPLEMENTATION-PLAN.md#operator-approved-codex-only-adopter-pilot).
-Keep #55 and draft PR #62 open until their separate live proof passes; the
-harness owner may refresh its candidate and complete authorized qualification. Its live proof and the
-actual adopter acceptance remain separate requirements for overall trunk
-completion. Do not block the independently authorized pilot on #55, provider
-login or this docs handoff, and do not infer new target/source-egress authority
-from public contributor instructions.
+The #26 adopter pilot is Codex-only. #55 and PR #62 are accepted and closed with their own installed harness evidence; that evidence does not qualify a later artifact or optional provider for this pilot. Current release qualification and actual adopter acceptance remain in [#26](https://github.com/clockgrove/factory/issues/26). Do not infer new target or source-egress authority from contributor instructions.
 
 ## Scope
 
@@ -30,7 +22,7 @@ Start from the current issue's outcome and the relevant section of the public pl
 
 Treat issue metadata as part of issue creation, not as optional cleanup. Before opening a Factory contributor issue, search both open and closed issues for the behavior and exact error. Prefer updating an existing issue when its accepted scope covers the finding. When a closed predecessor or active parent only partially covers it, file a focused follow-up and link the predecessor, parent tracking issue, relevant pull request, and durable public reproduction. Do not publish private adopter content, credentials, raw model prompts or responses, or local-only evidence.
 
-The repository's [Development Objective form](.github/ISSUE_TEMPLATE/objective.yml) is for an Objective in the repository that owns target work; it is not the template for Factory implementation findings. Use this minimum structure for a Factory contributor issue, adapting headings only when the subject genuinely requires it:
+The copyable [Development Objective form](docs/templates/objective.yml) is for an Objective in the repository that owns target work; it is not the template for Factory implementation findings. Use this minimum structure for a Factory contributor issue, adapting headings only when the subject genuinely requires it:
 
 ```markdown
 ## Outcome
@@ -64,9 +56,9 @@ Add `bug`, `enhancement`, `decision`, or `blocked` only when each label adds acc
 
 Build successive vertical slices. Define narrow contracts for the named variation points: PlanningModel, ExecutionDriver, AgentHarness, SandboxProvider, DeliveryStrategy, ContentStore, and GitHubGateway. Compose only implementations needed by the current slice. Do not abstract the state store, scheduler, lifecycle, validator, runner, Git model, or controller host.
 
-Use one atomic local snapshot. Do not add operational event journals, receipts, recovery journals, custom state refs, provider ranking, fallback chains, or qualification machinery. The planned [agent-readable diagnostics](docs/IMPLEMENTATION-PLAN.md#planned-agent-readable-diagnostics) record correlated local observations but never reconstruct or control lifecycle state; optional OpenTelemetry export is not a second controller. MediaAssetService preserves immutable bytes, AssetSets, provenance, review, selection, and bindings; the configured AgentHarness owns model and tool execution. Media reenters ordinary validation and delivery.
+Use one atomic local snapshot. Do not add operational event journals, receipts, recovery journals, custom state refs, provider ranking, fallback chains, or qualification machinery. The planned [agent-readable diagnostics](docs/IMPLEMENTATION-PLAN.md#agent-readable-diagnostics) record correlated local observations but never reconstruct or control lifecycle state; optional OpenTelemetry export is not a second controller. MediaAssetService preserves immutable bytes, AssetSets, provenance, review, selection, and bindings; the configured AgentHarness owns model and tool execution. Media reenters ordinary validation and delivery.
 
-The rebuild starts at schemaVersion 1 and reads no archived configuration or state. Inspect only archived paths named by the current slice in [SOURCE-PROVENANCE.md](docs/SOURCE-PROVENANCE.md) and the public plan; record retained behavior and clean destination. Copy no archived runtime, tests, or fixtures. Do not invent Factory limits beneath dependencies or operator policy. Work Item failure stops with evidence, and a new implementation attempt requires explicit retry. The planned compiler gate may make one evidenced planning revision after independent review; this is not an implementation retry and is not yet implemented. Ambiguous external state requires operator direction.
+The rebuild starts at schemaVersion 1 and reads no archived configuration or state. Inspect only archived paths named by the current slice in [SOURCE-PROVENANCE.md](docs/SOURCE-PROVENANCE.md) and the public plan; record retained behavior and clean destination. Copy no archived runtime, tests, or fixtures. Do not invent Factory limits beneath dependencies or operator policy. Work Item failure stops with evidence, and a new implementation attempt requires explicit retry. The compiler gate may make one evidenced planning revision after independent review; this is not an implementation retry. Ambiguous external state requires operator direction.
 
 Use low reasoning effort for focused implementation and routine tests, medium for architecture and unfamiliar debugging, and higher only for a concrete blocker. Review the accepted diff once, batch findings, fix blockers, run affected checks, and stop. Prefer deterministic integration scenarios with real temporary Git repositories; stub remote services at narrow contracts.
 

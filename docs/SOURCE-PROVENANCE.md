@@ -2,6 +2,8 @@
 
 The clean implementation starts from the Factory plan reviewed September 22, 2026. The archived source at `clockgrove/factory` commit `994bbfcadb317aed2dfa932ec9d128e7d0d8c7a8` is reference material only. No runtime source, test, fixture, snapshot, or generated artifact was copied into the clean implementation.
 
+The legacy repository was subsequently deleted. On September 28, 2026, the clean implementation repository was renamed from `clockgrove/factory-rebuild` to `clockgrove/factory`. The historical source identity above refers to the deleted legacy repository, not the current repository at that URL. The rename preserves this implementation's history, issues, PRs, tags and releases.
+
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
 ## Published v0.1.28

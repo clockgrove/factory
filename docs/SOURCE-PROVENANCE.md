@@ -13,9 +13,10 @@ metadata, normalized immutable assignments, issue projection and one local drive
 with profile-bound continuation. Existing local harness configurations and the
 atomic graph/configuration snapshot remain authoritative. Focused deterministic
 tests cover same-adapter distinct settings and ordinary mixed-DAG delivery. No
-archived code, tests, private prompts or private evidence were copied. This source
-capability is not a release or live mixed-provider qualification; exact-artifact
-acceptance remains in the issue. The dependent #164 source capability is recorded below.
+archived code, tests, private prompts or private evidence were copied. Independent
+mixed-provider installed-artifact acceptance subsequently closed #162 on v0.1.36;
+the shared public evidence and its narrower scope are recorded below. The dependent
+#164 source capability is recorded next.
 
 ## Assigned profile environment preparation (#164)
 
@@ -32,8 +33,31 @@ fixtures exercise production workers, temporary Git worktrees, concurrent
 same-adapter profiles, restart/cancel/collect, readiness rejection and cleanup.
 Inspection of pinned CLI 2.1.281 confirms status tool names use MCP's original
 `toolName`, with server information and provenance. No archived implementation,
-private material or live provider output was copied. Installed-artifact live
-qualification and release evidence remain separate gates.
+private material or live provider output was copied.
+
+### Shared v0.1.36 feature acceptance
+
+The [public Objective #1](https://github.com/clockgrove/factory-profiles-proof-20260928-v0136-e7d1cec/issues/1)
+supplies independent installed-artifact acceptance for
+[#162](https://github.com/clockgrove/factory/issues/162) and
+[#164](https://github.com/clockgrove/factory/issues/164), now closed. It used the
+immutable v0.1.36 artifact recorded in [BUILD-STATUS.md](BUILD-STATUS.md), with
+four original mixed Codex/Claude implementation attempts, frozen profile bindings,
+ordinary guarded delivery, all 23 automatic command receipts and automatic
+Objective acceptance. Independent fresh-clone validation passed all seven final
+commands and exact original-byte LFS hydration. Both Claude attempts successfully
+invoked the fixed worktree-read v1 MCP tool under distinct instructions/bindings;
+counters prove invocation, not exact read paths. Same-adapter concurrent isolation
+and restart/cancel coverage remain deterministic claims, not live observations.
+
+This evidence does not accept the complete public release gate: original-worker
+ignored dependency retention through collection was not established. Later
+validation and fresh-clone installation cannot supply that history. The separate
+obligation remains under #206 and blocks private pilot advancement; #207 final
+acceptance remains separate. Original evidence/accounting and fixture retention
+remain with the contributor qualification owner after owned-resource cleanup.
+This documentation update changes no runtime or published artifact and creates no
+successor run or retry.
 
 ## Explicit pending-result re-review
 

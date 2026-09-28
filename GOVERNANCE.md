@@ -1,16 +1,16 @@
 # Governance
 
-Factory is maintained by Clockgrove in the open. The public issue tracker, pull requests, implementation plan, and build status are the record of proposed work and accepted behavior. Maintainers decide scope, review contributions, and merge releases. An accepted issue or proposal does not itself authorize a change to a target repository.
+Factory is maintained by Clockgrove in the open. Maintainers decide project scope, review contributions, and merge and publish releases. Public issues and pull requests record proposals, decisions, and implementation evidence; the [project board](https://github.com/orgs/clockgrove/projects/2) tracks priorities.
 
-## Changes
+## Proposing changes
 
-Start with a focused issue or refer to an existing one. Explain the user-visible outcome, authority boundary, acceptance evidence, and non-goals. Contributors can submit pull requests under [CONTRIBUTING.md](CONTRIBUTING.md). Maintainers review for correctness, scope, security, and alignment with the [public plan](docs/IMPLEMENTATION-PLAN.md). A maintainer may request revision, defer work, or decline a proposal with a reason in the public discussion.
+Start with a focused issue or refer to an existing one. Explain the user-visible outcome, relevant boundaries, and how completion can be checked. Follow [CONTRIBUTING.md](CONTRIBUTING.md) when submitting a pull request.
 
-Factory's first release follows the public trunk issues and the acceptance gates in [BUILD-STATUS.md](docs/BUILD-STATUS.md). Later capability branches require their own acceptance. Release tags and package publication are maintainer decisions after the stated gates pass.
+Maintainers review for correctness, scope, security, and alignment with the [implementation plan](docs/IMPLEMENTATION-PLAN.md). They may request revisions, defer work, or decline a proposal with a reason in the public discussion. Release decisions follow the [release procedure](docs/PUBLIC-RELEASE.md) and its acceptance gates.
 
-## Authority
+## Target repository authority
 
-Factory provides a delivery tool. Each target repository retains authority over its Objective, instructions, source of truth, access controls, validation, media policy, and final acceptance. Factory maintainers do not govern projects that install it. Private adopter notes are evidence for those adopters and are never hidden operating instructions for this public project.
+Installing Factory does not transfer control of a project to Factory's maintainers. Each target repository retains authority over its Objectives, instructions, source of truth, access controls, validation, media policy, and final acceptance. An accepted Factory issue or proposal does not authorize changes to a target repository. Private adopter notes are evidence for those adopters, not hidden operating instructions for this public project.
 
 ## Concerns
 

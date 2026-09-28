@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a Factory defect or documentation problem
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues first. Do not include credentials, private source, or raw agent transcripts. Report suspected vulnerabilities through https://github.com/clockgrove/factory/security/advisories/new instead.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+      description: What should happen, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include the relevant command and minimal steps using public or synthetic inputs where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Factory version, installation method, operating system, Node.js version, and relevant harness or provider.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Relevant error output or public links. Remove sensitive data before posting.

@@ -2,15 +2,15 @@
 
 Factory owns the Objective lifecycle. A local `AgentHarness` owns only one Work
 Item attempt inside the exact worktree supplied by Factory. Codex is the default
-harness; the source candidate also contains pinned Claude Agent SDK and GitHub
+harness; the package also contains adapters for pinned Claude Agent SDK and GitHub
 Copilot SDK adapters and a package-root registration seam for another adapter.
 
 Planning and independent result review remain on the configured Codex SDK
 models. Selecting Claude or GitHub Copilot changes only Work Item execution.
 
-This is the unreleased `0.1.28` candidate interface, not a capability claim for
-earlier immutable public packages. Credential-free checks do not qualify a
-real provider or authorize a live attempt.
+This guide covers the local harness interface included in v0.1.30. Its offline tarball bundles Codex; Claude and Copilot require their optional dependencies. Each provider's live evidence applies only to the artifact and scenario actually exercised; see [release status](https://github.com/clockgrove/factory/issues/26).
+
+**Using the plugin:** start with the [built-in adapter matrix](#built-in-adapter-matrix) and [CLI selection](#cli-selection). **Building Factory or an adapter:** the capability and registration contracts below describe the developer interface. Credential-free checks do not qualify a real provider or authorize a live attempt.
 
 ## Capability contract
 

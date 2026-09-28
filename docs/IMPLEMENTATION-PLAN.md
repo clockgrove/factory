@@ -85,28 +85,11 @@ The `v0.1.0` one-immutable-package combined disposable gate passed; [BUILD-STATU
 
 ### Operator-approved Codex-only adopter pilot
 
-The [public #26 operator decision](https://github.com/clockgrove/factory/issues/26#operator-decision--codex-only-pilot)
-explicitly defers #55 and Claude/Copilot live qualification as prerequisites for
-this bounded Codex-only adopter pilot. This is an execution-order exception,
-not acceptance of #55 or permission to merge draft PR #62. That draft remains
-frozen at head `7bd51356b908cb43ce85d68bce12cabf1752ffeb`; source/default-installed
-checks do not substitute for its required authorized live-provider evidence.
+The approved [#26 pilot](https://github.com/clockgrove/factory/issues/26) uses the published plugin and matching CLI artifact with local Codex. Its execution-order exception allowed the bounded pilot before #55's separate installed-harness proof. #55 and PR #62 are now accepted and closed; their provider evidence retains its own exact artifact and scenario identity.
 
-Historical v0.1.24 and its fresh public installed gate passed their own
-prerequisite checks. Published v0.1.25 carries accepted #150; publication and
-installation verification passed, while its wholly fresh combined public gate
-has not yet qualified and automatic gate acceptance remains pending, as recorded in
-[BUILD-STATUS.md](BUILD-STATUS.md). The
-Codex-only #26 pilot may proceed under its separately recorded target/source-egress
-and activation authority without waiting for #55, Claude/Copilot login, or this
-documentation handoff. Root retains exact source/configuration/plan verification,
-guarded delivery and exact integrated-tree acceptance. The actual pilot remains
-OPEN/unaccepted; the public fixture is not adopter acceptance.
+The remaining first-adopter milestone requires fresh public qualification of the selected artifact, independent terminal audit, and then actual Clockgrove acceptance on that same artifact. Earlier accepted public runs do not qualify changed bytes. See [the release checklist](RELEASE-CHECKLIST.md) for the procedure and #26 for current status. Optional-provider logins, managed execution, sandboxes, and deferred profile enhancements do not become prerequisites for this Codex-only pilot.
 
-Overall trunk completion still requires both the actual adopter acceptance and
-#55's separate installed-harness/second-provider proof. Neither the deferral nor
-a successful Codex-only pilot would accept that proof or authorize later
-managed/sandbox/Daytona branches, repository cutover, or a trunk-complete claim.
+Overall trunk completion requires both the accepted installed-harness foundation and actual adopter acceptance. Contributor procedures do not grant an adopter new target, provider, source-egress, or spending authority.
 
 ## Trunk foundations and provider branches
 
@@ -135,7 +118,7 @@ This boundary preserves the full-trunk and actual-pilot start gates and the boun
 `PlanningModel` compiles and reviews the Work Item graph. `AgentHarness` performs one Work Item under a Factory-operated local or sandbox driver. The three peer `ExecutionDriver` implementations differ in placement and lifecycle ownership: trunk's `LocalExecutionDriver` operates a local worktree; Branch 1's `ManagedExecutionDriver` submits and tracks a provider-owned agent task; Branch 2's `SandboxExecutionDriver` operates a `SandboxProvider` and invokes the configured harness inside it. An SDK name alone does not determine whether an agent is local or managed.
 
 - [Managed cloud execution, starting with Copilot sessions, issue #7](https://github.com/clockgrove/factory/issues/7): evaluate GitHub Copilot SDK [cloud sessions](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/cloud-sessions) as the initial GitHub-hosted candidate, then implement only if its durable task, authorization, cancellation, exact-change, and result semantics fit the `ExecutionDriver` contract. Copilot SDK local CLI/runtime mode is not a managed task. Persist provider identity, observe/cancel/collect, and feed unchanged validation and delivery. Prove the same disposable Objective with this driver.
-- [Configured harnesses in Factory-managed sandboxes, issue #8](https://github.com/clockgrove/factory/issues/8): after trunk issue #55 lands, compose `SandboxProvider` with that installed harness seam. Prove transfer, execution, observation, cancellation, collection, and destruction with a provider-neutral fixture; do not redefine BYO harness installation or configuration in this branch.
+- [Configured harnesses in Factory-managed sandboxes, issue #8](https://github.com/clockgrove/factory/issues/8): using the accepted #55 harness foundation, compose `SandboxProvider` with that installed harness seam. Prove transfer, execution, observation, cancellation, collection, and destruction with a provider-neutral fixture; do not redefine BYO harness installation or configuration in this branch.
 - [Daytona sandbox provider, issue #9](https://github.com/clockgrove/factory/issues/9): add the first concrete provider behind `SandboxExecutionDriver` and run the Branch 2 scenario unchanged. Keep Daytona details within its adapter.
 
 ## Test reset and representative gates
@@ -148,7 +131,7 @@ Archived tests, fixtures, snapshots, transcripts, generated evidence, and covera
 formatting coverage to the previous ESLint and Prettier gate. Narrow fallback
 checks remain where the selected Biome release has no equivalent.
 
-`npm test` includes a bounded deterministic application suite. It composes a scripted planning model and harness, the real local execution driver and content store, the configured delivery strategy, and a small GitHub-domain fake through the production application boundary. The fake integrates actual commits through temporary local remotes; it does not emulate GitHub's wire protocol. A fresh packed-artifact smoke invokes the supported `install` and `status` surface from isolated prefix/config/state directories. No public read-only planning command exists yet, so that smoke does not create an internal-only substitute.
+`npm test` includes a bounded deterministic application suite. It composes a scripted planning model and harness, the real local execution driver and content store, the configured delivery strategy, and a small GitHub-domain fake through the production application boundary. The fake integrates actual commits through temporary local remotes; it does not emulate GitHub's wire protocol. A fresh packed-artifact smoke invokes the supported `install` and `status` surface from isolated prefix/config/state directories. The public `factory plan` command previews and independently reviews a plan without Work Item projection or execution state; its real model calls remain separate from this credential-free smoke.
 
 A contributor can copy `test/fixtures/disposable-target/` into an empty directory, run `git init -b main`, commit the two fixture files, and publish that directory as a new disposable GitHub repository they control. Use `gh issue create --body-file` with [walking-skeleton.md](../test/fixtures/objectives/walking-skeleton.md), [local-dag.md](../test/fixtures/objectives/local-dag.md), or [native-stack.md](../test/fixtures/objectives/native-stack.md). Install the packed CLI with a fresh `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, bind it to that checkout, and run the Issue number. Do not reuse an Objective after it has merged; use a fresh disposable repository or unique fixture paths for the next gate.
 

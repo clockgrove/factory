@@ -20,7 +20,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - Your target's build and validation tools; Git LFS for LFS-backed media work.
 - A trusted repository with committed instructions and requirements. Local workers run under your OS account; they are not a security boundary for hostile code.
 
-Planning, review, and workers consume your provider's usage. Factory currently runs one active Objective per installation, with one configured local harness. Managed cloud and sandbox execution are not available. See [local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md) for optional-provider requirements and boundaries.
+Planning, review, and workers consume your provider's usage. Factory currently runs one active Objective per installation, with a configured local harness or compile-time assigned local execution profiles. Managed cloud and sandbox execution are not available. See [local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md) for optional-provider requirements and boundaries.
 
 ## Install
 

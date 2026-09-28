@@ -309,6 +309,24 @@ export function parseFactoryState(
     const id = string(item.id, "Work Item ID");
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id) || ids.has(id))
       throw new Error(`invalid or duplicate Work Item ID ${id}`);
+    if (
+      item.executionProfile !== undefined ||
+      item.executionBinding !== undefined
+    ) {
+      const profile = record(item.executionProfile, `${id}.executionProfile`);
+      const binding = record(item.executionBinding, `${id}.executionBinding`);
+      string(profile.id, `${id}.executionProfile.id`);
+      string(profile.reason, `${id}.executionProfile.reason`);
+      string(binding.adapter, `${id}.executionBinding.adapter`);
+      sha(binding.digest, `${id}.executionBinding.digest`, 64);
+      if (profile.id !== binding.id)
+        throw new Error(
+          `Work Item ${id} profile identity differs from binding`,
+        );
+      for (const key of ["model", "reasoningEffort"])
+        if (binding[key] !== undefined)
+          string(binding[key], `${id}.executionBinding.${key}`);
+    }
     ids.add(id);
     for (const key of ["title", "goal", "brief"])
       string(item[key], `${id}.${key}`);
@@ -714,6 +732,20 @@ export function parseFactoryState(
         const active = record(execution.data, `work.${id}.execution.data`);
         const request = record(active.request, `work.${id}.execution.request`);
         const attemptedItem = record(request.item, `work.${id}.execution.item`);
+        const acceptedItem = (graph.items as Record<string, unknown>[]).find(
+          (candidate) => candidate.id === id,
+        )!;
+        if (
+          JSON.stringify(attemptedItem.executionProfile) !==
+            JSON.stringify(acceptedItem.executionProfile) ||
+          JSON.stringify(attemptedItem.executionBinding) !==
+            JSON.stringify(acceptedItem.executionBinding) ||
+          JSON.stringify(active.executionBinding) !==
+            JSON.stringify(acceptedItem.executionBinding)
+        )
+          throw new Error(
+            `Work Item ${id} execution profile differs from accepted graph`,
+          );
         const handle = record(active.handle, `work.${id}.harness`);
         if (
           typeof active.worktree !== "string" ||

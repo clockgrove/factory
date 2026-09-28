@@ -6,6 +6,17 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Compile-time assigned local execution profiles
+
+Issue #162 adds newly written installation-owned profiles, safe compiler/reviewer
+metadata, normalized immutable assignments, issue projection and one local driver
+with profile-bound continuation. Existing local harness configurations and the
+atomic graph/configuration snapshot remain authoritative. Focused deterministic
+tests cover same-adapter distinct settings and ordinary mixed-DAG delivery. No
+archived code, tests, private prompts or private evidence were copied. This source
+capability is not a release or live mixed-provider qualification; exact-artifact
+acceptance remains in the issue. Environment preparation is separate #164 work.
+
 ## Explicit pending-result re-review
 
 [PR #203](https://github.com/clockgrove/factory/pull/203), resolving [#202](https://github.com/clockgrove/factory/issues/202), adds the newly written explicit Work Item re-review transition, application/CLI entry point, regular/native continuation regressions and operator guidance. It reuses the existing exact-result validation path and preserves final review's existing continuation. Reviewed source `ba013fd20f8e1f319a5043b9b6ada0a645139ffb` integrated as `08b3d826fb80156f273a97e98122b61bfdd52c8e`, tree `c68af733bf555d1bb8e0d7298d4d5e1ada553c52`. No archived implementation, tests, private source or model transcripts were copied. Source integration does not establish installed release qualification; that evidence remains in #26.

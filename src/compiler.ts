@@ -1,3 +1,5 @@
+import { normalizeExecutionProfiles } from "./execution-profiles.js";
+import type { ExecutionProfileChoices } from "./contracts.js";
 import { Codex } from "@openai/codex-sdk";
 import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
@@ -246,16 +248,36 @@ function citationChoices(
 
 export function graphSchemaForSources(
   sources: { path: string; content: string; heading?: string }[],
+  executionProfiles?: ExecutionProfileChoices,
 ): unknown {
   const schema = structuredClone(graphSchema) as {
     properties: {
       items: {
         items: {
-          properties: { citations: { items: unknown } };
+          properties: {
+            citations: { items: unknown };
+            executionProfile?: unknown;
+          };
+          required: string[];
         };
       };
     };
   };
+  if (executionProfiles) {
+    schema.properties.items.items.properties.executionProfile = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        id: {
+          type: "string",
+          enum: executionProfiles.profiles.map((p) => p.id),
+        },
+        reason: { type: "string", minLength: 1 },
+      },
+      required: ["id", "reason"],
+    };
+    schema.properties.items.items.required.push("executionProfile");
+  }
   const headingsByPath = new Map<string, string[]>();
   for (const { path, heading } of citationChoices(sources)) {
     const headings = headingsByPath.get(path) ?? [];
@@ -284,8 +306,11 @@ export function graphSchemaForSources(
 
 function codexGraphSchemaForSources(
   sources: { path: string; content: string; heading?: string }[],
+  executionProfiles?: ExecutionProfileChoices,
 ): unknown {
-  const schema = structuredClone(graphSchema) as {
+  const schema = structuredClone(
+    graphSchemaForSources(sources, executionProfiles),
+  ) as {
     properties: {
       items: {
         items: {
@@ -640,12 +665,12 @@ export class CodexPlanningModel implements PlanningModel {
     const citationInstruction = useIndexedCitations
       ? `For every citation, set choiceIndex to exactly one index from this supplied citation choice JSON list: ${JSON.stringify(indexedCitationChoices)}. Factory decodes that authoritative index to the exact path and heading pair. An entry with an empty heading cites the whole source; every other heading is the exact bare Markdown heading text without # markers. Do not return path or heading fields in a citation.`
       : directCitationInstruction;
-    const prompt = `Compile this human Objective into the smallest complete dependency-aware Work Item graph. Use parallel lanes only when ownership and resources allow them. Return the requested JSON only. Use exact supplied base SHA and Objective number. ${citationInstruction} Give each item explicit non-goals. Choose observable acceptance and owned paths. Make each item brief self-contained for implementation. Workers receive the item title, goal, acceptance, non-goals, owned paths, brief and item validation, plus applicable asset bindings; they do not automatically receive the Objective, source packet, citations, sibling graph or final-command list. Include exact source-backed literals needed to implement or document the item in its brief with source attribution, even when intentionally absent from its validation. Do not leave required inputs as unresolved references to supervisor-only context. Distinguish writing a script or documenting a later command from executing it or satisfying its later prerequisites now. Preserve ownership, dependencies and validation timing; do not add a command to item validation merely to transport its text. Include only relevant implementation inputs, not unrelated source or controller operations. Work Item acceptance is reviewed after worker collection, selected-asset materialization and exact-tree validation, but BEFORE the current item's own delivery. Require only evidence available at that point. Required LFS objects for the current item are uploaded during its delivery before branch/PR publication; its integration follows delivery; final Objective commands and fresh-clone exact-byte hydration precede final Objective acceptance review. Keep these later controller guarantees as Objective obligations at their actual phases, never as pre-delivery Work Item prerequisites. Split compound criteria that combine current byte/pointer checks with evidence of the current item's future upload, publication or integration, or Objective final hydration; do not merely append "at the proper phase" to such a Work Item criterion. Preserve every source obligation through the exact supplied controller guarantee or final Objective acceptance; do not silently drop or weaken it. Acceptance may use supplied evidence of already-completed dependencies, including their publication or integration when actually recorded. A downstream regular item may require the recorded integrated predecessor head. Do not assume a native-stack dependency has merged merely because its result is available. If a source truly requires unavailable future evidence before the current item's delivery, expose the contradiction for independent review rather than pretending it is satisfiable. For every validation command, set provenance to base-observed or source-declared and name its exact source path. A source-declared command must be an exact command line in a supplied source (OBJECTIVE or a pinned source). A base-observed command must identify a tracked file in the exact base containing that command as an exact line, or a package.json script invoked by npm test/npm run NAME/pnpm test/pnpm check/pnpm run NAME. The exact source-declared command pnpm install --frozen-lockfile --ignore-scripts may precede pnpm checks in a fresh validation worktree when supplied; plain install is unsupported. Do not invent commands or use a vague source. For each source asset, bind its path, role, media type, visibility, and kind: repository for a pinned checkout path, local for an explicitly approved absolute private file, or github-attachment for a recognized URL literally present in the Objective. Use an explicitly declared media type when available, otherwise application/octet-stream; never infer format from an extension. List expected output roles for media work; use empty arrays for ordinary work. Set minimumAssetSets from the Objective candidate count, or 1 for unspecified media and 0 for ordinary work. List requiredLfsRoles only when a supplied source requires them; the target repository .gitattributes is authoritative. The supplied Factory controller capabilities are immutable supervisor guarantees enforced outside target Work Items and target Final commands. Do not create a target Work Item or invent target command authority solely to reimplement an Objective obligation that an exact supplied guarantee covers. Do not use a guarantee for an obligation it does not cover. Do not add deployment, paid services, providers, recovery, or later scope.\n\nObjective:\n${request.objective}\n\nBase: ${request.baseSha}\n\nFactory controller capabilities digest: ${request.controllerCapabilitiesDigest}\nFactory controller capabilities:\n${JSON.stringify(request.controllerCapabilities)}\n\nSources:\n${request.sources.map((s) => `--- ${s.path} ---\n${s.content}`).join("\n")}`;
+    const prompt = `Compile this human Objective into the smallest complete dependency-aware Work Item graph. Use parallel lanes only when ownership and resources allow them. Return the requested JSON only. Use exact supplied base SHA and Objective number. ${citationInstruction} Give each item explicit non-goals. Choose observable acceptance and owned paths. Make each item brief self-contained for implementation. Workers receive the item title, goal, acceptance, non-goals, owned paths, brief and item validation, plus applicable asset bindings; they do not automatically receive the Objective, source packet, citations, sibling graph or final-command list. Include exact source-backed literals needed to implement or document the item in its brief with source attribution, even when intentionally absent from its validation. Do not leave required inputs as unresolved references to supervisor-only context. Distinguish writing a script or documenting a later command from executing it or satisfying its later prerequisites now. Preserve ownership, dependencies and validation timing; do not add a command to item validation merely to transport its text. Include only relevant implementation inputs, not unrelated source or controller operations. Work Item acceptance is reviewed after worker collection, selected-asset materialization and exact-tree validation, but BEFORE the current item's own delivery. Require only evidence available at that point. Required LFS objects for the current item are uploaded during its delivery before branch/PR publication; its integration follows delivery; final Objective commands and fresh-clone exact-byte hydration precede final Objective acceptance review. Keep these later controller guarantees as Objective obligations at their actual phases, never as pre-delivery Work Item prerequisites. Split compound criteria that combine current byte/pointer checks with evidence of the current item's future upload, publication or integration, or Objective final hydration; do not merely append "at the proper phase" to such a Work Item criterion. Preserve every source obligation through the exact supplied controller guarantee or final Objective acceptance; do not silently drop or weaken it. Acceptance may use supplied evidence of already-completed dependencies, including their publication or integration when actually recorded. A downstream regular item may require the recorded integrated predecessor head. Do not assume a native-stack dependency has merged merely because its result is available. If a source truly requires unavailable future evidence before the current item's delivery, expose the contradiction for independent review rather than pretending it is satisfiable. For every validation command, set provenance to base-observed or source-declared and name its exact source path. A source-declared command must be an exact command line in a supplied source (OBJECTIVE or a pinned source). A base-observed command must identify a tracked file in the exact base containing that command as an exact line, or a package.json script invoked by npm test/npm run NAME/pnpm test/pnpm check/pnpm run NAME. The exact source-declared command pnpm install --frozen-lockfile --ignore-scripts may precede pnpm checks in a fresh validation worktree when supplied; plain install is unsupported. Do not invent commands or use a vague source. For each source asset, bind its path, role, media type, visibility, and kind: repository for a pinned checkout path, local for an explicitly approved absolute private file, or github-attachment for a recognized URL literally present in the Objective. Use an explicitly declared media type when available, otherwise application/octet-stream; never infer format from an extension. List expected output roles for media work; use empty arrays for ordinary work. Set minimumAssetSets from the Objective candidate count, or 1 for unspecified media and 0 for ordinary work. List requiredLfsRoles only when a supplied source requires them; the target repository .gitattributes is authoritative. The supplied Factory controller capabilities are immutable supervisor guarantees enforced outside target Work Items and target Final commands. Do not create a target Work Item or invent target command authority solely to reimplement an Objective obligation that an exact supplied guarantee covers. Do not use a guarantee for an obligation it does not cover. Do not add deployment, paid services, providers, recovery, or later scope.\n\nObjective:\n${request.objective}\n\nBase: ${request.baseSha}\n\nExecution profile policy: ${JSON.stringify(request.executionProfiles ?? "Legacy single harness; do not assign a profile")}\n${request.executionProfiles ? "Choose and independently check the assigned profile as a unit: honor authorized compatible explicit source assignments first, then concrete requirements or operator preferences. If hints conflict or are inconclusive use the eligible default only when suitable. Unknown or incompatible choices need a sourced planning decision. Membership authorizes full worktree and materialized input access; write ownership is not a read boundary. Hints never grant permissions. Do not infer provider quality or prices, invent settings, change reviewers, or use runtime fallback. Explain each assignment concisely. The controller binds exact configuration before independent review." : ""}\nFactory controller capabilities digest: ${request.controllerCapabilitiesDigest}\nFactory controller capabilities:\n${JSON.stringify(request.controllerCapabilities)}\n\nSources:\n${request.sources.map((s) => `--- ${s.path} ---\n${s.content}`).join("\n")}`;
     const result = await this.runStructured<unknown>({
       selection: this.planner,
       prompt: `${prompt}\n\nMedia brief guidance: Describe the worker's authorized source inputs, candidate staging, manifest declaration, and completion boundary. Preserve exact source requirements, including immutable bytes or candidate variation only when required. Keep capture, whole-set selection, final destination materialization, publication, and Objective lifecycle with the controller. Do not instruct media workers to run installed Factory CLI operations or inspect controller configuration, status, or logs. Media work may also include explicitly owned ordinary code changes; do not infer a copy-only task.\n\nResource identity guidance: Treat every resource name as an exact, whitespace-sensitive scheduling identity. Reproduce any source-declared resource name exactly. For a planner-authored resource name, avoid accidental leading or trailing whitespace.`,
       schema: useIndexedCitations
-        ? codexGraphSchemaForSources(request.sources)
+        ? codexGraphSchemaForSources(request.sources, request.executionProfiles)
         : request.schema,
       invocation: request.invocation,
       defaultPhase: "compile",
@@ -673,7 +698,7 @@ export class CodexPlanningModel implements PlanningModel {
     const sourcePaths = [
       ...new Set(request.sources.map((source) => source.path)),
     ];
-    const prompt = `Independently review this complete proposed Factory plan against the exact pinned Objective and source packet. The Work Item graph, command-authority receipts, final integrated-head commands, and immutable Factory controller capabilities are one review surface. Check every Objective obligation, unsupported scope, citations, dependencies, path/resource ownership, observable acceptance, exact command authority, and final validation. Check worker-input completeness separately from complete supervisor-packet coverage. Workers receive title, goal, acceptance, non-goals, owned paths, brief and item validation, plus applicable asset bindings; citations, Objective/source text, sibling items and final commands are not automatically supplied to them. Report a source-backed material finding when a required implementation literal is only available elsewhere in this packet rather than in the worker-visible item fields. Require exact relevant content and source attribution in the brief, not an unresolved reference. A command needed as script or documentation content need not run or pass during that item: preserve ownership, dependencies and later-phase validation, and do not demand its addition to item validation merely to expose the literal. The separate Final commands, Command authority receipts, and Factory controller capabilities sections are authoritative supervisor fields outside the inner WorkGraph; do not report them missing when they are present there. Do not demand a target Work Item or target command for an obligation covered by an exact supplied controller guarantee, and do not use a guarantee for an obligation it does not cover. Check the lifecycle of every acceptance criterion, including every clause of compound criteria. Work Item acceptance runs after collection, selected-asset materialization and exact-tree validation, but BEFORE the current item's own delivery. Its required LFS upload occurs during delivery before branch/PR publication; its integration, final Objective commands and fresh-clone exact-byte hydration occur later, before final Objective acceptance review. Report a material finding if a Work Item criterion requires evidence of its own future delivery/integration or Objective finalization, even if it also contains valid current byte/pointer checks or says "at the proper phase". Preserve later obligations under exact supplied controller guarantees and final Objective acceptance instead of demanding them early or removing them. Do not reject acceptance supported by supplied evidence of already-completed dependencies, including their publication or integration when actually recorded. A downstream regular item may require the recorded integrated predecessor head; do not assume a native-stack dependency has merged merely because its result is available. A source that truly contradicts this order requires a source-grounded finding and specific operator question, not silent weakening or a new controller Work Item. First decide whether a material source-grounded defect exists. If none exists, return exactly {"findings":[]}; do not emit advisory observations, confirmations, or speculative questions merely to avoid an empty array. A finding means the plan cannot be called clean. Return only material findings with a short exact quote from the cited source. For each finding, set source to exactly one value from this supplied-path JSON list: ${JSON.stringify(sourcePaths)}. Do not append a heading, section name, separator, or explanation to that value. Give a specific operator question for unresolved authority. Do not edit the plan, grant authority, or treat a malformed finding as approval.\n\nObjective:\n${request.objective}\nBase: ${request.baseSha}\nFactory controller capabilities digest: ${request.controllerCapabilitiesDigest}\nFactory controller capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nSources:\n${request.sources.map((s) => `--- ${s.path} ---\n${s.content}`).join("\n")}\nGraph:\n${JSON.stringify(request.graph)}\nCommand authority receipts:\n${JSON.stringify(request.commands)}\nFinal commands:\n${JSON.stringify(request.finalCommands)}`;
+    const prompt = `Independently review this complete proposed Factory plan against the exact pinned Objective and source packet. The Work Item graph, command-authority receipts, final integrated-head commands, and immutable Factory controller capabilities are one review surface. Check every Objective obligation, unsupported scope, citations, dependencies, path/resource ownership, observable acceptance, exact command authority, and final validation. Check worker-input completeness separately from complete supervisor-packet coverage. Workers receive title, goal, acceptance, non-goals, owned paths, brief and item validation, plus applicable asset bindings; citations, Objective/source text, sibling items and final commands are not automatically supplied to them. Report a source-backed material finding when a required implementation literal is only available elsewhere in this packet rather than in the worker-visible item fields. Require exact relevant content and source attribution in the brief, not an unresolved reference. A command needed as script or documentation content need not run or pass during that item: preserve ownership, dependencies and later-phase validation, and do not demand its addition to item validation merely to expose the literal. The separate Final commands, Command authority receipts, and Factory controller capabilities sections are authoritative supervisor fields outside the inner WorkGraph; do not report them missing when they are present there. Do not demand a target Work Item or target command for an obligation covered by an exact supplied controller guarantee, and do not use a guarantee for an obligation it does not cover. Check the lifecycle of every acceptance criterion, including every clause of compound criteria. Work Item acceptance runs after collection, selected-asset materialization and exact-tree validation, but BEFORE the current item's own delivery. Its required LFS upload occurs during delivery before branch/PR publication; its integration, final Objective commands and fresh-clone exact-byte hydration occur later, before final Objective acceptance review. Report a material finding if a Work Item criterion requires evidence of its own future delivery/integration or Objective finalization, even if it also contains valid current byte/pointer checks or says "at the proper phase". Preserve later obligations under exact supplied controller guarantees and final Objective acceptance instead of demanding them early or removing them. Do not reject acceptance supported by supplied evidence of already-completed dependencies, including their publication or integration when actually recorded. A downstream regular item may require the recorded integrated predecessor head; do not assume a native-stack dependency has merged merely because its result is available. A source that truly contradicts this order requires a source-grounded finding and specific operator question, not silent weakening or a new controller Work Item. First decide whether a material source-grounded defect exists. If none exists, return exactly {"findings":[]}; do not emit advisory observations, confirmations, or speculative questions merely to avoid an empty array. A finding means the plan cannot be called clean. Return only material findings with a short exact quote from the cited source. For each finding, set source to exactly one value from this supplied-path JSON list: ${JSON.stringify(sourcePaths)}. Do not append a heading, section name, separator, or explanation to that value. Give a specific operator question for unresolved authority. Do not edit the plan, grant authority, or treat a malformed finding as approval.\n\nObjective:\n${request.objective}\nBase: ${request.baseSha}\nExecution profile policy: ${JSON.stringify(request.executionProfiles ?? "Legacy single harness; do not assign a profile")}\n${request.executionProfiles ? "Choose and independently check the assigned profile as a unit: honor authorized compatible explicit source assignments first, then concrete requirements or operator preferences. If hints conflict or are inconclusive use the eligible default only when suitable. Unknown or incompatible choices need a sourced planning decision. Membership authorizes full worktree and materialized input access; write ownership is not a read boundary. Hints never grant permissions. Do not infer provider quality or prices, invent settings, change reviewers, or use runtime fallback. Explain each assignment concisely. The controller binds exact configuration before independent review." : ""}\nFactory controller capabilities digest: ${request.controllerCapabilitiesDigest}\nFactory controller capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nSources:\n${request.sources.map((s) => `--- ${s.path} ---\n${s.content}`).join("\n")}\nGraph:\n${JSON.stringify(request.graph)}\nCommand authority receipts:\n${JSON.stringify(request.commands)}\nFinal commands:\n${JSON.stringify(request.finalCommands)}`;
     return this.runStructured({
       selection: this.reviewer,
       prompt,
@@ -809,6 +834,7 @@ export interface PlanningSource {
 
 export interface PlanCandidate {
   schemaVersion: 2;
+  executionProfiles?: ExecutionProfileChoices;
   objective: number;
   baseSha: string;
   bodyDigest: string;
@@ -858,6 +884,7 @@ function planReviewPacket(
   sources: PlanningSource[],
   graph: WorkGraph,
   checkout: string,
+  executionProfiles?: ExecutionProfileChoices,
 ): PlanReviewRequest {
   return {
     objective,
@@ -866,6 +893,7 @@ function planReviewPacket(
     controllerCapabilities: installedControllerCapabilities(),
     controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
     graph,
+    ...(executionProfiles ? { executionProfiles } : {}),
     commands: commandAuthorizations(graph, sources, checkout),
     finalCommands: finalObjectiveCommands(objective),
   };
@@ -1286,6 +1314,7 @@ export async function compileObjective(
   extraSources: { path: string; content: string }[] = [],
   reviewFindings: { source: string; quote: string; detail: string }[] = [],
   invocation?: ModelInvocationContext,
+  executionProfiles?: ExecutionProfileChoices,
 ): Promise<WorkGraph> {
   assertObjectiveCriteria(body);
   const sources = planningSources(body, baseSha, checkout);
@@ -1298,11 +1327,13 @@ export async function compileObjective(
       sources,
       controllerCapabilities: installedControllerCapabilities(),
       controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-      schema: graphSchemaForSources(sources),
+      schema: graphSchemaForSources(sources, executionProfiles),
+      ...(executionProfiles ? { executionProfiles } : {}),
       invocation,
     })
     .catch(planningFailure);
   try {
+    normalizeExecutionProfiles(graph, executionProfiles);
     validateGraph(
       graph,
       objective,
@@ -1545,6 +1576,7 @@ export async function compilePlan(
   model: PlanningModel,
   configDigest = digest("unbound-test-configuration"),
   observe?: (observation: ModelInvocationObservation) => void,
+  executionProfiles?: ExecutionProfileChoices,
 ): Promise<PlanCandidate> {
   const invocation = (
     phase: ModelInvocationPhase,
@@ -1565,8 +1597,16 @@ export async function compilePlan(
     [],
     [],
     invocation("compile", 0),
+    executionProfiles,
   );
-  let packet = planReviewPacket(body, baseSha, sources, graph, checkout);
+  let packet = planReviewPacket(
+    body,
+    baseSha,
+    sources,
+    graph,
+    checkout,
+    executionProfiles,
+  );
   let review = await checkedPlanReview(
     model,
     packet,
@@ -1585,9 +1625,17 @@ export async function compilePlan(
         [],
         findings,
         invocation("compile", 1),
+        executionProfiles,
       );
       revisions = 1;
-      packet = planReviewPacket(body, baseSha, sources, graph, checkout);
+      packet = planReviewPacket(
+        body,
+        baseSha,
+        sources,
+        graph,
+        checkout,
+        executionProfiles,
+      );
       review = await checkedPlanReview(
         model,
         packet,
@@ -1619,6 +1667,7 @@ export async function compilePlan(
   };
   return {
     schemaVersion: 2,
+    ...(executionProfiles ? { executionProfiles } : {}),
     objective,
     baseSha,
     bodyDigest: digest(body),
@@ -1679,6 +1728,7 @@ export function verifyPlanCandidate(
     expectedSources,
     candidate.graph,
     checkout,
+    candidate.executionProfiles,
   );
   if (
     candidate.schemaVersion !== 2 ||

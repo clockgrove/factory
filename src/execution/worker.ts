@@ -127,6 +127,12 @@ export async function runCodexWorker(
       type,
       invocationId: request.attemptId ?? "",
       providerAttempt: 1,
+      ...(request.item.executionBinding
+        ? {
+            profileId: request.item.executionBinding.id,
+            adapter: request.item.executionBinding.adapter,
+          }
+        : {}),
       role: "worker",
       phase: "implementation",
       provider: "codex",

@@ -77,6 +77,12 @@ async function main(): Promise<void> {
       type,
       invocationId: input.request.attemptId ?? "",
       providerAttempt: 1,
+      ...(input.request.item.executionBinding
+        ? {
+            profileId: input.request.item.executionBinding.id,
+            adapter: input.request.item.executionBinding.adapter,
+          }
+        : {}),
       role: "worker",
       phase: "implementation",
       provider: "github-copilot",

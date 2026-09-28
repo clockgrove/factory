@@ -1,3 +1,5 @@
+import { assertExecutionBinding } from "../execution-profiles.js";
+import type { ExecutionBinding } from "../contracts.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
@@ -17,6 +19,8 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   AgentHarness,
+  WorkItem,
+  WorkGraph,
   CapturedAssetSet,
   ContentRef,
   ContentStore,
@@ -44,7 +48,13 @@ import type { CodexModelSelection } from "../config.js";
 import { parseAuthenticationRequest } from "./harness-support.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
 
+export interface LocalProfileRegistration {
+  binding: ExecutionBinding;
+  createHarness: () => AgentHarness;
+}
+
 type Active = {
+  executionBinding?: ExecutionBinding;
   request: ExecutionRequest;
   worktree: string;
   adapterIdentity: string;
@@ -365,22 +375,73 @@ export class LocalExecutionDriver implements ExecutionDriver {
     if (
       !resolve(active.worktree).startsWith(`${resolve(this.workRoot)}${sep}`) ||
       active.request.attemptId !== handle.identity ||
-      active.adapterIdentity !== this.adapterIdentity
+      active.adapterIdentity !==
+        (active.executionBinding?.adapter ?? this.adapterIdentity)
     )
       throw new Error(
         "Local execution handle is outside owned state or uses another adapter",
       );
+    if (this.profiles && !active.executionBinding)
+      throw new Error("Durable execution profile binding is missing");
+    this.resolveHarness(active.request.item, active.executionBinding);
     return active;
+  }
+
+  private profileHarnesses = new Map<string, AgentHarness>();
+  private resolveHarness(
+    item: WorkItem,
+    persisted?: ExecutionBinding,
+  ): AgentHarness {
+    if (!this.profiles) {
+      if (item.executionProfile || item.executionBinding || persisted)
+        throw new Error("Execution profiles are not configured");
+      return this.harness!;
+    }
+    const id = item.executionProfile?.id;
+    const registration = id ? this.profiles.get(id) : undefined;
+    if (!registration)
+      throw new Error(
+        `Assigned execution profile ${id} is unavailable; no fallback is available`,
+      );
+    assertExecutionBinding(item, registration.binding);
+    if (
+      persisted &&
+      JSON.stringify(persisted) !== JSON.stringify(registration.binding)
+    )
+      throw new Error("Durable execution profile binding changed");
+    let harness = this.profileHarnesses.get(id!);
+    if (!harness) {
+      harness = registration.createHarness();
+      this.assertCapabilities(harness, registration.binding.adapter);
+      this.profileHarnesses.set(id!, harness);
+    }
+    return harness;
   }
 
   constructor(
     private checkout: string,
     private workRoot: string,
-    private harness: AgentHarness,
+    private harness: AgentHarness | undefined,
     private concurrency: number,
     private contentStore: ContentStore,
     private adapterIdentity: string,
+    private profiles?: ReadonlyMap<string, LocalProfileRegistration>,
   ) {
+    if (profiles)
+      this.profiles = new Map(
+        [...profiles].map(([id, registration]) => [
+          id,
+          { ...registration, binding: structuredClone(registration.binding) },
+        ]),
+      );
+    else if (harness) this.assertCapabilities(harness, adapterIdentity);
+    else throw new Error("Local execution requires a harness or profiles");
+  }
+
+  private assertCapabilities(
+    harness: AgentHarness,
+    adapterIdentity: string,
+  ): void {
     const capabilities = harness.capabilities;
     if (
       capabilities?.protocolVersion !== 1 ||
@@ -398,11 +459,16 @@ export class LocalExecutionDriver implements ExecutionDriver {
       );
   }
 
+  async preflight(graph: WorkGraph): Promise<void> {
+    for (const item of graph.items) this.resolveHarness(item);
+  }
+
   async availableSlots(): Promise<number> {
     return Math.max(0, this.concurrency - this.active.size);
   }
 
   async start(request: ExecutionRequest): Promise<ExecutionHandle> {
+    const harness = this.resolveHarness(request.item);
     const identity = request.attemptId ?? randomUUID();
     const worktree = join(this.workRoot, identity);
     mkdirSync(this.workRoot, { recursive: true });
@@ -453,7 +519,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
           return { ...asset, path };
         }),
       );
-      const handle = await this.harness.start({
+      const handle = await harness.start({
         item: request.item,
         worktree,
         attemptId: identity,
@@ -466,9 +532,17 @@ export class LocalExecutionDriver implements ExecutionDriver {
       });
       assertDurableHandle(handle);
       const active = {
-        request: { ...request, sourceAssets },
+        request: structuredClone({
+          ...request,
+          attemptId: identity,
+          sourceAssets,
+        }),
         worktree,
-        adapterIdentity: this.adapterIdentity,
+        adapterIdentity:
+          request.item.executionBinding?.adapter ?? this.adapterIdentity,
+        ...(request.item.executionBinding
+          ? { executionBinding: structuredClone(request.item.executionBinding) }
+          : {}),
         handle,
       };
       this.active.set(identity, active);
@@ -481,18 +555,27 @@ export class LocalExecutionDriver implements ExecutionDriver {
 
   async observe(handle: ExecutionHandle): Promise<ExecutionObservation> {
     const active = this.require(handle);
-    return this.harness.observe(active.handle);
+    return this.resolveHarness(
+      active.request.item,
+      active.executionBinding,
+    ).observe(active.handle);
   }
 
   async cancel(handle: ExecutionHandle): Promise<void> {
     const active = this.require(handle);
-    await this.harness.cancel(active.handle);
+    await this.resolveHarness(
+      active.request.item,
+      active.executionBinding,
+    ).cancel(active.handle);
   }
 
   async collect(handle: ExecutionHandle): Promise<ExecutionResult> {
     const active = this.require(handle);
     try {
-      const result = await this.harness.collect(active.handle);
+      const result = await this.resolveHarness(
+        active.request.item,
+        active.executionBinding,
+      ).collect(active.handle);
       if (
         pinnedGit(active.worktree, "rev-parse", "HEAD") !==
         active.request.baseSha

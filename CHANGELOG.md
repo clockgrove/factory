@@ -2,10 +2,10 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.35 — candidate
+## 0.1.35 — 2026-09-28
 
 - Present bounded Git patch excerpts literally for current-result and controller-materialization review (#212 / PR #213), reusing ordinary Work Item delta rendering. Review prompts and citation grounding share the same text; exact-source matching, identity, ownership and truncation checks remain intact.
-- Dependency versions, provider scope and lifecycle behavior are unchanged. Publication and exact-artifact qualification are pending in [#206](https://github.com/clockgrove/factory/issues/206); final adopter acceptance remains in [#207](https://github.com/clockgrove/factory/issues/207). Preserve previous artifacts and evidence.
+- Dependency versions, provider scope and lifecycle behavior are unchanged. Publication and independent public-download/offline-installation verification passed; [PR #215](https://github.com/clockgrove/factory/pull/215) records release gates and reproduction. Exact-artifact live qualification remains pending in [#206](https://github.com/clockgrove/factory/issues/206); final adopter acceptance remains in [#207](https://github.com/clockgrove/factory/issues/207). Preserve previous artifacts and evidence.
 
 ## 0.1.34 — 2026-09-28
 

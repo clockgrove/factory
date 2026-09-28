@@ -2,10 +2,10 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.32 — candidate
+## 0.1.32 — 2026-09-28
 
 - Supply declared completed dependency deltas and ordered own-tree validation receipts to Work Item acceptance review (#198 / PR #199). Keep current and predecessor identities distinct; native published predecessors retain explicitly absent integration identities. Reuse final-review evidence without new persisted state or prior model verdicts as authority.
-- Preserve dependency versions, provider and selection-authority boundaries, final validation and release gates. Publication and fresh installed public/adopter qualification remain pending in [#26](https://github.com/clockgrove/factory/issues/26); previous releases and runs stay immutable.
+- Preserve dependency versions, provider and selection-authority boundaries, final validation and release gates. Publication and independent public-download/offline-installation verification passed; [PR #200](https://github.com/clockgrove/factory/pull/200) records source/artifact checks and reproduction. Fresh public qualification and actual adopter acceptance remain pending in [#26](https://github.com/clockgrove/factory/issues/26); previous releases and runs stay immutable.
 
 ## 0.1.31 — 2026-09-28
 

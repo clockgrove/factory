@@ -2,10 +2,10 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.33 — candidate
+## 0.1.33 — 2026-09-28
 
 - Add explicit `rereview` for an exact pending Work Item result (#202 / PR #203), followed by `run` to repeat validation and automatic review without restarting implementation or recording acceptance. Preserve earlier decisions, result identities and unknown usage. Final Objective review retains its existing `run` continuation.
-- Include matching user and director guidance. Dependency versions, provider scope and automatic-retry limits are unchanged. Publication and fresh installed public/adopter qualification remain pending in [#26](https://github.com/clockgrove/factory/issues/26); prior releases and runs stay immutable.
+- Include matching user and director guidance. Dependency versions, provider scope and automatic-retry limits are unchanged. Publication and independent public-download/offline-installation verification passed; [PR #204](https://github.com/clockgrove/factory/pull/204) records source/artifact checks and reproduction. Fresh public qualification and actual adopter acceptance remain pending in [#26](https://github.com/clockgrove/factory/issues/26); prior releases and runs stay immutable.
 
 ## 0.1.32 — 2026-09-28
 

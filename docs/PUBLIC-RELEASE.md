@@ -4,9 +4,9 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-The v0.1.33 candidate adds accepted [PR #203](https://github.com/clockgrove/factory/pull/203) explicit exact-tree Work Item re-review and matching operator guidance. It requires its own source/artifact gates, publication and independent public-download verification before fresh public qualification and actual Clockgrove acceptance in [#26](https://github.com/clockgrove/factory/issues/26). Use the same verified successor plugin and CLI for both gates.
+[Published v0.1.33](https://github.com/clockgrove/factory/releases/tag/v0.1.33) adds [PR #203](https://github.com/clockgrove/factory/pull/203) explicit exact-tree Work Item re-review and matching operator guidance. Its source/artifact gates, public download and offline installation are verified in the [immutable artifact record](BUILD-STATUS.md#immutable-v0133-artifact-record). Fresh public qualification and actual Clockgrove acceptance remain pending in [#26](https://github.com/clockgrove/factory/issues/26). Use the same verified plugin and CLI for both gates.
 
-Published v0.1.32 and its [immutable artifact record](BUILD-STATUS.md#immutable-v0132-artifact-record) remain unchanged. Earlier distribution or scenario checks do not qualify these changed runtime bytes.
+Earlier published artifacts and their evidence remain unchanged. Publication and installation checks do not establish Objective qualification.
 
 The pinned Git marketplace supplies the plugin manifest and use skills. The matching GitHub Release supplies a separate Linux x64 CLI tarball with the default Codex dependency tree bundled for offline installation. Optional Claude and Copilot SDKs are installed separately; consult [local harnesses](AGENT-HARNESSES.md). Installed default runtime requires Node.js 22 or later. Building from source has separate tooling requirements below. npm registry publication and a universal Plugins Directory listing are not part of this distribution route.
 
@@ -47,7 +47,7 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-After v0.1.33 publication and independent verification, install its matching tag and release assets:
+Install the published v0.1.33 tag and matching release assets:
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.33

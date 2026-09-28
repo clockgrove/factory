@@ -2,6 +2,26 @@
 
 Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and [qualification issue #26](https://github.com/clockgrove/factory/issues/26). This document records immutable distribution evidence, not a second work queue.
 
+## Immutable v0.1.33 artifact record
+
+[Release v0.1.33](https://github.com/clockgrove/factory/releases/tag/v0.1.33)
+uses reviewed source `140ec9e16320f53a7a7d5ab9e6de487f2867c071`, tree
+`b9a49a4d336a4fe612fa4c9568886fac51a801e0`, integrated on main as
+`81eaf899ecc0da8c5a05302cb8db72e8ffebf7ed` with the same tree. Tarball:
+150220729 bytes, SHA-256
+`e0b9142cb4f4ceedc67b8a915c0027086005bced9a6afebb0595bdb574a7588e`.
+[PR #204](https://github.com/clockgrove/factory/pull/204) records independent
+source/artifact review, passing PR and main CI, and byte-identical reproduction.
+The Node22 candidate run passed 237 tests with one existing optional Copilot
+skip; its source dependencies were prepared on Node24, so that run does not
+prove clean Node22 source bootstrap. Independent unauthenticated public download
+and normal empty-cache offline Node22 installation passed, with all 93
+package-owned files and 69 production dependency versions matching. Installed
+CLI and scanner exit-code 0/1/2 checks passed. This proves distribution and
+installation, not fresh live Objective qualification or actual adopter acceptance;
+those remain in #26. Current-main publication documentation does not alter the
+immutable tag or package.
+
 ## Immutable v0.1.32 artifact record
 
 [Release v0.1.32](https://github.com/clockgrove/factory/releases/tag/v0.1.32)

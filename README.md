@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** This checkout prepares **v0.1.31**, including the improved plugin onboarding and target-binding guidance. Publication and fresh end-to-end qualification are pending; [#26](https://github.com/clockgrove/factory/issues/26) tracks qualification and first-adopter acceptance. The previous [v0.1.30 release](https://github.com/clockgrove/factory/releases/tag/v0.1.30) remains available with verified public download and installation. Start with a disposable repository and supervise initial use. Some interrupted delivery states require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
+**Status:** [v0.1.31](https://github.com/clockgrove/factory/releases/tag/v0.1.31) is published with verified public download and offline installation, including improved plugin onboarding and target-binding guidance. Fresh end-to-end qualification and first-adopter acceptance remain pending in [#26](https://github.com/clockgrove/factory/issues/26). Start with a disposable repository and supervise initial use. Some interrupted delivery states require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
 
 ## Requirements
 
@@ -24,7 +24,7 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same version. These v0.1.31 commands apply once its [release](https://github.com/clockgrove/factory/releases/tag/v0.1.31) is published; until then use the [v0.1.30 instructions](https://github.com/clockgrove/factory/blob/1b7d517a0ada4054027bea8a166dce4cb1fe297e/README.md#install-published-v0130):
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version:
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.31

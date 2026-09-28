@@ -1,8 +1,8 @@
 # Public release checklist
 
-Published v0.1.32 carries [PR #199](https://github.com/clockgrove/factory/pull/199) dependency-result evidence for Work Item review. Its source/artifact gates, public download and offline installation are verified in the [immutable artifact record](BUILD-STATUS.md#immutable-v0132-artifact-record). Fresh public qualification and actual Clockgrove acceptance remain pending in [#26](https://github.com/clockgrove/factory/issues/26).
+The v0.1.33 candidate carries accepted [PR #203](https://github.com/clockgrove/factory/pull/203) explicit exact-tree Work Item re-review. Its coordinated source/artifact gates, publication and independent public-download verification must precede fresh public qualification and actual Clockgrove acceptance in [#26](https://github.com/clockgrove/factory/issues/26).
 
-Earlier published artifacts and their evidence remain intact. Distribution checks do not establish live qualification.
+Published v0.1.32 and [its immutable evidence](BUILD-STATUS.md#immutable-v0132-artifact-record) remain intact. Earlier distribution and scenario evidence does not qualify this changed runtime.
 
 Use this checklist for a new release without rebuilding or retagging existing artifacts. The [public release procedure](PUBLIC-RELEASE.md) supplies the commands and operational requirements. Each claim must identify the exact artifact and scenario it proves.
 

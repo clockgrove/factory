@@ -2,6 +2,11 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.32 — candidate
+
+- Supply declared completed dependency deltas and ordered own-tree validation receipts to Work Item acceptance review (#198 / PR #199). Keep current and predecessor identities distinct; native published predecessors retain explicitly absent integration identities. Reuse final-review evidence without new persisted state or prior model verdicts as authority.
+- Preserve dependency versions, provider and selection-authority boundaries, final validation and release gates. Publication and fresh installed public/adopter qualification remain pending in [#26](https://github.com/clockgrove/factory/issues/26); previous releases and runs stay immutable.
+
 ## 0.1.31 — 2026-09-28
 
 - Ship the accepted plugin onboarding from PR #194: setup and director distinguish ordinary target-repository operation from Factory development and contributor release fixtures. Director confirms the configured repository and checkout before every Objective command.

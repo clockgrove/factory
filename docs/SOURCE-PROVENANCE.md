@@ -6,6 +6,10 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Existing workspace package membership (#263)
+
+This implementation extends the current compiler, immutable Git validation and delivery paths from the public issue's generic reproduction. The established `yaml` parser supplies YAML node and ambiguity checks; a compact Objective declaration provides exact directory authority through existing digest bindings. New temporary-Git regressions contain generic public data. No archived implementation, private adopter source, prompts or transcripts were copied, and no additional state store was introduced.
+
 ## Reviewed graph amendments and executable hierarchy (#247)
 
 New amendment behavior extends the current compiler, atomic snapshot, owner control,

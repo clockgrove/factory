@@ -87,6 +87,10 @@ A concrete finding permits at most one evidenced compiler revision, followed by 
 
 An operator may explicitly request exact-tree Work Item re-review through `rereview`, then `run`, after inspecting a pending result. This schedules existing validation and automatic review without restarting implementation or recording acceptance. The existing final-result continuation remains `run`, which repeats final validation and review. These explicit actions do not expand automatic provider retries or revive terminal results. [Issue #202](https://github.com/clockgrove/factory/issues/202) records this continuation boundary.
 
+### Existing workspace membership authority
+
+The pinned Objective may declare exact relative directories under `## Workspace package additions`. Compilation requires one responsible Work Item to own the existing `pnpm-workspace.yaml` and each new package manifest and carry its directory in the brief. Runtime validation compares parsed membership against the original accepted base and accepted predecessor, permits only those additions with regular JSON manifests, preserves original entry order and predecessor membership, and keeps every non-membership setting pinned. Ambiguous YAML, aliases, tags and merges fail closed. This uses the existing Objective digest and immutable Git evidence, not a new permission store. Ownership and validation commands alone never grant this authority. The same check runs before commands in Work Item, environment, QA and final validation, including command-less results. Greenfield workspace authority remains unchanged.
+
 ### Executable acceptance coverage (#248)
 
 New compiler output retains one `coverage` collection in the accepted WorkGraph.

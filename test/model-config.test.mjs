@@ -2627,9 +2627,21 @@ test("actual worker packets preserve media requirements and isolate controller o
       assert.ok(
         captured.includes(`Owned paths:\n${item.ownedPaths.join("\n")}`),
       );
+      assert.match(
+        captured,
+        /\.factory-discovery\.json as a private uncommitted proposal/,
+      );
+      assert.match(
+        captured,
+        /controller independently reviews discoveries under existing Objective authority/,
+      );
+      assert.match(
+        captured,
+        /Out-of-scope discoveries are backlog proposals, never authority/,
+      );
       if (!scenario.roles.length) {
         assert.equal(
-          captured,
+          captured.split("\n\n").slice(0, 2).join("\n\n"),
           `Implement this Work Item in the current repository checkout. Change only the owned paths. Do not commit, push, create issues, create pull requests, or access GitHub credentials. Stop and report if acceptance is impossible.\n\nTitle: ${item.title}\nGoal: ${item.goal}\nAcceptance:\n${item.acceptance.join("\n")}\nNon-goals:\n${item.nonGoals.join("\n")}\nOwned paths:\n${item.ownedPaths.join("\n")}\nBrief:\n${item.brief}`,
         );
         continue;

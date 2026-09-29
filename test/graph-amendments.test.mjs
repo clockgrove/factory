@@ -14,6 +14,8 @@ import { coverageObligations } from "../dist/qa.js";
 import { objectiveCriteria } from "../dist/compiler.js";
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
 import { readState } from "../dist/state-store.js";
+import { requestControl } from "../dist/coordinator-control.js";
+import { controlObjective } from "../dist/runner.js";
 import { checkServiceState } from "../dist/supervision.js";
 import {
   createTarget,
@@ -801,3 +803,201 @@ for (const delivery of ["regular", "native-stack"])
       delivery,
     );
   });
+
+for (const mode of ["paused", "draining"])
+  for (const boundary of ["compiled", "reviewed", "projected"])
+    test(`${mode} during amendment ${boundary} preserves known work across continuation`, async () => {
+      await fixture(`${mode}-${boundary}`, async ({ config, initial }) => {
+        const obligations = coverageObligations(body, objectiveCriteria(body));
+        const graph = withCoverage(
+          { coverageObligations: obligations },
+          initial,
+        );
+        graph.coverage[0].source = obligations[0].source;
+        // Earlier accepted graphs omitted the now-required empty hierarchy field.
+        delete graph.items[0].kind;
+        let state = {
+          graph,
+          objective: 1,
+          baseSha: initial.baseSha,
+          runId: "fixture",
+          issueByItemId: { result: 2 },
+          work: {
+            result: {
+              status: "done",
+              attempt: "preserved",
+              graphRevisionDigest: graphDigest(graph),
+            },
+          },
+          admission: { graphDigest: graphDigest(graph), authority },
+          coordinator: { mode: "running" },
+        };
+        const admittedBytes = JSON.stringify(graph);
+        submitAmendment(state, {
+          ...discovery,
+          actor: "worker:result",
+          expectedGraphDigest: graphDigest(graph),
+        });
+        const calls = { compile: 0, review: 0, project: 0 };
+        let saved;
+        const stop = (at) => {
+          if (boundary === at) state.coordinator.mode = mode;
+        };
+        const args = {
+          config,
+          body,
+          cancelled: () => false,
+          save: () => {
+            saved = JSON.stringify(state);
+          },
+          model: {
+            async generateStructured() {
+              calls.compile++;
+              stop("compiled");
+              const candidate = qaGraph(graph);
+              candidate.items = candidate.items.map((entry) =>
+                Object.fromEntries(
+                  Object.entries({
+                    ...entry,
+                    kind: entry.kind ?? "work",
+                    children: [],
+                  }).reverse(),
+                ),
+              );
+              return candidate;
+            },
+            async reviewGraph() {
+              calls.review++;
+              stop("reviewed");
+              return { findings: [] };
+            },
+          },
+          github: {
+            async projectGraph() {
+              calls.project++;
+              stop("projected");
+              return { issueByItemId: { result: 2, qa: 3 } };
+            },
+          },
+        };
+        assert.equal(await applyPendingAmendment({ ...args, state }), false);
+        assert.equal(state.pendingAmendment.phase, boundary);
+        assert.equal(JSON.stringify(state.graph), admittedBytes);
+        assert.equal(state.allowanceConsumption.planningRevisions, 1);
+        const expected = {
+          compile: 1,
+          review: boundary === "compiled" ? 0 : 1,
+          project: boundary === "projected" ? 1 : 0,
+        };
+        assert.deepEqual(calls, expected);
+        // Rehydration preserves the safe point; a stopped coordinator submits nothing.
+        state = JSON.parse(saved);
+        assertGraphRevisions(state);
+        assert.equal(await applyPendingAmendment({ ...args, state }), false);
+        assert.deepEqual(calls, expected);
+        state.coordinator.mode = "running";
+        assert.equal(await applyPendingAmendment({ ...args, state }), true);
+        assert.deepEqual(calls, { compile: 1, review: 1, project: 1 });
+        assert.equal(state.allowanceConsumption.planningRevisions, 1);
+        assert.equal(state.graphRevisions.length, 2);
+        assert.equal(
+          JSON.stringify(state.graphRevisions[0].graph),
+          admittedBytes,
+        );
+        assert.equal(state.work.result.attempt, "preserved");
+        assert.deepEqual(state.issueByItemId, { result: 2, qa: 3 });
+        assertGraphRevisions(state);
+        state.graph.items[0].brief += " changed obligation";
+        assert.throws(
+          () => assertGraphRevisions(state),
+          /identity changed|differs|binding changed/,
+        );
+      });
+    });
+
+test("owner handoff after known amendment review resumes without repeating model work", {
+  timeout: 20000,
+}, async () => {
+  await fixture("amendment-handoff", async ({ root, config, initial }) => {
+    let first;
+    let generated = 0;
+    let reviewed = 0;
+    const planningModel = {
+      async generateStructured(request) {
+        generated++;
+        if (!first) return (first = withCoverage(request, initial));
+        return qaGraph(first);
+      },
+      async reviewGraph(request) {
+        reviewed++;
+        if (request.amendment)
+          await requestControl(config.repository, {
+            objective: 1,
+            action: "handoff",
+          });
+        return { findings: [] };
+      },
+      async reviewResult(request) {
+        return {
+          findings: request.reviewPacket.criteria.map((criterion) => ({
+            criterionId: criterion.id,
+            evidenceIds: [
+              request.reviewPacket.evidence.find(
+                (entry) => entry.path === "OBJECTIVE",
+              ).id,
+            ],
+            verdict: "pass",
+            detail: "Fixture source-backed acceptance",
+            question: "",
+          })),
+        };
+      },
+    };
+    const setup = makeApplication({
+      config,
+      graph: initial,
+      objectiveBody: body,
+      fakeRoot: join(root, "fake"),
+      planningModel,
+      actions: {
+        result: {
+          files: [
+            { path: "result.txt", text: "done\n" },
+            {
+              path: ".factory-discovery.json",
+              text: JSON.stringify(discovery),
+            },
+          ],
+        },
+      },
+    });
+    const candidate = await setup.application.planObjective(1);
+    const admission = await setup.application.admitObjective(1, candidate, {
+      ...authority,
+      serviceConsent: true,
+    });
+    await assert.rejects(
+      setup.application.runObjective(1, candidate, admission),
+      (error) => error.constructor.name === "CoordinatorHandoff",
+    );
+    const stopped = readState(config.repository, 1);
+    assert.equal(stopped.pendingAmendment.phase, "reviewed");
+    assert.equal(stopped.coordinator.mode, "draining");
+    assert.equal(stopped.graph.items.length, 1);
+    assert.equal(stopped.cancelRequested, undefined);
+    assert.equal(generated, 2);
+    assert.equal(reviewed, 2);
+    assert.doesNotThrow(() => checkServiceState(config, 1));
+    await controlObjective(config, { objective: 1, action: "resume" });
+    const result = await setup.application.runObjective(1);
+    assert.equal(result.finalValidation.passed, true);
+    assert.equal(generated, 2);
+    assert.equal(reviewed, 2);
+    assert.equal(result.allowanceConsumption.planningRevisions, 1);
+    assert.equal(
+      readEvents(setup.eventsPath).filter((event) => event.type === "start")
+        .length,
+      1,
+    );
+  });
+});

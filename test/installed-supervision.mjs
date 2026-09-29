@@ -27,6 +27,14 @@ cpSync(new URL("./fixtures/disposable-target", import.meta.url), checkout, {
   recursive: true,
 });
 execFileSync("git", ["init", "-b", "main", checkout]);
+execFileSync("git", [
+  "-C",
+  checkout,
+  "remote",
+  "add",
+  "origin",
+  "https://github.com/example/factory-supervision-fixture.git",
+]);
 execFileSync("git", ["-C", checkout, "add", "."]);
 execFileSync("git", [
   "-C",

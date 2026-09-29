@@ -67,7 +67,11 @@ join their integrated results, then ordinary read-only validation/review proves 
 parent acceptance. Hierarchy alone never grants readiness. The controller reconciles
 exact issue bodies, dependencies and native subissues before activating a successor.
 Remote edits are proposals, and unknown create/review outcomes remain fenced without
-replay. A discovery arriving during final review invalidates that completion result.
+replay. Pause and drain settle the current amendment call, persist its known result,
+and stop before the next call or graph activation. Resume or handoff continues from
+that recorded phase without repeating known model/projection work or consuming
+another planning allowance. A discovery arriving during final review invalidates
+that completion result.
 
 ### Compiler plan review
 

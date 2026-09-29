@@ -249,6 +249,12 @@ export async function runNativeGraph(args: {
     const ranked = rankPending(state.graph, state.work);
     const eligible = remainingUnits.filter(
       (unit) =>
+        (!args.amendmentPending?.() ||
+          unit.items.some(
+            (item) =>
+              state.work[item.id]?.attempt ||
+              state.work[item.id]?.status === "done",
+          )) &&
         unit.externalDependencies.every(
           (id) => state.work[id]?.status === "done",
         ) &&
@@ -267,7 +273,10 @@ export async function runNativeGraph(args: {
       (a, b) => ranked.indexOf(a.items[0]!) - ranked.indexOf(b.items[0]!),
     );
     const unit = eligible[0];
-    if (!unit) throw new Error("No dependency-ready delivery unit");
+    if (!unit) {
+      if (args.amendmentPending?.()) return settlePrepared();
+      throw new Error("No dependency-ready delivery unit");
+    }
     remainingUnits.splice(remainingUnits.indexOf(unit), 1);
     if (unit.items.every((item) => state.work[item.id]?.status === "done"))
       continue;
@@ -275,7 +284,7 @@ export async function runNativeGraph(args: {
       args.amendmentPending?.() &&
       !unit.items.some((item) => state.work[item.id]?.attempt)
     )
-      return;
+      return settlePrepared();
     await prepareReadyUnits();
     try {
       await active.get(unit.id);
@@ -298,7 +307,8 @@ export async function runNativeGraph(args: {
       if (state.work[item.id]?.status === "pending") {
         if (args.paused?.()) return settlePrepared();
         await args.reconcile?.();
-        if (args.paused?.()) return settlePrepared();
+        if (args.paused?.() || args.amendmentPending?.())
+          return settlePrepared();
       }
       await runQaItem({
         config,

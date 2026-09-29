@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](docs/BUILD-STATUS.md) for what has been qualified. Some interrupted deliveries require operator intervention; see [recovery limits](docs/USER-GUIDE.md#stopping-and-recovery).
+**Status:** Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](docs/BUILD-STATUS.md) for what has been qualified. Some interrupted deliveries require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
 
 ## Requirements
 

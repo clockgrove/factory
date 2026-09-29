@@ -692,6 +692,7 @@ for (const delivery of ["regular", "native"])
                 source: "OBJECTIVE",
                 verdict: "pass",
                 detail: "fixture semantic proof",
+                question: "",
               })),
             ),
           };

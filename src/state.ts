@@ -63,6 +63,9 @@ export interface AcceptancePending {
 }
 
 export interface WorkState {
+  /** Reservation survives an uncertain effect; item ownership is separate. */
+  phaseReservation?: import("./config.js").ResourcePhase;
+  requestedPhase?: import("./config.js").ResourcePhase;
   pendingEffect?: "review" | "publication" | "merge";
   qaChecks?: NamedCheckEvidence[];
   status: WorkStatus;
@@ -410,6 +413,8 @@ export function parseFactoryState(
         if (binding[key] !== undefined)
           string(binding[key], `${id}.executionBinding.${key}`);
     }
+    if (item.priority !== undefined && !Number.isSafeInteger(item.priority))
+      throw new Error(`Work Item ${id} has invalid priority`);
     ids.add(id);
     for (const key of ["title", "goal", "brief"])
       string(item[key], `${id}.${key}`);
@@ -495,6 +500,14 @@ export function parseFactoryState(
       throw new Error(`Work Item ${id} has invalid pending effect`);
     if (!statuses.has(item.status as WorkStatus))
       throw new Error(`Work Item ${id} has an invalid status`);
+    for (const field of ["phaseReservation", "requestedPhase"])
+      if (
+        item[field] !== undefined &&
+        !["coding", "validation", "review", "delivery"].includes(
+          String(item[field]),
+        )
+      )
+        throw new Error(`Work Item ${id} has an invalid resource phase`);
     if (item.step !== undefined && !steps.has(item.step as WorkStep))
       throw new Error(`Work Item ${id} has an invalid step`);
     if (item.authentication !== undefined) {

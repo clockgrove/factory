@@ -52,6 +52,7 @@ function graph(indexed = false) {
       items: [
         {
           id: "policy",
+          priority: 0,
           title: "Public policy",
           goal: "Create public result",
           brief: "Create only result.txt",

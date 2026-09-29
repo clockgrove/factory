@@ -95,6 +95,12 @@ export async function runNativeGraph(args: {
   const prepareReadyUnits = async (): Promise<void> => {
     if (args.paused?.() || args.amendmentPending?.()) return;
     if (
+      Object.values(state.work).some(
+        (work) => work.status === "running" && work.step === "validate",
+      )
+    )
+      return;
+    if (
       state.graph.items.some(
         (item) =>
           (item.kind === "qa" || item.kind === "aggregate") &&
@@ -246,6 +252,7 @@ export async function runNativeGraph(args: {
   const remainingUnits = [...units];
   while (remainingUnits.length) {
     if (preparationFailure) throw preparationFailure;
+    await prepareReadyUnits();
     const ranked = rankPending(state.graph, state.work);
     const eligible = remainingUnits.filter(
       (unit) =>
@@ -272,10 +279,29 @@ export async function runNativeGraph(args: {
     eligible.sort(
       (a, b) => ranked.indexOf(a.items[0]!) - ranked.indexOf(b.items[0]!),
     );
-    const unit = eligible[0];
+    const completionReady = eligible.filter(
+      (unit) =>
+        unit.items.some((item) => {
+          const work = state.work[item.id]!;
+          return (
+            work.status === "published" ||
+            (work.status === "running" && work.step !== "execute")
+          );
+        }) ||
+        unit.items[0]!.kind === "qa" ||
+        unit.items[0]!.kind === "aggregate",
+    );
+    const unit = completionReady[0] ?? eligible[0];
     if (!unit) {
       if (args.amendmentPending?.()) return settlePrepared();
       throw new Error("No dependency-ready delivery unit");
+    }
+    if (
+      active.has(unit.id) &&
+      state.work[unit.items[0]!.id]?.step === "execute"
+    ) {
+      await Promise.race(active.values());
+      continue;
     }
     remainingUnits.splice(remainingUnits.indexOf(unit), 1);
     if (unit.items.every((item) => state.work[item.id]?.status === "done"))
@@ -285,7 +311,6 @@ export async function runNativeGraph(args: {
       !unit.items.some((item) => state.work[item.id]?.attempt)
     )
       return settlePrepared();
-    await prepareReadyUnits();
     try {
       await active.get(unit.id);
     } finally {
@@ -676,6 +701,7 @@ export async function runNativeGraph(args: {
       }
       if (state.work[item.id]?.status === "waiting") return settlePrepared();
     }
+    await phases.reserve(unit.items.at(-1)!.id, "delivery");
     const layers: NativeStackLayer[] = unit.items.map((item) => {
       const work = state.work[item.id]!;
       if (work.status !== "published" || !work.pullRequest || !work.changeRef)
@@ -822,6 +848,7 @@ export async function runNativeGraph(args: {
       work.integratedSha = observedAfter;
       work.completedAt = new Date().toISOString();
     }
+    phases.release(unit.items.at(-1)!.id);
     save();
     for (const item of unit.items)
       await closeWorkItem(state, item.id, github, save, true);

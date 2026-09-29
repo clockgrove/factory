@@ -120,6 +120,8 @@ export type ExecutionConfig =
     };
 
 export interface FactoryConfig {
+  /** Explicit local sensitive-content opt-in; absent remains disabled. */
+  capture?: { enabled: boolean; maxBytesPerInvocation: number };
   schemaVersion: 1;
   repository: string;
   checkout: string;
@@ -576,6 +578,22 @@ export function validateConfig(value: unknown): FactoryConfig {
   }
   if (value.policy.deployments !== "denied")
     throw new Error("Deployments are unsupported");
+  if (value.capture !== undefined) {
+    assertObject(value.capture, "capture");
+    assertOnlyKeys(
+      value.capture,
+      ["enabled", "maxBytesPerInvocation"],
+      "capture",
+    );
+    if (
+      typeof value.capture.enabled !== "boolean" ||
+      !Number.isSafeInteger(value.capture.maxBytesPerInvocation) ||
+      (value.capture.maxBytesPerInvocation as number) <= 0
+    )
+      throw new Error(
+        "capture requires enabled boolean and positive maxBytesPerInvocation",
+      );
+  }
   return value as unknown as FactoryConfig;
 }
 

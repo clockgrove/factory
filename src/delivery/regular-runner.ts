@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { planningSources } from "../compiler.js";
+import { closeWorkItem } from "../completion.js";
 import type { FactoryConfig } from "../config.js";
-import type { FactoryState } from "../state.js";
 import type {
   ContentStore,
   DeliveryStrategy,
@@ -11,15 +12,15 @@ import type {
   WorkItem,
 } from "../contracts.js";
 import { AuthenticationRequiredError } from "../contracts.js";
+import type { DiagnosticEmitter } from "../diagnostics.js";
 import {
   materializeAssetSet,
   selectedInputsForItem,
   validationLfsMembersForItem,
 } from "../media.js";
-import { closeWorkItem } from "../completion.js";
 import { git } from "../process.js";
 import { readyItems } from "../scheduler.js";
-import type { DiagnosticEmitter } from "../diagnostics.js";
+import type { FactoryState } from "../state.js";
 import {
   AcceptanceDecisionRequired,
   reviewAcceptance,
@@ -27,7 +28,6 @@ import {
   workItemReviewEvidence,
   workItemReviewObservations,
 } from "../validation.js";
-import { planningSources } from "../compiler.js";
 
 export async function runRegularGraph(args: {
   config: FactoryConfig;
@@ -113,6 +113,7 @@ export async function runRegularGraph(args: {
         const handle =
           existingHandle ??
           (await driver.start({
+            captureContext: { objective, runId: state.runId },
             item,
             baseSha: itemBase,
             attemptId: work.attempt,

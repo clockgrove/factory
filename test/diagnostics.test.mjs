@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
-  mkdtempSync,
   mkdirSync,
+  mkdtempSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -10,19 +10,19 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { stateRoot } from "../dist/config.js";
 import {
   DiagnosticEmitter,
   diagnosticPath,
-  readDiagnostics,
   readAgentTimeline,
+  readDiagnostics,
   readWorkerOutput,
   redactDiagnosticDetail,
   StateDiagnostics,
-  summarizeModelInvocations,
   summarizeDiagnosticUsage,
+  summarizeModelInvocations,
 } from "../dist/diagnostics.js";
 import { validateTree } from "../dist/validation.js";
-import { stateRoot } from "../dist/config.js";
 import { createTarget } from "./support/integration-fixture.mjs";
 
 test("worker usage separates scopes, deduplicates cumulative counters and reports coverage", () => {
@@ -476,7 +476,15 @@ test("model diagnostics preserve safe correlation and aggregate only supplied us
       usageAvailable: true,
       usage: { inputTokens: 50, cachedInputTokens: 25 },
     });
-    const events = readDiagnostics("example/model-diagnostics", 7);
+    const allEvents = readDiagnostics("example/model-diagnostics", 7);
+    const events = allEvents.filter(
+      (event) => event.operation === "model-invocation",
+    );
+    assert.ok(
+      allEvents.some(
+        (event) => event.capture?.content.status === "capture-disabled",
+      ),
+    );
     assert.equal(events.length, 11);
     assert.ok(events.every((event) => event.operation === "model-invocation"));
     assert.equal(events[0].metadata.scopeId, "plan-attempt-1");

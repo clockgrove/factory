@@ -1,3 +1,4 @@
+import { WorkerInteractionCapture } from "./interaction-capture.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -64,12 +65,24 @@ async function main(): Promise<void> {
     /\.result\.json$/,
     ".progress.ndjson",
   );
+  const capture = new WorkerInteractionCapture(
+    input.request,
+    progressPath,
+    redactionValues,
+    {
+      provider: "github-copilot",
+      model: input.config.model,
+      reasoningEffort: input.config.reasoningEffort,
+    },
+  );
   let progressLost = false;
   const usage = new CopilotUsage(redactionValues);
   const turn = new ProviderTurnGuard(
     input.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   );
   let terminal = false;
+  let providerCompleted = false;
+  let captureFailure: unknown;
   let providerFailure: string | undefined;
   const observeUsage = (type: WorkerUsageObservation["type"]): void => {
     if (progressLost) return;
@@ -133,9 +146,10 @@ async function main(): Promise<void> {
       throw new Error(
         authentication.statusMessage ?? "Not authenticated with GitHub Copilot",
       );
+    const sessionOptions = githubCopilotSessionOptions(input);
     session = await turn.race(
       client.createSession({
-        ...githubCopilotSessionOptions(input),
+        ...sessionOptions,
         onEvent: (event) => {
           turn.progress();
           if (event.type === "session.idle") terminal = true;
@@ -144,12 +158,17 @@ async function main(): Promise<void> {
           if (event.type === "session.start") sessionStart = event.data;
           if (event.type === "session.start" || event.type === "session.error")
             observeStartup(event);
+          const observedUsage = usage.observe(
+            event,
+            session?.sessionId ?? sessionStart?.sessionId,
+          );
+          capture.copilot(
+            event,
+            session?.sessionId ?? sessionStart?.sessionId,
+            observedUsage,
+          );
           if (!progressLost)
             try {
-              const observedUsage = usage.observe(
-                event,
-                session?.sessionId ?? sessionStart?.sessionId,
-              );
               if (event.type === "assistant.usage" && !observedUsage) return;
               privateProgress(progressPath, {
                 ...progressEvent(
@@ -199,16 +218,21 @@ async function main(): Promise<void> {
       );
     // Startup idleness cannot qualify the implementation turn.
     terminal = false;
+    const prompt = workItemPrompt(input.request);
+    capture.request(prompt, {
+      systemMessage: sessionOptions.systemMessage,
+      availableTools: sessionOptions.availableTools,
+    });
     const response = await turn.race(
-      session.sendAndWait(
-        { prompt: workItemPrompt(input.request) },
-        input.config.timeoutSeconds * 1_000,
-      ),
+      session.sendAndWait({ prompt }, input.config.timeoutSeconds * 1_000),
     );
+    capture.response(response?.data.content, session.sessionId);
     if (providerFailure) throw new Error(providerFailure);
     if (!terminal)
       throw new Error("GitHub Copilot SDK ended without session.idle");
     turn.finish();
+    providerCompleted = true;
+    capture.providerCompleted();
     const assets = readProducedAssets(input.request);
     outcome = {
       state: "complete",
@@ -226,6 +250,7 @@ async function main(): Promise<void> {
       },
     };
   } catch (error) {
+    captureFailure = error;
     outcome = harnessFailure("github-copilot", error, redactionValues);
     process.exitCode = 1;
   } finally {
@@ -233,6 +258,7 @@ async function main(): Promise<void> {
     try {
       if (client) await cleanupCopilotClient(client, session);
     } catch (error) {
+      captureFailure = error;
       outcome = harnessFailure("github-copilot", error, redactionValues);
       process.exitCode = 1;
     }
@@ -240,6 +266,12 @@ async function main(): Promise<void> {
   if (!outcome) throw new Error("GitHub Copilot worker produced no outcome");
   writeHarnessResult(resultPath, outcome);
   observeUsage(outcome.state === "complete" ? "completed" : "failed");
+  capture.outcome(
+    outcome.state === "complete" ? "completed" : "failed",
+    usage.totals(),
+    captureFailure,
+    providerCompleted ? "protocol" : "provider",
+  );
 }
 
 main().catch((error: unknown) => {

@@ -1,9 +1,5 @@
-import {
-  reviewPacket,
-  decodeReview,
-  resolveReviewReferences,
-  type ReviewEvidenceReference,
-} from "./review-evidence.js";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   fstatSync,
@@ -15,10 +11,8 @@ import {
   rmSync,
 } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { createHash, randomUUID } from "node:crypto";
-import { isDeepStrictEqual } from "node:util";
-import { spawn, spawnSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
+import { isDeepStrictEqual } from "node:util";
 import type {
   CapturedAssetSet,
   ContentStore,
@@ -29,20 +23,26 @@ import type {
   ValidationLfsMember,
   WorkItem,
 } from "./contracts.js";
+import { assetSelectionDigest, type HydrationReceipt } from "./media.js";
+import {
+  localValidationEnvironment,
+  localValidationShellArguments,
+  pinnedGit,
+  pinnedGitEnvironment,
+  pinnedGitRaw,
+} from "./process.js";
+import {
+  decodeReview,
+  type ReviewEvidenceReference,
+  resolveReviewReferences,
+  reviewPacket,
+} from "./review-evidence.js";
 import type {
   AcceptancePending,
   FactoryState,
   ReviewRejectionReason,
   WorkState,
 } from "./state.js";
-import {
-  pinnedGit,
-  pinnedGitRaw,
-  pinnedGitEnvironment,
-  localValidationEnvironment,
-  localValidationShellArguments,
-} from "./process.js";
-import { assetSelectionDigest, type HydrationReceipt } from "./media.js";
 
 export interface CriterionEvidence {
   criterion: string;
@@ -1490,6 +1490,40 @@ export async function reviewAcceptance(args: {
   // Preserve independent valid assessments on existing item evidence; final raw
   // response remains in existing diagnostics rather than a second durable store.
   evidence.criteria = proven;
+  if (decoded) {
+    const protocolInvalid = Boolean(
+      decoded.packetError || decoded.errors.some(Boolean),
+    );
+    const observeOutcome = (stage: "protocol" | "semantic", status: string) => {
+      try {
+        args.invocation?.observe?.({
+          invocationId: args.invocation.invocationId,
+          phase: args.invocation.phase,
+          ordinal: args.invocation.ordinal,
+          providerAttempt: args.invocation.providerAttempt,
+          type: "progress",
+          capture: {
+            event: { kind: "outcome", outcome: { stage, status } },
+            content: () => ({
+              criteria: proven,
+              findings: decoded?.findings,
+              errors: decoded?.errors,
+              packetError: decoded?.packetError,
+            }),
+          },
+        });
+      } catch {
+        /* best-effort observations cannot affect acceptance */
+      }
+    };
+    observeOutcome("protocol", protocolInvalid ? "invalid" : "valid");
+    if (!protocolInvalid)
+      observeOutcome(
+        "semantic",
+        refused ? "refuse" : pending ? "needs-human" : "pass",
+      );
+  }
+
   if (refused) throw new Error(refused);
   const automaticCriterion = criteria.find(
     (criterion) =>

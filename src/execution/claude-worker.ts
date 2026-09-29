@@ -1,3 +1,4 @@
+import { WorkerInteractionCapture } from "./interaction-capture.js";
 import {
   createFactoryWorktreeMcp,
   factoryMcpServerName,
@@ -135,6 +136,16 @@ async function main(): Promise<void> {
     /\.result\.json$/,
     ".progress.ndjson",
   );
+  const capture = new WorkerInteractionCapture(
+    input.request,
+    progressPath,
+    redactionValues,
+    {
+      provider: "claude",
+      model: input.config.model,
+      reasoningEffort: input.config.reasoningEffort,
+    },
+  );
   const controller = new AbortController();
   process.once("SIGTERM", () => controller.abort());
   const turn = new ProviderTurnGuard(
@@ -145,6 +156,7 @@ async function main(): Promise<void> {
     () => controller.abort(turn.signal.reason),
     { once: true },
   );
+  let providerCompleted = false;
   let prepared: PreparedClaudeEnvironment | undefined;
   let events: AsyncIterator<SDKMessage> | undefined;
   let closeStarted = false;
@@ -201,10 +213,20 @@ async function main(): Promise<void> {
         }),
       );
     }
-    const stream = query({
-      prompt: workItemPrompt(input.request),
-      options: claudeQueryOptions(input, process.env, controller, prepared),
+    const prompt = workItemPrompt(input.request);
+    const options = claudeQueryOptions(
+      input,
+      process.env,
+      controller,
+      prepared,
+    );
+    capture.request(prompt, {
+      systemPrompt: options.systemPrompt,
+      tools: options.tools,
+      allowedTools: options.allowedTools,
+      permissionMode: options.permissionMode,
     });
+    const stream = query({ prompt, options });
     let result: SDKResultMessage | undefined;
     let initialization: SDKSystemMessage | undefined;
     events = stream[Symbol.asyncIterator]();
@@ -215,6 +237,7 @@ async function main(): Promise<void> {
       turn.progress();
       if (message.type === "result") result = message;
       const observedUsage = usage.observe(message);
+      capture.claude(message, observedUsage);
       if (!progressLost)
         try {
           privateProgress(progressPath, {
@@ -248,6 +271,8 @@ async function main(): Promise<void> {
     await closeProviderEventStream(events, turn, true);
     if (prepared) await turn.race(prepared.close());
     turn.finish();
+    providerCompleted = true;
+    capture.providerCompleted();
     const assets = readProducedAssets(input.request);
     writeHarnessResult(resultPath, {
       state: "complete",
@@ -274,6 +299,7 @@ async function main(): Promise<void> {
       },
     });
     observeUsage("completed");
+    capture.outcome("completed", usage.totals(), undefined, "protocol");
   } catch (error) {
     if (events && !closeStarted && !turn.signal.aborted) {
       closeStarted = true;
@@ -288,6 +314,12 @@ async function main(): Promise<void> {
       harnessFailure("claude", error, redactionValues),
     );
     observeUsage("failed");
+    capture.outcome(
+      "failed",
+      usage.totals(),
+      error,
+      providerCompleted ? "protocol" : "provider",
+    );
     process.exitCode = 1;
   } finally {
     if (events && !closeStarted)

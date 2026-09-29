@@ -1,31 +1,14 @@
-import {
-  reviewPacket,
-  renderReviewPacket,
-  reviewSchema,
-  decodeGraphReview,
-  type ResolvedGraphFinding,
-  type ReviewPacket,
-} from "./review-evidence.js";
-import { normalizeExecutionProfiles } from "./execution-profiles.js";
-import type { ExecutionProfileChoices } from "./contracts.js";
-import { Codex } from "@openai/codex-sdk";
 import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
-import { recognizedObjectiveAttachment } from "./media.js";
-import { markdownLines } from "./markdown.js";
-import { validateAndOrderGraph } from "./scheduler.js";
-import { pinnedGit, pinnedGitRaw } from "./process.js";
-import {
-  assertPinnedNpmScripts,
-  packageScriptInvocation,
-  PINNED_PNPM_BOOTSTRAP,
-} from "./validation.js";
+import { Codex } from "@openai/codex-sdk";
+import type { CodexModelSelection } from "./config.js";
 import type {
-  PlanCommandAuthorization,
+  ExecutionProfileChoices,
   ModelInvocationContext,
   ModelInvocationObservation,
   ModelInvocationPhase,
   ModelInvocationUsage,
+  PlanCommandAuthorization,
   PlanningModel,
   PlanningRequest,
   PlanReviewRequest,
@@ -34,21 +17,40 @@ import type {
   ValidationCommandReceipt,
   WorkGraph,
 } from "./contracts.js";
-import type { CodexModelSelection } from "./config.js";
 import {
   assertInstalledControllerCapabilities,
   CONTROLLER_CAPABILITIES_DIGEST,
-  installedControllerCapabilities,
   type ControllerCapabilitiesManifest,
+  installedControllerCapabilities,
 } from "./controller-capabilities.js";
+import { codexCaptureEvent } from "./execution/interaction-capture.js";
+import { normalizeExecutionProfiles } from "./execution-profiles.js";
+import { markdownLines } from "./markdown.js";
+import { recognizedObjectiveAttachment } from "./media.js";
+import { pinnedGit, pinnedGitRaw } from "./process.js";
 import {
+  closeProviderEventStream,
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   ProviderTurnGuard,
   ProviderTurnIncompleteError,
   ProviderTurnTimeoutError,
-  closeProviderEventStream,
   requireCompletedProviderTurn,
 } from "./provider-turn.js";
+import {
+  decodeGraphReview,
+  type ResolvedGraphFinding,
+  type ReviewPacket,
+  renderReviewPacket,
+  reviewPacket,
+  reviewSchema,
+} from "./review-evidence.js";
+import { validateAndOrderGraph } from "./scheduler.js";
+import { codexRawTokenUsage } from "./usage.js";
+import {
+  assertPinnedNpmScripts,
+  PINNED_PNPM_BOOTSTRAP,
+  packageScriptInvocation,
+} from "./validation.js";
 
 function observeModelInvocation(
   invocation: ModelInvocationContext | undefined,
@@ -112,6 +114,8 @@ const MAX_REVIEW_CAPACITY_RETRIES = 2;
 const MAX_REVIEW_CAPACITY_RETRY_DELAY_MS = 10_000;
 
 export interface CodexPlanningModelOptions {
+  /** Capture redaction only; never sent to the provider. */
+  redactionValues?: string[];
   reviewCapacityRetryDelaysMs?: readonly number[];
   wait?: (milliseconds: number) => Promise<void>;
 }
@@ -396,6 +400,7 @@ const phaseEvidenceGuidance =
 export class CodexPlanningModel implements PlanningModel {
   private readonly reviewCapacityRetryDelaysMs: readonly number[];
   private readonly wait: (milliseconds: number) => Promise<void>;
+  private readonly redactionValues: string[];
 
   constructor(
     private checkout: string,
@@ -404,6 +409,7 @@ export class CodexPlanningModel implements PlanningModel {
     private providerTurnIdleTimeoutMs = DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
     options: CodexPlanningModelOptions = {},
   ) {
+    this.redactionValues = [...(options.redactionValues ?? [])];
     this.reviewCapacityRetryDelaysMs = [
       ...(options.reviewCapacityRetryDelaysMs ??
         DEFAULT_REVIEW_CAPACITY_RETRY_DELAYS_MS),
@@ -501,6 +507,31 @@ export class CodexPlanningModel implements PlanningModel {
     const turn = new ProviderTurnGuard(this.providerTurnIdleTimeoutMs);
     observeModelInvocation(invocation, {
       type: "started",
+      capture: {
+        event: {
+          kind: "request",
+          promptDigest: digest(args.prompt),
+          schemaDigest: digest(schema),
+          sourceDigest:
+            args.sourcePacket === undefined
+              ? undefined
+              : digest(args.sourcePacket),
+        },
+        content: () => ({
+          prompt: args.prompt,
+          schema: args.schema,
+          settings: {
+            sandboxMode: "read-only",
+            approvalPolicy: "never",
+            ...args.selection,
+          },
+          coverage: {
+            implicitSystemPrompt: "not-exposed",
+            providerConversation: "not-exposed",
+            hiddenReasoning: "not-exposed",
+          },
+        }),
+      },
       provider,
       model: args.selection.model,
       reasoningEffort: args.selection.reasoningEffort,
@@ -537,6 +568,43 @@ export class CodexPlanningModel implements PlanningModel {
           )
             finalResponse = event.item.text;
           if (event.type === "turn.completed") {
+            observeModelInvocation(invocation, {
+              type: "progress",
+              capture: {
+                event: {
+                  kind: "usage",
+                  usage: {
+                    scope: "invocation-cumulative",
+                    terminal: true,
+                    completeness: event.usage
+                      ? "available-categories"
+                      : "unavailable",
+                    normalized: event.usage
+                      ? {
+                          inputTokens: event.usage.input_tokens,
+                          cachedInputTokens: event.usage.cached_input_tokens,
+                          cacheWriteInputTokens:
+                            event.usage.cache_write_input_tokens,
+                          outputTokens: event.usage.output_tokens,
+                          reasoningOutputTokens:
+                            event.usage.reasoning_output_tokens,
+                        }
+                      : {},
+                    raw: codexRawTokenUsage(event.usage),
+                  },
+                },
+              },
+            });
+            observeModelInvocation(invocation, {
+              type: "progress",
+              capture: {
+                event: {
+                  kind: "outcome",
+                  outcome: { stage: "provider", status: "completed" },
+                  durationMs: Date.now() - started,
+                },
+              },
+            });
             turnCompleted = true;
             if (event.usage)
               usage = {
@@ -563,6 +631,11 @@ export class CodexPlanningModel implements PlanningModel {
                   : undefined;
           observeModelInvocation(invocation, {
             type: "progress",
+            capture: codexCaptureEvent(
+              event,
+              thread.id ?? undefined,
+              this.redactionValues,
+            ),
             provider,
             model: args.selection.model,
             reasoningEffort: args.selection.reasoningEffort,
@@ -621,6 +694,15 @@ export class CodexPlanningModel implements PlanningModel {
         });
         throw error;
       }
+      observeModelInvocation(invocation, {
+        type: "progress",
+        capture: {
+          event: {
+            kind: "outcome",
+            outcome: { stage: "parse", status: "valid" },
+          },
+        },
+      });
       observeModelInvocation(invocation, {
         type: "completed",
         provider,
@@ -1402,9 +1484,29 @@ async function checkedPlanReview(
       invocation,
     });
     responseReceived = true;
-    return {
-      findings: decodeGraphReview(response, evidencePacket),
-    };
+    const findings = decodeGraphReview(response, evidencePacket);
+    observeModelInvocation(invocation, {
+      type: "progress",
+      capture: {
+        event: {
+          kind: "outcome",
+          outcome: { stage: "protocol", status: "valid" },
+        },
+      },
+    });
+    observeModelInvocation(invocation, {
+      type: "progress",
+      capture: {
+        event: {
+          kind: "outcome",
+          outcome: {
+            stage: "semantic",
+            status: findings.length ? "needs-human" : "pass",
+          },
+        },
+      },
+    });
+    return { findings };
   } catch (error) {
     if (responseReceived) {
       const rejections = [{ field: "findings", reason: "invalid" }];

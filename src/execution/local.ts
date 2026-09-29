@@ -1,8 +1,5 @@
-import { assertExecutionBinding } from "../execution-profiles.js";
-import type { ExecutionBinding } from "../contracts.js";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   createReadStream,
@@ -18,12 +15,15 @@ import {
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
+  CodexModelSelection,
+  ExecutionProfileEnvironment,
+} from "../config.js";
+import type {
   AgentHarness,
-  WorkItem,
-  WorkGraph,
   CapturedAssetSet,
   ContentRef,
   ContentStore,
+  ExecutionBinding,
   ExecutionDriver,
   ExecutionHandle,
   ExecutionObservation,
@@ -33,23 +33,25 @@ import type {
   HarnessObservation,
   HarnessRequest,
   HarnessResult,
+  WorkGraph,
+  WorkItem,
 } from "../contracts.js";
 import { AuthenticationRequiredError } from "../contracts.js";
-import { captureAssetSets, importSourceAssets } from "../media.js";
-import { parseProducedAssetSets } from "../media.js";
-import { checkStagedCandidate } from "./staged-candidate.js";
+import { assertExecutionBinding } from "../execution-profiles.js";
+import {
+  captureAssetSets,
+  importSourceAssets,
+  parseProducedAssetSets,
+} from "../media.js";
 import {
   linuxProcessIdentity,
   pinnedGit,
   processGroupExists,
   sanitizedWorkerEnvironment,
 } from "../process.js";
-import type {
-  CodexModelSelection,
-  ExecutionProfileEnvironment,
-} from "../config.js";
-import { parseAuthenticationRequest } from "./harness-support.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
+import { parseAuthenticationRequest } from "./harness-support.js";
+import { checkStagedCandidate } from "./staged-candidate.js";
 
 export interface LocalProfileRegistration {
   environment?: ExecutionProfileEnvironment;
@@ -430,6 +432,11 @@ export class LocalExecutionDriver implements ExecutionDriver {
     private contentStore: ContentStore,
     private adapterIdentity: string,
     private profiles?: ReadonlyMap<string, LocalProfileRegistration>,
+    private captureSettings?: {
+      repository: string;
+      policy?: import("../capture.js").CapturePolicy;
+      configDigest: string;
+    },
   ) {
     if (profiles)
       this.profiles = new Map(
@@ -531,6 +538,32 @@ export class LocalExecutionDriver implements ExecutionDriver {
         ? this.profiles?.get(request.item.executionProfile.id)?.environment
         : undefined;
       const handle = await harness.start({
+        ...(request.captureContext &&
+          this.captureSettings && {
+            capture: {
+              policy: this.captureSettings.policy,
+              context: {
+                repository: this.captureSettings.repository,
+                ...request.captureContext,
+                itemId: request.item.id,
+                attemptId: identity,
+                invocationId: identity,
+                providerAttempt: 1,
+                phase: "implementation",
+                adapter:
+                  request.item.executionBinding?.adapter ??
+                  this.adapterIdentity,
+                configured: {
+                  provider: this.adapterIdentity,
+                  model: "not-exposed",
+                },
+                configDigest: this.captureSettings.configDigest,
+                sourceDigest: createHash("sha256")
+                  .update(request.objectiveBody ?? "")
+                  .digest("hex"),
+              },
+            },
+          }),
         ...(environment && { environment: structuredClone(environment) }),
         item: request.item,
         worktree,

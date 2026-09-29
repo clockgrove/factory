@@ -304,7 +304,8 @@ function canHandoff(state: ContinuationState): boolean {
     !Object.values(state.work).some(
       (work) =>
         work.status === "running" ||
-        work.status === "published" ||
+        (work.status === "published" &&
+          (!work.pullRequest || !work.changeRef || !work.treeSha)) ||
         work.pendingEffect,
     )
   );
@@ -833,6 +834,10 @@ async function runObjectivePass(
     const installationConfigDigest = factoryConfigDigest(config);
     const continuation = readContinuation(config.repository, objective);
     owner.snapshot = continuation;
+    if (owner.handoff && continuation?.coordinator) {
+      continuation.coordinator.mode = "draining";
+      saveState(path, continuation);
+    }
     let preparation =
       continuation?.schemaVersion === 3 ? continuation : undefined;
     let state = continuation?.schemaVersion === 2 ? continuation : undefined;
@@ -1052,7 +1057,7 @@ async function runObjectivePass(
           planning: "ready",
           issueByItemId: {},
           coordinator: {
-            mode: "running",
+            mode: owner.handoff ? "draining" : "running",
             phase: "planning",
             phaseStartedAt: new Date().toISOString(),
             ...(owner.deadlineAt ? { deadlineAt: owner.deadlineAt } : {}),
@@ -1070,6 +1075,8 @@ async function runObjectivePass(
         throw new Error(
           "Preparation identity changed; operator direction required",
         );
+      if (owner.handoff && canHandoff(preparation))
+        throw new CoordinatorHandoff();
       const planningScopeId = preparation.runId;
       const plan =
         preparation.plan ??

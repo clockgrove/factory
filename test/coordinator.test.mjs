@@ -867,3 +867,151 @@ test("handoff settles an already running worker and preserves its attempt instea
     },
   );
 });
+
+test("SIGTERM before the first snapshot persists drain and starts no planning or worker", async () => {
+  await fixture(
+    "handoff-before-snapshot",
+    async ({ application, config, github, eventsPath, planningPath }) => {
+      const entered = deferred(),
+        release = deferred();
+      const original = github.objective.bind(github);
+      github.objective = async (...args) => {
+        entered.resolve();
+        await release.promise;
+        return original(...args);
+      };
+      const running = application.runObjective(1);
+      const rejected = assert.rejects(
+        running,
+        (error) => error.constructor.name === "CoordinatorHandoff",
+      );
+      await entered.promise;
+      assert.equal(readContinuation(config.repository, 1), undefined);
+      process.emit("SIGTERM");
+      release.resolve();
+      await rejected;
+      const state = readContinuation(config.repository, 1);
+      assert.equal(state.coordinator.mode, "draining");
+      assert.equal(state.planning, "ready");
+      assert.equal(state.cancelRequested, undefined);
+      assert.equal(
+        readEvents(eventsPath).filter((event) => event.type === "start").length,
+        0,
+      );
+      assert.equal(readEvents(planningPath).length, 0);
+      assert.equal(
+        existsSync(join(stateRoot(config.repository), "controller.lock")),
+        false,
+      );
+    },
+  );
+});
+
+test("native handoff retains a known published layer and resumes its pending successor without replay", async () => {
+  await fixture(
+    "handoff-native-layer",
+    async ({ application, config, github, eventsPath }) => {
+      const candidate = await application.planObjective(1);
+      const admission = await application.admitObjective(1, candidate, {
+        schemaVersion: 1,
+        actor: "fixture",
+        reason: "native handoff",
+        executionConsent: true,
+        serviceConsent: true,
+        objectives: [1],
+        allowances: {
+          planningRevisions: 1,
+          implementationRepairs: 0,
+          resultRereviews: 0,
+        },
+        repairClasses: [],
+        resources: { maxConcurrency: 2 },
+        requiredEnvironment: [],
+      });
+      const original = github.publish.bind(github);
+      let requested = false;
+      github.publish = async (request) => {
+        const published = await original(request);
+        if (!requested) {
+          requested = true;
+          await requestControl(config.repository, {
+            objective: 1,
+            action: "handoff",
+          });
+        }
+        return published;
+      };
+      await assert.rejects(
+        application.runObjective(1, candidate, admission),
+        (error) => error.constructor.name === "CoordinatorHandoff",
+      );
+      const paused = readState(config.repository, 1);
+      assert.equal(paused.work.result.status, "published");
+      assert.equal(paused.work.next.status, "pending");
+      assert.ok(paused.work.result.pullRequest);
+      assert.equal(paused.work.result.pendingEffect, undefined);
+      assert.equal(
+        existsSync(join(stateRoot(config.repository), "controller.lock")),
+        false,
+      );
+      assert.equal(
+        readEvents(eventsPath).filter((event) => event.type === "start").length,
+        1,
+      );
+      const identity = {
+        attemptId: paused.work.result.attemptId,
+        pullRequest: paused.work.result.pullRequest,
+        changeRef: paused.work.result.changeRef,
+      };
+      await controlObjective(config, { objective: 1, action: "resume" });
+      const completed = await application.runObjective(1);
+      assert.equal(completed.finalValidation.passed, true);
+      assert.deepEqual(
+        {
+          attemptId: completed.work.result.attemptId,
+          pullRequest: completed.work.result.pullRequest,
+          changeRef: completed.work.result.changeRef,
+        },
+        identity,
+      );
+      assert.equal(
+        readEvents(eventsPath).filter(
+          (event) => event.type === "start" && event.item === "result",
+        ).length,
+        1,
+      );
+      assert.equal(
+        readEvents(eventsPath).filter(
+          (event) => event.type === "start" && event.item === "next",
+        ).length,
+        1,
+      );
+    },
+    undefined,
+    (descriptor) => {
+      descriptor.config.delivery.kind = "native-stack";
+      descriptor.graph.items.push({
+        ...structuredClone(descriptor.graph.items[0]),
+        id: "next",
+        title: "Next",
+        goal: "Write next.txt",
+        brief: "Write next.txt",
+        acceptance: ["next.txt exists"],
+        dependencies: ["result"],
+        ownedPaths: ["next.txt"],
+        validation: [
+          {
+            command: "test -s next.txt",
+            provenance: "source-declared",
+            source: "OBJECTIVE",
+          },
+        ],
+      });
+      descriptor.objectiveBody +=
+        "\n## Successor validation\n- `test -s next.txt`\n";
+      descriptor.actions.next = {
+        files: [{ path: "next.txt", text: "next\n" }],
+      };
+    },
+  );
+});

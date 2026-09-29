@@ -1,3 +1,4 @@
+import { workspacePackageAdditions } from "./workspace-membership.js";
 import { graphDigest } from "./graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -31,6 +32,7 @@ export async function preflightItemEnvironment(args: {
   state: FactoryState;
   item: WorkItem;
   baseSha: string;
+  objectiveBody?: string;
   store?: ContentStore;
 }): Promise<void> {
   const entries = itemCoverage(args.state.graph, args.item.id);
@@ -63,6 +65,7 @@ export async function preflightItemEnvironment(args: {
       args.baseSha,
     ),
     args.store,
+    workspacePackageAdditions(args.objectiveBody ?? ""),
   );
 }
 
@@ -127,6 +130,7 @@ export async function runQaItem(args: {
       commit,
       validationLfsMembersForItem(state, item, args.config.checkout, commit),
       args.store,
+      workspacePackageAdditions(args.objectiveBody),
     );
     work.qaChecks = [];
     for (const entry of itemCoverage(state.graph, item.id).filter(

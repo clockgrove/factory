@@ -1,5 +1,6 @@
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
 import { applyWorkCorrection } from "./work-repair.js";
+import { workspacePackageAdditions } from "./workspace-membership.js";
 import {
   amendmentBlocksDispatch,
   applyPendingAmendment,
@@ -34,6 +35,8 @@ import {
   verifyPlanCandidate,
 } from "./compiler.js";
 import {
+  objectiveComplete,
+  sealFinalAcceptance,
   closeObjectiveIssue,
   closeWorkItem,
   GitHubClosureFailure,
@@ -295,6 +298,24 @@ export async function planObjective(
   }
 }
 
+function samePreparedPlan(
+  prepared: PlanCandidate,
+  candidate: PlanCandidate,
+): boolean {
+  const { humanDecision: _preparedDecision, ...original } = prepared;
+  const { humanDecision: _candidateDecision, ...resolved } = candidate;
+  return (
+    JSON.stringify({
+      ...original,
+      review: { ...original.review, status: "bound" },
+    }) ===
+    JSON.stringify({
+      ...resolved,
+      review: { ...resolved.review, status: "bound" },
+    })
+  );
+}
+
 function checkActiveAdmission(
   config: FactoryConfig,
   objective: number,
@@ -319,7 +340,7 @@ function checkActiveAdmission(
       const other = readContinuation(config.repository, Number(name));
       if (
         other &&
-        !(other.schemaVersion === 2 && other.finalValidation?.passed) &&
+        !(other.schemaVersion === 2 && objectiveComplete(other)) &&
         !other.cancelledAt
       )
         throw new Error(
@@ -654,6 +675,13 @@ export async function runObjective(
   };
   const cancel = (): void => {
     if (!owner.snapshot) return;
+    if (owner.snapshot.schemaVersion === 2 && owner.snapshot.finalAcceptance) {
+      owner.snapshot.coordinator!.waitReason =
+        "Acceptance is sealed; reconcile Objective closure before successor work";
+      persist();
+      wake();
+      return;
+    }
     owner.snapshot.cancelRequested = true;
     owner.snapshot.coordinator ??= {
       mode: "running",
@@ -743,6 +771,10 @@ export async function runObjective(
         return result;
       }
       if (request.action === "cancel") {
+        if (state.schemaVersion === 2 && state.finalAcceptance)
+          throw new Error(
+            "Acceptance is sealed; resume to reconcile Objective closure",
+          );
         cancel();
         return "requested";
       }
@@ -869,13 +901,22 @@ export async function runObjective(
           if (!settled) disposition.processes.push(process);
           persist();
         },
-      );
+      ).catch((error: unknown) => {
+        const current = owner.snapshot;
+        if (
+          !(error instanceof GitHubClosureFailure) ||
+          current?.schemaVersion !== 2 ||
+          !current.admission
+        )
+          throw error;
+        current.coordinator!.mode = "paused";
+        current.coordinator!.waitReason =
+          "GitHub closure acknowledgement unresolved; resume to reconcile";
+        persist();
+        return current;
+      });
       owner.snapshot = result;
-      if (
-        result.finalValidation?.passed ||
-        result.cancelledAt ||
-        !result.admission
-      )
+      if (objectiveComplete(result) || result.cancelledAt || !result.admission)
         return result;
       if (
         amendmentBlocksDispatch(result) &&
@@ -897,8 +938,9 @@ export async function runObjective(
           work.recovery?.phase === "stopped" &&
           ["failed", "waiting"].includes(work.status),
       );
-      result.coordinator!.waitReason =
-        result.coordinator!.mode === "draining"
+      result.coordinator!.waitReason = result.githubClosureError
+        ? "GitHub closure acknowledgement unresolved; resume to reconcile"
+        : result.coordinator!.mode === "draining"
           ? "Drained; no owned attempts remain"
           : stoppedRepair
             ? `Work Item ${stoppedRepair[0]}: ${stoppedRepair[1].recovery!.failure?.decision ?? "Inspect the retained recovery failure"}`
@@ -1017,6 +1059,22 @@ async function runObjectivePass(
     let preparation =
       continuation?.schemaVersion === 3 ? continuation : undefined;
     let state = continuation?.schemaVersion === 2 ? continuation : undefined;
+    if (preparation?.plan && acceptedPlan && !preparation.admission) {
+      if (!samePreparedPlan(preparation.plan, acceptedPlan))
+        throw new Error(
+          "Prepared plan changed; only its exact human decision can be resolved",
+        );
+      verifyPlanCandidate(
+        acceptedPlan,
+        objective,
+        issue.body,
+        preparation.baseSha,
+        config.checkout,
+        installationConfigDigest,
+      );
+      preparation.plan = structuredClone(acceptedPlan);
+      saveState(path, preparation);
+    }
     if (preparation?.admission) {
       if (admission && admission.digest !== preparation.admission.digest)
         throw new Error("Preparation admission cannot be replaced on restart");
@@ -1171,6 +1229,13 @@ async function runObjectivePass(
           `Objective stopped: ${state.error}. Use explicit retry or operator direction.`,
         );
       if (
+        !state.objectiveBodyDigest &&
+        workspacePackageAdditions(issue.body).length
+      )
+        throw new Error(
+          "Workspace package authority requires a digest-bound Objective; create a new plan",
+        );
+      if (
         state.objectiveBodyDigest &&
         state.objectiveBodyDigest !==
           createHash("sha256").update(issue.body).digest("hex")
@@ -1198,6 +1263,21 @@ async function runObjectivePass(
         reportRunStatus?.(
           "Factory: resuming the existing run from atomic state",
         );
+        if (!state.finalAcceptance && state.objectiveClosure !== "complete") {
+          await gitAsync(
+            config.checkout,
+            "fetch",
+            "origin",
+            await github.defaultBranch(),
+          );
+          if (
+            git(config.checkout, "rev-parse", "FETCH_HEAD") !==
+            state.integratedSha
+          )
+            throw new Error(
+              "Default branch changed before historical final acceptance could be sealed",
+            );
+        }
         await closeObjectiveIssue(state, issue.body, github, saveCurrent);
         return state;
       }
@@ -1214,7 +1294,7 @@ async function runObjectivePass(
           const other = readContinuation(config.repository, Number(name));
           if (
             other &&
-            !(other.schemaVersion === 2 && other.finalValidation?.passed) &&
+            !(other.schemaVersion === 2 && objectiveComplete(other)) &&
             !other.cancelledAt
           )
             throw new Error(
@@ -1642,6 +1722,7 @@ async function runObjectivePass(
       {
         sourceDeclared:
           state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+        workspacePackageAdditions: workspacePackageAdditions(issue.body),
       },
     );
     const commandEvidence = await validateTree(
@@ -1790,6 +1871,29 @@ async function runObjectivePass(
       throw error;
     }
     if (
+      state.coordinator.mode !== "running" ||
+      amendmentBlocksDispatch(state) ||
+      graphDigest(state.graph) !== finalGraphDigest ||
+      state.integratedSha !== integratedSha
+    ) {
+      save(state);
+      return state;
+    }
+    await gitAsync(
+      config.checkout,
+      "fetch",
+      "origin",
+      await github.defaultBranch(),
+    );
+    const reviewedHead = git(config.checkout, "rev-parse", "FETCH_HEAD");
+    if (reviewedHead !== integratedSha)
+      throw new Error(
+        `Default branch changed during final review: expected ${integratedSha}, observed ${reviewedHead}`,
+      );
+    // No await between this CAS, the immutable seal and pending closure persistence.
+    if (
+      cancellationRequested() ||
+      state.coordinator.mode !== "running" ||
       amendmentBlocksDispatch(state) ||
       graphDigest(state.graph) !== finalGraphDigest ||
       state.integratedSha !== integratedSha
@@ -1798,6 +1902,7 @@ async function runObjectivePass(
       return state;
     }
     state.finalValidation = { ...finalEvidence, passed: true };
+    sealFinalAcceptance(state);
     diagnostics.emit({
       runId: state.runId,
       operation: "objective-validation",
@@ -1817,6 +1922,16 @@ async function runObjectivePass(
       detail: error instanceof Error ? error.message : String(error),
     });
     const current = owner.snapshot;
+    if (
+      current?.schemaVersion === 2 &&
+      current.finalAcceptance &&
+      !(error instanceof GitHubClosureFailure)
+    ) {
+      // A rejected resume cannot turn immutable accepted evidence into a failed run.
+      current.coordinator!.waitReason = `Sealed acceptance preserved: ${error instanceof Error ? error.message : String(error)}`;
+      saveState(path, current);
+      throw error;
+    }
     if (
       active.size &&
       current?.schemaVersion === 2 &&
@@ -1909,11 +2024,14 @@ export async function cancelObjective(
     const continuation = readContinuation(config.repository, objective);
     if (!continuation) throw new Error("Objective has no Factory state");
     if (
-      (continuation.schemaVersion === 2 &&
-        continuation.finalValidation?.passed) ||
+      (continuation.schemaVersion === 2 && objectiveComplete(continuation)) ||
       continuation.cancelledAt
     )
       return "cancelled";
+    if (continuation.schemaVersion === 2 && continuation.finalAcceptance)
+      throw new Error(
+        "Acceptance is sealed; resume to reconcile Objective closure",
+      );
     continuation.cancelRequested = true;
     saveState(statePath(config.repository, objective), continuation);
     try {

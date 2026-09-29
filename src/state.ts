@@ -1,4 +1,5 @@
 import { assertRepairLedger } from "./repair-policy.js";
+import { assertFinalAcceptance } from "./completion.js";
 import {
   type AutonomousAdmission,
   assertAdmissionBinding,
@@ -150,6 +151,7 @@ export interface FactoryState {
     string,
     import("./graph-amendments.js").AllowanceConsumption
   >;
+  finalAcceptance?: import("./completion.js").FinalAcceptance;
   backlogDiscoveries?: import("./graph-amendments.js").AmendmentProposal[];
   graphRevisions?: import("./graph-amendments.js").GraphRevision[];
   pendingAmendment?: import("./graph-amendments.js").PendingAmendment;
@@ -1017,5 +1019,6 @@ export function parseFactoryState(
     }
   }
   if (validated.finalValidation?.passed) assertCompletedCoverage(validated);
+  assertFinalAcceptance(validated);
   return validated;
 }

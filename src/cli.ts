@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { objectiveComplete } from "./completion.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import type { AutonomousAdmission, ExecutionAuthority } from "./admission.js";
@@ -805,7 +806,7 @@ async function main(): Promise<void> {
       { deadlineAt: option(args, "deadline") },
     );
     console.log(
-      state.finalValidation?.passed
+      objectiveComplete(state)
         ? `Objective #${objective} completed at ${state.integratedSha}; final validation passed`
         : `Objective #${objective} awaits a decision; use status for the specific pending criterion or AssetSet`,
     );

@@ -1,3 +1,4 @@
+import { objectiveComplete } from "./completion.js";
 import { graphDigest } from "./graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import {
@@ -1140,7 +1141,7 @@ export function statusDocument(
         ? ("failed" as const)
         : state.finalAcceptancePending
           ? ("waiting" as const)
-          : state.finalValidation?.passed
+          : objectiveComplete(state)
             ? ("complete" as const)
             : ("active" as const),
     runId: state.runId,
@@ -1182,6 +1183,7 @@ export function statusDocument(
     baseSha: state.baseSha,
     integratedSha: state.integratedSha ?? null,
     finalValidation: state.finalValidation?.passed ?? false,
+    finalAcceptance: state.finalAcceptance ?? null,
     finalAcceptancePending: pendingDecision(state.finalAcceptancePending),
     objectiveClosure: state.objectiveClosure ?? null,
     lastError:
@@ -1415,11 +1417,7 @@ export class StateDiagnostics {
       });
       this.previousIntegrated = this.state.integratedSha;
     }
-    if (
-      this.state.finalValidation?.passed &&
-      this.state.objectiveClosure === "complete" &&
-      !this.previousFinal
-    ) {
+    if (objectiveComplete(this.state) && !this.previousFinal) {
       this.emitter.emit({
         runId: this.state.runId,
         operation: "objective-finalization",

@@ -87,6 +87,10 @@ A concrete finding permits at most one evidenced compiler revision, followed by 
 
 An operator may explicitly request exact-tree Work Item re-review through `rereview`, then `run`, after inspecting a pending result. This schedules existing validation and automatic review without restarting implementation or recording acceptance. The existing final-result continuation remains `run`, which repeats final validation and review. These explicit actions do not expand automatic provider retries or revive terminal results. [Issue #202](https://github.com/clockgrove/factory/issues/202) records this continuation boundary.
 
+### Existing workspace membership authority
+
+The pinned Objective may declare exact relative directories under `## Workspace package additions`. Compilation requires one responsible Work Item to own the existing `pnpm-workspace.yaml` and each new package manifest and carry its directory in the brief. Runtime validation compares parsed membership against the original accepted base and accepted predecessor, permits only those additions with regular JSON manifests, preserves original entry order and predecessor membership, and keeps every non-membership setting pinned. Ambiguous YAML, aliases, tags and merges fail closed. This uses the existing Objective digest and immutable Git evidence, not a new permission store. Ownership and validation commands alone never grant this authority. The same check runs before commands in Work Item, environment, QA and final validation, including command-less results. Greenfield workspace authority remains unchanged.
+
 ### Executable acceptance coverage (#248)
 
 New compiler output retains one `coverage` collection in the accepted WorkGraph.
@@ -258,6 +262,29 @@ The operator separately approved the repository rename on September 28, 2026: th
 ### Local supervision lifecycle
 
 A supported Linux systemd user manager may own the admitted coordinator independently of a chat. Registration binds the exact installed CLI, Node, configuration, state root and Objective, requires separate service consent, and never changes login persistence. Stop, disable, uninstall and artifact replacement drain the existing owner to a quiescent continuation; unknown effects do not become successful cessation. Detached attempts are not killed by service-group cleanup. Upgrades and rollback use the candidate artifact's actual continuation validator before and after drain. Unsupported state refuses without migration, deletion or allowance resets. Removing supervision preserves target binding and all execution evidence. Installed service lifecycle evidence and full autonomous Objective qualification are separate claims.
+
+### Current-graph terminal acceptance
+
+Final validation success is not Objective completion. After review the coordinator
+re-observes the default head, checks the current graph again, and seals the exact
+commit, tree, graph and configuration before beginning Objective closure. Required
+leaves and aggregate parents must have accepted proof and acknowledged issue closure;
+coverage, human decisions, pending discoveries, submitted effects and owned process
+cessation remain independent gates. Protected delivery and media acceptance keep
+their existing checks.
+
+One compact immutable binding in the atomic snapshot references the existing final
+and per-item evidence by digest. It retains diagnostic accounting scope without
+inventing complete usage totals, and records settled ownership with evidence
+retained. It is not a second acceptance ledger or deployment approval. Historical
+snapshots remain readable without fabricated bindings.
+
+Closure acknowledgement loss leaves the Objective active and an admitted owner
+paused for explicit resume/reconciliation. Reconciliation uses the authenticated
+GitHub closure contract and does not replay workers or review models. Amendment
+intake reports busy while closure is sealed or unresolved; discoveries after Done
+require successor work. A proposal arriving during review invalidates that review
+before sealing. Later default-branch changes do not rewrite the sealed candidate.
 
 ### Diagnosed bounded repair (#250)
 

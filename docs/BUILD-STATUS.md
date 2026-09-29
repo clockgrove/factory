@@ -2,7 +2,7 @@
 
 Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and [execution gates #206](https://github.com/clockgrove/factory/issues/206) and [final acceptance #207](https://github.com/clockgrove/factory/issues/207). This document records immutable distribution evidence, not a second work queue.
 
-The v0.1.38 public scenario is independently accepted. Private adopter execution and final human acceptance remain separate under #206 and #207. Historical observations below retain their original artifact and scenario scope.
+The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under #206 and explicitly accepted under #207. Historical observations below retain their original artifact and scenario scope.
 
 ## Immutable v0.1.38 artifact record
 
@@ -14,8 +14,11 @@ is tagged at source `de1e1adeab477648095c84f8c99f133a9958c592`, tree
 Independent public download and normal offline installation passed. The
 representative public workspace/LFS scenario passed independent terminal review
 on these same bytes; [#206](https://github.com/clockgrove/factory/issues/206)
-retains the exact acceptance evidence and limits. This does not transfer earlier
-worker history or establish private adopter acceptance. Earlier artifacts,
+retains the exact acceptance evidence and limits. Private implementation was delivered on v0.1.37; the explicitly upgraded v0.1.38
+installation completed final verification without replaying accepted implementation.
+Independent terminal/preservation review and explicit human acceptance are recorded
+in [#207](https://github.com/clockgrove/factory/issues/207). This is not a claim that
+v0.1.38 executed the earlier private workers. Earlier artifacts,
 failures and unknown accounting remain preserved.
 
 Public [Objective 1](https://github.com/clockgrove/factory-public-v0138-20260929/issues/1)

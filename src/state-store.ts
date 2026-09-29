@@ -136,6 +136,7 @@ export interface ControllerLock {
 }
 
 export interface ControllerOwner {
+  intake?: boolean;
   pid: number;
   startTime: string;
   objective: number;
@@ -206,6 +207,32 @@ export function acquireControllerLock(
   } finally {
     rmdirSync(guard);
   }
+}
+
+/** Retarget the same installation lease without permitting another owner between Objectives. */
+export function retargetControllerLock(
+  path: string,
+  lock: ControllerLock,
+  objective: number,
+): void {
+  const current = readControllerOwner(path);
+  const identity = linuxProcessIdentity(process.pid);
+  if (
+    !current ||
+    current.token !== lock.token ||
+    current.pid !== process.pid ||
+    current.startTime !== identity?.startTime
+  )
+    throw new Error("Installation owner changed before Objective selection");
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  const fd = openSync(temporary, "wx", 0o600);
+  try {
+    writeFileSync(fd, JSON.stringify({ ...current, objective, intake: true }));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temporary, path);
 }
 
 export function releaseControllerLock(

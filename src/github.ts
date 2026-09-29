@@ -1,5 +1,6 @@
 import type {
   GitHubGateway,
+  IntakeIssuePage,
   GraphProjection,
   MergeResult,
   NamedCheckEvidence,
@@ -21,6 +22,8 @@ type Issue = {
   body: string | null;
   state: "open" | "closed";
   pull_request?: unknown;
+  labels?: (string | { name?: string })[];
+  repository_url?: string;
 };
 type Pull = {
   number: number;
@@ -144,7 +147,60 @@ export class RealGitHubGateway implements GitHubGateway {
       !["open", "closed"].includes(issue.state)
     )
       throw new Error("Objective issue identity or state changed");
-    return { title: issue.title, body: issue.body ?? "", state: issue.state };
+    return {
+      title: issue.title,
+      body: issue.body ?? "",
+      state: issue.state,
+      labels: (issue.labels ?? []).map((label) =>
+        typeof label === "string" ? label : (label.name ?? ""),
+      ),
+    };
+  }
+
+  async intakePage(page: number, etag?: string): Promise<IntakeIssuePage> {
+    const observed = await this.client.request<{
+      status: number;
+      etag?: string;
+      data?: Issue[];
+    }>(
+      "GET",
+      this.route(
+        `issues?state=all&sort=created&direction=asc&per_page=100&page=${page}`,
+      ),
+      undefined,
+      { etag },
+    );
+    if (observed.status === 304) return { status: 304, etag: observed.etag };
+    if (!Array.isArray(observed.data)) throw new Error("Invalid intake page");
+    return {
+      ...observed,
+      data: observed.data.map((issue) => ({
+        // Preserve page length including PRs for correct pagination; unauthorized IDs never execute.
+        number: issue.pull_request ? 0 : issue.number,
+        state: issue.state,
+        labels: (issue.labels ?? []).map((label) =>
+          typeof label === "string" ? label : (label.name ?? ""),
+        ),
+      })),
+    };
+  }
+
+  async objectiveDependencies(number: number): Promise<number[]> {
+    const blockedBy = await this.client.paginate<Issue>(
+      this.route(`issues/${number}/dependencies/blocked_by`),
+    );
+    return blockedBy.map((issue) => {
+      if (
+        issue.pull_request ||
+        !Number.isSafeInteger(issue.number) ||
+        issue.repository_url !==
+          `https://api.github.com/repos/${this.repository}`
+      )
+        throw new Error(
+          "Objective predecessor is outside the bound repository",
+        );
+      return issue.number;
+    });
   }
 
   async closeIssue(

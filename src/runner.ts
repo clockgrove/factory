@@ -1,5 +1,6 @@
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
 import { applyWorkCorrection } from "./work-repair.js";
+import { workspacePackageAdditions } from "./workspace-membership.js";
 import {
   amendmentBlocksDispatch,
   applyPendingAmendment,
@@ -295,6 +296,24 @@ export async function planObjective(
         lock,
       );
   }
+}
+
+function samePreparedPlan(
+  prepared: PlanCandidate,
+  candidate: PlanCandidate,
+): boolean {
+  const { humanDecision: _preparedDecision, ...original } = prepared;
+  const { humanDecision: _candidateDecision, ...resolved } = candidate;
+  return (
+    JSON.stringify({
+      ...original,
+      review: { ...original.review, status: "bound" },
+    }) ===
+    JSON.stringify({
+      ...resolved,
+      review: { ...resolved.review, status: "bound" },
+    })
+  );
 }
 
 function checkActiveAdmission(
@@ -931,11 +950,18 @@ export async function runObjective(
       )
         continue;
       result.coordinator!.phase = "waiting";
+      const stoppedRepair = Object.entries(result.work).find(
+        ([, work]) =>
+          work.recovery?.phase === "stopped" &&
+          ["failed", "waiting"].includes(work.status),
+      );
       result.coordinator!.waitReason = result.githubClosureError
         ? "GitHub closure acknowledgement unresolved; resume to reconcile"
         : result.coordinator!.mode === "draining"
           ? "Drained; no owned attempts remain"
-          : "Awaiting exact candidate decision or resume";
+          : stoppedRepair
+            ? `Work Item ${stoppedRepair[0]}: ${stoppedRepair[1].recovery!.failure?.decision ?? "Inspect the retained recovery failure"}`
+            : "Awaiting exact candidate decision or resume";
       persist();
       await wait();
     }
@@ -1050,6 +1076,22 @@ async function runObjectivePass(
     let preparation =
       continuation?.schemaVersion === 3 ? continuation : undefined;
     let state = continuation?.schemaVersion === 2 ? continuation : undefined;
+    if (preparation?.plan && acceptedPlan && !preparation.admission) {
+      if (!samePreparedPlan(preparation.plan, acceptedPlan))
+        throw new Error(
+          "Prepared plan changed; only its exact human decision can be resolved",
+        );
+      verifyPlanCandidate(
+        acceptedPlan,
+        objective,
+        issue.body,
+        preparation.baseSha,
+        config.checkout,
+        installationConfigDigest,
+      );
+      preparation.plan = structuredClone(acceptedPlan);
+      saveState(path, preparation);
+    }
     if (preparation?.admission) {
       if (admission && admission.digest !== preparation.admission.digest)
         throw new Error("Preparation admission cannot be replaced on restart");
@@ -1202,6 +1244,13 @@ async function runObjectivePass(
       if (state.error)
         throw new Error(
           `Objective stopped: ${state.error}. Use explicit retry or operator direction.`,
+        );
+      if (
+        !state.objectiveBodyDigest &&
+        workspacePackageAdditions(issue.body).length
+      )
+        throw new Error(
+          "Workspace package authority requires a digest-bound Objective; create a new plan",
         );
       if (
         state.objectiveBodyDigest &&
@@ -1690,6 +1739,7 @@ async function runObjectivePass(
       {
         sourceDeclared:
           state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+        workspacePackageAdditions: workspacePackageAdditions(issue.body),
       },
     );
     const commandEvidence = await validateTree(

@@ -3,6 +3,7 @@ import {
   diagnoseWorkRepair,
   prepareEvidenceRecovery,
 } from "../work-repair.js";
+import { workspacePackageAdditions } from "../workspace-membership.js";
 import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -175,6 +176,7 @@ export async function runNativeGraph(args: {
             config,
             root,
             state,
+            objectiveBody: args.objectiveBody,
             item,
             store: contentStore,
             baseSha: work.baseSha!,
@@ -338,8 +340,10 @@ export async function runNativeGraph(args: {
       if (
         args.amendmentPending?.() ||
         (state.admission?.authority.repairPolicy &&
-          remainingUnits.some((unit) =>
-            unit.items.some((item) => state.work[item.id]!.status === "failed"),
+          Object.values(state.work).some(
+            (work) =>
+              work.status === "failed" &&
+              work.recovery?.failure?.classification !== "uncertain",
           ))
       )
         return settlePrepared();
@@ -483,6 +487,7 @@ export async function runNativeGraph(args: {
               config,
               root,
               state,
+              objectiveBody: args.objectiveBody,
               item,
               store: contentStore,
               baseSha: itemBase,
@@ -609,6 +614,7 @@ export async function runNativeGraph(args: {
             work.changeRef!,
           ),
           args.contentStore,
+          workspacePackageAdditions(args.objectiveBody),
         );
         await phases.reserve(item.id, "review");
         const reviewResult = () =>

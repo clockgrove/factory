@@ -24,14 +24,14 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. Install the published v0.1.39 artifacts (do not combine versions):
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The following commands target v0.1.40 and require that matching release to be published (do not combine versions):
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.39
+codex plugin marketplace add clockgrove/factory --ref v0.1.40
 codex plugin add factory@clockgrove
 
-gh release download v0.1.39 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.39.tgz --pattern SHA256SUMS
+gh release download v0.1.40 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.40.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
@@ -41,7 +41,7 @@ Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.39.tgz
+  ./clockgrove-factory-0.1.40.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

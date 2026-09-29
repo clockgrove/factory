@@ -334,6 +334,7 @@ for (const kind of [
         reviews = 0;
       const snapshots = [];
       const state = { authority: authority() };
+      const planningBody = `${body}\n## Worker material\nRetain the exact literal RELEASE_TOKEN in the worker brief. Representation is delegated to the developer. Security destination policy requires the security owner decision.\n`;
       const planner = {
         generateStructured: async (request) => {
           if (request.purpose === "diagnosis")
@@ -358,10 +359,15 @@ for (const kind of [
                 visibility: "repository",
               },
             ];
+          if (generates > 1 && kind !== "operator")
+            candidate.items[0].brief +=
+              " Retain RELEASE_TOKEN; choose a simple text representation within declared ownership.";
           return candidate;
         },
         reviewGraph: async (request) => {
           reviews++;
+          if (kind === "planning-evidence" && reviews > 1)
+            assert.match(request.graph.items[0].brief, /RELEASE_TOKEN/);
           return {
             findings:
               reviews === 1 && kind !== "planning-output"
@@ -384,7 +390,7 @@ for (const kind of [
       };
       const candidate = await compilePlan(
         1,
-        body,
+        planningBody,
         target.baseSha,
         target.checkout,
         planner,
@@ -620,98 +626,107 @@ test("durable plan --authority carries consumed planning allowance into exact ac
   }
 });
 
-test("supported repair control revalidates an unchanged candidate after an external prerequisite is restored", async () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-env-control-"));
-  const previous = process.env.XDG_STATE_HOME;
-  process.env.XDG_STATE_HOME = join(root, "state");
-  try {
-    const target = createTarget(root);
-    const config = factoryConfig(target.checkout, "example/env-control");
-    const gate = join(root, "readiness");
-    const command = `test -f '${gate}'`;
-    const source = `${body}\n## Environment\nThe controller requires this already-provisioned environment prerequisite.\n- ${command}\n`;
-    const graph = {
-      objective: 1,
-      baseSha: target.baseSha,
-      items: [
-        {
-          ...item(),
-          validation: [
-            ...item().validation,
-            { command, provenance: "source-declared", source: "OBJECTIVE" },
-          ],
+for (const delivery of ["regular", "native-stack"])
+  test(`${delivery}: supported repair control revalidates an unchanged candidate after an external prerequisite is restored`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "factory-env-control-"));
+    const previous = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = join(root, "state");
+    try {
+      const target = createTarget(root);
+      const config = factoryConfig(
+        target.checkout,
+        `example/env-control-${delivery}`,
+        delivery,
+      );
+      const gate = join(root, "readiness");
+      const command = `test -f '${gate}'`;
+      const source = `${body}\n## Environment\nThe controller requires this already-provisioned environment prerequisite.\n- ${command}\n`;
+      const graph = {
+        objective: 1,
+        baseSha: target.baseSha,
+        items: [
+          {
+            ...item(),
+            validation: [
+              ...item().validation,
+              { command, provenance: "source-declared", source: "OBJECTIVE" },
+            ],
+          },
+        ],
+      };
+      let reviews = 0;
+      const planner = model(graph);
+      planner.reviewResult = async (request) => {
+        reviews++;
+        return reviewer(request);
+      };
+      const fixture = makeApplication({
+        config,
+        graph,
+        objectiveBody: source,
+        fakeRoot: join(root, "fake"),
+        actions: {
+          result: { files: [{ path: "result.txt", text: "accepted\n" }] },
         },
-      ],
-    };
-    let reviews = 0;
-    const planner = model(graph);
-    planner.reviewResult = async (request) => {
-      reviews++;
-      return reviewer(request);
-    };
-    const fixture = makeApplication({
-      config,
-      graph,
-      objectiveBody: source,
-      fakeRoot: join(root, "fake"),
-      actions: {
-        result: { files: [{ path: "result.txt", text: "accepted\n" }] },
-      },
-      planningModel: planner,
-    });
-    const policy = authority();
-    policy.repairClasses = ["validation-environment"];
-    policy.allowances.implementationRepairs = 0;
-    const plan = await fixture.application.planObjective(1);
-    const admitted = await fixture.application.admitObjective(1, plan, policy);
-    const { readState, statePath } = await import("../dist/state-store.js");
-    const { requestControl } = await import("../dist/coordinator-control.js");
-    const running = fixture.application.runObjective(1, plan, admitted);
-    const failed = await waitForFile(
-      () => {
-        const state = readState(config.repository, 1);
-        return state?.work.result.status === "failed" ? state : undefined;
-      },
-      statePath(config.repository, 1),
-      "preserved validation candidate",
-    );
-    writeFileSync(gate, "ready\n");
-    const work = failed.work.result;
-    const reply = await requestControl(config.repository, {
-      objective: 1,
-      action: "repair",
-      input: {
-        item: "result",
-        treeSha: work.treeSha,
-        correction: {
-          kind: "validation-environment",
-          failureDigest: work.recovery.failure.digest,
-          actor: "fixture",
-          diagnosis: "Declared controller prerequisite was unavailable",
-          correction:
-            "The same declared prerequisite is now provisioned; revalidate the preserved exact candidate",
+        planningModel: planner,
+      });
+      const policy = authority();
+      policy.repairClasses = ["validation-environment"];
+      policy.allowances.implementationRepairs = 0;
+      const plan = await fixture.application.planObjective(1);
+      const admitted = await fixture.application.admitObjective(
+        1,
+        plan,
+        policy,
+      );
+      const { readState, statePath } = await import("../dist/state-store.js");
+      const { requestControl } = await import("../dist/coordinator-control.js");
+      const running = fixture.application.runObjective(1, plan, admitted);
+      const failed = await waitForFile(
+        () => {
+          const state = readState(config.repository, 1);
+          return state?.work.result.status === "failed" ? state : undefined;
         },
-      },
-    });
-    assert.equal(reply.handled, true);
-    const done = await running;
-    assert.equal(done.finalValidation.passed, true);
-    assert.equal(done.work.result.attempt, work.attempt);
-    assert.equal(done.work.result.treeSha, work.treeSha);
-    assert.equal(
-      readEvents(fixture.eventsPath).filter((event) => event.type === "start")
-        .length,
-      1,
-    );
-    assert.equal(done.allowanceConsumption.resultRereviews, 1);
-    assert.ok(reviews >= 2);
-    assert.equal(done.work.result.recovery.history[0].work.error, work.error);
-  } finally {
-    if (previous === undefined) delete process.env.XDG_STATE_HOME;
-    else process.env.XDG_STATE_HOME = previous;
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+        statePath(config.repository, 1),
+        "preserved validation candidate",
+      );
+      writeFileSync(gate, "ready\n");
+      const work = failed.work.result;
+      const reply = await requestControl(config.repository, {
+        objective: 1,
+        action: "repair",
+        input: {
+          item: "result",
+          treeSha: work.treeSha,
+          correction: {
+            kind: "validation-environment",
+            failureDigest: work.recovery.failure.digest,
+            actor: "fixture",
+            diagnosis: "Declared controller prerequisite was unavailable",
+            correction:
+              "The same declared prerequisite is now provisioned; revalidate the preserved exact candidate",
+          },
+        },
+      });
+      assert.equal(reply.handled, true);
+      const done = await running;
+      assert.equal(done.finalValidation.passed, true);
+      assert.equal(done.work.result.attempt, work.attempt);
+      assert.equal(done.work.result.treeSha, work.treeSha);
+      assert.equal(
+        readEvents(fixture.eventsPath).filter((event) => event.type === "start")
+          .length,
+        1,
+      );
+      assert.equal(done.allowanceConsumption.resultRereviews, 1);
+      assert.ok(reviews >= 2);
+      assert.equal(done.work.result.recovery.history[0].work.error, work.error);
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
 for (const delivery of ["regular", "native-stack"])
   test(`${delivery}: evidence-only recovery retains original rejection and exact worker result`, async () => {
@@ -908,4 +923,119 @@ test("real structured adapter uses a diagnosis request rather than a graph-compi
   assert.deepEqual(observed, result);
   assert.match(prompt, /requested diagnostic JSON/);
   assert.doesNotMatch(prompt, /Compile this human Objective/);
+});
+
+test("a real human-owned planning decision resolves the exact persisted plan without repeating models", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-human-plan-"));
+  const previous = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  try {
+    const target = createTarget(root);
+    const config = factoryConfig(target.checkout, "example/human-plan");
+    const graph = { objective: 1, baseSha: target.baseSha, items: [item()] };
+    let calls = 0;
+    const planner = model(graph, () => ({
+      kind: "operator",
+      diagnosis: "Policy selection belongs to the owner",
+      correction: "",
+    }));
+    const generate = planner.generateStructured;
+    planner.generateStructured = async (request) => {
+      calls++;
+      return generate(request);
+    };
+    planner.reviewGraph = async (request) => ({
+      findings: [
+        {
+          evidenceIds: [request.reviewPacket.evidence[0].id],
+          detail: "Source needs an owner interpretation",
+          question: "Which delivery policy applies?",
+        },
+      ],
+    });
+    const fixture = makeApplication({
+      config,
+      graph,
+      objectiveBody: body,
+      fakeRoot: join(root, "fake"),
+      actions: {
+        result: { files: [{ path: "result.txt", text: "accepted\n" }] },
+      },
+      planningModel: planner,
+    });
+    const plan = await fixture.application.planObjective(1, [], authority());
+    assert.equal(plan.review.status, "needs-human");
+    const answered = await fixture.application.decidePlan(1, plan, {
+      actor: "fixture-owner",
+      outcome: "accept",
+      reason: "Answer applies to this exact reviewed packet",
+      answer: "Use the existing declared target policy",
+    });
+    const admitted = await fixture.application.admitObjective(
+      1,
+      answered,
+      authority(),
+    );
+    const before = calls;
+    const done = await fixture.application.runObjective(1, answered, admitted);
+    assert.equal(done.finalValidation.passed, true);
+    assert.equal(calls, before);
+    assert.equal(done.allowanceConsumption.planningRevisions, 1);
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pause after known planning response preserves compilation for resume without repair authority or extra charge", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-planning-pause-"));
+  try {
+    const target = createTarget(root);
+    const graph = { objective: 1, baseSha: target.baseSha, items: [item()] };
+    const policy = authority();
+    delete policy.repairPolicy;
+    policy.repairClasses = [];
+    const state = { authority: policy };
+    let paused = false,
+      generations = 0,
+      reviews = 0;
+    const planner = {
+      generateStructured: async (request) => {
+        generations++;
+        paused = true;
+        return withCoverage(request, graph);
+      },
+      reviewGraph: async () => {
+        reviews++;
+        return { findings: [] };
+      },
+    };
+    const compile = () =>
+      compilePlan(
+        1,
+        body,
+        target.baseSha,
+        target.checkout,
+        planner,
+        undefined,
+        undefined,
+        undefined,
+        [],
+        { state, save: () => {}, stopped: () => paused },
+      );
+    await assert.rejects(compile(), /paused/);
+    assert.equal(state.planningRecovery.phase, "ready");
+    assert.ok(state.planningRecovery.response);
+    assert.equal(reviews, 0);
+    assert.equal(state.allowanceConsumption, undefined);
+    paused = false;
+    const accepted = await compile();
+    assert.equal(accepted.review.status, "clean");
+    assert.equal(generations, 1);
+    assert.equal(reviews, 1);
+    assert.equal(state.allowanceConsumption, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

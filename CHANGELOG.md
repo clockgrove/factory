@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.38 — 2026-09-29
+
+- Replace graph, Work Item and final review quotation transcription with packet-local evidence and criterion IDs. Preserve strict identity validation, semantic review and existing exact-tree operator decisions; malformed protocol responses remain distinct from substantive findings (#233 / PR #235).
+- Allocate bounded review text by actual emitted bytes and separate metadata from independently complete file patches, so unrelated omitted text does not discard complete evidence (#234 / PR #235).
+- Parse selected Markdown sections with a shared fence-aware ATX scanner, preserving exact source bodies, optional closing hashes and literal C# headings (#232 / PR #235).
+- Preserve dependencies, provider/model authority and lifecycle limits. This candidate does not inherit earlier distribution or live qualification; exact-artifact public qualification must precede adopter continuation under #206, and explicit final user acceptance remains #207.
+
 ## 0.1.37 — 2026-09-28
 
 - Record accepted ignored relative link paths during the existing original-worker collection safety scan, preserving provider evidence and carrying completed observations through existing regular/native private diagnostics with attempt and result-tree identities (#225 / PR #227).

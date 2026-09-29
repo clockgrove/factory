@@ -1,3 +1,4 @@
+import { graphDigest } from "./graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "./compiler.js";
@@ -86,7 +87,7 @@ export async function runQaItem(args: {
         `QA ${item.id} submitted ${work.pendingEffect} has unknown outcome; operator direction required`,
       );
     if (
-      item.kind !== "qa" ||
+      (item.kind !== "qa" && item.kind !== "aggregate") ||
       !item.dependencies.every(
         (id) =>
           state.work[id]?.status === "done" && state.work[id]?.integratedSha,
@@ -99,6 +100,7 @@ export async function runQaItem(args: {
     work.status = "running";
     work.step = "validate";
     work.attempt ??= randomUUID();
+    work.graphRevisionDigest ??= graphDigest(state.graph);
     work.startedAt ??= new Date().toISOString();
     work.baseSha = commit;
     work.executionBaseSha = commit;

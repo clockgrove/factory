@@ -253,3 +253,31 @@ If a regular Work Item remains `running` at `deliver`, `run` refuses the ambiguo
 Factory checks changed-path ownership, unsafe links and special files, and scans staged content and working bytes with its packaged Secretlint rules before publication. Target ignore files and scanner configuration cannot bypass the packaged scan. A finding reports its rule and path without the secret value. Review false positives outside the worker checkout; an operator may select a reviewed external configuration with `FACTORY_SECRETLINT_CONFIG` before an explicit retry. Do not weaken the scan merely to make an attempt pass.
 
 Workers receive a filtered environment; controller GitHub, Git, and SSH credential variables remain excluded even if named in an allowlist. These controls do not prevent same-user code from accessing readable host files. Run only trusted code, retain repository protections, and follow the [security policy](../SECURITY.md).
+
+## Discover required work during an admitted Objective
+
+This source capability is not included in published v0.1.39. An admitted Objective
+can use its recorded planning-revision allowance to review necessary discoveries.
+Workers stage a private `.factory-discovery.json` proposal with evidence, scope,
+ownership, acceptance and dependencies. Factory collects it with the ordinary result,
+then independently reviews and projects an in-scope graph revision. Workers keep
+implementing only their already accepted scope. Out-of-scope proposals remain backlog.
+
+An operator can submit the same structured discovery to a running owner:
+
+```sh
+factory propose-amendment --objective 123 --proposal /absolute/path/proposal.json
+```
+
+The proposal includes `scope` (`in-scope` or `backlog`), `reason`, nonempty `evidence`,
+`ownership` and `acceptance` arrays, a `dependencies` array of known Work Item IDs,
+`actor`, and `expectedGraphDigest` from the current status graph. An optional `graph`
+is a complete proposed replacement graph; it undergoes the same deterministic and
+independent checks. The owner rejects stale proposals. A started/completed node's
+identity cannot be repurposed; propose successor or revalidation work instead.
+
+A decomposed parent waits for every explicit child dependency and proves its own
+acceptance without another implementation worker or synthetic PR. Unknown model or
+projection outcomes pause affected work without repeating possibly completed calls.
+Inspect the preserved pending proposal and original evidence before choosing a
+supported continuation; editing state or running a fresh root cannot bypass a fence.

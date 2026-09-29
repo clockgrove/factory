@@ -1,0 +1,593 @@
+import { createHash, randomUUID } from "node:crypto";
+import {
+  compileObjective,
+  objectiveCriteria,
+  planningSources,
+  planReviewPacket,
+  validateCommandProvenance,
+  validateGraph,
+  validateGraphSources,
+} from "./compiler.js";
+import type { FactoryConfig } from "./config.js";
+import type {
+  GitHubGateway,
+  PlanningModel,
+  WorkDiscovery,
+  WorkGraph,
+} from "./contracts.js";
+import { CompletedModelInvocationError } from "./contracts.js";
+import { linearDeliveryUnits } from "./delivery/plan.js";
+import {
+  executionProfileChoices,
+  normalizeExecutionProfiles,
+  verifyExecutionProfiles,
+} from "./execution-profiles.js";
+import { assertCoverageSources, coverageObligations } from "./qa.js";
+import { decodeGraphReview, reviewPacket } from "./review-evidence.js";
+import type { DiagnosticEmitter } from "./diagnostics.js";
+import type { FactoryState } from "./state.js";
+
+export interface AmendmentProposal extends WorkDiscovery {
+  expectedGraphDigest: string;
+  actor: string;
+  /** Operator supplied candidate; worker discoveries are compiled by the controller. */
+  graph?: WorkGraph;
+  worker?: { itemId: string; attempt: string };
+}
+export interface PendingAmendment {
+  id: string;
+  proposal: AmendmentProposal;
+  phase:
+    | "ready"
+    | "compiling"
+    | "reviewing"
+    | "projecting"
+    | "rejected"
+    | "backlog";
+  graph?: WorkGraph;
+  reviewDigest?: string;
+  issueByItemId: Record<string, number>;
+  projectionPending?: string;
+  error?: string;
+}
+export interface GraphRevision {
+  graph: WorkGraph;
+  digest: string;
+  parentDigest?: string;
+  proposal?: AmendmentProposal;
+  reviewDigest?: string;
+  acceptedAt?: string;
+}
+export type AllowanceConsumption = {
+  planningRevisions: number;
+  implementationRepairs: number;
+  resultRereviews: number;
+};
+export const graphDigest = (graph: WorkGraph): string =>
+  createHash("sha256").update(JSON.stringify(graph)).digest("hex");
+
+export function assertDiscovery(value: WorkDiscovery): void {
+  if (
+    !value ||
+    !["in-scope", "backlog"].includes(value.scope) ||
+    typeof value.reason !== "string" ||
+    !value.reason.trim()
+  )
+    throw new Error("Discovery requires explicit scope and reason");
+  for (const field of [
+    "evidence",
+    "ownership",
+    "acceptance",
+    "dependencies",
+  ] as const)
+    if (
+      !Array.isArray(value[field]) ||
+      !value[field].every((text) => typeof text === "string" && text.trim()) ||
+      (field !== "dependencies" && !value[field].length)
+    )
+      throw new Error(`Discovery lacks ${field}`);
+}
+
+/** Validate the immutable succession, never rewrite the admitted initial digest. */
+export function assertGraphRevisions(state: FactoryState): void {
+  for (const proposal of state.backlogDiscoveries ?? []) {
+    assertDiscovery(proposal);
+    if (proposal.scope !== "backlog")
+      throw new Error("Backlog discovery cannot authorize execution");
+  }
+  const revisions = state.graphRevisions;
+  if (revisions) {
+    if (
+      !revisions.length ||
+      !state.admission ||
+      revisions[0]!.digest !== state.admission.graphDigest
+    )
+      throw new Error("Graph revisions do not descend from admitted authority");
+    for (const [index, revision] of revisions.entries()) {
+      if (
+        revision.digest !== graphDigest(revision.graph) ||
+        revision.graph.objective !== state.objective ||
+        revision.graph.baseSha !== state.baseSha
+      )
+        throw new Error("Graph revision identity changed");
+      if (
+        index &&
+        (revision.parentDigest !== revisions[index - 1]!.digest ||
+          !revision.proposal ||
+          revision.proposal.expectedGraphDigest !== revision.parentDigest ||
+          !/^[a-f0-9]{64}$/.test(revision.reviewDigest ?? "") ||
+          !Number.isFinite(Date.parse(revision.acceptedAt ?? "")))
+      )
+        throw new Error(
+          "Graph revision lacks reviewed compare-and-set succession",
+        );
+    }
+    if (revisions.at(-1)!.digest !== graphDigest(state.graph))
+      throw new Error("Current graph differs from accepted revision");
+  }
+  if (state.allowanceConsumption) {
+    if (!state.admission)
+      throw new Error("Allowance consumption lacks admission");
+    for (const key of [
+      "planningRevisions",
+      "implementationRepairs",
+      "resultRereviews",
+    ] as const)
+      if (
+        !Number.isSafeInteger(state.allowanceConsumption[key]) ||
+        state.allowanceConsumption[key] < 0 ||
+        state.allowanceConsumption[key] >
+          state.admission.authority.allowances[key]
+      )
+        throw new Error("Objective allowance consumption is invalid");
+    if (
+      (revisions?.length ?? 1) - 1 >
+      state.allowanceConsumption.planningRevisions
+    )
+      throw new Error("Accepted revisions exceed consumed allowance");
+  } else if (revisions && revisions.length > 1)
+    throw new Error("Graph revisions lost Objective allowance consumption");
+  for (const [id, work] of Object.entries(state.work)) {
+    if (!work.graphRevisionDigest) continue;
+    const revision =
+      revisions?.find((entry) => entry.digest === work.graphRevisionDigest)
+        ?.graph ??
+      (graphDigest(state.graph) === work.graphRevisionDigest
+        ? state.graph
+        : undefined);
+    if (
+      !revision ||
+      JSON.stringify(revision.items.find((item) => item.id === id)) !==
+        JSON.stringify(state.graph.items.find((item) => item.id === id))
+    )
+      throw new Error("Attempt graph revision binding changed");
+  }
+  const pending = state.pendingAmendment;
+  if (pending) {
+    assertDiscovery(pending.proposal);
+    if (
+      !pending.id ||
+      ![
+        "ready",
+        "compiling",
+        "reviewing",
+        "projecting",
+        "rejected",
+        "backlog",
+      ].includes(pending.phase) ||
+      pending.proposal.expectedGraphDigest !== graphDigest(state.graph)
+    )
+      throw new Error("Pending amendment has stale graph identity");
+    if (["reviewing", "projecting"].includes(pending.phase) && !pending.graph)
+      throw new Error("Pending amendment lacks candidate graph");
+  }
+}
+
+export function hasPendingAmendmentEffect(state: FactoryState): boolean {
+  return (
+    !!state.pendingAmendment &&
+    (["compiling", "reviewing", "projecting"].includes(
+      state.pendingAmendment.phase,
+    ) ||
+      !!state.pendingAmendment.projectionPending)
+  );
+}
+
+export function submitAmendment(
+  state: FactoryState,
+  proposal: AmendmentProposal,
+): PendingAmendment {
+  assertDiscovery(proposal);
+  if (
+    !proposal.actor?.trim() ||
+    proposal.expectedGraphDigest !== graphDigest(state.graph)
+  )
+    throw new Error(
+      "Amendment actor or compare-and-set graph identity is invalid",
+    );
+  if (
+    !state.admission ||
+    state.cancelRequested ||
+    state.cancelledAt ||
+    state.finalValidation?.passed
+  )
+    throw new Error("Amendment requires a nonterminal admitted Objective");
+  if (proposal.scope === "backlog") {
+    state.backlogDiscoveries ??= [];
+    state.backlogDiscoveries.push(structuredClone(proposal));
+    return {
+      id: randomUUID(),
+      proposal: structuredClone(proposal),
+      phase: "backlog",
+      issueByItemId: {},
+    };
+  }
+  if (state.pendingAmendment)
+    throw new Error("An amendment already awaits disposition");
+  if (proposal.worker) {
+    const work = state.work[proposal.worker.itemId];
+    if (!work || work.attempt !== proposal.worker.attempt)
+      throw new Error("Discovery has stale worker attempt identity");
+  }
+  state.pendingAmendment = {
+    id: randomUUID(),
+    proposal: structuredClone(proposal),
+    phase: "ready",
+    issueByItemId: { ...state.issueByItemId },
+  };
+  // Discovery invalidates finalization even when a review is already in flight.
+  delete state.finalValidation;
+  delete state.finalAcceptancePending;
+  delete state.finalAcceptanceDecisions;
+  return state.pendingAmendment;
+}
+
+export function recordWorkerDiscovery(
+  state: FactoryState,
+  itemId: string,
+  discovery: WorkDiscovery | undefined,
+): void {
+  if (!discovery) return;
+  assertDiscovery(discovery);
+  const work = state.work[itemId]!;
+  if (!work.attempt) throw new Error("Worker discovery lacks an attempt");
+  work.discovery = { ...structuredClone(discovery), attempt: work.attempt };
+}
+
+/** Selection is from settled result evidence in the existing snapshot, not another work queue. */
+export function selectWorkerAmendment(state: FactoryState): void {
+  if (state.pendingAmendment || !state.admission) return;
+  for (const [itemId, work] of Object.entries(state.work)) {
+    if (
+      !work.discovery ||
+      work.discovery.scope === "backlog" ||
+      work.discoveryDisposition
+    )
+      continue;
+    submitAmendment(state, {
+      ...work.discovery,
+      actor: `worker:${itemId}`,
+      expectedGraphDigest: graphDigest(state.graph),
+      worker: { itemId, attempt: work.discovery.attempt },
+    });
+    work.discoveryDisposition = "proposed";
+    return;
+  }
+}
+
+export function amendmentBlocksDispatch(state: FactoryState): boolean {
+  return (
+    (!!state.pendingAmendment && state.pendingAmendment.phase !== "backlog") ||
+    (!!state.admission &&
+      Object.values(state.work).some(
+        (work) =>
+          work.discovery?.scope === "in-scope" && !work.discoveryDisposition,
+      ))
+  );
+}
+
+export function validateAmendment(
+  state: FactoryState,
+  graph: WorkGraph,
+  config: FactoryConfig,
+  body: string,
+): void {
+  const pending = state.pendingAmendment!;
+  if (pending.proposal.expectedGraphDigest !== graphDigest(state.graph))
+    throw new Error("Stale amendment candidate");
+  const sources = planningSources(
+    body,
+    state.baseSha,
+    config.checkout,
+    state.additionalSources,
+  );
+  validateGraph(
+    graph,
+    state.objective,
+    state.baseSha,
+    new Set(sources.map((source) => source.path)),
+  );
+  validateCommandProvenance(graph, sources, config.checkout);
+  validateGraphSources(graph, sources, config.checkout, body, state.baseSha);
+  verifyExecutionProfiles(graph, executionProfileChoices(config));
+  assertCoverageSources(
+    graph,
+    sources,
+    coverageObligations(body, objectiveCriteria(body)),
+  );
+  if (!graph.coverage)
+    throw new Error("Amendment requires retained acceptance coverage");
+  for (const old of state.graph.items) {
+    const next = graph.items.find((item) => item.id === old.id);
+    if (!next)
+      throw new Error("Amendments cannot remove stable Work Item identities");
+    const changed = JSON.stringify(next) !== JSON.stringify(old);
+    const work = state.work[old.id]!;
+    if (
+      changed &&
+      (work.status !== "pending" ||
+        work.attempt ||
+        work.execution ||
+        work.pullRequest ||
+        work.pendingEffect)
+    )
+      throw new Error(
+        `Started/completed Work Item ${old.id} is immutable; add explicit successor or revalidation work`,
+      );
+    if (
+      old.acceptance.some((criterion) => !next.acceptance.includes(criterion))
+    )
+      throw new Error(
+        "Amendments cannot delete accepted Work Item obligations",
+      );
+  }
+  for (const entry of state.graph.coverage ?? []) {
+    const next = graph.coverage.find(
+      (candidate) => candidate.criterionId === entry.criterionId,
+    );
+    if (!next || JSON.stringify(next.source) !== JSON.stringify(entry.source))
+      throw new Error(
+        "Amendment deletes or changes source acceptance coverage",
+      );
+  }
+  if (config.delivery.kind === "native-stack") {
+    const nextUnits = linearDeliveryUnits(graph);
+    for (const unit of linearDeliveryUnits(state.graph)) {
+      if (
+        !unit.items.some(
+          (item) =>
+            state.work[item.id]?.attempt || state.work[item.id]?.pullRequest,
+        )
+      )
+        continue;
+      const next = nextUnits.find((candidate) => candidate.id === unit.id);
+      if (
+        !next ||
+        JSON.stringify(next.items.map((item) => item.id)) !==
+          JSON.stringify(unit.items.map((item) => item.id))
+      )
+        throw new Error(
+          "Amendment repartitions a started native delivery unit",
+        );
+    }
+  }
+}
+
+/** One bounded compilation/review at a settled boundary. Unknown external effects remain fenced. */
+export async function applyPendingAmendment(args: {
+  state: FactoryState;
+  config: FactoryConfig;
+  body: string;
+  model: PlanningModel;
+  github: GitHubGateway;
+  save: () => void;
+  cancelled: () => boolean;
+  diagnostics?: DiagnosticEmitter;
+}): Promise<boolean> {
+  const { state, config, save } = args;
+  selectWorkerAmendment(state);
+  const pending = state.pendingAmendment;
+  if (!pending || pending.phase === "backlog") return false;
+  if (
+    Object.values(state.work).some(
+      (work) =>
+        work.status === "running" ||
+        work.status === "published" ||
+        work.pendingEffect,
+    ) ||
+    state.coordinator?.processes?.length
+  )
+    return false;
+  if (pending.phase !== "ready")
+    throw new Error(
+      `Amendment ${pending.phase} cannot be replayed; inspect preserved evidence`,
+    );
+  state.allowanceConsumption ??= {
+    planningRevisions: 0,
+    implementationRepairs: 0,
+    resultRereviews: 0,
+  };
+  const consumption = state.allowanceConsumption;
+  if (
+    consumption.planningRevisions >=
+    state.admission!.authority.allowances.planningRevisions
+  )
+    throw new Error("Objective planning revision allowance exhausted");
+  consumption.planningRevisions++;
+  state.graphRevisions ??= [
+    { graph: structuredClone(state.graph), digest: graphDigest(state.graph) },
+  ];
+  save();
+  let compilationResponseObserved = false;
+  try {
+    if (args.cancelled()) throw new Error("Objective cancelled");
+    const choices = executionProfileChoices(config);
+    if (pending.proposal.graph) {
+      pending.graph = structuredClone(pending.proposal.graph);
+      for (const item of pending.graph.items) delete item.executionBinding;
+      normalizeExecutionProfiles(pending.graph, choices);
+    } else {
+      pending.phase = "compiling";
+      save();
+      pending.graph = await compileObjective(
+        state.objective,
+        args.body,
+        state.baseSha,
+        config.checkout,
+        {
+          generateStructured: async (request) => {
+            const response = await args.model.generateStructured(request);
+            compilationResponseObserved = true;
+            return response;
+          },
+          reviewGraph: (request) => args.model.reviewGraph(request),
+        },
+        [],
+        [],
+        {
+          invocationId: randomUUID(),
+          phase: "compile",
+          ordinal: consumption.planningRevisions,
+          observe: args.diagnostics?.modelObserver({
+            scopeId: pending.id,
+            runId: state.runId,
+          }),
+        },
+        choices,
+        state.additionalSources,
+        {
+          currentGraph: state.graph,
+          discovery: pending.proposal,
+          immutableItemIds: Object.keys(state.work).filter(
+            (id) =>
+              state.work[id]!.status !== "pending" || state.work[id]!.attempt,
+          ),
+        },
+      );
+    }
+    pending.phase = "ready";
+    save();
+    validateAmendment(state, pending.graph, config, args.body);
+    if (args.cancelled()) throw new Error("Objective cancelled");
+    const sources = planningSources(
+      args.body,
+      state.baseSha,
+      config.checkout,
+      state.additionalSources,
+    );
+    const packet = planReviewPacket(
+      args.body,
+      state.baseSha,
+      sources,
+      pending.graph,
+      config.checkout,
+      choices,
+    );
+    packet.amendment = {
+      previousGraph: state.graph,
+      proposal: pending.proposal,
+      work: Object.fromEntries(
+        Object.entries(state.work).map(([id, work]) => [
+          id,
+          {
+            status: work.status,
+            attempt: work.attempt,
+            treeSha: work.treeSha,
+            changeRef: work.changeRef,
+            pullRequest: work.pullRequest,
+            integratedSha: work.integratedSha,
+          },
+        ]),
+      ),
+    };
+    const evidence = reviewPacket(
+      [],
+      sources.map((source) => ({ ...source, origin: "source" as const })),
+    );
+    pending.phase = "reviewing";
+    save();
+    const response = await args.model.reviewGraph({
+      ...packet,
+      reviewPacket: evidence,
+      invocation: {
+        invocationId: randomUUID(),
+        phase: "graph-review",
+        ordinal: consumption.planningRevisions,
+        observe: args.diagnostics?.modelObserver({
+          scopeId: pending.id,
+          runId: state.runId,
+        }),
+      },
+    });
+    pending.phase = "ready";
+    save();
+    const findings = decodeGraphReview(response, evidence);
+    if (findings.length)
+      throw new Error(
+        `Independent amendment review rejected: ${JSON.stringify(findings)}`,
+      );
+    pending.reviewDigest = createHash("sha256")
+      .update(JSON.stringify({ packet, findings }))
+      .digest("hex");
+    validateAmendment(state, pending.graph, config, args.body);
+    if (args.cancelled()) throw new Error("Objective cancelled");
+    pending.phase = "projecting";
+    save();
+    const projected = await args.github.projectGraph({
+      graph: pending.graph,
+      previousGraph: state.graph,
+      objectiveIssue: state.objective,
+      knownIssues: pending.issueByItemId,
+      completedItems: Object.keys(state.work).filter(
+        (id) => state.work[id]!.status === "done",
+      ),
+      beforeCreate: (id) => {
+        if (args.cancelled()) throw new Error("Objective cancelled");
+        pending.projectionPending = id;
+        save();
+      },
+      projected: (id, issue) => {
+        pending.issueByItemId[id] = issue;
+        if (pending.projectionPending === id) delete pending.projectionPending;
+        save();
+      },
+    });
+    if (args.cancelled()) throw new Error("Objective cancelled");
+    validateAmendment(state, pending.graph, config, args.body);
+    const proposalReceipt = structuredClone(pending.proposal);
+    delete proposalReceipt.graph;
+    state.graphRevisions.push({
+      graph: structuredClone(pending.graph),
+      digest: graphDigest(pending.graph),
+      parentDigest: graphDigest(state.graph),
+      proposal: proposalReceipt,
+      reviewDigest: pending.reviewDigest,
+      acceptedAt: new Date().toISOString(),
+    });
+    state.graph = pending.graph;
+    state.issueByItemId = projected.issueByItemId;
+    for (const item of state.graph.items)
+      state.work[item.id] ??= { status: "pending" };
+    if (pending.proposal.worker)
+      state.work[pending.proposal.worker.itemId]!.discoveryDisposition =
+        "accepted";
+    delete state.pendingAmendment;
+    delete state.error;
+    save();
+    return true;
+  } catch (error) {
+    if (
+      !["compiling", "reviewing", "projecting"].includes(pending.phase) ||
+      error instanceof CompletedModelInvocationError ||
+      (pending.phase === "compiling" && compilationResponseObserved)
+    )
+      pending.phase = "rejected";
+    pending.error = error instanceof Error ? error.message : String(error);
+    if (state.coordinator) {
+      state.coordinator.mode = "paused";
+      state.coordinator.waitReason = pending.error;
+    }
+    save();
+    throw error;
+  }
+}

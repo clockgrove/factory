@@ -16,7 +16,8 @@ export interface ControlRequest {
     | "retry"
     | "rereview"
     | "decide-result"
-    | "select";
+    | "select"
+    | "propose-amendment";
   input?: Record<string, unknown>;
 }
 const socketPath = (repository: string) =>

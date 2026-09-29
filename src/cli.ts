@@ -45,7 +45,7 @@ function options(args: string[], name: string): string[] {
 
 function help(): void {
   console.log(
-    `Factory CLI\n\nCommands:\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
+    `Factory CLI\n\nCommands:\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  propose-amendment --objective N --proposal FILE [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
   );
 }
 
@@ -216,6 +216,7 @@ async function main(): Promise<void> {
       "review",
       "select",
       "cancel",
+      "propose-amendment",
       "pause",
       "drain",
       "resume",
@@ -348,6 +349,22 @@ async function main(): Promise<void> {
   let application: ReturnType<typeof compose> | undefined;
   const requireApplication = (): ReturnType<typeof compose> =>
     (application ??= compose(config));
+  if (command === "propose-amendment") {
+    const proposalPath = option(args, "proposal");
+    if (!proposalPath)
+      throw new Error("propose-amendment requires --proposal FILE");
+    const reply = await requestControl(config.repository, {
+      objective,
+      action: "propose-amendment",
+      input: JSON.parse(readFileSync(proposalPath, "utf8")),
+    });
+    if (!reply.handled)
+      throw new Error(
+        "Start the existing Objective owner before proposing an amendment",
+      );
+    console.log(JSON.stringify(reply.result, null, 2));
+    return;
+  }
   if (["pause", "drain", "resume"].includes(command)) {
     console.log(
       JSON.stringify(

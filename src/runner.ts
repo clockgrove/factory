@@ -1,3 +1,11 @@
+import {
+  amendmentBlocksDispatch,
+  applyPendingAmendment,
+  graphDigest,
+  hasPendingAmendmentEffect,
+  submitAmendment,
+  type AmendmentProposal,
+} from "./graph-amendments.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { userInfo } from "node:os";
@@ -401,6 +409,10 @@ async function cancelKnownWork(
     errors.push(
       "Submitted preparation effect has unknown outcome; operator direction required",
     );
+  if (state.schemaVersion === 2 && hasPendingAmendmentEffect(state))
+    errors.push(
+      "Submitted amendment effect has unknown outcome; operator direction required",
+    );
   if (state.coordinator?.phase === "objective-review-submitted")
     errors.push(
       "Submitted Objective review outcome is unknown; operator direction required",
@@ -567,6 +579,17 @@ export async function runObjective(
         phaseStartedAt: new Date().toISOString(),
       };
       if (request.action === "status") return state.coordinator;
+      if (request.action === "propose-amendment") {
+        if (state.schemaVersion !== 2)
+          throw new Error("Planning has no active graph to amend");
+        const result = submitAmendment(
+          state,
+          request.input as unknown as AmendmentProposal,
+        );
+        persist();
+        wake();
+        return result;
+      }
       if (request.action === "cancel") {
         cancel();
         return "requested";
@@ -686,6 +709,11 @@ export async function runObjective(
         !result.admission
       )
         return result;
+      if (
+        amendmentBlocksDispatch(result) &&
+        result.pendingAmendment?.phase !== "rejected"
+      )
+        continue;
       result.coordinator!.phase = "waiting";
       result.coordinator!.waitReason =
         result.coordinator!.mode === "draining"
@@ -834,6 +862,10 @@ async function runObjectivePass(
         throw new Error(
           "Interrupted coordinator subprocess remains owned; cancel or resolve ownership before continuing",
         );
+      if (state.schemaVersion === 2 && hasPendingAmendmentEffect(state))
+        throw new Error(
+          "Submitted amendment effect has unknown outcome; operator direction required",
+        );
       if (state.coordinator?.phase === "objective-review-submitted")
         throw new Error(
           "Interrupted Objective review outcome is unknown; operator direction required",
@@ -862,9 +894,7 @@ async function runObjectivePass(
         }));
         if (
           state.admission.graphDigest !==
-            createHash("sha256")
-              .update(JSON.stringify(state.graph))
-              .digest("hex") ||
+            (state.graphRevisions?.[0]?.digest ?? graphDigest(state.graph)) ||
           JSON.stringify(state.admission.sourceDigests) !==
             JSON.stringify(sourceDigests) ||
           JSON.stringify(state.additionalSources) !==
@@ -919,7 +949,10 @@ async function runObjectivePass(
           config.checkout,
           installationConfigDigest,
         );
-        if (JSON.stringify(acceptedPlan.graph) !== JSON.stringify(state.graph))
+        if (
+          JSON.stringify(acceptedPlan.graph) !==
+          JSON.stringify(state.graphRevisions?.[0]?.graph ?? state.graph)
+        )
           throw new Error(
             "Accepted plan differs from the already active Objective graph",
           );
@@ -1209,6 +1242,16 @@ async function runObjectivePass(
     };
     state.coordinator.observedAt = new Date().toISOString();
     delete state.coordinator.observationError;
+    await applyPendingAmendment({
+      state,
+      config,
+      body: issue.body,
+      model: planningModel,
+      github,
+      save: () => save(state),
+      cancelled: cancellationRequested,
+      diagnostics,
+    });
     const graph = state.graph;
     verifyExecutionProfiles(graph, executionProfileChoices(config));
     await driver.preflight?.(graph);
@@ -1266,6 +1309,7 @@ async function runObjectivePass(
         },
         cancelled: cancellationRequested,
         paused: () => state.coordinator?.mode !== "running",
+        amendmentPending: () => amendmentBlocksDispatch(state),
         diagnostics,
       });
       if (graph.items.some((item) => state.work[item.id]?.status === "waiting"))
@@ -1311,13 +1355,16 @@ async function runObjectivePass(
           save(state);
         },
         cancelled: cancellationRequested,
-        paused: () => state.coordinator?.mode !== "running",
+        paused: () =>
+          state.coordinator?.mode !== "running" ||
+          amendmentBlocksDispatch(state),
         diagnostics,
       });
       if (awaitingSelection) return state;
     }
     if (
       state.coordinator.mode !== "running" ||
+      amendmentBlocksDispatch(state) ||
       graph.items.some((item) => state.work[item.id]?.status !== "done")
     )
       return state;
@@ -1329,6 +1376,7 @@ async function runObjectivePass(
       "origin",
       await github.defaultBranch(),
     );
+    const finalGraphDigest = graphDigest(state.graph);
     const integratedSha = state.integratedSha!;
     const observedHead = git(config.checkout, "rev-parse", "FETCH_HEAD");
     if (observedHead !== integratedSha)
@@ -1502,6 +1550,14 @@ async function runObjectivePass(
         return state;
       }
       throw error;
+    }
+    if (
+      amendmentBlocksDispatch(state) ||
+      graphDigest(state.graph) !== finalGraphDigest ||
+      state.integratedSha !== integratedSha
+    ) {
+      save(state);
+      return state;
     }
     state.finalValidation = { ...finalEvidence, passed: true };
     diagnostics.emit({

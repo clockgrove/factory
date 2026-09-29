@@ -42,6 +42,33 @@ Exact active-issue reads distinguish confirmed closure or changed content from u
 
 The production GitHub gateway and native delivery share an asynchronous Octokit client and primary/secondary rate-limit gate. GitHub CLI is used only to obtain the local credential. HTTP mutations are never automatically retried after an uncertain response; authenticated reconciliation and existing delivery identities remain authoritative. Credentials and SDK objects stay outside continuation state.
 
+### Reviewed active graph amendments
+
+Issue #247 adds a controller-owned amendment operation to admitted Objectives.
+Workers can return a structured private discovery alongside their ordinary result;
+operators can submit a proposal to the existing local owner. Neither path grants
+new authority. Evidence describes the gap, scope, ownership, acceptance and
+prerequisites; the compiler still uses the original pinned source packet. Backlog
+discoveries remain proposed data and never enter current execution.
+
+The existing atomic snapshot retains the admitted initial graph, immutable reviewed
+successors, one pending amendment and Objective-level allowance consumption. Each
+new attempt binds its accepted graph digest. A revision consumes one recorded
+planning allowance before model submission; decomposition, children and restart do
+not reset it. Every required source criterion and existing Work Item acceptance
+remains covered. Changed started or completed nodes require explicit successor or
+revalidation work. Independent graph review includes the previous graph, proposal
+and compact attempt/result identities; it cannot expand source or command authority.
+
+New dispatch stops while a proposal settles. Existing native delivery units finish
+without repartitioning published identities; other owned effects settle before
+acceptance. Aggregate parents have no worker or PR: explicit child dependencies
+join their integrated results, then ordinary read-only validation/review proves the
+parent acceptance. Hierarchy alone never grants readiness. The controller reconciles
+exact issue bodies, dependencies and native subissues before activating a successor.
+Remote edits are proposals, and unknown create/review outcomes remain fenced without
+replay. A discovery arriving during final review invalidates that completion result.
+
 ### Compiler plan review
 
 [Trunk issue #19](https://github.com/clockgrove/factory/issues/19) defines the routine path: one structured compiler output from a complete, pinned source packet, deterministic graph checks, then one independent LLM review of the complete proposed plan. The review surface includes the Objective, base, pinned sources, Work Item graph, command-authority receipts, and exact final integrated-head commands. The reviewer must cite source-backed findings for missing Objective obligations, unsupported scope, citation defects, dependency or ownership mistakes, unobservable acceptance, or command/final-validation gaps. Deterministic checks remain authoritative for machine-checkable facts; the reviewer cannot grant authority or silently edit the plan.

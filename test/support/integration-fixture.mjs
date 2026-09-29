@@ -21,6 +21,7 @@ import { stateRoot } from "../../dist/config.js";
 import { LocalContentStore } from "../../dist/content/local.js";
 import { RegularDelivery } from "../../dist/delivery/regular.js";
 import { LocalExecutionDriver } from "../../dist/execution/local.js";
+import { withCoverage } from "./coverage.mjs";
 import { resultFindings } from "./review-protocol.mjs";
 
 export function git(path, ...args) {
@@ -261,7 +262,7 @@ class ScriptedPlanningModel {
       objective: request.objective,
       sources: request.sources.map((source) => source.path),
     });
-    return structuredClone(this.graph);
+    return withCoverage(request, this.graph);
   }
 
   async reviewGraph(request) {

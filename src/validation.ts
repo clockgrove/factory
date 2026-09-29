@@ -1021,6 +1021,49 @@ function workItemResultEvidence(args: {
     current.treeSha,
     `Work Item ${item.id} result`,
   );
+  if (item.kind === "qa") {
+    if (
+      current.changeRef !== current.baseSha ||
+      current.execution ||
+      current.pullRequest ||
+      item.ownedPaths.length
+    )
+      throw new Error(`QA ${item.id} contains a worker or delivery identity`);
+    assertCommandReceipts(
+      current.validation,
+      current.treeSha,
+      `QA ${item.id} validation`,
+    );
+    if (
+      current.validation.commands.length !== item.validation.length ||
+      current.validation.commands.some(
+        (receipt, index) => receipt.command !== item.validation[index]?.command,
+      )
+    )
+      throw new Error(
+        `QA ${item.id} command proof differs from accepted coverage`,
+      );
+    const record = {
+      id: item.id,
+      kind: "qa",
+      status: current.status,
+      resultCommitSha: current.changeRef,
+      resultTreeSha: current.treeSha,
+      validationTreeSha: current.validation.treeSha,
+      validationCommands: current.validation.commands,
+      namedChecks: current.qaChecks ?? [],
+      integratedCommitSha: current.integratedSha ?? null,
+    };
+    return {
+      record,
+      evidence: [
+        {
+          path: `Read-only QA proof: ${item.id}`,
+          content: JSON.stringify(record),
+        },
+      ],
+    };
+  }
   assertAncestor(
     checkout,
     current.baseSha,
@@ -1310,12 +1353,13 @@ export function objectiveReviewEvidence(args: {
       integratedCommitSha,
       `Work Item ${item.id} integration`,
     );
-    integrationRecords.push({
-      item,
-      resultBaseSha: current.baseSha,
-      resultCommitSha: current.changeRef,
-      integratedCommitSha: current.integratedSha,
-    });
+    if (item.kind !== "qa")
+      integrationRecords.push({
+        item,
+        resultBaseSha: current.baseSha,
+        resultCommitSha: current.changeRef,
+        integratedCommitSha: current.integratedSha,
+      });
     evidence.push(...proof.evidence);
     return proof.record;
   });

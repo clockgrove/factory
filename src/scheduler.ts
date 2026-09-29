@@ -1,4 +1,5 @@
 import type { WorkGraph, WorkItem } from "./contracts.js";
+import { assertCoverageShape } from "./qa.js";
 import type { WorkState } from "./state.js";
 
 function validPath(path: string): boolean {
@@ -48,6 +49,7 @@ export function validateAndOrderGraph(
       "Compiled graph must target the exact Objective and base with at least one Work Item",
     );
   }
+  assertCoverageShape(graph);
   const byId = new Map<string, WorkItem>();
   for (const item of graph.items) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(item.id) || byId.has(item.id))
@@ -58,7 +60,7 @@ export function validateAndOrderGraph(
       !item.brief ||
       !item.acceptance.length ||
       !item.nonGoals?.length ||
-      !item.ownedPaths.length ||
+      (item.kind !== "qa" && !item.ownedPaths.length) ||
       !item.ownedPaths.every(validPath) ||
       !item.citations.length ||
       !item.citations.every((citation) => sources.has(citation.path))
@@ -67,6 +69,19 @@ export function validateAndOrderGraph(
         `Work Item ${item.id} lacks acceptance, non-goals, ownership, or source citations`,
       );
     }
+    if (item.kind !== undefined && item.kind !== "qa" && item.kind !== "work")
+      throw new Error("Unknown Work Item kind");
+    if (
+      item.kind === "qa" &&
+      (item.ownedPaths.length ||
+        item.sourceAssets?.length ||
+        item.expectedOutputRoles?.length ||
+        item.executionProfile ||
+        item.executionBinding)
+    )
+      throw new Error(
+        "Read-only QA nodes cannot own changes, assets, or workers",
+      );
     for (const check of item.validation) {
       if (
         !check.command ||

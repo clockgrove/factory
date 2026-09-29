@@ -40,6 +40,8 @@ export interface ExecutionProfileChoices {
 }
 
 export interface WorkItem {
+  /** Read-only proof node; uses the ordinary scheduler without a worker or PR. */
+  kind?: "work" | "qa";
   executionProfile?: { id: string; reason: string };
   /** Controller-generated exact configuration identity; never model settings. */
   executionBinding?: ExecutionBinding;
@@ -64,7 +66,35 @@ export interface WorkItem {
   requiredLfsRoles?: string[];
 }
 
+export interface CoverageObligation {
+  criterionId: string;
+  source: { path: string; digest: string; text: string };
+}
+
+export interface AcceptanceCoverage extends CoverageObligation {
+  itemId: string;
+  /** Dependencies remain authoritative on the owning Work Item. */
+  phase: "result" | "integrated" | "published" | "final";
+  oracle: {
+    kind: "command" | "semantic" | "controller" | "ci";
+    /** Validation/acceptance index, final criterion ID, controller guarantee ID, or named CI check. */
+    reference: string;
+    /** For published CI, the existing dependency whose PR head is checked. */
+    targetItem: string;
+  };
+  environment: {
+    kind: "local" | "real";
+    readiness: "available" | "prepare" | "missing";
+    /** Exact source-authorized probe in the owning node's validation commands. */
+    probe: string;
+    /** Existing prerequisite node, never inferred setup authority. */
+    preparedBy: string;
+  };
+}
+
 export interface WorkGraph {
+  /** Absent only on legacy explicit graphs. New compiler output supplies coverage. */
+  coverage?: AcceptanceCoverage[];
   objective: number;
   baseSha: string;
   items: WorkItem[];
@@ -161,6 +191,7 @@ export interface ModelInvocationContext {
 }
 
 export interface PlanningRequest<T> {
+  coverageObligations?: CoverageObligation[];
   objective: string;
   baseSha: string;
   sources: { path: string; content: string; heading?: string }[];
@@ -582,7 +613,20 @@ export interface NativeStackLayer {
   branch: string;
   headSha: string;
 }
+export interface NamedCheckEvidence {
+  id: number;
+  headSha: string;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  detailsUrl: string;
+}
+
 export interface GitHubGateway {
+  namedCheck?(
+    headSha: string,
+    name: string,
+  ): Promise<NamedCheckEvidence | undefined>;
   objective(number: number): Promise<ObjectiveIssue>;
   defaultBranch(): string | Promise<string>;
   closeIssue(

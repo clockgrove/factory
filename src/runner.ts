@@ -65,6 +65,7 @@ import {
   processGroupExists,
   withProcessCancellation,
 } from "./process.js";
+import { assertCompletedCoverage } from "./qa.js";
 import type {
   ContinuationState,
   FactoryState,
@@ -1339,6 +1340,7 @@ async function runObjectivePass(
       "rev-parse",
       `${integratedSha}^{tree}`,
     );
+    assertCompletedCoverage(state);
     const finalValidationStarted = Date.now();
     diagnostics.emit({
       runId: state.runId,

@@ -4,6 +4,27 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under #206 and explicitly accepted under #207. Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.39 artifact record
+
+[Release v0.1.39](https://github.com/clockgrove/factory/releases/tag/v0.1.39)
+is tagged at source `e9451f85f49afa96a7b687ecc6a60a094cbc4361`, tree
+`d13b5331b2c4351a0a979cf5ce5e93a5bbb60a68`. Reviewed candidate
+`24337799eabcd0ba8f11be8e2e8841de872988fb` shares that tree.
+The archive is 150250681 bytes, SHA-256
+`2ccf06daaa1c35919b1b0d54fdabdaaa11fa6c5bea81ae8169858b6ce8cb81b1`.
+[PR #242](https://github.com/clockgrove/factory/pull/242) records the release gates.
+Independent review and 288 deterministic tests passed. Independent public
+download matched the frozen archive. Empty-cache offline Node 22 installation
+and installed CLI/capture/analysis smoke checks passed on those exact bytes
+before publication.
+
+This release adds phase-available evidence guidance (#197), opt-in private model
+interaction capture (#214), and local metadata analysis (#219). No model-backed
+Objective was rerun for this release. The accepted v0.1.38 public workflow and
+v0.1.37/v0.1.38 Clockgrove pilot retain their original artifact and scenario scope;
+they are not v0.1.39 qualification evidence. Capture and analysis remain local
+observations, with missing usage and cost explicitly unavailable.
+
 ## Immutable v0.1.38 artifact record
 
 [Release v0.1.38](https://github.com/clockgrove/factory/releases/tag/v0.1.38)

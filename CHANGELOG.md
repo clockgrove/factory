@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.39 — 2026-09-29
+
+- Clarify phase-available planning evidence: immutable ordinary blob equality can prove committed-byte preservation without proving hydration, opaque semantics or transient history (#197 / PR #239).
+- Add opt-in, bounded private interaction capture for planning/review and all shipped local worker adapters, preserving actual SDK-exposed content, identities, usage availability and provider-estimate completeness (#214 / PR #240).
+- Add local metadata-only analysis with exact grouping/filtering, separate outcomes, usage and time coverage, and restrictive report output (#219 / PR #241).
+- Publication, independent public-download/offline-installation verification and installed capture/analysis smoke checks passed. No live Objective was rerun; the accepted v0.1.38 workflow and earlier private implementation retain their original scope. See the [artifact record](docs/BUILD-STATUS.md#immutable-v0139-artifact-record).
+
 ## 0.1.38 — 2026-09-29
 
 - Replace graph, Work Item and final review quotation transcription with packet-local evidence and criterion IDs. Preserve strict identity validation, semantic review and existing exact-tree operator decisions; malformed protocol responses remain distinct from substantive findings (#233 / PR #235).

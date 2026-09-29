@@ -57,5 +57,13 @@ new node identities and projects native issue hierarchy.
 - `node scripts/check.mjs qa`
 - `factory-fixture-prerequisite`
 
-Non-goals: changing baseline checks, workflow or instructions; credentials,
+## Non-goals
+
+Changing baseline checks, workflow or instructions; credentials,
 network services, media, LFS, deployment, Factory source or unrelated repositories.
+
+## Planning sources
+
+- README.md
+- AGENTS.md
+- scripts/check.mjs

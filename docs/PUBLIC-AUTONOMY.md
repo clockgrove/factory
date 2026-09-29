@@ -37,11 +37,14 @@ packet. Do not substitute a filename inventory for their contents.
 Before remote creation, run this local mechanical fixture check:
 
 ```sh
+npm run build
 node test/autonomy-fixture-preflight.mjs
 ```
 
-It proves literal checks fail the unfinished baseline and pass a small complete
-implementation, including rejection of an input-mutating result. It invokes no
+It uses the real compiler to verify literal final commands and complete pinned
+source contents for the initial and accepted-predecessor baselines. It also proves
+checks fail the unfinished baseline and pass a small complete implementation,
+including rejection of an input-mutating result that passes the ordinary join. It invokes no
 Factory models and proves no runtime behavior. Existing focused regression suites
 own negative admission cases: out-of-scope discovery, stale graph, exhausted
 allowances, absent required environment, accounting uncertainty under a binding

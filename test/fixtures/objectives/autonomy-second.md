@@ -18,9 +18,20 @@ to the actual accepted predecessor head. Queueing alone does not satisfy that ga
 - The first Objective's accepted implementation and immutable checks are unchanged.
 - The predecessor's full QA still passes and independent review accepts the guide.
 
-## Validation and final validation
+## Final validation
 
 - `node scripts/check.mjs guide`
 - `node scripts/check.mjs qa`
 
-Non-goals: implementation, dependency changes, deployment, media or extra features.
+## Non-goals
+
+Implementation, dependency changes, deployment, media or extra features.
+
+## Planning sources
+
+- README.md
+- AGENTS.md
+- scripts/check.mjs
+- src/alpha.mjs
+- src/beta.mjs
+- src/summary.mjs

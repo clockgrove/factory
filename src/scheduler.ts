@@ -1,26 +1,8 @@
+import { pathsOverlap, validOwnershipPath } from "./ownership.js";
+export { pathsOverlap } from "./ownership.js";
 import type { WorkGraph, WorkItem } from "./contracts.js";
 import { assertCoverageShape } from "./qa.js";
 import type { WorkState } from "./state.js";
-
-function validPath(path: string): boolean {
-  const normalized = path.endsWith("/") ? path.slice(0, -1) : path;
-  return (
-    normalized.length > 0 &&
-    !normalized.startsWith("/") &&
-    !normalized.includes("\\") &&
-    !normalized.split("/").includes("..") &&
-    !normalized.split("/").includes("")
-  );
-}
-
-export function pathsOverlap(left: string, right: string): boolean {
-  const leftDirectory = left.endsWith("/");
-  const rightDirectory = right.endsWith("/");
-  if (!leftDirectory && !rightDirectory) return left === right;
-  if (leftDirectory && rightDirectory)
-    return left.startsWith(right) || right.startsWith(left);
-  return leftDirectory ? right.startsWith(left) : left.startsWith(right);
-}
 
 export function itemsConflict(left: WorkItem, right: WorkItem): boolean {
   return (
@@ -54,6 +36,12 @@ export function validateAndOrderGraph(
   for (const item of graph.items) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(item.id) || byId.has(item.id))
       throw new Error(`Invalid or duplicate Work Item ID: ${item.id}`);
+    for (const path of item.ownedPaths) {
+      if (!validOwnershipPath(path))
+        throw new Error(
+          `Work Item ${item.id} has invalid ownership path ${JSON.stringify(path)}; use a literal repository-relative file or directory ending in /. Wildcards * and ? are unsupported; do not use globs or normalize paths.`,
+        );
+    }
     if (
       !item.title ||
       !item.goal ||
@@ -62,7 +50,6 @@ export function validateAndOrderGraph(
       !item.nonGoals?.length ||
       (!["qa", "aggregate"].includes(item.kind ?? "work") &&
         !item.ownedPaths.length) ||
-      !item.ownedPaths.every(validPath) ||
       !item.citations.length ||
       !item.citations.every((citation) => sources.has(citation.path))
     ) {

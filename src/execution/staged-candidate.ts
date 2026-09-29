@@ -1,3 +1,4 @@
+import { ownsPath } from "../ownership.js";
 import { spawnSync } from "node:child_process";
 import {
   closeSync,
@@ -21,12 +22,6 @@ import {
   sanitizedWorkerEnvironment,
   subprocessAsync,
 } from "../process.js";
-
-function owns(path: string, owned: string[]): boolean {
-  return owned.some((scope) =>
-    scope.endsWith("/") ? path.startsWith(scope) : path === scope,
-  );
-}
 
 function inside(path: string, directory: string): boolean {
   const root = resolve(directory);
@@ -257,7 +252,7 @@ export async function checkStagedCandidate(
 ): Promise<string[]> {
   checkWorktreeEntries(worktree, acceptedIgnoredLinks);
   const paths = changedPaths(worktree);
-  const unowned = paths.filter((path) => !owns(path, ownedPaths));
+  const unowned = paths.filter((path) => !ownsPath(path, ownedPaths));
   if (unowned.length)
     throw new Error(
       `Worker changed paths outside ownership: ${unowned.join(", ")}`,

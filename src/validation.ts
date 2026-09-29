@@ -1,3 +1,4 @@
+import { ownsPath } from "./ownership.js";
 import {
   CandidateValidationFailure,
   CandidateEnvironmentFailure,
@@ -912,9 +913,7 @@ function assertResultCommitShape(
 }
 
 function itemOwnsPath(item: WorkItem, path: string): boolean {
-  return item.ownedPaths.some((scope) =>
-    scope.endsWith("/") ? path.startsWith(scope) : path === scope,
-  );
+  return ownsPath(path, item.ownedPaths);
 }
 
 function assertIntegrationBindings(

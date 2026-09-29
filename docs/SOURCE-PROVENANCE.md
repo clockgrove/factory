@@ -746,6 +746,11 @@ head advancement, closure acknowledgement loss, amendment overlap and immutable
 binding checks; existing delivery/media/human-decision tests retain their scope.
 No archived runtime, private source or provider responses were copied. Source
 validation does not qualify the full installed autonomous scenario in #253.
+
 ## Diagnosed bounded repair (#250)
 
 The admission contract, atomic preparation/WorkState, compiler review gate and existing retry/re-review transitions supplied this implementation. New compact failure dispositions and retained attempt records preserve original identities and accounting references; no operational journal, replacement queue or workspace replay store was copied or introduced. The fresh architecture review required shared Objective/path consumption across preparation, graph amendments and repair. Public synthetic source packets and temporary Git targets test lost-connectivity cleanup, actual local-control environment repair on an immutable candidate, independent-lane holds, review transport correction and planning authority distinctions. These are deterministic source checks; installed autonomous qualification remains #253.
+
+## Finite authorized intake (#252)
+
+The existing admission contract, single installation owner, per-Objective preparation/WorkState and authenticated GitHub observations supplied this implementation. Intake retains finite authority and control only; pending order and dispositions derive from current issues and existing snapshots. Transient conditional page caching does not become a second operational queue. Public synthetic Git fixtures exercise accepted predecessor baselines, changed/closed selections, priority labels, restart and known planning-output preservation. Mocked user-service and transport checks cover consent, compatibility and observation distinctions. No private source or provider responses were copied. Installed autonomous qualification remains #253.

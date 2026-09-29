@@ -348,7 +348,6 @@ export async function runIntake(
   if (!record) throw new Error("No intake authority registered");
   const lockPath = join(stateRoot(config.repository), "controller.lock");
   const lock = acquireControllerLock(lockPath, 0);
-  retargetControllerLock(lockPath, lock, 0);
   const observations = new IntakeObservation(services.github);
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
   let activeObjective: number | undefined;
@@ -368,6 +367,7 @@ export async function runIntake(
         preparation ?? readContinuation(config.repository, request.objective);
       if (
         preparing?.schemaVersion !== 3 ||
+        preparing.objective !== request.objective ||
         !record.authority.objectives.includes(request.objective)
       )
         throw new Error(
@@ -433,6 +433,7 @@ export async function runIntake(
   };
   process.on("SIGTERM", onHandoff);
   try {
+    retargetControllerLock(lockPath, lock, 0);
     await serve();
     for (;;) {
       if (handingOff || record.mode === "draining") return record;

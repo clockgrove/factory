@@ -343,3 +343,39 @@ For an existing admitted continuation, omit `--plan` and `--admission`. Registra
 To change installed artifacts, use `factory supervisor upgrade --cli /absolute/new-package/dist/cli.js --config /private/factory.json`. Factory asks that artifact to validate the actual continuation before draining and again after owned work settles, then switches the unit. Rollback uses the same operation and refuses if the older artifact cannot validate retained state. No state fields, allowances or evidence are reset. A failed activation leaves the selected unit and evidence inspectable; it does not silently choose another artifact.
 
 `supervisor disable` drains and stops before disabling future starts. `supervisor uninstall` also removes the owned unit. Both retain target binding, snapshots, results, logs and accounting. Neither removes the target repository or provider authentication. Raw systemd stop sends a graceful drain request only to the owner and does not kill detached workers; unresolved work can therefore keep it waiting. Prefer the packaged stop command for bounded diagnostics.
+
+## Run a finite batch of Objectives
+
+This intake capability is available from a build containing #252. Check the installed `factory help` before using it; source tests do not qualify an installed release.
+
+Use the same explicit authority file described under autonomous admission, with the finite `objectives` list in the desired order. Enqueue records that selection and each issue's current body. It does not start planning or execution. Configure the target and prepare its Objective issues first:
+
+```sh
+factory intake enqueue --authority /private/authority.json --config /private/factory.json
+factory intake run --config /private/factory.json
+factory intake status --config /private/factory.json
+```
+
+Factory processes one Objective at a time. Once an Objective is accepted, closed and its owned work has stopped, Factory can plan the next eligible selection. A GitHub issue's native “blocked by” dependencies must have retained Factory acceptance evidence. Factory verifies that the current default branch contains that accepted result before compiling the successor. Keep the configured checkout clean and able to fast-forward; Factory preserves conflicting local edits and reports the blocked baseline.
+
+The authority list is the default order. Optional repeated `--priority-label EXISTING_LABEL` arguments to `enqueue` rank pending selections using those labels, in argument order. Label changes can reorder pending work but never authorize another issue or interrupt active work. Closed issues, changed bodies and unresolved prerequisites remain ineligible with a reason in status. API failures are reported as unavailable observations. A reopened completed issue does not rerun. The poll interval defaults to 30 seconds and can be set with `--poll-seconds`.
+
+```sh
+factory intake pause --config /private/factory.json
+factory intake resume --config /private/factory.json
+factory intake dequeue --objective N --config /private/factory.json
+factory intake drain --config /private/factory.json
+```
+
+Pause stops new dispatch; drain permits owned work to settle and releases the controller. Both persist across restarts. Resume continues the existing authorization and remaining allowances. Dequeue withdraws a pending selection and refuses active work; it does not cancel an Objective. Enqueue replaces the finite selection only when no nonterminal Objective remains. Do not edit the saved authorization or create another state directory to bypass an unresolved continuation.
+
+For supported background operation, the same authority must explicitly include `serviceConsent: true`:
+
+```sh
+factory supervisor install --intake --config /private/factory.json
+factory supervisor start --config /private/factory.json
+```
+
+The existing exact-artifact service, credential and host requirements still apply. `supervisor stop` drains the intake owner. Before starting that service again, run `factory intake resume --config /private/factory.json` while it is stopped to release the retained drain, then run `factory supervisor start --config /private/factory.json`. Do not launch a foreground intake while that service owns the installation.
+
+An unresolved human plan question pauses intake; it is not automatic acceptance. Stop the service, or drain a foreground owner, before making the decision. Export the retained plan using `factory plan --objective N --authority /private/authority.json --output /private/plan.json` with the same configuration, then use the ordinary `decide` workflow below the preview instructions. Bind the decided plan with `admit` and run it with `run --plan /private/decided-plan.json --admission /private/admission.json`. This uses the same preparation and allowances. Once that Objective completes, resume and start intake again for its remaining selections. A failed or unknown submitted outcome requires its supported recovery; restart alone does not authorize replay. Result decisions and media selection continue to use the ordinary Objective controls.

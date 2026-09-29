@@ -232,7 +232,7 @@ test("pause after predecessor completion and restart keep accepted work and pres
     );
   }));
 
-test("changed or closed queued issue and missing predecessor remain precisely ineligible without provider calls", async () =>
+test("changed queued issue and missing predecessor remain precisely ineligible without provider calls", async () =>
   fixture(async (f) => {
     await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
     f.issues.get(1).body += "Changed requirement\n";
@@ -351,10 +351,7 @@ for (const disposition of ["failed", "cancelled"])
 
 test("pause during durable compilation and restart reuse known model output without a second compile", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake(
-      { ...authority, objectives: [1] },
-      { pollSeconds: 0.01 },
-    );
+    await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
     const generate = f.model.generateStructured.bind(f.model);
     let entered, release;
     const started = new Promise((resolve) => {
@@ -373,6 +370,16 @@ test("pause during durable compilation and restart reuse known model output with
     const before = readContinuation(f.config.repository, 1);
     assert.equal(before.authority.executionConsent, true);
     assert.equal(before.configDigest, factoryConfigDigest(f.config));
+    for (const action of ["status", "cancel", "pause"])
+      await assert.rejects(
+        controlObjective(f.config, { objective: 2, action }),
+        /Use intake control/,
+      );
+    assert.equal(
+      readContinuation(f.config.repository, 1).cancelRequested,
+      undefined,
+    );
+    await intakeControl(f.config, "dequeue", 2);
     await controlObjective(f.config, { objective: 1, action: "pause" });
     release();
     for (let i = 0; i < 100; i++) {
@@ -389,4 +396,27 @@ test("pause during durable compilation and restart reuse known model output with
     assert.equal(completed.runId, before.runId);
     assert.equal(objectiveComplete(completed), true);
     assert.equal(f.plans.length, 1);
+  }));
+
+test("closed selection stays ineligible until explicit dequeue without model calls", async () =>
+  fixture(async (f) => {
+    await f.application.enqueueIntake(
+      { ...authority, objectives: [1] },
+      { pollSeconds: 0.01 },
+    );
+    f.issues.get(1).state = "closed";
+    const running = f.application.runIntake();
+    for (
+      let i = 0;
+      i < 100 && !readIntake(f.config).observation?.reasons[1];
+      i++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(
+      readIntake(f.config).observation.reasons[1],
+      "Issue is closed",
+    );
+    await intakeControl(f.config, "dequeue", 1);
+    await running;
+    assert.equal(f.plans.length, 0);
   }));

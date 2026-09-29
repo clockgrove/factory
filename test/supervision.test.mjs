@@ -12,10 +12,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { enqueueIntake } from "../dist/intake.js";
 import { factoryConfigDigest } from "../dist/config.js";
 import { saveState, statePath } from "../dist/state-store.js";
 import {
   checkServiceState,
+  checkIntakeServiceState,
   renderService,
   serviceName,
   supervise,
@@ -213,3 +215,55 @@ test("unit escapes systemd specifiers and command variable expansion", () => {
     /line breaks/,
   );
 });
+
+async function registerIntake(config, state) {
+  rmSync(statePath(config.repository, 1));
+  await enqueueIntake(
+    config,
+    {
+      objective: async () => ({ body: "Authorized Objective", state: "open" }),
+    },
+    {
+      ...state.admission.authority,
+      resources: { maxConcurrency: config.execution.concurrency },
+    },
+  );
+}
+test("intake service pins its mode, requires consent and refuses unknown authorization fields", () =>
+  fixture(async ({ config, configPath, state }) => {
+    await registerIntake(config, state);
+    await supervise("install", configPath, { intake: true });
+    const unitPath = join(
+      process.env.XDG_CONFIG_HOME,
+      "systemd/user",
+      serviceName(config.repository),
+    );
+    const unit = readFileSync(unitPath, "utf8");
+    assert.match(unit, /"--intake"/);
+    assert.doesNotMatch(unit, /"--objective"/);
+    // Use the snapshot's established state root rather than a separate service copy.
+    const { stateRoot } = await import("../dist/config.js");
+    const intakePath = join(stateRoot(config.repository), "intake.json");
+    const value = JSON.parse(readFileSync(intakePath, "utf8"));
+    value.authority.serviceConsent = false;
+    writeFileSync(intakePath, JSON.stringify(value));
+    assert.throws(() => checkIntakeServiceState(config), /service consent/);
+    value.authority.serviceConsent = true;
+    value.futureAuthority = true;
+    writeFileSync(intakePath, JSON.stringify(value));
+    assert.throws(() => checkIntakeServiceState(config), /Unsupported intake/);
+  }));
+test("intake service start requires an owner while pending but accepts an exhausted finite batch", () =>
+  fixture(async ({ root, config, configPath, state }) => {
+    await registerIntake(config, state);
+    await supervise("install", configPath, { intake: true });
+    writeFileSync(
+      join(root, "bin/systemctl"),
+      '#!/bin/sh\ncase "$2" in is-system-running) echo running;; is-active) echo failed;; esac\n',
+      { mode: 0o700 },
+    );
+    await assert.rejects(supervise("start", configPath), /has not established/);
+    const { intakeControl } = await import("../dist/intake.js");
+    await intakeControl(config, "dequeue", 1);
+    await supervise("start", configPath);
+  }));

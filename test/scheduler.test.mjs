@@ -123,3 +123,62 @@ test("named resource conflicts use exact whitespace-sensitive identity", () => {
   assert.equal(itemsConflict(plain, trailing), false);
   assert.equal(itemsConflict(leading, sameLeading), true);
 });
+
+test("ownership is literal exact files and canonical directory prefixes", () => {
+  const accepted = [
+    "packages/example/",
+    "packages/example/src/index.ts",
+    "app/[slug]/page.tsx",
+    "app/{literal}.tsx",
+  ];
+  for (const path of accepted) {
+    const graph = {
+      objective: 1,
+      baseSha: "base",
+      items: [item("one", [], [path])],
+    };
+    assert.equal(
+      validateAndOrderGraph(graph, 1, "base", new Set(["OBJECTIVE"]))[0],
+      graph.items[0],
+    );
+  }
+  for (const path of [
+    "packages/example/**",
+    "src/*.ts",
+    "src/?.ts",
+    "../src/",
+    "./src/",
+    "src/./file",
+    "/src/",
+    "src//",
+    "",
+  ]) {
+    assert.throws(
+      () =>
+        validateAndOrderGraph(
+          { objective: 1, baseSha: "base", items: [item("one", [], [path])] },
+          1,
+          "base",
+          new Set(["OBJECTIVE"]),
+        ),
+      /Work Item one has invalid ownership path.*literal repository-relative file or directory ending in/,
+    );
+  }
+  for (const [left, right, conflict] of [
+    ["src/", "src/nested/", true],
+    ["src/", "src/file.ts", true],
+    ["src/", "src-other/file.ts", false],
+    ["src/file.ts", "src/file.ts", true],
+    ["src/file.ts", "src/file.ts/other", false],
+    ["app/[slug]/page.tsx", "app/some/page.tsx", false],
+  ]) {
+    assert.equal(
+      itemsConflict(item("left", [], [left]), item("right", [], [right])),
+      conflict,
+    );
+    assert.equal(
+      itemsConflict(item("left", [], [right]), item("right", [], [left])),
+      conflict,
+    );
+  }
+});

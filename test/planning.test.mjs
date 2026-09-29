@@ -1118,3 +1118,34 @@ test("additional pinned selectors reach compilation and review and reload at ver
     );
   });
 });
+
+test("compiler rejects wildcard ownership before independent review with actionable diagnostics", async () => {
+  await fixture("ownership-grammar", async (root) => {
+    const target = createTarget(root, {
+      "docs/plan.md": "# Plan\n\n## Wave 0\nCanonical obligation\n",
+    });
+    let reviews = 0;
+    for (const path of ["packages/example/**", "src/?.ts"]) {
+      await assert.rejects(
+        compilePlan(1, body, target.baseSha, target.checkout, {
+          async generateStructured(request) {
+            assert.match(
+              request.schema.properties.items.items.properties.ownedPaths.items
+                .description,
+              /Wildcards \* and \? are unsupported/,
+            );
+            const proposed = graph(target.baseSha);
+            proposed.items[0].ownedPaths = [path];
+            return withCoverage(request, proposed);
+          },
+          async reviewGraph() {
+            reviews++;
+            return { findings: [] };
+          },
+        }),
+        /Work Item one has invalid ownership path.*Wildcards \* and \? are unsupported/,
+      );
+    }
+    assert.equal(reviews, 0);
+  });
+});

@@ -754,3 +754,7 @@ The admission contract, atomic preparation/WorkState, compiler review gate and e
 ## Finite authorized intake (#252)
 
 The existing admission contract, single installation owner, per-Objective preparation/WorkState and authenticated GitHub observations supplied this implementation. Intake retains finite authority and control only; pending order and dispositions derive from current issues and existing snapshots. Transient conditional page caching does not become a second operational queue. Public synthetic Git fixtures exercise accepted predecessor baselines, changed/closed selections, priority labels, restart and known planning-output preservation. Mocked user-service and transport checks cover consent, compatibility and observation distinctions. No private source or provider responses were copied. Installed autonomous qualification remains #253.
+
+## Literal ownership grammar (#256)
+
+The existing exact-file and trailing-slash directory-prefix predicates supplied the shared stateless ownership functions. Deterministic graph validation now rejects unsupported wildcard declarations before review or dispatch; brackets and braces remain literal filename characters. Public temporary Git fixtures cover nested files, sibling rejection and dynamic route filenames. No archived code, private source or provider calls were used.

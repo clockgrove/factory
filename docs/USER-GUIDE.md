@@ -360,8 +360,6 @@ To change installed artifacts, use `factory supervisor upgrade --cli /absolute/n
 
 ## Run a finite batch of Objectives
 
-This intake capability is available from a build containing #252. Check the installed `factory help` before using it; source tests do not qualify an installed release.
-
 Use the same explicit authority file described under autonomous admission, with the finite `objectives` list in the desired order. Enqueue records that selection and each issue's current body. It does not start planning or execution. Configure the target and prepare its Objective issues first:
 
 ```sh

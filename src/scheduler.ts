@@ -98,6 +98,8 @@ export function validateAndOrderGraph(
         );
       }
     }
+    if (item.priority !== undefined && !Number.isSafeInteger(item.priority))
+      throw new Error(`Work Item ${item.id} has invalid priority`);
     byId.set(item.id, item);
   }
   const parents = new Set<string>();
@@ -150,7 +152,7 @@ export function readyItems(
   slots: number,
 ): WorkItem[] {
   const admitted: WorkItem[] = [];
-  for (const item of graph.items) {
+  for (const item of rankPending(graph, work)) {
     if (admitted.length >= slots) break;
     if (
       work[item.id]?.status !== "pending" ||
@@ -169,4 +171,23 @@ export function readyItems(
     admitted.push(item);
   }
   return admitted;
+}
+
+/** Rank only after the caller establishes dependencies/ownership eligibility. Completion gets the next opportunity. */
+export function rankPending(
+  graph: WorkGraph,
+  work: Record<string, WorkState>,
+): WorkItem[] {
+  const prerequisite = (id: string): boolean =>
+    graph.items.some(
+      (item) =>
+        work[item.id]?.status !== "done" && item.dependencies.includes(id),
+    );
+  return [...graph.items].sort(
+    (a, b) =>
+      Number(b.kind === "qa" || b.kind === "aggregate") -
+        Number(a.kind === "qa" || a.kind === "aggregate") ||
+      (b.priority ?? 0) - (a.priority ?? 0) ||
+      Number(prerequisite(b.id)) - Number(prerequisite(a.id)),
+  );
 }

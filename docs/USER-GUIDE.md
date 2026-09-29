@@ -66,6 +66,29 @@ export XDG_STATE_HOME="/absolute/private/factory-trial/state"
 
 These are installation choices, not recovery commands. Keep provider authentication accessible through its existing local profile. Never copy credentials into the target repository.
 
+### Resource limits in the upcoming autonomous release
+
+This source capability is not part of published v0.1.39. Before accepting a plan, an operator may add `scheduling` to the installation configuration. For example, the following declares four CPU units and 4096 MiB shared by active phases, with one concurrent reviewer and one validation job:
+
+```json
+{
+  "scheduling": {
+    "cpu": 4,
+    "memoryMiB": 4096,
+    "reviewConcurrency": 1,
+    "validationConcurrency": 1,
+    "phases": {
+      "coding": { "cpu": 2, "memoryMiB": 2048 },
+      "validation": { "cpu": 2, "memoryMiB": 2048 },
+      "review": { "cpu": 1, "memoryMiB": 512 },
+      "delivery": { "cpu": 1, "memoryMiB": 512 }
+    }
+  }
+}
+```
+
+Choose reservations for your actual workloads. They govern admission; they do not install OS resource controls or promise measured peak usage. When you set a CPU or memory total, declare that resource for every phase. Worker concurrency still applies. Review and QA receive the next suitable completion opportunity as workers settle, and a worker releases its coding reservation before review. Status shows held/requested phases and blocking reasons. An unknown provider capacity is reported as unknown and never expands the operator ceiling. Configuration is bound to the accepted plan; do not edit an active run's binding to raise a limit.
+
 ### Models, network, and delivery
 
 Factory persists explicit model choices at installation; it does not inherit ambient Codex model preferences. The defaults are planner and reviewer `gpt-5.6-sol`, worker `gpt-5.6-luna`, all with `medium` reasoning. Override them when installing:

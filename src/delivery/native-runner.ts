@@ -25,7 +25,8 @@ import {
 } from "../media.js";
 import { git, gitAsync } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
-import { itemsConflict } from "../scheduler.js";
+import { phaseAdmission } from "../phase-admission.js";
+import { itemsConflict, rankPending } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
 import {
   AcceptanceDecisionRequired,
@@ -68,6 +69,7 @@ export async function runNativeGraph(args: {
     save,
     active,
   } = args;
+  const phases = phaseAdmission(config, state, save, args.cancelled);
   const branchFor = (id: string) => `factory/objective-${objective}/${id}`;
   const defaultBranch = await github.defaultBranch();
   const units = linearDeliveryUnits(state.graph);
@@ -86,24 +88,51 @@ export async function runNativeGraph(args: {
       throw new Error(
         `Work Item ${id} submitted ${work.pendingEffect} has unknown outcome; operator direction required`,
       );
+  let preparationFailure: unknown;
   // Admit independent roots whenever their predecessor units have integrated.
   // Publication stays ordered; a prepared change is replayed and validated
   // again if an earlier unit advanced the integrated head.
   const prepareReadyUnits = async (): Promise<void> => {
     if (args.paused?.() || args.amendmentPending?.()) return;
+    if (
+      Object.values(state.work).some(
+        (work) => work.status === "running" && work.step === "validate",
+      )
+    )
+      return;
+    if (
+      state.graph.items.some(
+        (item) =>
+          (item.kind === "qa" || item.kind === "aggregate") &&
+          state.work[item.id]?.status === "pending" &&
+          item.dependencies.every((id) => state.work[id]?.status === "done"),
+      )
+    )
+      return;
     const reported = await driver.availableSlots();
-    const limit = Math.min(
-      config.execution.concurrency,
-      reported === "unknown" ? config.execution.concurrency : reported,
-    );
+    args.diagnostics?.emit({
+      runId: state.runId,
+      operation: "scheduling-capacity",
+      outcome: "observed",
+      metadata: {
+        driverAvailableSlots: reported,
+        operatorCeiling: config.execution.concurrency,
+        codingReservations: phases.codingCount(),
+      },
+    });
+    const limit = phases.availableSlots(reported);
     const prepared: typeof units = [];
     const runningUnits = units.filter((unit) =>
       unit.items.some((item) => state.work[item.id]?.status === "running"),
     );
-    for (const unit of units) {
+    const ranked = rankPending(state.graph, state.work);
+    for (const unit of [...units].sort(
+      (a, b) => ranked.indexOf(a.items[0]!) - ranked.indexOf(b.items[0]!),
+    )) {
       if (prepared.length >= limit) break;
       if (
         unit.items[0]!.kind === "qa" ||
+        phases.reason(unit.items[0]!.id, "coding") ||
         unit.items[0]!.kind === "aggregate" ||
         state.work[unit.items[0]!.id]?.status !== "pending" ||
         !unit.externalDependencies.every(
@@ -119,10 +148,10 @@ export async function runNativeGraph(args: {
         continue;
       prepared.push(unit);
     }
-    if (prepared.length > 1) {
+    if (prepared.length) {
       await args.reconcile?.();
       if (args.cancelled()) throw new Error("Objective cancelled");
-      if (args.paused?.()) return;
+      if (args.paused?.() || args.amendmentPending?.()) return;
       const tasks = prepared.map(async (unit) => {
         const item = unit.items[0]!;
         const work = state.work[item.id]!;
@@ -136,6 +165,7 @@ export async function runNativeGraph(args: {
         work.startedAt = new Date().toISOString();
         save();
         try {
+          await phases.reserve(item.id, "validation");
           await preflightItemEnvironment({
             config,
             root,
@@ -144,6 +174,7 @@ export async function runNativeGraph(args: {
             store: contentStore,
             baseSha: work.baseSha!,
           });
+          await phases.reserve(item.id, "coding");
           const handle = await driver.start({
             captureContext: { objective, runId: state.runId },
             item,
@@ -159,6 +190,7 @@ export async function runNativeGraph(args: {
             throw new Error("Objective cancelled");
           }
           const result = await driver.collect(handle);
+          phases.release(item.id);
           recordWorkerDiscovery(state, item.id, result.discovery);
           save();
           if (result.collection)
@@ -200,33 +232,91 @@ export async function runNativeGraph(args: {
           throw error;
         }
       });
-      for (const [index, task] of tasks.entries())
-        active.set(prepared[index]!.id, task);
-      try {
-        await Promise.all(tasks);
-      } catch (error) {
-        await Promise.all(
-          prepared.map(async (unit) => {
-            const handle = state.work[unit.id]?.execution;
-            if (handle) await driver.cancel(handle).catch(() => undefined);
-          }),
-        );
-        await Promise.allSettled(tasks);
-        throw error;
-      } finally {
-        for (const unit of prepared) active.delete(unit.id);
+      for (const [index, task] of tasks.entries()) {
+        const id = prepared[index]!.id;
+        const owned = task
+          .catch((error: unknown) => {
+            preparationFailure ??= error;
+            throw error;
+          })
+          .finally(() => active.delete(id));
+        void owned.catch(() => undefined);
+        active.set(id, owned);
       }
     }
   };
-  for (const unit of units) {
+  const settlePrepared = async () => {
+    await Promise.all(active.values());
+    if (preparationFailure) throw preparationFailure;
+  };
+  const remainingUnits = [...units];
+  while (remainingUnits.length) {
+    if (preparationFailure) throw preparationFailure;
+    await prepareReadyUnits();
+    const ranked = rankPending(state.graph, state.work);
+    const eligible = remainingUnits.filter(
+      (unit) =>
+        (!args.amendmentPending?.() ||
+          unit.items.some(
+            (item) =>
+              state.work[item.id]?.attempt ||
+              state.work[item.id]?.status === "done",
+          )) &&
+        unit.externalDependencies.every(
+          (id) => state.work[id]?.status === "done",
+        ) &&
+        !units.some(
+          (other) =>
+            other !== unit &&
+            other.items.some(
+              (item) => state.work[item.id]?.status === "running",
+            ) &&
+            unit.items.some((item) =>
+              other.items.some((candidate) => itemsConflict(item, candidate)),
+            ),
+        ),
+    );
+    eligible.sort(
+      (a, b) => ranked.indexOf(a.items[0]!) - ranked.indexOf(b.items[0]!),
+    );
+    const completionReady = eligible.filter(
+      (unit) =>
+        unit.items.some((item) => {
+          const work = state.work[item.id]!;
+          return (
+            work.status === "published" ||
+            (work.status === "running" && work.step !== "execute")
+          );
+        }) ||
+        unit.items[0]!.kind === "qa" ||
+        unit.items[0]!.kind === "aggregate",
+    );
+    const unit = completionReady[0] ?? eligible[0];
+    if (!unit) {
+      if (args.amendmentPending?.()) return settlePrepared();
+      throw new Error("No dependency-ready delivery unit");
+    }
+    if (
+      active.has(unit.id) &&
+      state.work[unit.items[0]!.id]?.step === "execute"
+    ) {
+      await Promise.race(active.values());
+      continue;
+    }
+    remainingUnits.splice(remainingUnits.indexOf(unit), 1);
     if (unit.items.every((item) => state.work[item.id]?.status === "done"))
       continue;
     if (
       args.amendmentPending?.() &&
       !unit.items.some((item) => state.work[item.id]?.attempt)
     )
-      return;
-    await prepareReadyUnits();
+      return settlePrepared();
+    try {
+      await active.get(unit.id);
+    } finally {
+      active.delete(unit.id);
+    }
+    if (preparationFailure) throw preparationFailure;
     if (
       !unit.externalDependencies.every(
         (dependency) => state.work[dependency]?.status === "done",
@@ -238,11 +328,12 @@ export async function runNativeGraph(args: {
     }
     if (unit.items[0]!.kind === "qa" || unit.items[0]!.kind === "aggregate") {
       const item = unit.items[0]!;
-      if (state.work[item.id]?.status === "waiting") return;
+      if (state.work[item.id]?.status === "waiting") return settlePrepared();
       if (state.work[item.id]?.status === "pending") {
-        if (args.paused?.()) return;
+        if (args.paused?.()) return settlePrepared();
         await args.reconcile?.();
-        if (args.paused?.()) return;
+        if (args.paused?.() || args.amendmentPending?.())
+          return settlePrepared();
       }
       await runQaItem({
         config,
@@ -256,15 +347,16 @@ export async function runNativeGraph(args: {
         store: contentStore,
         save,
         cancelled: args.cancelled,
+        phases,
       });
-      if (state.work[item.id]?.status !== "done") return;
+      if (state.work[item.id]?.status !== "done") return settlePrepared();
       continue;
     }
     for (const [index, item] of unit.items.entries()) {
       if (args.cancelled()) throw new Error("Objective cancelled");
       const work = state.work[item.id]!;
       if (work.status === "published") continue;
-      if (state.work[item.id]?.status === "waiting") return;
+      if (state.work[item.id]?.status === "waiting") return settlePrepared();
       if (work.status !== "pending" && work.status !== "running")
         throw new Error(`Work Item ${item.id} cannot enter native delivery`);
       const previous = index ? state.work[unit.items[index - 1]!.id]! : null;
@@ -274,11 +366,13 @@ export async function runNativeGraph(args: {
       if (!itemBase) throw new Error("Native stack predecessor has no commit");
       if (work.status === "running" && work.baseSha !== itemBase && index !== 0)
         throw new Error(`Work Item ${item.id} resumed on a changed base`);
-      if (work.status === "pending" && args.paused?.()) return;
+      if (work.status === "pending" && args.paused?.()) return settlePrepared();
       if (work.status === "pending") {
+        const available = await driver.availableSlots();
+        if (phases.availableSlots(available) <= 0) return settlePrepared();
         await args.reconcile?.();
         if (args.cancelled()) throw new Error("Objective cancelled");
-        if (args.paused?.()) return;
+        if (args.paused?.()) return settlePrepared();
         work.status = "running";
         work.step = "execute";
         work.baseSha = itemBase;
@@ -300,6 +394,7 @@ export async function runNativeGraph(args: {
         );
       const perform = async (): Promise<void> => {
         if (work.step === "approve-asset") {
+          await phases.reserve(item.id, "validation");
           const selected = work.assets?.find(
             (set) => set.id === work.selectedAssetSet,
           );
@@ -333,7 +428,8 @@ export async function runNativeGraph(args: {
           work.changeRef = applied.changeRef;
           work.treeSha = applied.treeSha;
         } else if (work.step === "execute") {
-          if (!work.execution)
+          if (!work.execution) {
+            await phases.reserve(item.id, "validation");
             await preflightItemEnvironment({
               config,
               root,
@@ -342,6 +438,8 @@ export async function runNativeGraph(args: {
               store: contentStore,
               baseSha: itemBase,
             });
+          }
+          await phases.reserve(item.id, "coding");
           const handle: ExecutionHandle =
             work.execution ??
             (await driver.start({
@@ -361,6 +459,7 @@ export async function runNativeGraph(args: {
             throw new Error("Objective cancelled");
           }
           const result = await driver.collect(handle);
+          phases.release(item.id);
           recordWorkerDiscovery(state, item.id, result.discovery);
           save();
           if (result.collection)
@@ -393,6 +492,7 @@ export async function runNativeGraph(args: {
           work.step = "validate";
           save();
         }
+        await phases.reserve(item.id, "validation");
         if (work.baseSha !== itemBase) {
           if (!work.changeRef || !work.baseSha || work.assets?.length)
             throw new Error(
@@ -409,6 +509,7 @@ export async function runNativeGraph(args: {
           work.baseSha = itemBase;
           save();
         }
+        await phases.reserve(item.id, "validation");
         work.step = "validate";
         save();
         work.validation = await validateWorkItem(
@@ -455,6 +556,7 @@ export async function runNativeGraph(args: {
           ),
           args.contentStore,
         );
+        await phases.reserve(item.id, "review");
         const reviewResult = () =>
           reviewAcceptance({
             model: args.planningModel,
@@ -522,6 +624,7 @@ export async function runNativeGraph(args: {
         delete work.pendingEffect;
         delete work.acceptancePending;
         if (args.cancelled()) throw new Error("Objective cancelled");
+        await phases.reserve(item.id, "delivery");
         work.step = "deliver";
         save();
         const publish = () =>
@@ -558,6 +661,7 @@ export async function runNativeGraph(args: {
           : await publish();
         work.pullRequest = published.pullRequest;
         delete work.pendingEffect;
+        phases.release(item.id);
         work.status = "published";
         delete work.step;
         save();
@@ -567,6 +671,7 @@ export async function runNativeGraph(args: {
           delete work.pendingEffect;
         if (error instanceof AcceptanceDecisionRequired) {
           delete work.pendingEffect;
+          phases.release(item.id);
           work.status = "waiting";
           work.step = "approve-result";
           work.acceptancePending = error.pending;
@@ -584,6 +689,8 @@ export async function runNativeGraph(args: {
           else delete work.authentication;
           save();
         }
+        if (!work.pendingEffect && work.phaseReservation !== "coding")
+          phases.release(item.id);
         throw error;
       });
       active.set(item.id, task);
@@ -592,8 +699,9 @@ export async function runNativeGraph(args: {
       } finally {
         active.delete(item.id);
       }
-      if (state.work[item.id]?.status === "waiting") return;
+      if (state.work[item.id]?.status === "waiting") return settlePrepared();
     }
+    await phases.reserve(unit.items.at(-1)!.id, "delivery");
     const layers: NativeStackLayer[] = unit.items.map((item) => {
       const work = state.work[item.id]!;
       if (work.status !== "published" || !work.pullRequest || !work.changeRef)
@@ -740,6 +848,7 @@ export async function runNativeGraph(args: {
       work.integratedSha = observedAfter;
       work.completedAt = new Date().toISOString();
     }
+    phases.release(unit.items.at(-1)!.id);
     save();
     for (const item of unit.items)
       await closeWorkItem(state, item.id, github, save, true);

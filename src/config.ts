@@ -119,7 +119,18 @@ export type ExecutionConfig =
       harness: { kind: string };
     };
 
+export type ResourcePhase = "coding" | "validation" | "review" | "delivery";
+
+export interface SchedulingConfig {
+  cpu?: number;
+  memoryMiB?: number;
+  reviewConcurrency?: number;
+  validationConcurrency?: number;
+  phases?: Partial<Record<ResourcePhase, { cpu?: number; memoryMiB?: number }>>;
+}
+
 export interface FactoryConfig {
+  scheduling?: SchedulingConfig;
   /** Explicit local sensitive-content opt-in; absent remains disabled. */
   capture?: { enabled: boolean; maxBytesPerInvocation: number };
   schemaVersion: 1;
@@ -445,6 +456,80 @@ export function validateConfig(value: unknown): FactoryConfig {
     throw new Error("Unsupported planning model");
   assertCodexModelSelection(value.planning.planner, "planning.planner");
   assertCodexModelSelection(value.planning.reviewer, "planning.reviewer");
+  if (value.scheduling !== undefined) {
+    assertObject(value.scheduling, "scheduling");
+    assertOnlyKeys(
+      value.scheduling,
+      [
+        "cpu",
+        "memoryMiB",
+        "reviewConcurrency",
+        "validationConcurrency",
+        "phases",
+      ],
+      "scheduling",
+    );
+    for (const key of [
+      "cpu",
+      "memoryMiB",
+      "reviewConcurrency",
+      "validationConcurrency",
+    ]) {
+      const amount = value.scheduling[key];
+      if (
+        amount !== undefined &&
+        (typeof amount !== "number" ||
+          !Number.isFinite(amount) ||
+          amount <= 0 ||
+          (key.endsWith("Concurrency") && !Number.isSafeInteger(amount)))
+      )
+        throw new Error(
+          `scheduling.${key} must be a positive finite reservation or integer ceiling`,
+        );
+    }
+    if (value.scheduling.phases !== undefined) {
+      assertObject(value.scheduling.phases, "scheduling.phases");
+      assertOnlyKeys(
+        value.scheduling.phases,
+        ["coding", "validation", "review", "delivery"],
+        "scheduling.phases",
+      );
+      for (const [phase, declaration] of Object.entries(
+        value.scheduling.phases,
+      )) {
+        assertObject(declaration, `scheduling.phases.${phase}`);
+        assertOnlyKeys(
+          declaration,
+          ["cpu", "memoryMiB"],
+          `scheduling.phases.${phase}`,
+        );
+        for (const key of ["cpu", "memoryMiB"])
+          if (
+            declaration[key] !== undefined &&
+            (typeof declaration[key] !== "number" ||
+              !Number.isFinite(declaration[key]) ||
+              Number(declaration[key]) < 0)
+          )
+            throw new Error(
+              `scheduling.phases.${phase}.${key} must be a nonnegative finite reservation`,
+            );
+      }
+    }
+    for (const key of ["cpu", "memoryMiB"]) {
+      if (value.scheduling[key] === undefined) continue;
+      const phases = value.scheduling.phases as
+        | Record<string, Record<string, number>>
+        | undefined;
+      for (const phase of ["coding", "validation", "review", "delivery"])
+        if (
+          phases?.[phase]?.[key] === undefined ||
+          phases[phase]![key]! > Number(value.scheduling[key])
+        )
+          throw new Error(
+            `Binding scheduling.${key} requires a fitting declaration for every phase; missing capacity is unknown`,
+          );
+    }
+  }
   assertObject(value.execution, "execution");
   if (value.execution.kind !== "local") {
     throw new Error(

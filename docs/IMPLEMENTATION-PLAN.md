@@ -258,3 +258,26 @@ The operator separately approved the repository rename on September 28, 2026: th
 ### Local supervision lifecycle
 
 A supported Linux systemd user manager may own the admitted coordinator independently of a chat. Registration binds the exact installed CLI, Node, configuration, state root and Objective, requires separate service consent, and never changes login persistence. Stop, disable, uninstall and artifact replacement drain the existing owner to a quiescent continuation; unknown effects do not become successful cessation. Detached attempts are not killed by service-group cleanup. Upgrades and rollback use the candidate artifact's actual continuation validator before and after drain. Unsupported state refuses without migration, deletion or allowance resets. Removing supervision preserves target binding and all execution evidence. Installed service lifecycle evidence and full autonomous Objective qualification are separate claims.
+
+### Current-graph terminal acceptance
+
+Final validation success is not Objective completion. After review the coordinator
+re-observes the default head, checks the current graph again, and seals the exact
+commit, tree, graph and configuration before beginning Objective closure. Required
+leaves and aggregate parents must have accepted proof and acknowledged issue closure;
+coverage, human decisions, pending discoveries, submitted effects and owned process
+cessation remain independent gates. Protected delivery and media acceptance keep
+their existing checks.
+
+One compact immutable binding in the atomic snapshot references the existing final
+and per-item evidence by digest. It retains diagnostic accounting scope without
+inventing complete usage totals, and records settled ownership with evidence
+retained. It is not a second acceptance ledger or deployment approval. Historical
+snapshots remain readable without fabricated bindings.
+
+Closure acknowledgement loss leaves the Objective active and an admitted owner
+paused for explicit resume/reconciliation. Reconciliation uses the authenticated
+GitHub closure contract and does not replay workers or review models. Amendment
+intake reports busy while closure is sealed or unresolved; discoveries after Done
+require successor work. A proposal arriving during review invalidates that review
+before sealing. Later default-branch changes do not rewrite the sealed candidate.

@@ -731,3 +731,14 @@ The existing scheduler, atomic WorkState, driver available-slot contract and reg
 ### Local background supervision (#246)
 
 The new `supervision.ts` module registers a single systemd user unit over the existing #245 owner, atomic continuation and control socket. `runner.ts` adds a quiescent handoff; no separate queue or execution journal is introduced. Public CLI operations preserve explicit service consent, exact installed paths, model-free state compatibility, private configuration and retained evidence. No archived service implementation was copied. User-manager lifecycle tests remain distinct from the later full autonomous Objective qualification in #253.
+
+### Current-graph final acceptance (#249)
+
+The existing completion, coverage, graph revision, diagnostic and atomic snapshot
+contracts supplied this newly written terminal acceptance binding. The shared
+completion predicate replaces validation-success shortcuts in admission, owner,
+status and supervision paths. Public deterministic Git fixtures exercise remote
+head advancement, closure acknowledgement loss, amendment overlap and immutable
+binding checks; existing delivery/media/human-decision tests retain their scope.
+No archived runtime, private source or provider responses were copied. Source
+validation does not qualify the full installed autonomous scenario in #253.

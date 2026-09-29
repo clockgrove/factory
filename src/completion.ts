@@ -1,5 +1,169 @@
+import { createHash } from "node:crypto";
+import { graphDigest, amendmentBlocksDispatch } from "./graph-amendments.js";
+import { assertCompletedCoverage } from "./qa.js";
 import type { GitHubGateway } from "./contracts.js";
 import type { FactoryState } from "./state.js";
+
+/** Compact bindings into the existing snapshot, not a second copy of its evidence. */
+export interface FinalAcceptance {
+  sealedAt: string;
+  graphDigest: string;
+  configDigest: string;
+  commit: string;
+  tree: string;
+  evidenceDigest: string;
+  usage: { availability: "unavailable"; runId: string; source: "diagnostics" };
+  resources: "owned-attempts-settled; controller-processes-stopped; evidence-retained";
+}
+
+function evidenceDigest(state: FactoryState): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        objectiveBodyDigest: state.objectiveBodyDigest,
+        admissionDigest: state.admission?.digest,
+        finalValidation: state.finalValidation,
+        decisions: state.finalAcceptanceDecisions,
+        work: state.graph.items.map(({ id }) => ({
+          id,
+          evidence: state.work[id],
+        })),
+      }),
+    )
+    .digest("hex");
+}
+
+export function assertTerminalEligibility(state: FactoryState): void {
+  if (
+    !state.finalValidation?.passed ||
+    !state.integratedSha ||
+    state.cancelRequested ||
+    state.cancelledAt ||
+    state.error ||
+    state.finalAcceptancePending ||
+    amendmentBlocksDispatch(state) ||
+    state.coordinator?.cancelError ||
+    state.coordinator?.processes?.length ||
+    state.coordinator?.phase === "objective-review-submitted"
+  )
+    throw new Error("Objective terminal eligibility is unresolved");
+  for (const work of Object.values(state.work)) {
+    if (
+      work.status === "running" ||
+      work.pendingEffect ||
+      (work.discovery?.scope === "in-scope" &&
+        work.discoveryDisposition !== "accepted")
+    )
+      throw new Error(
+        "Owned attempt, submitted effect or discovery remains unresolved",
+      );
+  }
+  for (const item of state.graph.items) {
+    const work = state.work[item.id];
+    if (
+      work?.status !== "done" ||
+      work.githubClosure !== "complete" ||
+      !work.validation ||
+      work.validation.treeSha !== work.treeSha ||
+      !work.changeRef ||
+      !work.treeSha ||
+      work.acceptancePending
+    )
+      throw new Error(
+        `Required Work Item ${item.id} is not accepted and closed`,
+      );
+  }
+  for (const [validation, decisions] of [
+    [state.finalValidation, state.finalAcceptanceDecisions],
+    ...state.graph.items.map(
+      ({ id }) =>
+        [
+          state.work[id]!.validation,
+          state.work[id]!.acceptanceDecisions,
+        ] as const,
+    ),
+  ] as const) {
+    if (
+      !validation ||
+      validation.commands.some(
+        (command) => !command.passed || command.treeSha !== validation.treeSha,
+      )
+    )
+      throw new Error(
+        "Acceptance has missing or failed exact-tree command evidence",
+      );
+    for (const criterion of validation.criteria ?? [])
+      if (
+        criterion.verdict === "human-accept" &&
+        !decisions?.some(
+          (decision) =>
+            decision.criterion === criterion.criterion &&
+            decision.treeSha === validation.treeSha &&
+            decision.outcome === "accept",
+        )
+      )
+        throw new Error("Human-owned acceptance lacks an exact-tree decision");
+  }
+  assertCompletedCoverage(state);
+}
+
+export function assertFinalAcceptance(state: FactoryState): void {
+  const seal = state.finalAcceptance;
+  if (!seal) return; // Historical snapshots remain readable without invented evidence.
+  assertTerminalEligibility(state);
+  if (
+    !Number.isFinite(Date.parse(seal.sealedAt)) ||
+    seal.graphDigest !== graphDigest(state.graph) ||
+    seal.configDigest !== state.configDigest ||
+    seal.commit !== state.integratedSha ||
+    seal.tree !== state.finalValidation?.treeSha ||
+    seal.evidenceDigest !== evidenceDigest(state) ||
+    seal.usage?.availability !== "unavailable" ||
+    seal.usage.runId !== state.runId ||
+    seal.usage.source !== "diagnostics" ||
+    seal.resources !==
+      "owned-attempts-settled; controller-processes-stopped; evidence-retained"
+  )
+    throw new Error(
+      "Final acceptance binding differs from its sealed candidate or evidence",
+    );
+}
+
+export function sealFinalAcceptance(state: FactoryState): void {
+  assertTerminalEligibility(state);
+  if (state.finalAcceptance) {
+    assertFinalAcceptance(state);
+    return;
+  }
+  state.finalAcceptance = {
+    sealedAt: new Date().toISOString(),
+    graphDigest: graphDigest(state.graph),
+    configDigest: state.configDigest,
+    commit: state.integratedSha!,
+    tree: state.finalValidation!.treeSha,
+    evidenceDigest: evidenceDigest(state),
+    // Diagnostic accounting is observational; no complete total is invented here.
+    usage: {
+      availability: "unavailable",
+      runId: state.runId,
+      source: "diagnostics",
+    },
+    resources:
+      "owned-attempts-settled; controller-processes-stopped; evidence-retained",
+  };
+}
+
+export function objectiveComplete(state: FactoryState): boolean {
+  if (!state.finalValidation?.passed || state.objectiveClosure !== "complete")
+    return false;
+  try {
+    assertTerminalEligibility(state);
+    assertFinalAcceptance(state);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export class GitHubClosureFailure extends Error {}
 
@@ -90,8 +254,7 @@ export async function closeObjectiveIssue(
   save: () => void,
 ): Promise<void> {
   if (state.objectiveClosure === "complete") return;
-  if (!state.finalValidation?.passed || !state.integratedSha)
-    throw new Error("Objective has no final validation identity");
+  sealFinalAcceptance(state);
   try {
     state.objectiveClosure = "pending";
     save();

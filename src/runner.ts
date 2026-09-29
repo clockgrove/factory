@@ -1686,6 +1686,16 @@ async function runObjectivePass(
     });
     const current = owner.snapshot;
     if (
+      current?.schemaVersion === 2 &&
+      current.finalAcceptance &&
+      !(error instanceof GitHubClosureFailure)
+    ) {
+      // A rejected resume cannot turn immutable accepted evidence into a failed run.
+      current.coordinator!.waitReason = `Sealed acceptance preserved: ${error instanceof Error ? error.message : String(error)}`;
+      saveState(path, current);
+      throw error;
+    }
+    if (
       active.size &&
       current?.schemaVersion === 2 &&
       !cancellationRequested()

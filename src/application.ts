@@ -1,3 +1,4 @@
+import { requestControl } from "./coordinator-control.js";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -47,6 +48,10 @@ import {
 import type { FactoryState } from "./state.js";
 
 export interface FactoryApplication {
+  proposeAmendment(
+    objective: number,
+    proposal: import("./graph-amendments.js").AmendmentProposal,
+  ): Promise<unknown>;
   planObjective(
     objective: number,
     additionalSources?: SourceSelector[],
@@ -156,6 +161,18 @@ export function createApplication(
       checkAdmission(config, objective, services, candidate, admission),
     decidePlan: (objective, candidate, input) =>
       decidePlan(config, objective, services, candidate, input),
+    proposeAmendment: async (objective, proposal) => {
+      const reply = await requestControl(config.repository, {
+        objective,
+        action: "propose-amendment",
+        input: proposal as unknown as Record<string, unknown>,
+      });
+      if (!reply.handled)
+        throw new Error(
+          "Start the existing Objective owner before proposing an amendment",
+        );
+      return reply.result;
+    },
     runObjective: (objective, acceptedPlan, admission, options) =>
       runObjective(
         config,

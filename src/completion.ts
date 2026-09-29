@@ -12,7 +12,10 @@ export async function closeWorkItem(
 ): Promise<void> {
   const work = state.work[itemId]!;
   if (work.githubClosure === "complete") return;
-  if (state.graph.items.find((item) => item.id === itemId)?.kind === "qa") {
+  if (
+    state.graph.items.find((item) => item.id === itemId)?.kind === "qa" ||
+    state.graph.items.find((item) => item.id === itemId)?.kind === "aggregate"
+  ) {
     if (
       work.status !== "done" ||
       !work.changeRef ||

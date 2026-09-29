@@ -28,7 +28,12 @@ export function linearDeliveryUnits(graph: WorkGraph): DeliveryUnit[] {
   const continuation = new Map<string, string>();
   const childOf = new Set<string>();
   for (const item of graph.items) {
-    if (item.kind === "qa" || item.dependencies.length !== 1) continue;
+    if (
+      item.kind === "qa" ||
+      item.kind === "aggregate" ||
+      item.dependencies.length !== 1
+    )
+      continue;
     // Environment preparation must integrate before the consumer is admitted.
     if (
       graph.coverage?.some(
@@ -38,7 +43,11 @@ export function linearDeliveryUnits(graph: WorkGraph): DeliveryUnit[] {
     )
       continue;
     const parent = item.dependencies[0]!;
-    if (byId.get(parent)?.kind === "qa" || children.get(parent)?.length !== 1)
+    if (
+      byId.get(parent)?.kind === "qa" ||
+      byId.get(parent)?.kind === "aggregate" ||
+      children.get(parent)?.length !== 1
+    )
       continue;
     continuation.set(parent, item.id);
     childOf.add(item.id);

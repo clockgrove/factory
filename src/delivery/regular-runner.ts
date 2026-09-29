@@ -1,4 +1,5 @@
 import { workspacePackageAdditions } from "../workspace-membership.js";
+import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "../compiler.js";
@@ -87,7 +88,7 @@ export async function runRegularGraph(args: {
   ): Promise<void> => {
     const work = state.work[item.id]!;
     try {
-      if (item.kind === "qa") {
+      if (item.kind === "qa" || item.kind === "aggregate") {
         await runQaItem({
           config,
           root,
@@ -166,6 +167,8 @@ export async function runRegularGraph(args: {
           throw new Error("Objective cancelled");
         }
         const result = await driver.collect(handle);
+        recordWorkerDiscovery(state, item.id, result.discovery);
+        save();
         if (result.collection)
           args.diagnostics?.emit({
             runId: state.runId,
@@ -413,7 +416,7 @@ export async function runRegularGraph(args: {
   for (const item of graph.items) {
     const work = state.work[item.id]!;
     if (work.status !== "running") continue;
-    if (item.kind === "qa") {
+    if (item.kind === "qa" || item.kind === "aggregate") {
       const promise = execute(item, state.integratedSha ?? baseSha).finally(
         () => active.delete(item.id),
       );
@@ -467,7 +470,10 @@ export async function runRegularGraph(args: {
     const ready = args.paused?.()
       ? []
       : readyItems(graph, state.work, new Set(active.keys()), slots).filter(
-          (item) => item.kind === "qa" || workerSlots-- > 0,
+          (item) =>
+            item.kind === "qa" ||
+            item.kind === "aggregate" ||
+            workerSlots-- > 0,
         );
     if (ready.length) await args.reconcile?.();
     for (const item of ready) {
@@ -477,6 +483,7 @@ export async function runRegularGraph(args: {
       work.status = "running";
       work.step = "execute";
       work.attempt = randomUUID();
+      work.graphRevisionDigest = graphDigest(state.graph);
       work.startedAt = new Date().toISOString();
       const itemBase = state.integratedSha ?? baseSha;
       work.baseSha = itemBase;

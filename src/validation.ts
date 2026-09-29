@@ -1022,7 +1022,7 @@ function workItemResultEvidence(args: {
     current.treeSha,
     `Work Item ${item.id} result`,
   );
-  if (item.kind === "qa") {
+  if (item.kind === "qa" || item.kind === "aggregate") {
     if (
       current.changeRef !== current.baseSha ||
       current.execution ||
@@ -1046,7 +1046,7 @@ function workItemResultEvidence(args: {
       );
     const record = {
       id: item.id,
-      kind: "qa",
+      kind: item.kind,
       status: current.status,
       resultCommitSha: current.changeRef,
       resultTreeSha: current.treeSha,
@@ -1354,7 +1354,7 @@ export function objectiveReviewEvidence(args: {
       integratedCommitSha,
       `Work Item ${item.id} integration`,
     );
-    if (item.kind !== "qa")
+    if (item.kind !== "qa" && item.kind !== "aggregate")
       integrationRecords.push({
         item,
         resultBaseSha: current.baseSha,

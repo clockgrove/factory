@@ -131,7 +131,11 @@ export function assertCoverageShape(graph: WorkGraph): void {
         throw new Error("Published CI requires the actual delivery dependency");
     } else if (targetItem)
       throw new Error("Only CI coverage names a candidate Work Item");
-    if (item.kind !== "qa" && !["result", "final"].includes(entry.phase))
+    if (
+      item.kind !== "qa" &&
+      item.kind !== "aggregate" &&
+      !["result", "final"].includes(entry.phase)
+    )
       throw new Error("Late proof requires a read-only QA node");
     if (
       item.kind === "qa" &&
@@ -156,7 +160,9 @@ export function assertCoverageShape(graph: WorkGraph): void {
       if (
         graph.items.some(
           (candidate) =>
-            candidate.kind !== "qa" && !ancestors.has(candidate.id),
+            candidate.kind !== "qa" &&
+            candidate.kind !== "aggregate" &&
+            !ancestors.has(candidate.id),
         )
       )
         throw new Error(

@@ -81,6 +81,7 @@ function sameItem(
       ...item,
       kind: item.kind ?? "work",
       children: item.children ?? [],
+      priority: item.priority ?? 0,
     };
   return isDeepStrictEqual(normalized(left), normalized(right));
 }

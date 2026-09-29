@@ -24,6 +24,7 @@ import {
 } from "../media.js";
 import { git, gitAsync } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
+import { phaseAdmission } from "../phase-admission.js";
 import { readyItems } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
 import {
@@ -64,6 +65,7 @@ export async function runRegularGraph(args: {
     save,
     active,
   } = args;
+  const phases = phaseAdmission(config, state, save, args.cancelled);
   const graph = state.graph;
   const baseSha = state.baseSha;
   // Refuse the whole restart before any resumable peer can perform work.
@@ -79,6 +81,7 @@ export async function runRegularGraph(args: {
       );
     }
   }
+  let failure: unknown;
   let mergeTail: Promise<void> = Promise.resolve();
   const execute = async (
     item: WorkItem,
@@ -100,10 +103,12 @@ export async function runRegularGraph(args: {
           store: contentStore,
           save,
           cancelled: args.cancelled,
+          phases,
         });
         return;
       }
-      if (!existingHandle && work.step === "execute")
+      if (!existingHandle && work.step === "execute") {
+        await phases.reserve(item.id, "validation");
         await preflightItemEnvironment({
           config,
           root,
@@ -112,6 +117,11 @@ export async function runRegularGraph(args: {
           store: contentStore,
           baseSha: itemBase,
         });
+      }
+      await phases.reserve(
+        item.id,
+        work.step === "execute" ? "coding" : "validation",
+      );
       if (work.step === "approve-asset") {
         const selected = work.assets?.find(
           (set) => set.id === work.selectedAssetSet,
@@ -165,6 +175,7 @@ export async function runRegularGraph(args: {
           throw new Error("Objective cancelled");
         }
         const result = await driver.collect(handle);
+        phases.release(item.id);
         recordWorkerDiscovery(state, item.id, result.discovery);
         save();
         if (result.collection)
@@ -194,6 +205,7 @@ export async function runRegularGraph(args: {
           return;
         }
       }
+      await phases.reserve(item.id, "validation");
       work.step = "validate";
       save();
       work.validation = await validateWorkItem(
@@ -240,6 +252,7 @@ export async function runRegularGraph(args: {
         ),
         args.contentStore,
       );
+      await phases.reserve(item.id, "review");
       const reviewResult = () =>
         reviewAcceptance({
           model: args.planningModel,
@@ -301,6 +314,7 @@ export async function runRegularGraph(args: {
       delete work.pendingEffect;
       delete work.acceptancePending;
       if (args.cancelled()) throw new Error("Objective cancelled");
+      await phases.reserve(item.id, "delivery");
       work.step = "deliver";
       save();
       const branch = `factory/objective-${objective}/${item.id}`;
@@ -386,12 +400,14 @@ export async function runRegularGraph(args: {
         () => undefined,
       );
       await integrate;
+      phases.release(item.id);
       await closeWorkItem(state, item.id, github, save, false);
     } catch (error) {
       if (error instanceof CompletedModelInvocationError)
         delete work.pendingEffect;
       if (error instanceof AcceptanceDecisionRequired) {
         delete work.pendingEffect;
+        phases.release(item.id);
         work.status = "waiting";
         work.step = "approve-result";
         work.acceptancePending = error.pending;
@@ -406,7 +422,10 @@ export async function runRegularGraph(args: {
       )
         work.authentication = error.authentication;
       else delete work.authentication;
+      if (!work.pendingEffect && work.phaseReservation !== "coding")
+        phases.release(item.id);
       save();
+      failure ??= error;
       throw error;
     }
   };
@@ -458,20 +477,53 @@ export async function runRegularGraph(args: {
     active.set(item.id, promise);
   }
   while (graph.items.some((item) => state.work[item.id]?.status !== "done")) {
+    if (failure) throw failure;
     if (args.cancelled()) throw new Error("Objective cancelled");
     const reported = await driver.availableSlots();
-    const available =
-      reported === "unknown" ? config.execution.concurrency : reported;
-    const slots = config.execution.concurrency - active.size;
-    let workerSlots = available;
+    args.diagnostics?.emit({
+      runId: state.runId,
+      operation: "scheduling-capacity",
+      outcome: "observed",
+      metadata: {
+        driverAvailableSlots: reported,
+        operatorCeiling: config.execution.concurrency,
+        codingReservations: phases.codingCount(),
+      },
+    });
+    const slots = graph.items.length;
+    let workerSlots = phases.availableSlots(reported);
     const ready = args.paused?.()
       ? []
-      : readyItems(graph, state.work, new Set(active.keys()), slots).filter(
-          (item) =>
-            item.kind === "qa" ||
-            item.kind === "aggregate" ||
-            workerSlots-- > 0,
-        );
+      : readyItems(
+          graph,
+          state.work,
+          new Set([
+            ...active.keys(),
+            ...graph.items
+              .filter((item) =>
+                ["waiting", "published"].includes(state.work[item.id]!.status),
+              )
+              .map((item) => item.id),
+          ]),
+          slots,
+        ).filter((item) => {
+          const blocked =
+            item.kind === "qa" || item.kind === "aggregate"
+              ? undefined
+              : (phases.reason(item.id, "coding") ??
+                (workerSlots <= 0
+                  ? reported === "unknown"
+                    ? "operator coding ceiling; provider capacity unknown"
+                    : "driver or operator coding capacity"
+                  : undefined));
+          if (blocked) {
+            state.work[item.id]!.waitingReason = blocked;
+            return false;
+          }
+          delete state.work[item.id]!.waitingReason;
+          if (item.kind !== "qa" && item.kind !== "aggregate") workerSlots--;
+          return true;
+        });
     if (ready.length) await args.reconcile?.();
     for (const item of ready) {
       if (args.cancelled()) throw new Error("Objective cancelled");
@@ -499,8 +551,11 @@ export async function runRegularGraph(args: {
     )
       return true;
     if (!active.size && args.paused?.()) return true;
+    if (failure) throw failure;
     if (!active.size) return true;
-    await Promise.race(active.values());
+    await Promise.race([...active.values(), phases.changed()]);
   }
+  await Promise.all(active.values());
+  if (failure) throw failure;
   return false;
 }

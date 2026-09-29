@@ -1717,12 +1717,23 @@ test("native application path runs a linear stack beside an independent replayed
       (event) => event.type === "merge-stack",
     );
     assert.ok(stackEvent);
-    assert.equal(state.work.lane.baseSha, stackEvent.integratedSha);
-    assert.equal(state.work.lane.validation.treeSha, state.work.lane.treeSha);
-    assert.equal(
-      git(target.checkout, "rev-parse", `${state.work.lane.changeRef}^`),
-      stackEvent.integratedSha,
+    // Either independent root can finish first. The later unit must replay on
+    // the actual preceding integration, while the native chain remains intact.
+    const merges = remote.events.filter((event) =>
+      ["merge", "merge-stack"].includes(event.type),
     );
+    assert.equal(merges.length, 2);
+    const firstRoot = merges[0].type === "merge-stack" ? "stack-a" : "lane";
+    const secondRoot = firstRoot === "stack-a" ? "lane" : "stack-a";
+    assert.equal(state.work[firstRoot].baseSha, target.baseSha);
+    assert.equal(state.work[secondRoot].baseSha, merges[0].integratedSha);
+    assert.equal(
+      git(target.checkout, "rev-parse", `${state.work[secondRoot].changeRef}^`),
+      merges[0].integratedSha,
+    );
+    assert.equal(state.integratedSha, merges[1].integratedSha);
+    for (const id of ["stack-a", "stack-b", "lane"])
+      assert.equal(state.work[id].validation.treeSha, state.work[id].treeSha);
     const stackPulls = [
       state.work["stack-a"].pullRequest,
       state.work["stack-b"].pullRequest,

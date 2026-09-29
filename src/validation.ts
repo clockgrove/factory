@@ -23,6 +23,7 @@ import type {
   ValidationLfsMember,
   WorkItem,
 } from "./contracts.js";
+import { CompletedModelInvocationError } from "./contracts.js";
 import { assetSelectionDigest, type HydrationReceipt } from "./media.js";
 import {
   hasUnresolvedSubprocesses,
@@ -1414,7 +1415,9 @@ export async function reviewAcceptance(args: {
   let responseReceived = false;
   try {
     if (!model.reviewResult)
-      throw new Error("No independent result reviewer is configured");
+      throw new CompletedModelInvocationError(
+        "No independent result reviewer is configured",
+      );
     const response = await model.reviewResult({
       reviewPhase: args.reviewPhase ?? "result-review",
       criteria,
@@ -1431,6 +1434,8 @@ export async function reviewAcceptance(args: {
     responseReceived = true;
     decoded = decodeReview(response, packet);
   } catch (error) {
+    if (!responseReceived && !(error instanceof CompletedModelInvocationError))
+      throw error;
     reviewFailure = error instanceof Error ? error.message : String(error);
   }
   const proven: CriterionEvidence[] = [];

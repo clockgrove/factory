@@ -113,6 +113,8 @@ export async function runNativeGraph(args: {
     }
     if (prepared.length > 1) {
       await args.reconcile?.();
+      if (args.cancelled()) throw new Error("Objective cancelled");
+      if (args.paused?.()) return;
       const tasks = prepared.map(async (unit) => {
         const item = unit.items[0]!;
         const work = state.work[item.id]!;
@@ -227,6 +229,8 @@ export async function runNativeGraph(args: {
       if (work.status === "pending" && args.paused?.()) return;
       if (work.status === "pending") {
         await args.reconcile?.();
+        if (args.cancelled()) throw new Error("Objective cancelled");
+        if (args.paused?.()) return;
         work.status = "running";
         work.step = "execute";
         work.baseSha = itemBase;

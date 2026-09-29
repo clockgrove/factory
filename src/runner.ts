@@ -290,7 +290,6 @@ interface LocalOwner {
   snapshot?: ContinuationState;
   lock: ControllerLock;
   abort: AbortController;
-  wake: () => void;
   changed: boolean;
   deadlineAt?: string;
   cancellation?: Promise<void>;
@@ -387,6 +386,49 @@ async function cancelRecordedSubprocesses(
   if (state.coordinator) state.coordinator.processes = [];
 }
 
+async function cancelKnownWork(
+  state: ContinuationState,
+  driver: ExecutionDriver,
+): Promise<void> {
+  const errors: string[] = [];
+  const tasks: Promise<void>[] = [];
+  if (
+    state.schemaVersion === 3 &&
+    (state.planning === "submitted" || state.projectionPending)
+  )
+    errors.push(
+      "Submitted preparation effect has unknown outcome; operator direction required",
+    );
+  if (state.coordinator?.phase === "objective-review-submitted")
+    errors.push(
+      "Submitted Objective review outcome is unknown; operator direction required",
+    );
+  if (state.schemaVersion === 2)
+    for (const work of Object.values(state.work)) {
+      if (work.pendingEffect)
+        errors.push(
+          `Submitted ${work.pendingEffect} outcome is unknown; operator direction required`,
+        );
+      if (
+        work.step !== "execute" ||
+        work.status === "done" ||
+        work.status === "cancelled"
+      )
+        continue;
+      if (!work.execution) {
+        errors.push(
+          "Active attempt has no stable handle; cessation is unknown",
+        );
+        continue;
+      }
+      tasks.push(driver.cancel(work.execution));
+    }
+  tasks.push(cancelRecordedSubprocesses(state));
+  for (const result of await Promise.allSettled(tasks))
+    if (result.status === "rejected") errors.push(String(result.reason));
+  if (errors.length) throw new Error(errors.join("; "));
+}
+
 export async function runObjective(
   config: FactoryConfig,
   objective: number,
@@ -418,15 +460,16 @@ export async function runObjective(
     changed: false,
     lock,
     abort: new AbortController(),
-    wake: () => undefined,
     waitForWake: async () => undefined,
     snapshot,
     deadlineAt: options.deadlineAt,
   };
   owners.set(ownerKey(config, objective), owner);
+  const waiters = new Set<() => void>();
   const wake = () => {
     owner.changed = true;
-    owner.wake();
+    for (const resolve of waiters) resolve();
+    waiters.clear();
   };
   const wait = async () => {
     if (owner.changed) {
@@ -434,7 +477,7 @@ export async function runObjective(
       return;
     }
     await new Promise<void>((resolve) => {
-      owner.wake = resolve;
+      waiters.add(resolve);
     });
     owner.changed = false;
   };
@@ -458,32 +501,7 @@ export async function runObjective(
     owner.cancellation = (async () => {
       const state = owner.snapshot!;
       try {
-        if (
-          state.schemaVersion === 3 &&
-          (state.planning === "submitted" || state.projectionPending)
-        )
-          throw new Error(
-            "Submitted preparation effect has unknown outcome; operator direction required",
-          );
-        if (state.schemaVersion === 2)
-          for (const work of Object.values(state.work)) {
-            if (work.pendingEffect)
-              throw new Error(
-                `Submitted ${work.pendingEffect} outcome is unknown; operator direction required`,
-              );
-            if (work.status !== "running" && !work.execution) continue;
-            if (!work.execution && work.step === "execute")
-              throw new Error(
-                "Active attempt has no stable handle; cessation is unknown",
-              );
-            if (work.execution && work.step === "execute")
-              await services.driver.cancel(work.execution);
-          }
-        if (state.coordinator?.phase === "objective-review-submitted")
-          throw new Error(
-            "Submitted Objective review outcome is unknown; operator direction required",
-          );
-        await cancelRecordedSubprocesses(state);
+        await cancelKnownWork(state, services.driver);
         // The run settles its in-flight effect before recording terminal cancellation.
         state.coordinator!.waitReason =
           "Owned cancellation acknowledged; waiting for in-flight phase to settle";
@@ -509,6 +527,9 @@ export async function runObjective(
       );
     }
     owner.deadlineAt = owner.snapshot.coordinator.deadlineAt;
+  } else if (owner.snapshot && owner.deadlineAt) {
+    owner.snapshot.coordinator!.deadlineAt = owner.deadlineAt;
+    persist();
   }
   let deadlineTimer: NodeJS.Timeout | undefined;
   const armDeadline = () => {
@@ -619,7 +640,16 @@ export async function runObjective(
         }
         throw new Error("Objective cancellation requested");
       }
-      if (state?.coordinator?.mode !== "running" && state?.coordinator) {
+      if (
+        state?.coordinator?.mode !== "running" &&
+        state?.coordinator &&
+        !(
+          state.schemaVersion === 2 &&
+          Object.values(state.work).some(
+            (work) => work.status === "running" || work.status === "published",
+          )
+        )
+      ) {
         await wait();
         continue;
       }
@@ -1097,6 +1127,16 @@ async function runObjectivePass(
             detail: entry.detail,
           }),
       });
+      const waitForAdmission = async () => {
+        while (
+          preparation!.coordinator.mode !== "running" &&
+          !cancellationRequested()
+        )
+          await owner.waitForWake();
+        if (cancellationRequested())
+          throw new Error("Objective cancellation requested");
+      };
+      await waitForAdmission();
       const projected = await diagnostics.span(
         {
           operation: "github-projection",
@@ -1107,7 +1147,8 @@ async function runObjectivePass(
             graph,
             objectiveIssue: objective,
             knownIssues: preparation!.issueByItemId,
-            beforeCreate: (id) => {
+            beforeCreate: async (id) => {
+              await waitForAdmission();
               if (cancellationRequested())
                 throw new Error("Objective cancellation requested");
               preparation!.projectionPending = id;
@@ -1568,49 +1609,40 @@ export async function cancelObjective(
   try {
     const continuation = readContinuation(config.repository, objective);
     if (!continuation) throw new Error("Objective has no Factory state");
-    if (continuation.schemaVersion === 3) {
-      continuation.cancelRequested = true;
-      saveState(statePath(config.repository, objective), continuation);
-      if (
-        continuation.planning === "submitted" ||
-        continuation.projectionPending
-      )
-        throw new Error(
-          "Submitted preparation outcome is unknown; operator direction required",
-        );
-      await cancelRecordedSubprocesses(continuation);
-      continuation.cancelledAt = new Date().toISOString();
-      saveState(statePath(config.repository, objective), continuation);
-      return "cancelled";
-    }
-    const state = continuation;
-    if (state.finalValidation?.passed || state.cancelledAt) return "cancelled";
-    state.cancelRequested = true;
-    saveState(statePath(config.repository, objective), state);
     if (
-      state.coordinator?.phase === "objective-review-submitted" ||
-      Object.values(state.work).some((work) => work.pendingEffect)
+      (continuation.schemaVersion === 2 &&
+        continuation.finalValidation?.passed) ||
+      continuation.cancelledAt
     )
-      throw new Error(
-        "Submitted effect outcome is unknown; operator direction required",
-      );
-    for (const work of Object.values(state.work)) {
-      if (work.status !== "running") continue;
-      if (!work.execution)
-        throw new Error(
-          "Active attempt has no stable handle; operator direction required",
-        );
-      await driver.cancel(work.execution);
-      await driver.collect(work.execution).catch(() => undefined);
-      work.status = "cancelled";
-      work.completedAt = new Date().toISOString();
+      return "cancelled";
+    continuation.cancelRequested = true;
+    saveState(statePath(config.repository, objective), continuation);
+    try {
+      await cancelKnownWork(continuation, driver);
+    } catch (error) {
+      continuation.coordinator ??= {
+        mode: "running",
+        phase: "waiting",
+        phaseStartedAt: new Date().toISOString(),
+      };
+      continuation.coordinator.cancelError = String(error);
+      continuation.coordinator.waitReason =
+        "Cancellation unresolved; operator direction required";
+      saveState(statePath(config.repository, objective), continuation);
+      throw error;
     }
-    await cancelRecordedSubprocesses(state);
-    for (const work of Object.values(state.work))
-      if (work.status === "pending") work.status = "cancelled";
-    state.cancelRequested = true;
-    state.cancelledAt = new Date().toISOString();
-    saveState(statePath(config.repository, objective), state);
+    if (continuation.schemaVersion === 2)
+      for (const work of Object.values(continuation.work)) {
+        if (work.execution && work.step === "execute")
+          await driver.collect(work.execution).catch(() => undefined);
+        if (work.status !== "done" && work.status !== "published") {
+          work.status = "cancelled";
+          work.completedAt = new Date().toISOString();
+        }
+      }
+    continuation.cancelledAt = new Date().toISOString();
+    saveState(statePath(config.repository, objective), continuation);
+    const state = continuation;
     new DiagnosticEmitter(config.repository, objective).emit({
       runId: state.runId,
       operation: "objective-cancel",

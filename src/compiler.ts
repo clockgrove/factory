@@ -17,6 +17,7 @@ import type {
   ValidationCommandReceipt,
   WorkGraph,
 } from "./contracts.js";
+import { CompletedModelInvocationError } from "./contracts.js";
 import {
   assertInstalledControllerCapabilities,
   CONTROLLER_CAPABILITIES_DIGEST,
@@ -84,9 +85,9 @@ function observeModelInvocation(
   }
 }
 
-class ProviderCapacityFailure extends Error {
+class ProviderCapacityFailure extends CompletedModelInvocationError {
   constructor(cause: unknown) {
-    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    super(cause);
     this.name = "ProviderCapacityFailure";
   }
 }
@@ -504,6 +505,7 @@ export class CodexPlanningModel implements PlanningModel {
     let usage: ModelInvocationUsage | undefined;
     let invalidStructuredOutput = false;
     let turnCompleted = false;
+    let turnFailed = false;
     const turn = new ProviderTurnGuard(this.providerTurnIdleTimeoutMs);
     observeModelInvocation(invocation, {
       type: "started",
@@ -649,8 +651,10 @@ export class CodexPlanningModel implements PlanningModel {
             tool,
             ...(usage ? { usage, usageAvailable: true } : {}),
           });
-          if (event.type === "turn.failed")
+          if (event.type === "turn.failed") {
+            turnFailed = true;
             throw new Error(event.error.message);
+          }
           if (event.type === "error") throw new Error(event.message);
           if (turnCompleted) break;
         }
@@ -740,6 +744,8 @@ export class CodexPlanningModel implements PlanningModel {
         if (failureClass === "provider-capacity")
           throw new ProviderCapacityFailure(error);
       }
+      if (turnCompleted || turnFailed)
+        throw new CompletedModelInvocationError(error);
       throw error;
     } finally {
       turn.finish();

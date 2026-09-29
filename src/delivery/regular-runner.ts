@@ -429,6 +429,8 @@ export async function runRegularGraph(args: {
       : readyItems(graph, state.work, new Set(active.keys()), slots);
     if (ready.length) await args.reconcile?.();
     for (const item of ready) {
+      if (args.cancelled()) throw new Error("Objective cancelled");
+      if (args.paused?.()) break;
       const work = state.work[item.id]!;
       work.status = "running";
       work.step = "execute";

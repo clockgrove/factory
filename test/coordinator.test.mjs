@@ -40,7 +40,7 @@ async function until(predicate) {
   }
   throw new Error("Fixture condition not reached");
 }
-async function fixture(name, fn, model) {
+async function fixture(name, fn, model, customize) {
   const root = mkdtempSync(join(tmpdir(), `fc-${name}-`));
   const previous = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = join(root, "state");
@@ -85,6 +85,7 @@ async function fixture(name, fn, model) {
       actions: { result: { files: [{ path: "result.txt", text: "done\n" }] } },
       ...(model ? { planningModel: model(graph) } : {}),
     };
+    customize?.(descriptor);
     await fn({
       ...makeApplication(descriptor),
       config,
@@ -169,7 +170,7 @@ test("partial projection saves each known identity and resumes without planning 
       github.projectGraph = async (request) => {
         if (once) {
           once = false;
-          request.beforeCreate("result");
+          await request.beforeCreate("result");
           request.projected("result", 42);
           throw new Error("API interruption after known issue");
         }
@@ -197,7 +198,7 @@ test("unknown projection acknowledgement stops restart without another create", 
   await fixture("unknown", async ({ application, config, github }) => {
     let creates = 0;
     github.projectGraph = async (request) => {
-      request.beforeCreate("result");
+      await request.beforeCreate("result");
       creates++;
       throw new Error("lost create reply");
     };
@@ -569,6 +570,180 @@ test("regular and native cancellation preserves unknown publication without term
           ),
           false,
         );
+      },
+    );
+});
+
+test("pause acknowledged during exact observation prevents regular and native dispatch", async () => {
+  for (const delivery of ["regular", "native-stack"])
+    await fixture(
+      `pause-dispatch-${delivery}`,
+      async ({ application, config, github, eventsPath }) => {
+        config.delivery.kind = delivery;
+        const pending = deferred();
+        const original = github.objective.bind(github);
+        let calls = 0;
+        github.objective = async (...args) => {
+          if (++calls === 2) await pending.promise;
+          return original(...args);
+        };
+        const run = application.runObjective(1);
+        await until(() => calls === 2);
+        await requestControl(config.repository, {
+          objective: 1,
+          action: "pause",
+        });
+        pending.resolve();
+        const paused = await run;
+        assert.equal(paused.work.result.status, "pending");
+        assert.equal(
+          readEvents(eventsPath).filter((event) => event.type === "start")
+            .length,
+          0,
+        );
+      },
+    );
+});
+
+test("pause during planning stops issue projection until resumed or cancelled", async () => {
+  const pending = deferred();
+  await fixture(
+    "pause-planning",
+    async ({ application, config, github }) => {
+      const run = application.runObjective(1);
+      const rejected = assert.rejects(run, /cancel/);
+      await until(
+        () => readContinuation(config.repository, 1)?.planning === "submitted",
+      );
+      await requestControl(config.repository, {
+        objective: 1,
+        action: "pause",
+      });
+      pending.resolve();
+      await until(
+        () => readContinuation(config.repository, 1)?.planning === "complete",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.equal(Object.keys(github.state().issues).length, 0);
+      await requestControl(config.repository, {
+        objective: 1,
+        action: "cancel",
+      });
+      await rejected;
+    },
+    (graph) => ({
+      async generateStructured() {
+        await pending.promise;
+        return graph;
+      },
+      async reviewGraph() {
+        return { findings: [] };
+      },
+    }),
+  );
+});
+
+test("first deadline added to existing preparation persists before a wait and cannot be extended", async () => {
+  await fixture("deadline-add", async ({ application, config, github }) => {
+    github.projectGraph = async () => {
+      throw new Error("offline projection");
+    };
+    await assert.rejects(application.runObjective(1), /offline projection/);
+    await controlObjective(config, { objective: 1, action: "pause" });
+    const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    const run = application.runObjective(1, undefined, undefined, {
+      deadlineAt,
+    });
+    const rejected = assert.rejects(run, /cancel/);
+    await until(
+      () =>
+        readContinuation(config.repository, 1)?.coordinator.deadlineAt ===
+        deadlineAt,
+    );
+    await requestControl(config.repository, { objective: 1, action: "cancel" });
+    await rejected;
+    assert.equal(
+      readContinuation(config.repository, 1).coordinator.deadlineAt,
+      deadlineAt,
+    );
+    await assert.rejects(
+      application.runObjective(1, undefined, undefined, {
+        deadlineAt: new Date(Date.now() + 120_000).toISOString(),
+      }),
+      /cannot be replaced/,
+    );
+  });
+});
+
+test("one resume wakes both concurrent GitHub outage waiters without replaying workers", {
+  timeout: 10_000,
+}, async () => {
+  await fixture(
+    "concurrent-outage",
+    async ({ application, config, github, eventsPath }) => {
+      const original = github.objective.bind(github);
+      let reads = 0;
+      let offline = true;
+      github.objective = async (...args) => {
+        reads++;
+        if (reads >= 3 && offline) throw new Error("shared outage");
+        return original(...args);
+      };
+      const run = application.runObjective(1);
+      await until(() => reads >= 4);
+      offline = false;
+      await requestControl(config.repository, {
+        objective: 1,
+        action: "resume",
+      });
+      const result = await run;
+      assert.ok(result.finalValidation.passed);
+      assert.equal(
+        readEvents(eventsPath).filter((event) => event.type === "start").length,
+        2,
+      );
+    },
+    undefined,
+    (descriptor) => {
+      const second = structuredClone(descriptor.graph.items[0]);
+      second.id = "second";
+      second.title = "Second";
+      second.ownedPaths = ["second.txt"];
+      second.acceptance = ["second.txt exists"];
+      second.validation[0].command = "test -s second.txt";
+      descriptor.graph.items.push(second);
+      descriptor.objectiveBody +=
+        "\n## Other validation\n- `test -s second.txt`\n";
+      descriptor.actions.second = {
+        files: [{ path: "second.txt", text: "second\n" }],
+      };
+    },
+  );
+});
+
+test("response-less result review preserves unknown effect and refuses implementation retry", async () => {
+  for (const delivery of ["regular", "native-stack"])
+    await fixture(
+      `unknown-review-${delivery}`,
+      async ({ application, config }) => {
+        config.delivery.kind = delivery;
+        await assert.rejects(
+          application.runObjective(1),
+          /review response lost/,
+        );
+        const state = readState(config.repository, 1);
+        assert.equal(state.work.result.pendingEffect, "review");
+        assert.equal(state.work.result.acceptancePending, undefined);
+        assert.throws(
+          () => application.retryWorkItem(1, "result"),
+          /Submitted effect outcome is unknown/,
+        );
+      },
+      undefined,
+      (descriptor) => {
+        descriptor.resultReviewer = async () => {
+          throw new Error("review response lost");
+        };
       },
     );
 });

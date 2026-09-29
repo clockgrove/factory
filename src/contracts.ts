@@ -550,7 +550,7 @@ export interface GraphProjection {
   graph: WorkGraph;
   objectiveIssue: number;
   knownIssues?: Record<string, number>;
-  beforeCreate?: (itemId: string) => void;
+  beforeCreate?: (itemId: string) => void | Promise<void>;
   projected?: (itemId: string, issue: number) => void;
 }
 export interface ProjectedGraph {
@@ -616,4 +616,12 @@ export interface GitHubGateway {
       cancelled: () => boolean;
     },
   ): Promise<string>;
+}
+
+/** Adapter evidence that a model turn ended, even when its returned content is invalid. */
+export class CompletedModelInvocationError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "CompletedModelInvocationError";
+  }
 }

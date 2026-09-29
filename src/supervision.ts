@@ -251,7 +251,7 @@ async function verifyServiceOwner(
     const current = readContinuation(config.repository, objective);
     if (
       current?.cancelledAt ||
-      (current?.schemaVersion === 2 && current.finalValidation?.passed)
+      (current?.schemaVersion === 2 && objectiveComplete(current))
     )
       return;
     if (inspect("is-active", name) === "failed") break;

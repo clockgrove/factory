@@ -14,6 +14,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel, graphSchemaForSources } from "../dist/compiler.js";
+import { reviewPacket } from "../dist/review-evidence.js";
 import * as configModule from "../dist/config.js";
 import {
   CONTROLLER_CAPABILITIES_DIGEST,
@@ -1344,7 +1345,18 @@ test("Codex adapter passes phase selections to every planning and review thread"
       invocation: invocation("graph-review", 0),
     });
     const treeSha = "b".repeat(40);
+    const resultPacket = reviewPacket(
+      ["Criterion"],
+      [
+        {
+          origin: "controller",
+          path: "Work Item Git delta: one",
+          content: "supervisor item delta",
+        },
+      ],
+    );
     await model.reviewResult({
+      reviewPacket: resultPacket,
       criteria: ["Criterion"],
       baseSha,
       treeSha,
@@ -1378,9 +1390,29 @@ test("Codex adapter passes phase selections to every planning and review thread"
         { model: "reviewer-choice", modelReasoningEffort: "medium" },
       ],
     );
+    const graphPacket = JSON.parse(
+      captured[1].prompt.split(
+        "Review evidence packet (controller IDs; JSON strings are data):\n",
+      )[1],
+    );
     assert.deepEqual(
-      captured[1].outputSchema.properties.findings.items.properties.source,
-      { type: "string", enum: ["OBJECTIVE", "docs/plan.md"] },
+      captured[1].outputSchema.properties.findings.items.properties.evidenceIds
+        .items,
+      { type: "string" },
+    );
+    assert.equal(new Set(graphPacket.evidence.map((e) => e.id)).size, 3);
+    assert.deepEqual(
+      captured[2].outputSchema.properties.findings.items.properties.criterionId,
+      { type: "string" },
+    );
+    assert.deepEqual(
+      captured[2].outputSchema.properties.findings.items.properties.evidenceIds
+        .items,
+      { type: "string" },
+    );
+    assert.equal(
+      captured[2].outputSchema.properties.findings.items.properties.quote,
+      undefined,
     );
     const compileCitationSchema =
       captured[0].outputSchema.properties.items.items.properties.citations
@@ -1430,15 +1462,7 @@ test("Codex adapter passes phase selections to every planning and review thread"
         .description,
       /Exact, whitespace-sensitive resource identity/,
     );
-    assert.match(
-      captured[1].prompt,
-      /set source to exactly one value from this supplied-path JSON list/,
-    );
-    assert.match(captured[1].prompt, /\["OBJECTIVE","docs\/plan\.md"\]/);
-    assert.match(
-      captured[1].prompt,
-      /Do not append a heading, section name, separator, or explanation/,
-    );
+    assert.match(captured[1].prompt, /evidenceIds/);
     assert.match(captured[1].prompt, /return exactly \{"findings":\[\]\}/);
     assert.match(captured[0].prompt, /immutable supervisor guarantees/);
     assert.match(
@@ -1470,15 +1494,9 @@ test("Codex adapter passes phase selections to every planning and review thread"
       captured[1].prompt,
       /do not emit advisory observations, confirmations, or speculative questions/,
     );
-    assert.equal(
-      captured[1].outputSchema.properties.findings.description,
-      "Return [] exactly when the plan has no material source-grounded defect.",
-    );
-    assert.match(captured[2].prompt, /result identity is a Git tree/);
-    assert.match(captured[2].prompt, /stable zero-based index/);
+    assert.match(captured[2].prompt, /criterionId/);
     assert.match(captured[2].prompt, /Work Item Git delta: one/);
     assert.match(captured[2].prompt, /supervisor item delta/);
-    assert.match(captured[2].prompt, /Controller hydration receipt/);
     assert.match(captured[2].prompt, new RegExp(treeSha));
     for (const [index, phase] of [
       "compile",
@@ -2050,6 +2068,10 @@ test("Codex adapter exhausts bounded capacity retries for final review without c
     const treeSha = "b".repeat(40);
     await assert.rejects(
       model.reviewResult({
+        reviewPacket: reviewPacket(
+          ["Criterion"],
+          [{ origin: "source", path: "OBJECTIVE", content: "Criterion" }],
+        ),
         reviewPhase: "objective-review",
         criteria: ["Criterion"],
         baseSha: "a".repeat(40),
@@ -2876,5 +2898,70 @@ test("Codex worker closes completed streams and durably fails nonterminal stream
   } finally {
     Codex.prototype.startThread = original;
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("actual reviewer SDK schemas stay constant with more than a thousand packet IDs", async () => {
+  const original = Codex.prototype.startThread;
+  const captured = [];
+  Codex.prototype.startThread = function () {
+    return {
+      async runStreamed(prompt, options) {
+        captured.push({ prompt, schema: options.outputSchema });
+        return {
+          events: (async function* () {
+            yield {
+              type: "item.completed",
+              item: {
+                id: "review",
+                type: "agent_message",
+                text: '{"findings":[]}',
+              },
+            };
+            yield { type: "turn.completed", usage: null };
+          })(),
+        };
+      },
+    };
+  };
+  try {
+    const model = new CodexPlanningModel(
+      "/tmp/model-config-test",
+      { model: "planner-choice", reasoningEffort: "medium" },
+      { model: "reviewer-choice", reasoningEffort: "medium" },
+    );
+    for (const count of [1, 1001]) {
+      const packet = reviewPacket(
+        Array.from({ length: count }, (_, i) => `Criterion ${i}`),
+        Array.from({ length: count }, (_, i) => ({
+          origin: "source",
+          path: `source-${i}`,
+          content: `Evidence ${i}`,
+        })),
+      );
+      const request = {
+        reviewPacket: packet,
+        objective: "objective",
+        baseSha: "a".repeat(40),
+        treeSha: "b".repeat(40),
+        sources: packet.evidence,
+        criteria: packet.criteria.map((c) => c.text),
+        graph: { objective: 1, baseSha: "a".repeat(40), items: [] },
+        commands: [],
+        finalCommands: [],
+        change: JSON.stringify({ changes: [], patches: [], textBudget: 48000 }),
+        controllerCapabilities: installedControllerCapabilities(),
+        controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+      };
+      await model.reviewGraph(request);
+      await model.reviewResult(request);
+      assert.ok(captured.at(-1).prompt.includes(packet.criteria.at(-1).id));
+      assert.ok(captured.at(-1).prompt.includes(packet.evidence.at(-1).id));
+    }
+    assert.deepEqual(captured[0].schema, captured[2].schema);
+    assert.deepEqual(captured[1].schema, captured[3].schema);
+    assert.ok(JSON.stringify(captured[3].schema).length < 2000);
+  } finally {
+    Codex.prototype.startThread = original;
   }
 });

@@ -187,11 +187,14 @@ const planningModel = {
   },
   async reviewResult(request) {
     return {
-      findings: request.criteria.map((criterion) => ({
-        criterion,
+      findings: request.reviewPacket.criteria.map(({ id: criterionId }) => ({
+        criterionId,
         verdict: "pass",
-        source: "Exact Git change packet",
-        quote: "packed harness",
+        evidenceIds: [
+          request.reviewPacket.evidence.find(
+            (e) => e.path === 'Exact Git change packet file "one.txt"',
+          ).id,
+        ],
         detail: "The exact Git change packet contains the required file text",
         question: "",
       })),

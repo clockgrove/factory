@@ -1,3 +1,7 @@
+import {
+  packetFromPrompt,
+  resultFindings,
+} from "./support/review-protocol.mjs";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -78,16 +82,16 @@ for (const attributes of [undefined, "*.bin filter=lfs # café\n"])
                 ).content,
               );
               return {
-                findings: [
+                findings: resultFindings(request, [
                   {
                     criterion: "notes complete",
                     verdict: "pass",
-                    source: "OBJECTIVE",
+                    source: 'Exact Git change packet file "notes.txt"',
                     quote: "notes complete",
                     detail: "fixture pass",
                     question: "",
                   },
-                ],
+                ]),
               };
             },
           },
@@ -270,17 +274,20 @@ test("binary same-path selected LFS validation supplies exact pointer and inheri
                   id: "review",
                   type: "agent_message",
                   text: JSON.stringify({
-                    findings: [
-                      {
-                        criterion: "pointer and rule",
-                        verdict: "pass",
-                        source: "Validated selected LFS pointers",
-                        quote: ref.digest,
-                        detail:
-                          "The checked pointer is bound to the selected bytes and exact tree.",
-                        question: "",
-                      },
-                    ],
+                    findings: resultFindings(
+                      { reviewPacket: packetFromPrompt(input) },
+                      [
+                        {
+                          criterion: "pointer and rule",
+                          verdict: "pass",
+                          source: "Validated selected LFS pointers",
+                          quote: ref.digest,
+                          detail:
+                            "The checked pointer is bound to the selected bytes and exact tree.",
+                          question: "",
+                        },
+                      ],
+                    ),
                   }),
                 },
               };
@@ -310,7 +317,11 @@ test("binary same-path selected LFS validation supplies exact pointer and inheri
       prompt,
       /Selected LFS tracked attributes: assets\/\.gitattributes/,
     );
-    assert.ok(prompt.includes(JSON.stringify(rule)));
+    assert.ok(
+      packetFromPrompt(prompt).evidence.some((e) =>
+        e.content.includes(JSON.stringify(rule)),
+      ),
+    );
     assert.ok(prompt.includes(treeSha));
     assert.match(
       prompt,

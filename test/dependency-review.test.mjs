@@ -235,7 +235,15 @@ test("dependency patches retain explicit bounded incompleteness", () => {
       const delta = evidence.find(
         (entry) => entry.path === "Work Item Git delta: foundation",
       );
-      assert.equal(delta.complete, false);
+      assert.equal(delta.complete, true);
+      assert.equal(JSON.parse(delta.content).contentComplete, false);
+      assert.ok(
+        evidence.some(
+          (entry) =>
+            entry.path.startsWith(`${delta.path} file `) &&
+            entry.complete === false,
+        ),
+      );
       assert.match(delta.content, /"truncated":true/);
       const records = JSON.parse(
         evidence.find((entry) => entry.path === "Completed dependency results")

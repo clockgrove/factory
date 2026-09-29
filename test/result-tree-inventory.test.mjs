@@ -1,3 +1,7 @@
+import {
+  packetFromPrompt,
+  resultFindings,
+} from "./support/review-protocol.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -74,9 +78,10 @@ for (const inheritedConfig of [false, true])
               prompt,
               /not file contents, submodule contents or host\/environment configuration/,
             );
-            const content = prompt
-              .split(`--- ${label} ---\n`)[1]
-              .split("\n")[0];
+            const reviewPacket = packetFromPrompt(prompt);
+            const content = reviewPacket.evidence.find(
+              (e) => e.path === label,
+            ).content;
             const inventory = JSON.parse(content);
             assert.equal(inventory.treeSha, treeSha);
             assert.equal(inventory.complete, true);
@@ -91,7 +96,9 @@ for (const inheritedConfig of [false, true])
               ].toSorted(),
             );
             const delta = JSON.parse(
-              prompt.split("Change packet:\n")[1].split("\n")[0],
+              reviewPacket.evidence.find(
+                (e) => e.path === "Exact Git change packet",
+              ).content,
             );
             assert.deepEqual(
               delta.changes.map((change) => change.path),
@@ -106,9 +113,9 @@ for (const inheritedConfig of [false, true])
                     id: "review",
                     type: "agent_message",
                     text: JSON.stringify({
-                      findings: [
+                      findings: resultFindings({ reviewPacket }, [
                         finding(content, inheritedConfig ? "refuse" : "pass"),
-                      ],
+                      ]),
                     }),
                   },
                 };
@@ -183,7 +190,9 @@ test("bounded incomplete inventory cannot ground a pass; larger existing budget 
               assert.equal(inventory.treeSha, treeSha);
             }
             return {
-              findings: [finding(source.content || "invented absence")],
+              findings: resultFindings(request, [
+                finding(source.content || "invented absence"),
+              ]),
             };
           },
         },
@@ -195,7 +204,7 @@ test("bounded incomplete inventory cannot ground a pass; larger existing budget 
           assert.ok(error instanceof AcceptanceDecisionRequired);
           assert.equal(
             error.pending.reviewRejection.reason,
-            "source-truncated",
+            "invalid-response",
           );
           return true;
         });
@@ -248,13 +257,15 @@ test("non-UTF-8 tracked names cannot produce a complete inventory", async () => 
               complete: false,
               paths: [],
             });
-            return { findings: [finding(source.content)] };
+            return {
+              findings: resultFindings(request, [finding(source.content)]),
+            };
           },
         },
       }),
       (error) => {
         assert.ok(error instanceof AcceptanceDecisionRequired);
-        assert.equal(error.pending.reviewRejection.reason, "source-truncated");
+        assert.equal(error.pending.reviewRejection.reason, "invalid-response");
         return true;
       },
     );

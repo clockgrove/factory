@@ -1,3 +1,4 @@
+import { resultFindings } from "./support/review-protocol.mjs";
 import { chmodSync, readFileSync } from "node:fs";
 import { RealGitHubGateway } from "../dist/github.js";
 import assert from "node:assert/strict";
@@ -131,14 +132,17 @@ function modelFor(graph, seen = []) {
     },
     async reviewResult(request) {
       return {
-        findings: request.criteria.map((criterion) => ({
-          criterion,
-          verdict: "pass",
-          source: "OBJECTIVE",
-          quote: criterion,
-          detail: "Scripted deterministic result review",
-          question: "",
-        })),
+        findings: resultFindings(
+          request,
+          request.criteria.map((criterion) => ({
+            criterion,
+            verdict: "pass",
+            source: "OBJECTIVE",
+            quote: criterion,
+            detail: "Scripted deterministic result review",
+            question: "",
+          })),
+        ),
       };
     },
   };

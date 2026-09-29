@@ -1,4 +1,10 @@
 import {
+  reviewPacket,
+  decodeReview,
+  resolveReviewReferences,
+  type ReviewEvidenceReference,
+} from "./review-evidence.js";
+import {
   closeSync,
   fstatSync,
   lstatSync,
@@ -18,9 +24,7 @@ import type {
   ContentStore,
   ModelInvocationContext,
   PlanningModel,
-  ResultReviewCandidate,
   ResultReviewEvidenceSource,
-  ResultReviewFinding,
   ValidationCommandReceipt,
   ValidationLfsMember,
   WorkItem,
@@ -43,8 +47,9 @@ import { assetSelectionDigest, type HydrationReceipt } from "./media.js";
 export interface CriterionEvidence {
   criterion: string;
   verdict: "pass" | "human-accept";
-  source: string;
-  quote: string;
+  source?: string;
+  quote?: string;
+  evidence?: ReviewEvidenceReference[];
   detail: string;
 }
 
@@ -375,7 +380,7 @@ export function workItemMaterializationEvidence(args: {
   state: FactoryState;
   item: WorkItem;
   checkout: string;
-  textBudgetPerBoundary?: number;
+  textBudget?: ReviewTextBudget;
 }): ResultReviewEvidenceSource[] {
   const { state, item, checkout } = args;
   const current = state.work[item.id];
@@ -415,20 +420,18 @@ export function workItemMaterializationEvidence(args: {
     "rev-parse",
     `${workerResultCommitSha}^{tree}`,
   );
-  const perBoundaryBudget =
-    args.textBudgetPerBoundary ??
-    Math.floor(configuredResultReviewTextBudget() / 2);
+  const textBudget = args.textBudget ?? newReviewTextBudget();
   const worker = resultChangePacket(
     checkout,
     current.baseSha,
     workerResultCommitSha,
-    perBoundaryBudget,
+    textBudget,
   );
   const materialization = resultChangePacket(
     checkout,
     workerResultCommitSha,
     current.changeRef,
-    perBoundaryBudget,
+    textBudget,
   );
   const workerPacket = parseResultChangePacket(worker.change);
   const materializationPacket = parseResultChangePacket(materialization.change);
@@ -454,28 +457,55 @@ export function workItemMaterializationEvidence(args: {
       `Work Item ${item.id} controller materialization differs from selected destinations`,
     );
 
+  const path = `Work Item Git delta: ${item.id} controller materialization`;
+  const identity = {
+    authority: "Factory supervisor controller materialization evidence",
+    workItemId: item.id,
+    selectedSetId: selected.id,
+    selectionDigest: current.selectionDigest,
+    destinations,
+    resultBaseCommitSha: current.baseSha,
+    workerResultCommitSha,
+    workerResultTreeSha,
+    materializationCommitSha: current.changeRef,
+    materializationTreeSha: current.treeSha,
+    workerDestinationChanges,
+  };
   return [
     {
-      path: `Work Item Git delta: ${item.id} controller materialization`,
-      complete:
-        worker.truncatedPaths.length === 0 &&
-        materialization.truncatedPaths.length === 0,
-      content: `${JSON.stringify({
-        authority: "Factory supervisor controller materialization evidence",
-        workItemId: item.id,
-        selectedSetId: selected.id,
-        selectionDigest: current.selectionDigest,
-        destinations,
-        resultBaseCommitSha: current.baseSha,
-        workerResultCommitSha,
-        workerResultTreeSha,
-        materializationCommitSha: current.changeRef,
-        materializationTreeSha: current.treeSha,
-        workerDestinationChanges,
+      path,
+      complete: true,
+      content: JSON.stringify({
+        ...identity,
+        evidenceScope:
+          "Complete boundary identities and changed-path descriptors only; file contents are separate evidence chunks.",
+        contentComplete:
+          worker.truncatedPaths.length === 0 &&
+          materialization.truncatedPaths.length === 0,
         workerChange: gitChangeMetadata(workerPacket),
         materializationChange: gitChangeMetadata(materializationPacket),
-      })}\n--- Worker result patches ---\n${literalGitPatches(workerPacket)}\n--- Controller materialization patches ---\n${literalGitPatches(materializationPacket)}`,
+      }),
     },
+    ...gitChangeEvidenceSources(worker.change, {
+      path: `${path} worker result`,
+      metadata: {
+        ...identity,
+        boundary: "worker",
+        baseCommitSha: current.baseSha,
+        resultCommitSha: workerResultCommitSha,
+        resultTreeSha: workerResultTreeSha,
+      },
+    }).slice(1),
+    ...gitChangeEvidenceSources(materialization.change, {
+      path: `${path} controller result`,
+      metadata: {
+        ...identity,
+        boundary: "controller",
+        baseCommitSha: workerResultCommitSha,
+        resultCommitSha: current.changeRef,
+        resultTreeSha: current.treeSha,
+      },
+    }).slice(1),
   ];
 }
 
@@ -483,7 +513,7 @@ function resultChangePacket(
   checkout: string,
   baseSha: string,
   commit: string,
-  textBudgetOverride?: number,
+  textBudgetOverride?: number | ReviewTextBudget,
 ): { change: string; truncatedPaths: string[] } {
   const raw = pinnedGitRaw(
     checkout,
@@ -536,12 +566,13 @@ function resultChangePacket(
   // Leave room in the reviewer context for sources, criteria, and observations.
   // The operator can raise this limit for a model with a larger context window.
   const configured =
-    textBudgetOverride ??
-    Number(process.env.FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES ?? 48_000);
+    (typeof textBudgetOverride === "object"
+      ? textBudgetOverride.remaining
+      : textBudgetOverride) ?? configuredResultReviewTextBudget();
   const textBudget =
     Number.isSafeInteger(configured) && configured >= 0 ? configured : 48_000;
   let remaining = textBudget;
-  const patches = changes.map(({ path }, index) => {
+  const patches = changes.map(({ path }) => {
     const lineStats = pinnedGit(
       checkout,
       "diff",
@@ -554,7 +585,7 @@ function resultChangePacket(
     );
     if (remaining === 0)
       return { path, lineStats, excerpt: "", truncated: true };
-    const limit = Math.ceil(remaining / (changes.length - index));
+    const limit = remaining;
     const result = spawnSync(
       "git",
       [
@@ -581,17 +612,33 @@ function resultChangePacket(
     if (!result.error && result.status !== 0)
       throw new Error(`Cannot describe text change for ${path}`);
     const output = result.stdout ?? Buffer.alloc(0);
-    const excerpt = output.subarray(0, limit).toString("utf8");
-    const truncated = Boolean(result.error) || output.length > limit;
+    const decoded = new StringDecoder("utf8").write(output.subarray(0, limit));
+    const excerpt = new StringDecoder("utf8").write(
+      Buffer.from(decoded).subarray(0, limit),
+    );
+    const truncated =
+      Boolean(result.error) ||
+      output.length > limit ||
+      Buffer.byteLength(decoded) !== Math.min(output.length, limit);
     remaining -= Buffer.byteLength(excerpt, "utf8");
     return { path, lineStats, excerpt, truncated };
   });
+  if (typeof textBudgetOverride === "object")
+    textBudgetOverride.remaining = remaining;
   return {
     change: JSON.stringify({ changes, textBudget, patches }),
     truncatedPaths: patches
       .filter((patch) => patch.truncated)
       .map((patch) => patch.path),
   };
+}
+
+interface ReviewTextBudget {
+  remaining: number;
+}
+
+function newReviewTextBudget(): ReviewTextBudget {
+  return { remaining: configuredResultReviewTextBudget() };
 }
 
 function configuredResultReviewTextBudget(): number {
@@ -708,6 +755,47 @@ function literalGitPatches(packet: ResultChangePacket): string {
 export function gitChangeEvidence(change: string): string {
   const packet = parseResultChangePacket(change);
   return `${JSON.stringify(gitChangeMetadata(packet))}\n${literalGitPatches(packet)}`;
+}
+
+/** Exact descriptors and independently bounded file deltas; metadata never proves file contents. */
+export function gitChangeEvidenceSources(
+  change: string,
+  identity: { path: string; metadata?: Record<string, unknown> } = {
+    path: "Exact Git change packet",
+  },
+): ResultReviewEvidenceSource[] {
+  const packet = parseResultChangePacket(change);
+  return [
+    {
+      path: identity.path,
+      complete: true,
+      content: JSON.stringify({
+        ...identity.metadata,
+        evidenceScope:
+          "Complete changed-path and blob descriptors only; file contents are separate evidence chunks.",
+        contentComplete: packet.patches.every((patch) => !patch.truncated),
+        ...gitChangeMetadata(packet),
+      }),
+    },
+    ...packet.patches.map((patch) => {
+      const file = packet.changes.find((entry) => entry.path === patch.path);
+      return {
+        path: `${identity.path} file ${JSON.stringify(patch.path)}`,
+        complete: !patch.truncated,
+        content: `${JSON.stringify({
+          ...identity.metadata,
+          evidenceScope:
+            "This exact file delta only; unchanged file content and sibling deltas are not supplied here.",
+          file,
+          patch: {
+            path: patch.path,
+            lineStats: patch.lineStats,
+            truncated: patch.truncated,
+          },
+        })}\n${literalGitPatches({ ...packet, patches: [patch] })}`,
+      };
+    }),
+  ];
 }
 
 function assertCommitTree(
@@ -864,7 +952,7 @@ function assertCommandReceipts(
       );
 }
 
-function workItemDeltaContent(args: {
+function workItemDeltaSources(args: {
   item: WorkItem;
   state: FactoryState;
   executionBaseSha: string;
@@ -874,8 +962,7 @@ function workItemDeltaContent(args: {
   integratedCommitSha: string | null;
   integratedTreeSha: string | null;
   change: string;
-}): string {
-  const packet = parseResultChangePacket(args.change);
+}): ResultReviewEvidenceSource[] {
   const identity = {
     authority: "Factory supervisor exact Git evidence",
     workItemId: args.item.id,
@@ -896,9 +983,11 @@ function workItemDeltaContent(args: {
         workItemId: item.id,
         ownedPaths: item.ownedPaths,
       })),
-    ...gitChangeMetadata(packet),
   };
-  return `${JSON.stringify(identity)}\n${literalGitPatches(packet)}`;
+  return gitChangeEvidenceSources(args.change, {
+    path: `Work Item Git delta: ${args.item.id}`,
+    metadata: identity,
+  });
 }
 
 /** Project one established result without copying prior model verdicts. */
@@ -906,9 +995,9 @@ function workItemResultEvidence(args: {
   state: FactoryState;
   item: WorkItem;
   checkout: string;
-  perPatchTextBudget: number;
+  textBudget: ReviewTextBudget;
 }) {
-  const { state, item, checkout, perPatchTextBudget } = args;
+  const { state, item, checkout, textBudget } = args;
   const current = state.work[item.id];
   if (
     !current?.executionBaseSha ||
@@ -968,11 +1057,11 @@ function workItemResultEvidence(args: {
     current.treeSha,
     `Work Item ${item.id} validation`,
   );
-  const { change, truncatedPaths } = resultChangePacket(
+  const { change } = resultChangePacket(
     checkout,
     current.baseSha,
     current.changeRef,
-    perPatchTextBudget,
+    textBudget,
   );
   const changePacket = parseResultChangePacket(change);
   const unownedChanges = changePacket.changes
@@ -996,10 +1085,8 @@ function workItemResultEvidence(args: {
     ? pinnedGit(checkout, "rev-parse", `${current.integratedSha}^{tree}`)
     : null;
   const evidencePath = `Work Item Git delta: ${item.id}`;
-  evidence.push({
-    path: evidencePath,
-    complete: truncatedPaths.length === 0,
-    content: workItemDeltaContent({
+  evidence.push(
+    ...workItemDeltaSources({
       item,
       state,
       executionBaseSha: current.executionBaseSha,
@@ -1010,13 +1097,13 @@ function workItemResultEvidence(args: {
       integratedTreeSha: itemIntegratedTreeSha,
       change,
     }),
-  });
+  );
   evidence.push(
     ...workItemMaterializationEvidence({
       state,
       item,
       checkout,
-      textBudgetPerBoundary: perPatchTextBudget,
+      textBudget,
     }),
   );
   const record = {
@@ -1077,18 +1164,12 @@ export function workItemReviewEvidence(args: {
     dependencies.push(dependency);
   };
   for (const id of item.dependencies) visit(id);
-  const selectedCount = [...dependencies, item].filter(
-    (entry) => state.work[entry.id]?.selectedAssetSet,
-  ).length;
-  const perPatchTextBudget = Math.floor(
-    configuredResultReviewTextBudget() /
-      Math.max(1, dependencies.length + selectedCount * 2),
-  );
+  const textBudget = newReviewTextBudget();
   const evidence = workItemMaterializationEvidence({
     state,
     item,
     checkout,
-    textBudgetPerBoundary: perPatchTextBudget,
+    textBudget,
   });
   const records = dependencies.map((dependency) => {
     const work = state.work[dependency.id];
@@ -1127,7 +1208,7 @@ export function workItemReviewEvidence(args: {
       state,
       item: dependency,
       checkout,
-      perPatchTextBudget,
+      textBudget,
     });
     evidence.push(...proof.evidence);
     return proof.record;
@@ -1190,17 +1271,7 @@ export function objectiveReviewEvidence(args: {
     resultCommitSha: string;
     integratedCommitSha: string;
   }[] = [];
-  const materializationPacketCount = state.graph.items.filter(
-    (item) => state.work[item.id]?.selectedAssetSet,
-  ).length;
-  // Every item contributes one ordinary delta packet. A selected-asset item
-  // adds separate worker and controller-boundary packets to the same budget.
-  const finalReviewPatchPacketCount =
-    state.graph.items.length + materializationPacketCount * 2;
-  const perPatchTextBudget = Math.floor(
-    configuredResultReviewTextBudget() /
-      Math.max(1, finalReviewPatchPacketCount),
-  );
+  const textBudget = newReviewTextBudget();
   const work = state.graph.items.map((item) => {
     const current = state.work[item.id];
     if (
@@ -1220,7 +1291,7 @@ export function objectiveReviewEvidence(args: {
       state,
       item,
       checkout,
-      perPatchTextBudget,
+      textBudget,
     });
     assertAncestor(
       checkout,
@@ -1254,74 +1325,7 @@ export function objectiveReviewEvidence(args: {
   };
 }
 
-function boundedReviewText(value: unknown): string {
-  if (typeof value !== "string") return "";
-  return Array.from(value)
-    .map((character) => {
-      const code = character.charCodeAt(0);
-      return code < 32 && code !== 9 && code !== 10 && code !== 13
-        ? " "
-        : code === 127
-          ? " "
-          : character;
-    })
-    .join("")
-    .slice(0, 4_096);
-}
-
-function capturedReviewFinding(
-  candidate: ResultReviewFinding,
-): ResultReviewCandidate {
-  return {
-    criterion: boundedReviewText(candidate.criterion),
-    verdict: boundedReviewText(candidate.verdict),
-    source: boundedReviewText(candidate.source),
-    quote: boundedReviewText(candidate.quote),
-    detail: boundedReviewText(candidate.detail),
-    question: boundedReviewText(candidate.question),
-  };
-}
-
-function reviewFindingRejection(
-  candidate: ResultReviewFinding | undefined,
-  criterion: string,
-  groundedSources: ResultReviewEvidenceSource[],
-):
-  | {
-      field:
-        | "finding"
-        | "criterion"
-        | "verdict"
-        | "detail"
-        | "source"
-        | "quote";
-      reason: ReviewRejectionReason;
-    }
-  | undefined {
-  if (!candidate) return { field: "finding", reason: "missing-finding" };
-  if (candidate.criterion !== criterion)
-    return { field: "criterion", reason: "criterion-mismatch" };
-  if (!["pass", "needs-human", "refuse"].includes(candidate.verdict))
-    return { field: "verdict", reason: "invalid-verdict" };
-  if (!candidate.detail?.trim())
-    return { field: "detail", reason: "empty-detail" };
-  const sources = groundedSources.filter(
-    (entry) => entry.path === candidate.source,
-  );
-  if (!sources.length) return { field: "source", reason: "unknown-source" };
-  if (
-    candidate.verdict === "pass" &&
-    sources.some((source) => source.complete === false)
-  )
-    return { field: "source", reason: "source-truncated" };
-  if (!candidate.quote?.trim())
-    return { field: "quote", reason: "empty-quote" };
-  if (!sources.some((source) => source.content.includes(candidate.quote)))
-    return { field: "quote", reason: "quote-not-found" };
-  return undefined;
-}
-
-/** One transient, directly quotable presentation for prompt and citation grounding. */
+/** Readable canonical command receipts, referenced by packet-local IDs. */
 export function commandPassEvidence(
   commands: ValidationCommandReceipt[],
 ): ResultReviewEvidenceSource {
@@ -1366,7 +1370,7 @@ export async function reviewAcceptance(args: {
     evidence.treeSha,
     Math.floor(remainingBudget / 2),
   );
-  const { change, truncatedPaths } = resultChangePacket(
+  const { change } = resultChangePacket(
     checkout,
     baseSha,
     commit,
@@ -1379,7 +1383,14 @@ export async function reviewAcceptance(args: {
     ...(args.evidenceSources ?? []),
   ];
   const evidenceSources: ResultReviewEvidenceSource[] = [
-    { path: "Exact Git change packet", content: gitChangeEvidence(change) },
+    ...gitChangeEvidenceSources(change, {
+      path: "Exact Git change packet",
+      metadata: {
+        baseCommitSha: baseSha,
+        resultCommitSha: commit,
+        resultTreeSha: evidence.treeSha,
+      },
+    }),
     commandPassEvidence(evidence.commands),
     {
       path: "Delivery observations",
@@ -1387,55 +1398,49 @@ export async function reviewAcceptance(args: {
     },
     ...suppliedEvidence,
   ];
-  const groundedSources = [...sources, ...evidenceSources];
-  // Selected headings legitimately share planning paths. Authoritative evidence
-  // labels must still be unique and cannot masquerade as planning sources.
-  const sourcePaths = new Set(sources.map((source) => source.path));
-  if (
-    new Set(evidenceSources.map((source) => source.path)).size !==
-      evidenceSources.length ||
-    evidenceSources.some((source) => sourcePaths.has(source.path))
-  )
-    throw new Error("Result review evidence paths must be unique");
-  let findings: Awaited<
-    ReturnType<NonNullable<PlanningModel["reviewResult"]>>
-  >["findings"] = [];
+  const packet = reviewPacket(criteria, [
+    ...sources.map((source) => ({ ...source, origin: "source" as const })),
+    ...evidenceSources.map((source) => ({
+      ...source,
+      origin: "controller" as const,
+    })),
+  ]);
+  let decoded: ReturnType<typeof decodeReview> | undefined;
   let reviewFailure: string | undefined;
-  let reviewFindingsAvailable = false;
-  if (model.reviewResult) {
-    try {
-      const reviewed = await model.reviewResult({
-        reviewPhase: args.reviewPhase ?? "result-review",
-        criteria,
-        baseSha,
-        treeSha: evidence.treeSha,
-        sources,
-        change,
-        commands: evidence.commands,
-        ...(suppliedEvidence.length ? { evidence: suppliedEvidence } : {}),
-        ...(args.observations ? { observations: args.observations } : {}),
-        invocation: args.invocation,
-      });
-      if (!Array.isArray(reviewed.findings)) {
-        observeInvalidReview(args.invocation, "findings", "not-an-array");
-        throw new Error("review response has no findings array");
-      }
-      findings = reviewed.findings;
-      reviewFindingsAvailable = true;
-    } catch (error) {
-      reviewFailure = error instanceof Error ? error.message : String(error);
-    }
-  } else reviewFailure = "No independent result reviewer is configured";
+  let responseReceived = false;
+  try {
+    if (!model.reviewResult)
+      throw new Error("No independent result reviewer is configured");
+    const response = await model.reviewResult({
+      reviewPhase: args.reviewPhase ?? "result-review",
+      criteria,
+      reviewPacket: packet,
+      baseSha,
+      treeSha: evidence.treeSha,
+      sources,
+      change,
+      commands: evidence.commands,
+      evidence: suppliedEvidence,
+      observations: args.observations,
+      invocation: args.invocation,
+    });
+    responseReceived = true;
+    decoded = decodeReview(response, packet);
+  } catch (error) {
+    reviewFailure = error instanceof Error ? error.message : String(error);
+  }
   const proven: CriterionEvidence[] = [];
+  let pending: AcceptancePending | undefined;
+  let refused: string | undefined;
   for (const [index, criterion] of criteria.entries()) {
     const decision = args.decisions?.find(
       (item) =>
         item.criterion === criterion && item.treeSha === evidence.treeSha,
     );
-    if (decision?.outcome === "refuse")
-      throw new Error(
-        `Acceptance criterion refused by ${decision.actor}: ${criterion}`,
-      );
+    if (decision?.outcome === "refuse") {
+      refused ??= `Acceptance criterion refused by ${decision.actor}: ${criterion}`;
+      continue;
+    }
     if (decision?.outcome === "accept") {
       proven.push({
         criterion,
@@ -1446,57 +1451,65 @@ export async function reviewAcceptance(args: {
       });
       continue;
     }
-    const candidate = findings[index];
-    const rejection = reviewFindingRejection(
-      candidate,
-      criterion,
-      groundedSources,
-    );
-    if (rejection && reviewFindingsAvailable)
-      observeInvalidReview(args.invocation, rejection.field, rejection.reason);
-    const finding = rejection ? undefined : candidate;
-    if (finding?.verdict === "pass" && truncatedPaths.length === 0) {
+    const finding = decoded?.findings[index];
+    const invalid = reviewFailure ?? decoded?.errors[index];
+    if (invalid && responseReceived)
+      observeInvalidReview(args.invocation, "finding", "invalid-response");
+    if (finding?.verdict === "pass") {
       proven.push({
         criterion,
         verdict: "pass",
-        source: finding.source,
-        quote: finding.quote,
+        evidence: resolveReviewReferences(finding.evidenceIds, packet, true),
         detail: finding.detail,
       });
       continue;
     }
-    if (finding?.verdict === "refuse")
-      throw new Error(
-        `Acceptance criterion disproved: ${criterion}: ${finding.detail}`,
-      );
-    throw new AcceptanceDecisionRequired({
+    if (finding?.verdict === "refuse") {
+      refused ??= `Acceptance criterion disproved: ${criterion}: ${finding.detail}`;
+      continue;
+    }
+    pending ??= {
       criterion,
       treeSha: evidence.treeSha,
-      source:
-        finding?.source ??
-        (boundedReviewText(candidate?.source).trim() || "OBJECTIVE"),
-      quote:
-        finding?.quote ??
-        (boundedReviewText(candidate?.quote).trim() || criterion),
-      detail:
-        finding?.verdict === "pass" && truncatedPaths.length > 0
-          ? `Independent review cannot auto-pass because text excerpts were truncated for ${truncatedPaths.slice(0, 3).join(", ")}${truncatedPaths.length > 3 ? ` and ${truncatedPaths.length - 3} more path(s)` : ""}; a source quote and partial patch do not prove the full result.`
-          : (finding?.detail ??
-            (reviewFailure
-              ? `Independent result review failed: ${reviewFailure}`
-              : candidate
-                ? `Independent result review returned invalid evidence for this criterion (${rejection?.field}: ${rejection?.reason})`
-                : "Independent result review omitted this criterion")),
+      detail: invalid
+        ? `Independent review transport was invalid: ${invalid}`
+        : (finding?.detail ?? "Independent review omitted this criterion"),
       question:
-        finding?.verdict === "pass" && truncatedPaths.length > 0
-          ? `Inspect tree ${evidence.treeSha} and decide this criterion, or retry with a larger FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES and reviewer context: ${criterion}`
-          : finding?.question?.trim() ||
-            boundedReviewText(candidate?.question).trim() ||
-            `Inspect tree ${evidence.treeSha} and decide whether it satisfies this criterion, or retry with a reviewer able to read the change packet: ${criterion}`,
-      ...(candidate ? { reviewFinding: capturedReviewFinding(candidate) } : {}),
-      ...(rejection ? { reviewRejection: rejection } : {}),
-    });
+        finding?.question ||
+        `Inspect the preserved review for ${criterion}; transport failure is not a substantive product decision or approval.`,
+      ...(invalid
+        ? {
+            reviewRejection: {
+              field: "finding" as const,
+              reason: "invalid-response" as const,
+            },
+          }
+        : {}),
+    };
   }
+  // Preserve independent valid assessments on existing item evidence; final raw
+  // response remains in existing diagnostics rather than a second durable store.
+  evidence.criteria = proven;
+  if (refused) throw new Error(refused);
+  const automaticCriterion = criteria.find(
+    (criterion) =>
+      !proven.some(
+        (item) =>
+          item.criterion === criterion && item.verdict === "human-accept",
+      ),
+  );
+  if (decoded?.packetError && automaticCriterion !== undefined) {
+    observeInvalidReview(args.invocation, "finding", "invalid-response");
+    pending ??= {
+      criterion: automaticCriterion,
+      treeSha: evidence.treeSha,
+      detail: decoded.packetError,
+      question:
+        "Inspect the invalid review response; an unknown criterion ID cannot grant acceptance.",
+      reviewRejection: { field: "finding", reason: "invalid-response" },
+    };
+  }
+  if (pending) throw new AcceptanceDecisionRequired(pending);
   return { ...evidence, criteria: proven };
 }
 
@@ -1517,7 +1530,7 @@ function observeInvalidReview(
         ? {}
         : { providerMaxAttempts: invocation.providerMaxAttempts }),
       type: "response-invalid",
-      failureClass: "semantic-validation",
+      failureClass: "review-protocol",
       failureField: field,
       detail: reason,
     });

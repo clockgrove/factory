@@ -140,7 +140,7 @@ Status describes current continuation state, including blocked work, selection p
 
 ## Review a result decision
 
-A pending result decision identifies one criterion, its exact tree, and a specific question. Inspect the complete result before accepting it. Review text can be truncated; an incomplete excerpt cannot establish automatic acceptance. A larger `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` and reviewer context may allow a complete review, but do not treat missing evidence as a pass.
+A pending result decision identifies one criterion, its exact tree, and a specific question. Inspect the complete result before accepting it. Review text can be truncated; an incomplete cited chunk cannot establish automatic acceptance, while complete independent evidence can prove a criterion despite unrelated omitted text. Malformed review responses are reported separately from substantive acceptance questions; they are not approval. A larger `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` and reviewer context may allow a complete review, but do not treat missing evidence as a pass.
 
 ```sh
 factory decide-result --objective ISSUE_NUMBER --item WORK_ITEM_ID \

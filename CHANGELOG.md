@@ -2,6 +2,11 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.41 — 2026-09-29
+
+- Constrain planner schema identities: non-CI coverage uses an empty target, and source-declared commands reference exact supplied source paths. Preserve runtime validators and base-observed command provenance (#276 / PR #278).
+- Publication, independent public download, offline installation and pinned plugin verification passed. Installed compiler diagnostics pass; live workspace/compiler qualification remains in #263/#276 and full autonomous qualification in #253. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0141-artifact-record).
+
 ## 0.1.40 — 2026-09-29
 
 - Add explicit Objective-bound exact package additions to existing pnpm workspaces, preserving non-membership configuration and enforcing the same authority during planning, item/QA and final validation (#263 / PR #268).

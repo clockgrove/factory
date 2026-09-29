@@ -4,6 +4,38 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under #206 and explicitly accepted under #207. Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.41 artifact record
+
+[Release v0.1.41](https://github.com/clockgrove/factory/releases/tag/v0.1.41)
+is tagged at source `d91d3e2af9b7be98100a9ffe42bfdf0b8296e1a4`, tree
+`6ea54040f4ebbe8f57e534882d276d7896c16c6c`. The archive is 151122117 bytes,
+SHA-256 `9de11c325f468943cc58c7584ff98470758dd49086e5fecd9b0aecc2b53f8587`.
+[PR #278](https://github.com/clockgrove/factory/pull/278) records one independent
+code review round and the compiler schema corrections for #276.
+[PR CI](https://github.com/clockgrove/factory/actions/runs/36643364172) and
+[integrated main CI](https://github.com/clockgrove/factory/actions/runs/36643713411)
+passed, including 477 deterministic tests on the integrated source.
+
+Independent public download matched the audited artifact. Fresh-prefix offline
+Node 24 installation with an empty cache passed; all 3583 regular installed files
+and 82 bundled dependency roots matched the archive and locked identities.
+Installed CLI and secret-scanner clean/detected/error checks passed. The pinned
+v0.1.41 marketplace plugin was enabled and its manifest and skills matched the
+runtime distribution. Exact v0.1.40 and v0.1.41 tag protections prohibit updates
+and deletion without bypass actors, as recorded in
+[#277](https://github.com/clockgrove/factory/issues/277).
+
+Installed compiler diagnostics rejected both known malformed schema identities
+and passed deterministic checks after corrections made only in memory. Rendered
+worker/reviewer input completeness was checked. These diagnostics created no
+accepted plan, review decision or provider usage and do not establish live
+qualification. Live workspace/compiler acceptance remains in
+[#263](https://github.com/clockgrove/factory/issues/263) and
+[#276](https://github.com/clockgrove/factory/issues/276); full autonomous program
+qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
+Earlier candidates, failures, accounting and live evidence retain their original
+identities and scope. No published archive was rebuilt or retagged.
+
 ## Immutable v0.1.40 artifact record
 
 [Release v0.1.40](https://github.com/clockgrove/factory/releases/tag/v0.1.40)

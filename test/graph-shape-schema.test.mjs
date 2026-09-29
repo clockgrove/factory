@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import {
   CodexPlanningModel,
   graphSchema,
   graphSchemaForSources,
+  validateCommandProvenance,
   validateGraph as validateCanonicalGraph,
 } from "../dist/compiler.js";
 import { coverageObligations, hydrateCoverageSources } from "../dist/qa.js";
+import { createTarget } from "./support/integration-fixture.mjs";
 import { withCoverage } from "./support/coverage.mjs";
 
 function validateGraph(graph, ...args) {
@@ -127,12 +132,46 @@ function assertBounds(schema) {
   assert.equal(properties.id.minLength, undefined);
   assert.equal(properties.id.pattern, undefined);
   assert.equal(properties.dependencies.items.minLength, undefined);
-  assert.equal(
-    properties.validation.items.properties.command.minLength,
-    undefined,
-  );
+  for (const entry of properties.validation.items.anyOf ?? [
+    properties.validation.items,
+  ])
+    assert.equal(entry.properties.command.minLength, undefined);
   assert.equal(properties.ownedPaths.items.minLength, undefined);
 }
+
+function assertCoverageAndSources(schema, indexed, sourceAware) {
+  const conforms = ajv.compile(schema);
+  for (const kind of ["command", "semantic", "controller", "ci"]) {
+    const value = graph(indexed);
+    value.coverage[0].oracle = { kind, reference: "proof", targetItem: "" };
+    assert.equal(conforms(value), true, `${kind} without CI target`);
+    value.coverage[0].oracle.targetItem = "policy";
+    assert.equal(conforms(value), kind === "ci", `${kind} with CI target`);
+  }
+  if (!sourceAware) return;
+  for (const source of [
+    "OBJECTIVE",
+    "OBJECTIVE#Acceptance",
+    "unselected.txt",
+  ]) {
+    for (const provenance of ["source-declared", "base-observed"]) {
+      const value = graph(indexed);
+      value.items[0].validation = [
+        { command: "test -s result.txt", provenance, source },
+      ];
+      assert.equal(
+        conforms(value),
+        provenance === "base-observed" || source === "OBJECTIVE",
+        `${provenance} ${source}`,
+      );
+    }
+  }
+}
+
+test("coverage schema constrains CI-only targets and exact source-declared identities", () => {
+  assertCoverageAndSources(graphSchema, false, false);
+  assertCoverageAndSources(graphSchemaForSources(sources), false, true);
+});
 
 test("generic and source-specific schemas reject provider-supported required-shape constraints", () => {
   for (const schema of [graphSchema, graphSchemaForSources(sources)]) {
@@ -246,6 +285,7 @@ test("production Codex indexed schema retains all lower bounds and decoder canno
     const valid = await model.generateStructured(request);
     const schema = captured[0];
     assertBounds(schema);
+    assertCoverageAndSources(schema, true, true);
     assert.deepEqual(
       schema.properties.items.items.properties.citations.items.properties
         .choiceIndex,
@@ -274,6 +314,35 @@ test("production Codex indexed schema retains all lower bounds and decoder canno
         field === "items"
           ? /at least one Work Item/
           : /lacks acceptance, non-goals, ownership, or source citations/,
+      );
+    }
+    for (const [mutate, expected] of [
+      [
+        (value) => {
+          value.coverage[0].oracle.targetItem = "policy";
+        },
+        /Only CI coverage/,
+      ],
+      [
+        (value) => {
+          value.items[0].validation = [
+            {
+              command: "test -s result.txt",
+              provenance: "source-declared",
+              source: "OBJECTIVE#Acceptance",
+            },
+          ];
+        },
+        /command provenance/,
+      ],
+    ]) {
+      response = graph(true);
+      mutate(response);
+      assert.equal(conforms(response), false);
+      const decoded = await model.generateStructured(request);
+      assert.throws(
+        () => validateGraph(decoded, 1, baseSha, new Set(["OBJECTIVE"])),
+        expected,
       );
     }
     response = graph(true);
@@ -320,5 +389,61 @@ test("provider schema avoids unsupported conditionals while runtime rejects empt
       () => validateGraph(value, 1, baseSha, new Set(["OBJECTIVE"])),
       /ownership/,
     );
+  }
+});
+
+test("source schema preserves unselected baseline command files and runtime literal checks", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-schema-provenance-"));
+  try {
+    const target = createTarget(root, { "checks.sh": "test -s result.txt\n" });
+    const commandSources = [
+      ...sources,
+      {
+        path: "docs/plan.md",
+        heading: "Checks",
+        content: "## Checks\n- test -s result.txt\n",
+      },
+      {
+        path: "docs/plan.md",
+        heading: "Other",
+        content: "## Other\nAdditional context\n",
+      },
+    ];
+    const conforms = ajv.compile(graphSchemaForSources(commandSources));
+    for (const [provenance, source] of [
+      ["base-observed", "checks.sh"],
+      ["source-declared", "docs/plan.md"],
+    ]) {
+      const value = graph();
+      value.baseSha = target.baseSha;
+      value.items[0].validation = [
+        { command: "test -s result.txt", provenance, source },
+      ];
+      assert.equal(conforms(value), true);
+      assert.doesNotThrow(() =>
+        validateCommandProvenance(value, commandSources, target.checkout),
+      );
+      value.items[0].validation[0].command = "test -s invented.txt";
+      assert.throws(
+        () => validateCommandProvenance(value, commandSources, target.checkout),
+        /no exact/,
+      );
+    }
+    const bad = graph();
+    bad.baseSha = target.baseSha;
+    bad.items[0].validation = [
+      {
+        command: "test -s result.txt",
+        provenance: "source-declared",
+        source: "docs/plan.md#Checks",
+      },
+    ];
+    assert.equal(conforms(bad), false);
+    assert.throws(
+      () => validateCommandProvenance(bad, commandSources, target.checkout),
+      /no exact/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

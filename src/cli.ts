@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import { readInteractionContent, readInteractionMetadata } from "./capture.js";
 import type { AutonomousAdmission, ExecutionAuthority } from "./admission.js";
+import { runAnalysisCommand } from "./analysis-cli.js";
+import { readInteractionContent, readInteractionMetadata } from "./capture.js";
 import type { PlanCandidate } from "./compiler.js";
 import {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
@@ -15,8 +16,8 @@ import {
   stateRoot,
   validateConfig,
 } from "./config.js";
-import { runAnalysisCommand } from "./analysis-cli.js";
 import { LocalContentStore } from "./content/local.js";
+import { requestControl } from "./coordinator-control.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import {
   readAgentTimeline,
@@ -27,9 +28,9 @@ import {
   summarizeDiagnosticUsage,
 } from "./diagnostics.js";
 import { compose, composePlanning } from "./index.js";
-import { selectAssetSetFromCli } from "./runner.js";
+import { controlObjective, selectAssetSetFromCli } from "./runner.js";
 import { itemsConflict } from "./scheduler.js";
-import { readState } from "./state-store.js";
+import { readContinuation, readState } from "./state-store.js";
 
 function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(`--${name}`);
@@ -44,7 +45,7 @@ function options(args: string[], name: string): string[] {
 
 function help(): void {
   console.log(
-    `Factory CLI\n\nCommands:\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  cancel --objective N [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
+    `Factory CLI\n\nCommands:\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
   );
 }
 
@@ -215,6 +216,9 @@ async function main(): Promise<void> {
       "review",
       "select",
       "cancel",
+      "pause",
+      "drain",
+      "resume",
       "retry",
       "decide-result",
       "rereview",
@@ -344,7 +348,40 @@ async function main(): Promise<void> {
   let application: ReturnType<typeof compose> | undefined;
   const requireApplication = (): ReturnType<typeof compose> =>
     (application ??= compose(config));
+  if (["pause", "drain", "resume"].includes(command)) {
+    console.log(
+      JSON.stringify(
+        await controlObjective(config, {
+          objective,
+          action: command as "pause" | "drain" | "resume",
+        }),
+      ),
+    );
+    return;
+  }
   if (command === "status") {
+    const continuation = readContinuation(config.repository, objective);
+    if (continuation?.schemaVersion === 3) {
+      console.log(
+        JSON.stringify({
+          repository: config.repository,
+          objective,
+          runId: continuation.runId,
+          state: "preparing",
+          coordinator: continuation.coordinator,
+          planning: continuation.planning,
+          issueByItemId: continuation.issueByItemId,
+          projectionPending: continuation.projectionPending,
+          error: continuation.error,
+          nextAction:
+            continuation.planning === "submitted" ||
+            continuation.projectionPending
+              ? "operator-direction"
+              : "run",
+        }),
+      );
+      return;
+    }
     const state = readState(config.repository, objective);
     if (args.includes("--json")) {
       console.log(
@@ -518,12 +555,23 @@ async function main(): Promise<void> {
         process.once("SIGTERM", stop);
       });
   } else if (command === "cancel") {
-    const result = await requireApplication().cancelObjective(objective);
+    const reply = await requestControl(config.repository, {
+      objective,
+      action: "cancel",
+    });
+    const result = reply.handled
+      ? reply.result
+      : await requireApplication().cancelObjective(objective);
     console.log(`Objective #${objective} cancellation ${result}`);
   } else if (command === "retry") {
     const item = option(args, "item");
     if (!item) throw new Error("retry requires --item ID");
-    requireApplication().retryWorkItem(objective, item);
+    const reply = await requestControl(config.repository, {
+      objective,
+      action: "retry",
+      input: { item },
+    });
+    if (!reply.handled) requireApplication().retryWorkItem(objective, item);
     console.log(`Work Item ${item} is pending for a new explicit attempt`);
   } else if (command === "rereview") {
     const item = option(args, "item");
@@ -534,12 +582,19 @@ async function main(): Promise<void> {
       throw new Error(
         "rereview requires --item, --tree, --actor, and --reason",
       );
-    requireApplication().rereviewWorkItem(objective, {
+    const rereviewInput = {
       item,
       treeSha,
       actor,
       reason,
+    };
+    const reply = await requestControl(config.repository, {
+      objective,
+      action: "rereview",
+      input: rereviewInput,
     });
+    if (!reply.handled)
+      requireApplication().rereviewWorkItem(objective, rereviewInput);
     console.log(
       `Work Item ${item} is ready for validation and automatic review; use run to continue`,
     );
@@ -557,13 +612,20 @@ async function main(): Promise<void> {
       throw new Error(
         "decide-result requires --tree, --outcome, --actor, and --reason",
       );
-    requireApplication().decideResult(objective, {
+    const decisionInput = {
       item: option(args, "item"),
       treeSha,
       actor,
       reason,
-      outcome,
+      outcome: outcome as "accept" | "refuse",
+    };
+    const reply = await requestControl(config.repository, {
+      objective,
+      action: "decide-result",
+      input: decisionInput,
     });
+    if (!reply.handled)
+      requireApplication().decideResult(objective, decisionInput);
     console.log(
       `Recorded ${outcome} for the exact pending criterion at ${treeSha}`,
     );
@@ -571,18 +633,30 @@ async function main(): Promise<void> {
     const item = option(args, "item");
     const set = option(args, "set");
     if (!item || !set) throw new Error("select requires --item and --set");
-    await selectAssetSetFromCli(
-      config,
+    const reply = await requestControl(config.repository, {
       objective,
-      item,
-      set,
-      new LocalContentStore(join(stateRoot(config.repository), "content")),
-      {
+      action: "select",
+      input: {
+        item,
+        set,
         actor: option(args, "actor"),
         reason: option(args, "reason"),
         downstreamItems: options(args, "bind"),
       },
-    );
+    });
+    if (!reply.handled)
+      await selectAssetSetFromCli(
+        config,
+        objective,
+        item,
+        set,
+        new LocalContentStore(join(stateRoot(config.repository), "content")),
+        {
+          actor: option(args, "actor"),
+          reason: option(args, "reason"),
+          downstreamItems: options(args, "bind"),
+        },
+      );
     console.log(
       `Selected AssetSet ${set} for Work Item ${item}; run the Objective to continue`,
     );
@@ -612,6 +686,7 @@ async function main(): Promise<void> {
             readFileSync(option(args, "admission")!, "utf8"),
           ) as AutonomousAdmission)
         : undefined,
+      { deadlineAt: option(args, "deadline") },
     );
     console.log(
       state.finalValidation?.passed

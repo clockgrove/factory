@@ -1,17 +1,20 @@
-import { pinnedGit } from "../process.js";
+import { pinnedGitAsync } from "../process.js";
 
 /** Replay one independently prepared result on the observed integration head. */
-export function transplantIndependentChange(
+export async function transplantIndependentChange(
   checkout: string,
   originalBase: string,
   changeRef: string,
   integratedBase: string,
-): { changeRef: string; treeSha: string } {
-  if (pinnedGit(checkout, "rev-parse", `${changeRef}^`) !== originalBase)
+): Promise<{ changeRef: string; treeSha: string }> {
+  if (
+    (await pinnedGitAsync(checkout, "rev-parse", `${changeRef}^`)) !==
+    originalBase
+  )
     throw new Error(
       "Prepared change has a different parent than its execution base",
     );
-  const treeSha = pinnedGit(
+  const treeSha = await pinnedGitAsync(
     checkout,
     "merge-tree",
     "--write-tree",
@@ -21,7 +24,7 @@ export function transplantIndependentChange(
   );
   if (!/^[0-9a-f]{40}$/.test(treeSha))
     throw new Error("Prepared change did not replay to one unconflicted tree");
-  const rebased = pinnedGit(
+  const rebased = await pinnedGitAsync(
     checkout,
     "-c",
     "user.name=Factory",

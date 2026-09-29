@@ -67,6 +67,8 @@ The archived paths are provenance, not required implementation instructions. An 
 
 Retain one active Objective, one concrete coordinator, atomic local continuation state, exact evidence and target-owned gates. This decision does not restore archived code, distributed election, event journals, adaptive pressure, mixed execution modes or bursting. Installation does not silently start a service or authorize target work. Existing explicit runs keep their prior retry and authority semantics; compatible state reads or safe upgrade refusal replace silent active-run migration.
 
+The #245 source implementation extends local ownership through preparation and decision waits, with responsive private control and persisted pause/drain. It retains one snapshot and explicit uncertainty rather than restoring archived recovery machinery. Host service installation remains #246's responsibility; the coordinator alone makes no logout or installed-release qualification claim.
+
 ## New mismatch found during this review
 
 `src/contracts.ts` still says `sourceAssets?: (string | SourceAssetBinding)[]` and calls string entries “Legacy path entries” readable in schema-version-1 snapshots. `src/compiler.ts` and `src/media.ts` still branch on that string form. That conflicts with the clean-start/no-backward-compatibility decision. The operator approved folding a **small trunk cleanup** into [#23](https://github.com/clockgrove/factory-rebuild/issues/23): use the one structured binding form in new graphs/state and remove the string adaptation, after checking current fixture/state consumers. Do not add migration machinery.

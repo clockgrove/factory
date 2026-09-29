@@ -154,6 +154,25 @@ If you made a decision, supply `decided-plan.json` instead. Activation verifies 
 
 Execution projects Work Items to GitHub, starts ready workers, independently validates and reviews their results, delivers accepted changes, and checks the final integrated Objective. Work Item completion is not Objective completion. Human-owned decisions and failed checks stop progress with evidence.
 
+## Keep an admitted Objective under local control
+
+This coordinator surface is source-development work for #245 and is not in published v0.1.39. An admitted `run` keeps one local owner alive while waiting for an exact result decision, pause or drain. It remains a foreground process; service installation and continuity after logout belong to the separate background-supervision capability.
+
+Use another terminal to control that owner:
+
+```sh
+factory pause --objective ISSUE_NUMBER
+factory drain --objective ISSUE_NUMBER
+factory status --objective ISSUE_NUMBER --json
+factory resume --objective ISSUE_NUMBER
+```
+
+Pause and drain stop new dispatch and persist across controller restarts. Inspect status to distinguish a requested drain from completed owned work. Resume permits the existing continuation to proceed; it grants no new attempt or repair authority. Exact-tree decisions and media selections reach the same owner through its private local socket. Once an admitted owner is waiting, submit the appropriate decision rather than start a second controller. Explicit runs without admission retain their return-at-wait behavior.
+
+An optional `factory run --deadline ISO_TIMESTAMP` records an absolute deadline. Restart cannot extend it. Expiry requests cancellation; it does not prove that a remote effect failed or that owned work stopped. Cancellation remains unresolved until cessation is verified. Preserve retained workspaces and evidence when status reports unresolved ownership.
+
+An unavailable exact GitHub observation pauses progress while local control remains available. Inspect the reported failure, then use `resume` to request another observation. Factory does not spend model calls on idle wakes or infer issue closure from a failed API request. Submitted planning, review or publication whose outcome is unknown cannot be replayed merely by restarting the controller.
+
 ## Inspect progress
 
 ```sh

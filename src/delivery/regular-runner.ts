@@ -18,7 +18,7 @@ import {
   selectedInputsForItem,
   validationLfsMembersForItem,
 } from "../media.js";
-import { git } from "../process.js";
+import { git, gitAsync } from "../process.js";
 import { readyItems } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
 import {
@@ -43,6 +43,8 @@ export async function runRegularGraph(args: {
   save: () => void;
   active: Map<string, Promise<void>>;
   cancelled: () => boolean;
+  paused?: () => boolean;
+  reconcile?: () => Promise<void>;
   diagnostics?: DiagnosticEmitter;
 }): Promise<boolean> {
   const {
@@ -62,6 +64,10 @@ export async function runRegularGraph(args: {
   // Refuse the whole restart before any resumable peer can perform work.
   for (const item of graph.items) {
     const work = state.work[item.id]!;
+    if (work.pendingEffect)
+      throw new Error(
+        `Work Item ${item.id} submitted ${work.pendingEffect} has unknown outcome; operator direction required`,
+      );
     if (work.status === "running" && work.step === "deliver") {
       throw new Error(
         `Work Item ${item.id} has ambiguous active state at deliver; operator direction required; interrupted regular delivery cannot be resumed automatically. Preserve the original snapshot and exact remote branch/PR evidence; do not retry, edit state, or use a result decision to bypass this refusal`,
@@ -241,6 +247,8 @@ export async function runRegularGraph(args: {
             }),
           },
         });
+      work.pendingEffect = "review";
+      save();
       work.validation = args.diagnostics
         ? await args.diagnostics.span(
             {
@@ -258,7 +266,9 @@ export async function runRegularGraph(args: {
                 : "failed",
           )
         : await reviewResult();
+      delete work.pendingEffect;
       delete work.acceptancePending;
+      if (args.cancelled()) throw new Error("Objective cancelled");
       work.step = "deliver";
       save();
       const branch = `factory/objective-${objective}/${item.id}`;
@@ -271,6 +281,9 @@ export async function runRegularGraph(args: {
           branch,
           lfs: Boolean(work.selectedAssetSet),
         });
+      await args.reconcile?.();
+      work.pendingEffect = "publication";
+      save();
       const published = args.diagnostics
         ? await args.diagnostics.span(
             {
@@ -289,11 +302,22 @@ export async function runRegularGraph(args: {
           )
         : await publish();
       work.pullRequest = published.pullRequest;
+      delete work.pendingEffect;
       save();
       const integrate = mergeTail.then(async () => {
         const merge = async () => {
+          if (args.cancelled()) throw new Error("Objective cancelled");
+          await args.reconcile?.();
+          work.pendingEffect = "merge";
+          save();
           const merged = await delivery.merge(published);
-          git(config.checkout, "fetch", "origin", github.defaultBranch());
+          delete work.pendingEffect;
+          await gitAsync(
+            config.checkout,
+            "fetch",
+            "origin",
+            await github.defaultBranch(),
+          );
           const observedHead = git(config.checkout, "rev-parse", "FETCH_HEAD");
           if (observedHead !== merged.integratedSha) {
             throw new Error(
@@ -333,14 +357,14 @@ export async function runRegularGraph(args: {
       await closeWorkItem(state, item.id, github, save, false);
     } catch (error) {
       if (error instanceof AcceptanceDecisionRequired) {
+        delete work.pendingEffect;
         work.status = "waiting";
         work.step = "approve-result";
         work.acceptancePending = error.pending;
         save();
         return;
       }
-      if (work.status !== "done")
-        work.status = args.cancelled() ? "cancelled" : "failed";
+      if (work.status !== "done") work.status = "failed";
       work.error = error instanceof Error ? error.message : String(error);
       if (
         error instanceof AuthenticationRequiredError &&
@@ -400,7 +424,10 @@ export async function runRegularGraph(args: {
       config.execution.concurrency - active.size,
       available,
     );
-    const ready = readyItems(graph, state.work, new Set(active.keys()), slots);
+    const ready = args.paused?.()
+      ? []
+      : readyItems(graph, state.work, new Set(active.keys()), slots);
+    if (ready.length) await args.reconcile?.();
     for (const item of ready) {
       const work = state.work[item.id]!;
       work.status = "running";
@@ -423,8 +450,8 @@ export async function runRegularGraph(args: {
       graph.items.some((item) => state.work[item.id]?.status === "waiting")
     )
       return true;
-    if (!active.size)
-      throw new Error("No ready Work Item; graph cannot progress");
+    if (!active.size && args.paused?.()) return true;
+    if (!active.size) return true;
     await Promise.race(active.values());
   }
   return false;

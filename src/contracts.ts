@@ -549,6 +549,9 @@ export interface AssetSelectionDecision {
 export interface GraphProjection {
   graph: WorkGraph;
   objectiveIssue: number;
+  knownIssues?: Record<string, number>;
+  beforeCreate?: (itemId: string) => void;
+  projected?: (itemId: string, issue: number) => void;
 }
 export interface ProjectedGraph {
   issueByItemId: Record<string, number>;
@@ -570,6 +573,7 @@ export interface PullRequestObservation {
   checks: "pending" | "passing" | "failing";
 }
 export interface ObjectiveIssue {
+  state?: "open" | "closed";
   body: string;
   title: string;
 }
@@ -580,7 +584,7 @@ export interface NativeStackLayer {
 }
 export interface GitHubGateway {
   objective(number: number): Promise<ObjectiveIssue>;
-  defaultBranch(): string;
+  defaultBranch(): string | Promise<string>;
   closeIssue(
     number: number,
     comment: string,

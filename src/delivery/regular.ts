@@ -1,12 +1,12 @@
 import type {
+  DeliveryObservation,
   DeliveryRequest,
   DeliveryResult,
-  DeliveryObservation,
   DeliveryStrategy,
   GitHubGateway,
   MergeResult,
 } from "../contracts.js";
-import { git } from "../process.js";
+import { gitAsync } from "../process.js";
 
 export class RegularDelivery implements DeliveryStrategy {
   constructor(
@@ -16,7 +16,7 @@ export class RegularDelivery implements DeliveryStrategy {
 
   async publish(request: DeliveryRequest): Promise<DeliveryResult> {
     const commit = request.changeRef;
-    const base = request.baseBranch ?? this.github.defaultBranch();
+    const base = request.baseBranch ?? (await this.github.defaultBranch());
     const existing = await this.github.findOpenPullRequest(
       request.branch,
       base,
@@ -28,8 +28,9 @@ export class RegularDelivery implements DeliveryStrategy {
         pullRequest: existing.number,
         headSha: existing.headSha,
       };
-    if (request.lfs) git(this.checkout, "lfs", "push", "origin", commit);
-    git(
+    if (request.lfs)
+      await gitAsync(this.checkout, "lfs", "push", "origin", commit);
+    await gitAsync(
       this.checkout,
       "push",
       "origin",

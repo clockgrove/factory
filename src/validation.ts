@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -25,11 +25,15 @@ import type {
 } from "./contracts.js";
 import { assetSelectionDigest, type HydrationReceipt } from "./media.js";
 import {
+  hasUnresolvedSubprocesses,
   localValidationEnvironment,
   localValidationShellArguments,
   pinnedGit,
+  pinnedGitAsync,
   pinnedGitEnvironment,
   pinnedGitRaw,
+  subprocessAsync,
+  withProcessCancellation,
 } from "./process.js";
 import {
   decodeReview,
@@ -1749,7 +1753,14 @@ export async function validateTree(
   const emptyCredentials = join(root, "empty-gh-config");
   mkdirSync(emptyCredentials, { recursive: true, mode: 0o700 });
   const worktree = join(root, randomUUID());
-  pinnedGit(checkout, "worktree", "add", "--detach", worktree, commit);
+  await pinnedGitAsync(
+    checkout,
+    "worktree",
+    "add",
+    "--detach",
+    worktree,
+    commit,
+  );
   try {
     const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
     if (treeSha !== expectedTree)
@@ -1771,53 +1782,42 @@ export async function validateTree(
     };
     for (const [index, check] of commands.entries()) {
       const started = Date.now();
-      const child = spawn("sh", localValidationShellArguments(check), {
-        cwd: worktree,
-        env: localValidationEnvironment(emptyCredentials),
-      });
       let stdout = "";
       let stderr = "";
-      const watch = (stream: "stdout" | "stderr") => {
-        const decoder = new StringDecoder("utf8");
-        child[stream].on("data", (chunk: Buffer) => {
-          const text = decoder.write(chunk);
+      const decoders = {
+        stdout: new StringDecoder("utf8"),
+        stderr: new StringDecoder("utf8"),
+      };
+      const result = await subprocessAsync(
+        "sh",
+        localValidationShellArguments(check),
+        {
+          cwd: worktree,
+          env: localValidationEnvironment(emptyCredentials),
+        },
+        undefined,
+        (stream, chunk) => {
+          const text = decoders[stream].write(chunk);
           if (stream === "stdout") stdout += text;
           else stderr += text;
           if (text)
             observeOutput?.({ index, stream, output: text, final: false });
-        });
-        return () => {
-          const trailing = decoder.end();
-          if (stream === "stdout") stdout += trailing;
-          else stderr += trailing;
-          observeOutput?.({ index, stream, output: trailing, final: true });
-        };
-      };
-      const flushStdout = watch("stdout");
-      const flushStderr = watch("stderr");
-      const result = await new Promise<{
-        status: number | null;
-        error?: Error;
-      }>((resolve) => {
-        let error: Error | undefined;
-        child.on("error", (cause: Error) => {
-          error = cause;
-        });
-        child.on("close", (status: number | null) =>
-          resolve({ status, error }),
-        );
-      });
-      flushStdout();
-      flushStderr();
+        },
+      );
+      for (const stream of ["stdout", "stderr"] as const) {
+        const trailing = decoders[stream].end();
+        if (stream === "stdout") stdout += trailing;
+        else stderr += trailing;
+        observeOutput?.({ index, stream, output: trailing, final: true });
+      }
       const output = `${stdout}${stderr}`;
       observe?.({
         index,
-        passed: !result.error && result.status === 0,
+        passed: result.status === 0,
         exitCode: result.status ?? -1,
         durationMs: Date.now() - started,
         output,
       });
-      if (result.error) throw result.error;
       if (result.status !== 0)
         throw new Error(
           `Validation command failed (${result.status}): ${check}: ${output}`,
@@ -1836,12 +1836,20 @@ export async function validateTree(
     }
     if (pinnedGit(worktree, "status", "--porcelain") !== hydratedStatus)
       throw new Error("Validation command modified the result tree");
+    if (hasUnresolvedSubprocesses())
+      throw new Error(
+        "Validation subprocess ownership unresolved; checkout retained",
+      );
     return evidence;
   } finally {
-    try {
-      pinnedGit(checkout, "worktree", "remove", "--force", worktree);
-    } catch {
-      rmSync(worktree, { recursive: true, force: true });
+    if (!hasUnresolvedSubprocesses()) {
+      try {
+        await withProcessCancellation(undefined, () =>
+          pinnedGitAsync(checkout, "worktree", "remove", "--force", worktree),
+        );
+      } catch {
+        rmSync(worktree, { recursive: true, force: true });
+      }
     }
   }
 }

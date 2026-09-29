@@ -1,24 +1,24 @@
 import assert from "node:assert/strict";
 import {
-  existsSync,
   chmodSync,
-  symlinkSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { readDiagnostics, statusDocument } from "../dist/diagnostics.js";
 import { preflightLocalExecutables } from "../dist/local-preflight.js";
 import {
   localValidationShellArguments,
   resolveLocalExecutable,
 } from "../dist/process.js";
-import { readDiagnostics, statusDocument } from "../dist/diagnostics.js";
-import { readState } from "../dist/state-store.js";
+import { readContinuation, readState } from "../dist/state-store.js";
 import {
   createTarget,
   factoryConfig,
@@ -196,11 +196,11 @@ test("missing work-item tools stop activation before projection, attempt or targ
       preflightStatus: "missing",
       pathContext: "/usr/bin:/bin",
     });
-    assert.equal(readState("example/preflight", 1), undefined);
-    assert.equal(
-      statusDocument(undefined, "example/preflight", 1, "regular").state,
-      "not-started",
-    );
+    const preparation = readContinuation("example/preflight", 1);
+    assert.equal(preparation.schemaVersion, 3);
+    assert.equal(preparation.planning, "complete");
+    assert.deepEqual(preparation.issueByItemId, {});
+    assert.match(preparation.coordinator.waitReason, /pnpm/);
     assert.deepEqual(readEvents(setup.eventsPath), []);
     assert.deepEqual(setup.github.state().projections, {});
     assert.equal(git(target.checkout, "rev-parse", "HEAD"), target.baseSha);

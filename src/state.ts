@@ -1,24 +1,24 @@
 import {
-  assertAdmissionBinding,
   type AutonomousAdmission,
+  assertAdmissionBinding,
 } from "./admission.js";
 import type { SourceSelector } from "./compiler.js";
 import type {
-  CapturedAssetSet,
-  AuthenticationRequest,
   AssetSelectionDecision,
+  AuthenticationRequest,
+  CapturedAssetSet,
   ExecutionHandle,
   ResultReviewCandidate,
   WorkGraph,
 } from "./contracts.js";
-import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
-import { assertSelectedLfsValidation } from "./validation.js";
 import {
   assertAssetCaptureReceipt,
   assertHydrationReceipt,
   assetSelectionDigest,
   finalValidationLfsMembers,
 } from "./media.js";
+import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
+import { assertSelectedLfsValidation } from "./validation.js";
 
 export type WorkStatus =
   | "pending"
@@ -61,6 +61,7 @@ export interface AcceptancePending {
 }
 
 export interface WorkState {
+  pendingEffect?: "review" | "publication" | "merge";
   status: WorkStatus;
   step?: WorkStep;
   attempt?: string;
@@ -90,7 +91,42 @@ export interface WorkState {
   githubClosure?: "pending" | "complete";
 }
 
+export interface CoordinatorDisposition {
+  mode: "running" | "paused" | "draining";
+  phase: string;
+  phaseStartedAt: string;
+  deadlineAt?: string;
+  observedAt?: string;
+  observationError?: string;
+  waitReason?: string;
+  cancelError?: string;
+  processes?: { pid: number; startTime: string }[];
+}
+
+/** Preparation shares the atomic state path; no executable graph is invented. */
+export interface PreparationState {
+  schemaVersion: 3;
+  kind: "preparing";
+  repository: string;
+  objective: number;
+  runId: string;
+  configDigest: string;
+  baseSha: string;
+  objectiveBodyDigest: string;
+  admission?: AutonomousAdmission;
+  coordinator: CoordinatorDisposition;
+  planning: "ready" | "submitted" | "complete";
+  plan?: import("./compiler.js").PlanCandidate;
+  issueByItemId: Record<string, number>;
+  projectionPending?: string;
+  error?: string;
+  cancelRequested?: boolean;
+  cancelledAt?: string;
+}
+export type ContinuationState = FactoryState | PreparationState;
+
 export interface FactoryState {
+  coordinator?: CoordinatorDisposition;
   admission?: AutonomousAdmission;
   additionalSources?: SourceSelector[];
   schemaVersion: 2;
@@ -118,6 +154,35 @@ export interface FactoryState {
   cancelRequested?: boolean;
   cancelledAt?: string;
   error?: string;
+}
+
+export function assertCoordinator(value: unknown): void {
+  if (value === undefined) return;
+  const entry = record(value, "coordinator");
+  if (
+    !["running", "paused", "draining"].includes(String(entry.mode)) ||
+    typeof entry.phase !== "string" ||
+    !Number.isFinite(Date.parse(String(entry.phaseStartedAt)))
+  )
+    throw new Error("Invalid coordinator disposition");
+  for (const key of ["deadlineAt", "observedAt"])
+    if (
+      entry[key] !== undefined &&
+      !Number.isFinite(Date.parse(String(entry[key])))
+    )
+      throw new Error(`Invalid coordinator ${key}`);
+  if (
+    entry.processes !== undefined &&
+    (!Array.isArray(entry.processes) ||
+      entry.processes.some(
+        (process) =>
+          !process ||
+          !Number.isSafeInteger(process.pid) ||
+          process.pid <= 0 ||
+          typeof process.startTime !== "string",
+      ))
+  )
+    throw new Error("Invalid coordinator process identities");
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -295,6 +360,7 @@ export function parseFactoryState(
   objective: number,
 ): FactoryState {
   const state = record(value, "state");
+  assertCoordinator(state.coordinator);
   if (
     state.schemaVersion !== 2 ||
     state.repository !== repository ||
@@ -418,6 +484,11 @@ export function parseFactoryState(
     if (!Number.isSafeInteger(projected[id]) || Number(projected[id]) <= 0)
       throw new Error(`Work Item ${id} has no projected Issue identity`);
     const item = record(work[id], `work.${id}`);
+    if (
+      item.pendingEffect !== undefined &&
+      !["review", "publication", "merge"].includes(String(item.pendingEffect))
+    )
+      throw new Error(`Work Item ${id} has invalid pending effect`);
     if (!statuses.has(item.status as WorkStatus))
       throw new Error(`Work Item ${id} has an invalid status`);
     if (item.step !== undefined && !steps.has(item.step as WorkStep))

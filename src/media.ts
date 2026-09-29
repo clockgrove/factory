@@ -18,20 +18,20 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import type {
-  CapturedAssetSet,
   AssetCaptureReceipt,
+  CapturedAssetSet,
   ContentRef,
   ContentStore,
   ProducedAssetSet,
-  SourceAssetBinding,
   SelectedAssetInput,
+  SourceAssetBinding,
   ValidationLfsMember,
   WorkItem,
 } from "./contracts.js";
-import type { FactoryState } from "./state.js";
-import { command, pinnedGit, pinnedGitRaw } from "./process.js";
-import { checkStagedCandidate } from "./execution/staged-candidate.js";
 import { CONTROLLER_CAPABILITIES_DIGEST } from "./controller-capabilities.js";
+import { checkStagedCandidate } from "./execution/staged-candidate.js";
+import { command, pinnedGit, pinnedGitRaw } from "./process.js";
+import type { FactoryState } from "./state.js";
 
 const LFS_POINTER_HEADER = Buffer.from(
   "version https://git-lfs.github.com/spec/v1\n",
@@ -725,7 +725,7 @@ export async function materializeAssetSet(args: {
         );
     }
     pinnedGit(worktree, "add", "--", ...[...destinations]);
-    const staged = checkStagedCandidate(
+    const staged = await checkStagedCandidate(
       worktree,
       args.checkout,
       args.item.ownedPaths,

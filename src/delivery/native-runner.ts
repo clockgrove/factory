@@ -19,7 +19,7 @@ import {
   selectedInputsForItem,
   validationLfsMembersForItem,
 } from "../media.js";
-import { git } from "../process.js";
+import { git, gitAsync } from "../process.js";
 import { itemsConflict } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
 import {
@@ -46,6 +46,8 @@ export async function runNativeGraph(args: {
   save: () => void;
   active: Map<string, Promise<void>>;
   cancelled: () => boolean;
+  paused?: () => boolean;
+  reconcile?: () => Promise<void>;
   diagnostics?: DiagnosticEmitter;
 }): Promise<void> {
   const {
@@ -61,12 +63,28 @@ export async function runNativeGraph(args: {
     active,
   } = args;
   const branchFor = (id: string) => `factory/objective-${objective}/${id}`;
-  const defaultBranch = github.defaultBranch();
+  const defaultBranch = await github.defaultBranch();
   const units = linearDeliveryUnits(state.graph);
+  for (const [id, work] of Object.entries(state.work))
+    if (
+      work.pendingEffect &&
+      !(
+        work.pendingEffect === "merge" &&
+        units.some(
+          (unit) =>
+            unit.items.at(-1)?.id === id &&
+            state.stackMerges?.[unit.id]?.expectedHeadSha === work.changeRef,
+        )
+      )
+    )
+      throw new Error(
+        `Work Item ${id} submitted ${work.pendingEffect} has unknown outcome; operator direction required`,
+      );
   // Admit independent roots whenever their predecessor units have integrated.
   // Publication stays ordered; a prepared change is replayed and validated
   // again if an earlier unit advanced the integrated head.
   const prepareReadyUnits = async (): Promise<void> => {
+    if (args.paused?.()) return;
     const reported = await driver.availableSlots();
     const limit = Math.min(
       config.execution.concurrency,
@@ -94,6 +112,7 @@ export async function runNativeGraph(args: {
       prepared.push(unit);
     }
     if (prepared.length > 1) {
+      await args.reconcile?.();
       const tasks = prepared.map(async (unit) => {
         const item = unit.items[0]!;
         const work = state.work[item.id]!;
@@ -148,7 +167,7 @@ export async function runNativeGraph(args: {
           work.step = "validate";
           save();
         } catch (error) {
-          work.status = args.cancelled() ? "cancelled" : "failed";
+          work.status = "failed";
           work.error = error instanceof Error ? error.message : String(error);
           if (
             error instanceof AuthenticationRequiredError &&
@@ -205,7 +224,9 @@ export async function runNativeGraph(args: {
       if (!itemBase) throw new Error("Native stack predecessor has no commit");
       if (work.status === "running" && work.baseSha !== itemBase && index !== 0)
         throw new Error(`Work Item ${item.id} resumed on a changed base`);
+      if (work.status === "pending" && args.paused?.()) return;
       if (work.status === "pending") {
+        await args.reconcile?.();
         work.status = "running";
         work.step = "execute";
         work.baseSha = itemBase;
@@ -313,7 +334,7 @@ export async function runNativeGraph(args: {
             throw new Error(
               `Work Item ${item.id} cannot replay its prepared change`,
             );
-          const replayed = transplantIndependentChange(
+          const replayed = await transplantIndependentChange(
             config.checkout,
             work.baseSha,
             work.changeRef,
@@ -415,6 +436,8 @@ export async function runNativeGraph(args: {
               }),
             },
           });
+        work.pendingEffect = "review";
+        save();
         work.validation = args.diagnostics
           ? await args.diagnostics.span(
               {
@@ -432,7 +455,9 @@ export async function runNativeGraph(args: {
                   : "failed",
             )
           : await reviewResult();
+        delete work.pendingEffect;
         delete work.acceptancePending;
+        if (args.cancelled()) throw new Error("Objective cancelled");
         work.step = "deliver";
         save();
         const publish = () =>
@@ -447,6 +472,9 @@ export async function runNativeGraph(args: {
               ? branchFor(unit.items[index - 1]!.id)
               : defaultBranch,
           });
+        await args.reconcile?.();
+        work.pendingEffect = "publication";
+        save();
         const published = args.diagnostics
           ? await args.diagnostics.span(
               {
@@ -465,12 +493,14 @@ export async function runNativeGraph(args: {
             )
           : await publish();
         work.pullRequest = published.pullRequest;
+        delete work.pendingEffect;
         work.status = "published";
         delete work.step;
         save();
       };
       const task = perform().catch((error: unknown) => {
         if (error instanceof AcceptanceDecisionRequired) {
+          delete work.pendingEffect;
           work.status = "waiting";
           work.step = "approve-result";
           work.acceptancePending = error.pending;
@@ -478,7 +508,7 @@ export async function runNativeGraph(args: {
           return;
         }
         if (work.status !== "done" && work.status !== "published") {
-          work.status = args.cancelled() ? "cancelled" : "failed";
+          work.status = "failed";
           work.error = error instanceof Error ? error.message : String(error);
           if (
             error instanceof AuthenticationRequiredError &&
@@ -522,7 +552,7 @@ export async function runNativeGraph(args: {
       (observation) => observation.state === "merged",
     );
     if (!pendingMerge && !allMerged) {
-      git(config.checkout, "fetch", "origin", defaultBranch);
+      await gitAsync(config.checkout, "fetch", "origin", defaultBranch);
       const observedBefore = git(config.checkout, "rev-parse", "FETCH_HEAD");
       if (observedBefore !== state.work[unit.items[0]!.id]!.baseSha)
         throw new Error(
@@ -544,7 +574,11 @@ export async function runNativeGraph(args: {
         headSha: layers.at(-1)!.headSha,
       },
     };
+    const topWork = state.work[unit.items.at(-1)!.id]!;
+    await args.reconcile?.();
     if (layers.length === 1) {
+      topWork.pendingEffect = "merge";
+      save();
       const layer = layers[0]!;
       const merge = async () =>
         (
@@ -564,7 +598,13 @@ export async function runNativeGraph(args: {
         : await merge();
     } else {
       state.stackNumbers ??= {};
-      const ensureStack = () => github.ensureNativeStack(layers, defaultBranch);
+      const ensureStack = async () => {
+        topWork.pendingEffect = "publication";
+        save();
+        const number = await github.ensureNativeStack(layers, defaultBranch);
+        delete topWork.pendingEffect;
+        return number;
+      };
       const stackNumber =
         state.stackNumbers[unit.id] ??
         (args.diagnostics
@@ -596,6 +636,8 @@ export async function runNativeGraph(args: {
         throw new Error(
           "Pending native merge identity changed; operator direction required",
         );
+      topWork.pendingEffect = "merge";
+      save();
       const mergeStack = () =>
         github.mergeNativeStack(layers, defaultBranch, stackNumber, {
           resumeUuid: pending?.uuid,
@@ -618,7 +660,7 @@ export async function runNativeGraph(args: {
           )
         : await mergeStack();
     }
-    git(config.checkout, "fetch", "origin", defaultBranch);
+    await gitAsync(config.checkout, "fetch", "origin", defaultBranch);
     const observedAfter = git(config.checkout, "rev-parse", "FETCH_HEAD");
     if (observedAfter !== integratedSha)
       throw new Error(
@@ -627,6 +669,7 @@ export async function runNativeGraph(args: {
     state.integratedSha = observedAfter;
     for (const item of unit.items) {
       const work = state.work[item.id]!;
+      delete work.pendingEffect;
       work.status = "done";
       work.integratedSha = observedAfter;
       work.completedAt = new Date().toISOString();

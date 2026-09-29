@@ -32,6 +32,16 @@ Automatic repair requires a concrete diagnosis, a permitted class and remaining 
 
 The initial admission capability does not start a service, automatically amend a graph or retry work. Coordinator, supervision, QA, amendment, repair, resource and intake issues enable their own reviewed behavior. Full program acceptance includes the installed public scenario and the finite subsequent interruption matrix; earlier artifact evidence retains its original scope.
 
+### Durable local ownership and control
+
+The #245 coordinator extends the existing runner with one installation owner and one atomic continuation snapshot. Preparation records the exact run, input bindings and planning disposition before provider submission, then saves the accepted plan and each projected issue identity before proceeding. Identifiable effects reconcile on restart; unknown submissions and publication acknowledgements stop affected work without replay. Existing active snapshots remain readable; unsupported state is refused without resetting it.
+
+Local lifecycle mutations route through the current owner's private socket. Long subprocess and GitHub operations are asynchronous so status and cancellation remain responsive. Admitted runs remain owned while paused, drained or waiting for an exact decision; terminal work releases the owner. An explicit run without admission retains its existing return-at-wait behavior. Pause/drain disposition and operator-declared absolute deadlines survive restart. Cancellation verifies owned cessation and preserves unresolved resources instead of claiming successful cleanup.
+
+Exact active-issue reads distinguish confirmed closure or changed content from unavailable observations. An observation failure persists a pause with its freshness/error and allows local control; an explicit resume requests another observation. Status exposes phase, wait reason and the existing graph/attempt identities. Idle waiting does not call models. This is local ownership, not service installation or automatic repair.
+
+The production GitHub gateway and native delivery share an asynchronous Octokit client and primary/secondary rate-limit gate. GitHub CLI is used only to obtain the local credential. HTTP mutations are never automatically retried after an uncertain response; authenticated reconciliation and existing delivery identities remain authoritative. Credentials and SDK objects stay outside continuation state.
+
 ### Compiler plan review
 
 [Trunk issue #19](https://github.com/clockgrove/factory/issues/19) defines the routine path: one structured compiler output from a complete, pinned source packet, deterministic graph checks, then one independent LLM review of the complete proposed plan. The review surface includes the Objective, base, pinned sources, Work Item graph, command-authority receipts, and exact final integrated-head commands. The reviewer must cite source-backed findings for missing Objective obligations, unsupported scope, citation defects, dependency or ownership mistakes, unobservable acceptance, or command/final-validation gaps. Deterministic checks remain authoritative for machine-checkable facts; the reviewer cannot grant authority or silently edit the plan.

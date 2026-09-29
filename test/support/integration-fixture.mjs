@@ -1,4 +1,3 @@
-import { resultFindings } from "./review-protocol.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -22,6 +21,7 @@ import { stateRoot } from "../../dist/config.js";
 import { LocalContentStore } from "../../dist/content/local.js";
 import { RegularDelivery } from "../../dist/delivery/regular.js";
 import { LocalExecutionDriver } from "../../dist/execution/local.js";
+import { resultFindings } from "./review-protocol.mjs";
 
 export function git(path, ...args) {
   return execFileSync("git", ["-C", path, ...args], {
@@ -502,6 +502,7 @@ class ScriptedHarness {
     const data = this.require(handle);
     if (existsSync(`${data.resultPath}.cancelled`))
       return { state: "cancelled" };
+    if (existsSync(`${data.resultPath}.failed`)) return { state: "failed" };
     if (existsSync(data.resultPath)) return { state: "complete" };
     return { state: "running" };
   }
@@ -541,6 +542,7 @@ class ScriptedHarness {
     ).length;
     if (starts <= (action.failAttempts ?? 0)) {
       appendEvent(this.eventsPath, { type: "failed", item: data.item });
+      writeFileSync(`${data.resultPath}.failed`, "failed\n");
       throw new Error(`Scripted failure for ${data.item}`);
     }
     for (const file of action.files ?? []) {

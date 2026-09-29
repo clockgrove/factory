@@ -1,8 +1,8 @@
-import type { AutonomousAdmission, ExecutionAuthority } from "./admission.js";
-import type { SourceSelector } from "./compiler.js";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import type { AutonomousAdmission, ExecutionAuthority } from "./admission.js";
+import type { SourceSelector } from "./compiler.js";
 import { CodexPlanningModel, type PlanCandidate } from "./compiler.js";
 import type { FactoryConfig, JsonValue, LocalHarnessConfig } from "./config.js";
 import {
@@ -33,8 +33,8 @@ import { RealGitHubGateway } from "./github.js";
 import {
   type ApplicationServices,
   admitObjective,
-  checkAdmission,
   cancelObjective,
+  checkAdmission,
   decidePlan,
   decideResult,
   exportAssetSetForReview,
@@ -76,6 +76,7 @@ export interface FactoryApplication {
     objective: number,
     acceptedPlan?: PlanCandidate,
     admission?: AutonomousAdmission,
+    options?: { deadlineAt?: string },
   ): Promise<FactoryState>;
   cancelObjective(objective: number): Promise<"requested" | "cancelled">;
   retryWorkItem(objective: number, itemId: string): void;
@@ -155,8 +156,15 @@ export function createApplication(
       checkAdmission(config, objective, services, candidate, admission),
     decidePlan: (objective, candidate, input) =>
       decidePlan(config, objective, services, candidate, input),
-    runObjective: (objective, acceptedPlan, admission) =>
-      runObjective(config, objective, services, acceptedPlan, admission),
+    runObjective: (objective, acceptedPlan, admission, options) =>
+      runObjective(
+        config,
+        objective,
+        services,
+        acceptedPlan,
+        admission,
+        options,
+      ),
     cancelObjective: (objective) =>
       cancelObjective(config, objective, services.driver),
     retryWorkItem: (objective, itemId) =>

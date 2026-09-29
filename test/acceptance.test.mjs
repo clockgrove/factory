@@ -1099,7 +1099,9 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
       );
       const events = readDiagnostics("example/retry-semantic", 1);
       const invalid = events.find(
-        (event) => event.metadata.observationType === "response-invalid",
+        (event) =>
+          event.operation === "model-invocation" &&
+          event.metadata.observationType === "response-invalid",
       );
       assert.equal(invalid.metadata.providerAttempt, 2);
       assert.equal(invalid.metadata.providerMaxAttempts, 3);

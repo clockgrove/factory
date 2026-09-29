@@ -685,3 +685,7 @@ C# examples; no archived implementation or private source was used.
 
 These deterministic checks do not qualify a published successor. A new exact
 artifact must pass installed public qualification before adopter use.
+
+## Local interaction capture (#214)
+
+The current diagnostic, provider SDK event and usage contracts supplied this observational capability. New code and synthetic tests use public scripted prompts, tool events and counters; no archived implementation or private source was copied. Actual boundary prompts retain existing packet identities, and existing normalized usage/deduplication remains authoritative for summaries. Capture has no lifecycle authority, external sink or live qualification claim.

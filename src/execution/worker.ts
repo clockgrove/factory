@@ -1,3 +1,4 @@
+import { WorkerInteractionCapture } from "./interaction-capture.js";
 import { Codex } from "@openai/codex-sdk";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -92,6 +93,16 @@ export async function runCodexWorker(
     /\.result\.json$/,
     ".progress.ndjson",
   );
+  const capture = new WorkerInteractionCapture(
+    request,
+    progressPath,
+    redactionValues,
+    {
+      provider: "codex",
+      model: model.model,
+      reasoningEffort: model.reasoningEffort,
+    },
+  );
   const codex = new Codex({
     env: Object.fromEntries(
       Object.entries(process.env).filter(
@@ -108,6 +119,7 @@ export async function runCodexWorker(
     modelReasoningEffort: model.reasoningEffort,
   });
   const prompt = workItemPrompt(request);
+  let providerCompleted = false;
   let turn: ProviderTurnGuard | undefined;
   let usage: unknown = null;
   let progressLost = false;
@@ -153,6 +165,11 @@ export async function runCodexWorker(
       providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
     );
     observeUsage("started");
+    capture.request(prompt, {
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      networkAccessEnabled: network === "host",
+    });
     const streamed = await turn.race(
       thread.runStreamed(prompt, { signal: turn.signal }),
     );
@@ -167,6 +184,7 @@ export async function runCodexWorker(
         if (next.done) break;
         const event = next.value;
         turn.progress();
+        capture.codex(event, thread.id ?? undefined);
         const observation = progressEvent(
           event,
           request.attemptId ?? "",
@@ -210,6 +228,8 @@ export async function runCodexWorker(
     }
     requireCompletedProviderTurn(turnCompleted);
     turn.finish();
+    providerCompleted = true;
+    capture.providerCompleted();
     const parsedAssets = readProducedAssets(request);
     writeHarnessResult(resultPath, {
       state: "complete",
@@ -221,6 +241,7 @@ export async function runCodexWorker(
       },
     });
     observeUsage("completed");
+    capture.outcome("completed", codexTokenUsage(usage), undefined, "protocol");
     return true;
   } catch (caught) {
     const error = caught;
@@ -229,6 +250,12 @@ export async function runCodexWorker(
       harnessFailure("codex", error, redactionValues),
     );
     observeUsage("failed");
+    capture.outcome(
+      "failed",
+      codexTokenUsage(usage),
+      error,
+      providerCompleted ? "protocol" : "provider",
+    );
     return false;
   } finally {
     turn?.finish();

@@ -1,10 +1,10 @@
-import type {
-  ReviewPacket,
-  ReviewFinding,
-  GraphReviewFinding,
-} from "./review-evidence.js";
 import type { ExecutionProfileEnvironment } from "./config.js";
 import type { ControllerCapabilitiesManifest } from "./controller-capabilities.js";
+import type {
+  GraphReviewFinding,
+  ReviewFinding,
+  ReviewPacket,
+} from "./review-evidence.js";
 
 export type Repository = `${string}/${string}`;
 
@@ -102,6 +102,11 @@ export interface WorkerUsageObservation {
 }
 
 export interface ModelInvocationObservation {
+  /** Private transient input for the opt-in observational sink; never lifecycle state. */
+  capture?: {
+    event: import("./capture.js").CaptureEvent;
+    content?: () => unknown;
+  };
   type:
     | "started"
     | "progress"
@@ -239,6 +244,7 @@ export interface PlanningModel {
 }
 
 export interface ExecutionRequest {
+  captureContext?: { objective: number; runId: string };
   item: WorkItem;
   baseSha: string;
   attemptId?: string;
@@ -290,6 +296,10 @@ export interface ExecutionDriver {
 }
 
 export interface HarnessRequest {
+  capture?: {
+    context: import("./capture.js").CaptureContext;
+    policy?: import("./capture.js").CapturePolicy;
+  };
   /** Installation-owned private preparation; never part of the Work Item graph. */
   environment?: ExecutionProfileEnvironment;
   /** Exact Factory-owned worktree. The harness may operate only inside it. */

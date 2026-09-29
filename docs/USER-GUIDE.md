@@ -136,7 +136,7 @@ factory diagnostics --objective ISSUE_NUMBER --summary
 factory logs --objective ISSUE_NUMBER --item WORK_ITEM_ID --follow
 ```
 
-Status describes current continuation state, including blocked work, selection pauses, errors, and final acceptance. Diagnostics provide a private timeline and available usage; logs expose worker output. A quiet timeline means no new provider event was observed. Neither silence nor missing counters proves completion or zero usage. Keep transcripts and private validation output out of public issues.
+Status describes current continuation state, including blocked work, selection pauses, errors, and final acceptance. Diagnostics provide a private timeline and available usage; logs expose worker output. A quiet timeline means no new provider event was observed. Neither silence nor missing counters proves completion or zero usage. Keep transcripts and private validation output out of public issues. For optional sensitive local request/response capture and metadata-only inspection, see [local model capture](LOCAL-CAPTURE.md).
 
 ## Review a result decision
 

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type { FactoryState } from "../state.js";
+import { planningSources } from "../compiler.js";
+import { closeWorkItem } from "../completion.js";
 import type { FactoryConfig } from "../config.js";
 import type {
   ContentStore,
@@ -8,11 +9,19 @@ import type {
   ExecutionDriver,
   ExecutionHandle,
   GitHubGateway,
-  PlanningModel,
   NativeStackLayer,
+  PlanningModel,
 } from "../contracts.js";
 import { AuthenticationRequiredError } from "../contracts.js";
+import type { DiagnosticEmitter } from "../diagnostics.js";
+import {
+  materializeAssetSet,
+  selectedInputsForItem,
+  validationLfsMembersForItem,
+} from "../media.js";
 import { git } from "../process.js";
+import { itemsConflict } from "../scheduler.js";
+import type { FactoryState } from "../state.js";
 import {
   AcceptanceDecisionRequired,
   reviewAcceptance,
@@ -20,17 +29,8 @@ import {
   workItemReviewEvidence,
   workItemReviewObservations,
 } from "../validation.js";
-import { planningSources } from "../compiler.js";
 import { linearDeliveryUnits } from "./plan.js";
-import {
-  materializeAssetSet,
-  selectedInputsForItem,
-  validationLfsMembersForItem,
-} from "../media.js";
-import { itemsConflict } from "../scheduler.js";
 import { transplantIndependentChange } from "./transplant.js";
-import { closeWorkItem } from "../completion.js";
-import type { DiagnosticEmitter } from "../diagnostics.js";
 
 export async function runNativeGraph(args: {
   config: FactoryConfig;
@@ -107,6 +107,7 @@ export async function runNativeGraph(args: {
         save();
         try {
           const handle = await driver.start({
+            captureContext: { objective, runId: state.runId },
             item,
             baseSha: work.baseSha!,
             attemptId: work.attempt,
@@ -261,6 +262,7 @@ export async function runNativeGraph(args: {
           const handle: ExecutionHandle =
             work.execution ??
             (await driver.start({
+              captureContext: { objective, runId: state.runId },
               item,
               baseSha: itemBase,
               attemptId: work.attempt,

@@ -1,18 +1,22 @@
-import { profileBinding } from "./execution-profiles.js";
-import type { LocalProfileRegistration } from "./execution/local.js";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { CodexPlanningModel, type PlanCandidate } from "./compiler.js";
 import type { FactoryConfig, JsonValue, LocalHarnessConfig } from "./config.js";
 import {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
+  factoryConfigDigest,
   GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
   stateRoot,
   validateConfig,
   validateTarget,
 } from "./config.js";
-import { CodexPlanningModel, type PlanCandidate } from "./compiler.js";
 import { LocalContentStore } from "./content/local.js";
+import type {
+  AgentHarness,
+  GitHubGateway,
+  PlanningModel,
+} from "./contracts.js";
 import { NativeStackDelivery } from "./delivery/native-stack.js";
 import { RegularDelivery } from "./delivery/regular.js";
 import { ClaudeAgentSdkHarness } from "./execution/claude.js";
@@ -20,26 +24,23 @@ import {
   GitHubCopilotSdkHarness,
   requireCopilotRuntime,
 } from "./execution/github-copilot.js";
+import type { LocalProfileRegistration } from "./execution/local.js";
 import { CodexHarness, LocalExecutionDriver } from "./execution/local.js";
+import { profileBinding } from "./execution-profiles.js";
 import { RealGitHubGateway } from "./github.js";
-import type {
-  AgentHarness,
-  GitHubGateway,
-  PlanningModel,
-} from "./contracts.js";
-import type { FactoryState } from "./state.js";
 import {
+  type ApplicationServices,
   cancelObjective,
-  decideResult,
   decidePlan,
+  decideResult,
   exportAssetSetForReview,
   planObjective,
-  retryWorkItem,
   rereviewWorkItem,
+  retryWorkItem,
   runObjective,
   selectAssetSet,
-  type ApplicationServices,
 } from "./runner.js";
+import type { FactoryState } from "./state.js";
 
 export interface FactoryApplication {
   planObjective(objective: number): Promise<PlanCandidate>;
@@ -170,6 +171,12 @@ export function composePlanning(
       config.checkout,
       config.planning.planner,
       config.planning.reviewer,
+      undefined,
+      {
+        redactionValues: config.policy.allowedSecretNames.flatMap((name) =>
+          process.env[name] ? [process.env[name]!] : [],
+        ),
+      },
     ),
     github: new RealGitHubGateway(
       config.repository,
@@ -252,6 +259,11 @@ function composeLocal(
     contentStore,
     adapterIdentity,
     profiles,
+    {
+      repository: config.repository,
+      policy: config.capture,
+      configDigest: factoryConfigDigest(config),
+    },
   );
   return createApplication(config, {
     planningModel:
@@ -260,6 +272,12 @@ function composeLocal(
         config.checkout,
         config.planning.planner,
         config.planning.reviewer,
+        undefined,
+        {
+          redactionValues: config.policy.allowedSecretNames.flatMap((name) =>
+            process.env[name] ? [process.env[name]!] : [],
+          ),
+        },
       ),
     driver,
     github,

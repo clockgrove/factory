@@ -1,30 +1,36 @@
+import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
   closeSync,
   constants,
+  existsSync,
   fstatSync,
+  mkdirSync,
+  openSync,
   readdirSync,
+  readFileSync,
   readSync,
 } from "node:fs";
-import { StringDecoder } from "node:string_decoder";
-import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
+import {
+  type CapturePolicy,
+  CaptureWriter,
+  type InteractionMetadata,
+} from "./capture.js";
 import { stateRoot } from "./config.js";
-import type { FactoryState, WorkState } from "./state.js";
-import { itemsConflict } from "./scheduler.js";
-import { linearDeliveryUnits } from "./delivery/plan.js";
-import { normalizeTokenUsage, tokenCategories } from "./usage.js";
 import type {
   ModelInvocationObservation,
   ModelInvocationPhase,
   ModelInvocationUsage,
 } from "./contracts.js";
+import { linearDeliveryUnits } from "./delivery/plan.js";
+import { itemsConflict } from "./scheduler.js";
+import type { FactoryState, WorkState } from "./state.js";
+import { normalizeTokenUsage, tokenCategories } from "./usage.js";
 
 export interface DiagnosticEvent {
+  capture?: InteractionMetadata;
   eventId: string;
   at: string;
   repository: string;
@@ -113,10 +119,14 @@ export function diagnosticPath(repository: string, objective: number): string {
 
 export class DiagnosticEmitter {
   private streamBuffers = new Map<string, string>();
+  private captureWriters = new Map<string, CaptureWriter>();
+  private captureBudgets = new Map<string, { retained: number }>();
   constructor(
     private repository: string,
     private objective: number,
     private secrets: string[] = [],
+    private capturePolicy?: CapturePolicy,
+    private configDigest?: string,
   ) {}
 
   emit(
@@ -185,6 +195,90 @@ export class DiagnosticEmitter {
   }): (observation: ModelInvocationObservation) => void {
     return (observation) => {
       const { scopeId, ...diagnosticContext } = context;
+      const captureKey = `${observation.invocationId}:${observation.providerAttempt ?? 1}`;
+      let writer = this.captureWriters.get(captureKey);
+      if (!writer) {
+        const budget = this.captureBudgets.get(observation.invocationId) ?? {
+          retained: 0,
+        };
+        this.captureBudgets.set(observation.invocationId, budget);
+        writer = new CaptureWriter(
+          {
+            repository: this.repository,
+            objective: this.objective,
+            ...context,
+            invocationId: observation.invocationId,
+            providerAttempt: observation.providerAttempt ?? 1,
+            phase: observation.phase,
+            adapter: "@openai/codex-sdk@0.156.0",
+            configured: {
+              provider: observation.provider ?? "openai-codex-sdk",
+              model: observation.model ?? "not-exposed",
+              reasoningEffort: observation.reasoningEffort,
+            },
+            configDigest: this.configDigest,
+          },
+          this.capturePolicy,
+          this.secrets,
+          (capture) =>
+            this.emit({
+              ...diagnosticContext,
+              operation: "model-capture",
+              outcome: "observed",
+              capture,
+            }),
+          budget,
+        );
+        this.captureWriters.set(captureKey, writer);
+      }
+      if (observation.capture)
+        writer.record(observation.capture.event, observation.capture.content);
+      // A capture-only evaluation is not another provider progress observation.
+      if (
+        observation.capture &&
+        observation.type === "progress" &&
+        !observation.providerEvent
+      )
+        return;
+      if (
+        observation.type === "completed" ||
+        observation.type === "failed" ||
+        observation.type === "response-invalid"
+      ) {
+        const stage =
+          observation.type === "response-invalid"
+            ? observation.failureClass === "structured-output-parse"
+              ? "parse"
+              : observation.failureClass === "review-protocol"
+                ? "protocol"
+                : "semantic"
+            : "provider";
+        writer.record({
+          kind: "outcome",
+          durationMs: observation.durationMs,
+          providerSessionId: observation.providerThreadId,
+          outcome: {
+            stage,
+            status:
+              observation.type === "response-invalid"
+                ? "invalid"
+                : observation.type,
+            failureClass: observation.failureClass,
+          },
+          ...(observation.usage && {
+            usage: {
+              scope: "invocation-cumulative",
+              terminal: true,
+              completeness: observation.usageAvailable
+                ? "available-categories"
+                : "unavailable",
+              normalized: observation.usage,
+              deduplicationKey: captureKey,
+            },
+          }),
+        });
+      }
+
       const metadata: Record<string, string | number | boolean> = {
         scopeId,
         invocationId: observation.invocationId,
@@ -648,6 +742,18 @@ export function summarizeDiagnosticUsage(events: Record<string, unknown>[]) {
   };
 }
 
+export function readDiagnosticMetadata(
+  repository: string,
+  objective: number,
+): Omit<DiagnosticEvent, "detail">[] {
+  const path = diagnosticPath(repository, objective);
+  if (!existsSync(path)) return [];
+  const events: Omit<DiagnosticEvent, "detail">[] = [];
+  for (const { detail: _detail, ...event } of privateRecords(path))
+    events.push(event as Omit<DiagnosticEvent, "detail">);
+  return events;
+}
+
 export function readDiagnostics(
   repository: string,
   objective: number,
@@ -752,7 +858,9 @@ export function readAgentTimeline(
 }
 
 /** Parse every complete record, retaining at most the current record text. */
-function* privateRecords(path: string): Generator<Record<string, unknown>> {
+export function* privateRecords(
+  path: string,
+): Generator<Record<string, unknown>> {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd);

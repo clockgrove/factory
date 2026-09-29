@@ -1,30 +1,25 @@
-import {
-  executionProfileChoices,
-  verifyExecutionProfiles,
-} from "./execution-profiles.js";
 import { createHash, randomUUID } from "node:crypto";
-import { readdirSync, existsSync, mkdirSync } from "node:fs";
-import { basename, isAbsolute, join, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { userInfo } from "node:os";
-import type { FactoryConfig } from "./config.js";
-import { factoryConfigDigest, stateRoot, validateTarget } from "./config.js";
-import type { FactoryState } from "./state.js";
+import { basename, isAbsolute, join, resolve, sep } from "node:path";
+import {
+  assertObjectiveCriteria,
+  compilePlan,
+  finalObjectiveCommands,
+  objectiveCriteria,
+  type PlanCandidate,
+  planningSources,
+  resolvePlan,
+  validateCommandProvenance,
+  verifyPlanCandidate,
+} from "./compiler.js";
 import {
   closeObjectiveIssue,
   closeWorkItem,
   GitHubClosureFailure,
 } from "./completion.js";
-import {
-  compilePlan,
-  assertObjectiveCriteria,
-  finalObjectiveCommands,
-  objectiveCriteria,
-  planningSources,
-  resolvePlan,
-  validateCommandProvenance,
-  verifyPlanCandidate,
-  type PlanCandidate,
-} from "./compiler.js";
+import type { FactoryConfig } from "./config.js";
+import { factoryConfigDigest, stateRoot, validateTarget } from "./config.js";
 import type {
   ContentStore,
   DeliveryStrategy,
@@ -32,24 +27,22 @@ import type {
   GitHubGateway,
   PlanningModel,
 } from "./contracts.js";
+import { runNativeGraph } from "./delivery/native-runner.js";
+import { linearDeliveryUnits } from "./delivery/plan.js";
+import { runRegularGraph } from "./delivery/regular-runner.js";
+import { DiagnosticEmitter, StateDiagnostics } from "./diagnostics.js";
+import {
+  executionProfileChoices,
+  verifyExecutionProfiles,
+} from "./execution-profiles.js";
+import { preflightLocalExecutables } from "./local-preflight.js";
 import {
   assetSelectionDigest,
   finalValidationLfsMembers,
   verifyHydratedAssets,
 } from "./media.js";
-import { runNativeGraph } from "./delivery/native-runner.js";
-import { linearDeliveryUnits } from "./delivery/plan.js";
-import { runRegularGraph } from "./delivery/regular-runner.js";
 import { git, linuxProcessIdentity, pinnedGit } from "./process.js";
-import {
-  AcceptanceDecisionRequired,
-  assertPinnedNpmScripts,
-  objectiveReviewEvidence,
-  reviewAcceptance,
-  validateTree,
-} from "./validation.js";
-import { DiagnosticEmitter, StateDiagnostics } from "./diagnostics.js";
-import { preflightLocalExecutables } from "./local-preflight.js";
+import type { FactoryState } from "./state.js";
 import {
   acquireControllerLock,
   readControllerOwner,
@@ -58,6 +51,13 @@ import {
   saveState,
   statePath,
 } from "./state-store.js";
+import {
+  AcceptanceDecisionRequired,
+  assertPinnedNpmScripts,
+  objectiveReviewEvidence,
+  reviewAcceptance,
+  validateTree,
+} from "./validation.js";
 
 export interface ApplicationServices {
   planningModel: PlanningModel;
@@ -85,6 +85,8 @@ export async function planObjective(
     config.repository,
     objective,
     configuredDiagnosticSecrets(config),
+    config.capture,
+    factoryConfigDigest(config),
   );
   const planningScopeId = randomUUID();
   const started = Date.now();
@@ -147,6 +149,8 @@ export async function decidePlan(
     config.repository,
     objective,
     configuredDiagnosticSecrets(config),
+    config.capture,
+    factoryConfigDigest(config),
   );
   const started = Date.now();
   diagnostics.emit({ operation: "planning-decision", outcome: "started" });
@@ -198,6 +202,8 @@ export async function runObjective(
     config.repository,
     objective,
     configuredDiagnosticSecrets(config),
+    config.capture,
+    factoryConfigDigest(config),
   );
   let stateDiagnostics: StateDiagnostics | undefined;
   const save = (state: FactoryState) => {

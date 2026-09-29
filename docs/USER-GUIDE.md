@@ -6,7 +6,7 @@ Start with the [published installation instructions](../README.md#install). Use 
 
 ## Published plugin compatibility
 
-Published [v0.1.40](https://github.com/clockgrove/factory/releases/tag/v0.1.40) has verified public download and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0140-artifact-record). It includes the local autonomy capabilities documented below; their full program qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Live workspace/LFS qualification for this artifact remains tracked in [#263](https://github.com/clockgrove/factory/issues/263). Earlier accepted scenarios remain bound to [v0.1.38](BUILD-STATUS.md#immutable-v0138-artifact-record) and are not transferred to v0.1.40. The bounded Clockgrove pilot passed verification under [#206](https://github.com/clockgrove/factory/issues/206) and explicit operator acceptance under [#207](https://github.com/clockgrove/factory/issues/207). Using Factory as a plugin does not require a Factory source checkout; contributors building Factory follow [Contributing](../CONTRIBUTING.md).
+Use matching plugin and CLI versions, and check `factory help` for the installed commands. [Release evidence and limitations](BUILD-STATUS.md) records which artifact and scenario were qualified. Using Factory as a plugin does not require a Factory source checkout; contributors building Factory follow [Contributing](../CONTRIBUTING.md).
 
 If you remain on immutable v0.1.30, its older skills still refer to the maintainer qualification workflow. Explicitly ask your agent to follow this guide for ordinary target-repository work rather than create release fixtures. Retain host/worker readiness, target authority, sandbox and spending boundaries. Maintainers qualifying any release must still follow the full [release procedure](PUBLIC-RELEASE.md).
 
@@ -66,9 +66,9 @@ export XDG_STATE_HOME="/absolute/private/factory-trial/state"
 
 These are installation choices, not recovery commands. Keep provider authentication accessible through its existing local profile. Never copy credentials into the target repository.
 
-### Resource limits
+### Resource limits in the upcoming autonomous release
 
-Resource scheduling is included in published v0.1.40; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Before accepting a plan, an operator may add `scheduling` to the installation configuration. For example, the following declares four CPU units and 4096 MiB shared by active phases, with one concurrent reviewer and one validation job:
+Before accepting a plan, an operator may add `scheduling` to the installation configuration. For example, the following declares four CPU units and 4096 MiB shared by active phases, with one concurrent reviewer and one validation job:
 
 ```json
 {
@@ -109,7 +109,7 @@ The default network policy is `host`; `--network off` selects the supported offl
 
 ## Admit an exact plan for autonomous work
 
-This admission surface is included in published v0.1.40; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Check your installed `factory help` before using it. Background supervision and automatic repair are separate capabilities and are not enabled by admission alone.
+Admission binds authority to a reviewed plan. It does not start execution or a background service; automatic repair requires the separate policy below.
 
 Plan the selected Objective under its ordinary planning authority. When an autonomous policy is already available, pass `factory plan --authority /absolute/private/authority.json` with the usual Objective/output options so known consent, membership, resource and required-environment errors fail before model calls. Then bind the reviewed candidate to that policy:
 
@@ -123,9 +123,9 @@ factory run --objective 123 --plan /absolute/private/plan.json \
   --admission /absolute/private/admission.json
 ```
 
-The authority file records `schemaVersion: 1`, the operator's `actor` and `reason`, explicit `executionConsent: true`, separate boolean `serviceConsent`, and a finite `objectives` list. It requires numeric `allowances` for `planningRevisions`, `implementationRepairs` and `resultRereviews`, `repairClasses` selected from `implementation` and `review-evidence`, `resources.maxConcurrency`, and `requiredEnvironment` worker-secret variable names. Obtain these choices from the operator; zero allowances are valid and no unspecified allowance means unlimited. Required worker-secret names must already be permitted by the installation allowlist; the declaration checks availability without granting access or exposing values. This does not prove controller-validation credentials or complete phase readiness. The installation's provider, credential-access, network and delivery configuration still applies.
+The authority file records `schemaVersion: 1`, the operator's `actor` and `reason`, explicit `executionConsent: true`, separate boolean `serviceConsent`, and a finite `objectives` list. It requires numeric `allowances` for `planningRevisions`, `implementationRepairs` and `resultRereviews`, `repairClasses` selected from the supported classes below, `resources.maxConcurrency`, and `requiredEnvironment` worker-secret variable names. Obtain these choices from the operator; zero allowances are valid and no unspecified allowance means unlimited. Required worker-secret names must already be permitted by the installation allowlist; the declaration checks availability without granting access or exposing values. This does not prove controller-validation credentials or complete phase readiness. The installation's provider, credential-access, network and delivery configuration still applies.
 
-Admission binds the repository, Objective body, pinned base and source packet, reviewed plan and configuration. It rejects an Objective outside the authorized list, changed inputs, unresolved acceptance or an installation worker ceiling exceeding the admitted maximum. A larger admitted maximum never raises the configured concurrency. Checking admission creates no worker or runnable queue. A batch list grants bounded membership; it is not an instruction to run every listed Objective now. Service consent does not install or start a service. Recorded repair allowances do not enable automatic repair before that capability exists.
+Admission binds the repository, Objective body, pinned base and source packet, reviewed plan and configuration. It rejects an Objective outside the authorized list, changed inputs, unresolved acceptance or an installation worker ceiling exceeding the admitted maximum. A larger admitted maximum never raises the configured concurrency. Checking admission creates no worker or runnable queue. A batch list grants bounded membership; it is not an instruction to run every listed Objective now. Service consent does not install or start a service. Recorded repair allowances enable automatic repair only when the policy below explicitly permits it.
 
 Existing explicit runs keep their current behavior. Their state cannot gain admission or retry authority on upgrade. A running admitted Objective keeps its recorded policy; changing a file does not expand an active attempt. Preserve state and resolve a refused change at a supported safe boundary.
 
@@ -195,7 +195,7 @@ Execution projects Work Items to GitHub, starts ready workers, independently val
 
 ## Keep an admitted Objective under local control
 
-This coordinator surface is included in published v0.1.40; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). An admitted `run` keeps one local owner alive while waiting for an exact result decision, pause or drain. It remains a foreground process; service installation and continuity after logout belong to the separate background-supervision capability.
+An admitted `run` keeps one local owner alive while waiting for an exact result decision, pause or drain. It remains a foreground process; see local background supervision for service operation and host limitations.
 
 Use another terminal to control that owner:
 
@@ -277,7 +277,7 @@ Source assets may be pinned repository files, explicitly cited absolute private 
 factory cancel --objective ISSUE_NUMBER
 ```
 
-Cancellation stops owned local work. Inspect its resulting status before attempting anything else. For a failed or cancelled unpublished item, an explicit new-attempt decision can use:
+Cancellation stops owned local work. Inspect its resulting status before attempting anything else. For a failed or cancelled unpublished item without an admitted repair policy, an explicit new-attempt decision can use:
 
 ```sh
 factory retry --objective ISSUE_NUMBER --item WORK_ITEM_ID
@@ -287,6 +287,20 @@ An ordinary restart may reattach to an identifiable worker or continue a support
 
 If a regular Work Item remains `running` at `deliver`, `run` refuses the ambiguous active state even if a branch or PR exists. There is no supported automatic continuation for that publication window. Preserve the original snapshot, plan/configuration identities, attempt, validated commit/tree, review evidence, and remote branch/PR heads. Use status and read-only GitHub inspection; do not edit state, republish, replay a worker, or use `retry` or `decide-result` to bypass the refusal. Manual target disposition requires explicit operator direction and does not complete the original Objective. See [support](../SUPPORT.md) for reporting a redacted reproduction.
 
+## Allow diagnosed repairs
+
+Automatic repairs are opt-in. Alongside the Objective's `allowances`, set `repairPolicy.perPath` with explicit numeric `planningRevisions`, `implementationRepairs` and `resultRereviews` limits. Select only the permitted `repairClasses`: `implementation`, `review-evidence`, `validation-environment`, `planning-output`, `planning-evidence` or `planning-choice`. Omit the policy to retain explicit retry behavior. Choose these limits before admission; children, restart and recompilation cannot reset consumption.
+
+Factory requires a concrete diagnosis and correction before another implementation attempt. The new attempt starts from the accepted base; removed unfinished edits are unavailable. An evidence-only review correction preserves the result and still requires independent review. Missing product or security decisions, unknown external outcomes and exhausted limits stop for an explicit decision. `status --json` reports the failure identity, consumed allowances and next decision.
+
+For a collected result blocked by an external prerequisite, restore only the already authorized environment. Submit a proposal file containing `item`, the preserved `treeSha`, and `correction` with `kind: "validation-environment"`, `failureDigest`, `actor`, `diagnosis` and `correction`:
+
+```sh
+factory repair --objective ISSUE_NUMBER --proposal /private/repair.json
+```
+
+The admitted policy must permit that class and have a result rereview remaining. Factory revalidates and independently reviews the same candidate; this command does not accept it or rerun implementation. An admitted repair policy uses diagnosed proposals rather than unrestricted `retry` or `rereview` commands. Unknown accounting stays unknown, and no recovery operation raises a provider or spending limit.
+
 ## Publication and local safety
 
 Factory checks changed-path ownership, unsafe links and special files, and scans staged content and working bytes with its packaged Secretlint rules before publication. Target ignore files and scanner configuration cannot bypass the packaged scan. A finding reports its rule and path without the secret value. Review false positives outside the worker checkout; an operator may select a reviewed external configuration with `FACTORY_SECRETLINT_CONFIG` before an explicit retry. Do not weaken the scan merely to make an attempt pass.
@@ -295,7 +309,7 @@ Workers receive a filtered environment; controller GitHub, Git, and SSH credenti
 
 ## Discover required work during an admitted Objective
 
-Graph amendments are included in published v0.1.40; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). An admitted Objective
+An admitted Objective
 can use its recorded planning-revision allowance to review necessary discoveries.
 Workers stage a private `.factory-discovery.json` proposal with evidence, scope,
 ownership, acceptance and dependencies. Factory collects it with the ordinary result,
@@ -323,7 +337,7 @@ supported continuation; editing state or running a fresh root cannot bypass a fe
 
 ## Local background supervision
 
-Local background supervision is included in published v0.1.40; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). A supported Linux or WSL host needs a running systemd user manager. Factory never changes login persistence or gains administrator privileges. A user manager can survive the chat closing; sleeping pauses execution, shutdown stops it, and logout behavior depends on the host's existing linger policy.
+A supported Linux or WSL host needs a running systemd user manager. Factory never changes login persistence or gains administrator privileges. A user manager can survive the chat closing; sleeping pauses execution, shutdown stops it, and logout behavior depends on the host's existing linger policy.
 
 After binding a target and admitting its exact plan with explicit `serviceConsent: true`, register the installed artifact:
 
@@ -343,3 +357,37 @@ For an existing admitted continuation, omit `--plan` and `--admission`. Registra
 To change installed artifacts, use `factory supervisor upgrade --cli /absolute/new-package/dist/cli.js --config /private/factory.json`. Factory asks that artifact to validate the actual continuation before draining and again after owned work settles, then switches the unit. Rollback uses the same operation and refuses if the older artifact cannot validate retained state. No state fields, allowances or evidence are reset. A failed activation leaves the selected unit and evidence inspectable; it does not silently choose another artifact.
 
 `supervisor disable` drains and stops before disabling future starts. `supervisor uninstall` also removes the owned unit. Both retain target binding, snapshots, results, logs and accounting. Neither removes the target repository or provider authentication. Raw systemd stop sends a graceful drain request only to the owner and does not kill detached workers; unresolved work can therefore keep it waiting. Prefer the packaged stop command for bounded diagnostics.
+
+## Run a finite batch of Objectives
+
+Use the same explicit authority file described under autonomous admission, with the finite `objectives` list in the desired order. Enqueue records that selection and each issue's current body. It does not start planning or execution. Configure the target and prepare its Objective issues first:
+
+```sh
+factory intake enqueue --authority /private/authority.json --config /private/factory.json
+factory intake run --config /private/factory.json
+factory intake status --config /private/factory.json
+```
+
+Factory processes one Objective at a time. Once an Objective is accepted, closed and its owned work has stopped, Factory can plan the next eligible selection. A GitHub issue's native “blocked by” dependencies must have retained Factory acceptance evidence. Factory verifies that the current default branch contains that accepted result before compiling the successor. Keep the configured checkout clean and able to fast-forward; Factory preserves conflicting local edits and reports the blocked baseline.
+
+The authority list is the default order. Optional repeated `--priority-label EXISTING_LABEL` arguments to `enqueue` rank pending selections using those labels, in argument order. Label changes can reorder pending work but never authorize another issue or interrupt active work. Closed issues, changed bodies and unresolved prerequisites remain ineligible with a reason in status. API failures are reported as unavailable observations. A reopened completed issue does not rerun. The poll interval defaults to 30 seconds and can be set with `--poll-seconds`.
+
+```sh
+factory intake pause --config /private/factory.json
+factory intake resume --config /private/factory.json
+factory intake dequeue --objective N --config /private/factory.json
+factory intake drain --config /private/factory.json
+```
+
+Pause stops new dispatch; drain permits owned work to settle and releases the controller. Both persist across restarts. Resume continues the existing authorization and remaining allowances. Dequeue withdraws a pending selection and refuses active work; it does not cancel an Objective. Enqueue replaces the finite selection only when no nonterminal Objective remains. Do not edit the saved authorization or create another state directory to bypass an unresolved continuation.
+
+For supported background operation, the same authority must explicitly include `serviceConsent: true`:
+
+```sh
+factory supervisor install --intake --config /private/factory.json
+factory supervisor start --config /private/factory.json
+```
+
+The existing exact-artifact service, credential and host requirements still apply. `supervisor stop` drains the intake owner. Before starting that service again, run `factory intake resume --config /private/factory.json` while it is stopped to release the retained drain, then run `factory supervisor start --config /private/factory.json`. Do not launch a foreground intake while that service owns the installation.
+
+An unresolved human plan question pauses intake; it is not automatic acceptance. Stop the service, or drain a foreground owner, before making the decision. Export the retained plan using `factory plan --objective N --authority /private/authority.json --output /private/plan.json` with the same configuration, then use the ordinary `decide` workflow below the preview instructions. Bind the decided plan with `admit`. With the service still stopped, run `factory intake resume --config /private/factory.json` to release the preparation's retained drain, then run the decided Objective with `run --plan /private/decided-plan.json --admission /private/admission.json`. This uses the same preparation and allowances. Once that Objective completes, resume and start intake again for its remaining selections. A failed or unknown submitted outcome requires its supported recovery; restart alone does not authorize replay. Result decisions and media selection continue to use the ordinary Objective controls.

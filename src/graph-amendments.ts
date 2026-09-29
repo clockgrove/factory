@@ -1,3 +1,4 @@
+import { consumeAllowance } from "./repair-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -447,14 +448,8 @@ export async function applyPendingAmendment(args: {
     resultRereviews: 0,
   };
   const consumption = state.allowanceConsumption;
-  if (pending.phase === "ready") {
-    if (
-      consumption.planningRevisions >=
-      state.admission!.authority.allowances.planningRevisions
-    )
-      throw new Error("Objective planning revision allowance exhausted");
-    consumption.planningRevisions++;
-  }
+  if (pending.phase === "ready")
+    consumeAllowance(state, "planningRevisions", ["$planning"]);
   state.graphRevisions ??= [
     { graph: structuredClone(state.graph), digest: graphDigest(state.graph) },
   ];

@@ -1,3 +1,8 @@
+import {
+  recordWorkFailure,
+  diagnoseWorkRepair,
+  prepareEvidenceRecovery,
+} from "../work-repair.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
 import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
 import { randomUUID } from "node:crypto";
@@ -162,7 +167,12 @@ export async function runRegularGraph(args: {
           existingHandle ??
           (await driver.start({
             captureContext: { objective, runId: state.runId },
-            item,
+            item: work.recovery?.correction
+              ? {
+                  ...item,
+                  brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
+                }
+              : item,
             baseSha: itemBase,
             attemptId: work.attempt,
             objectiveBody: args.objectiveBody,
@@ -414,6 +424,8 @@ export async function runRegularGraph(args: {
         work.status = "waiting";
         work.step = "approve-result";
         work.acceptancePending = error.pending;
+        if (!args.cancelled() && !args.paused?.())
+          prepareEvidenceRecovery(state, item.id);
         save();
         return;
       }
@@ -427,6 +439,35 @@ export async function runRegularGraph(args: {
       else delete work.authentication;
       if (!work.pendingEffect && work.phaseReservation !== "coding")
         phases.release(item.id);
+      const isolated = recordWorkFailure(state, item.id, error);
+      if (
+        isolated &&
+        state.admission?.authority.repairPolicy &&
+        !args.cancelled()
+      ) {
+        phases.release(item.id);
+        save();
+        await phases.reserve(item.id, "review");
+        try {
+          await diagnoseWorkRepair({
+            state,
+            item,
+            model: args.planningModel,
+            diagnostics: args.diagnostics,
+            sources: planningSources(
+              args.objectiveBody,
+              state.baseSha,
+              config.checkout,
+              state.additionalSources,
+            ),
+            save,
+            stopped: () => args.cancelled() || Boolean(args.paused?.()),
+          });
+        } finally {
+          phases.release(item.id);
+        }
+        return;
+      }
       save();
       failure ??= error;
       throw error;

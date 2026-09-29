@@ -1160,6 +1160,25 @@ export function statusDocument(
         }
       : null,
     allowanceConsumption: state.allowanceConsumption ?? null,
+    repairConsumption: state.repairConsumption ?? null,
+    repairs: Object.fromEntries(
+      Object.entries(state.work)
+        .filter(([, work]) => work.recovery)
+        .map(([id, work]) => [
+          id,
+          {
+            phase: work.recovery!.phase ?? null,
+            failureClass: work.recovery!.failure?.classification ?? null,
+            failureDigest: work.recovery!.failure?.digest ?? null,
+            continuation: work.recovery!.failure?.continuation ?? null,
+            unfinishedEdits: work.recovery!.failure?.unfinishedEdits ?? null,
+            priorAttempts: work.recovery!.history?.length ?? 0,
+            nextDecision: work.recovery!.failure?.decision
+              ? redactDiagnosticDetail(work.recovery!.failure.decision, secrets)
+              : null,
+          },
+        ]),
+    ),
     configuredSlots: configuredSlots ?? null,
     baseSha: state.baseSha,
     integratedSha: state.integratedSha ?? null,

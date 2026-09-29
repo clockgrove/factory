@@ -116,8 +116,7 @@ test("optional production workers bound turns, require terminals and report unav
         writeFileSync(
           input,
           JSON.stringify({
-            providerTurnIdleTimeoutMs:
-              scenario === "cleanup-progress" ? 1_000 : 100,
+            providerTurnIdleTimeoutMs: complete ? 1_000 : 100,
             request: {
               attemptId,
               worktree: root,
@@ -178,7 +177,7 @@ test("optional production workers bound turns, require terminals and report unav
         assert.equal(
           outcome.state,
           complete ? "complete" : "failed",
-          `${attemptId}: ${child.stderr}`,
+          `${attemptId}: ${outcome.error ?? ""} ${child.stderr}`,
         );
         assert.equal(child.status, complete ? 0 : 1, attemptId);
         if (scenario === "cleanup-progress") {

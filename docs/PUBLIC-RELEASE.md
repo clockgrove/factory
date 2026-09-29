@@ -4,7 +4,7 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Published [v0.1.40](https://github.com/clockgrove/factory/releases/tag/v0.1.40) has verified public download, pinned plugin identity and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0140-artifact-record). Distribution checks do not establish live Objective qualification; [#263](https://github.com/clockgrove/factory/issues/263) owns the new workspace/LFS gate and [#253](https://github.com/clockgrove/factory/issues/253) owns full autonomous qualification. Earlier artifact and adopter evidence remain bound to their original bytes and scenarios.
+Published [v0.1.39](https://github.com/clockgrove/factory/releases/tag/v0.1.39) has verified public download and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0139-artifact-record). Live workspace/LFS qualification remains bound to [v0.1.38](BUILD-STATUS.md#immutable-v0138-artifact-record); it was not rerun or transferred to v0.1.39. The bounded Clockgrove pilot passed verification under [#206](https://github.com/clockgrove/factory/issues/206) and explicit operator acceptance under [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
 
 Earlier published artifacts and their evidence remain unchanged. Publication and installation checks do not establish Objective qualification.
 
@@ -47,21 +47,28 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-Install the published v0.1.40 tag and matching release assets:
+Install the published v0.1.39 tag and matching release assets:
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.40
+codex plugin marketplace add clockgrove/factory --ref v0.1.39
 codex plugin add factory@clockgrove
-gh release download v0.1.40 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.40.tgz --pattern SHA256SUMS
+gh release download v0.1.39 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.39.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the digest with the independent value in the release preparation PR.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.40.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.39.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```
 
 Verify `factory@clockgrove` appears in `codex plugin list --json` before the live Objective. The installed `director` and `setup` skills guide agent use; the `factory` CLI above supplies their documented operations. The CLI prefix, Factory configuration, state, review exports, and planning candidates must stay outside the target checkout. A target still requires GitHub CLI access and an authenticated Codex SDK environment; media Objectives require Git LFS.
+
+## Autonomous public qualification
+
+The complete autonomous installed scenario for #243 is documented in
+[Installed public autonomy qualification](PUBLIC-AUTONOMY.md). It uses a public
+fixture and two sequential Objectives; it does not transfer earlier artifact
+evidence or authorize private adopter work.
 
 ## Local host-toolchain check
 

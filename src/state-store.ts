@@ -1,3 +1,5 @@
+import { assertRepairLedger } from "./repair-policy.js";
+import { validateAuthority } from "./admission.js";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -82,7 +84,14 @@ export function readContinuation(
     throw new Error(
       "Invalid preparation snapshot; operator direction required",
     );
+  if (
+    value.sourcePacketDigest !== undefined &&
+    !/^[a-f0-9]{64}$/.test(value.sourcePacketDigest)
+  )
+    throw new Error("Invalid preparation source packet binding");
   assertCoordinator(value.coordinator);
+  if (value.authority) validateAuthority(value.authority);
+  assertRepairLedger(value);
   return value as PreparationState;
 }
 
@@ -127,6 +136,7 @@ export interface ControllerLock {
 }
 
 export interface ControllerOwner {
+  intake?: boolean;
   pid: number;
   startTime: string;
   objective: number;
@@ -197,6 +207,32 @@ export function acquireControllerLock(
   } finally {
     rmdirSync(guard);
   }
+}
+
+/** Retarget the same installation lease without permitting another owner between Objectives. */
+export function retargetControllerLock(
+  path: string,
+  lock: ControllerLock,
+  objective: number,
+): void {
+  const current = readControllerOwner(path);
+  const identity = linuxProcessIdentity(process.pid);
+  if (
+    !current ||
+    current.token !== lock.token ||
+    current.pid !== process.pid ||
+    current.startTime !== identity?.startTime
+  )
+    throw new Error("Installation owner changed before Objective selection");
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  const fd = openSync(temporary, "wx", 0o600);
+  try {
+    writeFileSync(fd, JSON.stringify({ ...current, objective, intake: true }));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temporary, path);
 }
 
 export function releaseControllerLock(

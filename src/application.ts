@@ -1,3 +1,8 @@
+import {
+  enqueueIntake,
+  runIntake,
+  type IntakeAuthorization,
+} from "./intake.js";
 import { requestControl } from "./coordinator-control.js";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -42,12 +47,18 @@ import {
   planObjective,
   rereviewWorkItem,
   retryWorkItem,
+  repairWorkItem,
   runObjective,
   selectAssetSet,
 } from "./runner.js";
 import type { FactoryState } from "./state.js";
 
 export interface FactoryApplication {
+  enqueueIntake(
+    authority: ExecutionAuthority,
+    options?: { priorityLabels?: string[]; pollSeconds?: number },
+  ): Promise<IntakeAuthorization>;
+  runIntake(): Promise<IntakeAuthorization>;
   proposeAmendment(
     objective: number,
     proposal: import("./graph-amendments.js").AmendmentProposal,
@@ -85,6 +96,10 @@ export interface FactoryApplication {
   ): Promise<FactoryState>;
   cancelObjective(objective: number): Promise<"requested" | "cancelled">;
   retryWorkItem(objective: number, itemId: string): void;
+  repairWorkItem(
+    objective: number,
+    input: Parameters<typeof repairWorkItem>[2],
+  ): void;
   rereviewWorkItem(
     objective: number,
     input: { item: string; treeSha: string; actor: string; reason: string },
@@ -153,6 +168,9 @@ export function createApplication(
   services: ApplicationServices,
 ): FactoryApplication {
   return {
+    enqueueIntake: (authority, options) =>
+      enqueueIntake(config, services.github, authority, options),
+    runIntake: () => runIntake(config, services),
     planObjective: (objective, additionalSources, authority) =>
       planObjective(config, objective, services, additionalSources, authority),
     admitObjective: (objective, candidate, authority) =>
@@ -184,6 +202,8 @@ export function createApplication(
       ),
     cancelObjective: (objective) =>
       cancelObjective(config, objective, services.driver),
+    repairWorkItem: (objective, input) =>
+      repairWorkItem(config, objective, input),
     retryWorkItem: (objective, itemId) =>
       retryWorkItem(config, objective, itemId),
     rereviewWorkItem: (objective, input) =>

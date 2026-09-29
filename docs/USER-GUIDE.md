@@ -6,7 +6,7 @@ Start with the [published installation instructions](../README.md#install). Use 
 
 ## Published plugin compatibility
 
-Published [v0.1.39](https://github.com/clockgrove/factory/releases/tag/v0.1.39) has verified public download and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0139-artifact-record). Live workspace/LFS qualification remains bound to [v0.1.38](BUILD-STATUS.md#immutable-v0138-artifact-record); it was not rerun or transferred to v0.1.39. The bounded Clockgrove pilot passed verification under [#206](https://github.com/clockgrove/factory/issues/206) and explicit operator acceptance under [#207](https://github.com/clockgrove/factory/issues/207). Using Factory as a plugin does not require a Factory source checkout; contributors building Factory follow [Contributing](../CONTRIBUTING.md).
+Use matching plugin and CLI versions, and check `factory help` for the installed commands. [Release evidence and limitations](BUILD-STATUS.md) records which artifact and scenario were qualified. Using Factory as a plugin does not require a Factory source checkout; contributors building Factory follow [Contributing](../CONTRIBUTING.md).
 
 If you remain on immutable v0.1.30, its older skills still refer to the maintainer qualification workflow. Explicitly ask your agent to follow this guide for ordinary target-repository work rather than create release fixtures. Retain host/worker readiness, target authority, sandbox and spending boundaries. Maintainers qualifying any release must still follow the full [release procedure](PUBLIC-RELEASE.md).
 
@@ -68,7 +68,7 @@ These are installation choices, not recovery commands. Keep provider authenticat
 
 ### Resource limits in the upcoming autonomous release
 
-This source capability is not part of published v0.1.39. Before accepting a plan, an operator may add `scheduling` to the installation configuration. For example, the following declares four CPU units and 4096 MiB shared by active phases, with one concurrent reviewer and one validation job:
+Before accepting a plan, an operator may add `scheduling` to the installation configuration. For example, the following declares four CPU units and 4096 MiB shared by active phases, with one concurrent reviewer and one validation job:
 
 ```json
 {
@@ -109,7 +109,7 @@ The default network policy is `host`; `--network off` selects the supported offl
 
 ## Admit an exact plan for autonomous work
 
-This admission surface is source-development work for #244; it is not in published v0.1.39. Check your installed `factory help` before using it. Background supervision and automatic repair are separate capabilities and are not enabled by admission alone.
+Admission binds authority to a reviewed plan. It does not start execution or a background service; automatic repair requires the separate policy below.
 
 Plan the selected Objective under its ordinary planning authority. When an autonomous policy is already available, pass `factory plan --authority /absolute/private/authority.json` with the usual Objective/output options so known consent, membership, resource and required-environment errors fail before model calls. Then bind the reviewed candidate to that policy:
 
@@ -123,9 +123,9 @@ factory run --objective 123 --plan /absolute/private/plan.json \
   --admission /absolute/private/admission.json
 ```
 
-The authority file records `schemaVersion: 1`, the operator's `actor` and `reason`, explicit `executionConsent: true`, separate boolean `serviceConsent`, and a finite `objectives` list. It requires numeric `allowances` for `planningRevisions`, `implementationRepairs` and `resultRereviews`, `repairClasses` selected from `implementation` and `review-evidence`, `resources.maxConcurrency`, and `requiredEnvironment` worker-secret variable names. Obtain these choices from the operator; zero allowances are valid and no unspecified allowance means unlimited. Required worker-secret names must already be permitted by the installation allowlist; the declaration checks availability without granting access or exposing values. This does not prove controller-validation credentials or complete phase readiness. The installation's provider, credential-access, network and delivery configuration still applies.
+The authority file records `schemaVersion: 1`, the operator's `actor` and `reason`, explicit `executionConsent: true`, separate boolean `serviceConsent`, and a finite `objectives` list. It requires numeric `allowances` for `planningRevisions`, `implementationRepairs` and `resultRereviews`, `repairClasses` selected from the supported classes below, `resources.maxConcurrency`, and `requiredEnvironment` worker-secret variable names. Obtain these choices from the operator; zero allowances are valid and no unspecified allowance means unlimited. Required worker-secret names must already be permitted by the installation allowlist; the declaration checks availability without granting access or exposing values. This does not prove controller-validation credentials or complete phase readiness. The installation's provider, credential-access, network and delivery configuration still applies.
 
-Admission binds the repository, Objective body, pinned base and source packet, reviewed plan and configuration. It rejects an Objective outside the authorized list, changed inputs, unresolved acceptance or an installation worker ceiling exceeding the admitted maximum. A larger admitted maximum never raises the configured concurrency. Checking admission creates no worker or runnable queue. A batch list grants bounded membership; it is not an instruction to run every listed Objective now. Service consent does not install or start a service. Recorded repair allowances do not enable automatic repair before that capability exists.
+Admission binds the repository, Objective body, pinned base and source packet, reviewed plan and configuration. It rejects an Objective outside the authorized list, changed inputs, unresolved acceptance or an installation worker ceiling exceeding the admitted maximum. A larger admitted maximum never raises the configured concurrency. Checking admission creates no worker or runnable queue. A batch list grants bounded membership; it is not an instruction to run every listed Objective now. Service consent does not install or start a service. Recorded repair allowances enable automatic repair only when the policy below explicitly permits it.
 
 Existing explicit runs keep their current behavior. Their state cannot gain admission or retry authority on upgrade. A running admitted Objective keeps its recorded policy; changing a file does not expand an active attempt. Preserve state and resolve a refused change at a supported safe boundary.
 
@@ -195,7 +195,7 @@ Execution projects Work Items to GitHub, starts ready workers, independently val
 
 ## Keep an admitted Objective under local control
 
-This coordinator surface is source-development work for #245 and is not in published v0.1.39. An admitted `run` keeps one local owner alive while waiting for an exact result decision, pause or drain. It remains a foreground process; service installation and continuity after logout belong to the separate background-supervision capability.
+An admitted `run` keeps one local owner alive while waiting for an exact result decision, pause or drain. It remains a foreground process; see local background supervision for service operation and host limitations.
 
 Use another terminal to control that owner:
 
@@ -277,7 +277,7 @@ Source assets may be pinned repository files, explicitly cited absolute private 
 factory cancel --objective ISSUE_NUMBER
 ```
 
-Cancellation stops owned local work. Inspect its resulting status before attempting anything else. For a failed or cancelled unpublished item, an explicit new-attempt decision can use:
+Cancellation stops owned local work. Inspect its resulting status before attempting anything else. For a failed or cancelled unpublished item without an admitted repair policy, an explicit new-attempt decision can use:
 
 ```sh
 factory retry --objective ISSUE_NUMBER --item WORK_ITEM_ID
@@ -287,6 +287,20 @@ An ordinary restart may reattach to an identifiable worker or continue a support
 
 If a regular Work Item remains `running` at `deliver`, `run` refuses the ambiguous active state even if a branch or PR exists. There is no supported automatic continuation for that publication window. Preserve the original snapshot, plan/configuration identities, attempt, validated commit/tree, review evidence, and remote branch/PR heads. Use status and read-only GitHub inspection; do not edit state, republish, replay a worker, or use `retry` or `decide-result` to bypass the refusal. Manual target disposition requires explicit operator direction and does not complete the original Objective. See [support](../SUPPORT.md) for reporting a redacted reproduction.
 
+## Allow diagnosed repairs
+
+Automatic repairs are opt-in. Alongside the Objective's `allowances`, set `repairPolicy.perPath` with explicit numeric `planningRevisions`, `implementationRepairs` and `resultRereviews` limits. Select only the permitted `repairClasses`: `implementation`, `review-evidence`, `validation-environment`, `planning-output`, `planning-evidence` or `planning-choice`. Omit the policy to retain explicit retry behavior. Choose these limits before admission; children, restart and recompilation cannot reset consumption.
+
+Factory requires a concrete diagnosis and correction before another implementation attempt. The new attempt starts from the accepted base; removed unfinished edits are unavailable. An evidence-only review correction preserves the result and still requires independent review. Missing product or security decisions, unknown external outcomes and exhausted limits stop for an explicit decision. `status --json` reports the failure identity, consumed allowances and next decision.
+
+For a collected result blocked by an external prerequisite, restore only the already authorized environment. Submit a proposal file containing `item`, the preserved `treeSha`, and `correction` with `kind: "validation-environment"`, `failureDigest`, `actor`, `diagnosis` and `correction`:
+
+```sh
+factory repair --objective ISSUE_NUMBER --proposal /private/repair.json
+```
+
+The admitted policy must permit that class and have a result rereview remaining. Factory revalidates and independently reviews the same candidate; this command does not accept it or rerun implementation. An admitted repair policy uses diagnosed proposals rather than unrestricted `retry` or `rereview` commands. Unknown accounting stays unknown, and no recovery operation raises a provider or spending limit.
+
 ## Publication and local safety
 
 Factory checks changed-path ownership, unsafe links and special files, and scans staged content and working bytes with its packaged Secretlint rules before publication. Target ignore files and scanner configuration cannot bypass the packaged scan. A finding reports its rule and path without the secret value. Review false positives outside the worker checkout; an operator may select a reviewed external configuration with `FACTORY_SECRETLINT_CONFIG` before an explicit retry. Do not weaken the scan merely to make an attempt pass.
@@ -295,7 +309,7 @@ Workers receive a filtered environment; controller GitHub, Git, and SSH credenti
 
 ## Discover required work during an admitted Objective
 
-This source capability is not included in published v0.1.39. An admitted Objective
+An admitted Objective
 can use its recorded planning-revision allowance to review necessary discoveries.
 Workers stage a private `.factory-discovery.json` proposal with evidence, scope,
 ownership, acceptance and dependencies. Factory collects it with the ordinary result,
@@ -323,7 +337,7 @@ supported continuation; editing state or running a fresh root cannot bypass a fe
 
 ## Local background supervision
 
-This source capability belongs to #246 and is not in the published v0.1.39 package. A supported Linux or WSL host needs a running systemd user manager. Factory never changes login persistence or gains administrator privileges. A user manager can survive the chat closing; sleeping pauses execution, shutdown stops it, and logout behavior depends on the host's existing linger policy.
+A supported Linux or WSL host needs a running systemd user manager. Factory never changes login persistence or gains administrator privileges. A user manager can survive the chat closing; sleeping pauses execution, shutdown stops it, and logout behavior depends on the host's existing linger policy.
 
 After binding a target and admitting its exact plan with explicit `serviceConsent: true`, register the installed artifact:
 

@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** v0.1.37 is the source candidate for original-worker ignored-link collection observations ([#225](https://github.com/clockgrove/factory/issues/225)). Publication and fresh exact-artifact public qualification remain pending under [#206](https://github.com/clockgrove/factory/issues/206), before private pilot advancement and [#207](https://github.com/clockgrove/factory/issues/207) adopter acceptance. Assigned profiles and bounded worker environments were independently accepted on v0.1.36; that artifact did not satisfy the complete public release gate, and its evidence does not qualify this candidate. Earlier artifacts and runs remain unchanged. Start with a disposable repository and supervise initial use. Some interrupted delivery states require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
+**Status:** [v0.1.37 is published](https://github.com/clockgrove/factory/releases/tag/v0.1.37), with public download, offline installation and pinned plugin installation verified. Its original-worker collection-observation capability passed independent review, but the full public qualification remains incomplete after a policy citation rejection. Private pilot advancement is blocked under [#206](https://github.com/clockgrove/factory/issues/206); adopter acceptance remains separate under [#207](https://github.com/clockgrove/factory/issues/207). Earlier assigned-profile and bounded-environment acceptance on v0.1.36 remains scoped to those features. See [artifact evidence and limitations](docs/BUILD-STATUS.md#immutable-v0137-artifact-record). Start with a disposable repository and supervise initial use. Some interrupted delivery states require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
 
 ## Requirements
 
@@ -24,7 +24,7 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. After v0.1.37 is published, install its matching artifacts (do not combine versions):
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. Install the published v0.1.37 artifacts (do not combine versions):
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.37

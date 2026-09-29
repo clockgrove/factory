@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** [v0.1.37 is published](https://github.com/clockgrove/factory/releases/tag/v0.1.37), with public download, offline installation and pinned plugin installation verified. Its aggregate public workspace/LFS qualification passed independent terminal review, including original-worker collection evidence and all seven checks in a fresh clone of the exact final commit. The private Codex-only pilot remains separate under [#206](https://github.com/clockgrove/factory/issues/206), with final adopter acceptance under [#207](https://github.com/clockgrove/factory/issues/207). See [artifact evidence, preserved failures and limitations](docs/BUILD-STATUS.md#immutable-v0137-artifact-record). Start with a disposable repository and supervise initial use. Some interrupted delivery states require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
+**Status:** [v0.1.38 is published](https://github.com/clockgrove/factory/releases/tag/v0.1.38) and independently verified for installation and the public workspace/LFS workflow. Private adopter verification and final acceptance remain in [#206](https://github.com/clockgrove/factory/issues/206) and [#207](https://github.com/clockgrove/factory/issues/207). See [evidence and limitations](docs/BUILD-STATUS.md#immutable-v0138-artifact-record). Start with a disposable repository and supervise initial use. Some interrupted delivery states require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
 
 ## Requirements
 
@@ -24,14 +24,14 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. Install the published v0.1.37 artifacts (do not combine versions):
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. Install the published v0.1.38 artifacts (do not combine versions):
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.37
+codex plugin marketplace add clockgrove/factory --ref v0.1.38
 codex plugin add factory@clockgrove
 
-gh release download v0.1.37 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.37.tgz --pattern SHA256SUMS
+gh release download v0.1.38 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.38.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
@@ -41,7 +41,7 @@ Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.37.tgz
+  ./clockgrove-factory-0.1.38.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

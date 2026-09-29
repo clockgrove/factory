@@ -2,7 +2,39 @@
 
 Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and [execution gates #206](https://github.com/clockgrove/factory/issues/206) and [final acceptance #207](https://github.com/clockgrove/factory/issues/207). This document records immutable distribution evidence, not a second work queue.
 
-The v0.1.37 aggregate public scenario is independently accepted. Private adopter execution and final human acceptance remain separate under #206 and #207. Historical observations below retain their original artifact and scenario scope.
+The v0.1.38 public scenario is independently accepted. Private adopter execution and final human acceptance remain separate under #206 and #207. Historical observations below retain their original artifact and scenario scope.
+
+## Immutable v0.1.38 artifact record
+
+[Release v0.1.38](https://github.com/clockgrove/factory/releases/tag/v0.1.38)
+is tagged at source `de1e1adeab477648095c84f8c99f133a9958c592`, tree
+`f5b27d8da7bec2f2c749e95d4004a3d174a38538`. The published archive is
+150234642 bytes, SHA-256
+`ade34452362a1aa1fcbe136ceb6f609210bf9cdbbcf2a260d153c79d9aeb6b84`.
+Independent public download and normal offline installation passed. The
+representative public workspace/LFS scenario passed independent terminal review
+on these same bytes; [#206](https://github.com/clockgrove/factory/issues/206)
+retains the exact acceptance evidence and limits. This does not transfer earlier
+worker history or establish private adopter acceptance. Earlier artifacts,
+failures and unknown accounting remain preserved.
+
+Public [Objective 1](https://github.com/clockgrove/factory-public-v0138-20260929/issues/1)
+completed at commit `5140a16985c2defb4b82ff86cf2c6ed93f70a815`, tree
+`453ac37aa7ddb1be61b2286cc6b0dfd7acbd981a`, through four merged PRs. All 23
+controller command receipts and 23 automatic criteria passed. An independent
+fresh clone passed all seven final commands and hydrated the unchanged 77-byte
+image from remote LFS. Original-worker installation, inspection and positive
+ignored-link collection evidence were independently verified; history samples
+do not establish continuous retention. Mixed Codex/Claude execution overlapped,
+and both Claude profiles invoked their fixed MCP read capability; no live
+same-adapter concurrency claim is made. The fixture has no active branch rules.
+
+All 11 model invocations completed with category usage available and zero failed
+or active calls; aggregate total tokens and whole-run cost remain unavailable.
+Owned workers, controller sessions, observer, worktrees, locks and leases were
+cleared. The qualification owner retains the public fixture and evidence for
+#206/#207 acceptance or the next explicit disposal review. No earlier failure,
+private implementation or artifact evidence is relabeled by this result.
 
 ## Accepted execution profiles and bounded environment
 

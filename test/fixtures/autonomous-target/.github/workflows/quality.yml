@@ -1,0 +1,13 @@
+name: Fixture quality
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  source-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --check src/alpha.mjs && node --check src/beta.mjs && node --check scripts/check.mjs

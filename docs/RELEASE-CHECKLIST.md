@@ -1,6 +1,6 @@
 # Public release checklist
 
-Published [v0.1.39](https://github.com/clockgrove/factory/releases/tag/v0.1.39) has verified public download and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0139-artifact-record). Live workspace/LFS qualification remains bound to [v0.1.38](BUILD-STATUS.md#immutable-v0138-artifact-record); it was not rerun or transferred to v0.1.39. The bounded Clockgrove pilot passed verification under [#206](https://github.com/clockgrove/factory/issues/206) and explicit operator acceptance under [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
+Published [v0.1.41](https://github.com/clockgrove/factory/releases/tag/v0.1.41) has verified public download, pinned plugin identity and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0141-artifact-record). Live workspace/compiler qualification remains in [#263](https://github.com/clockgrove/factory/issues/263) and [#276](https://github.com/clockgrove/factory/issues/276); full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier artifact and adopter evidence remain bound to their original bytes and scenarios.
 
 Earlier published artifacts and their evidence remain intact. Distribution checks do not establish live qualification.
 

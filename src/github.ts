@@ -9,6 +9,7 @@ import type {
   PullRequestIdentity,
   PullRequestObservation,
   PullRequestPublication,
+  WorkItem,
 } from "./contracts.js";
 import { NativeStackDelivery } from "./delivery/native-stack.js";
 import { GitHubClient, sharedGitHubClient } from "./github-client.js";
@@ -29,6 +30,11 @@ type Pull = {
   base: { ref: string };
   merge_commit_sha: string | null;
 };
+
+export function projectedIssueBody(item: WorkItem, objective: number): string {
+  const marker = `<!-- factory:objective=${objective};item=${item.id} -->`;
+  return `${marker}\n\n## Goal\n${item.goal}\n\n## Acceptance\n${item.acceptance.map((a) => `- ${a}`).join("\n")}\n\n## Non-goals\n${item.nonGoals.map((a) => `- ${a}`).join("\n")}\n\n## Dependencies\n${item.dependencies.length ? item.dependencies.map((id) => `- ${id}`).join("\n") : "- None"}\n\n## Sources\n${item.citations.map((c) => `- ${c.path}${c.heading ? ` — ${c.heading}` : ""}`).join("\n")}\n\n## Owned paths\n${item.ownedPaths.map((p) => `- ${p}`).join("\n")}\n\n## Validation\n${item.validation.map((check) => `- \`${check.command}\` (${check.provenance}${check.source ? `: ${check.source}` : ""})`).join("\n")}\n\n## Brief\n${item.brief}${item.executionBinding ? `\n\n## Assigned execution profile\n${JSON.stringify(item.executionProfile)}\n\nResolved binding: ${JSON.stringify(item.executionBinding)}` : ""}`;
+}
 
 export class RealGitHubGateway implements GitHubGateway {
   constructor(
@@ -224,12 +230,48 @@ export class RealGitHubGateway implements GitHubGateway {
           );
       }
       if (found) {
+        if (request.previousGraph) {
+          if (
+            found.state === "closed" &&
+            !request.completedItems?.includes(item.id)
+          )
+            throw new Error("Unreviewed remote issue closure");
+          const old = request.previousGraph.items.find(
+            (previous) => previous.id === item.id,
+          );
+          const expectedBody = projectedIssueBody(item, request.objectiveIssue);
+          if (found.body !== expectedBody || found.title !== item.title) {
+            if (
+              !old ||
+              found.body !== projectedIssueBody(old, request.objectiveIssue) ||
+              found.title !== old.title ||
+              found.state !== "open"
+            )
+              throw new Error(
+                `Work Item ${item.id} projection changed; edits are proposals, not graph authority`,
+              );
+            await this.client.request(
+              "PATCH",
+              this.route(`issues/${found.number}`),
+              { title: item.title, body: expectedBody },
+            );
+            const observed = await this.client.request<Issue>(
+              "GET",
+              this.route(`issues/${found.number}`),
+            );
+            if (observed.body !== expectedBody || observed.title !== item.title)
+              throw new Error(
+                "Amendment issue projection did not reconcile exactly",
+              );
+            found = observed;
+          }
+        }
         issueByItemId[item.id] = found.number;
         issues.set(found.number, found);
         request.projected?.(item.id, found.number);
         continue;
       }
-      const body = `${marker}\n\n## Goal\n${item.goal}\n\n## Acceptance\n${item.acceptance.map((a) => `- ${a}`).join("\n")}\n\n## Non-goals\n${item.nonGoals.map((a) => `- ${a}`).join("\n")}\n\n## Dependencies\n${item.dependencies.length ? item.dependencies.map((id) => `- ${id}`).join("\n") : "- None"}\n\n## Sources\n${item.citations.map((c) => `- ${c.path}${c.heading ? ` — ${c.heading}` : ""}`).join("\n")}\n\n## Owned paths\n${item.ownedPaths.map((p) => `- ${p}`).join("\n")}\n\n## Validation\n${item.validation.map((check) => `- \`${check.command}\` (${check.provenance}${check.source ? `: ${check.source}` : ""})`).join("\n")}\n\n## Brief\n${item.brief}${item.executionBinding ? `\n\n## Assigned execution profile\n${JSON.stringify(item.executionProfile)}\n\nResolved binding: ${JSON.stringify(item.executionBinding)}` : ""}`;
+      const body = projectedIssueBody(item, request.objectiveIssue);
       await request.beforeCreate?.(item.id);
       const created = await this.client.request<Issue>(
         "POST",
@@ -246,15 +288,34 @@ export class RealGitHubGateway implements GitHubGateway {
       existing?.push(created);
     }
     for (const item of request.graph.items) {
-      if (!item.dependencies.length) continue;
+      if (!item.dependencies.length && !request.previousGraph) continue;
       const number = issueByItemId[item.id]!;
-      const existing = new Set(
-        (
-          await this.client.paginate<Issue>(
-            this.route(`issues/${number}/dependencies/blocked_by`),
-          )
-        ).map((issue) => issue.number),
+      const observations = await this.client.paginate<Issue>(
+        this.route(`issues/${number}/dependencies/blocked_by`),
       );
+      const existing = new Set(observations.map((issue) => issue.number));
+      if (request.previousGraph) {
+        const old = request.previousGraph.items.find(
+          (previous) => previous.id === item.id,
+        );
+        const allowed = new Set(
+          [...(old?.dependencies ?? []), ...item.dependencies].map(
+            (id) => issueByItemId[id],
+          ),
+        );
+        if (observations.some((issue) => !allowed.has(issue.number)))
+          throw new Error("Unreviewed remote dependency edit");
+        for (const issue of observations) {
+          if (
+            item.dependencies.some((id) => issueByItemId[id] === issue.number)
+          )
+            continue;
+          await this.client.request(
+            "DELETE",
+            this.route(`issues/${number}/dependencies/blocked_by/${issue.id}`),
+          );
+        }
+      }
       for (const dependency of item.dependencies) {
         const blocker = issueByItemId[dependency]!;
         if (!existing.has(blocker)) {
@@ -269,6 +330,64 @@ export class RealGitHubGateway implements GitHubGateway {
             { issue_id: issue.id },
           );
         }
+      }
+      if (request.previousGraph) {
+        const observed = await this.client.paginate<Issue>(
+          this.route(`issues/${number}/dependencies/blocked_by`),
+        );
+        const expected = item.dependencies.map((id) => issueByItemId[id]);
+        if (
+          observed.length !== expected.length ||
+          observed.some((issue) => !expected.includes(issue.number))
+        )
+          throw new Error("Amendment dependencies did not reconcile exactly");
+      }
+    }
+    if (
+      request.previousGraph ||
+      request.graph.items.some((item) => item.kind === "aggregate")
+    ) {
+      const parentByChild = new Map(
+        request.graph.items.flatMap((parent) =>
+          (parent.children ?? []).map((id) => [id, parent.id] as const),
+        ),
+      );
+      const childrenByParent = new Map<number, number[]>();
+      for (const item of request.graph.items) {
+        const parentId = parentByChild.get(item.id);
+        const parent = parentId
+          ? issueByItemId[parentId]!
+          : request.objectiveIssue;
+        childrenByParent.set(parent, [
+          ...(childrenByParent.get(parent) ?? []),
+          issueByItemId[item.id]!,
+        ]);
+      }
+      for (const [parent, children] of childrenByParent) {
+        const existing = await this.client.paginate<Issue>(
+          this.route(`issues/${parent}/sub_issues`),
+        );
+        if (existing.some((issue) => !children.includes(issue.number)))
+          throw new Error("Unreviewed remote hierarchy edit");
+        for (const child of children) {
+          if (existing.some((issue) => issue.number === child)) continue;
+          const childIssue = issues.get(child)!;
+          if (!Number.isSafeInteger(childIssue.id) || childIssue.id <= 0)
+            throw new Error("Sub-issue lacks authenticated database identity");
+          await this.client.request(
+            "POST",
+            this.route(`issues/${parent}/sub_issues`),
+            { sub_issue_id: childIssue.id, replace_parent: false },
+          );
+        }
+        const observed = await this.client.paginate<Issue>(
+          this.route(`issues/${parent}/sub_issues`),
+        );
+        if (
+          observed.length !== children.length ||
+          observed.some((issue) => !children.includes(issue.number))
+        )
+          throw new Error("Amendment hierarchy did not reconcile exactly");
       }
     }
     return { issueByItemId };

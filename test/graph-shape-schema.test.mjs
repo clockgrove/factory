@@ -31,6 +31,7 @@ const sources = [
 const requiredArrays = ["acceptance", "nonGoals", "citations"];
 const requiredStrings = ["title", "goal", "brief"];
 const optionalArrays = [
+  "children",
   "dependencies",
   "resources",
   "validation",
@@ -60,6 +61,7 @@ function graph(indexed = false) {
           citations: indexed
             ? [{ choiceIndex: 0 }]
             : [{ path: "OBJECTIVE", heading: "" }],
+          children: [],
           dependencies: [],
           ownedPaths: ["result.txt"],
           resources: [],
@@ -105,6 +107,7 @@ function assertBounds(schema) {
   assert.deepEqual(schema.properties.items.items.properties.kind.enum, [
     "work",
     "qa",
+    "aggregate",
   ]);
 
   assert.equal(schema.properties.items.minItems, 1);

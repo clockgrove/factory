@@ -6,6 +6,18 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Reviewed graph amendments and executable hierarchy (#247)
+
+New amendment behavior extends the current compiler, atomic snapshot, owner control,
+worker-result collection, scheduler, read-only QA and GitHub gateway. Discovery is
+private proposal evidence, not source authority. Immutable graph succession and
+Objective allowance consumption remain in the existing snapshot; no second graph
+service, durable queue or recovery journal was added. Deterministic tests use new
+public fixtures and real temporary Git for regular/native discovery, aggregate
+acceptance, finalization races and preserved completed identity. No archived code,
+private adopter material or provider calls supplied this implementation. Installed
+program qualification remains #253.
+
 ## Durable coordinator and asynchronous GitHub transport (#245)
 
 New coordinator work extends the current runner, atomic snapshot, process ownership and driver contracts. Preparation and per-issue projection use the same continuation path; local control uses a private socket owned by the existing installation lock. Async subprocess and Octokit transport replace blocking operations on that path, preserving delivery identities and uncertain-effect refusals. The shared rate gate follows GitHub's primary/secondary limits and does not retry mutations automatically. Newly written deterministic fixtures cover responsive control, restart and owned cancellation. No archived runtime, recovery protocol, private adopter source or transcripts were copied. Service supervision, graph amendments, automatic repair and exact-artifact live qualification remain separately owned capabilities.

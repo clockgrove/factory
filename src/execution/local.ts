@@ -1,3 +1,4 @@
+import { assertDiscovery } from "../graph-amendments.js";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -641,6 +642,20 @@ export class LocalExecutionDriver implements ExecutionDriver {
         active.request.item,
         active.executionBinding,
       ).collect(active.handle);
+      const discoveryPath = join(active.worktree, ".factory-discovery.json");
+      let discovery: import("../contracts.js").WorkDiscovery | undefined;
+      if (existsSync(discoveryPath)) {
+        if (
+          !lstatSync(discoveryPath).isFile() ||
+          realpathSync(discoveryPath) !== discoveryPath
+        )
+          throw new Error(
+            "Discovery manifest must be a regular private staging file",
+          );
+        discovery = JSON.parse(readFileSync(discoveryPath, "utf8"));
+        assertDiscovery(discovery!);
+        rmSync(discoveryPath);
+      }
       if (
         pinnedGit(active.worktree, "rev-parse", "HEAD") !==
         active.request.baseSha
@@ -727,6 +742,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
         changeRef: commit,
         treeSha,
         evidence: result.evidence,
+        ...(discovery ? { discovery } : {}),
         collection: { acceptedIgnoredLinks },
         assets,
       };

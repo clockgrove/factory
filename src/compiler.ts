@@ -862,6 +862,11 @@ export function validateCommandProvenance(
   }
 }
 
+export interface SourceSelector {
+  path: string;
+  heading?: string;
+}
+
 export interface PlanningSource {
   path: string;
   content: string;
@@ -870,6 +875,7 @@ export interface PlanningSource {
 
 export interface PlanCandidate {
   schemaVersion: 2;
+  additionalSources?: SourceSelector[];
   executionProfiles?: ExecutionProfileChoices;
   objective: number;
   baseSha: string;
@@ -1015,11 +1021,17 @@ function commandAuthorizations(
 /** Final commands are accepted only as exact lines under the Objective heading. */
 export function finalObjectiveCommands(body: string): string[] {
   const section = objectiveSection(body, ["Final validation"]);
-  return markdownLines(section).flatMap(({ text: line, fenced }) => {
-    if (fenced) return [];
-    const match = line.match(/^\s*-\s+(`[^`]+`|[^`]+?)\s*$/);
-    return match ? [match[1]!.replace(/^`|`$/g, "")] : [];
+  if (!section && !hasObjectiveSection(body, "Final validation")) return [];
+  const commands = markdownLines(section).flatMap(({ text: line, fenced }) => {
+    if (!line.trim()) return [];
+    const match = !fenced && line.match(/^\s*-\s+(`[^`]+`|[^`]+?)\s*$/);
+    if (!match || !match[1]!.replace(/^`|`$/g, "").trim())
+      throw new Error(`Invalid Final validation entry: ${line.trim()}`);
+    return [match[1]!.replace(/^`|`$/g, "")];
   });
+  if (!commands.length)
+    throw new Error("Final validation requires at least one command");
+  return commands;
 }
 
 export function objectiveCriteria(body: string): string[] {
@@ -1048,6 +1060,15 @@ export function assertObjectiveCriteria(body: string): void {
     throw new Error(
       "Objective requires nonempty final criteria under Acceptance, What must be true, Goal, or Outcome before planning or activation",
     );
+}
+
+function hasObjectiveSection(body: string, name: string): boolean {
+  return markdownLines(body).some(
+    ({ heading }) =>
+      heading &&
+      [2, 3].includes(heading.level) &&
+      heading.text.toLowerCase() === name.toLowerCase(),
+  );
 }
 
 function objectiveSection(body: string, names: string[]): string {
@@ -1192,12 +1213,15 @@ function planningFailure(error: unknown): never {
   throw error;
 }
 
-function selectedHeadings(body: string): { path: string; heading?: string }[] {
+function selectedHeadings(body: string): SourceSelector[] {
   const section = objectiveSection(body, ["Planning sources"]);
   if (!section) return [];
   return markdownLines(section)
-    .filter(({ fenced }) => !fenced)
-    .map(({ text }) => text)
+    .map(({ text, fenced }) => {
+      if (fenced && text.trim())
+        throw new Error(`Invalid Planning sources entry: ${text.trim()}`);
+      return text;
+    })
     .filter((line) => line.trim())
     .map((line) => {
       const value = line
@@ -1207,6 +1231,8 @@ function selectedHeadings(body: string): { path: string; heading?: string }[] {
       if (!value)
         throw new Error(`Invalid Planning sources entry: ${line.trim()}`);
       const split = value.indexOf("#");
+      if (split === 0 || (split >= 0 && !value.slice(split + 1).trim()))
+        throw new Error(`Invalid Planning sources entry: ${line.trim()}`);
       return split < 0
         ? { path: value }
         : { path: value.slice(0, split), heading: value.slice(split + 1) };
@@ -1223,6 +1249,11 @@ function pinnedText(checkout: string, baseSha: string, path: string): string {
     throw new Error(`Invalid planning source path: ${path}`);
   let bytes: Buffer;
   try {
+    if (
+      pinnedGit(checkout, "cat-file", "-t", `${baseSha}:${path}`).trim() !==
+      "blob"
+    )
+      throw new Error("Planning source must be a file");
     bytes = pinnedGitRaw(checkout, "show", `${baseSha}:${path}`);
   } catch {
     throw new Error(`Planning source ${path} is missing at base ${baseSha}`);
@@ -1263,7 +1294,9 @@ export function planningSources(
   body: string,
   baseSha: string,
   checkout: string,
+  additionalSources: SourceSelector[] = [],
 ): PlanningSource[] {
+  finalObjectiveCommands(body);
   const sources: PlanningSource[] = [{ path: "OBJECTIVE", content: body }];
   const selected = selectedHeadings(body);
   const defaults = ["AGENTS.md", "README.md"].filter((path) => {
@@ -1278,7 +1311,10 @@ export function planningSources(
   for (const { path, heading } of [
     ...defaults.map((path) => ({ path, heading: undefined })),
     ...selected,
+    ...additionalSources,
   ]) {
+    if (heading !== undefined && !heading.trim())
+      throw new Error(`Invalid planning source heading: ${path}`);
     const identity = `${path}#${heading ?? ""}`;
     if (identities.has(identity)) continue;
     identities.add(identity);
@@ -1289,6 +1325,18 @@ export function planningSources(
       content: heading ? sectionText(path, text, heading) : text,
     });
   }
+  for (const command of finalObjectiveCommands(body))
+    if (
+      !authorizedCommand(
+        { command, provenance: "source-declared", source: "OBJECTIVE" },
+        baseSha,
+        sources,
+        checkout,
+      )
+    )
+      throw new Error(
+        `Final validation command has no executable authority at the accepted base: ${command}`,
+      );
   return sources;
 }
 
@@ -1352,9 +1400,10 @@ export async function compileObjective(
   reviewFindings: ResolvedGraphFinding[] = [],
   invocation?: ModelInvocationContext,
   executionProfiles?: ExecutionProfileChoices,
+  additionalSources: SourceSelector[] = [],
 ): Promise<WorkGraph> {
   assertObjectiveCriteria(body);
-  const sources = planningSources(body, baseSha, checkout);
+  const sources = planningSources(body, baseSha, checkout, additionalSources);
   sources.push(...extraSources);
   const prompt = `Objective #${objective}\n${body}${reviewFindings.length ? `\n\nOne independent review found these sourced defects. Revise the complete graph once; do not expand scope or invent authority:\n${JSON.stringify(reviewFindings)}` : ""}`;
   const graph = await model
@@ -1540,6 +1589,7 @@ export async function compilePlan(
   configDigest = digest("unbound-test-configuration"),
   observe?: (observation: ModelInvocationObservation) => void,
   executionProfiles?: ExecutionProfileChoices,
+  additionalSources: SourceSelector[] = [],
 ): Promise<PlanCandidate> {
   const invocation = (
     phase: ModelInvocationPhase,
@@ -1550,7 +1600,7 @@ export async function compilePlan(
     ordinal,
     observe,
   });
-  const sources = planningSources(body, baseSha, checkout);
+  const sources = planningSources(body, baseSha, checkout, additionalSources);
   let graph = await compileObjective(
     objective,
     body,
@@ -1561,6 +1611,7 @@ export async function compilePlan(
     [],
     invocation("compile", 0),
     executionProfiles,
+    additionalSources,
   );
   let packet = planReviewPacket(
     body,
@@ -1589,6 +1640,7 @@ export async function compilePlan(
         findings,
         invocation("compile", 1),
         executionProfiles,
+        additionalSources,
       );
       revisions = 1;
       packet = planReviewPacket(
@@ -1629,6 +1681,7 @@ export async function compilePlan(
   };
   return {
     schemaVersion: 2,
+    ...(additionalSources.length ? { additionalSources } : {}),
     ...(executionProfiles ? { executionProfiles } : {}),
     objective,
     baseSha,
@@ -1683,7 +1736,12 @@ export function verifyPlanCandidate(
     candidate.controllerCapabilities,
     candidate.controllerCapabilitiesDigest,
   );
-  const expectedSources = planningSources(body, baseSha, checkout);
+  const expectedSources = planningSources(
+    body,
+    baseSha,
+    checkout,
+    candidate.additionalSources,
+  );
   const expectedPacket = planReviewPacket(
     body,
     baseSha,

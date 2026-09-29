@@ -365,9 +365,8 @@ test("planning rejects missing selected heading without mutating run state", asy
     assert.ok(
       readDiagnostics(descriptor.config.repository, 1).some(
         (event) =>
-          event.operation === "planning" &&
+          event.operation === "objective-run" &&
           event.outcome === "failed" &&
-          event.durationMs >= 0 &&
           /0 headings named Wave 0/.test(event.detail),
       ),
     );
@@ -1048,6 +1047,67 @@ test("graph review requires an array and accepts an explicit clean empty review"
     assert.equal(
       cleanObservations.some((event) => event.type === "response-invalid"),
       false,
+    );
+  });
+});
+
+test("additional pinned selectors reach compilation and review and reload at verification", async () => {
+  await fixture("additional", async (root) => {
+    const target = createTarget(root, {
+      "docs/plan.md": "## Wave 0\nCanonical obligation\n",
+      "toolchain.md": "## Setup\nPinned setup\n## Other\nOther text\n",
+    });
+    const selectors = [{ path: "toolchain.md", heading: "Setup" }];
+    const packets = [];
+    const model = {
+      async generateStructured(packet) {
+        packets.push(packet);
+        return graph(target.baseSha);
+      },
+      async reviewGraph(packet) {
+        packets.push(packet);
+        return { findings: [] };
+      },
+    };
+    const candidate = await compilePlan(
+      1,
+      body,
+      target.baseSha,
+      target.checkout,
+      model,
+      undefined,
+      undefined,
+      undefined,
+      selectors,
+    );
+    assert.deepEqual(candidate.additionalSources, selectors);
+    for (const packet of packets)
+      assert.equal(
+        packet.sources.find((source) => source.path === "toolchain.md").content,
+        "## Setup\nPinned setup",
+      );
+    verifyPlanCandidate(candidate, 1, body, target.baseSha, target.checkout);
+    assert.throws(
+      () =>
+        verifyPlanCandidate(
+          { ...candidate, additionalSources: [] },
+          1,
+          body,
+          target.baseSha,
+          target.checkout,
+        ),
+      /modified|stale|differ|match/i,
+    );
+    assert.throws(
+      () =>
+        verifyPlanCandidate(
+          { ...candidate, additionalSources: [{ path: "missing.md" }] },
+          1,
+          body,
+          target.baseSha,
+          target.checkout,
+        ),
+      /missing at base/,
     );
   });
 });

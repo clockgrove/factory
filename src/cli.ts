@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { readInteractionContent, readInteractionMetadata } from "./capture.js";
+import type { AutonomousAdmission, ExecutionAuthority } from "./admission.js";
 import type { PlanCandidate } from "./compiler.js";
 import {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
@@ -43,7 +44,7 @@ function options(args: string[], name: string): string[] {
 
 function help(): void {
   console.log(
-    `Factory CLI\n\nCommands:\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  run --objective N [--plan PLAN_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  cancel --objective N [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
+    `Factory CLI\n\nCommands:\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  cancel --objective N [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
   );
 }
 
@@ -202,6 +203,8 @@ async function main(): Promise<void> {
   if (
     ![
       "plan",
+      "admit",
+      "check-admission",
       "decide",
       "run",
       "status",
@@ -222,7 +225,10 @@ async function main(): Promise<void> {
   const objective = Number(option(args, "objective"));
   if (!Number.isSafeInteger(objective) || objective <= 0)
     throw new Error(`${command} requires --objective N`);
-  const savePlan = (output: string, candidate: PlanCandidate): void => {
+  const savePlan = (
+    output: string,
+    candidate: PlanCandidate | AutonomousAdmission,
+  ): void => {
     if (!output.startsWith("/"))
       throw new Error("Plan output requires an absolute file path");
     const target = resolve(config.checkout);
@@ -236,7 +242,21 @@ async function main(): Promise<void> {
     });
   };
   if (command === "plan") {
-    const candidate = await composePlanning(config).planObjective(objective);
+    const additionalSources = options(args, "source").map((value) => {
+      const at = value.indexOf("#");
+      return at < 0
+        ? { path: value }
+        : { path: value.slice(0, at), heading: value.slice(at + 1) };
+    });
+    const candidate = await composePlanning(config).planObjective(
+      objective,
+      additionalSources,
+      option(args, "authority")
+        ? (JSON.parse(
+            readFileSync(option(args, "authority")!, "utf8"),
+          ) as ExecutionAuthority)
+        : undefined,
+    );
     const output = option(args, "output");
     const json = `${JSON.stringify(candidate, null, 2)}\n`;
     if (output) {
@@ -249,6 +269,42 @@ async function main(): Promise<void> {
       else if (candidate.review.findings.length)
         console.log(candidate.review.findings[0]!.question);
     } else console.log(json.trimEnd());
+    return;
+  } else if (command === "admit" || command === "check-admission") {
+    const planPath = option(args, "plan");
+    if (!planPath) throw new Error(`${command} requires --plan`);
+    const candidate = JSON.parse(
+      readFileSync(planPath, "utf8"),
+    ) as PlanCandidate;
+    const application = composePlanning(config);
+    if (command === "admit") {
+      const authorityPath = option(args, "authority");
+      const output = option(args, "output");
+      if (!authorityPath || !output)
+        throw new Error("admit requires --authority and --output");
+      const authority = JSON.parse(
+        readFileSync(authorityPath, "utf8"),
+      ) as ExecutionAuthority;
+      savePlan(
+        output,
+        await application.admitObjective(objective, candidate, authority),
+      );
+      console.log(
+        `Admission for Objective #${objective} saved ${output}; background service and automatic repairs are not activated`,
+      );
+    } else {
+      const admissionPath = option(args, "admission");
+      if (!admissionPath)
+        throw new Error("check-admission requires --admission");
+      await application.checkAdmission(
+        objective,
+        candidate,
+        JSON.parse(readFileSync(admissionPath, "utf8")) as AutonomousAdmission,
+      );
+      console.log(
+        `Admission for Objective #${objective} matches current inputs and prerequisites`,
+      );
+    }
     return;
   } else if (command === "decide") {
     const planPath = option(args, "plan");
@@ -551,6 +607,11 @@ async function main(): Promise<void> {
     const state = await requireApplication().runObjective(
       objective,
       acceptedPlan,
+      option(args, "admission")
+        ? (JSON.parse(
+            readFileSync(option(args, "admission")!, "utf8"),
+          ) as AutonomousAdmission)
+        : undefined,
     );
     console.log(
       state.finalValidation?.passed

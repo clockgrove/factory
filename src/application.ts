@@ -1,3 +1,5 @@
+import type { AutonomousAdmission, ExecutionAuthority } from "./admission.js";
+import type { SourceSelector } from "./compiler.js";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -30,6 +32,8 @@ import { profileBinding } from "./execution-profiles.js";
 import { RealGitHubGateway } from "./github.js";
 import {
   type ApplicationServices,
+  admitObjective,
+  checkAdmission,
   cancelObjective,
   decidePlan,
   decideResult,
@@ -43,7 +47,21 @@ import {
 import type { FactoryState } from "./state.js";
 
 export interface FactoryApplication {
-  planObjective(objective: number): Promise<PlanCandidate>;
+  planObjective(
+    objective: number,
+    additionalSources?: SourceSelector[],
+    authority?: ExecutionAuthority,
+  ): Promise<PlanCandidate>;
+  admitObjective(
+    objective: number,
+    candidate: PlanCandidate,
+    authority: ExecutionAuthority,
+  ): Promise<AutonomousAdmission>;
+  checkAdmission(
+    objective: number,
+    candidate: PlanCandidate,
+    admission: AutonomousAdmission,
+  ): Promise<void>;
   decidePlan(
     objective: number,
     candidate: PlanCandidate,
@@ -57,6 +75,7 @@ export interface FactoryApplication {
   runObjective(
     objective: number,
     acceptedPlan?: PlanCandidate,
+    admission?: AutonomousAdmission,
   ): Promise<FactoryState>;
   cancelObjective(objective: number): Promise<"requested" | "cancelled">;
   retryWorkItem(objective: number, itemId: string): void;
@@ -128,11 +147,16 @@ export function createApplication(
   services: ApplicationServices,
 ): FactoryApplication {
   return {
-    planObjective: (objective) => planObjective(config, objective, services),
+    planObjective: (objective, additionalSources, authority) =>
+      planObjective(config, objective, services, additionalSources, authority),
+    admitObjective: (objective, candidate, authority) =>
+      admitObjective(config, objective, services, candidate, authority),
+    checkAdmission: (objective, candidate, admission) =>
+      checkAdmission(config, objective, services, candidate, admission),
     decidePlan: (objective, candidate, input) =>
       decidePlan(config, objective, services, candidate, input),
-    runObjective: (objective, acceptedPlan) =>
-      runObjective(config, objective, services, acceptedPlan),
+    runObjective: (objective, acceptedPlan, admission) =>
+      runObjective(config, objective, services, acceptedPlan, admission),
     cancelObjective: (objective) =>
       cancelObjective(config, objective, services.driver),
     retryWorkItem: (objective, itemId) =>
@@ -164,7 +188,10 @@ export function createApplication(
 /** Planning composition never constructs a driver, content store, or run state. */
 export function composePlanning(
   config: FactoryConfig,
-): Pick<FactoryApplication, "planObjective" | "decidePlan"> {
+): Pick<
+  FactoryApplication,
+  "planObjective" | "decidePlan" | "admitObjective" | "checkAdmission"
+> {
   validateTarget(config.repository, config.checkout);
   const services = {
     planningModel: new CodexPlanningModel(
@@ -184,7 +211,12 @@ export function composePlanning(
     ),
   };
   return {
-    planObjective: (objective) => planObjective(config, objective, services),
+    planObjective: (objective, additionalSources, authority) =>
+      planObjective(config, objective, services, additionalSources, authority),
+    admitObjective: (objective, candidate, authority) =>
+      admitObjective(config, objective, services, candidate, authority),
+    checkAdmission: (objective, candidate, admission) =>
+      checkAdmission(config, objective, services, candidate, admission),
     decidePlan: (objective, candidate, input) =>
       decidePlan(config, objective, services, candidate, input),
   };

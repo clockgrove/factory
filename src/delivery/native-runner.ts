@@ -382,6 +382,7 @@ export async function runNativeGraph(args: {
               args.objectiveBody,
               state.baseSha,
               config.checkout,
+              state.additionalSources,
             ),
             decisions: work.acceptanceDecisions,
             evidenceSources: workItemReviewEvidence({

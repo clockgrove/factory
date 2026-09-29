@@ -137,7 +137,31 @@ function descriptor(root, target, commands, finalCommands = ["pnpm test"]) {
   };
 }
 
-test("missing work-item/final tools stop activation before projection, attempt or target mutation", async () => {
+test("known missing final tools fail before planning spend", async () => {
+  await fixture(async (root) => {
+    const target = createTarget(root);
+    const setup = makeApplication({
+      ...descriptor(root, target, ["test -s proof.txt"]),
+      planningModel: {
+        async compile() {
+          assert.fail("planner must not run");
+        },
+        async reviewGraph() {
+          assert.fail("reviewer must not run");
+        },
+      },
+    });
+    process.env.PATH = "/usr/bin:/bin";
+    await assert.rejects(
+      setup.application.planObjective(1),
+      /final.*command index 0.*executable pnpm/,
+    );
+    assert.equal(readState("example/preflight", 1), undefined);
+    assert.deepEqual(setup.github.state().projections, {});
+  });
+});
+
+test("missing work-item tools stop activation before projection, attempt or target mutation", async () => {
   await fixture(async (root) => {
     const target = createTarget(root);
     const commands = [
@@ -146,7 +170,7 @@ test("missing work-item/final tools stop activation before projection, attempt o
       "pnpm check",
     ];
     process.env.PATH = "/usr/bin:/bin";
-    const setup = makeApplication(descriptor(root, target, commands));
+    const setup = makeApplication(descriptor(root, target, commands, ["true"]));
     process.env.PATH = "/usr/bin:/bin";
     const plan = await setup.application.planObjective(1);
     assert.equal(plan.review.status, "clean");
@@ -172,14 +196,6 @@ test("missing work-item/final tools stop activation before projection, attempt o
       preflightStatus: "missing",
       pathContext: "/usr/bin:/bin",
     });
-    assert.ok(
-      events.some(
-        (e) =>
-          e.metadata.origin === "final" &&
-          e.metadata.executable === "pnpm" &&
-          e.outcome === "failed",
-      ),
-    );
     assert.equal(readState("example/preflight", 1), undefined);
     assert.equal(
       statusDocument(undefined, "example/preflight", 1, "regular").state,
@@ -247,7 +263,7 @@ test("activation rechecks changed PATH, final requirements, pinned mismatches an
         scripts: {},
       }),
     });
-    const tools = hostTools(root, "8.0.0");
+    const tools = hostTools(root, "9.0.0");
     process.env.PATH = `${tools.bin}:/usr/bin:/bin`;
     const setup = makeApplication(
       descriptor(
@@ -263,6 +279,9 @@ test("activation rechecks changed PATH, final requirements, pinned mismatches an
       setup.application.runObjective(1, plan),
       /final.*command index 0.*executable pnpm/,
     );
+    writeFileSync(join(tools.bin, "pnpm"), `#!/bin/sh\necho 8.0.0\n`, {
+      mode: 0o755,
+    });
     process.env.PATH = `${tools.bin}:/usr/bin:/bin`;
     await assert.rejects(
       setup.application.runObjective(1, plan),

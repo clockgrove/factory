@@ -414,28 +414,9 @@ test("exact script-disabled pnpm bootstrap is source-authorized and plain instal
       );
 
       const unsafeBody = body.replace(PINNED_PNPM_BOOTSTRAP, "pnpm install");
-      const unsafe = await compilePlan(
-        1,
-        unsafeBody,
-        target.baseSha,
-        target.checkout,
-        model,
-      );
-      assert.equal(
-        unsafe.commands.find((entry) => entry.command === "pnpm install")
-          ?.hostExecution,
-        "blocked",
-      );
-      assert.throws(
-        () =>
-          verifyPlanCandidate(
-            unsafe,
-            1,
-            unsafeBody,
-            target.baseSha,
-            target.checkout,
-          ),
-        /host execution authority/,
+      await assert.rejects(
+        compilePlan(1, unsafeBody, target.baseSha, target.checkout, model),
+        /Final validation command has no executable authority/,
       );
       writeFileSync(
         join(target.checkout, ".pnpmfile.cjs"),

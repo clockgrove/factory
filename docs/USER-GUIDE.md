@@ -6,7 +6,7 @@ Start with the [published installation instructions](../README.md#install). Use 
 
 ## Published plugin compatibility
 
-[Published v0.1.35](https://github.com/clockgrove/factory/releases/tag/v0.1.35) includes the setup and director skill guidance described here: ordinary plugin use is separate from contributor release fixtures, and the director checks the target repository binding before Objective commands. Public download and offline installation are verified; fresh live qualification and adopter execution remain in [#206](https://github.com/clockgrove/factory/issues/206), with final acceptance in [#207](https://github.com/clockgrove/factory/issues/207).
+Published [v0.1.37](https://github.com/clockgrove/factory/releases/tag/v0.1.37) has verified public download, offline installation and pinned plugin installation. Its aggregate public workspace/LFS qualification passed independent review; see the [exact artifact record](BUILD-STATUS.md#immutable-v0137-artifact-record) for evidence and limitations. Private adopter execution remains under [#206](https://github.com/clockgrove/factory/issues/206), with explicit final acceptance under [#207](https://github.com/clockgrove/factory/issues/207). Using Factory as a plugin does not require a Factory source checkout; contributors building Factory follow [Contributing](../CONTRIBUTING.md).
 
 If you remain on immutable v0.1.30, its older skills still refer to the maintainer qualification workflow. Explicitly ask your agent to follow this guide for ordinary target-repository work rather than create release fixtures. Retain host/worker readiness, target authority, sandbox and spending boundaries. Maintainers qualifying any release must still follow the full [release procedure](PUBLIC-RELEASE.md).
 

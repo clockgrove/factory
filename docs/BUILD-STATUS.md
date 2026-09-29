@@ -2,7 +2,7 @@
 
 Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and [execution gates #206](https://github.com/clockgrove/factory/issues/206) and [final acceptance #207](https://github.com/clockgrove/factory/issues/207). This document records immutable distribution evidence, not a second work queue.
 
-The v0.1.34 public scenario was subsequently accepted; actual adopter acceptance remains pending. This does not qualify changed v0.1.35 bytes. Historical observations below retain their original scope; current execution and final acceptance are tracked in #206 and #207.
+The v0.1.37 aggregate public scenario is independently accepted. Private adopter execution and final human acceptance remain separate under #206 and #207. Historical observations below retain their original artifact and scenario scope.
 
 ## Accepted execution profiles and bounded environment
 

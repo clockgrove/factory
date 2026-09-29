@@ -1,6 +1,6 @@
 # Public release checklist
 
-Published v0.1.35 carries [PR #213](https://github.com/clockgrove/factory/pull/213): literal Git patch evidence shared by review prompts and exact citation grounding. Publication and independent public-download/offline-installation verification passed; [PR #215](https://github.com/clockgrove/factory/pull/215) records release gates and reproduction. Exact-artifact live qualification remains pending. The earlier v0.1.34 public scenario was accepted; its evidence does not qualify changed bytes. Execution remains in [#206](https://github.com/clockgrove/factory/issues/206), with final adopter acceptance in [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
+Published [v0.1.37](https://github.com/clockgrove/factory/releases/tag/v0.1.37) has verified public download, offline installation and pinned plugin installation. Its aggregate public workspace/LFS qualification passed independent review; see the [exact artifact record](BUILD-STATUS.md#immutable-v0137-artifact-record) for evidence and limitations. Private adopter execution remains under [#206](https://github.com/clockgrove/factory/issues/206), with explicit final acceptance under [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
 
 Earlier published artifacts and their evidence remain intact. Distribution checks do not establish live qualification.
 

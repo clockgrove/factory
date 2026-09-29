@@ -22,15 +22,65 @@ recorded below and remains under #206.
 
 ## Collection observation correction (#225)
 
-The source correction for [#225](https://github.com/clockgrove/factory/issues/225)
-adds positive ignored-link observations to the existing original-worker safety
-scan and private regular/native diagnostics. An empty completed observation is
-distinct from unavailable evidence; provider evidence and collection refusals are
-unchanged. It proves presence during that scan, not continuous retention or how a
-link was created. Source tests include real offline pnpm-generated dependencies.
-Independent implementation review and the changed artifact's distribution/public
-gates remain required. The v0.1.36 historical gap and private-pilot block remain
-unchanged; published bytes and terminal evidence are preserved.
+The correction for [#225](https://github.com/clockgrove/factory/issues/225)
+records accepted ignored links from the existing original-worker safety scan in
+private regular/native diagnostics. Independent source review, deterministic
+checks and v0.1.37 distribution verification passed. Its narrower installed
+capability was independently accepted from actual original-worker installation,
+inspection and a completed collection observation. This proves presence during
+the scan, not continuous retention or provenance from the scan alone. The full
+public scenario remains incomplete as recorded below; private advancement is
+blocked. The v0.1.36 historical gap and all earlier evidence remain unchanged.
+
+## Immutable v0.1.37 artifact record
+
+[Release v0.1.37](https://github.com/clockgrove/factory/releases/tag/v0.1.37)
+is tagged at integrated source `6fbb01cf42f009c124f0b2ef349471e1b97f0527`,
+with reviewed candidate `8c90d016ac1dbc2db191c15f58a453bb8171530f` sharing tree
+`f7b8beaabe82b3b90ca7b796816f90df4f0a18c4`. Tarball: 150232932 bytes, SHA-256
+`5f251b430f798e527b8b2d3db42ff35ff0e45c9f989bba4cb44c9c2288662cb5`.
+[PR #227](https://github.com/clockgrove/factory/pull/227) records the correction;
+[PR #228](https://github.com/clockgrove/factory/pull/228) records release preparation.
+Independent review, 260 tests, static/notices checks, exact-head and integrated
+CI passed. A clean integrated-source build reproduced the archive byte-for-byte.
+Independent unauthenticated public download and normal empty-cache offline
+Node 22.23.3 installation passed, with all 3144 installed files, 97 Factory-owned
+files and 69 production dependency identities/notices verified. Installed CLI
+and scanner checks passed. Actual pinned marketplace/plugin installation in an
+isolated Codex home reports `factory@clockgrove` version `0.1.37`.
+
+The [public Objective #1](https://github.com/clockgrove/factory-collection-proof-20260928-v0137/issues/1)
+was cancelled after foundation delivery and policy result-review rejection.
+Foundation was automatically accepted and integrated through
+[PR #6](https://github.com/clockgrove/factory-collection-proof-20260928-v0137/pull/6)
+at `90b92638a556727ced9b6d0ba63d634297f5b5ad`. Four foundation and three policy
+command receipts passed; the other sixteen planned receipts do not exist.
+Original foundation evidence shows ordinary pnpm installation, inspection of the
+real ignored TypeScript dependency link, and a completed collector observation
+containing that link with matching attempt/result identities. Installation used
+an explicit temporary `--store-dir` option after default/XDG-store failures;
+there is no unqualified claim that the exact requested setup command succeeded
+unchanged. Independent review accepted the narrower #225 capability only.
+
+**The full public release gate remains incomplete.** Policy review proposed a
+quote that reconstructed a smaller JSON object instead of copying a contiguous
+supplied excerpt; the citation guard correctly rejected it with `quote-not-found`.
+This does not establish an image-content change or a runtime defect. There was no
+acceptance override, result re-review or worker retry. Media and final integration
+never started; no selected-media delivery, final Objective acceptance or final
+fresh-clone hydration was established by this run.
+
+The cancelled run, waiting policy result, original evidence/accounting and
+fixture are retained. Owned worker/controller activity and locks/leases are
+settled; storage residue is not active execution. Missing Codex and total monetary
+cost remain unavailable, not zero. Diagnosis and supported reuse of the retained
+installation/state root remain under [#206](https://github.com/clockgrove/factory/issues/206).
+No runtime defect requiring another release has been demonstrated; this record
+authorizes no new artifact, run, retry or reversal of cancellation. Private pilot
+advancement remains blocked pending full public acceptance and independent audit,
+with final adopter acceptance separate under #207. The contributor qualification
+owner retains the fixture for review at full acceptance or an explicit disposal
+decision. Earlier #162/#164 acceptance is unchanged.
 
 ## Immutable v0.1.36 artifact record
 

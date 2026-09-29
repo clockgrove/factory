@@ -4,6 +4,10 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under #206 and explicitly accepted under #207. Historical observations below retain their original artifact and scenario scope.
 
+## Source capabilities after v0.1.39
+
+Integrated source adds exact autonomous admission (#244), the durable responsive local coordinator (#245), and executable QA coverage (#248), with their issue/PR checks. Local supervision (#246) builds on that owner. These source capabilities are not part of the immutable v0.1.39 archive and do not inherit its installed or pilot qualification. The complete autonomous installed scenario remains #253.
+
 ## Immutable v0.1.39 artifact record
 
 [Release v0.1.39](https://github.com/clockgrove/factory/releases/tag/v0.1.39)

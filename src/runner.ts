@@ -1,3 +1,5 @@
+import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
+import { applyWorkCorrection } from "./work-repair.js";
 import {
   amendmentBlocksDispatch,
   applyPendingAmendment,
@@ -114,13 +116,18 @@ function configuredDiagnosticSecrets(config: FactoryConfig): string[] {
     .filter((value): value is string => Boolean(value));
 }
 
-/** Read-only preflight: no controller lock, issue projection, or run state. */
+/** Explicit previews remain read-only; admitted repair or intake planning persists one bound preparation. */
 export async function planObjective(
   config: FactoryConfig,
   objective: number,
   services: Pick<ApplicationServices, "planningModel" | "github">,
   additionalSources: SourceSelector[] = [],
   authority?: ExecutionAuthority,
+  options?: {
+    ownerLock?: ControllerLock;
+    observePreparation?: (state: PreparationState) => void;
+    stopped?: () => boolean;
+  },
 ): Promise<PlanCandidate> {
   validateTarget(config.repository, config.checkout);
   if (authority) checkAuthority(config, objective, authority);
@@ -138,11 +145,96 @@ export async function planObjective(
     outcome: "started",
     metadata: { scopeId: planningScopeId },
   });
+  let lock: ControllerLock | undefined;
+  let preparation: PreparationState | undefined;
+  const persistPreparation = () => {
+    if (preparation) {
+      saveState(statePath(config.repository, objective), preparation);
+      options?.observePreparation?.(preparation);
+    }
+  };
   try {
     const issue = await services.github.objective(objective);
     const baseSha = git(config.checkout, "rev-parse", "HEAD");
-    planningSources(issue.body, baseSha, config.checkout, additionalSources);
+    const sourcePacketDigest = createHash("sha256")
+      .update(
+        JSON.stringify(
+          planningSources(
+            issue.body,
+            baseSha,
+            config.checkout,
+            additionalSources,
+          ),
+        ),
+      )
+      .digest("hex");
     preflightObjective(config, issue.body, baseSha);
+    if (authority?.repairPolicy || options?.ownerLock) {
+      if (!authority)
+        throw new Error("Owned durable planning requires bound authority");
+      mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
+      if (options?.ownerLock) {
+        const owner = readControllerOwner(
+          join(stateRoot(config.repository), "controller.lock"),
+        );
+        if (
+          !owner ||
+          owner.token !== options.ownerLock.token ||
+          owner.pid !== process.pid ||
+          owner.objective !== objective ||
+          owner.startTime !== linuxProcessIdentity(process.pid)?.startTime
+        )
+          throw new Error(
+            "Planning owner lock differs from the current process and Objective",
+          );
+        lock = options.ownerLock;
+      } else lock = mutationLock(config, objective);
+      const previous = readContinuation(config.repository, objective);
+      if (previous && previous.schemaVersion !== 3)
+        throw new Error("An activated Objective cannot be recompiled");
+      preparation = previous as PreparationState | undefined;
+      const bodyDigest = createHash("sha256").update(issue.body).digest("hex");
+      if (
+        preparation &&
+        (preparation.sourcePacketDigest !== sourcePacketDigest ||
+          preparation.baseSha !== baseSha ||
+          preparation.objectiveBodyDigest !== bodyDigest ||
+          preparation.configDigest !== factoryConfigDigest(config) ||
+          JSON.stringify(preparation.authority) !== JSON.stringify(authority))
+      )
+        throw new Error(
+          "Planning authority or immutable preparation identity changed",
+        );
+      preparation ??= {
+        schemaVersion: 3,
+        kind: "preparing",
+        repository: config.repository,
+        objective,
+        runId: planningScopeId,
+        configDigest: factoryConfigDigest(config),
+        baseSha,
+        objectiveBodyDigest: bodyDigest,
+        sourcePacketDigest,
+        authority: structuredClone(authority),
+        planning: "ready",
+        issueByItemId: {},
+        coordinator: {
+          mode: "running",
+          phase: "planning",
+          phaseStartedAt: new Date().toISOString(),
+        },
+      };
+      if (
+        preparation.cancelRequested ||
+        preparation.cancelledAt ||
+        preparation.planning === "submitted"
+      )
+        throw new Error(
+          "Preparation is cancelled or has an unknown submitted effect",
+        );
+      if (preparation.plan) return preparation.plan;
+      persistPreparation();
+    }
     const result = await compilePlan(
       objective,
       issue.body,
@@ -153,7 +245,28 @@ export async function planObjective(
       diagnostics.modelObserver({ scopeId: planningScopeId }),
       executionProfileChoices(config),
       additionalSources,
+      preparation
+        ? {
+            state: preparation,
+            save: () => {
+              preparation!.planning =
+                preparation!.planningRecovery?.phase === "submitted"
+                  ? "submitted"
+                  : "ready";
+              persistPreparation();
+            },
+            stopped: () =>
+              preparation!.coordinator.mode !== "running" ||
+              Boolean(preparation!.cancelRequested) ||
+              Boolean(options?.stopped?.()),
+          }
+        : undefined,
     );
+    if (preparation) {
+      preparation.plan = result;
+      preparation.planning = "complete";
+      persistPreparation();
+    }
     diagnostics.emit({
       operation: "planning-preview",
       outcome: "completed",
@@ -175,6 +288,12 @@ export async function planObjective(
       detail: error instanceof Error ? error.message : String(error),
     });
     throw error;
+  } finally {
+    if (lock && !options?.ownerLock)
+      releaseMutationLock(
+        join(stateRoot(config.repository), "controller.lock"),
+        lock,
+      );
   }
 }
 
@@ -186,7 +305,13 @@ function checkActiveAdmission(
   const state = readContinuation(config.repository, objective);
   if (
     state &&
-    (!state.admission || state.admission.digest !== admission.digest)
+    (!state.admission || state.admission.digest !== admission.digest) &&
+    !(
+      state.schemaVersion === 3 &&
+      state.authority &&
+      JSON.stringify(state.authority) === JSON.stringify(admission.authority) &&
+      state.plan?.graphDigest === admission.graphDigest
+    )
   )
     throw new Error("Active Objective admission cannot be added or replaced");
   const directory = join(stateRoot(config.repository), "objectives");
@@ -671,6 +796,12 @@ export async function runObjective(
         const input = request.input ?? {};
         if (request.action === "retry")
           retryWorkItem(config, objective, String(input.item));
+        else if (request.action === "repair")
+          repairWorkItem(
+            config,
+            objective,
+            input as Parameters<typeof repairWorkItem>[2],
+          );
         else if (request.action === "rereview")
           rereviewWorkItem(
             config,
@@ -788,6 +919,15 @@ export async function runObjective(
       if (
         amendmentBlocksDispatch(result) &&
         result.pendingAmendment?.phase !== "rejected"
+      )
+        continue;
+      if (
+        result.coordinator?.mode === "running" &&
+        Object.values(result.work).some(
+          (work) =>
+            work.recovery?.phase === "ready" &&
+            (work.status === "pending" || work.status === "running"),
+        )
       )
         continue;
       result.coordinator!.phase = "waiting";
@@ -915,8 +1055,28 @@ async function runObjectivePass(
         throw new Error("Preparation admission cannot be replaced on restart");
       admission = preparation.admission;
     } else if (preparation && admission) {
-      throw new Error("Preparation cannot gain admission on restart");
+      if (
+        !preparation.authority ||
+        JSON.stringify(preparation.authority) !==
+          JSON.stringify(admission.authority) ||
+        !preparation.plan
+      )
+        throw new Error("Preparation cannot gain unbound admission on restart");
+      verifyAdmission(
+        config,
+        objective,
+        issue.body,
+        preparation.baseSha,
+        preparation.plan,
+        admission,
+      );
+      preparation.admission = admission;
+      saveState(path, preparation);
     }
+    if (preparation?.authority && !admission)
+      throw new Error(
+        "Durable authorized planning requires its exact reviewed admission before activation",
+      );
     if (preparation?.error)
       throw new Error(`Objective preparation stopped: ${preparation.error}`);
     if (preparation?.planning === "submitted" || preparation?.projectionPending)
@@ -1194,6 +1354,16 @@ async function runObjectivePass(
                 installationConfigDigest,
                 diagnostics.modelObserver({ scopeId: planningScopeId }),
                 executionProfileChoices(config),
+                [],
+                preparation!.authority?.repairPolicy
+                  ? {
+                      state: preparation!,
+                      save: () => saveState(path, preparation!),
+                      stopped: () =>
+                        cancellationRequested() ||
+                        preparation!.coordinator.mode !== "running",
+                    }
+                  : undefined,
               );
             }
             verifyPlanCandidate(
@@ -1297,6 +1467,12 @@ async function runObjectivePass(
       );
       state = {
         schemaVersion: 2,
+        ...(preparation.allowanceConsumption
+          ? { allowanceConsumption: preparation.allowanceConsumption }
+          : {}),
+        ...(preparation.repairConsumption
+          ? { repairConsumption: preparation.repairConsumption }
+          : {}),
         ...(admission
           ? {
               admission: JSON.parse(
@@ -1351,6 +1527,17 @@ async function runObjectivePass(
       cancelled: cancellationRequested,
       diagnostics,
     });
+    if (state.coordinator.mode === "running" && !cancellationRequested())
+      for (const [id, work] of Object.entries(state.work)) {
+        if (
+          work.status === "failed" &&
+          work.recovery?.phase === "ready" &&
+          work.recovery.correction
+        ) {
+          applyWorkCorrection(state, id, work.recovery.correction, true);
+          save(state);
+        }
+      }
     const graph = state.graph;
     verifyExecutionProfiles(graph, executionProfileChoices(config));
     await driver.preflight?.(graph);
@@ -1895,7 +2082,11 @@ export function retryWorkItem(
           state.stackMerges?.[nativeUnit.id]))
     )
       throw new Error("Published PR requires operator direction before retry");
-    state.work[itemId] = { status: "pending" };
+    if (state.admission?.authority.repairPolicy)
+      throw new Error(
+        "Admitted repair requires a concrete diagnosed proposal; retry cannot reset its allowance",
+      );
+    state.work[itemId] = { status: "pending", recovery: archiveAttempt(work) };
     state.cancelRequested = false;
     delete state.cancelledAt;
     delete state.error;
@@ -1908,6 +2099,43 @@ export function retryWorkItem(
     });
   } finally {
     releaseMutationLock(lock, lockHandle);
+  }
+}
+
+/** Diagnosed correction requests retain the exact failure and consume admitted limits. */
+export function repairWorkItem(
+  config: FactoryConfig,
+  objective: number,
+  input: { item: string; treeSha?: string; correction: RepairCorrection },
+): void {
+  const lock = join(stateRoot(config.repository), "controller.lock");
+  const handle = mutationLock(config, objective);
+  try {
+    const state = mutationState(config, objective);
+    if (
+      !state ||
+      state.finalValidation?.passed ||
+      state.error ||
+      state.configDigest !== factoryConfigDigest(config)
+    )
+      throw new Error("Objective is not available for diagnosed repair");
+    const work = state.work[input.item];
+    if (input.correction.kind !== "implementation") {
+      if (
+        !work?.changeRef ||
+        !work.treeSha ||
+        input.treeSha !== work.treeSha ||
+        pinnedGit(config.checkout, "rev-parse", `${work.changeRef}^{tree}`) !==
+          work.treeSha
+      )
+        throw new Error(
+          "Preserved repair candidate tree changed or is unavailable",
+        );
+    }
+    applyWorkCorrection(state, input.item, input.correction);
+    saveState(statePath(config.repository, objective), state);
+  } finally {
+    releaseMutationLock(lock, handle);
   }
 }
 
@@ -1969,6 +2197,11 @@ export function rereviewWorkItem(
       );
     if (!input.actor.trim() || !input.reason.trim())
       throw new Error("Result re-review requires actor and reason");
+    if (state.admission?.authority.repairPolicy)
+      throw new Error(
+        "Admitted re-review requires a diagnosed repair proposal within its allowance",
+      );
+    work.recovery = archiveAttempt(work);
     work.status = "running";
     work.step = "validate";
     delete work.acceptancePending;

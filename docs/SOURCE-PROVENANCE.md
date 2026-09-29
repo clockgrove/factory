@@ -724,6 +724,10 @@ The current diagnostic, provider SDK event and usage contracts supplied this obs
 
 The versioned #214 interaction metadata, existing diagnostic scopes and normalized usage contracts supplied this newly written local analysis capability. Public synthetic observations test identity grouping, exact filters, overlapping intervals, missing counters, provider estimates and separate provider/protocol/semantic outcomes. CLI tests exercise metadata-only reads and restrictive exclusive report creation outside the target checkout. No archived implementation, private source or provider transcripts were copied. Reports have no lifecycle authority, hosted service, pricing model or model-quality inference; source tests do not extend historical installed-artifact qualification.
 
+## Fair phase scheduling (#251)
+
+The existing scheduler, atomic WorkState, driver available-slot contract and regular/native delivery runners supplied this capability. A fresh architecture review identified coding-slot retention through review and eager native collection as the concrete failure mechanisms. Newly written phase reservations separate item ownership from coding, validation, review and delivery capacity; operator declarations bound CPU/memory without guessing provider capacity or measuring pressure. Public synthetic tests exercise reservations and priority, and temporary Git targets prove review proceeds while an independent local worker remains active. No archived implementation, private source, live provider call or cloud execution claim is involved. Exact installed qualification belongs to #253.
+
 ### Local background supervision (#246)
 
 The new `supervision.ts` module registers a single systemd user unit over the existing #245 owner, atomic continuation and control socket. `runner.ts` adds a quiescent handoff; no separate queue or execution journal is introduced. Public CLI operations preserve explicit service consent, exact installed paths, model-free state compatibility, private configuration and retained evidence. No archived service implementation was copied. User-manager lifecycle tests remain distinct from the later full autonomous Objective qualification in #253.
@@ -738,3 +742,6 @@ head advancement, closure acknowledgement loss, amendment overlap and immutable
 binding checks; existing delivery/media/human-decision tests retain their scope.
 No archived runtime, private source or provider responses were copied. Source
 validation does not qualify the full installed autonomous scenario in #253.
+## Diagnosed bounded repair (#250)
+
+The admission contract, atomic preparation/WorkState, compiler review gate and existing retry/re-review transitions supplied this implementation. New compact failure dispositions and retained attempt records preserve original identities and accounting references; no operational journal, replacement queue or workspace replay store was copied or introduced. The fresh architecture review required shared Objective/path consumption across preparation, graph amendments and repair. Public synthetic source packets and temporary Git targets test lost-connectivity cleanup, actual local-control environment repair on an immutable candidate, independent-lane holds, review transport correction and planning authority distinctions. These are deterministic source checks; installed autonomous qualification remains #253.

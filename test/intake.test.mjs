@@ -79,11 +79,14 @@ async function fixture(fn) {
     const dependencies = new Map([[2, [1]]]);
     const model = {
       async generateStructured(request) {
-        plans.push({ objective: request.objective, base: request.baseSha });
+        const objective = Number(
+          request.objective.match(/^Objective #(\d+)/)[1],
+        );
+        plans.push({ objective, base: request.baseSha });
         return withCoverage(request, {
-          objective: request.objective,
+          objective,
           baseSha: request.baseSha,
-          items: [item(request.objective)],
+          items: [item(objective)],
         });
       },
       async reviewGraph() {
@@ -193,7 +196,10 @@ test("pause after predecessor completion and restart keep accepted work, refresh
     await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
     const running = f.application.runIntake();
     for (let i = 0; i < 500; i++) {
-      if (readState(f.config.repository, 1)?.objectiveClosure === "complete")
+      if (
+        readContinuation(f.config.repository, 1)?.objectiveClosure ===
+        "complete"
+      )
         break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }

@@ -47,6 +47,7 @@ import {
   planObjective,
   rereviewWorkItem,
   retryWorkItem,
+  repairWorkItem,
   runObjective,
   selectAssetSet,
 } from "./runner.js";
@@ -95,6 +96,10 @@ export interface FactoryApplication {
   ): Promise<FactoryState>;
   cancelObjective(objective: number): Promise<"requested" | "cancelled">;
   retryWorkItem(objective: number, itemId: string): void;
+  repairWorkItem(
+    objective: number,
+    input: Parameters<typeof repairWorkItem>[2],
+  ): void;
   rereviewWorkItem(
     objective: number,
     input: { item: string; treeSha: string; actor: string; reason: string },
@@ -197,6 +202,8 @@ export function createApplication(
       ),
     cancelObjective: (objective) =>
       cancelObjective(config, objective, services.driver),
+    repairWorkItem: (objective, input) =>
+      repairWorkItem(config, objective, input),
     retryWorkItem: (objective, itemId) =>
       retryWorkItem(config, objective, itemId),
     rereviewWorkItem: (objective, input) =>

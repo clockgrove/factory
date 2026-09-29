@@ -1,3 +1,4 @@
+import type { ContinuationState } from "./state.js";
 import { readIntake } from "./intake.js";
 import { objectiveComplete } from "./completion.js";
 import { spawnSync } from "node:child_process";
@@ -157,24 +158,25 @@ export function renderService(value: ServiceBinding): string {
       "\n",
     )}\nKillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nRestartPreventExitStatus=1\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
 }
+function checkServiceContinuationFields(state: ContinuationState): void {
+  // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
+  const fields =
+    state.schemaVersion === 3
+      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest admission authority allowanceConsumption repairConsumption planningRecovery coordinator planning plan issueByItemId projectionPending error cancelRequested cancelledAt"
+      : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment allowanceConsumption repairConsumption backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
+  for (const field of Object.keys(state))
+    if (!fields.split(" ").includes(field))
+      throw new Error(
+        `Artifact cannot validate continuation field ${field}; upgrade/rollback refused`,
+      );
+}
 export function checkServiceState(
   config: FactoryConfig,
   objective: number,
   admissionPath?: string,
 ): void {
   const state = readContinuation(config.repository, objective);
-  if (state) {
-    // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
-    const fields =
-      state.schemaVersion === 3
-        ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest admission coordinator planning plan issueByItemId projectionPending error cancelRequested cancelledAt"
-        : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment allowanceConsumption backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
-    for (const field of Object.keys(state))
-      if (!fields.split(" ").includes(field))
-        throw new Error(
-          `Artifact cannot validate continuation field ${field}; upgrade/rollback refused`,
-        );
-  }
+  if (state) checkServiceContinuationFields(state);
   const admission =
     state?.admission ??
     (admissionPath
@@ -216,6 +218,7 @@ export function checkIntakeServiceState(config: FactoryConfig): void {
     );
   for (const id of intake.authority.objectives) {
     const state = readContinuation(config.repository, id);
+    if (state) checkServiceContinuationFields(state);
     if (state?.admission) checkServiceState(config, id);
     else if (state && state.schemaVersion !== 3)
       throw new Error("Intake continuation has no admission");

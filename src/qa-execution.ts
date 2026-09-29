@@ -13,6 +13,7 @@ import type {
 import { CompletedModelInvocationError } from "./contracts.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { validationLfsMembersForItem } from "./media.js";
+import type { PhaseAdmission } from "./phase-admission.js";
 import { gitAsync } from "./process.js";
 import { itemCoverage } from "./qa.js";
 import type { FactoryState } from "./state.js";
@@ -78,6 +79,7 @@ export async function runQaItem(args: {
   save: () => void;
   cancelled: () => boolean;
   diagnostics?: DiagnosticEmitter;
+  phases?: PhaseAdmission;
 }): Promise<void> {
   const { state, item, save } = args;
   const work = state.work[item.id]!;
@@ -111,6 +113,7 @@ export async function runQaItem(args: {
       `${commit}^{tree}`,
     );
     save();
+    await args.phases?.reserve(item.id, "validation");
     await preflightItemEnvironment({ ...args, baseSha: commit });
     work.validation = await validateWorkItem(
       args.config.checkout,
@@ -160,6 +163,7 @@ export async function runQaItem(args: {
       save();
     }
     if (args.cancelled()) throw new Error("Objective cancelled");
+    await args.phases?.reserve(item.id, "review");
     work.pendingEffect = "review";
     save();
     work.validation = await reviewAcceptance({
@@ -208,18 +212,21 @@ export async function runQaItem(args: {
     work.completedAt = new Date().toISOString();
     delete work.step;
     save();
+    args.phases?.release(item.id);
     await closeWorkItem(state, item.id, args.github, save, false);
   } catch (error) {
     if (error instanceof CompletedModelInvocationError)
       delete work.pendingEffect;
     if (error instanceof AcceptanceDecisionRequired) {
       delete work.pendingEffect;
+      args.phases?.release(item.id);
       work.status = "waiting";
       work.step = "approve-result";
       work.acceptancePending = error.pending;
       save();
       return;
     }
+    if (!work.pendingEffect) args.phases?.release(item.id);
     if (work.status !== "done") work.status = "failed";
     work.error = error instanceof Error ? error.message : String(error);
     save();

@@ -1,4 +1,5 @@
 import { assertFinalAcceptance } from "./completion.js";
+import { assertRepairLedger } from "./repair-policy.js";
 import {
   type AutonomousAdmission,
   assertAdmissionBinding,
@@ -65,6 +66,10 @@ export interface AcceptancePending {
 }
 
 export interface WorkState {
+  recovery?: import("./repair-policy.js").WorkRecovery;
+  /** Reservation survives an uncertain effect; item ownership is separate. */
+  phaseReservation?: import("./config.js").ResourcePhase;
+  requestedPhase?: import("./config.js").ResourcePhase;
   graphRevisionDigest?: string;
   discovery?: import("./contracts.js").WorkDiscovery & { attempt: string };
   discoveryDisposition?: "proposed" | "accepted";
@@ -113,6 +118,14 @@ export interface CoordinatorDisposition {
 
 /** Preparation shares the atomic state path; no executable graph is invented. */
 export interface PreparationState {
+  sourcePacketDigest?: string;
+  planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
+  authority?: import("./admission.js").ExecutionAuthority;
+  allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
+  repairConsumption?: Record<
+    string,
+    import("./graph-amendments.js").AllowanceConsumption
+  >;
   schemaVersion: 3;
   kind: "preparing";
   repository: string;
@@ -135,6 +148,10 @@ export type ContinuationState = FactoryState | PreparationState;
 
 export interface FactoryState {
   finalAcceptance?: import("./completion.js").FinalAcceptance;
+  repairConsumption?: Record<
+    string,
+    import("./graph-amendments.js").AllowanceConsumption
+  >;
   backlogDiscoveries?: import("./graph-amendments.js").AmendmentProposal[];
   graphRevisions?: import("./graph-amendments.js").GraphRevision[];
   pendingAmendment?: import("./graph-amendments.js").PendingAmendment;
@@ -397,6 +414,7 @@ export function parseFactoryState(
     throw new Error("graph identity or items are invalid");
   assertCoverageShape(graph as unknown as WorkGraph);
   assertGraphRevisions(state as unknown as FactoryState);
+  assertRepairLedger(state as unknown as FactoryState);
   const ids = new Set<string>();
   for (const [index, raw] of graph.items.entries()) {
     const item = record(raw, `graph.items[${index}]`);
@@ -421,6 +439,8 @@ export function parseFactoryState(
         if (binding[key] !== undefined)
           string(binding[key], `${id}.executionBinding.${key}`);
     }
+    if (item.priority !== undefined && !Number.isSafeInteger(item.priority))
+      throw new Error(`Work Item ${id} has invalid priority`);
     ids.add(id);
     for (const key of ["title", "goal", "brief"])
       string(item[key], `${id}.${key}`);
@@ -506,6 +526,14 @@ export function parseFactoryState(
       throw new Error(`Work Item ${id} has invalid pending effect`);
     if (!statuses.has(item.status as WorkStatus))
       throw new Error(`Work Item ${id} has an invalid status`);
+    for (const field of ["phaseReservation", "requestedPhase"])
+      if (
+        item[field] !== undefined &&
+        !["coding", "validation", "review", "delivery"].includes(
+          String(item[field]),
+        )
+      )
+        throw new Error(`Work Item ${id} has an invalid resource phase`);
     if (item.step !== undefined && !steps.has(item.step as WorkStep))
       throw new Error(`Work Item ${id} has an invalid step`);
     if (item.authentication !== undefined) {

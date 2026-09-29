@@ -1,3 +1,4 @@
+import { SettledAttemptFailure } from "../work-repair.js";
 import { assertDiscovery } from "../graph-amendments.js";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -778,7 +779,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
         rmSync(active.worktree, { recursive: true, force: true });
       }
     }
-    if (failed) throw collectionError;
+    if (failed) throw new SettledAttemptFailure(collectionError);
     return collected!;
   }
 }

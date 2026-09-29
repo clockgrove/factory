@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 import {
+  closeSync,
+  fsyncSync,
+  openSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -62,11 +65,20 @@ function saveIntake(config: FactoryConfig, value: IntakeAuthorization): void {
   const path = intakePath(config);
   mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, {
-    mode: 0o600,
-    flag: "wx",
-  });
+  const fd = openSync(temporary, "wx", 0o600);
+  try {
+    writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   renameSync(temporary, path);
+  const directory = openSync(stateRoot(config.repository), "r");
+  try {
+    fsyncSync(directory);
+  } finally {
+    closeSync(directory);
+  }
 }
 export function readIntake(
   config: FactoryConfig,
@@ -91,6 +103,24 @@ export function readIntake(
     throw new Error(
       "Intake authority differs from this installation or is invalid",
     );
+  for (const key of Object.keys(value))
+    if (
+      ![
+        "version",
+        "repository",
+        "configDigest",
+        "authority",
+        "bodyDigests",
+        "priorityLabels",
+        "pollSeconds",
+        "dequeued",
+        "mode",
+        "observation",
+      ].includes(key)
+    )
+      throw new Error(
+        `Unsupported intake authorization field ${key}; compatibility refused`,
+      );
   for (const objective of value.authority.objectives) {
     checkAuthority(config, objective, value.authority);
     if (!/^[a-f0-9]{64}$/.test(value.bodyDigests[objective] ?? ""))

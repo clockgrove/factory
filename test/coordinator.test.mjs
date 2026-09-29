@@ -25,6 +25,7 @@ import {
   makeApplication,
   readEvents,
 } from "./support/integration-fixture.mjs";
+import { resultFindings } from "./support/review-protocol.mjs";
 
 const deferred = () => {
   let resolve;
@@ -630,6 +631,7 @@ test("pause during planning stops issue projection until resumed or cancelled", 
         action: "cancel",
       });
       await rejected;
+      assert.ok(readContinuation(config.repository, 1).cancelledAt);
     },
     (graph) => ({
       async generateStructured() {
@@ -744,6 +746,39 @@ test("response-less result review preserves unknown effect and refuses implement
         descriptor.resultReviewer = async () => {
           throw new Error("review response lost");
         };
+      },
+    );
+});
+
+test("a completed semantic refusal is failed evidence, not an unknown submitted review", async () => {
+  for (const delivery of ["regular", "native-stack"])
+    await fixture(
+      `refused-review-${delivery}`,
+      async ({ application, config }) => {
+        config.delivery.kind = delivery;
+        await assert.rejects(
+          application.runObjective(1),
+          /criterion disproved/,
+        );
+        const state = readState(config.repository, 1);
+        assert.equal(state.work.result.pendingEffect, undefined);
+        assert.equal(state.work.result.status, "failed");
+      },
+      undefined,
+      (descriptor) => {
+        descriptor.resultReviewer = async (request) => ({
+          findings: resultFindings(
+            request,
+            request.criteria.map((criterion) => ({
+              criterion,
+              verdict: "refuse",
+              source: "OBJECTIVE",
+              quote: "## Acceptance",
+              detail: "Result does not satisfy the accepted criterion",
+              question: "",
+            })),
+          ),
+        });
       },
     );
 });

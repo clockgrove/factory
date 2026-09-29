@@ -33,6 +33,7 @@ import { checkStagedCandidate } from "./execution/staged-candidate.js";
 import {
   command,
   commandAsync,
+  currentProcessSignal,
   hasUnresolvedSubprocesses,
   pinnedGit,
   pinnedGitAsync,
@@ -1034,6 +1035,7 @@ export async function verifyHydratedAssets(args: {
             fd,
             autoClose: false,
           })) {
+            currentProcessSignal()?.throwIfAborted();
             hash.update(chunk);
             bytes += chunk.length;
           }
@@ -1050,6 +1052,7 @@ export async function verifyHydratedAssets(args: {
             `Hydrated asset differs from selected bytes: ${member.destination}`,
           );
       }
+    currentProcessSignal()?.throwIfAborted();
     receipt = expectedHydrationReceipt(
       args.integratedSha,
       integratedTreeSha,

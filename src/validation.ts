@@ -1533,7 +1533,7 @@ export async function reviewAcceptance(args: {
       );
   }
 
-  if (refused) throw new Error(refused);
+  if (refused) throw new CompletedModelInvocationError(refused);
   const automaticCriterion = criteria.find(
     (criterion) =>
       !proven.some(

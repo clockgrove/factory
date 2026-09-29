@@ -14,12 +14,13 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel, graphSchemaForSources } from "../dist/compiler.js";
-import { reviewPacket } from "../dist/review-evidence.js";
 import * as configModule from "../dist/config.js";
+import { CompletedModelInvocationError } from "../dist/contracts.js";
 import {
   CONTROLLER_CAPABILITIES_DIGEST,
   installedControllerCapabilities,
 } from "../dist/controller-capabilities.js";
+import { summarizeDiagnosticUsage } from "../dist/diagnostics.js";
 import {
   claudeWorkerEnvironment,
   claudeWorkerInput,
@@ -33,17 +34,17 @@ import {
   githubCopilotClientOptions,
   githubCopilotSessionOptions,
 } from "../dist/execution/github-copilot-options.js";
-import { codexWorkerInput } from "../dist/execution/local.js";
 import {
   authenticationFailure,
   harnessFailure,
   parseAuthenticationRequest,
   workItemPrompt,
 } from "../dist/execution/harness-support.js";
-import { FACTORY_VERSION } from "../dist/package-metadata.js";
+import { codexWorkerInput } from "../dist/execution/local.js";
 import { runCodexWorker } from "../dist/execution/worker.js";
-import { summarizeDiagnosticUsage } from "../dist/diagnostics.js";
 import * as publicModule from "../dist/index.js";
+import { FACTORY_VERSION } from "../dist/package-metadata.js";
+import { reviewPacket } from "../dist/review-evidence.js";
 import {
   bindTarget,
   createTarget,
@@ -1747,7 +1748,9 @@ test("Codex adapter reports unavailable usage, malformed output, and provider fa
           observe: (event) => malformed.push(event),
         },
       }),
-      SyntaxError,
+      (error) =>
+        error instanceof CompletedModelInvocationError &&
+        error.cause instanceof SyntaxError,
     );
     assert.equal(malformed.at(-1).type, "response-invalid");
     assert.equal(malformed.at(-1).failureClass, "structured-output-parse");
@@ -2961,6 +2964,61 @@ test("actual reviewer SDK schemas stay constant with more than a thousand packet
     assert.deepEqual(captured[0].schema, captured[2].schema);
     assert.deepEqual(captured[1].schema, captured[3].schema);
     assert.ok(JSON.stringify(captured[3].schema).length < 2000);
+  } finally {
+    Codex.prototype.startThread = original;
+  }
+});
+
+test("capacity-like transport text without a terminal provider event does not retry or claim completion", async () => {
+  const { CompletedModelInvocationError } = await import(
+    "../dist/contracts.js"
+  );
+  const original = Codex.prototype.startThread;
+  let calls = 0;
+  const waits = [];
+  Codex.prototype.startThread = function () {
+    calls++;
+    return {
+      id: "uncertain-review",
+      async runStreamed() {
+        return {
+          events: (async function* () {
+            yield { type: "thread.started", thread_id: "uncertain-review" };
+            throw new Error("connection temporarily unavailable");
+          })(),
+        };
+      },
+    };
+  };
+  try {
+    const model = new CodexPlanningModel(
+      "/tmp/model-config-test",
+      { model: "planner", reasoningEffort: "medium" },
+      { model: "reviewer", reasoningEffort: "medium" },
+      undefined,
+      {
+        reviewCapacityRetryDelaysMs: [0, 0],
+        wait: async (delay) => waits.push(delay),
+      },
+    );
+    const baseSha = "a".repeat(40);
+    await assert.rejects(
+      model.reviewGraph({
+        objective: "objective",
+        baseSha,
+        sources: [{ path: "OBJECTIVE", content: "objective" }],
+        graph: { objective: 1, baseSha, items: [] },
+        commands: [],
+        finalCommands: [],
+        controllerCapabilities: installedControllerCapabilities(),
+        controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+      }),
+      (error) =>
+        error.message === "connection temporarily unavailable" &&
+        !(error instanceof CompletedModelInvocationError),
+    );
+    assert.equal(calls, 1);
+    assert.deepEqual(waits, []);
   } finally {
     Codex.prototype.startThread = original;
   }

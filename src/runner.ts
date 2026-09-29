@@ -37,6 +37,7 @@ import type {
   GitHubGateway,
   PlanningModel,
 } from "./contracts.js";
+import { CompletedModelInvocationError } from "./contracts.js";
 import {
   type ControlRequest,
   requestControl,
@@ -1457,6 +1458,8 @@ async function runObjectivePass(
             }),
           },
         });
+      if (cancellationRequested())
+        throw new Error("Objective cancellation requested");
       state.coordinator.phase = "objective-review-submitted";
       saveState(path, state);
       finalEvidence = await diagnostics.span(
@@ -1475,6 +1478,8 @@ async function runObjectivePass(
       state.coordinator.phase = "objective-review-complete";
       delete state.finalAcceptancePending;
     } catch (error) {
+      if (error instanceof CompletedModelInvocationError)
+        state.coordinator.phase = "objective-review-complete";
       if (error instanceof AcceptanceDecisionRequired) {
         state.coordinator.phase = "waiting";
         state.finalAcceptancePending = error.pending;
@@ -1552,15 +1557,12 @@ async function runObjectivePass(
       if (cancellationRequested()) {
         await owner.cancellation;
         await Promise.allSettled(active.values());
-        if (
-          !current.coordinator?.cancelError &&
-          active.size === 0 &&
-          current.schemaVersion === 2
-        ) {
+        if (!current.coordinator?.cancelError && active.size === 0) {
           current.cancelledAt = new Date().toISOString();
-          for (const work of Object.values(current.work))
-            if (work.status !== "done" && work.status !== "published")
-              work.status = "cancelled";
+          if (current.schemaVersion === 2)
+            for (const work of Object.values(current.work))
+              if (work.status !== "done" && work.status !== "published")
+                work.status = "cancelled";
         }
       } else if (
         error instanceof GitHubClosureFailure &&

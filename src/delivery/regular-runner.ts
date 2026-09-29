@@ -11,7 +11,10 @@ import type {
   PlanningModel,
   WorkItem,
 } from "../contracts.js";
-import { AuthenticationRequiredError } from "../contracts.js";
+import {
+  AuthenticationRequiredError,
+  CompletedModelInvocationError,
+} from "../contracts.js";
 import type { DiagnosticEmitter } from "../diagnostics.js";
 import {
   materializeAssetSet,
@@ -356,6 +359,8 @@ export async function runRegularGraph(args: {
       await integrate;
       await closeWorkItem(state, item.id, github, save, false);
     } catch (error) {
+      if (error instanceof CompletedModelInvocationError)
+        delete work.pendingEffect;
       if (error instanceof AcceptanceDecisionRequired) {
         delete work.pendingEffect;
         work.status = "waiting";

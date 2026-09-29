@@ -741,7 +741,10 @@ export class CodexPlanningModel implements PlanningModel {
           failureClass,
           detail: error instanceof Error ? error.message : String(error),
         });
-        if (failureClass === "provider-capacity")
+        if (
+          failureClass === "provider-capacity" &&
+          (turnCompleted || turnFailed)
+        )
           throw new ProviderCapacityFailure(error);
       }
       if (turnCompleted || turnFailed)

@@ -12,7 +12,10 @@ import type {
   NativeStackLayer,
   PlanningModel,
 } from "../contracts.js";
-import { AuthenticationRequiredError } from "../contracts.js";
+import {
+  AuthenticationRequiredError,
+  CompletedModelInvocationError,
+} from "../contracts.js";
 import type { DiagnosticEmitter } from "../diagnostics.js";
 import {
   materializeAssetSet,
@@ -503,6 +506,8 @@ export async function runNativeGraph(args: {
         save();
       };
       const task = perform().catch((error: unknown) => {
+        if (error instanceof CompletedModelInvocationError)
+          delete work.pendingEffect;
         if (error instanceof AcceptanceDecisionRequired) {
           delete work.pendingEffect;
           work.status = "waiting";

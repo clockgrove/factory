@@ -1,4 +1,3 @@
-import { resultFindings } from "./support/review-protocol.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -9,8 +8,8 @@ import { stateRoot } from "../dist/config.js";
 import { readDiagnostics } from "../dist/diagnostics.js";
 import {
   acquireControllerLock,
-  releaseControllerLock,
   readState,
+  releaseControllerLock,
   saveState,
   statePath,
 } from "../dist/state-store.js";
@@ -20,6 +19,7 @@ import {
   makeApplication,
   readEvents,
 } from "./support/integration-fixture.mjs";
+import { resultFindings } from "./support/review-protocol.mjs";
 
 for (const delivery of ["regular", "native-stack"]) {
   test(`${delivery} explicit re-review preserves implementation and final run resumes automatic review`, async () => {
@@ -71,9 +71,9 @@ for (const delivery of ["regular", "native-stack"]) {
         resultReviewer(request) {
           const current = JSON.parse(request.observations).reviewedItemId;
           if (current === "second" && ++itemReviews === 1)
-            throw new Error("Provider turn produced no progress for 900000 ms");
+            return { findings: "malformed completed response" };
           if (!current && ++finalReviews === 1)
-            throw new Error("Provider turn produced no progress for 900000 ms");
+            return { findings: "malformed completed response" };
           return {
             findings: resultFindings(
               request,
@@ -93,7 +93,7 @@ for (const delivery of ["regular", "native-stack"]) {
       const waiting = await application.runObjective(1);
       assert.equal(waiting.work.second.status, "waiting");
       assert.equal(waiting.work.second.step, "approve-result");
-      assert.match(waiting.work.second.acceptancePending.detail, /no progress/);
+      assert.match(waiting.work.second.acceptancePending.detail, /invalid/);
       assert.equal(
         waiting.work.first.status,
         delivery === "regular" ? "done" : "published",

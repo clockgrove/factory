@@ -4,8 +4,8 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -164,3 +164,62 @@ if ((${JSON.stringify(phase)} === "clone" && isClone) ||
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+test("cancellation during asynchronous selected-byte hashing cannot produce a hydration receipt", async () => {
+  const fs = (await import("node:fs")).default;
+  const { syncBuiltinESMExports } = await import("node:module");
+  const { createHash } = await import("node:crypto");
+  const root = mkdtempSync(join(tmpdir(), "factory-hydration-hash-cancel-"));
+  const original = fs.createReadStream;
+  const abort = new AbortController();
+  let hashStarted = false;
+  try {
+    const bytes = Buffer.alloc(128 * 1024, 42);
+    const target = createTarget(root, { "asset.bin": bytes });
+    fs.createReadStream = function (path, options) {
+      const stream = original(path, options);
+      if (String(path).endsWith("/asset.bin"))
+        stream.once("data", () => {
+          hashStarted = true;
+          abort.abort();
+        });
+      return stream;
+    };
+    syncBuiltinESMExports();
+    await assert.rejects(
+      withProcessCancellation(abort.signal, () =>
+        verifyHydratedAssets({
+          checkout: target.checkout,
+          workRoot: join(root, "hydration"),
+          integratedSha: target.baseSha,
+          selections: [
+            {
+              itemId: "media",
+              set: {
+                id: "selected",
+                members: [
+                  {
+                    role: "asset",
+                    destination: "asset.bin",
+                    ref: {
+                      digest: createHash("sha256").update(bytes).digest("hex"),
+                      bytes: bytes.length,
+                      mediaType: "application/octet-stream",
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      ),
+      /verification failed during selected-byte-verification/,
+    );
+    assert.equal(hashStarted, true);
+    assert.deepEqual(readdirSync(join(root, "hydration")), []);
+  } finally {
+    fs.createReadStream = original;
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

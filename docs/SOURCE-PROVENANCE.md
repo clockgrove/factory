@@ -746,3 +746,7 @@ head advancement, closure acknowledgement loss, amendment overlap and immutable
 binding checks; existing delivery/media/human-decision tests retain their scope.
 No archived runtime, private source or provider responses were copied. Source
 validation does not qualify the full installed autonomous scenario in #253.
+
+## Diagnosed bounded repair (#250)
+
+The admission contract, atomic preparation/WorkState, compiler review gate and existing retry/re-review transitions supplied this implementation. New compact failure dispositions and retained attempt records preserve original identities and accounting references; no operational journal, replacement queue or workspace replay store was copied or introduced. The fresh architecture review required shared Objective/path consumption across preparation, graph amendments and repair. Public synthetic source packets and temporary Git targets test lost-connectivity cleanup, actual local-control environment repair on an immutable candidate, independent-lane holds, review transport correction and planning authority distinctions. These are deterministic source checks; installed autonomous qualification remains #253.

@@ -166,8 +166,8 @@ export function checkServiceState(
     // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
     const fields =
       state.schemaVersion === 3
-        ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest admission coordinator planning plan issueByItemId projectionPending error cancelRequested cancelledAt"
-        : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment allowanceConsumption backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
+        ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest admission authority allowanceConsumption repairConsumption planningRecovery coordinator planning plan issueByItemId projectionPending error cancelRequested cancelledAt"
+        : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
     for (const field of Object.keys(state))
       if (!fields.split(" ").includes(field))
         throw new Error(

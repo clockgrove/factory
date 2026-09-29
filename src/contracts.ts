@@ -195,6 +195,7 @@ export interface ModelInvocationContext {
 }
 
 export interface PlanningRequest<T> {
+  purpose?: "diagnosis";
   coverageObligations?: CoverageObligation[];
   objective: string;
   baseSha: string;

@@ -1,3 +1,8 @@
+import {
+  recordWorkFailure,
+  diagnoseWorkRepair,
+  prepareEvidenceRecovery,
+} from "../work-repair.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
 import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
 import { randomUUID } from "node:crypto";
@@ -179,7 +184,12 @@ export async function runNativeGraph(args: {
           await phases.reserve(item.id, "coding");
           const handle = await driver.start({
             captureContext: { objective, runId: state.runId },
-            item,
+            item: work.recovery?.correction
+              ? {
+                  ...item,
+                  brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
+                }
+              : item,
             baseSha: work.baseSha!,
             attemptId: work.attempt,
             objectiveBody: args.objectiveBody,
@@ -230,6 +240,35 @@ export async function runNativeGraph(args: {
           )
             work.authentication = error.authentication;
           else delete work.authentication;
+          const isolated = recordWorkFailure(state, item.id, error);
+          if (
+            isolated &&
+            state.admission?.authority.repairPolicy &&
+            !args.cancelled()
+          ) {
+            phases.release(item.id);
+            save();
+            await phases.reserve(item.id, "review");
+            try {
+              await diagnoseWorkRepair({
+                state,
+                item,
+                model: args.planningModel,
+                diagnostics: args.diagnostics,
+                sources: planningSources(
+                  args.objectiveBody,
+                  state.baseSha,
+                  config.checkout,
+                  state.additionalSources,
+                ),
+                save,
+                stopped: () => args.cancelled() || Boolean(args.paused?.()),
+              });
+            } finally {
+              phases.release(item.id);
+            }
+            return;
+          }
           save();
           throw error;
         }
@@ -252,12 +291,15 @@ export async function runNativeGraph(args: {
     if (preparationFailure) throw preparationFailure;
   };
   const remainingUnits = [...units];
-  while (remainingUnits.length) {
+  unitLoop: while (remainingUnits.length) {
     if (preparationFailure) throw preparationFailure;
     await prepareReadyUnits();
     const ranked = rankPending(state.graph, state.work);
     const eligible = remainingUnits.filter(
       (unit) =>
+        !unit.items.some((item) =>
+          ["failed", "cancelled"].includes(state.work[item.id]!.status),
+        ) &&
         (!args.amendmentPending?.() ||
           unit.items.some(
             (item) =>
@@ -295,7 +337,16 @@ export async function runNativeGraph(args: {
     );
     const unit = completionReady[0] ?? eligible[0];
     if (!unit) {
-      if (args.amendmentPending?.()) return settlePrepared();
+      if (
+        args.amendmentPending?.() ||
+        (state.admission?.authority.repairPolicy &&
+          Object.values(state.work).some(
+            (work) =>
+              work.status === "failed" &&
+              work.recovery?.failure?.classification !== "uncertain",
+          ))
+      )
+        return settlePrepared();
       throw new Error("No dependency-ready delivery unit");
     }
     if (
@@ -447,7 +498,12 @@ export async function runNativeGraph(args: {
             work.execution ??
             (await driver.start({
               captureContext: { objective, runId: state.runId },
-              item,
+              item: work.recovery?.correction
+                ? {
+                    ...item,
+                    brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
+                  }
+                : item,
               baseSha: itemBase,
               attemptId: work.attempt,
               objectiveBody: args.objectiveBody,
@@ -670,7 +726,7 @@ export async function runNativeGraph(args: {
         delete work.step;
         save();
       };
-      const task = perform().catch((error: unknown) => {
+      const task = perform().catch(async (error: unknown) => {
         if (error instanceof CompletedModelInvocationError)
           delete work.pendingEffect;
         if (error instanceof AcceptanceDecisionRequired) {
@@ -679,6 +735,8 @@ export async function runNativeGraph(args: {
           work.status = "waiting";
           work.step = "approve-result";
           work.acceptancePending = error.pending;
+          if (!args.cancelled() && !args.paused?.())
+            prepareEvidenceRecovery(state, item.id);
           save();
           return;
         }
@@ -693,8 +751,39 @@ export async function runNativeGraph(args: {
           else delete work.authentication;
           save();
         }
+        const isolated = recordWorkFailure(state, item.id, error);
+        if (
+          isolated &&
+          state.admission?.authority.repairPolicy &&
+          !unit.items.some((entry) => state.work[entry.id]?.pullRequest) &&
+          !args.cancelled()
+        ) {
+          phases.release(item.id);
+          save();
+          await phases.reserve(item.id, "review");
+          try {
+            await diagnoseWorkRepair({
+              state,
+              item,
+              model: args.planningModel,
+              diagnostics: args.diagnostics,
+              sources: planningSources(
+                args.objectiveBody,
+                state.baseSha,
+                config.checkout,
+                state.additionalSources,
+              ),
+              save,
+              stopped: () => args.cancelled() || Boolean(args.paused?.()),
+            });
+          } finally {
+            phases.release(item.id);
+          }
+          return;
+        }
         if (!work.pendingEffect && work.phaseReservation !== "coding")
           phases.release(item.id);
+        save();
         throw error;
       });
       active.set(item.id, task);
@@ -703,6 +792,14 @@ export async function runNativeGraph(args: {
       } finally {
         active.delete(item.id);
       }
+      if (
+        state.work[item.id]?.status === "pending" ||
+        state.work[item.id]?.status === "running"
+      ) {
+        remainingUnits.push(unit);
+        continue unitLoop;
+      }
+      if (state.work[item.id]?.status === "failed") continue unitLoop;
       if (state.work[item.id]?.status === "waiting") return settlePrepared();
     }
     await phases.reserve(unit.items.at(-1)!.id, "delivery");

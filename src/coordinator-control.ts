@@ -14,6 +14,7 @@ export interface ControlRequest {
     | "handoff"
     | "resume"
     | "cancel"
+    | "repair"
     | "retry"
     | "rereview"
     | "decide-result"

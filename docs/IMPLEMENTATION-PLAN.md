@@ -285,6 +285,7 @@ GitHub closure contract and does not replay workers or review models. Amendment
 intake reports busy while closure is sealed or unresolved; discoveries after Done
 require successor work. A proposal arriving during review invalidates that review
 before sealing. Later default-branch changes do not rewrite the sealed candidate.
+
 ### Diagnosed bounded repair (#250)
 
 An admission may explicitly opt into `repairPolicy.perPath`, with numeric

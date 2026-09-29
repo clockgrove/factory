@@ -148,6 +148,7 @@ export type ContinuationState = FactoryState | PreparationState;
 
 export interface FactoryState {
   finalAcceptance?: import("./completion.js").FinalAcceptance;
+  planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
   repairConsumption?: Record<
     string,
     import("./graph-amendments.js").AllowanceConsumption

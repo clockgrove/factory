@@ -896,35 +896,38 @@ test("application fails closed once after exhausted result-review capacity witho
   });
 });
 
-test("Work Item review receives exact concurrent-attempt provenance from run state", async () => {
-  await fixture("result-provenance", async (root) => {
-    const target = createTarget(root);
-    const fakeRoot = join(root, "fake");
-    const barrier = join(root, "barriers", "roots.go");
-    const commands = [
-      'test "$(cat left.txt)" = left',
-      'test "$(cat right.txt)" = right',
-    ];
-    const leftCriterion = `rc-left has no dependencies, starts at ${target.baseSha} independently of rc-right, and both attempts start before either result is integrated.`;
-    const rightCriterion = `rc-right has no dependencies, starts at ${target.baseSha} independently of rc-left, and both attempts start before either result is integrated.`;
-    const left = item("rc-left", {
-      path: "left.txt",
-      command: commands[0],
-    });
-    left.acceptance = ["left.txt has the scripted result", leftCriterion];
-    left.citations = [{ path: "OBJECTIVE", heading: "Work Items" }];
-    const right = item("rc-right", {
-      path: "right.txt",
-      command: commands[1],
-    });
-    right.acceptance = ["right.txt has the scripted result", rightCriterion];
-    right.citations = [{ path: "OBJECTIVE", heading: "Work Items" }];
-    const graph = {
-      objective,
-      baseSha: target.baseSha,
-      items: [left, right],
-    };
-    const objectiveBody = `# Concurrent result provenance
+for (const firstId of ["rc-left", "rc-right"])
+  test(`Work Item review receives exact concurrent-attempt provenance with ${firstId} first`, async () => {
+    await fixture("result-provenance", async (root) => {
+      const target = createTarget(root);
+      const fakeRoot = join(root, "fake");
+      const barrier = join(root, "barriers", "roots.go");
+      const peerBarrier = join(root, "barriers", "peer.go");
+      const secondId = firstId === "rc-left" ? "rc-right" : "rc-left";
+      const commands = [
+        'test "$(cat left.txt)" = left',
+        'test "$(cat right.txt)" = right',
+      ];
+      const leftCriterion = `rc-left has no dependencies, starts at ${target.baseSha} independently of rc-right, and both attempts start before either result is integrated.`;
+      const rightCriterion = `rc-right has no dependencies, starts at ${target.baseSha} independently of rc-left, and both attempts start before either result is integrated.`;
+      const left = item("rc-left", {
+        path: "left.txt",
+        command: commands[0],
+      });
+      left.acceptance = ["left.txt has the scripted result", leftCriterion];
+      left.citations = [{ path: "OBJECTIVE", heading: "Work Items" }];
+      const right = item("rc-right", {
+        path: "right.txt",
+        command: commands[1],
+      });
+      right.acceptance = ["right.txt has the scripted result", rightCriterion];
+      right.citations = [{ path: "OBJECTIVE", heading: "Work Items" }];
+      const graph = {
+        objective,
+        baseSha: target.baseSha,
+        items: [left, right],
+      };
+      const objectiveBody = `# Concurrent result provenance
 
 ## Work Items
 
@@ -944,167 +947,188 @@ test("Work Item review receives exact concurrent-attempt provenance from run sta
 - \`${commands[0]}\`
 - \`${commands[1]}\`
 `;
-    const reviewed = new Set();
-    const planningModel = {
-      async generateStructured(request) {
-        return withCoverage(request, structuredClone(graph));
-      },
-      async reviewGraph() {
-        return { findings: [] };
-      },
-      async reviewResult(request) {
-        const source = request.sources.find(
-          (candidate) => candidate.path === "OBJECTIVE",
-        );
-        const provenanceCriterion = request.criteria.find(
-          (criterion) =>
-            criterion === leftCriterion || criterion === rightCriterion,
-        );
-        let observations;
-        if (provenanceCriterion) {
-          observations = JSON.parse(request.observations);
-          assert.equal(observations.objectiveBaseCommitSha, target.baseSha);
-          const attempts = Object.fromEntries(
-            observations.attempts.map((attempt) => [attempt.id, attempt]),
+      const reviewed = new Set();
+      const planningModel = {
+        async generateStructured(request) {
+          return withCoverage(request, structuredClone(graph));
+        },
+        async reviewGraph() {
+          return { findings: [] };
+        },
+        async reviewResult(request) {
+          const source = request.sources.find(
+            (candidate) => candidate.path === "OBJECTIVE",
           );
-          assert.deepEqual(Object.keys(attempts).sort(), [
-            "rc-left",
-            "rc-right",
-          ]);
-          assert.deepEqual(attempts["rc-left"].declaredDependencies, []);
-          assert.deepEqual(attempts["rc-right"].declaredDependencies, []);
-          for (const id of ["rc-left", "rc-right"]) {
-            assert.deepEqual(Object.keys(attempts[id]).sort(), [
-              "attemptId",
-              "declaredDependencies",
-              "executionBaseCommitSha",
-              "id",
-              "integratedCommitSha",
-              "integrationAtStart",
-              "ownedPaths",
-              "resources",
-              "resultCommitSha",
-              "resultTreeSha",
-              "startedAt",
+          const provenanceCriterion = request.criteria.find(
+            (criterion) =>
+              criterion === leftCriterion || criterion === rightCriterion,
+          );
+          let observations;
+          if (provenanceCriterion) {
+            observations = JSON.parse(request.observations);
+            assert.equal(observations.objectiveBaseCommitSha, target.baseSha);
+            const attempts = Object.fromEntries(
+              observations.attempts.map((attempt) => [attempt.id, attempt]),
+            );
+            assert.deepEqual(Object.keys(attempts).sort(), [
+              "rc-left",
+              "rc-right",
             ]);
-            assert.match(attempts[id].attemptId, /^[0-9a-f-]{36}$/);
-            assert.equal(attempts[id].executionBaseCommitSha, target.baseSha);
-            assert.deepEqual(attempts[id].integrationAtStart, {
-              recorded: true,
-              integratedCommitSha: null,
-            });
-            assert.match(attempts[id].resultCommitSha, /^[0-9a-f]{40}$/);
-            assert.match(attempts[id].resultTreeSha, /^[0-9a-f]{40}$/);
-            assert.ok(Number.isFinite(Date.parse(attempts[id].startedAt)));
-          }
-          if (observations.reviewedItemId === "rc-left") {
-            assert.equal(observations.currentIntegratedCommitSha, null);
-            assert.equal(attempts["rc-left"].integratedCommitSha, null);
-            assert.equal(attempts["rc-right"].integratedCommitSha, null);
-          } else {
-            assert.equal(observations.reviewedItemId, "rc-right");
+            assert.deepEqual(attempts["rc-left"].declaredDependencies, []);
+            assert.deepEqual(attempts["rc-right"].declaredDependencies, []);
+            for (const id of ["rc-left", "rc-right"]) {
+              assert.deepEqual(Object.keys(attempts[id]).sort(), [
+                "attemptId",
+                "declaredDependencies",
+                "executionBaseCommitSha",
+                "id",
+                "integratedCommitSha",
+                "integrationAtStart",
+                "ownedPaths",
+                "resources",
+                "resultCommitSha",
+                "resultTreeSha",
+                "startedAt",
+              ]);
+              assert.match(attempts[id].attemptId, /^[0-9a-f-]{36}$/);
+              assert.equal(attempts[id].executionBaseCommitSha, target.baseSha);
+              assert.deepEqual(attempts[id].integrationAtStart, {
+                recorded: true,
+                integratedCommitSha: null,
+              });
+              const current = readState("example/result-provenance", objective)
+                .work[id];
+              assert.equal(
+                attempts[id].resultCommitSha,
+                current.changeRef ?? null,
+              );
+              assert.equal(attempts[id].resultTreeSha, current.treeSha ?? null);
+              assert.ok(Number.isFinite(Date.parse(attempts[id].startedAt)));
+            }
             assert.match(
-              observations.currentIntegratedCommitSha,
+              attempts[observations.reviewedItemId].resultCommitSha,
               /^[0-9a-f]{40}$/,
             );
-            assert.equal(
-              attempts["rc-left"].integratedCommitSha,
-              observations.currentIntegratedCommitSha,
+            assert.match(
+              attempts[observations.reviewedItemId].resultTreeSha,
+              /^[0-9a-f]{40}$/,
             );
-            assert.equal(attempts["rc-right"].integratedCommitSha, null);
+            if (observations.reviewedItemId === firstId) {
+              assert.equal(reviewed.size, 0);
+              assert.equal(attempts[secondId].resultCommitSha, null);
+              assert.equal(attempts[secondId].resultTreeSha, null);
+              assert.equal(observations.currentIntegratedCommitSha, null);
+              assert.equal(attempts["rc-left"].integratedCommitSha, null);
+              assert.equal(attempts["rc-right"].integratedCommitSha, null);
+            } else {
+              assert.equal(observations.reviewedItemId, secondId);
+              assert.match(
+                observations.currentIntegratedCommitSha,
+                /^[0-9a-f]{40}$/,
+              );
+              assert.equal(
+                attempts[firstId].integratedCommitSha,
+                observations.currentIntegratedCommitSha,
+              );
+              assert.equal(attempts[secondId].integratedCommitSha, null);
+            }
+            reviewed.add(observations.reviewedItemId);
+            if (observations.reviewedItemId === firstId)
+              writeFileSync(peerBarrier, "go\n");
           }
-          reviewed.add(observations.reviewedItemId);
-        }
-        return {
-          findings: resultFindings(
-            request,
-            request.criteria.map((criterion) => {
-              if (criterion === leftCriterion || criterion === rightCriterion) {
+          return {
+            findings: resultFindings(
+              request,
+              request.criteria.map((criterion) => {
+                if (
+                  criterion === leftCriterion ||
+                  criterion === rightCriterion
+                ) {
+                  return {
+                    criterion,
+                    verdict: "pass",
+                    source: "Delivery observations",
+                    quote: request.observations,
+                    detail:
+                      "The atomic snapshot proves both named dependency-free attempts started at the Objective base while the integrated head at each start was empty.",
+                    question: "",
+                  };
+                }
+                assert.ok(source.content.includes(criterion));
                 return {
                   criterion,
                   verdict: "pass",
-                  source: "Delivery observations",
-                  quote: request.observations,
+                  source: "OBJECTIVE",
+                  quote: criterion,
                   detail:
-                    "The atomic snapshot proves both named dependency-free attempts started at the Objective base while the integrated head at each start was empty.",
+                    "The pinned Objective and exact result prove this criterion.",
                   question: "",
                 };
-              }
-              assert.ok(source.content.includes(criterion));
-              return {
-                criterion,
-                verdict: "pass",
-                source: "OBJECTIVE",
-                quote: criterion,
-                detail:
-                  "The pinned Objective and exact result prove this criterion.",
-                question: "",
-              };
-            }),
-          ),
-        };
-      },
-    };
-    const runStatus = [];
-    const { application, eventsPath } = makeApplication({
-      config: factoryConfig(
-        target.checkout,
-        "example/result-provenance",
-        "native-stack",
-        2,
-      ),
-      graph,
-      objectiveBody,
-      fakeRoot,
-      planningModel,
-      actions: {
-        "rc-left": {
-          barrier,
-          files: [{ path: "left.txt", text: "left\n" }],
+              }),
+            ),
+          };
         },
-        "rc-right": {
-          barrier,
-          files: [{ path: "right.txt", text: "right\n" }],
+      };
+      const runStatus = [];
+      const { application, eventsPath } = makeApplication({
+        config: factoryConfig(
+          target.checkout,
+          "example/result-provenance",
+          "native-stack",
+          2,
+        ),
+        graph,
+        objectiveBody,
+        fakeRoot,
+        planningModel,
+        actions: {
+          "rc-left": {
+            barrier: firstId === "rc-left" ? barrier : peerBarrier,
+            files: [{ path: "left.txt", text: "left\n" }],
+          },
+          "rc-right": {
+            barrier: firstId === "rc-right" ? barrier : peerBarrier,
+            files: [{ path: "right.txt", text: "right\n" }],
+          },
         },
-      },
-      reportRunStatus: (message) => runStatus.push(message),
-    });
-    const running = application.runObjective(objective);
-    await waitFor(
-      () => {
-        const starts = readEvents(eventsPath).filter(
-          (event) => event.type === "start",
-        );
-        return starts.length === 2 ? starts : undefined;
-      },
-      fakeRoot,
-      "both provenance roots",
-    );
-    mkdirSync(dirname(barrier), { recursive: true });
-    writeFileSync(barrier, "go\n");
-    const completed = await running;
-    assert.deepEqual(runStatus, [
-      "Factory: compiling and independently reviewing a fresh plan",
-    ]);
-    assert.ok(completed.finalValidation, JSON.stringify(completed, null, 2));
-    assert.equal(completed.finalValidation.passed, true);
-    assert.deepEqual(reviewed, new Set(["rc-left", "rc-right"]));
-    assert.equal(completed.work["rc-left"].executionBaseSha, target.baseSha);
-    assert.equal(completed.work["rc-right"].executionBaseSha, target.baseSha);
-    assert.equal(completed.work["rc-left"].integratedShaAtStart, null);
-    assert.equal(completed.work["rc-right"].integratedShaAtStart, null);
-    assert.equal(
-      completed.work["rc-right"].baseSha,
-      completed.work["rc-left"].integratedSha,
-    );
-    assert.notEqual(completed.work["rc-right"].baseSha, target.baseSha);
-    for (const id of reviewed)
-      assert.equal(
-        completed.work[id].validation.criteria.at(-1).verdict,
-        "pass",
+        reportRunStatus: (message) => runStatus.push(message),
+      });
+      const running = application.runObjective(objective);
+      await waitFor(
+        () => {
+          const starts = readEvents(eventsPath).filter(
+            (event) => event.type === "start",
+          );
+          return starts.length === 2 ? starts : undefined;
+        },
+        fakeRoot,
+        "both provenance roots",
       );
+      mkdirSync(dirname(barrier), { recursive: true });
+      writeFileSync(barrier, "go\n");
+      const completed = await running;
+      assert.deepEqual(runStatus, [
+        "Factory: compiling and independently reviewing a fresh plan",
+      ]);
+      assert.ok(completed.finalValidation, JSON.stringify(completed, null, 2));
+      assert.equal(completed.finalValidation.passed, true);
+      assert.deepEqual(reviewed, new Set(["rc-left", "rc-right"]));
+      assert.equal(completed.work["rc-left"].executionBaseSha, target.baseSha);
+      assert.equal(completed.work["rc-right"].executionBaseSha, target.baseSha);
+      assert.equal(completed.work["rc-left"].integratedShaAtStart, null);
+      assert.equal(completed.work["rc-right"].integratedShaAtStart, null);
+      assert.equal(
+        completed.work[secondId].baseSha,
+        completed.work[firstId].integratedSha,
+      );
+      assert.notEqual(completed.work[secondId].baseSha, target.baseSha);
+      for (const id of reviewed)
+        assert.equal(
+          completed.work[id].validation.criteria.at(-1).verdict,
+          "pass",
+        );
+    });
   });
-});
 
 test("native successor review receives its exact predecessor result head", async () => {
   await fixture("native-predecessor-provenance", async (root) => {

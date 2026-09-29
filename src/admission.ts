@@ -1,4 +1,8 @@
-import { repairClasses, type RepairClass, type RepairPolicy } from "./repair-policy.js";
+import {
+  repairClasses,
+  type RepairClass,
+  type RepairPolicy,
+} from "./repair-policy.js";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -120,18 +124,30 @@ export function validateAuthority(value: ExecutionAuthority): void {
       );
   if (
     !Array.isArray(value.repairClasses) ||
-    value.repairClasses.some(
-      (kind) => !repairClasses.includes(kind),
-    )
+    value.repairClasses.some((kind) => !repairClasses.includes(kind))
   )
     throw new Error("Admission has unsupported repair classes");
   if (value.repairPolicy !== undefined) {
     exactFields(value.repairPolicy, ["perPath"], "repair policy");
-    if (!value.repairPolicy.perPath) throw new Error("Repair policy requires per-path allowances");
-    exactFields(value.repairPolicy.perPath, ["planningRevisions", "implementationRepairs", "resultRereviews"], "repair path allowance");
-    for (const key of ["planningRevisions", "implementationRepairs", "resultRereviews"] as const)
-      if (!Number.isSafeInteger(value.repairPolicy.perPath[key]) || value.repairPolicy.perPath[key] < 0)
-        throw new Error(`Repair policy requires a nonnegative ${key} per-path allowance`);
+    if (!value.repairPolicy.perPath)
+      throw new Error("Repair policy requires per-path allowances");
+    exactFields(
+      value.repairPolicy.perPath,
+      ["planningRevisions", "implementationRepairs", "resultRereviews"],
+      "repair path allowance",
+    );
+    for (const key of [
+      "planningRevisions",
+      "implementationRepairs",
+      "resultRereviews",
+    ] as const)
+      if (
+        !Number.isSafeInteger(value.repairPolicy.perPath[key]) ||
+        value.repairPolicy.perPath[key] < 0
+      )
+        throw new Error(
+          `Repair policy requires a nonnegative ${key} per-path allowance`,
+        );
   }
   if (
     !Number.isSafeInteger(value.resources?.maxConcurrency) ||

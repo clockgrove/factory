@@ -731,3 +731,7 @@ The existing scheduler, atomic WorkState, driver available-slot contract and reg
 ### Local background supervision (#246)
 
 The new `supervision.ts` module registers a single systemd user unit over the existing #245 owner, atomic continuation and control socket. `runner.ts` adds a quiescent handoff; no separate queue or execution journal is introduced. Public CLI operations preserve explicit service consent, exact installed paths, model-free state compatibility, private configuration and retained evidence. No archived service implementation was copied. User-manager lifecycle tests remain distinct from the later full autonomous Objective qualification in #253.
+
+## Diagnosed bounded repair (#250)
+
+The admission contract, atomic preparation/WorkState, compiler review gate and existing retry/re-review transitions supplied this implementation. New compact failure dispositions and retained attempt records preserve original identities and accounting references; no operational journal, replacement queue or workspace replay store was copied or introduced. The fresh architecture review required shared Objective/path consumption across preparation, graph amendments and repair. Public synthetic source packets and temporary Git targets test lost-connectivity cleanup, actual local-control environment repair on an immutable candidate, independent-lane holds, review transport correction and planning authority distinctions. These are deterministic source checks; installed autonomous qualification remains #253.

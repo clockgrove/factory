@@ -1,3 +1,5 @@
+import { assertRepairLedger } from "./repair-policy.js";
+import { validateAuthority } from "./admission.js";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -82,7 +84,14 @@ export function readContinuation(
     throw new Error(
       "Invalid preparation snapshot; operator direction required",
     );
+  if (
+    value.sourcePacketDigest !== undefined &&
+    !/^[a-f0-9]{64}$/.test(value.sourcePacketDigest)
+  )
+    throw new Error("Invalid preparation source packet binding");
   assertCoordinator(value.coordinator);
+  if (value.authority) validateAuthority(value.authority);
+  assertRepairLedger(value);
   return value as PreparationState;
 }
 

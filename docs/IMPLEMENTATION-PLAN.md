@@ -258,3 +258,48 @@ The operator separately approved the repository rename on September 28, 2026: th
 ### Local supervision lifecycle
 
 A supported Linux systemd user manager may own the admitted coordinator independently of a chat. Registration binds the exact installed CLI, Node, configuration, state root and Objective, requires separate service consent, and never changes login persistence. Stop, disable, uninstall and artifact replacement drain the existing owner to a quiescent continuation; unknown effects do not become successful cessation. Detached attempts are not killed by service-group cleanup. Upgrades and rollback use the candidate artifact's actual continuation validator before and after drain. Unsupported state refuses without migration, deletion or allowance resets. Removing supervision preserves target binding and all execution evidence. Installed service lifecycle evidence and full autonomous Objective qualification are separate claims.
+
+### Diagnosed bounded repair (#250)
+
+An admission may explicitly opt into `repairPolicy.perPath`, with numeric
+`planningRevisions`, `implementationRepairs` and `resultRereviews` limits alongside
+the existing Objective totals. `repairClasses` selects `implementation`,
+`review-evidence`, `validation-environment`, `planning-output`,
+`planning-evidence` or `planning-choice`. Omitting `repairPolicy` preserves the
+previous explicit-run behavior. No contributor policy or upgrade grants this
+permission to a target.
+
+The atomic continuation retains original failed attempt identities, evidence and
+corrections. A known, unpublished implementation failure may consume a permitted
+repair, obtain a concrete diagnosis and correction, then start a new worker from
+the accepted base. Removed unfinished edits are reported as unavailable; this is
+not harness-session continuation. A repeated failed correction stops. Independent
+regular lanes and independent unpublished native units may finish while failed
+descendants remain held. Unknown submissions, publication, review or cancellation
+retain their existing global fences. Deadlines use owned cancellation, never quiet
+logs as a reason to retry. Unknown usage stays unknown in existing accounting;
+this feature creates no monetary budget or missing-usage estimate.
+
+A collected candidate can instead remain pinned through a diagnosed validation
+environment correction. `factory repair --objective N --proposal FILE` accepts
+`item`, its exact `treeSha`, and a `correction` containing `kind`, `failureDigest`,
+`actor`, `diagnosis` and `correction`. The status response supplies the failure
+identity. The operator restores only the already authorized prerequisite; changing
+installation policy requires new authority, not this command. Recovery revalidates
+the preserved commit/tree and runs full independent review, never implementation
+or manual acceptance. Evidence-only review recovery uses the same exact candidate
+and carries the concrete rejected transport field into a fresh review packet.
+Missing/truncated evidence and semantic decisions require their actual correction;
+a repeated unchanged failure is not silently accepted.
+
+Planning with a repair policy, or within authorized intake, first persists its
+body/base/configuration/authority binding. Initial compilation, diagnosis,
+corrective compilation and independent review have explicit invocation identities.
+Known responses remain in preparation until consumed; unknown responses cannot be
+replayed. Malformed output, omitted supplied facts and already delegated choices
+can consume planning correction allowances; genuinely missing product or security
+decisions remain decisions. Preparation transfers its consumed allowances into
+activation. Graph amendments share the same planning counter and path limit.
+Original admitted item IDs anchor work repair scopes; aggregate children inherit
+those scopes, and otherwise new work shares the Objective discovery scope. Neither
+new children, explicit retry commands, recompilation nor restart resets limits.

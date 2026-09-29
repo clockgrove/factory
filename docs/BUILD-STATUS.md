@@ -339,3 +339,14 @@ See the [preserved candidate record](history/BUILD-STATUS-2026-09-28.md#historic
 The [historical ledger](history/BUILD-STATUS-2026-09-28.md#historical-preparation-and-release-evidence) preserves previous source, artifact, run, accounting and acceptance identities, including failed and superseded candidates. Its pending-work statements are historical; consult the linked issues for current status. [PR #183](https://github.com/clockgrove/factory/pull/183) retains the exact v0.1.29 release record.
 
 Earlier success establishes only that artifact's tested scenario. It does not qualify a later artifact or the Clockgrove adopter pilot. Published tags, release assets and terminal runs remain unchanged.
+
+## Bounded repair source capability (#250)
+
+The contributor implementation adds explicit admitted repair classes and per-path
+limits, retained failed attempts, diagnosed new implementation attempts, immutable
+candidate revalidation, evidence-only review correction and persisted planning
+revisions. Temporary Git and scripted-provider regressions cover safe independent
+work, original attempt cleanup and accounting availability, inherited allowance
+exhaustion, source-packet corrections and real policy decisions. This source
+capability does not qualify the published plugin; installed program evidence
+remains with #253 and the finite interruption cases with #254.

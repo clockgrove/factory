@@ -1,4 +1,7 @@
-import { CandidateValidationFailure } from "./work-repair.js";
+import {
+  CandidateValidationFailure,
+  CandidateEnvironmentFailure,
+} from "./work-repair.js";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -321,6 +324,15 @@ export function workItemReviewObservations(
     );
   });
   return JSON.stringify({
+    ...(current.recovery?.correction?.kind === "review-evidence"
+      ? {
+          reviewTransportCorrection: {
+            diagnosis: current.recovery.correction.diagnosis,
+            correction: current.recovery.correction.correction,
+            acceptanceOverride: false,
+          },
+        }
+      : {}),
     objectiveBaseCommitSha: state.baseSha,
     currentIntegratedCommitSha: state.integratedSha ?? null,
     reviewedItemId: item.id,
@@ -1799,9 +1811,15 @@ export async function validateTree(
   lfsMembers: ValidationLfsMember[] = [],
   contentStore?: ContentStore,
 ): Promise<ValidationEvidence> {
-  mkdirSync(root, { recursive: true });
   const emptyCredentials = join(root, "empty-gh-config");
-  mkdirSync(emptyCredentials, { recursive: true, mode: 0o700 });
+  try {
+    mkdirSync(root, { recursive: true });
+    mkdirSync(emptyCredentials, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    throw new CandidateEnvironmentFailure(
+      `Validation environment unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   const worktree = join(root, randomUUID());
   await pinnedGitAsync(
     checkout,

@@ -200,7 +200,21 @@ for (const delivery of ["regular", "native-stack"]) {
         step: "validate",
       };
       delete expected.acceptancePending;
-      assert.deepEqual(requested.work.second, expected);
+      const { recovery: priorRecovery, ...priorAttempt } = identities.second;
+      assert.deepEqual(
+        requested.work.second.recovery.history.at(-1).work,
+        priorAttempt,
+      );
+      assert.deepEqual(
+        requested.work.second.recovery.history.at(-1).failure,
+        priorRecovery.failure,
+      );
+      const observed = {
+        ...requested.work.second,
+        recovery: { ...requested.work.second.recovery },
+      };
+      delete observed.recovery.history;
+      assert.deepEqual(observed, expected);
       const finalWaiting = await application.runObjective(1);
       assert.equal(itemReviews, 2);
       assert.ok(finalWaiting.finalAcceptancePending);

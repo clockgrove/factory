@@ -15,6 +15,7 @@ import {
 import { coverageObligations, hydrateCoverageSources } from "../dist/qa.js";
 import { createTarget } from "./support/integration-fixture.mjs";
 import { withCoverage } from "./support/coverage.mjs";
+import { encodeCodexReadiness } from "./support/codex-readiness.mjs";
 
 function validateGraph(graph, ...args) {
   const canonical = structuredClone(graph);
@@ -85,7 +86,7 @@ function graph(indexed = false) {
     reference: "post-integration-hydration",
     targetItem: "",
   };
-  return result;
+  return indexed ? encodeCodexReadiness(result) : result;
 }
 
 function emptyCases(indexed = false) {
@@ -307,6 +308,13 @@ test("production Codex indexed schema retains all lower bounds and decoder canno
       response = value;
       assert.equal(conforms(response), false, field);
       // The scripted transport deliberately ignores schema. Runtime must still refuse.
+      if (field === "items") {
+        await assert.rejects(
+          model.generateStructured(request),
+          /readiness probe owner/,
+        );
+        continue;
+      }
       const decoded = await model.generateStructured(request);
       assertBounds(captured.at(-1));
       assert.throws(

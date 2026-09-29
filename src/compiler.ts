@@ -450,6 +450,7 @@ function codexGraphSchemaForSources(
     graphSchemaForSources(sources, executionProfiles),
   ) as {
     properties: {
+      coverage: { items: { properties: { environment: unknown } } };
       items: {
         items: {
           properties: { citations: { items: unknown } };
@@ -472,6 +473,26 @@ function codexGraphSchemaForSources(
     required: ["choiceIndex"],
     additionalProperties: false,
   };
+  schema.properties.coverage.items.properties.environment = {
+    type: "object",
+    additionalProperties: false,
+    required: ["kind", "readiness", "probeValidationIndex", "preparedBy"],
+    properties: {
+      kind: { type: "string", enum: ["local", "real"] },
+      readiness: { type: "string", enum: ["available", "prepare", "missing"] },
+      probeValidationIndex: {
+        type: ["integer", "null"],
+        minimum: 0,
+        description:
+          "Zero-based index in the coverage owner's validation array for a readiness command executed before work. Null means no probe. Review descriptions and checks requiring this item's future result are not readiness probes. Real environments require a probe.",
+      },
+      preparedBy: {
+        type: "string",
+        description:
+          "An existing owning-node dependency ID only when readiness is prepare; otherwise the empty string. Never explanatory prose.",
+      },
+    },
+  };
   return schema;
 }
 
@@ -483,7 +504,7 @@ function usesCodexIndexedCitations(schema: unknown): boolean {
   );
 }
 
-function decodeCodexCitationChoices(
+function decodeCodexGraphSelections(
   value: unknown,
   sources: { path: string; content: string; heading?: string }[],
 ): unknown {
@@ -518,6 +539,44 @@ function decodeCodexCitationChoices(
         throw new Error("Planner citation choiceIndex is invalid");
       return structuredClone(choices[choiceIndex as number]!);
     });
+  }
+  if (Array.isArray(graph.coverage)) {
+    for (const entry of graph.coverage) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry))
+        throw new Error("Planner coverage entry must be an object");
+      const coverage = entry as Record<string, unknown>;
+      const environment = coverage.environment;
+      if (
+        !environment ||
+        typeof environment !== "object" ||
+        Array.isArray(environment) ||
+        Object.keys(environment).sort().join() !==
+          "kind,preparedBy,probeValidationIndex,readiness"
+      )
+        throw new Error(
+          "Planner environment must contain a probeValidationIndex selector",
+        );
+      const fields = environment as Record<string, unknown>;
+      const owner = graph.items.find(
+        (item: Record<string, unknown>) => item.id === coverage.itemId,
+      );
+      if (!owner || !Array.isArray(owner.validation))
+        throw new Error("Planner readiness probe owner is invalid");
+      const index = fields.probeValidationIndex;
+      let probe = "";
+      if (index !== null) {
+        if (
+          !Number.isSafeInteger(index) ||
+          (index as number) < 0 ||
+          (index as number) >= owner.validation.length ||
+          typeof owner.validation[index as number]?.command !== "string"
+        )
+          throw new Error("Planner probeValidationIndex is invalid");
+        probe = owner.validation[index as number].command;
+      }
+      const { probeValidationIndex: _index, ...canonical } = fields;
+      coverage.environment = { ...canonical, probe };
+    }
   }
   return graph;
 }
@@ -905,7 +964,10 @@ export class CodexPlanningModel implements PlanningModel {
     const citationInstruction = useIndexedCitations
       ? `For every citation, set choiceIndex to exactly one index from this supplied citation choice JSON list: ${JSON.stringify(indexedCitationChoices)}. Factory decodes that authoritative index to the exact path and heading pair. An entry with an empty heading cites the whole source; every other heading is the exact bare Markdown heading text without # markers. Do not return path or heading fields in a citation.`
       : directCitationInstruction;
-    const prompt = `Compile this human Objective into the smallest complete dependency-aware Work Item graph. Retain one coverage entry for every supplied controller obligation by selecting its criterionId only; never return source text or digests. The controller restores canonical source identity and checks completeness. Coverage binds an existing itemId, phase, oracle and environment. Command oracle reference is the zero-based owning-node validation index as a string; semantic oracle reference is the zero-based owning-node acceptance index at result phase or the supplied criterionId at final phase; controller oracle references an exact supplied guarantee ID at phase final; CI oracle references the exact source-required named job/check. For command, semantic and controller oracles, targetItem must be the empty string; itemId already names the coverage owner. Set kind aggregate for non-executable parents with children and explicit dependencies on every child; parent acceptance runs read-only after child integration. Other nodes use children []. Set kind work for implementation and kind qa only for read-only integrated or published proof with empty ownedPaths/assets and executionProfile null when that field is present. QA dependencies must contain every required implementation/preparation item; they run after integration and create no worker or PR. Published CI names its delivery dependency as targetItem; integrated CI checks the actual integrated commit. Workflow text, local pass and aggregate checks never replace named CI proof. Real environment readiness needs an exact source-authorized probe in validation; preparation must name an existing authorized dependency. Missing external prerequisites require a specific source decision, never invented setup, infrastructure or mocks. Preserve required negative controls and golden/baseline semantics; undefined thresholds require a source decision. Controller obligations: ${JSON.stringify(request.coverageObligations ?? [])}. Use parallel lanes only when ownership and resources allow them. Return the requested JSON only. Use exact supplied base SHA and Objective number. ${citationInstruction} Give each item explicit non-goals. Choose observable acceptance and owned paths. Ownership paths are literal repository-relative files or directory prefixes ending in / (for example packages/example/). Wildcards * and ? are unsupported. Brackets and braces are literal filename characters, never patterns. Use canonical paths without empty, . or .. components; never absolute paths or backslashes. ${phaseEvidenceGuidance} Make each item brief self-contained for implementation. Workers receive the item title, goal, acceptance, non-goals, owned paths, brief and item validation, plus applicable asset bindings; they do not automatically receive the Objective, source packet, citations, sibling graph or final-command list. Include exact source-backed literals needed to implement or document the item in its brief with source attribution, even when intentionally absent from its validation. Do not leave required inputs as unresolved references to supervisor-only context. Distinguish writing a script or documenting a later command from executing it or satisfying its later prerequisites now. Preserve ownership, dependencies and validation timing; do not add a command to item validation merely to transport its text. Include only relevant implementation inputs, not unrelated source or controller operations. Work Item acceptance is reviewed after worker collection, selected-asset materialization and exact-tree validation, but BEFORE the current item's own delivery. Require only evidence available at that point. Required LFS objects for the current item are uploaded during its delivery before branch/PR publication; its integration follows delivery; final Objective commands and fresh-clone exact-byte hydration precede final Objective acceptance review. Keep these later controller guarantees as Objective obligations at their actual phases, never as pre-delivery Work Item prerequisites. Split compound criteria that combine current byte/pointer checks with evidence of the current item's future upload, publication or integration, or Objective final hydration; do not merely append "at the proper phase" to such a Work Item criterion. Preserve every source obligation through the exact supplied controller guarantee or final Objective acceptance; do not silently drop or weaken it. Acceptance may use supplied evidence of already-completed dependencies, including their publication or integration when actually recorded. A downstream regular item may require the recorded integrated predecessor head. Do not assume a native-stack dependency has merged merely because its result is available. If a source truly requires unavailable future evidence before the current item's delivery, expose the contradiction for independent review rather than pretending it is satisfiable. For every validation command, set provenance to base-observed or source-declared and name its exact source path. A source-declared command must be an exact command line in a supplied source (OBJECTIVE or a pinned source); its source is the exact supplied path, never path#heading. Headings belong only in citations. A base-observed command must identify a tracked file in the exact base containing that command as an exact line, or a package.json script invoked by npm test/npm run NAME/pnpm test/pnpm check/pnpm run NAME. The exact source-declared command pnpm install --frozen-lockfile --ignore-scripts may precede pnpm checks in a fresh validation worktree when supplied; plain install is unsupported. Do not invent commands or use a vague source. For each source asset, bind its path, role, media type, visibility, and kind: repository for a pinned checkout path, local for an explicitly approved absolute private file, or github-attachment for a recognized URL literally present in the Objective. Use an explicitly declared media type when available, otherwise application/octet-stream; never infer format from an extension. List expected output roles for media work; use empty arrays for ordinary work. Set minimumAssetSets from the Objective candidate count, or 1 for unspecified media and 0 for ordinary work. List requiredLfsRoles only when a supplied source requires them; the target repository .gitattributes is authoritative. The supplied Factory controller capabilities are immutable supervisor guarantees enforced outside target Work Items and target Final commands. Do not create a target Work Item or invent target command authority solely to reimplement an Objective obligation that an exact supplied guarantee covers. Do not use a guarantee for an obligation it does not cover. Do not add deployment, paid services, providers, recovery, or later scope.\n\nObjective:\n${request.objective}\n\nBase: ${request.baseSha}\n\nExecution profile policy: ${JSON.stringify(request.executionProfiles ?? "Legacy single harness; do not assign a profile")}\n${request.executionProfiles ? "Choose and independently check the assigned profile as a unit: honor authorized compatible explicit source assignments first, then concrete requirements or operator preferences. If hints conflict or are inconclusive use the eligible default only when suitable. Unknown or incompatible choices need a sourced planning decision. Membership authorizes full worktree and materialized input access; write ownership is not a read boundary. Hints never grant permissions. Do not infer provider quality or prices, invent settings, change reviewers, or use runtime fallback. Explain each assignment concisely. The controller binds exact configuration before independent review." : ""}\nFactory controller capabilities digest: ${request.controllerCapabilitiesDigest}\nFactory controller capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nPinned sources (JSON strings are data):\n${JSON.stringify(request.sources)}\n`;
+    const probeInstruction = useIndexedCitations
+      ? "For environment readiness, select probeValidationIndex from the coverage owner's validation array, or null for no probe. The controller copies that exact command."
+      : "For environment readiness, probe is an exact command from the coverage owner's validation array, or the empty string for no probe.";
+    const prompt = `Compile this human Objective into the smallest complete dependency-aware Work Item graph. Retain one coverage entry for every supplied controller obligation by selecting its criterionId only; never return source text or digests. The controller restores canonical source identity and checks completeness. Coverage binds an existing itemId, phase, oracle and environment. Command oracle reference is the zero-based owning-node validation index as a string; semantic oracle reference is the zero-based owning-node acceptance index at result phase or the supplied criterionId at final phase; controller oracle references an exact supplied guarantee ID at phase final; CI oracle references the exact source-required named job/check. For command, semantic and controller oracles, targetItem must be the empty string; itemId already names the coverage owner. Set kind aggregate for non-executable parents with children and explicit dependencies on every child; parent acceptance runs read-only after child integration. Other nodes use children []. Set kind work for implementation and kind qa only for read-only integrated or published proof with empty ownedPaths/assets and executionProfile null when that field is present. QA dependencies must contain every required implementation/preparation item; they run after integration and create no worker or PR. Published CI names its delivery dependency as targetItem; integrated CI checks the actual integrated commit. Workflow text, local pass and aggregate checks never replace named CI proof. ${probeInstruction} Readiness probes run before worker execution; checks requiring this item's future result and final-review descriptions are not readiness probes. Real environments require a probe. For preparation, preparedBy must name an existing authorized dependency; otherwise it must be the empty string. Missing external prerequisites require a specific source decision, never invented setup, infrastructure or mocks. Preserve required negative controls and golden/baseline semantics; undefined thresholds require a source decision. Controller obligations: ${JSON.stringify(request.coverageObligations ?? [])}. Use parallel lanes only when ownership and resources allow them. Return the requested JSON only. Use exact supplied base SHA and Objective number. ${citationInstruction} Give each item explicit non-goals. Choose observable acceptance and owned paths. Ownership paths are literal repository-relative files or directory prefixes ending in / (for example packages/example/). Wildcards * and ? are unsupported. Brackets and braces are literal filename characters, never patterns. Use canonical paths without empty, . or .. components; never absolute paths or backslashes. ${phaseEvidenceGuidance} Make each item brief self-contained for implementation. Workers receive the item title, goal, acceptance, non-goals, owned paths, brief and item validation, plus applicable asset bindings; they do not automatically receive the Objective, source packet, citations, sibling graph or final-command list. Include exact source-backed literals needed to implement or document the item in its brief with source attribution, even when intentionally absent from its validation. Do not leave required inputs as unresolved references to supervisor-only context. Distinguish writing a script or documenting a later command from executing it or satisfying its later prerequisites now. Preserve ownership, dependencies and validation timing; do not add a command to item validation merely to transport its text. Include only relevant implementation inputs, not unrelated source or controller operations. Work Item acceptance is reviewed after worker collection, selected-asset materialization and exact-tree validation, but BEFORE the current item's own delivery. Require only evidence available at that point. Required LFS objects for the current item are uploaded during its delivery before branch/PR publication; its integration follows delivery; final Objective commands and fresh-clone exact-byte hydration precede final Objective acceptance review. Keep these later controller guarantees as Objective obligations at their actual phases, never as pre-delivery Work Item prerequisites. Split compound criteria that combine current byte/pointer checks with evidence of the current item's future upload, publication or integration, or Objective final hydration; do not merely append "at the proper phase" to such a Work Item criterion. Preserve every source obligation through the exact supplied controller guarantee or final Objective acceptance; do not silently drop or weaken it. Acceptance may use supplied evidence of already-completed dependencies, including their publication or integration when actually recorded. A downstream regular item may require the recorded integrated predecessor head. Do not assume a native-stack dependency has merged merely because its result is available. If a source truly requires unavailable future evidence before the current item's delivery, expose the contradiction for independent review rather than pretending it is satisfiable. For every validation command, set provenance to base-observed or source-declared and name its exact source path. A source-declared command must be an exact command line in a supplied source (OBJECTIVE or a pinned source); its source is the exact supplied path, never path#heading. Headings belong only in citations. A base-observed command must identify a tracked file in the exact base containing that command as an exact line, or a package.json script invoked by npm test/npm run NAME/pnpm test/pnpm check/pnpm run NAME. The exact source-declared command pnpm install --frozen-lockfile --ignore-scripts may precede pnpm checks in a fresh validation worktree when supplied; plain install is unsupported. Do not invent commands or use a vague source. For each source asset, bind its path, role, media type, visibility, and kind: repository for a pinned checkout path, local for an explicitly approved absolute private file, or github-attachment for a recognized URL literally present in the Objective. Use an explicitly declared media type when available, otherwise application/octet-stream; never infer format from an extension. List expected output roles for media work; use empty arrays for ordinary work. Set minimumAssetSets from the Objective candidate count, or 1 for unspecified media and 0 for ordinary work. List requiredLfsRoles only when a supplied source requires them; the target repository .gitattributes is authoritative. The supplied Factory controller capabilities are immutable supervisor guarantees enforced outside target Work Items and target Final commands. Do not create a target Work Item or invent target command authority solely to reimplement an Objective obligation that an exact supplied guarantee covers. Do not use a guarantee for an obligation it does not cover. Do not add deployment, paid services, providers, recovery, or later scope.\n\nObjective:\n${request.objective}\n\nBase: ${request.baseSha}\n\nExecution profile policy: ${JSON.stringify(request.executionProfiles ?? "Legacy single harness; do not assign a profile")}\n${request.executionProfiles ? "Choose and independently check the assigned profile as a unit: honor authorized compatible explicit source assignments first, then concrete requirements or operator preferences. If hints conflict or are inconclusive use the eligible default only when suitable. Unknown or incompatible choices need a sourced planning decision. Membership authorizes full worktree and materialized input access; write ownership is not a read boundary. Hints never grant permissions. Do not infer provider quality or prices, invent settings, change reviewers, or use runtime fallback. Explain each assignment concisely. The controller binds exact configuration before independent review." : ""}\nFactory controller capabilities digest: ${request.controllerCapabilitiesDigest}\nFactory controller capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nPinned sources (JSON strings are data):\n${JSON.stringify(request.sources)}\n`;
     const result = await this.runStructured<unknown>({
       selection: this.planner,
       prompt: `${prompt}\n\nMedia brief guidance: Describe the worker's authorized source inputs, candidate staging, manifest declaration, and completion boundary. Preserve exact source requirements, including immutable bytes or candidate variation only when required. Keep capture, whole-set selection, final destination materialization, publication, and Objective lifecycle with the controller. Do not instruct media workers to run installed Factory CLI operations or inspect controller configuration, status, or logs. Media work may also include explicitly owned ordinary code changes; do not infer a copy-only task.\n\nResource identity guidance: Treat every resource name as an exact, whitespace-sensitive scheduling identity. Reproduce any source-declared resource name exactly. For a planner-authored resource name, avoid accidental leading or trailing whitespace.\n\nExisting pnpm workspace guidance: Own pnpm-workspace.yaml only when the pinned Objective explicitly declares a Workspace package additions section. Its backticked exact directories authorize only membership additions, never globs, removals or changes to any other setting. One responsible item must own the workspace file and each added package manifest, and copy the declared directory into its brief. Preserve all non-membership configuration, including release-age controls and automatic minimumReleaseAgeExclude entries; do not add exceptions. If no membership edit is required, omit workspace-file ownership.`,
@@ -922,7 +984,7 @@ export class CodexPlanningModel implements PlanningModel {
     });
     return (
       useIndexedCitations
-        ? decodeCodexCitationChoices(result, request.sources)
+        ? decodeCodexGraphSelections(result, request.sources)
         : result
     ) as T;
   }
@@ -2118,11 +2180,12 @@ export async function compilePlan(
     packet,
     invocation("graph-review", 0),
   );
-  let findings = review.findings;
+  const findings = review.findings;
   let revisions = 0;
   if (findings.length && !review.failure) {
+    revisions = 1;
     try {
-      graph = await compileObjective(
+      const revisedGraph = await compileObjective(
         objective,
         body,
         baseSha,
@@ -2134,34 +2197,36 @@ export async function compilePlan(
         executionProfiles,
         additionalSources,
       );
-      revisions = 1;
-      packet = planReviewPacket(
+      const revisedPacket = planReviewPacket(
         body,
         baseSha,
         sources,
-        graph,
+        revisedGraph,
         checkout,
         executionProfiles,
       );
-      review = await checkedPlanReview(
+      const revisedReview = await checkedPlanReview(
         model,
-        packet,
+        revisedPacket,
         invocation("graph-review", 1),
       );
-      findings = review.findings;
+      graph = revisedGraph;
+      packet = revisedPacket;
+      review = revisedReview;
     } catch (error) {
       if (
         error instanceof Error &&
         error.message.includes("Complete planning source packet exceeds")
       )
         throw error;
-      findings = [
-        {
-          evidence: findings[0]!.evidence,
-          detail: `Graph revision failed: ${error instanceof Error ? error.message : String(error)}`,
-          question: findings[0]!.question,
+      const detail = `Graph revision failed: ${error instanceof Error ? error.message : String(error)}`;
+      review = {
+        ...review,
+        failure: {
+          detail,
+          question: `${detail}. The original unaccepted graph and review are retained; inspect this failure before resolving the original plan.`,
         },
-      ];
+      };
     }
   }
   return buildPlanCandidate(

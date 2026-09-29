@@ -25,6 +25,7 @@ import { selectAssetSetFromCli } from "../dist/runner.js";
 import { parseFactoryState } from "../dist/state.js";
 import { readContinuation, readState, statePath } from "../dist/state-store.js";
 import { withCoverage } from "./support/coverage.mjs";
+import { encodeCodexReadiness } from "./support/codex-readiness.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -77,6 +78,7 @@ ${finalCommands.map((command) => `- \`${command}\``).join("\n")}
 }
 
 function encodeCodexCitationIndexes(graph, citationChoiceIndex = 2) {
+  graph = encodeCodexReadiness(graph);
   return {
     ...graph,
     items: graph.items.map((workItem) => ({

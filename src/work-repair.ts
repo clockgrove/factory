@@ -19,7 +19,10 @@ import {
 
 /** Collection settled the owned worker and removed its unfinished checkout. */
 export class SettledAttemptFailure extends Error {
-  constructor(cause: unknown) {
+  constructor(
+    cause: unknown,
+    readonly classification: "implementation" | "interruption" = "interruption",
+  ) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
   }
 }
@@ -48,7 +51,7 @@ export function recordWorkFailure(
     at: new Date().toISOString(),
     classification: isolated
       ? error instanceof SettledAttemptFailure
-        ? "interruption"
+        ? error.classification
         : error instanceof CandidateEnvironmentFailure
           ? "validation-environment"
           : "implementation"
@@ -127,6 +130,17 @@ export function applyWorkCorrection(
     )
       throw new Error(
         "Semantic review requires its own decision; evidence recovery cannot waive it",
+      );
+    if (
+      correction.kind === "validation-environment" &&
+      (work.status !== "failed" ||
+        work.step !== "validate" ||
+        !["implementation", "validation-environment"].includes(
+          work.recovery!.failure!.classification,
+        ))
+    )
+      throw new Error(
+        "Environment revalidation requires a failed collected-result validation, not a semantic review decision",
       );
     if (!alreadyCharged)
       chargeRepair(state, correction.kind, repairScopes(state, id));

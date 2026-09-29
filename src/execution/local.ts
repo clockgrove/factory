@@ -751,6 +751,8 @@ export class LocalExecutionDriver implements ExecutionDriver {
       failed = true;
       collectionError = error;
     }
+    let failureClassification: "implementation" | "interruption" =
+      "implementation";
     {
       const observed = await this.resolveHarness(
         active.request.item,
@@ -764,6 +766,8 @@ export class LocalExecutionDriver implements ExecutionDriver {
         throw new Error(
           "Collection subprocess ownership unresolved; checkout retained",
         );
+      failureClassification =
+        observed.state === "complete" ? "implementation" : "interruption";
       this.active.delete(handle.identity);
       try {
         await withProcessCancellation(undefined, () =>
@@ -779,7 +783,11 @@ export class LocalExecutionDriver implements ExecutionDriver {
         rmSync(active.worktree, { recursive: true, force: true });
       }
     }
-    if (failed) throw new SettledAttemptFailure(collectionError);
+    if (failed) {
+      if (collectionError instanceof AuthenticationRequiredError)
+        throw collectionError;
+      throw new SettledAttemptFailure(collectionError, failureClassification);
+    }
     return collected!;
   }
 }

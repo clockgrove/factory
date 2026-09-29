@@ -1895,6 +1895,8 @@ async function compileRecoverablePlan(
       save();
       throw new Error("Planning correction is not admitted");
     }
+    if (context.stopped?.())
+      throw new Error("Planning is paused or cancelled before diagnosis");
     chargeRepair(state, permitted[0]!, ["$planning"]);
     record.phase = "submitted";
     record.invocation = { id: randomUUID(), phase: "diagnosis" };

@@ -892,10 +892,17 @@ export async function runObjective(
       )
         continue;
       result.coordinator!.phase = "waiting";
+      const stoppedRepair = Object.entries(result.work).find(
+        ([, work]) =>
+          work.recovery?.phase === "stopped" &&
+          ["failed", "waiting"].includes(work.status),
+      );
       result.coordinator!.waitReason =
         result.coordinator!.mode === "draining"
           ? "Drained; no owned attempts remain"
-          : "Awaiting exact candidate decision or resume";
+          : stoppedRepair
+            ? `Work Item ${stoppedRepair[0]}: ${stoppedRepair[1].recovery!.failure?.decision ?? "Inspect the retained recovery failure"}`
+            : "Awaiting exact candidate decision or resume";
       persist();
       await wait();
     }

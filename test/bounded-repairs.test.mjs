@@ -334,6 +334,7 @@ for (const kind of [
         reviews = 0;
       const snapshots = [];
       const state = { authority: authority() };
+      const planningBody = `${body}\n## Worker material\nRetain the exact literal RELEASE_TOKEN in the worker brief. Representation is delegated to the developer. Security destination policy requires the security owner decision.\n`;
       const planner = {
         generateStructured: async (request) => {
           if (request.purpose === "diagnosis")
@@ -358,10 +359,15 @@ for (const kind of [
                 visibility: "repository",
               },
             ];
+          if (generates > 1 && kind !== "operator")
+            candidate.items[0].brief +=
+              " Retain RELEASE_TOKEN; choose a simple text representation within declared ownership.";
           return candidate;
         },
         reviewGraph: async (request) => {
           reviews++;
+          if (kind === "planning-evidence" && reviews > 1)
+            assert.match(request.graph.items[0].brief, /RELEASE_TOKEN/);
           return {
             findings:
               reviews === 1 && kind !== "planning-output"
@@ -384,7 +390,7 @@ for (const kind of [
       };
       const candidate = await compilePlan(
         1,
-        body,
+        planningBody,
         target.baseSha,
         target.checkout,
         planner,

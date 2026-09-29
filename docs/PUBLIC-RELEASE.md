@@ -63,6 +63,13 @@ factory help
 
 Verify `factory@clockgrove` appears in `codex plugin list --json` before the live Objective. The installed `director` and `setup` skills guide agent use; the `factory` CLI above supplies their documented operations. The CLI prefix, Factory configuration, state, review exports, and planning candidates must stay outside the target checkout. A target still requires GitHub CLI access and an authenticated Codex SDK environment; media Objectives require Git LFS.
 
+## Autonomous public qualification
+
+The complete autonomous installed scenario for #243 is documented in
+[Installed public autonomy qualification](PUBLIC-AUTONOMY.md). It uses a public
+fixture and two sequential Objectives; it does not transfer earlier artifact
+evidence or authorize private adopter work.
+
 ## Local host-toolchain check
 
 Use the same host environment and exact installed artifact for preflight and qualification. Successful package installation alone does not establish host readiness.

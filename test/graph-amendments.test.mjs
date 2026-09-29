@@ -14,6 +14,7 @@ import { coverageObligations } from "../dist/qa.js";
 import { objectiveCriteria } from "../dist/compiler.js";
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
 import { readState } from "../dist/state-store.js";
+import { checkServiceState } from "../dist/supervision.js";
 import {
   createTarget,
   factoryConfig,
@@ -162,11 +163,10 @@ for (const delivery of ["regular", "native-stack"])
           },
         });
         const candidate = await setup.application.planObjective(1);
-        const admission = await setup.application.admitObjective(
-          1,
-          candidate,
-          authority,
-        );
+        const admission = await setup.application.admitObjective(1, candidate, {
+          ...authority,
+          serviceConsent: true,
+        });
         const state = await setup.application.runObjective(
           1,
           candidate,
@@ -187,6 +187,7 @@ for (const delivery of ["regular", "native-stack"])
           1,
         );
         assertGraphRevisions(readState(config.repository, 1));
+        assert.doesNotThrow(() => checkServiceState(config, 1));
       },
       delivery,
     );

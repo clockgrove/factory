@@ -296,7 +296,32 @@ export async function decidePlan(
   }
 }
 
+export class CoordinatorHandoff extends Error {
+  constructor() {
+    super("Coordinator drained and released ownership");
+  }
+}
+
+function canHandoff(state: ContinuationState): boolean {
+  if (state.coordinator?.processes?.length || state.coordinator?.cancelError)
+    return false;
+  if (state.schemaVersion === 3)
+    return state.planning !== "submitted" && !state.projectionPending;
+  return (
+    !state.coordinator?.phase.endsWith("-submitted") &&
+    !hasPendingAmendmentEffect(state) &&
+    !Object.values(state.work).some(
+      (work) =>
+        work.status === "running" ||
+        (work.status === "published" &&
+          (!work.pullRequest || !work.changeRef || !work.treeSha)) ||
+        work.pendingEffect,
+    )
+  );
+}
+
 interface LocalOwner {
+  handoff?: boolean;
   snapshot?: ContinuationState;
   lock: ControllerLock;
   abort: AbortController;
@@ -486,6 +511,8 @@ export async function runObjective(
     waiters.clear();
   };
   const wait = async () => {
+    if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
+      throw new CoordinatorHandoff();
     if (owner.changed) {
       owner.changed = false;
       return;
@@ -594,11 +621,12 @@ export async function runObjective(
         cancel();
         return "requested";
       }
-      if (["pause", "drain", "resume"].includes(request.action)) {
+      if (["pause", "drain", "resume", "handoff"].includes(request.action)) {
+        if (request.action === "handoff") owner.handoff = true;
         state.coordinator.mode =
           request.action === "pause"
             ? "paused"
-            : request.action === "drain"
+            : ["drain", "handoff"].includes(request.action)
               ? "draining"
               : "running";
         persist();
@@ -648,6 +676,15 @@ export async function runObjective(
     releaseControllerLock(lockPath, lock);
     throw error;
   }
+  const handoff = () => {
+    owner.handoff = true;
+    if (owner.snapshot?.coordinator) {
+      owner.snapshot.coordinator.mode = "draining";
+      persist();
+    }
+    wake();
+  };
+  process.on("SIGTERM", handoff);
   process.on("SIGUSR1", cancel);
   try {
     for (;;) {
@@ -725,6 +762,7 @@ export async function runObjective(
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     process.off("SIGUSR1", cancel);
+    process.off("SIGTERM", handoff);
     await new Promise<void>((resolve) => server.close(() => resolve()));
     owners.delete(ownerKey(config, objective));
     releaseControllerLock(lockPath, lock);
@@ -825,6 +863,10 @@ async function runObjectivePass(
     const installationConfigDigest = factoryConfigDigest(config);
     const continuation = readContinuation(config.repository, objective);
     owner.snapshot = continuation;
+    if (owner.handoff && continuation?.coordinator) {
+      continuation.coordinator.mode = "draining";
+      saveState(path, continuation);
+    }
     let preparation =
       continuation?.schemaVersion === 3 ? continuation : undefined;
     let state = continuation?.schemaVersion === 2 ? continuation : undefined;
@@ -1049,7 +1091,7 @@ async function runObjectivePass(
           planning: "ready",
           issueByItemId: {},
           coordinator: {
-            mode: "running",
+            mode: owner.handoff ? "draining" : "running",
             phase: "planning",
             phaseStartedAt: new Date().toISOString(),
             ...(owner.deadlineAt ? { deadlineAt: owner.deadlineAt } : {}),
@@ -1067,6 +1109,8 @@ async function runObjectivePass(
         throw new Error(
           "Preparation identity changed; operator direction required",
         );
+      if (owner.handoff && canHandoff(preparation))
+        throw new CoordinatorHandoff();
       const planningScopeId = preparation.runId;
       const plan =
         preparation.plan ??
@@ -1571,6 +1615,7 @@ async function runObjectivePass(
     await closeObjectiveIssue(state, issue.body, github, () => save(state));
     return state;
   } catch (error) {
+    if (error instanceof CoordinatorHandoff) throw error;
     diagnostics.emit({
       runId: stateForSignal?.runId,
       operation: "objective-run",

@@ -37,7 +37,9 @@ Run the controller from an authorized ordinary host terminal, retaining worker s
 
 ### Host and worker readiness
 
-Before model-backed execution, use the exact installed harness's supported model-free sandbox diagnostic from the same authorized host launch context and with the intended worker policy. In disposable paths, check shell execution, an allowed workspace write, and refusal of an out-of-scope write. Consult that installed binary's help; syntax varies by version. Preserve managed requirements and the intended network policy. This checks the local launch environment, not the correctness of an Objective.
+The source CLI provides `factory readiness --outside-directory /absolute/existing/sibling --config /private/factory.json` for the configured default local Codex implementation harness. It starts the exact bundled model-free app-server diagnostic, applies the worker's workspace-write/never/network settings and filtered environment, and checks a temporary workspace write plus refusal of a temporary write outside it. It does not create a thread, submit a model turn, or change managed requirements. Choose an existing outside directory you own that is outside the intended writable roots. Temporary probe files are removed.
+
+An unavailable result retains its diagnostic explanation; it never certifies readiness. Other harnesses and non-default execution profiles need their own supported diagnostics. This implementation-harness result does not establish controller validation readiness: acceptance commands still need their actual dependencies and must run in their declared execution environment. A differently configured home, permission profile or enclosing launch sandbox proves only that different environment.
 
 If the harness reports a socket directory or permission error, inspect the host and enclosing sandbox before another model call. An outer agent sandbox can deliberately hide a correctly configured host socket directory. Do not chmod, unmask, relocate credentials, bypass a security control, or retry a worker as a readiness probe. Correct the authorized controller launch context and repeat the model-free check. Then use the already requested bounded Objective to exercise real tools; ordinary plugin use does not require creating or qualifying a Factory release fixture.
 
@@ -281,3 +283,26 @@ acceptance without another implementation worker or synthetic PR. Unknown model 
 projection outcomes pause affected work without repeating possibly completed calls.
 Inspect the preserved pending proposal and original evidence before choosing a
 supported continuation; editing state or running a fresh root cannot bypass a fence.
+
+## Local background supervision
+
+This source capability belongs to #246 and is not in the published v0.1.39 package. A supported Linux or WSL host needs a running systemd user manager. Factory never changes login persistence or gains administrator privileges. A user manager can survive the chat closing; sleeping pauses execution, shutdown stops it, and logout behavior depends on the host's existing linger policy.
+
+After binding a target and admitting its exact plan with explicit `serviceConsent: true`, register the installed artifact:
+
+```sh
+factory supervisor install --objective N --plan /private/plan.json \
+  --admission /private/admission.json --config /private/factory.json
+factory supervisor status --config /private/factory.json
+factory supervisor start --config /private/factory.json
+```
+
+For an existing admitted continuation, omit `--plan` and `--admission`. Registration enables one deterministic user unit, without immediately starting work. A future user-manager start can start the enabled unit. Configuration, plan and admission files must be private to your user. Keep the registered package directory immutable and retain it until an explicit upgrade. The unit pins absolute Node, CLI, configuration and state paths, plus the installation's launch path and existing credential-directory settings; it does not copy credential values. Supply separately authorized secrets through the user manager's existing environment before starting. Worker environment filtering remains in force.
+
+`supervisor status` reports registration, active/enabled state, exact paths, manager availability and logout persistence separately. Unsupported hosts retain the foreground `factory run` option. A failed start or unknown worker outcome is not success; inspect the persisted Objective status and service diagnostics.
+
+`factory supervisor stop --config /private/factory.json` requests a drain and waits for ownership to be released. It does not cancel the Objective. If owned work or an uncertain external effect remains, stop refuses and preserves the live owner and evidence. Check status before trying again. A stopped continuation retains its draining mode; after starting it again, use the ordinary `factory resume --objective N` with the same configuration when ready to dispatch more work. Explicit Objective cancellation remains a separate command.
+
+To change installed artifacts, use `factory supervisor upgrade --cli /absolute/new-package/dist/cli.js --config /private/factory.json`. Factory asks that artifact to validate the actual continuation before draining and again after owned work settles, then switches the unit. Rollback uses the same operation and refuses if the older artifact cannot validate retained state. No state fields, allowances or evidence are reset. A failed activation leaves the selected unit and evidence inspectable; it does not silently choose another artifact.
+
+`supervisor disable` drains and stops before disabling future starts. `supervisor uninstall` also removes the owned unit. Both retain target binding, snapshots, results, logs and accounting. Neither removes the target repository or provider authentication. Raw systemd stop sends a graceful drain request only to the owner and does not kill detached workers; unresolved work can therefore keep it waiting. Prefer the packaged stop command for bounded diagnostics.

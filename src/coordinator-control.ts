@@ -11,6 +11,7 @@ export interface ControlRequest {
     | "status"
     | "pause"
     | "drain"
+    | "handoff"
     | "resume"
     | "cancel"
     | "retry"

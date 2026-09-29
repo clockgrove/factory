@@ -13,135 +13,186 @@ import {
 import { resultFindings } from "./support/review-protocol.mjs";
 
 for (const delivery of ["regular", "native-stack"]) {
-  test(`${delivery}: review receives the freed coding capacity while an independent worker remains active`, async () => {
-    const root = mkdtempSync(join(tmpdir(), "factory-phase-integration-"));
-    const previous = process.env.XDG_STATE_HOME;
-    process.env.XDG_STATE_HOME = join(root, "state");
-    try {
-      const target = createTarget(root);
-      const repository = `example/phase-${delivery}`;
-      const barrier = join(root, "barriers", "slow.go");
-      const body =
-        "# Phase admission\n## Acceptance\n- fast.txt exists\n- slow.txt exists\n- joined.txt exists\n## Commands\n- test -s fast.txt\n- test -s slow.txt\n- test -s joined.txt\n## Final validation\n- test -s joined.txt\n";
-      const item = (id, dependencies = []) => ({
-        id,
-        title: id,
-        goal: id,
-        acceptance: [`${id}.txt exists`],
-        nonGoals: ["No deployment"],
-        citations: [{ path: "OBJECTIVE" }],
-        dependencies,
-        ownedPaths: [`${id}.txt`],
-        resources: [],
-        validation: [
-          {
-            command: `test -s ${id}.txt`,
-            provenance: "source-declared",
-            source: "OBJECTIVE",
-          },
-        ],
-        brief: id,
-        sourceAssets: [],
-        expectedOutputRoles: [],
-        minimumAssetSets: 0,
-        requiredLfsRoles: [],
-      });
-      const config = factoryConfig(target.checkout, repository, delivery, 2);
-      config.scheduling = {
-        cpu: 2,
-        memoryMiB: 200,
-        reviewConcurrency: 1,
-        validationConcurrency: 1,
-        phases: Object.fromEntries(
-          ["coding", "validation", "review", "delivery"].map((phase) => [
-            phase,
-            { cpu: 1, memoryMiB: 100 },
-          ]),
-        ),
-      };
-      assert.equal(validateConfig(config), config);
-      const missing = structuredClone(config);
-      delete missing.scheduling.phases.review.cpu;
-      assert.throws(
-        () => validateConfig(missing),
-        /requires a fitting declaration/,
-      );
-      const oversized = structuredClone(config);
-      oversized.scheduling.phases.validation.memoryMiB = 201;
-      assert.throws(
-        () => validateConfig(oversized),
-        /requires a fitting declaration/,
-      );
-      let reviewedWhileCoding = false;
-      const { application, driver } = makeApplication({
-        config,
-        graph: {
-          objective: 1,
-          baseSha: target.baseSha,
-          items: [item("fast"), item("slow"), item("joined", ["fast", "slow"])],
-        },
-        objectiveBody: body,
-        fakeRoot: join(root, "fake"),
-        actions: {
-          fast: { files: [{ path: "fast.txt", text: "fast" }] },
-          slow: { barrier, files: [{ path: "slow.txt", text: "slow" }] },
-          joined: { files: [{ path: "joined.txt", text: "joined" }] },
-        },
-        resultReviewer(request) {
-          const state = readState(repository, 1);
-          const held = Object.values(state.work).filter(
-            (work) => work.phaseReservation,
-          );
-          assert.ok(
-            held.length <= 2,
-            "declared CPU/memory remains within the operator envelope",
-          );
-          if (
-            request.criteria.includes("fast.txt exists") &&
-            state.work.fast.status === "running"
-          ) {
-            assert.equal(state.work.fast.phaseReservation, "review");
-            assert.equal(state.work.slow.phaseReservation, "coding");
-            reviewedWhileCoding = true;
-            mkdirSync(dirname(barrier), { recursive: true });
-            writeFileSync(barrier, "release");
-          }
-          return {
-            findings: resultFindings(
-              request,
-              request.criteria.map((criterion) => ({
-                criterion,
-                verdict: "pass",
-                source: "OBJECTIVE",
-                quote: "# Phase admission",
-                detail: "Exact fixture proof",
-                question: "",
-              })),
-            ),
-          };
-        },
-      });
-      const start = driver.start.bind(driver);
-      driver.start = async (request) => {
-        const state = readState(repository, 1);
-        assert.equal(state.work[request.item.id].phaseReservation, "coding");
-        assert.ok(
-          Object.values(state.work).filter((work) => work.phaseReservation)
-            .length <= 2,
+  for (const slowFirst of [
+    false,
+    true,
+    ...(delivery === "native-stack" ? ["unknown-merge"] : []),
+  ])
+    test(`${delivery} slowFirst=${slowFirst}: review receives the freed coding capacity while an independent worker remains active`, async () => {
+      const root = mkdtempSync(join(tmpdir(), "factory-phase-integration-"));
+      const previous = process.env.XDG_STATE_HOME;
+      process.env.XDG_STATE_HOME = join(root, "state");
+      try {
+        const target = createTarget(root);
+        const repository = `example/phase-${delivery}`;
+        const barrier = join(root, "barriers", "slow.go");
+        const body =
+          "# Phase admission\n## Acceptance\n- fast.txt exists\n- slow.txt exists\n- joined.txt exists\n- tail.txt exists\n## Commands\n- test -s fast.txt\n- test -s slow.txt\n- test -s joined.txt\n- test -s tail.txt\n## Final validation\n- test -s joined.txt\n";
+        const item = (id, dependencies = []) => ({
+          id,
+          title: id,
+          goal: id,
+          acceptance: [`${id}.txt exists`],
+          nonGoals: ["No deployment"],
+          citations: [{ path: "OBJECTIVE" }],
+          dependencies,
+          ownedPaths: [`${id}.txt`],
+          resources: [],
+          validation: [
+            {
+              command: `test -s ${id}.txt`,
+              provenance: "source-declared",
+              source: "OBJECTIVE",
+            },
+          ],
+          brief: id,
+          sourceAssets: [],
+          expectedOutputRoles: [],
+          minimumAssetSets: 0,
+          requiredLfsRoles: [],
+        });
+        const config = factoryConfig(target.checkout, repository, delivery, 2);
+        config.scheduling = {
+          cpu: 2,
+          memoryMiB: 200,
+          reviewConcurrency: 1,
+          validationConcurrency: 1,
+          phases: Object.fromEntries(
+            ["coding", "validation", "review", "delivery"].map((phase) => [
+              phase,
+              { cpu: 1, memoryMiB: 100 },
+            ]),
+          ),
+        };
+        assert.equal(validateConfig(config), config);
+        const missing = structuredClone(config);
+        delete missing.scheduling.phases.review.cpu;
+        assert.throws(
+          () => validateConfig(missing),
+          /requires a fitting declaration/,
         );
-        return start(request);
-      };
-      const plan = await application.planObjective(1);
-      const final = await application.runObjective(1, plan);
-      assert.equal(reviewedWhileCoding, true);
-      assert.equal(final.finalValidation.passed, true);
-      assert.ok(
-        Object.values(final.work).every((work) => !work.phaseReservation),
-      );
-    } finally {
-      if (previous === undefined) delete process.env.XDG_STATE_HOME;
-      else process.env.XDG_STATE_HOME = previous;
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
+        const oversized = structuredClone(config);
+        oversized.scheduling.phases.validation.memoryMiB = 201;
+        assert.throws(
+          () => validateConfig(oversized),
+          /requires a fitting declaration/,
+        );
+        let reviewedWhileCoding = false;
+        const { application, driver, github } = makeApplication({
+          config,
+          graph: {
+            objective: 1,
+            baseSha: target.baseSha,
+            items: [
+              ...(slowFirst
+                ? [item("slow"), item("fast")]
+                : [item("fast"), item("slow")]),
+              item("joined", ["fast", "slow"]),
+              item("tail", ["joined"]),
+            ],
+          },
+          objectiveBody: body,
+          fakeRoot: join(root, "fake"),
+          actions: {
+            fast: { files: [{ path: "fast.txt", text: "fast" }] },
+            slow: { barrier, files: [{ path: "slow.txt", text: "slow" }] },
+            joined: { files: [{ path: "joined.txt", text: "joined" }] },
+            tail: { files: [{ path: "tail.txt", text: "tail" }] },
+          },
+          resultReviewer(request) {
+            const state = readState(repository, 1);
+            const held = Object.values(state.work).filter(
+              (work) => work.phaseReservation,
+            );
+            assert.ok(
+              held.length <= 2,
+              "declared CPU/memory remains within the operator envelope",
+            );
+            if (
+              request.criteria.includes("fast.txt exists") &&
+              state.work.fast.status === "running"
+            ) {
+              assert.equal(state.work.fast.phaseReservation, "review");
+              assert.equal(state.work.slow.phaseReservation, "coding");
+              reviewedWhileCoding = true;
+              mkdirSync(dirname(barrier), { recursive: true });
+              writeFileSync(barrier, "release");
+            }
+            return {
+              findings: resultFindings(
+                request,
+                request.criteria.map((criterion) => ({
+                  criterion,
+                  verdict: "pass",
+                  source: "OBJECTIVE",
+                  quote: "# Phase admission",
+                  detail: "Exact fixture proof",
+                  question: "",
+                })),
+              ),
+            };
+          },
+        });
+        let stackMerges = 0;
+        for (const method of ["merge", "mergeNativeStack"]) {
+          const original = github[method].bind(github);
+          github[method] = async (...args) => {
+            const state = readState(repository, 1);
+            const number =
+              method === "merge" ? args[0].number : args[0].at(-1).pullRequest;
+            const owner = Object.values(state.work).find(
+              (work) => work.pullRequest === number,
+            );
+            assert.equal(
+              owner.phaseReservation,
+              "delivery",
+              `actual ${method} must reserve delivery`,
+            );
+            assert.ok(
+              Object.values(state.work).filter((work) => work.phaseReservation)
+                .length <= 2,
+            );
+            if (method === "mergeNativeStack") {
+              stackMerges++;
+              if (slowFirst === "unknown-merge")
+                throw new Error("Native merge response lost");
+            }
+            return original(...args);
+          };
+        }
+        const start = driver.start.bind(driver);
+        driver.start = async (request) => {
+          const state = readState(repository, 1);
+          assert.equal(state.work[request.item.id].phaseReservation, "coding");
+          assert.ok(
+            Object.values(state.work).filter((work) => work.phaseReservation)
+              .length <= 2,
+          );
+          return start(request);
+        };
+        const plan = await application.planObjective(1);
+        if (slowFirst === "unknown-merge") {
+          await assert.rejects(
+            application.runObjective(1, plan),
+            /Native merge response lost/,
+          );
+          const preserved = readState(repository, 1);
+          assert.equal(preserved.work.tail.pendingEffect, "merge");
+          assert.equal(preserved.work.tail.phaseReservation, "delivery");
+          assert.equal(stackMerges, 1);
+          return;
+        }
+        const final = await application.runObjective(1, plan);
+        assert.equal(reviewedWhileCoding, true);
+        assert.equal(final.finalValidation.passed, true);
+        if (delivery === "native-stack") assert.equal(stackMerges, 1);
+        assert.ok(
+          Object.values(final.work).every((work) => !work.phaseReservation),
+        );
+      } finally {
+        if (previous === undefined) delete process.env.XDG_STATE_HOME;
+        else process.env.XDG_STATE_HOME = previous;
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
 }

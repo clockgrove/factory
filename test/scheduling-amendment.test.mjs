@@ -52,7 +52,11 @@ test("accepted reprioritization changes pending order without resetting running 
       {
         objective: 1,
         baseSha: target.baseSha,
-        items: [item("first"), item("second")],
+        items: [
+          item("first"),
+          item("second"),
+          { ...item("legacy"), priority: undefined },
+        ],
       },
     );
     graph.coverage[0].source = obligations[0].source;
@@ -61,8 +65,12 @@ test("accepted reprioritization changes pending order without resetting running 
       baseSha: target.baseSha,
       graph,
       runId: "priority-fixture",
-      issueByItemId: { first: 2, second: 3 },
-      work: { first: { status: "pending" }, second: { status: "pending" } },
+      issueByItemId: { first: 2, second: 3, legacy: 4 },
+      work: {
+        first: { status: "pending" },
+        second: { status: "pending" },
+        legacy: { status: "done", attempt: "retained-legacy" },
+      },
       admission: {
         graphDigest: graphDigest(graph),
         authority: {
@@ -81,6 +89,7 @@ test("accepted reprioritization changes pending order without resetting running 
     );
     const candidate = structuredClone(graph);
     candidate.items[1].priority = 5;
+    candidate.items[2].priority = 0;
     const proposal = {
       scope: "in-scope",
       reason: "Accepted prerequisite urgency",
@@ -113,6 +122,8 @@ test("accepted reprioritization changes pending order without resetting running 
       cancelled: () => false,
     });
     assert.equal(reviews, 1);
+    assert.equal(state.work.legacy.attempt, "retained-legacy");
+    assert.equal(state.graph.items[2].priority, 0);
     assert.equal(
       readyItems(state.graph, state.work, new Set(), 1)[0].id,
       "second",

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   compileObjective,
   objectiveCriteria,
@@ -14,6 +15,7 @@ import type {
   PlanningModel,
   WorkDiscovery,
   WorkGraph,
+  WorkItem,
 } from "./contracts.js";
 import { CompletedModelInvocationError } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
@@ -39,6 +41,9 @@ export interface PendingAmendment {
   proposal: AmendmentProposal;
   phase:
     | "ready"
+    | "compiled"
+    | "reviewed"
+    | "projected"
     | "compiling"
     | "reviewing"
     | "projecting"
@@ -65,6 +70,21 @@ export type AllowanceConsumption = {
 };
 export const graphDigest = (graph: WorkGraph): string =>
   createHash("sha256").update(JSON.stringify(graph)).digest("hex");
+
+/** Compare supported defaults without changing immutable admitted graph bytes. */
+function sameItem(
+  left: WorkItem | undefined,
+  right: WorkItem | undefined,
+): boolean {
+  const normalized = (item: WorkItem | undefined) =>
+    item && {
+      ...item,
+      kind: item.kind ?? "work",
+      children: item.children ?? [],
+      priority: item.priority ?? 0,
+    };
+  return isDeepStrictEqual(normalized(left), normalized(right));
+}
 
 export function assertDiscovery(value: WorkDiscovery): void {
   if (
@@ -157,8 +177,10 @@ export function assertGraphRevisions(state: FactoryState): void {
         : undefined);
     if (
       !revision ||
-      JSON.stringify(revision.items.find((item) => item.id === id)) !==
-        JSON.stringify(state.graph.items.find((item) => item.id === id))
+      !sameItem(
+        revision.items.find((item) => item.id === id),
+        state.graph.items.find((item) => item.id === id),
+      )
     )
       throw new Error("Attempt graph revision binding changed");
   }
@@ -169,6 +191,9 @@ export function assertGraphRevisions(state: FactoryState): void {
       !pending.id ||
       ![
         "ready",
+        "compiled",
+        "reviewed",
+        "projected",
         "compiling",
         "reviewing",
         "projecting",
@@ -178,7 +203,12 @@ export function assertGraphRevisions(state: FactoryState): void {
       pending.proposal.expectedGraphDigest !== graphDigest(state.graph)
     )
       throw new Error("Pending amendment has stale graph identity");
-    if (["reviewing", "projecting"].includes(pending.phase) && !pending.graph)
+    if (
+      ["compiled", "reviewing", "reviewed", "projecting", "projected"].includes(
+        pending.phase,
+      ) &&
+      !pending.graph
+    )
       throw new Error("Pending amendment lacks candidate graph");
   }
 }
@@ -321,7 +351,7 @@ export function validateAmendment(
     const next = graph.items.find((item) => item.id === old.id);
     if (!next)
       throw new Error("Amendments cannot remove stable Work Item identities");
-    const changed = JSON.stringify(next) !== JSON.stringify(old);
+    const changed = !sameItem(next, old);
     const work = state.work[old.id]!;
     if (
       changed &&
@@ -345,7 +375,7 @@ export function validateAmendment(
     const next = graph.coverage.find(
       (candidate) => candidate.criterionId === entry.criterionId,
     );
-    if (!next || JSON.stringify(next.source) !== JSON.stringify(entry.source))
+    if (!next || !isDeepStrictEqual(next.source, entry.source))
       throw new Error(
         "Amendment deletes or changes source acceptance coverage",
       );
@@ -398,174 +428,194 @@ export async function applyPendingAmendment(args: {
     state.coordinator?.processes?.length
   )
     return false;
-  if (pending.phase !== "ready")
+  if (!["ready", "compiled", "reviewed", "projected"].includes(pending.phase))
     throw new Error(
       `Amendment ${pending.phase} cannot be replayed; inspect preserved evidence`,
     );
+  const stopped = () =>
+    state.coordinator && state.coordinator.mode !== "running";
+  if (stopped()) return false;
   state.allowanceConsumption ??= {
     planningRevisions: 0,
     implementationRepairs: 0,
     resultRereviews: 0,
   };
   const consumption = state.allowanceConsumption;
-  if (
-    consumption.planningRevisions >=
-    state.admission!.authority.allowances.planningRevisions
-  )
-    throw new Error("Objective planning revision allowance exhausted");
-  consumption.planningRevisions++;
+  if (pending.phase === "ready") {
+    if (
+      consumption.planningRevisions >=
+      state.admission!.authority.allowances.planningRevisions
+    )
+      throw new Error("Objective planning revision allowance exhausted");
+    consumption.planningRevisions++;
+  }
   state.graphRevisions ??= [
     { graph: structuredClone(state.graph), digest: graphDigest(state.graph) },
   ];
-  save();
   let compilationResponseObserved = false;
   try {
     if (args.cancelled()) throw new Error("Objective cancelled");
     const choices = executionProfileChoices(config);
-    if (pending.proposal.graph) {
-      pending.graph = structuredClone(pending.proposal.graph);
-      for (const item of pending.graph.items) delete item.executionBinding;
-      normalizeExecutionProfiles(pending.graph, choices);
-    } else {
-      pending.phase = "compiling";
+    if (pending.phase === "ready") {
+      if (pending.proposal.graph) {
+        pending.graph = structuredClone(pending.proposal.graph);
+        for (const item of pending.graph.items) delete item.executionBinding;
+        normalizeExecutionProfiles(pending.graph, choices);
+      } else {
+        pending.phase = "compiling";
+        save();
+        pending.graph = await compileObjective(
+          state.objective,
+          args.body,
+          state.baseSha,
+          config.checkout,
+          {
+            generateStructured: async (request) => {
+              const response = await args.model.generateStructured(request);
+              compilationResponseObserved = true;
+              return response;
+            },
+            reviewGraph: (request) => args.model.reviewGraph(request),
+          },
+          [],
+          [],
+          {
+            invocationId: randomUUID(),
+            phase: "compile",
+            ordinal: consumption.planningRevisions,
+            observe: args.diagnostics?.modelObserver({
+              scopeId: pending.id,
+              runId: state.runId,
+            }),
+          },
+          choices,
+          state.additionalSources,
+          {
+            currentGraph: state.graph,
+            discovery: pending.proposal,
+            immutableItemIds: Object.keys(state.work).filter(
+              (id) =>
+                state.work[id]!.status !== "pending" || state.work[id]!.attempt,
+            ),
+          },
+        );
+      }
+      pending.phase = "compiled";
       save();
-      pending.graph = await compileObjective(
-        state.objective,
+    }
+    if (args.cancelled()) throw new Error("Objective cancelled");
+    if (stopped()) return false;
+    validateAmendment(state, pending.graph!, config, args.body);
+    if (args.cancelled()) throw new Error("Objective cancelled");
+    if (pending.phase === "compiled") {
+      const sources = planningSources(
         args.body,
         state.baseSha,
         config.checkout,
-        {
-          generateStructured: async (request) => {
-            const response = await args.model.generateStructured(request);
-            compilationResponseObserved = true;
-            return response;
-          },
-          reviewGraph: (request) => args.model.reviewGraph(request),
-        },
+        state.additionalSources,
+      );
+      const packet = planReviewPacket(
+        args.body,
+        state.baseSha,
+        sources,
+        pending.graph!,
+        config.checkout,
+        choices,
+      );
+      packet.amendment = {
+        previousGraph: state.graph,
+        proposal: pending.proposal,
+        work: Object.fromEntries(
+          Object.entries(state.work).map(([id, work]) => [
+            id,
+            {
+              status: work.status,
+              attempt: work.attempt,
+              treeSha: work.treeSha,
+              changeRef: work.changeRef,
+              pullRequest: work.pullRequest,
+              integratedSha: work.integratedSha,
+            },
+          ]),
+        ),
+      };
+      const evidence = reviewPacket(
         [],
-        [],
-        {
+        sources.map((source) => ({ ...source, origin: "source" as const })),
+      );
+      pending.phase = "reviewing";
+      save();
+      const response = await args.model.reviewGraph({
+        ...packet,
+        reviewPacket: evidence,
+        invocation: {
           invocationId: randomUUID(),
-          phase: "compile",
+          phase: "graph-review",
           ordinal: consumption.planningRevisions,
           observe: args.diagnostics?.modelObserver({
             scopeId: pending.id,
             runId: state.runId,
           }),
         },
-        choices,
-        state.additionalSources,
-        {
-          currentGraph: state.graph,
-          discovery: pending.proposal,
-          immutableItemIds: Object.keys(state.work).filter(
-            (id) =>
-              state.work[id]!.status !== "pending" || state.work[id]!.attempt,
-          ),
-        },
-      );
+      });
+      pending.phase = "compiled";
+      const findings = decodeGraphReview(response, evidence);
+      if (findings.length)
+        throw new Error(
+          `Independent amendment review rejected: ${JSON.stringify(findings)}`,
+        );
+      pending.reviewDigest = createHash("sha256")
+        .update(JSON.stringify({ packet, findings }))
+        .digest("hex");
+      pending.phase = "reviewed";
+      save();
     }
-    pending.phase = "ready";
-    save();
-    validateAmendment(state, pending.graph, config, args.body);
     if (args.cancelled()) throw new Error("Objective cancelled");
-    const sources = planningSources(
-      args.body,
-      state.baseSha,
-      config.checkout,
-      state.additionalSources,
-    );
-    const packet = planReviewPacket(
-      args.body,
-      state.baseSha,
-      sources,
-      pending.graph,
-      config.checkout,
-      choices,
-    );
-    packet.amendment = {
-      previousGraph: state.graph,
-      proposal: pending.proposal,
-      work: Object.fromEntries(
-        Object.entries(state.work).map(([id, work]) => [
-          id,
-          {
-            status: work.status,
-            attempt: work.attempt,
-            treeSha: work.treeSha,
-            changeRef: work.changeRef,
-            pullRequest: work.pullRequest,
-            integratedSha: work.integratedSha,
-          },
-        ]),
-      ),
-    };
-    const evidence = reviewPacket(
-      [],
-      sources.map((source) => ({ ...source, origin: "source" as const })),
-    );
-    pending.phase = "reviewing";
-    save();
-    const response = await args.model.reviewGraph({
-      ...packet,
-      reviewPacket: evidence,
-      invocation: {
-        invocationId: randomUUID(),
-        phase: "graph-review",
-        ordinal: consumption.planningRevisions,
-        observe: args.diagnostics?.modelObserver({
-          scopeId: pending.id,
-          runId: state.runId,
-        }),
-      },
-    });
-    pending.phase = "ready";
-    save();
-    const findings = decodeGraphReview(response, evidence);
-    if (findings.length)
-      throw new Error(
-        `Independent amendment review rejected: ${JSON.stringify(findings)}`,
-      );
-    pending.reviewDigest = createHash("sha256")
-      .update(JSON.stringify({ packet, findings }))
-      .digest("hex");
-    validateAmendment(state, pending.graph, config, args.body);
+    if (stopped()) return false;
+    validateAmendment(state, pending.graph!, config, args.body);
     if (args.cancelled()) throw new Error("Objective cancelled");
-    pending.phase = "projecting";
-    save();
-    const projected = await args.github.projectGraph({
-      graph: pending.graph,
-      previousGraph: state.graph,
-      objectiveIssue: state.objective,
-      knownIssues: pending.issueByItemId,
-      completedItems: Object.keys(state.work).filter(
-        (id) => state.work[id]!.status === "done",
-      ),
-      beforeCreate: (id) => {
-        if (args.cancelled()) throw new Error("Objective cancelled");
-        pending.projectionPending = id;
-        save();
-      },
-      projected: (id, issue) => {
-        pending.issueByItemId[id] = issue;
-        if (pending.projectionPending === id) delete pending.projectionPending;
-        save();
-      },
-    });
+    if (pending.phase === "reviewed") {
+      pending.phase = "projecting";
+      save();
+      const projected = await args.github.projectGraph({
+        graph: pending.graph!,
+        previousGraph: state.graph,
+        objectiveIssue: state.objective,
+        knownIssues: pending.issueByItemId,
+        completedItems: Object.keys(state.work).filter(
+          (id) => state.work[id]!.status === "done",
+        ),
+        beforeCreate: (id) => {
+          if (args.cancelled()) throw new Error("Objective cancelled");
+          pending.projectionPending = id;
+          save();
+        },
+        projected: (id, issue) => {
+          pending.issueByItemId[id] = issue;
+          if (pending.projectionPending === id)
+            delete pending.projectionPending;
+          save();
+        },
+      });
+      pending.issueByItemId = projected.issueByItemId;
+      pending.phase = "projected";
+      save();
+    }
     if (args.cancelled()) throw new Error("Objective cancelled");
-    validateAmendment(state, pending.graph, config, args.body);
+    if (stopped()) return false;
+    validateAmendment(state, pending.graph!, config, args.body);
     const proposalReceipt = structuredClone(pending.proposal);
     delete proposalReceipt.graph;
     state.graphRevisions.push({
-      graph: structuredClone(pending.graph),
-      digest: graphDigest(pending.graph),
+      graph: structuredClone(pending.graph!),
+      digest: graphDigest(pending.graph!),
       parentDigest: graphDigest(state.graph),
       proposal: proposalReceipt,
-      reviewDigest: pending.reviewDigest,
+      reviewDigest: pending.reviewDigest!,
       acceptedAt: new Date().toISOString(),
     });
-    state.graph = pending.graph;
-    state.issueByItemId = projected.issueByItemId;
+    state.graph = pending.graph!;
+    state.issueByItemId = pending.issueByItemId;
     for (const item of state.graph.items)
       state.work[item.id] ??= { status: "pending" };
     if (pending.proposal.worker)

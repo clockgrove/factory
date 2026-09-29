@@ -814,12 +814,56 @@ test("owner handoff releases a paused preparation without cancellation or projec
       );
     },
     (graph) => ({
-      generateStructured: async () => {
+      generateStructured: async (request) => {
         started.resolve();
         await release.promise;
-        return graph;
+        return withCoverage(request, graph);
       },
       reviewGraph: async () => ({ findings: [] }),
     }),
+  );
+});
+
+test("handoff settles an already running worker and preserves its attempt instead of cancellation", async () => {
+  await fixture(
+    "handoff-worker",
+    async ({ application, config, descriptor, eventsPath, root }) => {
+      const barrier = join(root, "barrier", "go");
+      descriptor.actions.result.barrier = barrier;
+      const running = application.runObjective(1);
+      await until(() =>
+        readEvents(eventsPath).some((event) => event.type === "start"),
+      );
+      const attempt = readState(config.repository, 1).work.result.attemptId;
+      await requestControl(config.repository, {
+        objective: 1,
+        action: "handoff",
+      });
+      assert.equal(
+        existsSync(join(stateRoot(config.repository), "controller.lock")),
+        true,
+      );
+      mkdirSync(join(root, "barrier"), { recursive: true });
+      writeFileSync(barrier, "go");
+      await running;
+      const state = readState(config.repository, 1);
+      assert.equal(state.work.result.attemptId, attempt);
+      assert.equal(state.cancelledAt, undefined);
+      assert.equal(state.cancelRequested, undefined);
+      assert.equal(state.work.result.status, "done");
+      assert.equal(
+        readEvents(eventsPath).filter((event) => event.type === "start").length,
+        1,
+      );
+      assert.equal(
+        readEvents(eventsPath).filter((event) => event.type === "cancel")
+          .length,
+        0,
+      );
+      assert.equal(
+        existsSync(join(stateRoot(config.repository), "controller.lock")),
+        false,
+      );
+    },
   );
 });

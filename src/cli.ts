@@ -27,6 +27,7 @@ import {
   statusDocument,
   summarizeDiagnosticUsage,
 } from "./diagnostics.js";
+import { probeCodexReadiness } from "./harness-readiness.js";
 import { compose, composePlanning } from "./index.js";
 import {
   CoordinatorHandoff,
@@ -50,7 +51,7 @@ function options(args: string[], name: string): string[] {
 
 function help(): void {
   console.log(
-    `Factory CLI\n\nCommands:\n  supervisor install|status|start|stop|disable|uninstall|upgrade [--objective N] [--plan PATH --admission PATH] [--cli ABSOLUTE_INSTALLED_CLI] [--config PATH]\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
+    `Factory CLI\n\nCommands:\n  readiness --outside-directory ABSOLUTE_EXISTING_DIRECTORY [--config PATH]\n  supervisor install|status|start|stop|disable|uninstall|upgrade [--objective N] [--plan PATH --admission PATH] [--cli ABSOLUTE_INSTALLED_CLI] [--config PATH]\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
   );
 }
 
@@ -58,6 +59,54 @@ async function main(): Promise<void> {
   const [, , command, ...args] = process.argv;
   if (!command || command === "help" || command === "--help") return help();
   const path = option(args, "config") ?? configPath();
+  if (command === "readiness") {
+    const config = readConfig(path);
+    const outsideDirectory = option(args, "outside-directory");
+    if (!outsideDirectory)
+      throw new Error(
+        "readiness requires --outside-directory ABSOLUTE_EXISTING_DIRECTORY",
+      );
+    const harness =
+      config.execution.kind === "local"
+        ? (config.execution.profiles?.[config.execution.defaultProfile ?? ""]
+            ?.harness ?? config.execution.harness)
+        : undefined;
+    if (harness?.kind !== "codex-sdk") {
+      console.log(
+        JSON.stringify({
+          status: "unavailable",
+          detail:
+            "This model-free readiness probe supports the configured default local Codex harness only",
+          controllerValidation: "not assessed",
+        }),
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const credentials = join(stateRoot(config.repository), "empty-gh-config");
+    mkdirSync(credentials, { recursive: true, mode: 0o700 });
+    const result = await probeCodexReadiness({
+      workspace: config.checkout,
+      outsideDirectory,
+      credentialDirectory: credentials,
+      network: config.policy.network,
+      allowedSecretNames: config.policy.allowedSecretNames,
+    });
+    console.log(
+      JSON.stringify(
+        {
+          ...result,
+          scope: "configured default implementation harness",
+          controllerValidation:
+            "not assessed; run source-declared acceptance commands in their declared environment",
+        },
+        null,
+        2,
+      ),
+    );
+    if (result.status !== "ready") process.exitCode = 1;
+    return;
+  }
   if (command === "supervisor") {
     const action = args[0] ?? "status";
     const input = {

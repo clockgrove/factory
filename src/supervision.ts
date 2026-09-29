@@ -1,3 +1,4 @@
+import { objectiveComplete } from "./completion.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -166,7 +167,7 @@ export function checkServiceState(
     const fields =
       state.schemaVersion === 3
         ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest admission coordinator planning plan issueByItemId projectionPending error cancelRequested cancelledAt"
-        : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment allowanceConsumption backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
+        : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment allowanceConsumption backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
     for (const field of Object.keys(state))
       if (!fields.split(" ").includes(field))
         throw new Error(

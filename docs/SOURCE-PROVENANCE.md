@@ -701,3 +701,7 @@ The current diagnostic, provider SDK event and usage contracts supplied this obs
 ## Local interaction analysis (#219)
 
 The versioned #214 interaction metadata, existing diagnostic scopes and normalized usage contracts supplied this newly written local analysis capability. Public synthetic observations test identity grouping, exact filters, overlapping intervals, missing counters, provider estimates and separate provider/protocol/semantic outcomes. CLI tests exercise metadata-only reads and restrictive exclusive report creation outside the target checkout. No archived implementation, private source or provider transcripts were copied. Reports have no lifecycle authority, hosted service, pricing model or model-quality inference; source tests do not extend historical installed-artifact qualification.
+
+### Local background supervision (#246)
+
+The new `supervision.ts` module registers a single systemd user unit over the existing #245 owner, atomic continuation and control socket. `runner.ts` adds a quiescent handoff; no separate queue or execution journal is introduced. Public CLI operations preserve explicit service consent, exact installed paths, model-free state compatibility, private configuration and retained evidence. No archived service implementation was copied. User-manager lifecycle tests remain distinct from the later full autonomous Objective qualification in #253.

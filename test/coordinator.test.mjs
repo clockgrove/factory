@@ -782,3 +782,43 @@ test("a completed semantic refusal is failed evidence, not an unknown submitted 
       },
     );
 });
+
+test("owner handoff releases a paused preparation without cancellation or projection", async () => {
+  const started = deferred();
+  const release = deferred();
+  await fixture(
+    "handoff-preparation",
+    async ({ application, config }) => {
+      const running = application.runObjective(1);
+      const outcome = running.then(
+        () => "returned",
+        (error) => error,
+      );
+      await started.promise;
+      await requestControl(config.repository, {
+        objective: 1,
+        action: "handoff",
+      });
+      release.resolve();
+      const error = await outcome;
+      assert.equal(error.constructor.name, "CoordinatorHandoff");
+      const state = readContinuation(config.repository, 1);
+      assert.equal(state.coordinator.mode, "draining");
+      assert.equal(state.cancelRequested, undefined);
+      assert.equal(state.cancelledAt, undefined);
+      assert.deepEqual(state.issueByItemId, {});
+      assert.equal(
+        existsSync(join(stateRoot(config.repository), "controller.lock")),
+        false,
+      );
+    },
+    (graph) => ({
+      generateStructured: async () => {
+        started.resolve();
+        await release.promise;
+        return graph;
+      },
+      reviewGraph: async () => ({ findings: [] }),
+    }),
+  );
+});

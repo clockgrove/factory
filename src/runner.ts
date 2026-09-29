@@ -1499,6 +1499,9 @@ async function runObjectivePass(
       );
       state = {
         schemaVersion: 2,
+        ...(preparation.planningRecovery
+          ? { planningRecovery: preparation.planningRecovery }
+          : {}),
         ...(preparation.allowanceConsumption
           ? { allowanceConsumption: preparation.allowanceConsumption }
           : {}),

@@ -571,6 +571,7 @@ test("durable plan --authority carries consumed planning allowance into exact ac
   try {
     const target = createTarget(root);
     const config = factoryConfig(target.checkout, "example/durable-plan");
+    config.capture = { enabled: false, maxBytesPerInvocation: 1024 };
     const graph = { objective: 1, baseSha: target.baseSha, items: [item()] };
     let calls = 0;
     const planner = model(graph, () => ({
@@ -619,6 +620,27 @@ test("durable plan --authority carries consumed planning allowance into exact ac
     const state = await fixture.application.runObjective(1, plan, admitted);
     assert.equal(state.finalValidation.passed, true);
     assert.equal(state.allowanceConsumption.planningRevisions, 1);
+    const reloaded = JSON.parse(JSON.stringify(state));
+    assertRepairLedger(reloaded);
+    const retained = reloaded.planningRecovery;
+    assert.equal(retained.phase, "complete");
+    assert.equal(retained.response, undefined);
+    assert.equal(retained.history.length, 1);
+    const failure = retained.history[0];
+    assert.match(failure.detail, /invented.png/);
+    assert.equal(failure.failure, failureDigest(failure.detail));
+    assert.deepEqual(
+      failure.invocations.map((entry) => entry.phase),
+      ["compile", "diagnosis"],
+    );
+    for (const receipt of [...failure.invocations, ...retained.invocations]) {
+      assert.match(receipt.id, /^[a-f0-9-]{36}$/);
+      assert.match(receipt.resultDigest, /^[a-f0-9]{64}$/);
+    }
+    assert.deepEqual(
+      retained.invocations.map((entry) => entry.phase),
+      ["compile", "graph-review"],
+    );
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previous;

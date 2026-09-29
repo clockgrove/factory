@@ -1706,11 +1706,14 @@ async function checkedPlanReview(
 export interface PlanningRecoveryRecord {
   phase: "ready" | "submitted" | "complete" | "stopped";
   invocation?: { id: string; phase: string };
+  invocations?: { id: string; phase: string; resultDigest?: string }[];
   response?: unknown;
   responseFailure?: string;
   reviewResponse?: Awaited<ReturnType<PlanningModel["reviewGraph"]>>;
   history: {
     failure: string;
+    detail: string;
+    invocations: { id: string; phase: string; resultDigest?: string }[];
     kind: RepairClass;
     diagnosis: string;
     correction: string;
@@ -1771,6 +1774,8 @@ async function compileRecoverablePlan(
     const id = randomUUID();
     record.phase = "submitted";
     record.invocation = { id, phase };
+    record.invocations ??= [];
+    record.invocations.push({ id, phase });
     save();
     return {
       invocationId: id,
@@ -1778,6 +1783,10 @@ async function compileRecoverablePlan(
       ordinal: state.allowanceConsumption?.planningRevisions ?? 0,
       observe,
     };
+  };
+  const retainResult = (result: unknown): void => {
+    const receipt = record.invocations?.at(-1);
+    if (receipt) receipt.resultDigest = failureDigest(JSON.stringify(result));
   };
   const observedModel: PlanningModel = {
     generateStructured: async (request) => {
@@ -1790,12 +1799,14 @@ async function compileRecoverablePlan(
         result = await model.generateStructured(request);
       } catch (error) {
         if (error instanceof MalformedPlannerOutput) {
+          retainResult(error.message);
           record.responseFailure = error.message;
           record.phase = "ready";
           save();
         }
         throw error;
       }
+      retainResult(result);
       record.response = structuredClone(result);
       record.phase = "ready";
       save();
@@ -1804,6 +1815,7 @@ async function compileRecoverablePlan(
     reviewGraph: async (request) => {
       if (record.reviewResponse) return structuredClone(record.reviewResponse);
       const result = await model.reviewGraph(request);
+      retainResult(result);
       record.reviewResponse = structuredClone(result);
       record.phase = "ready";
       save();
@@ -1912,6 +1924,8 @@ async function compileRecoverablePlan(
     chargeRepair(state, permitted[0]!, ["$planning"]);
     record.phase = "submitted";
     record.invocation = { id: randomUUID(), phase: "diagnosis" };
+    record.invocations ??= [];
+    record.invocations.push({ ...record.invocation });
     save();
     const diagnosis = await model.generateStructured<{
       kind: string;
@@ -1941,6 +1955,7 @@ async function compileRecoverablePlan(
         observe,
       },
     });
+    retainResult(diagnosis);
     record.phase = "ready";
     if (
       !permitted.includes(diagnosis.kind as (typeof permitted)[number]) ||
@@ -1969,10 +1984,13 @@ async function compileRecoverablePlan(
     }
     record.history.push({
       failure: identity,
+      detail: failure,
+      invocations: structuredClone(record.invocations ?? []),
       kind: diagnosis.kind as RepairClass,
       diagnosis: diagnosis.diagnosis,
       correction: diagnosis.correction,
     });
+    record.invocations = [];
     corrections = [
       { evidence: [], detail: diagnosis.correction, question: "" },
     ];

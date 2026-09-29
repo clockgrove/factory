@@ -287,7 +287,18 @@ export function assertRepairLedger(
           !repairClasses.includes(entry.kind) ||
           !/^[a-f0-9]{64}$/.test(entry.failure) ||
           !entry.diagnosis ||
-          !entry.correction,
+          !entry.correction ||
+          typeof entry.detail !== "string" ||
+          failureDigest(entry.detail) !== entry.failure ||
+          !Array.isArray(entry.invocations) ||
+          entry.invocations.some(
+            (receipt) =>
+              !receipt ||
+              !receipt.id ||
+              !receipt.phase ||
+              (receipt.resultDigest !== undefined &&
+                !/^[a-f0-9]{64}$/.test(receipt.resultDigest)),
+          ),
       )
     )
       throw new Error("Invalid planning recovery disposition");

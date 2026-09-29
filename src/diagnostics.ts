@@ -1,3 +1,4 @@
+import { objectiveComplete } from "./completion.js";
 import { graphDigest } from "./graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import {
@@ -1025,7 +1026,11 @@ export function statusDocument(
         }
       : null;
   const activeCount = Object.values(state.work).filter(
-    (item) => item.status === "running",
+    (item) =>
+      item.phaseReservation === "coding" ||
+      (!item.phaseReservation &&
+        item.status === "running" &&
+        item.step === "execute"),
   ).length;
   const configuredSlots =
     concurrency === undefined
@@ -1033,7 +1038,9 @@ export function statusDocument(
       : Math.max(0, concurrency - activeCount);
   const work = state.graph.items.map((item) => {
     const current = state.work[item.id]!;
-    let blockedReason: string | undefined;
+    let blockedReason: string | undefined = current.requestedPhase
+      ? current.waitingReason
+      : undefined;
     let eligible = false;
     if (current.status === "pending") {
       const dependency = item.dependencies.find(
@@ -1055,9 +1062,11 @@ export function statusDocument(
         ? `dependency:${dependency}`
         : conflict
           ? `resource:${conflict.id}`
-          : configuredSlots === 0
+          : item.kind !== "qa" &&
+              item.kind !== "aggregate" &&
+              configuredSlots === 0
             ? "capacity"
-            : undefined;
+            : current.waitingReason;
     } else if (current.status === "waiting")
       blockedReason =
         current.step === "approve-result"
@@ -1068,6 +1077,9 @@ export function statusDocument(
       issue: state.issueByItemId[item.id],
       status: current.status,
       step: current.step ?? null,
+      phaseReservation: current.phaseReservation ?? null,
+      requestedPhase: current.requestedPhase ?? null,
+      priority: item.priority ?? 0,
       eligible,
       // Provider capacity is not persisted in the state snapshot.
       ready: current.status === "pending" && !blockedReason ? null : false,
@@ -1129,7 +1141,7 @@ export function statusDocument(
         ? ("failed" as const)
         : state.finalAcceptancePending
           ? ("waiting" as const)
-          : state.finalValidation?.passed
+          : objectiveComplete(state)
             ? ("complete" as const)
             : ("active" as const),
     runId: state.runId,
@@ -1152,6 +1164,7 @@ export function statusDocument(
     baseSha: state.baseSha,
     integratedSha: state.integratedSha ?? null,
     finalValidation: state.finalValidation?.passed ?? false,
+    finalAcceptance: state.finalAcceptance ?? null,
     finalAcceptancePending: pendingDecision(state.finalAcceptancePending),
     objectiveClosure: state.objectiveClosure ?? null,
     lastError:
@@ -1385,11 +1398,7 @@ export class StateDiagnostics {
       });
       this.previousIntegrated = this.state.integratedSha;
     }
-    if (
-      this.state.finalValidation?.passed &&
-      this.state.objectiveClosure === "complete" &&
-      !this.previousFinal
-    ) {
+    if (objectiveComplete(this.state) && !this.previousFinal) {
       this.emitter.emit({
         runId: this.state.runId,
         operation: "objective-finalization",

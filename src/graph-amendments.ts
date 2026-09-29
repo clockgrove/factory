@@ -81,6 +81,7 @@ function sameItem(
       ...item,
       kind: item.kind ?? "work",
       children: item.children ?? [],
+      priority: item.priority ?? 0,
     };
   return isDeepStrictEqual(normalized(left), normalized(right));
 }
@@ -226,6 +227,12 @@ export function submitAmendment(
   state: FactoryState,
   proposal: AmendmentProposal,
 ): PendingAmendment {
+  if (state.objectiveClosure === "complete")
+    throw new Error("Completed Objective discoveries require successor work");
+  if (state.finalAcceptance || state.objectiveClosure === "pending")
+    throw new Error(
+      "Objective closure is busy or awaiting reconciliation; amendment intake is fenced",
+    );
   assertDiscovery(proposal);
   if (
     !proposal.actor?.trim() ||

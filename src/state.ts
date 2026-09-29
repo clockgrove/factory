@@ -1,3 +1,4 @@
+import { assertFinalAcceptance } from "./completion.js";
 import {
   type AutonomousAdmission,
   assertAdmissionBinding,
@@ -64,6 +65,9 @@ export interface AcceptancePending {
 }
 
 export interface WorkState {
+  /** Reservation survives an uncertain effect; item ownership is separate. */
+  phaseReservation?: import("./config.js").ResourcePhase;
+  requestedPhase?: import("./config.js").ResourcePhase;
   graphRevisionDigest?: string;
   discovery?: import("./contracts.js").WorkDiscovery & { attempt: string };
   discoveryDisposition?: "proposed" | "accepted";
@@ -133,6 +137,7 @@ export interface PreparationState {
 export type ContinuationState = FactoryState | PreparationState;
 
 export interface FactoryState {
+  finalAcceptance?: import("./completion.js").FinalAcceptance;
   backlogDiscoveries?: import("./graph-amendments.js").AmendmentProposal[];
   graphRevisions?: import("./graph-amendments.js").GraphRevision[];
   pendingAmendment?: import("./graph-amendments.js").PendingAmendment;
@@ -419,6 +424,8 @@ export function parseFactoryState(
         if (binding[key] !== undefined)
           string(binding[key], `${id}.executionBinding.${key}`);
     }
+    if (item.priority !== undefined && !Number.isSafeInteger(item.priority))
+      throw new Error(`Work Item ${id} has invalid priority`);
     ids.add(id);
     for (const key of ["title", "goal", "brief"])
       string(item[key], `${id}.${key}`);
@@ -504,6 +511,14 @@ export function parseFactoryState(
       throw new Error(`Work Item ${id} has invalid pending effect`);
     if (!statuses.has(item.status as WorkStatus))
       throw new Error(`Work Item ${id} has an invalid status`);
+    for (const field of ["phaseReservation", "requestedPhase"])
+      if (
+        item[field] !== undefined &&
+        !["coding", "validation", "review", "delivery"].includes(
+          String(item[field]),
+        )
+      )
+        throw new Error(`Work Item ${id} has an invalid resource phase`);
     if (item.step !== undefined && !steps.has(item.step as WorkStep))
       throw new Error(`Work Item ${id} has an invalid step`);
     if (item.authentication !== undefined) {
@@ -989,5 +1004,6 @@ export function parseFactoryState(
     }
   }
   if (validated.finalValidation?.passed) assertCompletedCoverage(validated);
+  assertFinalAcceptance(validated);
   return validated;
 }

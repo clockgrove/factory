@@ -207,6 +207,11 @@ export const graphSchema = {
           children: { type: "array", items: { type: "string" } },
           dependencies: { type: "array", items: { type: "string" } },
           ownedPaths: { type: "array", items: { type: "string" } },
+          priority: {
+            type: "integer",
+            description:
+              "Source-authorized pending priority; larger first, zero when unspecified.",
+          },
           resources: {
             type: "array",
             items: {
@@ -266,6 +271,7 @@ export const graphSchema = {
           "dependencies",
           "ownedPaths",
           "resources",
+          "priority",
           "validation",
           "brief",
           "sourceAssets",

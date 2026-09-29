@@ -56,6 +56,8 @@ export interface WorkItem {
   dependencies: string[];
   ownedPaths: string[];
   resources?: string[];
+  /** Accepted pending priority: larger values run first, absent means zero. */
+  priority?: number;
   validation: {
     command: string;
     provenance: "base-observed" | "source-declared";

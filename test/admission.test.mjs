@@ -1,3 +1,4 @@
+import { objectiveComplete } from "../dist/completion.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,7 +7,7 @@ import test from "node:test";
 import { checkAuthority, validateAuthority } from "../dist/admission.js";
 import { compilePlan } from "../dist/compiler.js";
 import { factoryConfigDigest } from "../dist/config.js";
-import { readState, statePath } from "../dist/state-store.js";
+import { readState, saveState, statePath } from "../dist/state-store.js";
 import { withCoverage } from "./support/coverage.mjs";
 import {
   createTarget,
@@ -240,7 +241,8 @@ test("admitted execution persists authority and refuses replacement on resume", 
     );
     assert.equal(existsSync(statePath(config.repository, 1)), false);
     await application.runObjective(1, candidate, admission);
-    assert.deepEqual(readState(config.repository, 1).admission, admission);
+    const accepted = readState(config.repository, 1);
+    assert.deepEqual(accepted.admission, admission);
     const replacement = {
       ...admission,
       authority: authority({ reason: "Replace authority" }),
@@ -249,7 +251,26 @@ test("admitted execution persists authority and refuses replacement on resume", 
       application.runObjective(1, undefined, replacement),
       /cannot be added or replaced/,
     );
-    assert.deepEqual(readState(config.repository, 1).admission, admission);
+    const unchanged = readState(config.repository, 1);
+    assert.deepEqual(unchanged.admission, admission);
+    assert.deepEqual(unchanged.finalAcceptance, accepted.finalAcceptance);
+    assert.equal(unchanged.error, undefined);
+    assert.equal(objectiveComplete(unchanged), true);
+    const pending = structuredClone(unchanged);
+    pending.objectiveClosure = "pending";
+    saveState(statePath(config.repository, 1), pending);
+    await assert.rejects(
+      application.runObjective(1, undefined, replacement),
+      /cannot be added or replaced/,
+    );
+    const stillPending = readState(config.repository, 1);
+    assert.deepEqual(stillPending.finalAcceptance, accepted.finalAcceptance);
+    assert.equal(stillPending.objectiveClosure, "pending");
+    assert.equal(stillPending.error, undefined);
+    assert.equal(objectiveComplete(stillPending), false);
+    const reconciled = await application.runObjective(1);
+    assert.deepEqual(reconciled.finalAcceptance, accepted.finalAcceptance);
+    assert.equal(objectiveComplete(reconciled), true);
   });
 });
 

@@ -147,6 +147,16 @@ The harness capability contract requires Factory-owned read/write worktrees, unc
 
 Media belongs to the configured `AgentHarness`: it may return multiple logical multi-file `AssetSet` candidates with evidence and provenance. Candidate count and required LFS roles come from the source-grounded Work Item. The local `ContentStore` keeps immutable SHA-256-addressed bytes and media type; each source binding records role, declared media type, and visibility, while each captured AssetSet descriptor retains input bindings and digests, provenance, rights, visibility, lineage, member roles, optional output relationships, and any declared authoritative format metadata without interpreting the format. A digest binds the private harness result. This lets the same bytes support different uses without attaching mutable policy to a content digest. Factory supports human review and whole-set selection, binds the selected set to approved destinations, and feeds it through ordinary validation and delivery. Workers produce candidates only under the private media staging directory and may not mutate final destinations. The controller permits an existing destination only for an exact byte-identical repository-source-to-required-LFS migration at the same owned path; every other overwrite remains invalid. The target's `.gitattributes` controls LFS for any format. Factory verifies pointer assignment, exact raw bytes, upload, and fresh-clone hydration. Exact-tree Work Item and final validation first verify the committed pointer, locally restore only applicable selected required-LFS members from the content store, and verify their SHA-256 and size before command zero; missing or corrupt content fails closed without smudge or network fallback. Selected bytes are reverified after commands and clean-tree enforcement uses the controller-hydrated state as its baseline. A canonical versioned controller-capability manifest is bound into compile, graph review, and immutable plan identity so these supervisor guarantees do not become invented target work or commands. Fresh-clone hydration runs before final acceptance review and contributes an exact integrated-commit/tree/member receipt to both review evidence and the atomic snapshot. The public PNG gate is one example; the core capture and delivery path also handles opaque 3D, audio, video, and other files.
 
+## Resource admission and completion opportunity
+
+Both delivery paths share phase admission over the existing atomic WorkState. Item path and named-resource ownership lasts across coding, validation, independent review and delivery; coding capacity is released after collection settles. Each effect reserves its configured phase before starting. A completed phase transfers its reservation before waiting for the next, so a concurrency-one run can review and finish its own worker result. Unknown effects retain their reservation and existing replay refusal.
+
+Accepted pending priority uses larger integer values first (zero when unspecified), then prerequisite work within that priority, then stable graph order. Dependencies, accepted authority and ownership remain eligibility gates. Ready QA and waiting review receive the next suitable completion opportunity before new coding grants; this is not a wall-clock or preemption promise. Pending reprioritization uses the accepted graph-amendment boundary; running attempts retain their identities. Read-only aggregate/QA nodes reserve validation/review capacity and never a coding slot.
+
+Optional installation `scheduling` declares total `cpu` and `memoryMiB`, `reviewConcurrency` and `validationConcurrency`, and per-phase `phases.coding`, `phases.validation`, `phases.review`, `phases.delivery` CPU/memory reservations. A binding total requires a fitting declaration for every phase; an absent reservation is unknown, not zero. These are operator admission reservations, not OS quotas or adaptive measurements. The execution concurrency and admitted maximum bound coding; the driver's `availableSlots` is already remaining capacity and is never reduced a second time. Unknown driver capacity stays unknown in diagnostics while the operator ceiling remains enforced. Existing absolute Objective deadlines also govern waiting phase admission.
+
+Native preparation retains actual overlap but does not wait for every independent worker before reviewing a completed result. Publication and integration retain their established safety boundaries. Final Objective validation/review occurs after item work has settled. No separate queue, resource inventory or operational journal is introduced. Source acceptance does not qualify managed/sandbox execution; installed public overlap evidence remains #253.
+
 ## Trunk slices and done criteria
 
 | Slice                                      | Public acceptance                                        | Issue                                                |
@@ -252,3 +262,26 @@ The operator separately approved the repository rename on September 28, 2026: th
 ### Local supervision lifecycle
 
 A supported Linux systemd user manager may own the admitted coordinator independently of a chat. Registration binds the exact installed CLI, Node, configuration, state root and Objective, requires separate service consent, and never changes login persistence. Stop, disable, uninstall and artifact replacement drain the existing owner to a quiescent continuation; unknown effects do not become successful cessation. Detached attempts are not killed by service-group cleanup. Upgrades and rollback use the candidate artifact's actual continuation validator before and after drain. Unsupported state refuses without migration, deletion or allowance resets. Removing supervision preserves target binding and all execution evidence. Installed service lifecycle evidence and full autonomous Objective qualification are separate claims.
+
+### Current-graph terminal acceptance
+
+Final validation success is not Objective completion. After review the coordinator
+re-observes the default head, checks the current graph again, and seals the exact
+commit, tree, graph and configuration before beginning Objective closure. Required
+leaves and aggregate parents must have accepted proof and acknowledged issue closure;
+coverage, human decisions, pending discoveries, submitted effects and owned process
+cessation remain independent gates. Protected delivery and media acceptance keep
+their existing checks.
+
+One compact immutable binding in the atomic snapshot references the existing final
+and per-item evidence by digest. It retains diagnostic accounting scope without
+inventing complete usage totals, and records settled ownership with evidence
+retained. It is not a second acceptance ledger or deployment approval. Historical
+snapshots remain readable without fabricated bindings.
+
+Closure acknowledgement loss leaves the Objective active and an admitted owner
+paused for explicit resume/reconciliation. Reconciliation uses the authenticated
+GitHub closure contract and does not replay workers or review models. Amendment
+intake reports busy while closure is sealed or unresolved; discoveries after Done
+require successor work. A proposal arriving during review invalidates that review
+before sealing. Later default-branch changes do not rewrite the sealed candidate.

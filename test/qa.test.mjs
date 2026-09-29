@@ -10,6 +10,7 @@ import {
   objectiveCriteria,
   validateCommandProvenance,
 } from "../dist/compiler.js";
+import { runNativeGraph } from "../dist/delivery/native-runner.js";
 import { linearDeliveryUnits } from "../dist/delivery/plan.js";
 import {
   assertCompletedCoverage,
@@ -25,6 +26,7 @@ import {
   makeApplication,
   readEvents,
 } from "./support/integration-fixture.mjs";
+import { resultFindings } from "./support/review-protocol.mjs";
 
 function work(id, dependencies = []) {
   return {
@@ -601,3 +603,116 @@ test("native preparation integrates before its worker consumer readiness probe",
     );
     assert.equal(started[1].baseSha, state.work.unit.integratedSha);
   }));
+
+test("native paused admission does not start a pending QA proof", async () => {
+  for (const initiallyPaused of [true, false]) {
+    let paused = initiallyPaused;
+    let reconciliations = 0;
+    let saves = 0;
+    const candidate = "a".repeat(40);
+    const state = {
+      graph: graph(candidate),
+      integratedSha: candidate,
+      work: {
+        unit: { status: "done", integratedSha: candidate },
+        integration: { status: "done", integratedSha: candidate },
+        qa: { status: "pending" },
+      },
+    };
+    await runNativeGraph({
+      config: { execution: { concurrency: 1 } },
+      objective: 1,
+      objectiveBody: body,
+      root: "/unused",
+      state,
+      driver: {
+        async availableSlots() {
+          return 0;
+        },
+      },
+      github: {
+        async defaultBranch() {
+          return "main";
+        },
+      },
+      save() {
+        saves++;
+      },
+      active: new Map(),
+      cancelled: () => false,
+      paused: () => paused,
+      async reconcile() {
+        reconciliations++;
+        paused = true;
+      },
+    });
+    assert.equal(state.work.qa.status, "pending");
+    assert.equal(saves, 0);
+    assert.equal(reconciliations, initiallyPaused ? 0 : 1);
+  }
+});
+
+for (const delivery of ["regular", "native"])
+  test(`${delivery} unknown QA review retains submission identity and refuses replay`, async () =>
+    fixture(async (root) => {
+      const target = createTarget(root, {
+        "real-environment.txt": "actual local resource",
+      });
+      const repository = `example/qa-review-unknown-${delivery}`;
+      let submissions = 0;
+      const { application, github } = makeApplication({
+        config: factoryConfig(target.checkout, repository, delivery),
+        graph: graph(target.baseSha),
+        objectiveBody: body,
+        fakeRoot: join(root, "fake"),
+        actions: {
+          unit: { files: [{ path: "unit.txt", text: "unit" }] },
+          integration: {
+            files: [{ path: "integration.txt", text: "integration" }],
+          },
+        },
+        resultReviewer(request) {
+          if (
+            request.criteria.includes(
+              "real environment and exact named CI proof",
+            )
+          ) {
+            submissions++;
+            assert.equal(
+              readState(repository, 1).work.qa.pendingEffect,
+              "review",
+            );
+            throw new Error("QA provider response was lost");
+          }
+          return {
+            findings: resultFindings(
+              request,
+              request.criteria.map((criterion) => ({
+                criterion,
+                source: "OBJECTIVE",
+                verdict: "pass",
+                detail: "fixture semantic proof",
+              })),
+            ),
+          };
+        },
+      });
+      github.namedCheck = async (headSha, name) => ({
+        id: 94,
+        headSha,
+        name,
+        status: "completed",
+        conclusion: "success",
+        detailsUrl: "https://github.com/example/check/94",
+      });
+      const plan = await application.planObjective(1);
+      await assert.rejects(
+        application.runObjective(1, plan),
+        /QA provider response was lost/,
+      );
+      const state = readState(repository, 1);
+      assert.equal(state.work.qa.pendingEffect, "review");
+      assert.equal(state.work.qa.status, "failed");
+      await assert.rejects(application.runObjective(1, plan));
+      assert.equal(submissions, 1);
+    }));

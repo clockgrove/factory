@@ -228,6 +228,11 @@ export async function runNativeGraph(args: {
     if (unit.items[0]!.kind === "qa") {
       const item = unit.items[0]!;
       if (state.work[item.id]?.status === "waiting") return;
+      if (state.work[item.id]?.status === "pending") {
+        if (args.paused?.()) return;
+        await args.reconcile?.();
+        if (args.paused?.()) return;
+      }
       await runQaItem({
         config,
         root,

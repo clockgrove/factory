@@ -653,67 +653,85 @@ test("native paused admission does not start a pending QA proof", async () => {
 });
 
 for (const delivery of ["regular", "native"])
-  test(`${delivery} unknown QA review retains submission identity and refuses replay`, async () =>
-    fixture(async (root) => {
-      const target = createTarget(root, {
-        "real-environment.txt": "actual local resource",
-      });
-      const repository = `example/qa-review-unknown-${delivery}`;
-      let submissions = 0;
-      const { application, github } = makeApplication({
-        config: factoryConfig(target.checkout, repository, delivery),
-        graph: graph(target.baseSha),
-        objectiveBody: body,
-        fakeRoot: join(root, "fake"),
-        actions: {
-          unit: { files: [{ path: "unit.txt", text: "unit" }] },
-          integration: {
-            files: [{ path: "integration.txt", text: "integration" }],
+  for (const outcome of ["unknown", "refused"])
+    test(`${delivery} ${outcome} QA review preserves the correct retry boundary`, async () =>
+      fixture(async (root) => {
+        const target = createTarget(root, {
+          "real-environment.txt": "actual local resource",
+        });
+        const repository = `example/qa-review-${outcome}-${delivery}`;
+        let submissions = 0;
+        const { application, github } = makeApplication({
+          config: factoryConfig(target.checkout, repository, delivery),
+          graph: graph(target.baseSha),
+          objectiveBody: body,
+          fakeRoot: join(root, "fake"),
+          actions: {
+            unit: { files: [{ path: "unit.txt", text: "unit" }] },
+            integration: {
+              files: [{ path: "integration.txt", text: "integration" }],
+            },
           },
-        },
-        resultReviewer(request) {
-          if (
-            request.criteria.includes(
-              "real environment and exact named CI proof",
-            )
-          ) {
-            submissions++;
-            assert.equal(
-              readState(repository, 1).work.qa.pendingEffect,
-              "review",
-            );
-            throw new Error("QA provider response was lost");
-          }
-          return {
-            findings: resultFindings(
-              request,
-              request.criteria.map((criterion) => ({
-                criterion,
-                source: "OBJECTIVE",
-                verdict: "pass",
-                detail: "fixture semantic proof",
-                question: "",
-              })),
-            ),
-          };
-        },
-      });
-      github.namedCheck = async (headSha, name) => ({
-        id: 94,
-        headSha,
-        name,
-        status: "completed",
-        conclusion: "success",
-        detailsUrl: "https://github.com/example/check/94",
-      });
-      const plan = await application.planObjective(1);
-      await assert.rejects(
-        application.runObjective(1, plan),
-        /QA provider response was lost/,
-      );
-      const state = readState(repository, 1);
-      assert.equal(state.work.qa.pendingEffect, "review");
-      assert.equal(state.work.qa.status, "failed");
-      await assert.rejects(application.runObjective(1, plan));
-      assert.equal(submissions, 1);
-    }));
+          resultReviewer(request) {
+            if (
+              request.criteria.includes(
+                "real environment and exact named CI proof",
+              )
+            ) {
+              submissions++;
+              assert.equal(
+                readState(repository, 1).work.qa.pendingEffect,
+                "review",
+              );
+              if (outcome === "unknown")
+                throw new Error("QA provider response was lost");
+            }
+            return {
+              findings: resultFindings(
+                request,
+                request.criteria.map((criterion) => ({
+                  criterion,
+                  source: "OBJECTIVE",
+                  verdict:
+                    outcome === "refused" &&
+                    submissions === 1 &&
+                    criterion === "real environment and exact named CI proof"
+                      ? "refuse"
+                      : "pass",
+                  detail: "fixture semantic proof",
+                  question: "",
+                })),
+              ),
+            };
+          },
+        });
+        github.namedCheck = async (headSha, name) => ({
+          id: 94,
+          headSha,
+          name,
+          status: "completed",
+          conclusion: "success",
+          detailsUrl: "https://github.com/example/check/94",
+        });
+        const plan = await application.planObjective(1);
+        await assert.rejects(
+          application.runObjective(1, plan),
+          outcome === "unknown"
+            ? /QA provider response was lost/
+            : /criterion disproved/,
+        );
+        const state = readState(repository, 1);
+        assert.equal(
+          state.work.qa.pendingEffect,
+          outcome === "unknown" ? "review" : undefined,
+        );
+        assert.equal(state.work.qa.status, "failed");
+        await assert.rejects(application.runObjective(1, plan));
+        assert.equal(submissions, 1);
+        if (outcome === "refused") {
+          application.retryWorkItem(1, "qa");
+          const completed = await application.runObjective(1, plan);
+          assert.equal(completed.finalValidation.passed, true);
+          assert.equal(submissions, 2);
+        }
+      }));

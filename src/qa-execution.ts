@@ -9,6 +9,7 @@ import type {
   PlanningModel,
   WorkItem,
 } from "./contracts.js";
+import { CompletedModelInvocationError } from "./contracts.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { validationLfsMembersForItem } from "./media.js";
 import { gitAsync } from "./process.js";
@@ -206,6 +207,8 @@ export async function runQaItem(args: {
     save();
     await closeWorkItem(state, item.id, args.github, save, false);
   } catch (error) {
+    if (error instanceof CompletedModelInvocationError)
+      delete work.pendingEffect;
     if (error instanceof AcceptanceDecisionRequired) {
       delete work.pendingEffect;
       work.status = "waiting";

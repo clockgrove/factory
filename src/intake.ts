@@ -25,7 +25,7 @@ import {
   requestControl,
   serveControl,
 } from "./coordinator-control.js";
-import { git, gitAsync } from "./process.js";
+import { git, gitAsync, withProcessCancellation } from "./process.js";
 import {
   type ApplicationServices,
   planObjective,
@@ -145,6 +145,16 @@ function terminal(state: ContinuationState): boolean {
     (state.schemaVersion === 2 && objectiveComplete(state))
   );
 }
+export function intakeComplete(
+  config: FactoryConfig,
+  record: IntakeAuthorization,
+): boolean {
+  return record.authority.objectives.every((id) => {
+    if (record.dequeued.includes(id)) return true;
+    const state = readContinuation(config.repository, id);
+    return !!state && terminal(state);
+  });
+}
 export async function enqueueIntake(
   config: FactoryConfig,
   github: GitHubGateway,
@@ -244,6 +254,16 @@ export async function intakeControl(
     const record = readIntake(config);
     if (!record) throw new Error("No intake authority registered");
     applyControl(config, record, action, objective);
+    if (["pause", "resume", "drain"].includes(action)) {
+      for (const current of continuations(config).filter(
+        (state) => !terminal(state),
+      )) {
+        if (current.coordinator) {
+          current.coordinator.mode = record.mode;
+          saveState(statePath(config.repository, current.objective), current);
+        }
+      }
+    }
     return record;
   } finally {
     releaseControllerLock(path, lock);
@@ -333,6 +353,7 @@ export async function runIntake(
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
   let activeObjective: number | undefined;
   let preparation: PreparationState | undefined;
+  let planningAbort: AbortController | undefined;
   let handingOff = false;
   let wake: (() => void) | undefined;
   const onHandoff = () => {
@@ -342,10 +363,34 @@ export async function runIntake(
     wake?.();
   };
   const handle = async (request: ControlRequest): Promise<unknown> => {
-    if (request.objective !== 0)
-      throw new Error(
-        "Use intake control while compilation or discovery owns this installation",
-      );
+    if (request.objective !== 0) {
+      const preparing =
+        preparation ?? readContinuation(config.repository, request.objective);
+      if (
+        preparing?.schemaVersion !== 3 ||
+        !record.authority.objectives.includes(request.objective)
+      )
+        throw new Error(
+          "Use intake control while discovery owns this installation",
+        );
+      if (request.action === "status") return preparing.coordinator;
+      if (request.action === "cancel") {
+        preparing.cancelRequested = true;
+        preparing.coordinator.mode = "paused";
+        preparing.coordinator.waitReason =
+          "Planning cancellation requested; submitted outcomes remain preserved";
+        saveState(statePath(config.repository, preparing.objective), preparing);
+        record.mode = "paused";
+        saveIntake(config, record);
+        planningAbort?.abort();
+        wake?.();
+        return "requested";
+      }
+      if (!["pause", "resume", "drain", "handoff"].includes(request.action))
+        throw new Error(
+          "Preparation supports status, pause, resume, drain, handoff and cancellation",
+        );
+    }
     applyControl(
       config,
       record,
@@ -362,15 +407,17 @@ export async function runIntake(
         objective: activeObjective,
         action: request.action,
       });
-    if (
-      preparation &&
-      ["pause", "resume", "drain", "handoff"].includes(request.action)
-    ) {
-      preparation.coordinator.mode = record.mode;
-      saveState(
-        statePath(config.repository, preparation.objective),
-        preparation,
-      );
+    if (["pause", "resume", "drain", "handoff"].includes(request.action)) {
+      const preparing =
+        preparation ??
+        continuations(config).find(
+          (state): state is PreparationState =>
+            state.schemaVersion === 3 && !terminal(state),
+        );
+      if (preparing) {
+        preparing.coordinator.mode = record.mode;
+        saveState(statePath(config.repository, preparing.objective), preparing);
+      }
     }
     wake?.();
     return { ...record, activeObjective: activeObjective ?? null };
@@ -475,6 +522,10 @@ export async function runIntake(
         retargetControllerLock(lockPath, lock, selected);
         try {
           let state = readContinuation(config.repository, selected);
+          if (state?.error || state?.cancelRequested)
+            throw new Error(
+              "Current Objective is failed or cancelling; explicit supported recovery is required",
+            );
           let plan;
           let admission;
           if (!state || state.schemaVersion === 3) {
@@ -485,20 +536,20 @@ export async function runIntake(
             )
               throw new Error("Selected Objective changed before compilation");
             // #250 supplies the internal durable planning/borrowed-owner seam.
-            plan = await planObjective(
-              config,
-              selected,
-              services,
-              [],
-              record.authority,
-              {
+            planningAbort = new AbortController();
+            plan = await withProcessCancellation(planningAbort.signal, () =>
+              planObjective(config, selected!, services, [], record.authority, {
                 ownerLock: lock,
                 observePreparation: (value: PreparationState) => {
                   preparation = value;
                 },
-                stopped: () => record.mode !== "running" || handingOff,
-              },
+                stopped: () =>
+                  record.mode !== "running" ||
+                  handingOff ||
+                  !!preparation?.cancelRequested,
+              }),
             );
+            planningAbort = undefined;
             preparation = undefined;
             if (!["clean", "human-accepted"].includes(plan.review.status))
               throw new Error(
@@ -540,6 +591,7 @@ export async function runIntake(
           return record;
         } finally {
           preparation = undefined;
+          planningAbort = undefined;
           activeObjective = undefined;
           retargetControllerLock(lockPath, lock, 0);
           if (!server && !handingOff) await serve();

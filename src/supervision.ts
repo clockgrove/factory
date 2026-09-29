@@ -1,5 +1,5 @@
 import type { ContinuationState } from "./state.js";
-import { readIntake } from "./intake.js";
+import { readIntake, intakeComplete } from "./intake.js";
 import { objectiveComplete } from "./completion.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -266,6 +266,8 @@ async function verifyServiceOwner(
       });
       if (reply.handled) return;
     }
+    const intake = objective === 0 ? readIntake(config) : undefined;
+    if (intake && intakeComplete(config, intake)) return;
     const current = readContinuation(config.repository, objective);
     if (
       current?.cancelledAt ||

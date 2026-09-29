@@ -81,10 +81,7 @@ export async function requestControl(
   const current = linuxProcessIdentity(owner.pid);
   if (current?.startTime !== owner.startTime || current.state === "Z")
     return { handled: false };
-  if (
-    owner.objective !== request.objective &&
-    !(owner.intake && request.objective === 0)
-  )
+  if (owner.objective !== request.objective && !owner.intake)
     throw new Error(`Controller is running Objective #${owner.objective}`);
   return new Promise((resolve, reject) => {
     const directory = openSync(stateRoot(repository), "r");

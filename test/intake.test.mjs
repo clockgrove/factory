@@ -3,9 +3,17 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { controlObjective } from "../dist/runner.js";
 import { intakeControl, readIntake } from "../dist/intake.js";
+import { factoryConfigDigest } from "../dist/config.js";
+import { createHash } from "node:crypto";
 import { objectiveComplete } from "../dist/completion.js";
-import { readState, readContinuation } from "../dist/state-store.js";
+import {
+  readState,
+  readContinuation,
+  saveState,
+  statePath,
+} from "../dist/state-store.js";
 import { withCoverage } from "./support/coverage.mjs";
 import {
   createTarget,
@@ -149,7 +157,16 @@ async function fixture(fn) {
         state.events.push({ type: "close-objective", number });
       });
     };
-    await fn({ ...setup, root, target, config, plans, issues, dependencies });
+    await fn({
+      ...setup,
+      root,
+      target,
+      config,
+      plans,
+      issues,
+      dependencies,
+      model,
+    });
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previous;
@@ -183,7 +200,7 @@ test("two explicitly authorized Objectives advance with accepted predecessor bas
     );
   }));
 
-test("pause after predecessor completion and restart keep accepted work, refresh pending priority, and preserve one active Objective", async () =>
+test("pause after predecessor completion and restart keep accepted work and preserve one active Objective", async () =>
   fixture(async (f) => {
     f.dependencies.clear();
     let closures = 0;
@@ -252,4 +269,124 @@ test("dirty compilation checkout is retained and cannot start planning", async (
     assert.match(git(f.config.checkout, "diff"), /User change/);
     await intakeControl(f.config, "drain");
     await running;
+  }));
+
+test("configured existing priority reorders only authorized pending Objectives", async () =>
+  fixture(async (f) => {
+    f.dependencies.clear();
+    await f.application.enqueueIntake(authority, {
+      priorityLabels: ["high"],
+      pollSeconds: 0.01,
+    });
+    f.issues.get(2).labels = ["high"];
+    f.issues.set(99, {
+      state: "open",
+      body: body(99),
+      title: "Unapproved",
+      labels: ["high"],
+    });
+    await f.application.runIntake();
+    assert.deepEqual(
+      f.plans.map((entry) => entry.objective),
+      [2, 1],
+    );
+    assert.equal(readContinuation(f.config.repository, 99), undefined);
+  }));
+
+test("discovery omission refreshes exact authorized ID instead of treating work as deleted", async () =>
+  fixture(async (f) => {
+    await f.application.enqueueIntake(
+      { ...authority, objectives: [1] },
+      { pollSeconds: 0.01 },
+    );
+    f.github.intakePage = async () => ({ status: 200, data: [] });
+    await f.application.runIntake();
+    assert.deepEqual(
+      f.plans.map((entry) => entry.objective),
+      [1],
+    );
+  }));
+
+for (const disposition of ["failed", "cancelled"])
+  test(`${disposition} predecessor cannot admit its dependent`, async () =>
+    fixture(async (f) => {
+      await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
+      saveState(statePath(f.config.repository, 1), {
+        schemaVersion: 3,
+        kind: "preparing",
+        repository: f.config.repository,
+        objective: 1,
+        runId: "failed-preparation",
+        configDigest: factoryConfigDigest(f.config),
+        baseSha: f.target.baseSha,
+        objectiveBodyDigest: createHash("sha256").update(body(1)).digest("hex"),
+        planning: "ready",
+        issueByItemId: {},
+        coordinator: {
+          mode: "paused",
+          phase: "waiting",
+          phaseStartedAt: new Date().toISOString(),
+        },
+        ...(disposition === "cancelled"
+          ? { cancelRequested: true, cancelledAt: new Date().toISOString() }
+          : { error: "Known rejected preparation" }),
+      });
+      if (disposition === "failed") await f.application.runIntake();
+      else {
+        const running = f.application.runIntake();
+        for (let i = 0; i < 100; i++) {
+          if (readIntake(f.config).observation?.reasons[2]) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert.match(
+          readIntake(f.config).observation.reasons[2],
+          /Predecessor #1/,
+        );
+        await intakeControl(f.config, "drain");
+        await running;
+      }
+      assert.equal(f.plans.length, 0);
+      assert.equal(readContinuation(f.config.repository, 2), undefined);
+    }));
+
+test("pause during durable compilation and restart reuse known model output without a second compile", async () =>
+  fixture(async (f) => {
+    await f.application.enqueueIntake(
+      { ...authority, objectives: [1] },
+      { pollSeconds: 0.01 },
+    );
+    const generate = f.model.generateStructured.bind(f.model);
+    let entered, release;
+    const started = new Promise((resolve) => {
+      entered = resolve;
+    });
+    const blocked = new Promise((resolve) => {
+      release = resolve;
+    });
+    f.model.generateStructured = async (request) => {
+      entered();
+      await blocked;
+      return generate(request);
+    };
+    const running = f.application.runIntake();
+    await started;
+    const before = readContinuation(f.config.repository, 1);
+    assert.equal(before.authority.executionConsent, true);
+    assert.equal(before.configDigest, factoryConfigDigest(f.config));
+    await controlObjective(f.config, { objective: 1, action: "pause" });
+    release();
+    for (let i = 0; i < 100; i++) {
+      if (readContinuation(f.config.repository, 1).planningRecovery?.response)
+        break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await intakeControl(f.config, "drain");
+    await running;
+    assert.equal(f.plans.length, 1);
+    await intakeControl(f.config, "resume");
+    await f.application.runIntake();
+    const completed = readState(f.config.repository, 1);
+    assert.equal(completed.runId, before.runId);
+    assert.equal(objectiveComplete(completed), true);
+    assert.equal(f.plans.length, 1);
   }));

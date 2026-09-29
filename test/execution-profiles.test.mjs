@@ -446,14 +446,17 @@ for (const strategy of ["regular", "native-stack"])
       assert.equal(state.finalValidation?.passed, true, JSON.stringify(state));
       assert.equal(state.work.joined.status, "done");
       assert.equal(projected.items[0].executionProfile.id, "standard");
+      const starts = events.filter((event) => event.method === "start");
+      // Independent async preparations may finish in either order; the join waits.
+      assert.equal(starts.at(-1).item, "joined");
       assert.deepEqual(
-        events
-          .filter((e) => e.method === "start")
-          .map((e) => [e.item, e.profile]),
+        starts
+          .map((event) => [event.item, event.profile])
+          .sort(([a], [b]) => a.localeCompare(b)),
         [
+          ["joined", "focused"],
           ["one", "standard"],
           ["two", "focused"],
-          ["joined", "focused"],
         ],
       );
       const joinedBase = events.find((e) => e.item === "joined").base;

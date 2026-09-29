@@ -138,6 +138,8 @@ factory logs --objective ISSUE_NUMBER --item WORK_ITEM_ID --follow
 
 Status describes current continuation state, including blocked work, selection pauses, errors, and final acceptance. Diagnostics provide a private timeline and available usage; logs expose worker output. A quiet timeline means no new provider event was observed. Neither silence nor missing counters proves completion or zero usage. Keep transcripts and private validation output out of public issues. For optional sensitive local request/response capture and metadata-only inspection, see [local model capture](LOCAL-CAPTURE.md).
 
+For metadata-only comparisons of recorded usage, timing and outcomes, use [`factory analyze`](LOCAL-ANALYSIS.md). Captured content inspection is a separate, explicit operation.
+
 ## Review a result decision
 
 A pending result decision identifies one criterion, its exact tree, and a specific question. Inspect the complete result before accepting it. Review text can be truncated; an incomplete cited chunk cannot establish automatic acceptance, while complete independent evidence can prove a criterion despite unrelated omitted text. Malformed review responses are reported separately from substantive acceptance questions; they are not approval. A larger `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` and reviewer context may allow a complete review, but do not treat missing evidence as a pass.

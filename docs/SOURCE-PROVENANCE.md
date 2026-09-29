@@ -689,3 +689,7 @@ artifact must pass installed public qualification before adopter use.
 ## Local interaction capture (#214)
 
 The current diagnostic, provider SDK event and usage contracts supplied this observational capability. New code and synthetic tests use public scripted prompts, tool events and counters; no archived implementation or private source was copied. Actual boundary prompts retain existing packet identities, and existing normalized usage/deduplication remains authoritative for summaries. Capture has no lifecycle authority, external sink or live qualification claim.
+
+## Local interaction analysis (#219)
+
+The versioned #214 interaction metadata, existing diagnostic scopes and normalized usage contracts supplied this newly written local analysis capability. Public synthetic observations test identity grouping, exact filters, overlapping intervals, missing counters, provider estimates and separate provider/protocol/semantic outcomes. CLI tests exercise metadata-only reads and restrictive exclusive report creation outside the target checkout. No archived implementation, private source or provider transcripts were copied. Reports have no lifecycle authority, hosted service, pricing model or model-quality inference; source tests do not extend historical installed-artifact qualification.

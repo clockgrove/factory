@@ -6,7 +6,7 @@ Start with the [published installation instructions](../README.md#install). Use 
 
 ## Published plugin compatibility
 
-Published [v0.1.39](https://github.com/clockgrove/factory/releases/tag/v0.1.39) has verified public download and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0139-artifact-record). Live workspace/LFS qualification remains bound to [v0.1.38](BUILD-STATUS.md#immutable-v0138-artifact-record); it was not rerun or transferred to v0.1.39. The bounded Clockgrove pilot passed verification under [#206](https://github.com/clockgrove/factory/issues/206) and explicit operator acceptance under [#207](https://github.com/clockgrove/factory/issues/207). Using Factory as a plugin does not require a Factory source checkout; contributors building Factory follow [Contributing](../CONTRIBUTING.md).
+Published [v0.1.40](https://github.com/clockgrove/factory/releases/tag/v0.1.40) has verified public download and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0140-artifact-record). It includes the local autonomy capabilities documented below; their full program qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Live workspace/LFS qualification for this artifact remains tracked in [#263](https://github.com/clockgrove/factory/issues/263). Earlier accepted scenarios remain bound to [v0.1.38](BUILD-STATUS.md#immutable-v0138-artifact-record) and are not transferred to v0.1.40. The bounded Clockgrove pilot passed verification under [#206](https://github.com/clockgrove/factory/issues/206) and explicit operator acceptance under [#207](https://github.com/clockgrove/factory/issues/207). Using Factory as a plugin does not require a Factory source checkout; contributors building Factory follow [Contributing](../CONTRIBUTING.md).
 
 If you remain on immutable v0.1.30, its older skills still refer to the maintainer qualification workflow. Explicitly ask your agent to follow this guide for ordinary target-repository work rather than create release fixtures. Retain host/worker readiness, target authority, sandbox and spending boundaries. Maintainers qualifying any release must still follow the full [release procedure](PUBLIC-RELEASE.md).
 
@@ -66,9 +66,9 @@ export XDG_STATE_HOME="/absolute/private/factory-trial/state"
 
 These are installation choices, not recovery commands. Keep provider authentication accessible through its existing local profile. Never copy credentials into the target repository.
 
-### Resource limits in the upcoming autonomous release
+### Resource limits
 
-This source capability is not part of published v0.1.39. Before accepting a plan, an operator may add `scheduling` to the installation configuration. For example, the following declares four CPU units and 4096 MiB shared by active phases, with one concurrent reviewer and one validation job:
+Resource scheduling is included in published v0.1.40; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Before accepting a plan, an operator may add `scheduling` to the installation configuration. For example, the following declares four CPU units and 4096 MiB shared by active phases, with one concurrent reviewer and one validation job:
 
 ```json
 {
@@ -109,7 +109,7 @@ The default network policy is `host`; `--network off` selects the supported offl
 
 ## Admit an exact plan for autonomous work
 
-This admission surface is source-development work for #244; it is not in published v0.1.39. Check your installed `factory help` before using it. Background supervision and automatic repair are separate capabilities and are not enabled by admission alone.
+This admission surface is included in published v0.1.40; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Check your installed `factory help` before using it. Background supervision and automatic repair are separate capabilities and are not enabled by admission alone.
 
 Plan the selected Objective under its ordinary planning authority. When an autonomous policy is already available, pass `factory plan --authority /absolute/private/authority.json` with the usual Objective/output options so known consent, membership, resource and required-environment errors fail before model calls. Then bind the reviewed candidate to that policy:
 
@@ -195,7 +195,7 @@ Execution projects Work Items to GitHub, starts ready workers, independently val
 
 ## Keep an admitted Objective under local control
 
-This coordinator surface is source-development work for #245 and is not in published v0.1.39. An admitted `run` keeps one local owner alive while waiting for an exact result decision, pause or drain. It remains a foreground process; service installation and continuity after logout belong to the separate background-supervision capability.
+This coordinator surface is included in published v0.1.40; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). An admitted `run` keeps one local owner alive while waiting for an exact result decision, pause or drain. It remains a foreground process; service installation and continuity after logout belong to the separate background-supervision capability.
 
 Use another terminal to control that owner:
 
@@ -295,7 +295,7 @@ Workers receive a filtered environment; controller GitHub, Git, and SSH credenti
 
 ## Discover required work during an admitted Objective
 
-This source capability is not included in published v0.1.39. An admitted Objective
+Graph amendments are included in published v0.1.40; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). An admitted Objective
 can use its recorded planning-revision allowance to review necessary discoveries.
 Workers stage a private `.factory-discovery.json` proposal with evidence, scope,
 ownership, acceptance and dependencies. Factory collects it with the ordinary result,
@@ -323,7 +323,7 @@ supported continuation; editing state or running a fresh root cannot bypass a fe
 
 ## Local background supervision
 
-This source capability belongs to #246 and is not in the published v0.1.39 package. A supported Linux or WSL host needs a running systemd user manager. Factory never changes login persistence or gains administrator privileges. A user manager can survive the chat closing; sleeping pauses execution, shutdown stops it, and logout behavior depends on the host's existing linger policy.
+Local background supervision is included in published v0.1.40; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). A supported Linux or WSL host needs a running systemd user manager. Factory never changes login persistence or gains administrator privileges. A user manager can survive the chat closing; sleeping pauses execution, shutdown stops it, and logout behavior depends on the host's existing linger policy.
 
 After binding a target and admitting its exact plan with explicit `serviceConsent: true`, register the installed artifact:
 

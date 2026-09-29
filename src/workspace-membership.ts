@@ -1,3 +1,4 @@
+import { ownsPath } from "./ownership.js";
 import { isDeepStrictEqual } from "node:util";
 import { isScalar, parseDocument, visit } from "yaml";
 import type { WorkGraph } from "./contracts.js";
@@ -216,12 +217,7 @@ export function validateWorkspacePackagePlan(
     if (
       !owners.some(
         (item) =>
-          item.brief.includes(entry) &&
-          item.ownedPaths.some(
-            (scope) =>
-              scope === manifest ||
-              (scope.endsWith("/") && manifest.startsWith(scope)),
-          ),
+          item.brief.includes(entry) && ownsPath(manifest, item.ownedPaths),
       )
     )
       throw new Error(

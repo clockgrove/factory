@@ -1,3 +1,4 @@
+import { ownsPath } from "./ownership.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -122,12 +123,6 @@ function safeRelative(path: string, staging = false): boolean {
     path !== ".factory-assets.json" &&
     path !== ".factory-media" &&
     (staging || !path.startsWith(".factory-media/"))
-  );
-}
-
-function owned(path: string, scopes: string[]): boolean {
-  return scopes.some((scope) =>
-    scope.endsWith("/") ? path.startsWith(scope) : path === scope,
   );
 }
 
@@ -461,7 +456,7 @@ export async function captureAssetSets(
         roles.has(member.role) ||
         !member.destination ||
         !safeRelative(member.destination) ||
-        !owned(member.destination, item.ownedPaths) ||
+        !ownsPath(member.destination, item.ownedPaths) ||
         destinations.has(member.destination)
       )
         throw new Error(
@@ -648,7 +643,7 @@ export async function materializeAssetSet(args: {
     for (const member of args.set.members) {
       if (
         !safeRelative(member.destination) ||
-        !owned(member.destination, args.item.ownedPaths) ||
+        !ownsPath(member.destination, args.item.ownedPaths) ||
         destinations.has(member.destination)
       )
         throw new Error("Selected AssetSet destination is invalid or unowned");

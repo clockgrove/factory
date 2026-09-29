@@ -989,3 +989,48 @@ test("failed collection retains owned checkout when worker cessation is unknown"
     assert.equal(retained, true);
   }
 });
+
+test("accepted literal ownership collects staged files without broadening sibling or dynamic-route scope", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-ownership-"));
+  try {
+    const { checkout } = target(root);
+    const path = "packages/example/src/index.ts";
+    mkdirSync(join(checkout, "packages/example/src"), { recursive: true });
+    writeFileSync(join(checkout, path), "export const value = 1;\n");
+    git(checkout, "add", path);
+    for (const scope of ["packages/example/", path])
+      assert.deepEqual(
+        await checkStagedCandidate(checkout, checkout, [scope]),
+        [path],
+      );
+    for (const scope of [
+      "packages/example/**",
+      "packages/example-sibling/",
+      "packages/example/src/other.ts",
+    ])
+      await assert.rejects(
+        checkStagedCandidate(checkout, checkout, [scope]),
+        /outside ownership/,
+      );
+    const route = "app/[slug]/page.tsx";
+    mkdirSync(join(checkout, "app/[slug]"), { recursive: true });
+    writeFileSync(join(checkout, route), "export const page = 1;\n");
+    git(checkout, "add", route);
+    assert.deepEqual(
+      await checkStagedCandidate(checkout, checkout, [
+        "packages/example/",
+        route,
+      ]),
+      [route, path],
+    );
+    await assert.rejects(
+      checkStagedCandidate(checkout, checkout, [
+        "packages/example/",
+        "app/slug/page.tsx",
+      ]),
+      /outside ownership/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

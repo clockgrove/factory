@@ -3,16 +3,17 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
-  mkdtempSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
+import { withCoverage } from "./support/coverage.mjs";
 import { bindTarget, createTarget } from "./support/integration-fixture.mjs";
 
 test("fresh packed artifact composes a registered harness through the package root", async () => {
@@ -240,7 +241,7 @@ test("fresh packed artifact composes a registered harness through the package ro
         planningModel: {
           async generateStructured(request) {
             observeInvocation(request);
-            return graph;
+            return withCoverage(request, graph);
           },
           async reviewGraph(request) {
             observeInvocation(request);

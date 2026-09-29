@@ -10,6 +10,16 @@ The MIT license text is retained from the archived repository. Runtime code does
 
 New coordinator work extends the current runner, atomic snapshot, process ownership and driver contracts. Preparation and per-issue projection use the same continuation path; local control uses a private socket owned by the existing installation lock. Async subprocess and Octokit transport replace blocking operations on that path, preserving delivery identities and uncertain-effect refusals. The shared rate gate follows GitHub's primary/secondary limits and does not retry mutations automatically. Newly written deterministic fixtures cover responsive control, restart and owned cancellation. No archived runtime, recovery protocol, private adopter source or transcripts were copied. Service supervision, graph amendments, automatic repair and exact-artifact live qualification remain separately owned capabilities.
 
+## Executable acceptance coverage (#248)
+
+Coverage and read-only QA extend the current compiler, scheduler, validation,
+independent-review and atomic work-state paths. Controller criterion identities
+bind pinned Objective content; named CI retains compact authenticated check identity
+through the existing GitHub gateway. No separate QA controller, evidence store or
+archived implementation was introduced. Regression fixtures use new public data,
+real temporary Git and domain-level remote fakes. No private adopter source,
+transcripts or provider calls supplied this implementation.
+
 ## Autonomous admission and prerequisite checks (#244)
 
 New admission and preflight work extends the current implementation's exact plan/configuration/source bindings. It reuses the concrete application, pinned source parser and atomic snapshot rather than copying archived activation or recovery protocols. No archived runtime, tests, private adopter source or transcripts are used. Background ownership, graph amendments and automatic recovery remain separate capabilities under #243; admission alone does not implement them.

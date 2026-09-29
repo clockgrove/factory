@@ -2,6 +2,7 @@ import type {
   GitHubGateway,
   GraphProjection,
   MergeResult,
+  NamedCheckEvidence,
   NativeStackLayer,
   ObjectiveIssue,
   ProjectedGraph,
@@ -38,6 +39,59 @@ export class RealGitHubGateway implements GitHubGateway {
 
   private route(path: string): string {
     return `repos/${this.repository}/${path}`;
+  }
+
+  async namedCheck(
+    headSha: string,
+    name: string,
+  ): Promise<NamedCheckEvidence | undefined> {
+    if (!/^[a-f0-9]{40}$/.test(headSha) || !name)
+      throw new Error(
+        "Named CI observation requires an exact candidate and check name",
+      );
+    type CheckRun = {
+      id: number;
+      name: string;
+      head_sha: string;
+      status: string;
+      conclusion: string | null;
+      html_url: string;
+    };
+    const matches: CheckRun[] = [];
+    for (let page = 1; ; page++) {
+      const result = await this.client.request<{
+        total_count: number;
+        check_runs: CheckRun[];
+      }>(
+        "GET",
+        this.route(
+          `commits/${headSha}/check-runs?check_name=${encodeURIComponent(name)}&filter=latest&per_page=100&page=${page}`,
+        ),
+      );
+      if (!Array.isArray(result.check_runs))
+        throw new Error("Named CI response lacks check runs");
+      matches.push(
+        ...result.check_runs.filter(
+          (check) => check.name === name && check.head_sha === headSha,
+        ),
+      );
+      if (result.check_runs.length < 100) break;
+    }
+    // GitHub selects latest reruns. Multiple apps/suites using the same name
+    // are ambiguous: choosing a convenient successful check would weaken proof.
+    if (matches.length > 1)
+      throw new Error("Required named CI check is ambiguous");
+    const check = matches[0];
+    return check
+      ? {
+          id: check.id,
+          headSha: check.head_sha,
+          name: check.name,
+          status: check.status,
+          conclusion: check.conclusion,
+          detailsUrl: check.html_url,
+        }
+      : undefined;
   }
 
   async findOpenPullRequest(

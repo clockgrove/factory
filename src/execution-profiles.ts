@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { FactoryConfig, ExecutionProfile } from "./config.js";
+import type { ExecutionProfile, FactoryConfig } from "./config.js";
 import type {
   ExecutionBinding,
   ExecutionProfileChoices,
@@ -74,6 +74,12 @@ export function normalizeExecutionProfiles(
   choices?: ExecutionProfileChoices,
 ): void {
   for (const item of graph.items) {
+    if (item.executionProfile === null) delete item.executionProfile;
+    if (item.kind === "qa") {
+      if (item.executionProfile || item.executionBinding)
+        throw new Error("QA has no worker profile");
+      continue;
+    }
     if (item.executionBinding !== undefined)
       throw new Error("Model may not supply an execution binding");
     if (!choices) {

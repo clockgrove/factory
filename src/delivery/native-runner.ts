@@ -23,6 +23,7 @@ import {
   validationLfsMembersForItem,
 } from "../media.js";
 import { git, gitAsync } from "../process.js";
+import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
 import { itemsConflict } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
 import {
@@ -100,6 +101,7 @@ export async function runNativeGraph(args: {
     for (const unit of units) {
       if (prepared.length >= limit) break;
       if (
+        unit.items[0]!.kind === "qa" ||
         state.work[unit.items[0]!.id]?.status !== "pending" ||
         !unit.externalDependencies.every(
           (dependency) => state.work[dependency]?.status === "done",
@@ -130,6 +132,14 @@ export async function runNativeGraph(args: {
         work.startedAt = new Date().toISOString();
         save();
         try {
+          await preflightItemEnvironment({
+            config,
+            root,
+            state,
+            item,
+            store: contentStore,
+            baseSha: work.baseSha!,
+          });
           const handle = await driver.start({
             captureContext: { objective, runId: state.runId },
             item,
@@ -215,6 +225,30 @@ export async function runNativeGraph(args: {
         `Delivery unit ${unit.id} started before its dependencies`,
       );
     }
+    if (unit.items[0]!.kind === "qa") {
+      const item = unit.items[0]!;
+      if (state.work[item.id]?.status === "waiting") return;
+      if (state.work[item.id]?.status === "pending") {
+        if (args.paused?.()) return;
+        await args.reconcile?.();
+        if (args.paused?.()) return;
+      }
+      await runQaItem({
+        config,
+        root,
+        state,
+        item,
+        github,
+        model: args.planningModel,
+        diagnostics: args.diagnostics,
+        objectiveBody: args.objectiveBody,
+        store: contentStore,
+        save,
+        cancelled: args.cancelled,
+      });
+      if (state.work[item.id]?.status !== "done") return;
+      continue;
+    }
     for (const [index, item] of unit.items.entries()) {
       if (args.cancelled()) throw new Error("Objective cancelled");
       const work = state.work[item.id]!;
@@ -287,6 +321,15 @@ export async function runNativeGraph(args: {
           work.changeRef = applied.changeRef;
           work.treeSha = applied.treeSha;
         } else if (work.step === "execute") {
+          if (!work.execution)
+            await preflightItemEnvironment({
+              config,
+              root,
+              state,
+              item,
+              store: contentStore,
+              baseSha: itemBase,
+            });
           const handle: ExecutionHandle =
             work.execution ??
             (await driver.start({

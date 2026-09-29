@@ -56,7 +56,43 @@ A concrete finding permits at most one evidenced compiler revision, followed by 
 
 An operator may explicitly request exact-tree Work Item re-review through `rereview`, then `run`, after inspecting a pending result. This schedules existing validation and automatic review without restarting implementation or recording acceptance. The existing final-result continuation remains `run`, which repeats final validation and review. These explicit actions do not expand automatic provider retries or revive terminal results. [Issue #202](https://github.com/clockgrove/factory/issues/202) records this continuation boundary.
 
-### Agent-readable diagnostics
+### Executable acceptance coverage (#248)
+
+New compiler output retains one `coverage` collection in the accepted WorkGraph.
+Controller-generated criterion IDs bind each Objective acceptance criterion to its
+complete pinned source digest and text. The planner selects criterion IDs; the
+controller restores source facts without requiring quoted text or hash transcription.
+Command and result-semantic oracles select owning-array indices, while final semantic
+oracles select the criterion ID. Each entry names an existing Work Item,
+its command, semantic oracle, controller guarantee or named CI check, the feasible
+phase, and environment readiness. Deterministic checks reject uncovered criteria,
+unknown owners, unsupported commands and premature proof. Independent graph review
+still owns semantic adequacy, source obligations beyond mechanically parsed Objective
+criteria, required negative controls, golden/baseline authority and missing thresholds.
+Final semantic coverage refers to the exact Objective criterion; controller guarantees
+remain subject to the existing final acceptance review. Older explicit graphs without
+coverage remain readable, while new compilation requires complete coverage.
+
+A read-only `kind: qa` Work Item has empty path ownership and no execution profile,
+worker, media output or pull request. It uses existing dependencies, work state,
+validation, independent review and issue closure. Native delivery isolates it from
+PR chains. A native consumer of a declared prepared environment also starts a new
+delivery unit, so its preparer integrates before the readiness probe. Integrated QA waits for every implementation ancestor and validates the
+actual integrated candidate; published CI refers to a delivery dependency's exact PR
+head. Finalization rejects stale integrated QA. Required named CI must carry a
+successful authenticated check-run identity at the exact head; aggregate green checks,
+workflow text and local command receipts cannot satisfy it. Missing, pending or failed
+CI blocks completion without adding an automatic implementation retry.
+
+Real-environment checks require a source-authorized readiness probe. Probes run before
+worker execution, and any preparation names an existing authorized dependency.
+Missing external prerequisites require a precise source decision. Factory does not
+infer setup commands, infrastructure or mock substitutes. Command and selected-LFS
+validation keep their established authority and exact-tree rules. Deterministic tests
+use temporary Git repositories and narrow service fakes; installed public acceptance
+belongs to #253 and does not follow from these tests.
+
+## Agent-readable diagnostics
 
 [Trunk issue #28](https://github.com/clockgrove/factory/issues/28) established machine-readable current status and timestamped, correlated local diagnostics across planning and review, scheduling and blocked reasons, harness work, validation output, GitHub delivery, media decisions, and final acceptance. [Issue #73](https://github.com/clockgrove/factory/issues/73) closes the planning-adapter regression: the provider-neutral model observation seam now covers compile, graph review, Work Item result review, and final Objective review with real provider progress, explicit model policy, usage availability, safe request/response correlation, and semantic rejection. [Issue #76](https://github.com/clockgrove/factory/issues/76) makes graph-review rejection actionable without exposing target content: malformed review transport reports a fixed field and reason without copying provider content; result criteria are validated independently. Clean review remains exactly an empty findings array; malformed findings fail closed into the existing planning decision instead of being normalized into approval. One narrow application-layer emitter feeds a local structured-log sink; the read/follow/summary surface lets agents inspect progress without parsing private state JSON. The atomic snapshot remains the only continuation truth. Diagnostic loss is visible but cannot trigger replay, retry, or state reconstruction.
 

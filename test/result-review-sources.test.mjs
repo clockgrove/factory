@@ -9,6 +9,7 @@ import {
   reviewAcceptance,
   validateTree,
 } from "../dist/validation.js";
+import { withCoverage } from "./support/coverage.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -352,8 +353,8 @@ test("actual application Work Item and final review accept later selected headin
     };
     const phases = [];
     const planningModel = {
-      async generateStructured() {
-        return structuredClone(graph);
+      async generateStructured(request) {
+        return withCoverage(request, structuredClone(graph));
       },
       async reviewGraph() {
         return { findings: [] };

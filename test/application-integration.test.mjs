@@ -24,6 +24,7 @@ import {
 import { selectAssetSetFromCli } from "../dist/runner.js";
 import { parseFactoryState } from "../dist/state.js";
 import { readContinuation, readState, statePath } from "../dist/state-store.js";
+import { withCoverage } from "./support/coverage.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -437,8 +438,8 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
 `;
     const reviewedScopes = new Set();
     const planningModel = {
-      async generateStructured() {
-        return structuredClone(graph);
+      async generateStructured(request) {
+        return withCoverage(request, structuredClone(graph));
       },
       async reviewGraph() {
         return { findings: [] };
@@ -622,7 +623,20 @@ test("application retries capacity for exact Work Item and final review requests
                 item: {
                   id: `${id}-message`,
                   type: "agent_message",
-                  text: JSON.stringify(encodeCodexCitationIndexes(graph)),
+                  text: JSON.stringify(
+                    encodeCodexCitationIndexes(
+                      withCoverage(
+                        {
+                          coverageObligations: JSON.parse(
+                            prompt
+                              .split("Controller obligations: ")[1]
+                              .split(". Use parallel")[0],
+                          ),
+                        },
+                        graph,
+                      ),
+                    ),
+                  ),
                 },
               };
               yield { type: "turn.completed", usage: null };
@@ -778,7 +792,20 @@ test("application fails closed once after exhausted result-review capacity witho
                 item: {
                   id: `${id}-message`,
                   type: "agent_message",
-                  text: JSON.stringify(encodeCodexCitationIndexes(graph)),
+                  text: JSON.stringify(
+                    encodeCodexCitationIndexes(
+                      withCoverage(
+                        {
+                          coverageObligations: JSON.parse(
+                            prompt
+                              .split("Controller obligations: ")[1]
+                              .split(". Use parallel")[0],
+                          ),
+                        },
+                        graph,
+                      ),
+                    ),
+                  ),
                 },
               };
               yield { type: "turn.completed", usage: null };
@@ -919,8 +946,8 @@ test("Work Item review receives exact concurrent-attempt provenance from run sta
 `;
     const reviewed = new Set();
     const planningModel = {
-      async generateStructured() {
-        return structuredClone(graph);
+      async generateStructured(request) {
+        return withCoverage(request, structuredClone(graph));
       },
       async reviewGraph() {
         return { findings: [] };
@@ -1141,8 +1168,8 @@ test("native successor review receives its exact predecessor result head", async
 `;
     const observedProofs = new Set();
     const planningModel = {
-      async generateStructured() {
-        return structuredClone(graph);
+      async generateStructured(request) {
+        return withCoverage(request, structuredClone(graph));
       },
       async reviewGraph() {
         return { findings: [] };
@@ -1254,8 +1281,8 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
     };
     let reviewCount = 0;
     const planningModel = {
-      async generateStructured() {
-        return structuredClone(graph);
+      async generateStructured(request) {
+        return withCoverage(request, structuredClone(graph));
       },
       async reviewGraph() {
         reviewCount += 1;
@@ -1358,9 +1385,9 @@ test("clean accepted plan activates without planning calls and rejects config dr
     let reviewCount = 0;
     let reviewedPacket;
     const planningModel = {
-      async generateStructured() {
+      async generateStructured(request) {
         generationCount += 1;
-        return structuredClone(graph);
+        return withCoverage(request, structuredClone(graph));
       },
       async reviewGraph(request) {
         reviewCount += 1;

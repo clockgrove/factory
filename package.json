@@ -68,11 +68,13 @@
     "typescript-eslint": "8.44.1"
   },
   "dependencies": {
+    "@octokit/core": "^7.0.8",
     "@openai/codex-sdk": "0.156.0",
     "@secretlint/node": "13.0.5",
     "@secretlint/secretlint-rule-preset-recommend": "^13.0.5"
   },
   "bundleDependencies": [
+    "@octokit/core",
     "@openai/codex-sdk",
     "@secretlint/node",
     "@secretlint/secretlint-rule-preset-recommend"

@@ -1,5 +1,6 @@
-import { spawnSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { type SpawnOptions, spawn, spawnSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
 
 export function command(
   file: string,
@@ -155,7 +156,10 @@ export function linuxProcessIdentity(
       throw new Error(`Cannot parse process identity for ${pid}`);
     return { group, startTime, state: fields[0] };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if (
+      ["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")
+    )
+      return null;
     throw error;
   }
 }
@@ -167,4 +171,145 @@ export function processGroupExists(group: number): boolean {
     if (identity?.group === group && identity.state !== "Z") return true;
   }
   return false;
+}
+
+export interface OwnedSubprocess {
+  pid: number;
+  startTime: string;
+}
+interface ProcessScope {
+  unresolved?: boolean;
+  signal?: AbortSignal;
+  observe?: (process: OwnedSubprocess, settled: boolean) => void;
+}
+const processCancellation = new AsyncLocalStorage<ProcessScope>();
+export function hasUnresolvedSubprocesses(): boolean {
+  return processCancellation.getStore()?.unresolved === true;
+}
+export function currentProcessSignal(): AbortSignal | undefined {
+  return processCancellation.getStore()?.signal;
+}
+
+/** Bind controller subprocesses to the current coordinator cancellation request. */
+export function withProcessCancellation<T>(
+  signal: AbortSignal | undefined,
+  operation: () => Promise<T>,
+  observe?: ProcessScope["observe"],
+): Promise<T> {
+  return processCancellation.run({ signal, observe }, operation);
+}
+
+export async function subprocessAsync(
+  file: string,
+  args: string[],
+  options: SpawnOptions = {},
+  input?: string,
+  observe?: (stream: "stdout" | "stderr", chunk: Buffer) => void,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const scope = processCancellation.getStore();
+  const signal = scope?.signal;
+  signal?.throwIfAborted();
+  const child = spawn(file, args, { ...options, detached: true });
+  const identity = child.pid ? linuxProcessIdentity(child.pid) : null;
+  const owned =
+    child.pid && identity
+      ? { pid: child.pid, startTime: identity.startTime }
+      : undefined;
+  if (owned) scope?.observe?.(owned, false);
+  let cancellationError: unknown;
+  let aborted = false;
+  const cancel = () => {
+    aborted = true;
+    if (!child.pid) return;
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH")
+        cancellationError = error;
+    }
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) cancel();
+  const output: Record<"stdout" | "stderr", Buffer[]> = {
+    stdout: [],
+    stderr: [],
+  };
+  for (const stream of ["stdout", "stderr"] as const)
+    child[stream]?.on("data", (chunk: Buffer) => {
+      output[stream].push(chunk);
+      observe?.(stream, chunk);
+    });
+  // A child may exit before consuming input; its exit status remains authoritative.
+  child.stdin?.on("error", () => {
+    /* Child exit status is authoritative. */
+  });
+  child.stdin?.end(input);
+  let error: Error | undefined;
+  const status = await new Promise<number | null>((resolve) => {
+    child.on("error", (cause) => {
+      error = cause;
+    });
+    child.on("close", resolve);
+  });
+  signal?.removeEventListener("abort", cancel);
+  if (aborted && child.pid) {
+    // SIGKILL is asynchronous. Allow the kernel to reap runnable descendants.
+    for (
+      let attempt = 0;
+      attempt < 100 && processGroupExists(child.pid);
+      attempt++
+    )
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    if (cancellationError || processGroupExists(child.pid)) {
+      if (scope) scope.unresolved = true;
+      throw new Error(
+        "Owned subprocess cessation could not be verified; outcome unknown",
+        { cause: cancellationError },
+      );
+    }
+  }
+  if (owned && !processGroupExists(owned.pid)) scope?.observe?.(owned, true);
+  else if (owned) {
+    if (scope) scope.unresolved = true;
+    throw new Error("Owned subprocess group remains active; outcome unknown");
+  }
+  if (aborted)
+    throw new Error("Owned subprocess cancelled after verified cessation");
+  if (error) throw error;
+  return {
+    status,
+    stdout: Buffer.concat(output.stdout).toString("utf8"),
+    stderr: Buffer.concat(output.stderr).toString("utf8"),
+  };
+}
+
+export async function commandAsync(
+  file: string,
+  args: string[],
+  cwd?: string,
+  env?: NodeJS.ProcessEnv,
+  input?: string,
+): Promise<string> {
+  const result = await subprocessAsync(file, args, { cwd, env }, input);
+  if (result.status !== 0)
+    throw new Error(
+      `${file} ${args.join(" ")} failed (${result.status}): ${result.stderr || result.stdout}`,
+    );
+  return result.stdout.trim();
+}
+
+export function gitAsync(checkout: string, ...args: string[]): Promise<string> {
+  return commandAsync("git", ["-C", checkout, ...args]);
+}
+
+export function pinnedGitAsync(
+  checkout: string,
+  ...args: string[]
+): Promise<string> {
+  return commandAsync(
+    "git",
+    ["-C", checkout, ...args],
+    undefined,
+    pinnedGitEnvironment(),
+  );
 }

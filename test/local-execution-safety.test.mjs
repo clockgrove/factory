@@ -2,21 +2,21 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
-  mkdtempSync,
   mkdirSync,
+  mkdtempSync,
   renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { createRequire } from "node:module";
 import test from "node:test";
 import { LocalContentStore } from "../dist/content/local.js";
 import { LocalExecutionDriver } from "../dist/execution/local.js";
-import { sanitizedWorkerEnvironment } from "../dist/process.js";
 import { checkStagedCandidate } from "../dist/execution/staged-candidate.js";
+import { sanitizedWorkerEnvironment } from "../dist/process.js";
 
 function git(checkout, ...args) {
   return execFileSync("git", ["-C", checkout, ...args], {
@@ -24,7 +24,7 @@ function git(checkout, ...args) {
   }).trim();
 }
 
-test("staged secrets cannot be hidden by replacing working bytes", () => {
+test("staged secrets cannot be hidden by replacing working bytes", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-staged-secret-"));
   try {
     const { checkout } = target(root);
@@ -32,7 +32,7 @@ test("staged secrets cannot be hidden by replacing working bytes", () => {
     writeFileSync(join(checkout, "safe.txt"), `GITHUB_TOKEN=${value}\n`);
     git(checkout, "add", "safe.txt");
     writeFileSync(join(checkout, "safe.txt"), "Clean working bytes.\n");
-    assert.throws(
+    await assert.rejects(
       () => checkStagedCandidate(checkout, checkout, ["safe.txt"]),
       (error) => {
         assert.match(
@@ -49,7 +49,7 @@ test("staged secrets cannot be hidden by replacing working bytes", () => {
   }
 });
 
-test("invalid external scanner configuration fails closed", () => {
+test("invalid external scanner configuration fails closed", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-invalid-scan-config-"));
   const previous = process.env.FACTORY_SECRETLINT_CONFIG;
   try {
@@ -71,12 +71,12 @@ test("invalid external scanner configuration fails closed", () => {
       join(root, "missing.json"),
     ]) {
       process.env.FACTORY_SECRETLINT_CONFIG = config;
-      assert.throws(() =>
+      await assert.rejects(() =>
         checkStagedCandidate(checkout, checkout, ["safe.txt"]),
       );
     }
     process.env.FACTORY_SECRETLINT_CONFIG = external;
-    assert.throws(
+    await assert.rejects(
       () => checkStagedCandidate(checkout, checkout, ["safe.txt"]),
       /Secretlint could not check "safe.txt"; publication stopped/,
     );
@@ -164,10 +164,12 @@ async function runCandidate(change, options = {}) {
         return { identity: request.attemptId, data: {} };
       },
       async observe() {
+        if (options.observe) return options.observe();
         return { state: "complete" };
       },
       async cancel() {},
       async collect() {
+        if (options.collect) return options.collect();
         return {
           evidence: options.evidence ?? { harness: "scripted" },
           collection: { acceptedIgnoredLinks: ["provider-forged"] },
@@ -188,7 +190,13 @@ async function runCandidate(change, options = {}) {
       ownedPaths: options.ownedPaths ?? ["safe.txt"],
     };
     const handle = await driver.start({ attemptId: "attempt", baseSha, item });
-    const result = await driver.collect(handle);
+    let result;
+    try {
+      result = await driver.collect(handle);
+    } catch (error) {
+      options.inspectFailure?.(handle.data.worktree);
+      throw error;
+    }
     assert.deepEqual(
       result.evidence,
       options.evidence ?? { harness: "scripted" },
@@ -383,7 +391,7 @@ test("ignored generated links do not bypass the collection safety matrix", async
   }
 });
 
-test("staged regular bytes behind an ignored symlink ancestor still fail", () => {
+test("staged regular bytes behind an ignored symlink ancestor still fail", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-ignored-ancestor-"));
   try {
     const { checkout } = target(root);
@@ -399,7 +407,7 @@ test("staged regular bytes behind an ignored symlink ancestor still fail", () =>
       "--cacheinfo",
       `100644,${blob},node_modules/entry.txt`,
     );
-    assert.throws(
+    await assert.rejects(
       () =>
         checkStagedCandidate(checkout, checkout, ["node_modules/entry.txt"]),
       /unsafe filesystem entry|unsafe symlink/,
@@ -411,7 +419,7 @@ test("staged regular bytes behind an ignored symlink ancestor still fail", () =>
 
 test("ignored links preserve staged mode and staged/working secret checks", async (t) => {
   for (const kind of ["submodule", "staged secret", "working secret"]) {
-    await t.test(kind, () => {
+    await t.test(kind, async () => {
       const root = mkdtempSync(join(tmpdir(), "factory-ignored-staged-"));
       try {
         const { checkout } = target(root);
@@ -426,7 +434,7 @@ test("ignored links preserve staged mode and staged/working secret checks", asyn
             "--cacheinfo",
             `160000,${git(checkout, "rev-parse", "HEAD")},safe.txt`,
           );
-          assert.throws(
+          await assert.rejects(
             () => checkStagedCandidate(checkout, checkout, ["safe.txt"]),
             /unsafe Git entry/,
           );
@@ -441,7 +449,7 @@ test("ignored links preserve staged mode and staged/working secret checks", asyn
             git(checkout, "add", "safe.txt");
             writeFileSync(join(checkout, "safe.txt"), secret);
           }
-          assert.throws(
+          await assert.rejects(
             () => checkStagedCandidate(checkout, checkout, ["safe.txt"]),
             /Secretlint found suspected secret/,
           );
@@ -812,7 +820,7 @@ test("operator-owned external scanner config can handle a reviewed false positiv
   }
 });
 
-test("worker receives only declared ambient values and an empty GitHub credential directory", () => {
+test("worker receives only declared ambient values and an empty GitHub credential directory", async () => {
   const original = { ...process.env };
   try {
     Object.assign(process.env, {
@@ -956,5 +964,28 @@ test("late secret and commit failures never return completed collection observat
       failure === "secret" ? /Secretlint/ : /git.*commit|Command failed/s,
     );
     assert.equal(completed, false);
+  }
+});
+
+test("failed collection retains owned checkout when worker cessation is unknown", async () => {
+  for (const unknown of ["running", "observation-failure"]) {
+    let retained = false;
+    await assert.rejects(
+      runCandidate(() => {}, {
+        async collect() {
+          throw new Error("collection disconnected");
+        },
+        async observe() {
+          if (unknown === "observation-failure")
+            throw new Error("observation unavailable");
+          return { state: "running" };
+        },
+        inspectFailure(worktree) {
+          retained = existsSync(worktree);
+        },
+      }),
+      /worker remains active|observation unavailable/,
+    );
+    assert.equal(retained, true);
   }
 });

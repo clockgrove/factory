@@ -1,5 +1,4 @@
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import {
   closeSync,
   existsSync,
@@ -7,18 +6,20 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   readSync,
   realpathSync,
   rmSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   pinnedGit,
   pinnedGitEnvironment,
   pinnedGitRaw,
   sanitizedWorkerEnvironment,
+  subprocessAsync,
 } from "../process.js";
 
 function owns(path: string, owned: string[]): boolean {
@@ -184,13 +185,13 @@ const recommendedRules = JSON.stringify({
   rules: [{ id: "@secretlint/secretlint-rule-preset-recommend" }],
 });
 
-function scanChangedFile(
+async function scanChangedFile(
   worktree: string,
   path: string,
   source: string,
   report: string,
   checkout: string,
-): void {
+): Promise<void> {
   const config = process.env.FACTORY_SECRETLINT_CONFIG;
   if (
     config &&
@@ -212,7 +213,7 @@ function scanChangedFile(
   const output = openSync(report, "w", 0o600);
   let result;
   try {
-    result = spawnSync(process.execPath, args, {
+    result = await subprocessAsync(process.execPath, args, {
       cwd: worktree,
       stdio: ["ignore", output, output],
       env: sanitizedWorkerEnvironment(
@@ -222,7 +223,7 @@ function scanChangedFile(
   } finally {
     closeSync(output);
   }
-  if (result.error || ![0, 1].includes(result.status ?? -1))
+  if (![0, 1].includes(result.status ?? -1))
     throw new Error(
       `Secretlint could not check ${JSON.stringify(path)}; publication stopped`,
     );
@@ -248,12 +249,12 @@ function scanChangedFile(
 }
 
 /** Guard the staged candidate before any controller-side publication or upload. */
-export function checkStagedCandidate(
+export async function checkStagedCandidate(
   worktree: string,
   checkout: string,
   ownedPaths: string[],
   acceptedIgnoredLinks?: string[],
-): string[] {
+): Promise<string[]> {
   checkWorktreeEntries(worktree, acceptedIgnoredLinks);
   const paths = changedPaths(worktree);
   const unowned = paths.filter((path) => !owns(path, ownedPaths));
@@ -276,7 +277,7 @@ export function checkStagedCandidate(
       const output = openSync(staged, "wx", 0o600);
       let copy;
       try {
-        copy = spawnSync(
+        copy = await subprocessAsync(
           "git",
           ["-C", worktree, "cat-file", "blob", entry.blob],
           {
@@ -287,17 +288,23 @@ export function checkStagedCandidate(
       } finally {
         closeSync(output);
       }
-      if (copy.error || copy.status !== 0)
+      if (copy.status !== 0)
         throw new Error(
           `Cannot read staged content at ${JSON.stringify(path)}`,
         );
       const report = join(scanRoot, "report.txt");
-      scanChangedFile(worktree, path, staged, report, checkout);
+      await scanChangedFile(worktree, path, staged, report, checkout);
       if (
         pinnedGit(worktree, "hash-object", "--no-filters", "--", path) !==
         entry.blob
       )
-        scanChangedFile(worktree, path, join(worktree, path), report, checkout);
+        await scanChangedFile(
+          worktree,
+          path,
+          join(worktree, path),
+          report,
+          checkout,
+        );
     } finally {
       rmSync(scanRoot, { recursive: true, force: true });
     }

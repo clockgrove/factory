@@ -1,5 +1,6 @@
 import { resultFindings } from "./support/review-protocol.mjs";
-import { chmodSync, readFileSync } from "node:fs";
+import { Octokit } from "@octokit/core";
+import { GitHubClient } from "../dist/github-client.js";
 import { RealGitHubGateway } from "../dist/github.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
@@ -445,14 +446,17 @@ for (const strategy of ["regular", "native-stack"])
       assert.equal(state.finalValidation?.passed, true, JSON.stringify(state));
       assert.equal(state.work.joined.status, "done");
       assert.equal(projected.items[0].executionProfile.id, "standard");
+      const starts = events.filter((event) => event.method === "start");
+      // Independent async preparations may finish in either order; the join waits.
+      assert.equal(starts.at(-1).item, "joined");
       assert.deepEqual(
-        events
-          .filter((e) => e.method === "start")
-          .map((e) => [e.item, e.profile]),
+        starts
+          .map((event) => [event.item, event.profile])
+          .sort(([a], [b]) => a.localeCompare(b)),
         [
+          ["joined", "focused"],
           ["one", "standard"],
           ["two", "focused"],
-          ["joined", "focused"],
         ],
       );
       const joinedBase = events.find((e) => e.item === "joined").base;
@@ -609,27 +613,27 @@ test("GitHub issue projection renders the accepted assignment and resolved bindi
       items: [item("one")],
     };
     normalizeExecutionProfiles(graph, executionProfileChoices(config));
-    const executable = join(root, "gh");
-    const captured = join(root, "projected.json");
-    writeFileSync(
-      executable,
-      `#!${process.execPath}
-const fs=require('node:fs');const args=process.argv.slice(2);if(args[0]==='api')process.stdout.write('[[]]');else if(args[0]==='issue'&&args[1]==='create'){fs.writeFileSync(${JSON.stringify(captured)},JSON.stringify(args));process.stdout.write('https://github.com/example/profiles/issues/101');}else process.exit(1);
-`,
+    let body;
+    const client = new GitHubClient(
+      new Octokit({
+        request: {
+          fetch: async (url, options) => {
+            assert.equal(
+              new URL(url).pathname,
+              "/repos/example/profiles/issues",
+            );
+            if (options.method === "GET") return Response.json([]);
+            assert.equal(options.method, "POST");
+            body = JSON.parse(options.body).body;
+            return Response.json({ id: 1010, number: 101 });
+          },
+        },
+      }),
     );
-    chmodSync(executable, 0o755);
-    const previous = process.env.PATH;
-    process.env.PATH = `${root}:${previous}`;
-    try {
-      const gateway = new RealGitHubGateway(config.repository, {});
-      await gateway.projectGraph({ graph, objectiveIssue: 1 });
-      const args = JSON.parse(readFileSync(captured, "utf8"));
-      const body = args[args.indexOf("--body") + 1];
-      assert.match(body, /## Assigned execution profile/);
-      assert.ok(body.includes(JSON.stringify(graph.items[0].executionProfile)));
-      assert.ok(body.includes(JSON.stringify(graph.items[0].executionBinding)));
-      assert.doesNotMatch(body, /DO-NOT-SEND|privatePath/);
-    } finally {
-      process.env.PATH = previous;
-    }
+    const gateway = new RealGitHubGateway(config.repository, {}, client);
+    await gateway.projectGraph({ graph, objectiveIssue: 1 });
+    assert.match(body, /## Assigned execution profile/);
+    assert.ok(body.includes(JSON.stringify(graph.items[0].executionProfile)));
+    assert.ok(body.includes(JSON.stringify(graph.items[0].executionBinding)));
+    assert.doesNotMatch(body, /DO-NOT-SEND|privatePath/);
   }));

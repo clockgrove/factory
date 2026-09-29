@@ -18,20 +18,29 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import type {
-  CapturedAssetSet,
   AssetCaptureReceipt,
+  CapturedAssetSet,
   ContentRef,
   ContentStore,
   ProducedAssetSet,
-  SourceAssetBinding,
   SelectedAssetInput,
+  SourceAssetBinding,
   ValidationLfsMember,
   WorkItem,
 } from "./contracts.js";
-import type { FactoryState } from "./state.js";
-import { command, pinnedGit, pinnedGitRaw } from "./process.js";
-import { checkStagedCandidate } from "./execution/staged-candidate.js";
 import { CONTROLLER_CAPABILITIES_DIGEST } from "./controller-capabilities.js";
+import { checkStagedCandidate } from "./execution/staged-candidate.js";
+import {
+  command,
+  commandAsync,
+  currentProcessSignal,
+  hasUnresolvedSubprocesses,
+  pinnedGit,
+  pinnedGitAsync,
+  pinnedGitRaw,
+  withProcessCancellation,
+} from "./process.js";
+import type { FactoryState } from "./state.js";
 
 const LFS_POINTER_HEADER = Buffer.from(
   "version https://git-lfs.github.com/spec/v1\n",
@@ -625,7 +634,7 @@ export async function materializeAssetSet(args: {
 }): Promise<{ changeRef: string; treeSha: string }> {
   const worktree = join(args.workRoot, `selected-${randomUUID()}`);
   mkdirSync(args.workRoot, { recursive: true });
-  pinnedGit(
+  await pinnedGitAsync(
     args.checkout,
     "worktree",
     "add",
@@ -634,7 +643,7 @@ export async function materializeAssetSet(args: {
     args.baseCommit,
   );
   try {
-    command("git", ["-C", worktree, "lfs", "install", "--local"]);
+    await commandAsync("git", ["-C", worktree, "lfs", "install", "--local"]);
     const destinations = new Set<string>();
     for (const member of args.set.members) {
       if (
@@ -649,7 +658,7 @@ export async function materializeAssetSet(args: {
         member.destination,
       );
       const { destination } = destinationState;
-      const filter = pinnedGit(
+      const filter = await pinnedGitAsync(
         worktree,
         "check-attr",
         "filter",
@@ -662,7 +671,7 @@ export async function materializeAssetSet(args: {
             (input.binding.kind ?? "repository") === "repository" &&
             input.binding.path === member.destination,
         );
-        const tracked = pinnedGit(
+        const tracked = await pinnedGitAsync(
           worktree,
           "ls-tree",
           "HEAD",
@@ -724,8 +733,8 @@ export async function materializeAssetSet(args: {
           `Repository LFS policy does not cover ${member.destination}`,
         );
     }
-    pinnedGit(worktree, "add", "--", ...[...destinations]);
-    const staged = checkStagedCandidate(
+    await pinnedGitAsync(worktree, "add", "--", ...[...destinations]);
+    const staged = await checkStagedCandidate(
       worktree,
       args.checkout,
       args.item.ownedPaths,
@@ -737,7 +746,7 @@ export async function materializeAssetSet(args: {
       throw new Error(
         "Selected AssetSet staged paths differ from approved destinations",
       );
-    pinnedGit(
+    await pinnedGitAsync(
       worktree,
       "-c",
       "user.name=Factory",
@@ -747,9 +756,9 @@ export async function materializeAssetSet(args: {
       "-m",
       `Factory: selected ${args.set.id} assets`,
     );
-    const changeRef = pinnedGit(worktree, "rev-parse", "HEAD");
+    const changeRef = await pinnedGitAsync(worktree, "rev-parse", "HEAD");
     for (const member of args.set.members) {
-      const filter = pinnedGit(
+      const filter = await pinnedGitAsync(
         worktree,
         "check-attr",
         "filter",
@@ -757,7 +766,7 @@ export async function materializeAssetSet(args: {
         member.destination,
       );
       if (!filter.endsWith(": lfs")) continue;
-      const pointer = pinnedGit(
+      const pointer = await pinnedGitAsync(
         worktree,
         "show",
         `${changeRef}:${member.destination}`,
@@ -773,13 +782,23 @@ export async function materializeAssetSet(args: {
     }
     return {
       changeRef,
-      treeSha: pinnedGit(worktree, "rev-parse", "HEAD^{tree}"),
+      treeSha: await pinnedGitAsync(worktree, "rev-parse", "HEAD^{tree}"),
     };
   } finally {
     try {
-      pinnedGit(args.checkout, "worktree", "remove", "--force", worktree);
+      if (!hasUnresolvedSubprocesses())
+        await withProcessCancellation(undefined, () =>
+          pinnedGitAsync(
+            args.checkout,
+            "worktree",
+            "remove",
+            "--force",
+            worktree,
+          ),
+        );
     } catch {
-      rmSync(worktree, { recursive: true, force: true });
+      if (!hasUnresolvedSubprocesses())
+        rmSync(worktree, { recursive: true, force: true });
     }
   }
 }
@@ -964,12 +983,12 @@ export function assertHydrationReceipt(
     );
 }
 
-export function verifyHydratedAssets(args: {
+export async function verifyHydratedAssets(args: {
   checkout: string;
   workRoot: string;
   integratedSha: string;
   selections: SelectedAssetSet[];
-}): HydrationReceipt | undefined {
+}): Promise<HydrationReceipt | undefined> {
   if (!args.selections.length) return undefined;
   mkdirSync(args.workRoot, { recursive: true });
   const clone = join(args.workRoot, `fresh-${randomUUID()}`);
@@ -985,13 +1004,19 @@ export function verifyHydratedAssets(args: {
       `${args.integratedSha}^{tree}`,
     );
     phase = "clone";
-    command("git", ["clone", "--no-checkout", remote, clone]);
+    await commandAsync("git", ["clone", "--no-checkout", remote, clone]);
     phase = "lfs-setup";
-    command("git", ["-C", clone, "lfs", "install", "--local"]);
+    await commandAsync("git", ["-C", clone, "lfs", "install", "--local"]);
     phase = "integrated-checkout";
-    command("git", ["-C", clone, "checkout", "--detach", args.integratedSha]);
+    await commandAsync("git", [
+      "-C",
+      clone,
+      "checkout",
+      "--detach",
+      args.integratedSha,
+    ]);
     phase = "lfs-pull";
-    command("git", ["-C", clone, "lfs", "pull"]);
+    await commandAsync("git", ["-C", clone, "lfs", "pull"]);
     phase = "integrated-identity";
     if (pinnedGit(clone, "rev-parse", "HEAD") !== args.integratedSha)
       throw new Error("Fresh clone resolved a different integrated commit");
@@ -1006,12 +1031,13 @@ export function verifyHydratedAssets(args: {
         let bytes = 0;
         try {
           const expectedBytes = fstatSync(fd).size;
-          const chunk = Buffer.allocUnsafe(64 * 1024);
-          for (;;) {
-            const count = readSync(fd, chunk, 0, chunk.length, null);
-            if (!count) break;
-            hash.update(chunk.subarray(0, count));
-            bytes += count;
+          for await (const chunk of createReadStream(path, {
+            fd,
+            autoClose: false,
+          })) {
+            currentProcessSignal()?.throwIfAborted();
+            hash.update(chunk);
+            bytes += chunk.length;
           }
           if (bytes !== expectedBytes)
             throw new Error("Hydrated file changed during verification");
@@ -1026,6 +1052,7 @@ export function verifyHydratedAssets(args: {
             `Hydrated asset differs from selected bytes: ${member.destination}`,
           );
       }
+    currentProcessSignal()?.throwIfAborted();
     receipt = expectedHydrationReceipt(
       args.integratedSha,
       integratedTreeSha,
@@ -1037,7 +1064,12 @@ export function verifyHydratedAssets(args: {
     );
   }
   try {
-    rmSync(clone, { recursive: true, force: true });
+    if (!hasUnresolvedSubprocesses())
+      rmSync(clone, { recursive: true, force: true });
+    else
+      failure ??= new Error(
+        "Fresh-clone hydration subprocess ownership unresolved; clone retained",
+      );
   } catch {
     failure ??= new Error(
       "Fresh-clone hydration verification failed during cleanup",

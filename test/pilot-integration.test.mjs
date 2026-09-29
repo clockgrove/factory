@@ -1,7 +1,3 @@
-import {
-  packetFromPrompt,
-  resultFindings,
-} from "./support/review-protocol.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -30,7 +26,12 @@ import {
   git,
   makeApplication,
   readEvents,
+  waitFor,
 } from "./support/integration-fixture.mjs";
+import {
+  packetFromPrompt,
+  resultFindings,
+} from "./support/review-protocol.mjs";
 
 // Real pnpm, local tarball dependency, Git and LFS; no registry, provider or GitHub calls.
 test("ordinary pilot combines real pnpm collection, LFS selection and complete final evidence", async () => {
@@ -228,6 +229,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
       fakeRoot: join(root, "fake"),
       actions: {
         foundation: {
+          barrier: join(root, "lanes.go"),
           files: Object.entries(files).map(([path, text]) => ({ path, text })),
           commands: [
             [process.execPath, ...frozenArgs],
@@ -235,6 +237,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
           ],
         },
         policy: {
+          barrier: join(root, "lanes.go"),
           files: [
             {
               path: ".gitattributes",
@@ -516,7 +519,21 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
     descriptor.resultReviewer = (request) => reviewer.reviewResult(request);
     const { application, contentStore, planningPath, eventsPath } =
       makeApplication(descriptor);
-    const waiting = await application.runObjective(1);
+    const running = application.runObjective(1);
+    await waitFor(
+      () => {
+        const started = readEvents(eventsPath).filter(
+          (event) => event.type === "start",
+        );
+        return ["foundation", "policy"].every((id) =>
+          started.some((event) => event.item === id),
+        );
+      },
+      root,
+      "both ordinary pilot lanes started",
+    );
+    writeFileSync(join(root, "lanes.go"), "go");
+    const waiting = await running;
     assert.equal(
       waiting.work.media.step,
       "approve-asset",

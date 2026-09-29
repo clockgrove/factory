@@ -1,10 +1,7 @@
-import {
-  resultFindings,
-  packetFromPrompt,
-} from "./support/review-protocol.mjs";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -16,18 +13,17 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { once } from "node:events";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel } from "../dist/compiler.js";
-import { parseFactoryState } from "../dist/state.js";
-import { readState, statePath } from "../dist/state-store.js";
 import {
   readDiagnostics,
   statusDocument,
   summarizeModelInvocations,
 } from "../dist/diagnostics.js";
 import { selectAssetSetFromCli } from "../dist/runner.js";
+import { parseFactoryState } from "../dist/state.js";
+import { readContinuation, readState, statePath } from "../dist/state-store.js";
 import {
   createTarget,
   factoryConfig,
@@ -38,6 +34,10 @@ import {
   waitForFile,
   writeDescriptor,
 } from "./support/integration-fixture.mjs";
+import {
+  packetFromPrompt,
+  resultFindings,
+} from "./support/review-protocol.mjs";
 
 const objective = 1;
 
@@ -1474,9 +1474,11 @@ test("application lifecycle reattaches once, cancels owned work, and retries onl
       await waitForFile(
         () => {
           const state = existsSync(restartStatePath)
-            ? readState(descriptor.config.repository, objective)
+            ? readContinuation(descriptor.config.repository, objective)
             : undefined;
-          return state?.work.restart.execution ? state : undefined;
+          return state?.schemaVersion === 2 && state.work.restart.execution
+            ? state
+            : undefined;
         },
         restartStatePath,
         "persisted restart handle",

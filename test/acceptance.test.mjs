@@ -1,4 +1,3 @@
-import { resultFindings } from "./support/review-protocol.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
@@ -17,6 +16,19 @@ import {
   objectiveCriteria,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
+import { LocalContentStore } from "../dist/content/local.js";
+import { CompletedModelInvocationError } from "../dist/contracts.js";
+import {
+  DiagnosticEmitter,
+  readDiagnostics,
+  summarizeModelInvocations,
+} from "../dist/diagnostics.js";
+import {
+  assetSelectionDigest,
+  validationLfsMembersForItem,
+} from "../dist/media.js";
+import { decideResult } from "../dist/runner.js";
+import { readState, saveState, statePath } from "../dist/state-store.js";
 import {
   AcceptanceDecisionRequired,
   assertPinnedNpmScripts,
@@ -26,23 +38,12 @@ import {
   validateTree,
   validateWorkItem,
 } from "../dist/validation.js";
-import { decideResult } from "../dist/runner.js";
-import { readState, saveState, statePath } from "../dist/state-store.js";
 import {
   createTarget,
   factoryConfig,
   git,
 } from "./support/integration-fixture.mjs";
-import { LocalContentStore } from "../dist/content/local.js";
-import {
-  assetSelectionDigest,
-  validationLfsMembersForItem,
-} from "../dist/media.js";
-import {
-  DiagnosticEmitter,
-  readDiagnostics,
-  summarizeModelInvocations,
-} from "../dist/diagnostics.js";
+import { resultFindings } from "./support/review-protocol.mjs";
 
 function item(baseSha, validation) {
   return {
@@ -996,7 +997,9 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         },
         invocation: invocation(providerFailureEvents),
       }),
-      AcceptanceDecisionRequired,
+      (error) =>
+        error.message === "provider unavailable" &&
+        !(error instanceof AcceptanceDecisionRequired),
     );
     assert.deepEqual(providerFailureEvents, []);
     const malformedEvents = [];
@@ -2219,7 +2222,9 @@ test("large binary results reach independent review as descriptors, and reviewer
             assert.match(packet.patches[0].excerpt, /Binary files/);
             assert.equal(packet.patches[0].truncated, false);
             assert.ok(review.change.length < 10_000);
-            throw new Error("review context unavailable");
+            throw new CompletedModelInvocationError(
+              "review context unavailable",
+            );
           },
         },
       }),

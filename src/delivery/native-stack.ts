@@ -1,6 +1,4 @@
-import { command } from "../process.js";
-
-const version = "2026-03-10";
+import { GitHubClient, sharedGitHubClient } from "../github-client.js";
 
 type Pull = {
   number: number;
@@ -24,55 +22,38 @@ export interface StackLayer {
 }
 
 export class NativeStackDelivery {
-  constructor(private repository: string) {}
+  constructor(
+    private repository: string,
+    private readonly client: GitHubClient = sharedGitHubClient,
+  ) {}
 
-  private api<T>(route: string, method = "GET", body?: unknown): T {
-    const args = [
-      "api",
-      "-H",
-      `X-GitHub-Api-Version: ${version}`,
-      "-X",
-      method,
-      route,
-    ];
-    if (body !== undefined) args.push("--input", "-");
-    return JSON.parse(
-      command(
-        "gh",
-        args,
-        undefined,
-        undefined,
-        body === undefined ? undefined : JSON.stringify(body),
-      ),
-    ) as T;
+  private async api<T>(
+    route: string,
+    method = "GET",
+    body?: Record<string, unknown>,
+  ): Promise<T> {
+    return this.client.request<T>(method, route, body);
   }
 
-  private pull(number: number): Pull {
+  private async pull(number: number): Promise<Pull> {
     return this.api<Pull>(`repos/${this.repository}/pulls/${number}`);
   }
 
-  private mergedSha(number: number): string {
-    const detail = JSON.parse(
-      command("gh", [
-        "pr",
-        "view",
-        String(number),
-        "-R",
-        this.repository,
-        "--json",
-        "state,mergeCommit",
-      ]),
-    ) as { state: string; mergeCommit: { oid: string } | null };
-    if (detail.state !== "MERGED" || !detail.mergeCommit?.oid)
+  private async mergedSha(number: number): Promise<string> {
+    const detail = await this.pull(number);
+    if (detail.state !== "closed" || !detail.merged || !detail.merge_commit_sha)
       throw new Error(
         `Native stack PR #${number} has no integrated commit yet`,
       );
-    return detail.mergeCommit.oid;
+    return detail.merge_commit_sha;
   }
 
-  private assertLayers(layers: StackLayer[], baseBranch: string): void {
+  private async assertLayers(
+    layers: StackLayer[],
+    baseBranch: string,
+  ): Promise<void> {
     for (const [index, layer] of layers.entries()) {
-      const observed = this.pull(layer.pullRequest);
+      const observed = await this.pull(layer.pullRequest);
       const expectedBase = index ? layers[index - 1]!.branch : baseBranch;
       if (
         observed.head.ref !== layer.branch ||
@@ -87,12 +68,12 @@ export class NativeStackDelivery {
     }
   }
 
-  ensureStack(layers: StackLayer[], baseBranch: string): number {
+  async ensureStack(layers: StackLayer[], baseBranch: string): Promise<number> {
     if (layers.length < 2)
       throw new Error("Native stack requires two or more PRs");
-    this.assertLayers(layers, baseBranch);
+    await this.assertLayers(layers, baseBranch);
     const numbers = layers.map((layer) => layer.pullRequest);
-    const existing = this.api<Stack[]>(
+    const existing = await this.api<Stack[]>(
       `repos/${this.repository}/stacks?pull_request=${numbers[0]}`,
     );
     if (existing.length) {
@@ -108,9 +89,13 @@ export class NativeStackDelivery {
         );
       return stack.number;
     }
-    const created = this.api<Stack>(`repos/${this.repository}/stacks`, "POST", {
-      pull_requests: numbers,
-    });
+    const created = await this.api<Stack>(
+      `repos/${this.repository}/stacks`,
+      "POST",
+      {
+        pull_requests: numbers,
+      },
+    );
     if (
       created.base.ref !== baseBranch ||
       JSON.stringify(created.pull_requests.map((pull) => pull.number)) !==
@@ -130,7 +115,9 @@ export class NativeStackDelivery {
       cancelled: () => boolean;
     },
   ): Promise<string> {
-    const already = layers.map((layer) => this.pull(layer.pullRequest));
+    const already = await Promise.all(
+      layers.map((layer) => this.pull(layer.pullRequest)),
+    );
     if (
       already.every(
         (pull) =>
@@ -145,14 +132,16 @@ export class NativeStackDelivery {
           throw new Error(
             "Merged native stack head changed; operator direction required",
           );
-      const merged = layers.map((layer) => this.mergedSha(layer.pullRequest));
+      const merged = await Promise.all(
+        layers.map((layer) => this.mergedSha(layer.pullRequest)),
+      );
       if (new Set(merged).size !== 1)
         throw new Error("Native stack layers have different merge commits");
       return merged[0]!;
     }
     if (
       !options.resumeUuid &&
-      this.ensureStack(layers, baseBranch) !== expectedStack
+      (await this.ensureStack(layers, baseBranch)) !== expectedStack
     )
       throw new Error("Native stack identity changed before merge");
     const top = layers.at(-1)!;
@@ -163,11 +152,11 @@ export class NativeStackDelivery {
     let uuid = options.resumeUuid;
     let observed: AsyncResult;
     if (uuid) {
-      observed = this.api(
+      observed = await this.api(
         `repos/${this.repository}/pulls/${top.pullRequest}/merge-async/${uuid}`,
       );
     } else {
-      observed = this.api<AsyncResult>(
+      observed = await this.api<AsyncResult>(
         `repos/${this.repository}/pulls/${top.pullRequest}/merge-async`,
         "PUT",
         {
@@ -186,15 +175,15 @@ export class NativeStackDelivery {
         throw new Error("Objective cancelled during native merge observation");
       await new Promise<void>((resolve) => setTimeout(resolve, 500));
       if (uuid)
-        observed = this.api(
+        observed = await this.api(
           `repos/${this.repository}/pulls/${top.pullRequest}/merge-async/${uuid}`,
         );
       else {
-        const pull = this.pull(top.pullRequest);
+        const pull = await this.pull(top.pullRequest);
         if (pull.state === "closed" && pull.merged === true)
           observed = {
             status: "merged",
-            details: { sha: this.mergedSha(top.pullRequest) },
+            details: { sha: await this.mergedSha(top.pullRequest) },
           };
       }
     }
@@ -205,7 +194,9 @@ export class NativeStackDelivery {
     for (;;) {
       if (options.cancelled())
         throw new Error("Objective cancelled during native merge observation");
-      const pulls = layers.map((layer) => this.pull(layer.pullRequest));
+      const pulls = await Promise.all(
+        layers.map((layer) => this.pull(layer.pullRequest)),
+      );
       if (
         pulls.every(
           (pull) =>
@@ -215,7 +206,9 @@ export class NativeStackDelivery {
         break;
       await new Promise<void>((resolve) => setTimeout(resolve, 500));
     }
-    const merged = layers.map((layer) => this.mergedSha(layer.pullRequest));
+    const merged = await Promise.all(
+      layers.map((layer) => this.mergedSha(layer.pullRequest)),
+    );
     if (new Set(merged).size !== 1 || merged[0] !== observed.details.sha)
       throw new Error(
         "Native stack merge commit differs from the async result",

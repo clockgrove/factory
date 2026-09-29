@@ -1132,6 +1132,7 @@ export function statusDocument(
             ? ("complete" as const)
             : ("active" as const),
     runId: state.runId,
+    coordinator: state.coordinator ?? null,
     configuredSlots: configuredSlots ?? null,
     baseSha: state.baseSha,
     integratedSha: state.integratedSha ?? null,

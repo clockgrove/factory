@@ -7,13 +7,20 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { stateRoot } from "./config.js";
 import { linuxProcessIdentity } from "./process.js";
-import { parseFactoryState, type FactoryState } from "./state.js";
+import {
+  assertCoordinator,
+  type ContinuationState,
+  type FactoryState,
+  type PreparationState,
+  parseFactoryState,
+} from "./state.js";
 
 export function statePath(repository: string, objective: number): string {
   return join(
@@ -24,7 +31,7 @@ export function statePath(repository: string, objective: number): string {
   );
 }
 
-export function saveState(path: string, state: FactoryState): void {
+export function saveState(path: string, state: ContinuationState): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${randomUUID()}.tmp`;
   const fd = openSync(temporary, "wx", 0o600);
@@ -41,6 +48,42 @@ export function saveState(path: string, state: FactoryState): void {
   } finally {
     closeSync(directory);
   }
+}
+
+export function readContinuation(
+  repository: string,
+  objective: number,
+): ContinuationState | undefined {
+  const path = statePath(repository, objective);
+  if (!existsSync(path)) return undefined;
+  const value = JSON.parse(readFileSync(path, "utf8"));
+  if (value.schemaVersion !== 3) return readState(repository, objective);
+  if (
+    value.kind !== "preparing" ||
+    value.repository !== repository ||
+    value.objective !== objective ||
+    typeof value.runId !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.configDigest) ||
+    !/^[a-f0-9]{40}$/.test(value.baseSha) ||
+    !/^[a-f0-9]{64}$/.test(value.objectiveBodyDigest) ||
+    !["ready", "submitted", "complete"].includes(value.planning) ||
+    !value.coordinator ||
+    !["running", "paused", "draining"].includes(value.coordinator.mode) ||
+    typeof value.coordinator.phase !== "string" ||
+    !Number.isFinite(Date.parse(value.coordinator.phaseStartedAt)) ||
+    !value.issueByItemId ||
+    typeof value.issueByItemId !== "object" ||
+    Array.isArray(value.issueByItemId) ||
+    Object.values(value.issueByItemId).some(
+      (id) => !Number.isSafeInteger(id) || Number(id) <= 0,
+    ) ||
+    (value.planning === "complete" && !value.plan)
+  )
+    throw new Error(
+      "Invalid preparation snapshot; operator direction required",
+    );
+  assertCoordinator(value.coordinator);
+  return value as PreparationState;
 }
 
 export function readState(
@@ -120,32 +163,40 @@ export function acquireControllerLock(
   path: string,
   objective: number,
 ): ControllerLock {
-  const previous = readControllerOwner(path);
-  if (previous) {
-    const current = linuxProcessIdentity(previous.pid);
-    if (current?.startTime === previous.startTime && current.state !== "Z")
-      throw new Error("A Factory controller already owns this installation");
-    rmSync(path);
+  // Serialize stale-owner replacement as well as creation. A crashed guard is
+  // refused explicitly; never remove a contender's newly acquired lock.
+  const guard = `${path}.acquire`;
+  mkdirSync(guard, { mode: 0o700 });
+  try {
+    const previous = readControllerOwner(path);
+    if (previous) {
+      const current = linuxProcessIdentity(previous.pid);
+      if (current?.startTime === previous.startTime && current.state !== "Z")
+        throw new Error("A Factory controller already owns this installation");
+      rmSync(path);
+    }
+    const fd = openSync(path, "wx", 0o600);
+    const identity = linuxProcessIdentity(process.pid);
+    if (!identity) {
+      closeSync(fd);
+      rmSync(path, { force: true });
+      throw new Error("Cannot establish controller process identity");
+    }
+    const token = randomUUID();
+    writeFileSync(
+      fd,
+      JSON.stringify({
+        pid: process.pid,
+        startTime: identity.startTime,
+        token,
+        objective,
+      }),
+    );
+    fsyncSync(fd);
+    return { fd, token };
+  } finally {
+    rmdirSync(guard);
   }
-  const fd = openSync(path, "wx", 0o600);
-  const identity = linuxProcessIdentity(process.pid);
-  if (!identity) {
-    closeSync(fd);
-    rmSync(path, { force: true });
-    throw new Error("Cannot establish controller process identity");
-  }
-  const token = randomUUID();
-  writeFileSync(
-    fd,
-    JSON.stringify({
-      pid: process.pid,
-      startTime: identity.startTime,
-      token,
-      objective,
-    }),
-  );
-  fsyncSync(fd);
-  return { fd, token };
 }
 
 export function releaseControllerLock(

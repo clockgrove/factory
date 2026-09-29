@@ -44,10 +44,13 @@ import {
   parseProducedAssetSets,
 } from "../media.js";
 import {
+  hasUnresolvedSubprocesses,
   linuxProcessIdentity,
   pinnedGit,
+  pinnedGitAsync,
   processGroupExists,
   sanitizedWorkerEnvironment,
+  withProcessCancellation,
 } from "../process.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
 import { parseAuthenticationRequest } from "./harness-support.js";
@@ -214,8 +217,14 @@ export class CodexHarness implements AgentHarness {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
     }
-    while (processGroupExists(data.pid))
+    for (
+      let attempt = 0;
+      attempt < 100 && processGroupExists(data.pid);
+      attempt++
+    )
       await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    if (processGroupExists(data.pid))
+      throw new Error("Worker cessation remains unresolved; checkout retained");
   }
 
   async collect(handle: HarnessHandle): Promise<HarnessResult> {
@@ -495,7 +504,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     );
     if (verified !== request.baseSha)
       throw new Error("Execution base does not resolve exactly");
-    pinnedGit(
+    await pinnedGitAsync(
       this.checkout,
       "worktree",
       "add",
@@ -593,7 +602,15 @@ export class LocalExecutionDriver implements ExecutionDriver {
       this.active.set(identity, active);
       return { provider: "local", identity, data: active };
     } catch (error) {
-      pinnedGit(this.checkout, "worktree", "remove", "--force", worktree);
+      await withProcessCancellation(undefined, () =>
+        pinnedGitAsync(
+          this.checkout,
+          "worktree",
+          "remove",
+          "--force",
+          worktree,
+        ),
+      );
       throw error;
     }
   }
@@ -616,6 +633,9 @@ export class LocalExecutionDriver implements ExecutionDriver {
 
   async collect(handle: ExecutionHandle): Promise<ExecutionResult> {
     const active = this.require(handle);
+    let collected: ExecutionResult | undefined;
+    let failed = false;
+    let collectionError: unknown;
     try {
       const result = await this.resolveHarness(
         active.request.item,
@@ -672,11 +692,17 @@ export class LocalExecutionDriver implements ExecutionDriver {
         active.worktree,
         assets,
       );
-      pinnedGit(active.worktree, "add", "-A");
+      await pinnedGitAsync(active.worktree, "add", "-A");
       if (assetDestinations.length)
-        pinnedGit(active.worktree, "reset", "HEAD", "--", ...assetDestinations);
+        await pinnedGitAsync(
+          active.worktree,
+          "reset",
+          "HEAD",
+          "--",
+          ...assetDestinations,
+        );
       const acceptedIgnoredLinks: string[] = [];
-      const paths = checkStagedCandidate(
+      const paths = await checkStagedCandidate(
         active.worktree,
         this.checkout,
         active.request.item.ownedPaths,
@@ -685,7 +711,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
       if (!paths.length && !assets.length)
         throw new Error("Worker produced no repository change");
       if (paths.length)
-        pinnedGit(
+        await pinnedGitAsync(
           active.worktree,
           "-c",
           "user.name=Factory",
@@ -697,26 +723,46 @@ export class LocalExecutionDriver implements ExecutionDriver {
         );
       const commit = pinnedGit(active.worktree, "rev-parse", "HEAD");
       const treeSha = pinnedGit(active.worktree, "rev-parse", "HEAD^{tree}");
-      return {
+      collected = {
         changeRef: commit,
         treeSha,
         evidence: result.evidence,
         collection: { acceptedIgnoredLinks },
         assets,
       };
-    } finally {
+    } catch (error) {
+      failed = true;
+      collectionError = error;
+    }
+    {
+      const observed = await this.resolveHarness(
+        active.request.item,
+        active.executionBinding,
+      ).observe(active.handle);
+      if (observed.state === "running")
+        throw new Error(
+          "Collection failed while worker remains active; checkout retained",
+        );
+      if (hasUnresolvedSubprocesses())
+        throw new Error(
+          "Collection subprocess ownership unresolved; checkout retained",
+        );
       this.active.delete(handle.identity);
       try {
-        pinnedGit(
-          this.checkout,
-          "worktree",
-          "remove",
-          "--force",
-          active.worktree,
+        await withProcessCancellation(undefined, () =>
+          pinnedGitAsync(
+            this.checkout,
+            "worktree",
+            "remove",
+            "--force",
+            active.worktree,
+          ),
         );
       } catch {
         rmSync(active.worktree, { recursive: true, force: true });
       }
     }
+    if (failed) throw collectionError;
+    return collected!;
   }
 }

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { transplantIndependentChange } from "../dist/delivery/transplant.js";
 
@@ -12,7 +12,7 @@ function git(root, ...args) {
   }).trim();
 }
 
-test("independent prepared change is replayed on the observed integration head", () => {
+test("independent prepared change is replayed on the observed integration head", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-transplant-"));
   try {
     git(root, "init", "-b", "main");
@@ -34,7 +34,7 @@ test("independent prepared change is replayed on the observed integration head",
     git(root, "commit", "-m", "right");
     const prepared = git(root, "rev-parse", "HEAD");
 
-    const replayed = transplantIndependentChange(
+    const replayed = await transplantIndependentChange(
       root,
       base,
       prepared,
@@ -47,7 +47,7 @@ test("independent prepared change is replayed on the observed integration head",
     );
     assert.equal(git(root, "show", `${replayed.changeRef}:left.txt`), "left");
     assert.equal(git(root, "show", `${replayed.changeRef}:right.txt`), "right");
-    assert.throws(() =>
+    await assert.rejects(() =>
       transplantIndependentChange(root, integrated, prepared, base),
     );
   } finally {

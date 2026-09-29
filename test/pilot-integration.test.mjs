@@ -1,3 +1,7 @@
+import {
+  packetFromPrompt,
+  resultFindings,
+} from "./support/review-protocol.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -276,10 +280,16 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
     function reviewSerialized(prompt) {
       const line = (label) => prompt.split(`\n${label}: `)[1].split("\n")[0];
       const tree = line("Result tree");
-      const criteria = JSON.parse(line("Criteria"));
-      const commandText = prompt
-        .split("\nCommand pass evidence:\n")[1]
-        .split("\nDelivery observations:")[0];
+      const criteria = packetFromPrompt(prompt).criteria.map((c) => c.text);
+      const packet = packetFromPrompt(prompt);
+      const sources = new Map(packet.evidence.map((e) => [e.path, e.content]));
+      // Check exact supplied chunks together without inventing a review source.
+      const sourceContent = (name) =>
+        packet.evidence
+          .filter((e) => e.path === name || e.path.startsWith(`${name} file `))
+          .map((e) => e.content)
+          .join("\n");
+      const commandText = sources.get("Command pass evidence");
       const receipts = commandText.split("\n\n").map((entry) => {
         const [identity, command] = entry.split("\nCommand:\n");
         return { ...JSON.parse(identity.slice("Receipt: ".length)), command };
@@ -289,18 +299,8 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
           (r) => r.treeSha === tree && r.passed && r.exitCode === 0,
         ),
       );
-      const observations = JSON.parse(line("Delivery observations"));
-      const sourceText = prompt
-        .split("\nSources: ")[1]
-        .split("\nChange packet:\n")[0];
-      const sources = new Map(
-        [
-          ...sourceText.matchAll(
-            /--- (?!Exact patch )([^\n]+) ---\n([\s\S]*?)(?=\n--- (?!Exact patch )[^\n]+ ---\n|$)/g,
-          ),
-        ].map((m) => [m[1], m[2]]),
-      );
-      const changeText = prompt.split("\nChange packet:\n")[1];
+      const observations = JSON.parse(sources.get("Delivery observations"));
+      const changeText = sourceContent("Exact Git change packet");
       const change = JSON.parse(changeText.split("\n")[0]);
       if (["media", "integration"].includes(observations.reviewedItemId)) {
         const prior = JSON.parse(sources.get("Completed dependency results"));
@@ -330,14 +330,14 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
           policyCommands,
         );
         assert.match(
-          sources.get(policyProof.evidenceSource),
+          sourceContent(policyProof.evidenceSource),
           /assets\/source.png filter=lfs diff=lfs merge=lfs -text/,
         );
         if (observations.reviewedItemId === "integration") {
           const foundationProof = prior.work.find(
             (entry) => entry.id === "foundation",
           );
-          const delta = sources.get(foundationProof.evidenceSource);
+          const delta = sourceContent(foundationProof.evidenceSource);
           for (const literal of [
             "package.json",
             "check.mjs",
@@ -357,7 +357,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
               ? JSON.stringify(observations)
               : name === "Exact Git change packet"
                 ? changeText
-                : sources.get(name);
+                : sourceContent(name);
         assert.ok(text?.includes(quote), `missing source/quote ${name}`);
         return {
           criterion,
@@ -370,111 +370,121 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
         };
       };
       return {
-        findings: criteria.map((criterion) => {
-          if (criterion.startsWith("Exact selected pointer")) {
-            const selected = JSON.parse(
-              sources.get("Validated selected LFS pointers"),
-            );
-            assert.deepEqual(selected, [
-              {
-                treeSha: tree,
-                destination: "assets/source.png",
+        findings: resultFindings(
+          { reviewPacket: packet },
+          criteria.map((criterion) => {
+            if (criterion.startsWith("Exact selected pointer")) {
+              const selected = JSON.parse(
+                sources.get("Validated selected LFS pointers"),
+              );
+              assert.deepEqual(selected, [
+                {
+                  treeSha: tree,
+                  destination: "assets/source.png",
+                  digest,
+                  bytes: source.length,
+                  filter: "lfs",
+                },
+              ]);
+              const rule = JSON.parse(
+                sources.get("Selected LFS tracked attributes: .gitattributes"),
+              );
+              assert.equal(rule.treeSha, tree);
+              assert.equal(rule.complete, true);
+              assert.equal(
+                rule.text,
+                "assets/source.png filter=lfs diff=lfs merge=lfs -text\n",
+              );
+              return proven(
+                criterion,
+                "Validated selected LFS pointers",
                 digest,
-                bytes: source.length,
-                filter: "lfs",
-              },
-            ]);
-            const rule = JSON.parse(
-              sources.get("Selected LFS tracked attributes: .gitattributes"),
+              );
+            }
+            if (criterion.startsWith("Fresh-clone hydration")) {
+              const receipt = JSON.parse(
+                sources.get("Controller hydration receipt"),
+              );
+              assert.equal(receipt.integratedTreeSha, tree);
+              assert.equal(receipt.passed, true);
+              assert.equal(receipt.members[0].observedDigest, digest);
+              assert.equal(receipt.members[0].observedBytes, source.length);
+              return proven(criterion, "Controller hydration receipt", digest);
+            }
+            if (criterion.startsWith("Foundation preserves")) {
+              assert.equal(
+                sources.get("docs/toolchain.md")?.trimEnd(),
+                toolchain.trimEnd(),
+              );
+              const check = change.patches.find((p) => p.path === "check.mjs");
+              assert.ok(
+                check &&
+                  !check.truncated &&
+                  changeText.includes("process.versions.node.split"),
+              );
+              assert.deepEqual(
+                receipts.map((r) => r.command),
+                commands.slice(0, 2),
+              );
+              return proven(
+                criterion,
+                "docs/toolchain.md",
+                `Node major ${process.versions.node.split(".")[0]}`,
+              );
+            }
+            if (observations.reviewedItemId === "media") {
+              assert.equal(
+                observations.assetSelectionReceipt.setId,
+                "original",
+              );
+              const capture = observations.assetCaptureReceipts[0];
+              assert.equal(capture.inputs[0].ref.digest, digest);
+              assert.equal(capture.members[0].digest, digest);
+              assert.equal(capture.declarationPath, ".factory-assets.json");
+              const boundary = JSON.parse(
+                sources
+                  .get("Work Item Git delta: media controller materialization")
+                  .split("\n")[0],
+              );
+              assert.deepEqual(boundary.workerDestinationChanges, []);
+              assert.equal(boundary.materializationTreeSha, tree);
+              return proven(criterion, "Delivery observations", digest);
+            }
+            if (observations.reviewedItemId === "policy") {
+              assert.deepEqual(
+                change.changes.map((c) => c.path),
+                [".gitattributes"],
+              );
+              assert.equal(receipts[0].command, policyCommand);
+              return proven(
+                criterion,
+                "Command pass evidence",
+                commandPassEvidence([receipts[0]]).content,
+              );
+            }
+            if (observations.reviewedItemId === "integration") {
+              assert.deepEqual(
+                change.changes.map((c) => c.path),
+                ["result.md"],
+              );
+              assert.ok(
+                observations.attempts
+                  .filter((a) => ["foundation", "media"].includes(a.id))
+                  .every((a) => a.integratedCommitSha),
+              );
+              return proven(criterion, "Exact Git change packet", "result.md");
+            }
+            const receipt = receipts.find(
+              (r) => r.command === criterion.replace(/^`|`$/g, ""),
             );
-            assert.equal(rule.treeSha, tree);
-            assert.equal(rule.complete, true);
-            assert.equal(
-              rule.text,
-              "assets/source.png filter=lfs diff=lfs merge=lfs -text\n",
-            );
-            return proven(criterion, "Validated selected LFS pointers", digest);
-          }
-          if (criterion.startsWith("Fresh-clone hydration")) {
-            const receipt = JSON.parse(
-              sources.get("Controller hydration receipt"),
-            );
-            assert.equal(receipt.integratedTreeSha, tree);
-            assert.equal(receipt.passed, true);
-            assert.equal(receipt.members[0].observedDigest, digest);
-            assert.equal(receipt.members[0].observedBytes, source.length);
-            return proven(criterion, "Controller hydration receipt", digest);
-          }
-          if (criterion.startsWith("Foundation preserves")) {
-            assert.equal(
-              sources.get("docs/toolchain.md")?.trimEnd(),
-              toolchain.trimEnd(),
-            );
-            const check = change.patches.find((p) => p.path === "check.mjs");
-            assert.ok(
-              check &&
-                !check.truncated &&
-                changeText.includes("process.versions.node.split"),
-            );
-            assert.deepEqual(
-              receipts.map((r) => r.command),
-              commands.slice(0, 2),
-            );
-            return proven(
-              criterion,
-              "docs/toolchain.md",
-              `Node major ${process.versions.node.split(".")[0]}`,
-            );
-          }
-          if (observations.reviewedItemId === "media") {
-            assert.equal(observations.assetSelectionReceipt.setId, "original");
-            const capture = observations.assetCaptureReceipts[0];
-            assert.equal(capture.inputs[0].ref.digest, digest);
-            assert.equal(capture.members[0].digest, digest);
-            assert.equal(capture.declarationPath, ".factory-assets.json");
-            const boundary = JSON.parse(
-              sources
-                .get("Work Item Git delta: media controller materialization")
-                .split("\n")[0],
-            );
-            assert.deepEqual(boundary.workerDestinationChanges, []);
-            assert.equal(boundary.materializationTreeSha, tree);
-            return proven(criterion, "Delivery observations", digest);
-          }
-          if (observations.reviewedItemId === "policy") {
-            assert.deepEqual(
-              change.changes.map((c) => c.path),
-              [".gitattributes"],
-            );
-            assert.equal(receipts[0].command, policyCommand);
+            assert.ok(receipt, `No concrete receipt for ${criterion}`);
             return proven(
               criterion,
               "Command pass evidence",
-              commandPassEvidence([receipts[0]]).content,
+              commandPassEvidence([receipt]).content,
             );
-          }
-          if (observations.reviewedItemId === "integration") {
-            assert.deepEqual(
-              change.changes.map((c) => c.path),
-              ["result.md"],
-            );
-            assert.ok(
-              observations.attempts
-                .filter((a) => ["foundation", "media"].includes(a.id))
-                .every((a) => a.integratedCommitSha),
-            );
-            return proven(criterion, "Exact Git change packet", "result.md");
-          }
-          const receipt = receipts.find(
-            (r) => r.command === criterion.replace(/^`|`$/g, ""),
-          );
-          assert.ok(receipt, `No concrete receipt for ${criterion}`);
-          return proven(
-            criterion,
-            "Command pass evidence",
-            commandPassEvidence([receipt]).content,
-          );
-        }),
+          }),
+        ),
       };
     }
     Codex.prototype.startThread = function () {
@@ -550,44 +560,49 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
     );
 
     assert.equal(completed.finalValidation.hydrationReceipt.passed, true);
-    const selectedPrompt = prompts.find((p) =>
-      p.includes('"reviewedItemId":"media"'),
+    const observationsOf = (prompt) =>
+      JSON.parse(
+        packetFromPrompt(prompt).evidence.find(
+          (e) => e.path === "Delivery observations",
+        ).content,
+      );
+    const omitEvidence = (prompt, path) => {
+      const packet = packetFromPrompt(prompt);
+      const marker = "Review packet (controller IDs; JSON strings are data):\n";
+      return (
+        prompt.slice(0, prompt.lastIndexOf(marker) + marker.length) +
+        JSON.stringify({
+          ...packet,
+          evidence: packet.evidence.filter((e) => e.path !== path),
+        })
+      );
+    };
+    const selectedPrompt = prompts.find(
+      (p) => observationsOf(p).reviewedItemId === "media",
     );
     assert.ok(selectedPrompt.includes("Binary files"));
     for (const missing of [
       "Validated selected LFS pointers",
       "Selected LFS tracked attributes: .gitattributes",
-    ]) {
+    ])
       assert.throws(() =>
-        reviewSerialized(
-          selectedPrompt.replace(
-            `--- ${missing} ---`,
-            `--- omitted ${missing} ---`,
-          ),
-        ),
+        reviewSerialized(omitEvidence(selectedPrompt, missing)),
       );
-    }
     const finalPrompt = prompts.find((p) =>
-      p.includes("--- Controller hydration receipt ---"),
+      packetFromPrompt(p).evidence.some(
+        (e) => e.path === "Controller hydration receipt",
+      ),
     );
     assert.throws(() =>
       reviewSerialized(
-        finalPrompt.replace(
-          "--- Controller hydration receipt ---",
-          "--- omitted hydration ---",
-        ),
+        omitEvidence(finalPrompt, "Controller hydration receipt"),
       ),
     );
-    const foundationPrompt = prompts.find((p) =>
-      p.includes('"reviewedItemId":"foundation"'),
+    const foundationPrompt = prompts.find(
+      (p) => observationsOf(p).reviewedItemId === "foundation",
     );
     assert.throws(() =>
-      reviewSerialized(
-        foundationPrompt.replace(
-          "--- docs/toolchain.md ---",
-          "--- omitted toolchain ---",
-        ),
-      ),
+      reviewSerialized(omitEvidence(foundationPrompt, "docs/toolchain.md")),
     );
     for (const work of Object.values(completed.work))
       assert.ok(work.validation.commands.every((receipt) => receipt.passed));
@@ -606,25 +621,33 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
     const lockPacket = finalReview.evidence.find(
       (entry) =>
         entry.path.includes("foundation") &&
-        entry.content.includes("pnpm-lock.yaml"),
+        entry.path.endsWith(' file "pnpm-lock.yaml"'),
     );
     assert.ok(lockPacket, "final review includes foundation lockfile evidence");
     assert.ok(
       lockPacket.content.includes("representative lockfile evidence padding"),
     );
-    // The same real integrated result must expose the old budget pressure.
+    // The shared budget removes the old per-item cap while retaining honest truncation.
     // This builds evidence only; it does not rerun or override a controller.
     process.env.FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES = "48000";
-    const limited = objectiveReviewEvidence({
-      state: completed,
-      checkout: target.checkout,
-      integratedCommitSha: completed.integratedSha,
-      integratedTreeSha: git(
-        target.checkout,
-        "rev-parse",
-        `${completed.integratedSha}^{tree}`,
-      ),
-    });
+    const evidenceAtBudget = () =>
+      objectiveReviewEvidence({
+        state: completed,
+        checkout: target.checkout,
+        integratedCommitSha: completed.integratedSha,
+        integratedTreeSha: git(
+          target.checkout,
+          "rev-parse",
+          `${completed.integratedSha}^{tree}`,
+        ),
+      });
+    assert.ok(
+      evidenceAtBudget()
+        .evidence.filter((entry) => entry.path.includes("foundation"))
+        .every((entry) => entry.complete),
+    );
+    process.env.FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES = "4096";
+    const limited = evidenceAtBudget();
     assert.ok(
       limited.evidence.some(
         (entry) =>

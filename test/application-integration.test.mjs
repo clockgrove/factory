@@ -1,3 +1,7 @@
+import {
+  resultFindings,
+  packetFromPrompt,
+} from "./support/review-protocol.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
@@ -492,7 +496,7 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
             request.commands,
           );
           assert.equal(observations.work[0].validation, undefined);
-          assert.equal(request.evidence.length, 2);
+          assert.ok(request.evidence.length >= 2);
           const inventory = request.evidence.find(
             (source) => source.path === "Exact result tree inventory",
           );
@@ -512,15 +516,18 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
           assert.doesNotMatch(request.observations, /"criteria":/);
         }
         return {
-          findings: request.criteria.map((reviewedCriterion) => ({
-            criterion: reviewedCriterion,
-            verdict: "pass",
-            source: "Command pass evidence",
-            quote: request.commands[0].command,
-            detail:
-              "The canonical receipts prove the ordered commands passed at the exact result tree.",
-            question: "",
-          })),
+          findings: resultFindings(
+            request,
+            request.criteria.map((reviewedCriterion) => ({
+              criterion: reviewedCriterion,
+              verdict: "pass",
+              source: "Command pass evidence",
+              quote: request.commands[0].command,
+              detail:
+                "The canonical receipts prove the ordered commands passed at the exact result tree.",
+              question: "",
+            })),
+          ),
         };
       },
     };
@@ -637,7 +644,11 @@ test("application retries capacity for exact Work Item and final review requests
               yield { type: "turn.completed", usage: null };
               return;
             }
-            const scope = prompt.includes('"reviewedItemId":"review-capacity"')
+            const scope = packetFromPrompt(prompt).evidence.some(
+              (e) =>
+                e.path === "Delivery observations" &&
+                e.content.includes('"reviewedItemId":"review-capacity"'),
+            )
               ? "work"
               : "final";
             prompts[scope].push(prompt);
@@ -649,20 +660,19 @@ test("application retries capacity for exact Work Item and final review requests
               };
               return;
             }
-            const criteria = JSON.parse(
-              prompt.match(/Criteria: (\[[^\n]*\])/)?.[1] ?? "[]",
-            );
+            const packet = packetFromPrompt(prompt);
             yield {
               type: "item.completed",
               item: {
                 id: `${id}-message`,
                 type: "agent_message",
                 text: JSON.stringify({
-                  findings: criteria.map((criterion) => ({
-                    criterion,
+                  findings: packet.criteria.map(({ id: criterionId }) => ({
+                    criterionId,
                     verdict: "pass",
-                    source: "OBJECTIVE",
-                    quote: "## Acceptance",
+                    evidenceIds: [
+                      packet.evidence.find((e) => e.path === "OBJECTIVE").id,
+                    ],
                     detail:
                       "The exact validated result satisfies the criterion.",
                     question: "",
@@ -835,7 +845,7 @@ test("application fails closed once after exhausted result-review capacity witho
       assert.equal(waiting.work["review-exhausted"].step, "approve-result");
       assert.match(
         waiting.work["review-exhausted"].acceptancePending.detail,
-        /Independent result review failed: reviewer capacity unavailable/,
+        /Independent review transport was invalid: reviewer capacity unavailable/,
       );
       assert.equal(resultPrompts.length, 3);
       assert.ok(resultPrompts.every((prompt) => prompt === resultPrompts[0]));
@@ -979,29 +989,32 @@ test("Work Item review receives exact concurrent-attempt provenance from run sta
           reviewed.add(observations.reviewedItemId);
         }
         return {
-          findings: request.criteria.map((criterion) => {
-            if (criterion === leftCriterion || criterion === rightCriterion) {
+          findings: resultFindings(
+            request,
+            request.criteria.map((criterion) => {
+              if (criterion === leftCriterion || criterion === rightCriterion) {
+                return {
+                  criterion,
+                  verdict: "pass",
+                  source: "Delivery observations",
+                  quote: request.observations,
+                  detail:
+                    "The atomic snapshot proves both named dependency-free attempts started at the Objective base while the integrated head at each start was empty.",
+                  question: "",
+                };
+              }
+              assert.ok(source.content.includes(criterion));
               return {
                 criterion,
                 verdict: "pass",
-                source: "Delivery observations",
-                quote: request.observations,
+                source: "OBJECTIVE",
+                quote: criterion,
                 detail:
-                  "The atomic snapshot proves both named dependency-free attempts started at the Objective base while the integrated head at each start was empty.",
+                  "The pinned Objective and exact result prove this criterion.",
                 question: "",
               };
-            }
-            assert.ok(source.content.includes(criterion));
-            return {
-              criterion,
-              verdict: "pass",
-              source: "OBJECTIVE",
-              quote: criterion,
-              detail:
-                "The pinned Objective and exact result prove this criterion.",
-              question: "",
-            };
-          }),
+            }),
+          ),
         };
       },
     };
@@ -1136,59 +1149,62 @@ test("native successor review receives its exact predecessor result head", async
       },
       async reviewResult(request) {
         return {
-          findings: request.criteria.map((criterion) => {
-            if (
-              criterion === predecessorCriterion ||
-              criterion === topCriterion
-            ) {
-              const observations = JSON.parse(request.observations);
-              const attempts = Object.fromEntries(
-                observations.attempts.map((attempt) => [attempt.id, attempt]),
-              );
-              const isMiddle = criterion === predecessorCriterion;
-              const currentId = isMiddle ? "successor" : "top";
-              const predecessorId = isMiddle ? "foundation" : "successor";
-              assert.equal(observations.reviewedItemId, currentId);
-              assert.deepEqual(observations.delivery, {
-                kind: "native-stack",
-                unitId: "foundation",
-                layerNumber: isMiddle ? 2 : 3,
-                layerCount: 3,
-                predecessorItemId: predecessorId,
-              });
-              assert.deepEqual(
-                Object.keys(attempts).sort(),
-                [currentId, predecessorId].sort(),
-              );
-              assert.match(
-                attempts[predecessorId].resultCommitSha,
-                /^[0-9a-f]{40}$/,
-              );
-              assert.equal(
-                attempts[currentId].executionBaseCommitSha,
-                attempts[predecessorId].resultCommitSha,
-              );
-              assert.equal(attempts[predecessorId].integratedCommitSha, null);
-              observedProofs.add(criterion);
+          findings: resultFindings(
+            request,
+            request.criteria.map((criterion) => {
+              if (
+                criterion === predecessorCriterion ||
+                criterion === topCriterion
+              ) {
+                const observations = JSON.parse(request.observations);
+                const attempts = Object.fromEntries(
+                  observations.attempts.map((attempt) => [attempt.id, attempt]),
+                );
+                const isMiddle = criterion === predecessorCriterion;
+                const currentId = isMiddle ? "successor" : "top";
+                const predecessorId = isMiddle ? "foundation" : "successor";
+                assert.equal(observations.reviewedItemId, currentId);
+                assert.deepEqual(observations.delivery, {
+                  kind: "native-stack",
+                  unitId: "foundation",
+                  layerNumber: isMiddle ? 2 : 3,
+                  layerCount: 3,
+                  predecessorItemId: predecessorId,
+                });
+                assert.deepEqual(
+                  Object.keys(attempts).sort(),
+                  [currentId, predecessorId].sort(),
+                );
+                assert.match(
+                  attempts[predecessorId].resultCommitSha,
+                  /^[0-9a-f]{40}$/,
+                );
+                assert.equal(
+                  attempts[currentId].executionBaseCommitSha,
+                  attempts[predecessorId].resultCommitSha,
+                );
+                assert.equal(attempts[predecessorId].integratedCommitSha, null);
+                observedProofs.add(criterion);
+                return {
+                  criterion,
+                  verdict: "pass",
+                  source: "Delivery observations",
+                  quote: request.observations,
+                  detail:
+                    "The native layer position is explicit and the predecessor result head exactly equals the successor execution base.",
+                  question: "",
+                };
+              }
               return {
                 criterion,
                 verdict: "pass",
-                source: "Delivery observations",
-                quote: request.observations,
-                detail:
-                  "The native layer position is explicit and the predecessor result head exactly equals the successor execution base.",
+                source: "OBJECTIVE",
+                quote: criterion,
+                detail: "The pinned Objective states this exact criterion.",
                 question: "",
               };
-            }
-            return {
-              criterion,
-              verdict: "pass",
-              source: "OBJECTIVE",
-              quote: criterion,
-              detail: "The pinned Objective states this exact criterion.",
-              question: "",
-            };
-          }),
+            }),
+          ),
         };
       },
     };
@@ -1256,15 +1272,18 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
       },
       async reviewResult(request) {
         return {
-          findings: request.criteria.map((criterion) => ({
-            criterion,
-            verdict: "pass",
-            source: "OBJECTIVE",
-            quote: "## Acceptance",
-            detail:
-              "The scripted result and command evidence prove this criterion",
-            question: "",
-          })),
+          findings: resultFindings(
+            request,
+            request.criteria.map((criterion) => ({
+              criterion,
+              verdict: "pass",
+              source: "OBJECTIVE",
+              quote: "## Acceptance",
+              detail:
+                "The scripted result and command evidence prove this criterion",
+              question: "",
+            })),
+          ),
         };
       },
     };
@@ -1351,14 +1370,17 @@ test("clean accepted plan activates without planning calls and rejects config dr
       },
       async reviewResult(request) {
         return {
-          findings: request.criteria.map((criterion) => ({
-            criterion,
-            verdict: "pass",
-            source: "OBJECTIVE",
-            quote: "## Acceptance",
-            detail: "The scripted result proves the exact criterion",
-            question: "",
-          })),
+          findings: resultFindings(
+            request,
+            request.criteria.map((criterion) => ({
+              criterion,
+              verdict: "pass",
+              source: "OBJECTIVE",
+              quote: "## Acceptance",
+              detail: "The scripted result proves the exact criterion",
+              question: "",
+            })),
+          ),
         };
       },
     };
@@ -2259,17 +2281,17 @@ test("regular and native asset selection preserve a complete set and hydrate tar
         entry.path.endsWith("controller materialization"),
       );
       assert.equal(materializationEvidence.complete, true);
-      assert.ok(
-        materializationEvidence.content.includes(
-          "\n--- Worker result patches ---\n",
+      const materializationChunks = mediaReview.evidence.filter((entry) =>
+        entry.path.startsWith(
+          `${materializationEvidence.path} controller result file `,
         ),
       );
+      assert.ok(materializationChunks.length > 0);
       assert.ok(
-        materializationEvidence.content.includes(
-          "\n--- Controller materialization patches ---\n",
+        materializationChunks.every((entry) =>
+          entry.content.includes("\ndiff --git "),
         ),
       );
-      assert.ok(materializationEvidence.content.includes("\ndiff --git "));
       const materializationPacket = JSON.parse(
         materializationEvidence.content.split("\n")[0],
       );
@@ -2666,12 +2688,13 @@ done
           entry.path.endsWith("controller materialization"),
         );
         assert.equal(evidence.complete, true);
-        assert.ok(
-          evidence.content.includes(
-            "\n--- Controller materialization patches ---\n",
-          ),
+        const chunks = review.evidence.filter((entry) =>
+          entry.path.startsWith(`${evidence.path} controller result file `),
         );
-        assert.ok(evidence.content.includes("\ndiff --git "));
+        assert.ok(chunks.length > 0);
+        assert.ok(
+          chunks.every((entry) => entry.content.includes("\ndiff --git ")),
+        );
         const packet = JSON.parse(evidence.content.split("\n")[0]);
         assert.deepEqual(packet.workerDestinationChanges, []);
         assert.deepEqual(

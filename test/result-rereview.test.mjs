@@ -1,3 +1,4 @@
+import { resultFindings } from "./support/review-protocol.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -74,14 +75,17 @@ for (const delivery of ["regular", "native-stack"]) {
           if (!current && ++finalReviews === 1)
             throw new Error("Provider turn produced no progress for 900000 ms");
           return {
-            findings: request.criteria.map((criterion) => ({
-              criterion,
-              verdict: "pass",
-              source: "Command pass evidence",
-              quote: request.commands[0].command,
-              detail: "Exact-tree command passed",
-              question: "",
-            })),
+            findings: resultFindings(
+              request,
+              request.criteria.map((criterion) => ({
+                criterion,
+                verdict: "pass",
+                source: "Command pass evidence",
+                quote: request.commands[0].command,
+                detail: "Exact-tree command passed",
+                question: "",
+              })),
+            ),
           };
         },
       };

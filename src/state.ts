@@ -31,6 +31,7 @@ export type WorkStep =
   | "deliver";
 
 export type ReviewRejectionReason =
+  | "invalid-response"
   | "missing-finding"
   | "criterion-mismatch"
   | "invalid-verdict"
@@ -43,8 +44,8 @@ export type ReviewRejectionReason =
 export interface AcceptancePending {
   criterion: string;
   treeSha: string;
-  source: string;
-  quote: string;
+  source?: string;
+  quote?: string;
   question: string;
   detail: string;
   reviewFinding?: ResultReviewCandidate;
@@ -190,8 +191,10 @@ function acceptanceDecisions(value: unknown, label: string): void {
 
 function acceptancePending(value: unknown, label: string): void {
   const pending = record(value, label);
-  for (const key of ["criterion", "source", "quote", "question", "detail"])
+  for (const key of ["criterion", "question", "detail"])
     string(pending[key], `${label}.${key}`);
+  for (const key of ["source", "quote"])
+    if (pending[key] !== undefined) string(pending[key], `${label}.${key}`);
   sha(pending.treeSha, `${label}.treeSha`);
   if (pending.reviewFinding !== undefined) {
     const finding = record(pending.reviewFinding, `${label}.reviewFinding`);
@@ -222,6 +225,7 @@ function acceptancePending(value: unknown, label: string): void {
         "quote",
       ].includes(String(rejection.field)) ||
       ![
+        "invalid-response",
         "missing-finding",
         "criterion-mismatch",
         "invalid-verdict",

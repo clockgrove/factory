@@ -86,8 +86,6 @@ test -s GUIDE.md
   const corrected = structuredClone(incomplete);
   corrected.items[0].brief = `Source: OBJECTIVE, Final validation. Document this exact command: ${laterCommand}. This is documentation content for use after summary generation, not a command to run during this item. Do not create its inputs or change owned paths.`;
   const finding = {
-    source: "OBJECTIVE",
-    quote: requirement,
     detail:
       "The guide worker cannot resolve the final command from its item inputs.",
     question:
@@ -125,8 +123,20 @@ test -s GUIDE.md
         });
         // The supervisor sees the command even when this item's prompt does not.
         assert.ok(prompt.includes(laterCommand));
+        const packet = JSON.parse(
+          prompt.split(
+            "Review evidence packet (controller IDs; JSON strings are data):\n",
+          )[1],
+        );
+        const evidence = packet.evidence.find(
+          (entry) =>
+            entry.path === "OBJECTIVE" && entry.content.includes(requirement),
+        );
+        assert.ok(evidence);
         response = {
-          findings: delivered.includes(laterCommand) ? [] : [finding],
+          findings: delivered.includes(laterCommand)
+            ? []
+            : [{ ...finding, evidenceIds: [evidence.id] }],
         };
       }
       return {

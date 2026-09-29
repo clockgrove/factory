@@ -661,3 +661,27 @@ No private source, archived implementation, runtime change or new release is
 introduced. Original failed/cancelled runs and accounting remain preserved;
 [build status](BUILD-STATUS.md#public-completion-on-unchanged-v0137) records the
 separate acceptance scope and current result.
+
+## Packet-bound review evidence and Markdown sections (#232, #233, #234)
+
+Current review-contract failures and the existing compiler, validation and
+provider transport contracts supplied this correction. New transient opaque IDs
+bind findings to exact supplied evidence chunks and controller criteria, removing
+quotation transcription and source-label matching from graph, item and final
+review. Findings persist compact resolved provenance, not copied chunks or
+invented quotations. Existing lifecycle and exact-tree authority remain unchanged.
+This supersedes the quotation matching described in the earlier #208 and #212
+entries; those records describe their historical implementations.
+
+Fresh synthetic Git, shell-command and adapter tests cover multiline patches,
+quoted assertions, reordered and multiple references, malformed/stale identities,
+independent criterion validation and the actual structured-output schema. The
+schema stays constant in size as evidence grows; controller lookup still rejects
+unknown identities. File chunks carry individual completeness, and text allocation
+uses emitted UTF-8 bytes rather than equal per-file or per-item shares. The shared
+Markdown section scanner and synthetic source-selection regressions were written
+from the current compiler contracts and public fenced-heading, closing-hash and
+C# examples; no archived implementation or private source was used.
+
+These deterministic checks do not qualify a published successor. A new exact
+artifact must pass installed public qualification before adopter use.

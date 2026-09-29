@@ -1,3 +1,4 @@
+import { resultFindings } from "./support/review-protocol.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
@@ -1008,7 +1009,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
       reviewAcceptance({
         ...request,
         model: {
-          async reviewResult() {
+          async reviewResult(_reviewRequest) {
             throw new Error("provider unavailable");
           },
         },
@@ -1022,7 +1023,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
       reviewAcceptance({
         ...request,
         model: {
-          async reviewResult() {
+          async reviewResult(_reviewRequest) {
             return { findings: "not-an-array" };
           },
         },
@@ -1032,7 +1033,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
     );
     assert.deepEqual(
       malformedEvents.map((event) => [event.type, event.failureField]),
-      [["response-invalid", "findings"]],
+      [["response-invalid", "finding"]],
     );
     const previousStateRoot = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = join(root, "diagnostic-state");
@@ -1072,7 +1073,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         reviewAcceptance({
           ...request,
           model: {
-            async reviewResult() {
+            async reviewResult(_reviewRequest) {
               return {
                 findings: [
                   {
@@ -1080,6 +1081,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
                     verdict: "pass",
                     source: "OBJECTIVE",
                     quote: "not present in the source",
+                    evidenceIds: ["unknown"],
                     detail: "Invalid semantic evidence",
                     question: "",
                   },
@@ -1112,9 +1114,9 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
     const clean = await reviewAcceptance({
       ...request,
       model: {
-        async reviewResult() {
+        async reviewResult(_reviewRequest) {
           return {
-            findings: [
+            findings: resultFindings(_reviewRequest, [
               {
                 criterion: "result.txt exists",
                 verdict: "pass",
@@ -1123,7 +1125,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
                 detail: "The diff adds result.txt",
                 question: "",
               },
-            ],
+            ]),
           };
         },
       },
@@ -1154,7 +1156,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         async reviewResult(review) {
           assert.deepEqual(review.commands, resultEvidence.commands);
           return {
-            findings: [
+            findings: resultFindings(review, [
               {
                 criterion: "result.txt exists",
                 verdict: "pass",
@@ -1171,7 +1173,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
                 detail: "The exact-tree command completed successfully.",
                 question: "",
               },
-            ],
+            ]),
           };
         },
       },
@@ -1196,7 +1198,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
           ...request,
           evidence: invalidEvidence,
           model: {
-            async reviewResult() {
+            async reviewResult(_reviewRequest) {
               invalidReceiptReviewCalls++;
               return { findings: [] };
             },
@@ -1228,9 +1230,9 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         ],
         observations: missingProvenance,
         model: {
-          async reviewResult() {
+          async reviewResult(_reviewRequest) {
             return {
-              findings: [
+              findings: resultFindings(_reviewRequest, [
                 {
                   criterion: "result.txt exists",
                   verdict: "pass",
@@ -1249,7 +1251,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
                   question:
                     "Can you provide the exact attempt and integration timing evidence?",
                 },
-              ],
+              ]),
             };
           },
         },
@@ -1291,9 +1293,9 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         ],
         observations: contradictoryProvenance,
         model: {
-          async reviewResult() {
+          async reviewResult(_reviewRequest) {
             return {
-              findings: [
+              findings: resultFindings(_reviewRequest, [
                 {
                   criterion: "result.txt exists",
                   verdict: "pass",
@@ -1312,7 +1314,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
                   question:
                     "Which exact accepted base should govern this attempt?",
                 },
-              ],
+              ]),
             };
           },
         },
@@ -1324,158 +1326,10 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         return true;
       },
     );
-    await assert.rejects(
-      reviewAcceptance({
-        ...request,
-        criteria: ["result.txt exists", "result.txt contains expected text"],
-        sources: [
-          {
-            path: "OBJECTIVE",
-            content: "result.txt exists\nresult.txt contains expected text",
-          },
-        ],
-        model: {
-          async reviewResult() {
-            return {
-              findings: [
-                {
-                  criterion: "result.txt exists",
-                  verdict: "pass",
-                  source: "OBJECTIVE",
-                  quote: "result.txt exists",
-                  detail: "The exact diff adds result.txt",
-                  question: "",
-                },
-                {
-                  criterion: "result.txt contains expected text",
-                  verdict: "pass",
-                  source: "OBJECTIVE",
-                  quote: "a quote absent from the pinned source",
-                  detail: "Unsupported claim",
-                  question: "",
-                },
-              ],
-            };
-          },
-        },
-      }),
-      (error) => {
-        assert.ok(error instanceof AcceptanceDecisionRequired);
-        assert.equal(
-          error.pending.criterion,
-          "result.txt contains expected text",
-        );
-        assert.match(error.pending.detail, /invalid evidence/);
-        assert.deepEqual(error.pending.reviewRejection, {
-          field: "quote",
-          reason: "quote-not-found",
-        });
-        assert.deepEqual(error.pending.reviewFinding, {
-          criterion: "result.txt contains expected text",
-          verdict: "pass",
-          source: "OBJECTIVE",
-          quote: "a quote absent from the pinned source",
-          detail: "Unsupported claim",
-          question: "",
-        });
-        return true;
-      },
-    );
-    for (const [name, finding, rejection] of [
-      [
-        "criterion mismatch",
-        {
-          criterion: "different criterion",
-          verdict: "pass",
-          source: "OBJECTIVE",
-          quote: "result.txt exists",
-          detail: "Detail",
-          question: "",
-        },
-        { field: "criterion", reason: "criterion-mismatch" },
-      ],
-      [
-        "invalid verdict",
-        {
-          criterion: "result.txt exists",
-          verdict: "maybe",
-          source: "OBJECTIVE",
-          quote: "result.txt exists",
-          detail: "Detail",
-          question: "",
-        },
-        { field: "verdict", reason: "invalid-verdict" },
-      ],
-      [
-        "empty detail",
-        {
-          criterion: "result.txt exists",
-          verdict: "pass",
-          source: "OBJECTIVE",
-          quote: "result.txt exists",
-          detail: "",
-          question: "",
-        },
-        { field: "detail", reason: "empty-detail" },
-      ],
-      [
-        "unknown source",
-        {
-          criterion: "result.txt exists",
-          verdict: "pass",
-          source: "invented",
-          quote: "result.txt exists",
-          detail: "Detail",
-          question: "",
-        },
-        { field: "source", reason: "unknown-source" },
-      ],
-      [
-        "empty quote",
-        {
-          criterion: "result.txt exists",
-          verdict: "pass",
-          source: "OBJECTIVE",
-          quote: "",
-          detail: "Detail",
-          question: "",
-        },
-        { field: "quote", reason: "empty-quote" },
-      ],
-      [
-        "quote not found",
-        {
-          criterion: "result.txt exists",
-          verdict: "pass",
-          source: "OBJECTIVE",
-          quote: "not in source",
-          detail: "Detail",
-          question: "",
-        },
-        { field: "quote", reason: "quote-not-found" },
-      ],
-    ]) {
-      await assert.rejects(
-        reviewAcceptance({
-          ...request,
-          model: {
-            async reviewResult() {
-              return { findings: [finding] };
-            },
-          },
-        }),
-        (error) => {
-          assert.ok(error instanceof AcceptanceDecisionRequired, name);
-          assert.deepEqual(error.pending.reviewRejection, rejection, name);
-          assert.equal(error.pending.reviewFinding.verdict, finding.verdict);
-          return true;
-        },
-      );
-    }
     const unsure = {
-      async reviewResult() {
+      async reviewResult(_reviewRequest) {
         return {
-          findings: [
+          findings: resultFindings(_reviewRequest, [
             {
               criterion: "result.txt exists",
               verdict: "needs-human",
@@ -1484,7 +1338,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
               detail: "Content semantics unclear",
               question: "Does this file meet the target need?",
             },
-          ],
+          ]),
         };
       },
     };
@@ -1736,7 +1590,9 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
     assert.equal(observations.work[2].validation, undefined);
     assert.doesNotMatch(objectiveEvidence.observations, /model-generated/);
     const followUpEvidence = objectiveEvidence.evidence.find(
-      (source) => source.path === "Work Item Git delta: follow-up",
+      (source) =>
+        source.path ===
+        'Work Item Git delta: follow-up file "proof-follow-up.txt"',
     );
     assert.equal(followUpEvidence.complete, true);
     assert.match(followUpEvidence.content, /greenfield pnpm follow-up/);
@@ -1757,7 +1613,7 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
             objectiveEvidence.evidence,
           );
           return {
-            findings: [
+            findings: resultFindings(request, [
               {
                 criterion,
                 verdict: "pass",
@@ -1767,7 +1623,7 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
                   "The supervisor delta has the exact added line, only proof-follow-up.txt changes, and bootstrap.txt is bootstrap-owned.",
                 question: "",
               },
-            ],
+            ]),
           };
         },
       },
@@ -1932,7 +1788,8 @@ test("truncated per-Work-Item evidence cannot ground an automatic pass", async (
         integratedCommitSha: integrated,
         integratedTreeSha: treeSha,
       });
-      assert.equal(objectiveEvidence.evidence[0].complete, false);
+      assert.equal(objectiveEvidence.evidence[0].complete, true);
+      assert.equal(objectiveEvidence.evidence[1].complete, false);
       assert.match(objectiveEvidence.evidence[0].content, /"textBudget":32/);
       assert.match(objectiveEvidence.evidence[0].content, /"truncated":true/);
       await assert.rejects(
@@ -1945,18 +1802,18 @@ test("truncated per-Work-Item evidence cannot ground an automatic pass", async (
           sources: [{ path: "OBJECTIVE", content: "result is complete" }],
           evidenceSources: objectiveEvidence.evidence,
           model: {
-            async reviewResult() {
+            async reviewResult(_reviewRequest) {
               return {
-                findings: [
+                findings: resultFindings(_reviewRequest, [
                   {
                     criterion: "result is complete",
                     verdict: "pass",
-                    source: objectiveEvidence.evidence[0].path,
+                    source: objectiveEvidence.evidence[1].path,
                     quote: "result.txt",
                     detail: "The partial packet appears sufficient.",
                     question: "",
                   },
-                ],
+                ]),
               };
             },
           },
@@ -1964,8 +1821,8 @@ test("truncated per-Work-Item evidence cannot ground an automatic pass", async (
         (error) => {
           assert.ok(error instanceof AcceptanceDecisionRequired);
           assert.deepEqual(error.pending.reviewRejection, {
-            field: "source",
-            reason: "source-truncated",
+            field: "finding",
+            reason: "invalid-response",
           });
           return true;
         },
@@ -2186,7 +2043,9 @@ test("final review shares one text budget across ordinary and materialization pa
           integratedTreeSha: materializedTwo.tree,
         });
         assert.deepEqual(
-          objectiveEvidence.evidence.map((source) => source.path),
+          objectiveEvidence.evidence
+            .filter((source) => !source.path.includes(" file "))
+            .map((source) => source.path),
           [
             "Work Item Git delta: media-one",
             "Work Item Git delta: media-one controller materialization",
@@ -2195,9 +2054,9 @@ test("final review shares one text budget across ordinary and materialization pa
           ],
         );
         assert.ok(
-          objectiveEvidence.evidence.every(
-            (source) => source.complete === false,
-          ),
+          objectiveEvidence.evidence
+            .filter((source) => source.path.includes(" file "))
+            .every((source) => source.complete === false),
         );
 
         const expectedById = {
@@ -2232,7 +2091,10 @@ test("final review shares one text budget across ordinary and materialization pa
             ordinaryIdentity.resultTreeSha,
             expected.materialized.tree,
           );
-          assert.equal(ordinaryIdentity.textBudget, 2);
+          assert.equal(
+            ordinaryIdentity.textBudget,
+            id === "media-one" ? 12 : 0,
+          );
           assert.ok(
             ordinaryIdentity.patches.every((patch) => patch.truncated === true),
           );
@@ -2264,8 +2126,8 @@ test("final review shares one text budget across ordinary and materialization pa
             packet.materializationChange.changes.map((change) => change.path),
             [expected.destination],
           );
-          assert.equal(packet.workerChange.textBudget, 2);
-          assert.equal(packet.materializationChange.textBudget, 2);
+          assert.equal(packet.workerChange.textBudget, 0);
+          assert.equal(packet.materializationChange.textBudget, 0);
           assert.equal(packet.workerChange.patches[0].truncated, true);
           assert.equal(packet.materializationChange.patches[0].truncated, true);
           allocatedTextBudget +=
@@ -2274,7 +2136,12 @@ test("final review shares one text budget across ordinary and materialization pa
         }
         assert.equal(allocatedTextBudget, 12);
 
-        const truncatedMaterialization = objectiveEvidence.evidence[1];
+        const truncatedMaterialization = objectiveEvidence.evidence.find(
+          (source) =>
+            source.path.includes(
+              "controller materialization controller result file",
+            ),
+        );
         await assert.rejects(
           reviewAcceptance({
             checkout: target.checkout,
@@ -2290,9 +2157,9 @@ test("final review shares one text budget across ordinary and materialization pa
             ],
             evidenceSources: objectiveEvidence.evidence,
             model: {
-              async reviewResult() {
+              async reviewResult(_reviewRequest) {
                 return {
-                  findings: [
+                  findings: resultFindings(_reviewRequest, [
                     {
                       criterion: "both selected assets are grounded",
                       verdict: "pass",
@@ -2302,7 +2169,7 @@ test("final review shares one text budget across ordinary and materialization pa
                         "The bounded materialization source identifies it.",
                       question: "",
                     },
-                  ],
+                  ]),
                 };
               },
             },
@@ -2310,8 +2177,8 @@ test("final review shares one text budget across ordinary and materialization pa
           (error) => {
             assert.ok(error instanceof AcceptanceDecisionRequired);
             assert.deepEqual(error.pending.reviewRejection, {
-              field: "source",
-              reason: "source-truncated",
+              field: "finding",
+              reason: "invalid-response",
             });
             return true;
           },
@@ -2443,17 +2310,17 @@ test("a reviewer pass cannot auto-accept truncated result text", async () => {
               );
               assert.ok(review.change.length < 4000);
               return {
-                findings: [
+                findings: resultFindings(review, [
                   {
                     criterion: "result meets requirements",
                     verdict: "pass",
-                    source: "OBJECTIVE",
+                    source: 'Exact Git change packet file "result.txt"',
                     quote: "result meets requirements",
                     detail:
                       "Objective quote says the result meets requirements",
                     question: "",
                   },
-                ],
+                ]),
               };
             },
           },
@@ -2461,12 +2328,7 @@ test("a reviewer pass cannot auto-accept truncated result text", async () => {
         (error) => {
           assert.ok(error instanceof AcceptanceDecisionRequired);
           assert.equal(error.pending.treeSha, treeSha);
-          assert.match(error.pending.detail, /text excerpts were truncated/);
-          assert.match(error.pending.detail, /result.txt/);
-          assert.match(
-            error.pending.question,
-            /FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES/,
-          );
+          assert.match(error.pending.detail, /incomplete cited evidence/);
           return true;
         },
       );

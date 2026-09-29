@@ -1,3 +1,8 @@
+import type {
+  ReviewPacket,
+  ReviewFinding,
+  GraphReviewFinding,
+} from "./review-evidence.js";
 import type { ExecutionProfileEnvironment } from "./config.js";
 import type { ControllerCapabilitiesManifest } from "./controller-capabilities.js";
 
@@ -172,6 +177,7 @@ export interface PlanCommandAuthorization {
 }
 
 export interface PlanReviewRequest {
+  reviewPacket?: ReviewPacket;
   objective: string;
   baseSha: string;
   sources: { path: string; content: string; heading?: string }[];
@@ -208,23 +214,17 @@ export interface ResultReviewCandidate {
   question: string;
 }
 
-export interface ResultReviewFinding extends ResultReviewCandidate {
-  verdict: "pass" | "needs-human" | "refuse";
-}
+export type ResultReviewFinding = ReviewFinding;
 
 export interface PlanningModel {
   generateStructured<T>(request: PlanningRequest<T>): Promise<T>;
-  reviewGraph(request: PlanReviewRequest): Promise<{
-    findings: {
-      source: string;
-      quote: string;
-      detail: string;
-      question: string;
-    }[];
-  }>;
+  reviewGraph(
+    request: PlanReviewRequest,
+  ): Promise<{ findings: GraphReviewFinding[] }>;
   reviewResult?(request: {
     reviewPhase?: "result-review" | "objective-review";
     criteria: string[];
+    reviewPacket: ReviewPacket;
     baseSha: string;
     treeSha: string;
     sources: { path: string; content: string }[];

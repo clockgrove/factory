@@ -1,3 +1,4 @@
+import { resultFindings } from "./review-protocol.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -281,153 +282,156 @@ class ScriptedPlanningModel {
     if (this.resultReviewer) return this.resultReviewer(request);
     const source = request.sources.find((item) => item.path === "OBJECTIVE");
     return {
-      findings: request.criteria.map((criterion) => {
-        const hydration = request.evidence?.find(
-          (item) => item.path === "Controller hydration receipt",
-        );
-        if (/fresh-clone|hydrat|selected bytes/i.test(criterion) && hydration)
+      findings: resultFindings(
+        request,
+        request.criteria.map((criterion) => {
+          const hydration = request.evidence?.find(
+            (item) => item.path === "Controller hydration receipt",
+          );
+          if (/fresh-clone|hydrat|selected bytes/i.test(criterion) && hydration)
+            return {
+              criterion,
+              verdict: "pass",
+              source: hydration.path,
+              quote: '"passed":true',
+              detail:
+                "The controller receipt binds successful hydration to the reviewed result",
+              question: "",
+            };
+          if (
+            /worker does not write, remove, or change the final destination/i.test(
+              criterion,
+            )
+          ) {
+            const materialization = request.evidence?.find(
+              (item) =>
+                item.path.startsWith("Work Item Git delta:") &&
+                item.path.endsWith("controller materialization"),
+            );
+            const packet = materialization
+              ? JSON.parse(materialization.content.split("\n")[0])
+              : null;
+            if (
+              materialization?.complete === true &&
+              packet?.authority ===
+                "Factory supervisor controller materialization evidence" &&
+              packet.workerDestinationChanges?.length === 0 &&
+              packet.materializationChange?.changes?.length ===
+                packet.destinations?.length
+            )
+              return {
+                criterion,
+                verdict: "pass",
+                source: materialization.path,
+                quote: '"workerDestinationChanges":[]',
+                detail:
+                  "Exact supervisor Git evidence separates the unchanged worker destinations from the controller-only selected-set commit",
+                question: "",
+              };
+            return {
+              criterion,
+              verdict: "needs-human",
+              source: "Delivery observations",
+              quote: '"assetSelectionReceipt"',
+              detail:
+                "The review packet does not prove the worker/controller materialization boundary",
+              question:
+                "Did the worker leave final destinations unchanged and only Factory materialize the selected set?",
+            };
+          }
+          if (/\.factory-assets\.json/.test(criterion)) {
+            const observations = request.observations
+              ? JSON.parse(request.observations)
+              : null;
+            const selectedSetId = observations?.assetSelectionReceipt?.setId;
+            const receipt = observations?.assetCaptureReceipts?.find(
+              (candidate) => candidate?.setId === selectedSetId,
+            );
+            if (
+              receipt?.declarationPath === ".factory-assets.json" &&
+              receipt.declarationDigest &&
+              receipt.declarationProvenance
+            )
+              return {
+                criterion,
+                verdict: "pass",
+                source: "Delivery observations",
+                quote: JSON.stringify(receipt.declarationProvenance),
+                detail:
+                  "The controller receipt binds the selected set's manifest provenance to its parsed declaration",
+                question: "",
+              };
+            return {
+              criterion,
+              verdict: "needs-human",
+              source: "Delivery observations",
+              quote: '"assetCaptureReceipts"',
+              detail:
+                "The delivery observations do not contain controller-verified manifest provenance for the selected set",
+              question:
+                "Was the selected set's provenance declared in the parsed manifest?",
+            };
+          }
+          if (/byte-for-byte from the repository source/i.test(criterion)) {
+            const observations = request.observations
+              ? JSON.parse(request.observations)
+              : null;
+            const selectedSetId = observations?.assetSelectionReceipt?.setId;
+            const receipt = observations?.assetCaptureReceipts?.find(
+              (candidate) => candidate?.setId === selectedSetId,
+            );
+            const pair = receipt?.inputs
+              ?.filter((candidate) => candidate.binding.kind === "repository")
+              .map((input) => ({
+                input,
+                member: receipt.members?.find(
+                  (candidate) => candidate.destination === input.binding.path,
+                ),
+              }))
+              .find(({ member }) => member);
+            const input = pair?.input;
+            const member = pair?.member;
+            if (
+              input &&
+              member &&
+              input.ref.digest === member.digest &&
+              input.ref.bytes === member.bytes &&
+              input.ref.mediaType === member.mediaType
+            )
+              return {
+                criterion,
+                verdict: "pass",
+                source: "Delivery observations",
+                quote: JSON.stringify(receipt),
+                detail:
+                  "The controller receipt binds equal source-input and captured-member identities to the selected destination",
+                question: "",
+              };
+            return {
+              criterion,
+              verdict: "needs-human",
+              source: "Delivery observations",
+              quote: '"assetCaptureReceipts"',
+              detail:
+                "The controller receipt does not prove matching imported-source and captured-member identities",
+              question:
+                "Were the selected member bytes copied exactly from the imported repository source?",
+            };
+          }
           return {
             criterion,
             verdict: "pass",
-            source: hydration.path,
-            quote: '"passed":true',
-            detail:
-              "The controller receipt binds successful hydration to the reviewed result",
+            source: "OBJECTIVE",
+            quote:
+              source.content
+                .split("\n")
+                .find((line) => line.includes("test -s"))
+                ?.trim() ?? source.content.split("\n").find(Boolean),
+            detail: "Scripted integration fixture confirms its declared result",
             question: "",
           };
-        if (
-          /worker does not write, remove, or change the final destination/i.test(
-            criterion,
-          )
-        ) {
-          const materialization = request.evidence?.find(
-            (item) =>
-              item.path.startsWith("Work Item Git delta:") &&
-              item.path.endsWith("controller materialization"),
-          );
-          const packet = materialization
-            ? JSON.parse(materialization.content.split("\n")[0])
-            : null;
-          if (
-            materialization?.complete === true &&
-            packet?.authority ===
-              "Factory supervisor controller materialization evidence" &&
-            packet.workerDestinationChanges?.length === 0 &&
-            packet.materializationChange?.changes?.length ===
-              packet.destinations?.length
-          )
-            return {
-              criterion,
-              verdict: "pass",
-              source: materialization.path,
-              quote: '"workerDestinationChanges":[]',
-              detail:
-                "Exact supervisor Git evidence separates the unchanged worker destinations from the controller-only selected-set commit",
-              question: "",
-            };
-          return {
-            criterion,
-            verdict: "needs-human",
-            source: "Delivery observations",
-            quote: '"assetSelectionReceipt"',
-            detail:
-              "The review packet does not prove the worker/controller materialization boundary",
-            question:
-              "Did the worker leave final destinations unchanged and only Factory materialize the selected set?",
-          };
-        }
-        if (/\.factory-assets\.json/.test(criterion)) {
-          const observations = request.observations
-            ? JSON.parse(request.observations)
-            : null;
-          const selectedSetId = observations?.assetSelectionReceipt?.setId;
-          const receipt = observations?.assetCaptureReceipts?.find(
-            (candidate) => candidate?.setId === selectedSetId,
-          );
-          if (
-            receipt?.declarationPath === ".factory-assets.json" &&
-            receipt.declarationDigest &&
-            receipt.declarationProvenance
-          )
-            return {
-              criterion,
-              verdict: "pass",
-              source: "Delivery observations",
-              quote: JSON.stringify(receipt.declarationProvenance),
-              detail:
-                "The controller receipt binds the selected set's manifest provenance to its parsed declaration",
-              question: "",
-            };
-          return {
-            criterion,
-            verdict: "needs-human",
-            source: "Delivery observations",
-            quote: '"assetCaptureReceipts"',
-            detail:
-              "The delivery observations do not contain controller-verified manifest provenance for the selected set",
-            question:
-              "Was the selected set's provenance declared in the parsed manifest?",
-          };
-        }
-        if (/byte-for-byte from the repository source/i.test(criterion)) {
-          const observations = request.observations
-            ? JSON.parse(request.observations)
-            : null;
-          const selectedSetId = observations?.assetSelectionReceipt?.setId;
-          const receipt = observations?.assetCaptureReceipts?.find(
-            (candidate) => candidate?.setId === selectedSetId,
-          );
-          const pair = receipt?.inputs
-            ?.filter((candidate) => candidate.binding.kind === "repository")
-            .map((input) => ({
-              input,
-              member: receipt.members?.find(
-                (candidate) => candidate.destination === input.binding.path,
-              ),
-            }))
-            .find(({ member }) => member);
-          const input = pair?.input;
-          const member = pair?.member;
-          if (
-            input &&
-            member &&
-            input.ref.digest === member.digest &&
-            input.ref.bytes === member.bytes &&
-            input.ref.mediaType === member.mediaType
-          )
-            return {
-              criterion,
-              verdict: "pass",
-              source: "Delivery observations",
-              quote: JSON.stringify(receipt),
-              detail:
-                "The controller receipt binds equal source-input and captured-member identities to the selected destination",
-              question: "",
-            };
-          return {
-            criterion,
-            verdict: "needs-human",
-            source: "Delivery observations",
-            quote: '"assetCaptureReceipts"',
-            detail:
-              "The controller receipt does not prove matching imported-source and captured-member identities",
-            question:
-              "Were the selected member bytes copied exactly from the imported repository source?",
-          };
-        }
-        return {
-          criterion,
-          verdict: "pass",
-          source: "OBJECTIVE",
-          quote:
-            source.content
-              .split("\n")
-              .find((line) => line.includes("test -s"))
-              ?.trim() ?? source.content.split("\n").find(Boolean),
-          detail: "Scripted integration fixture confirms its declared result",
-          question: "",
-        };
-      }),
+        }),
+      ),
     };
   }
 }

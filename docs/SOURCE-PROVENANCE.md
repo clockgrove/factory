@@ -646,3 +646,18 @@ the separate raw-excerpt matching exception unnecessary. Public temporary-Git
 regressions cover exact literal citations and rejection of mixed JSON/text quotes,
 with regular/native media fixtures checking distinct worker/controller boundaries.
 No archived source, private fixture, new state or live qualification is included.
+
+## v0.1.37 public qualification continuation
+
+The [completion fixture](https://github.com/clockgrove/factory-public-completion-20260928-v0137)
+starts at `ff4695821b8272d2cc1c904875fc1548cf188b10`. Its selected
+[baseline identity manifest](https://github.com/clockgrove/factory-public-completion-20260928-v0137/blob/ff4695821b8272d2cc1c904875fc1548cf188b10/docs/baseline-identities.json)
+records eight unchanged accepted workspace blobs and the narrow policy blob
+from public predecessor `52571ef6573c555deb756049ae9d451cc3589eae`.
+The original 77-byte image retains its MIT public-fixture source and unchanged
+byte lineage. New qualification source describes only current media and usage
+note work and supplies complete immutable contents and literal IDs to review.
+No private source, archived implementation, runtime change or new release is
+introduced. Original failed/cancelled runs and accounting remain preserved;
+[build status](BUILD-STATUS.md#public-completion-on-unchanged-v0137) records the
+separate acceptance scope and current result.

@@ -16,9 +16,9 @@ prove actual tool use, not exact read paths or returned bytes. Live same-adapter
 concurrency is not claimed; retained deterministic tests cover that isolation,
 readiness rejection and restart/cancel/collect behavior.
 
-This feature acceptance does not satisfy the full public release gate or authorize
-private pilot advancement. The separate unproven collection-history obligation is
-recorded below and remains under #206.
+This feature acceptance is narrower than the public release gate. The subsequent
+v0.1.37 qualification below retains its own collection-history, media and final
+acceptance evidence; actual adopter acceptance remains separate under #207.
 
 ## Collection observation correction (#225)
 
@@ -28,9 +28,9 @@ private regular/native diagnostics. Independent source review, deterministic
 checks and v0.1.37 distribution verification passed. Its narrower installed
 capability was independently accepted from actual original-worker installation,
 inspection and a completed collection observation. This proves presence during
-the scan, not continuous retention or provenance from the scan alone. The full
-public scenario remains incomplete as recorded below; private advancement is
-blocked. The v0.1.36 historical gap and all earlier evidence remain unchanged.
+the scan, not continuous retention or provenance from the scan alone. The later
+public completion below preserves this proof. The v0.1.36 historical gap and all
+earlier evidence remain unchanged.
 
 ## Immutable v0.1.37 artifact record
 
@@ -62,7 +62,7 @@ an explicit temporary `--store-dir` option after default/XDG-store failures;
 there is no unqualified claim that the exact requested setup command succeeded
 unchanged. Independent review accepted the narrower #225 capability only.
 
-**The full public release gate remains incomplete.** Policy review proposed a
+**This first run did not complete the public release gate.** Policy review proposed a
 quote that reconstructed a smaller JSON object instead of copying a contiguous
 supplied excerpt; the citation guard correctly rejected it with `quote-not-found`.
 This does not establish an image-content change or a runtime defect. There was no
@@ -70,17 +70,60 @@ acceptance override, result re-review or worker retry. Media and final integrati
 never started; no selected-media delivery, final Objective acceptance or final
 fresh-clone hydration was established by this run.
 
-The cancelled run, waiting policy result, original evidence/accounting and
-fixture are retained. Owned worker/controller activity and locks/leases are
-settled; storage residue is not active execution. Missing Codex and total monetary
-cost remain unavailable, not zero. Diagnosis and supported reuse of the retained
-installation/state root remain under [#206](https://github.com/clockgrove/factory/issues/206).
-No runtime defect requiring another release has been demonstrated; this record
-authorizes no new artifact, run, retry or reversal of cancellation. Private pilot
-advancement remains blocked pending full public acceptance and independent audit,
-with final adopter acceptance separate under #207. The contributor qualification
-owner retains the fixture for review at full acceptance or an explicit disposal
-decision. Earlier #162/#164 acceptance is unchanged.
+The cancelled run, waiting policy result and original evidence/accounting remain
+retained. A supported remaining-work [Objective #7](https://github.com/clockgrove/factory-collection-proof-20260928-v0137/issues/7)
+reused the accepted foundation. Policy passed after one explicit, independently
+reviewed citation-only re-review of the same result and delivered through
+[PR #11](https://github.com/clockgrove/factory-collection-proof-20260928-v0137/pull/11).
+Media then passed and delivered through
+[PR #12](https://github.com/clockgrove/factory-collection-proof-20260928-v0137/pull/12).
+Its final note failed substantive truthfulness review and requested historical
+blob identities absent from that review packet. All seven integration commands
+passed, but that run was not accepted. Its original and repeated receipts,
+rejected note and usage are preserved; no terminal run was revived.
+
+### Public completion on unchanged v0.1.37
+
+The narrow [completion Objective](https://github.com/clockgrove/factory-public-completion-20260928-v0137/issues/1)
+uses the same installed artifact. Its public seed preserves the exact eight
+accepted foundation blobs and narrow policy blob, with the original ordinary
+image. A single current source and literal identity manifest remove the earlier
+input ambiguities. Installed-function rehearsal verified capture, pointer
+materialization, all seven commands and final hydration before provider calls.
+This uses a separate disposable fixture because an inherited LFS pointer is not
+an ordinary-file migration source; it does not reset the earlier target.
+
+The two original worker attempts delivered media and scoped usage documentation
+through [PR #4](https://github.com/clockgrove/factory-public-completion-20260928-v0137/pull/4)
+and [PR #5](https://github.com/clockgrove/factory-public-completion-20260928-v0137/pull/5),
+with no compiler revision, worker retry, result re-review or acceptance override.
+Final automatic acceptance passed at commit
+`5a5e96d809105d04a584acf0ed57c7adc7c4b2ea`, tree
+`d2b8258399df7acbade4547c43f6c06dca63bb52`. Controller selection, pointer checks,
+upload and exact final-commit fresh-clone hydration bind the original 77-byte
+image, SHA-256
+`886eca293713dd0dc77ee8c492c64e81359f6e0286b79d5f6df20c506466d1e2`.
+An independent fresh clone passed all seven unchanged commands with Node 24.20.0
+and pnpm 10.34.5 and retained a clean tracked tree.
+
+The linked scenario accounts for 23 accepted canonical command obligations:
+retained foundation four and policy three, current media two, documentation
+seven and final seven. All 38 actual controller command executions across the
+three v0.1.37 runs are retained, including repeated and rejected-run checks;
+they are not conflated with those 23 accepted obligations. Earlier actual mixed
+Codex/Claude overlap and distinct Claude profile/MCP evidence remain aggregate
+same-artifact evidence, not a claim of new-run or live same-adapter concurrency.
+
+**Independent aggregate public qualification: PASS.** Review verified every
+media, documentation and final acceptance clause, literal citations, baseline
+identities, exact fresh-clone checks, accounting availability and owned-resource
+clearance. All seven historical worker identities are inactive; owned worktrees,
+locks and leases are absent. All 24 invocations across these three scopes retain
+reported usage categories; total tokens and total monetary cost remain unavailable,
+not zero. Actual adopter execution and final operator acceptance remain separate
+under #206 and #207. The contributor qualification owner retains all fixtures and
+evidence until full pilot acceptance or an explicit disposal decision. This
+record changes neither published artifact bytes nor earlier rejected outcomes.
 
 ## Immutable v0.1.36 artifact record
 

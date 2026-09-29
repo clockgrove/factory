@@ -86,6 +86,7 @@ export async function runNativeGraph(args: {
       throw new Error(
         `Work Item ${id} submitted ${work.pendingEffect} has unknown outcome; operator direction required`,
       );
+  let preparationFailure: unknown;
   // Admit independent roots whenever their predecessor units have integrated.
   // Publication stays ordered; a prepared change is replayed and validated
   // again if an earlier unit advanced the integrated head.
@@ -221,14 +222,24 @@ export async function runNativeGraph(args: {
       });
       for (const [index, task] of tasks.entries()) {
         const id = prepared[index]!.id;
-        const owned = task;
+        const owned = task
+          .catch((error: unknown) => {
+            preparationFailure ??= error;
+            throw error;
+          })
+          .finally(() => active.delete(id));
         void owned.catch(() => undefined);
         active.set(id, owned);
       }
     }
   };
+  const settlePrepared = async () => {
+    await Promise.all(active.values());
+    if (preparationFailure) throw preparationFailure;
+  };
   const remainingUnits = [...units];
   while (remainingUnits.length) {
+    if (preparationFailure) throw preparationFailure;
     const ranked = rankPending(state.graph, state.work);
     const eligible = remainingUnits.filter(
       (unit) =>
@@ -260,6 +271,7 @@ export async function runNativeGraph(args: {
     } finally {
       active.delete(unit.id);
     }
+    if (preparationFailure) throw preparationFailure;
     if (
       !unit.externalDependencies.every(
         (dependency) => state.work[dependency]?.status === "done",
@@ -271,11 +283,11 @@ export async function runNativeGraph(args: {
     }
     if (unit.items[0]!.kind === "qa") {
       const item = unit.items[0]!;
-      if (state.work[item.id]?.status === "waiting") return;
+      if (state.work[item.id]?.status === "waiting") return settlePrepared();
       if (state.work[item.id]?.status === "pending") {
-        if (args.paused?.()) return;
+        if (args.paused?.()) return settlePrepared();
         await args.reconcile?.();
-        if (args.paused?.()) return;
+        if (args.paused?.()) return settlePrepared();
       }
       await runQaItem({
         config,
@@ -291,14 +303,14 @@ export async function runNativeGraph(args: {
         cancelled: args.cancelled,
         phases,
       });
-      if (state.work[item.id]?.status !== "done") return;
+      if (state.work[item.id]?.status !== "done") return settlePrepared();
       continue;
     }
     for (const [index, item] of unit.items.entries()) {
       if (args.cancelled()) throw new Error("Objective cancelled");
       const work = state.work[item.id]!;
       if (work.status === "published") continue;
-      if (state.work[item.id]?.status === "waiting") return;
+      if (state.work[item.id]?.status === "waiting") return settlePrepared();
       if (work.status !== "pending" && work.status !== "running")
         throw new Error(`Work Item ${item.id} cannot enter native delivery`);
       const previous = index ? state.work[unit.items[index - 1]!.id]! : null;
@@ -308,13 +320,13 @@ export async function runNativeGraph(args: {
       if (!itemBase) throw new Error("Native stack predecessor has no commit");
       if (work.status === "running" && work.baseSha !== itemBase && index !== 0)
         throw new Error(`Work Item ${item.id} resumed on a changed base`);
-      if (work.status === "pending" && args.paused?.()) return;
+      if (work.status === "pending" && args.paused?.()) return settlePrepared();
       if (work.status === "pending") {
         const available = await driver.availableSlots();
-        if (phases.availableSlots(available) <= 0) return;
+        if (phases.availableSlots(available) <= 0) return settlePrepared();
         await args.reconcile?.();
         if (args.cancelled()) throw new Error("Objective cancelled");
-        if (args.paused?.()) return;
+        if (args.paused?.()) return settlePrepared();
         work.status = "running";
         work.step = "execute";
         work.baseSha = itemBase;
@@ -638,7 +650,7 @@ export async function runNativeGraph(args: {
       } finally {
         active.delete(item.id);
       }
-      if (state.work[item.id]?.status === "waiting") return;
+      if (state.work[item.id]?.status === "waiting") return settlePrepared();
     }
     const layers: NativeStackLayer[] = unit.items.map((item) => {
       const work = state.work[item.id]!;

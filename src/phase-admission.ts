@@ -8,13 +8,14 @@ export function phaseAdmission(
   save: () => void,
   cancelled: () => boolean,
 ) {
-  for (const work of Object.values(state.work))
-    if (
-      !work.phaseReservation &&
-      work.status === "running" &&
-      work.step === "execute"
-    )
-      work.phaseReservation = "coding";
+  const effectivePhase = (work: FactoryState["work"][string]) =>
+    work.phaseReservation ??
+    (!work.requestedPhase &&
+    work.status === "running" &&
+    work.step === "execute" &&
+    work.execution
+      ? "coding"
+      : undefined);
   const waiters = new Set<() => void>();
   const notify = () => {
     for (const wake of waiters) wake();
@@ -32,7 +33,7 @@ export function phaseAdmission(
     });
   const codingCount = () =>
     Object.values(state.work).filter(
-      (work) => work.phaseReservation === "coding",
+      (work) => effectivePhase(work) === "coding",
     ).length;
   const availableSlots = (reported: number | "unknown") => {
     if (
@@ -57,9 +58,12 @@ export function phaseAdmission(
     );
   };
   const reason = (id: string, phase: ResourcePhase): string | undefined => {
-    const reservations = Object.entries(state.work).filter(
-      ([other, work]) => other !== id && work.phaseReservation,
-    );
+    const reservations = Object.entries(state.work)
+      .map(
+        ([other, work]) =>
+          [other, { ...work, phaseReservation: effectivePhase(work) }] as const,
+      )
+      .filter(([other, work]) => other !== id && work.phaseReservation);
     const ceiling =
       phase === "coding"
         ? Math.min(

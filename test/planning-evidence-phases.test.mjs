@@ -13,6 +13,7 @@ import {
 } from "../dist/compiler.js";
 import { coverageObligations } from "../dist/qa.js";
 import { withCoverage } from "./support/coverage.mjs";
+import { encodeCodexReadiness } from "./support/codex-readiness.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
 
 const image = readFileSync(
@@ -135,6 +136,7 @@ test("rendered compiler and plan reviewer distinguish current bytes from unsuppo
           graph(target.baseSha, unsupported),
         );
         response.items[0].citations = [{ choiceIndex: 0 }];
+        response = encodeCodexReadiness(response);
       } else {
         const packet = JSON.parse(
           prompt.split(

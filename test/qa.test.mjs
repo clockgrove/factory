@@ -735,3 +735,77 @@ for (const delivery of ["regular", "native"])
           assert.equal(submissions, 2);
         }
       }));
+
+test(
+  "cancellation acknowledged during named CI observation prevents QA model submission",
+  { timeout: 10_000 },
+  async () =>
+    fixture(async (root) => {
+      const target = createTarget(root, {
+        "real-environment.txt": "actual local resource",
+      });
+      const repository = "example/qa-cancel-before-review";
+      const entered = Promise.withResolvers();
+      const response = Promise.withResolvers();
+      let qaReviews = 0;
+      const { application, github } = makeApplication({
+        config: factoryConfig(target.checkout, repository),
+        graph: graph(target.baseSha),
+        objectiveBody: body,
+        fakeRoot: join(root, "fake"),
+        actions: {
+          unit: { files: [{ path: "unit.txt", text: "unit" }] },
+          integration: {
+            files: [{ path: "integration.txt", text: "integration" }],
+          },
+        },
+        resultReviewer(request) {
+          if (
+            request.criteria.includes(
+              "real environment and exact named CI proof",
+            )
+          )
+            qaReviews++;
+          return {
+            findings: resultFindings(
+              request,
+              request.criteria.map((criterion) => ({
+                criterion,
+                source: "OBJECTIVE",
+                verdict: "pass",
+                detail: "fixture semantic proof",
+                question: "",
+              })),
+            ),
+          };
+        },
+      });
+      github.namedCheck = async (headSha, name) => {
+        entered.resolve();
+        await response.promise;
+        return {
+          id: 95,
+          headSha,
+          name,
+          status: "completed",
+          conclusion: "success",
+          detailsUrl: "https://github.com/example/check/95",
+        };
+      };
+      const plan = await application.planObjective(1);
+      const rejected = assert.rejects(
+        application.runObjective(1, plan),
+        /cancel/i,
+      );
+      await entered.promise;
+      try {
+        await application.cancelObjective(1);
+        assert.equal(readState(repository, 1).cancelRequested, true);
+      } finally {
+        response.resolve();
+      }
+      await rejected;
+      assert.equal(qaReviews, 0);
+      assert.equal(readState(repository, 1).work.qa.pendingEffect, undefined);
+    }),
+);

@@ -157,6 +157,7 @@ export async function runQaItem(args: {
       work.qaChecks.push(check);
       save();
     }
+    if (args.cancelled()) throw new Error("Objective cancelled");
     work.pendingEffect = "review";
     save();
     work.validation = await reviewAcceptance({

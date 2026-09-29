@@ -1,3 +1,4 @@
+import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "../compiler.js";
@@ -52,6 +53,7 @@ export async function runNativeGraph(args: {
   active: Map<string, Promise<void>>;
   cancelled: () => boolean;
   paused?: () => boolean;
+  amendmentPending?: () => boolean;
   reconcile?: () => Promise<void>;
   diagnostics?: DiagnosticEmitter;
 }): Promise<void> {
@@ -91,11 +93,11 @@ export async function runNativeGraph(args: {
   // Publication stays ordered; a prepared change is replayed and validated
   // again if an earlier unit advanced the integrated head.
   const prepareReadyUnits = async (): Promise<void> => {
-    if (args.paused?.()) return;
+    if (args.paused?.() || args.amendmentPending?.()) return;
     if (
       state.graph.items.some(
         (item) =>
-          item.kind === "qa" &&
+          (item.kind === "qa" || item.kind === "aggregate") &&
           state.work[item.id]?.status === "pending" &&
           item.dependencies.every((id) => state.work[id]?.status === "done"),
       )
@@ -125,6 +127,7 @@ export async function runNativeGraph(args: {
       if (
         unit.items[0]!.kind === "qa" ||
         phases.reason(unit.items[0]!.id, "coding") ||
+        unit.items[0]!.kind === "aggregate" ||
         state.work[unit.items[0]!.id]?.status !== "pending" ||
         !unit.externalDependencies.every(
           (dependency) => state.work[dependency]?.status === "done",
@@ -142,7 +145,7 @@ export async function runNativeGraph(args: {
     if (prepared.length) {
       await args.reconcile?.();
       if (args.cancelled()) throw new Error("Objective cancelled");
-      if (args.paused?.()) return;
+      if (args.paused?.() || args.amendmentPending?.()) return;
       const tasks = prepared.map(async (unit) => {
         const item = unit.items[0]!;
         const work = state.work[item.id]!;
@@ -152,6 +155,7 @@ export async function runNativeGraph(args: {
         work.executionBaseSha = work.baseSha;
         work.integratedShaAtStart = state.integratedSha ?? null;
         work.attempt = randomUUID();
+        work.graphRevisionDigest = graphDigest(state.graph);
         work.startedAt = new Date().toISOString();
         save();
         try {
@@ -181,6 +185,8 @@ export async function runNativeGraph(args: {
           }
           const result = await driver.collect(handle);
           phases.release(item.id);
+          recordWorkerDiscovery(state, item.id, result.discovery);
+          save();
           if (result.collection)
             args.diagnostics?.emit({
               runId: state.runId,
@@ -265,6 +271,11 @@ export async function runNativeGraph(args: {
     remainingUnits.splice(remainingUnits.indexOf(unit), 1);
     if (unit.items.every((item) => state.work[item.id]?.status === "done"))
       continue;
+    if (
+      args.amendmentPending?.() &&
+      !unit.items.some((item) => state.work[item.id]?.attempt)
+    )
+      return;
     await prepareReadyUnits();
     try {
       await active.get(unit.id);
@@ -281,7 +292,7 @@ export async function runNativeGraph(args: {
         `Delivery unit ${unit.id} started before its dependencies`,
       );
     }
-    if (unit.items[0]!.kind === "qa") {
+    if (unit.items[0]!.kind === "qa" || unit.items[0]!.kind === "aggregate") {
       const item = unit.items[0]!;
       if (state.work[item.id]?.status === "waiting") return settlePrepared();
       if (state.work[item.id]?.status === "pending") {
@@ -333,6 +344,7 @@ export async function runNativeGraph(args: {
         work.executionBaseSha = itemBase;
         work.integratedShaAtStart = state.integratedSha ?? null;
         work.attempt = randomUUID();
+        work.graphRevisionDigest = graphDigest(state.graph);
         work.startedAt = new Date().toISOString();
         save();
       }
@@ -413,6 +425,8 @@ export async function runNativeGraph(args: {
           }
           const result = await driver.collect(handle);
           phases.release(item.id);
+          recordWorkerDiscovery(state, item.id, result.discovery);
+          save();
           if (result.collection)
             args.diagnostics?.emit({
               runId: state.runId,

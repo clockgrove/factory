@@ -1,3 +1,4 @@
+import { graphDigest } from "./graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -1060,7 +1061,9 @@ export function statusDocument(
         ? `dependency:${dependency}`
         : conflict
           ? `resource:${conflict.id}`
-          : item.kind !== "qa" && configuredSlots === 0
+          : item.kind !== "qa" &&
+              item.kind !== "aggregate" &&
+              configuredSlots === 0
             ? "capacity"
             : current.waitingReason;
     } else if (current.status === "waiting")
@@ -1142,6 +1145,20 @@ export function statusDocument(
             : ("active" as const),
     runId: state.runId,
     coordinator: state.coordinator ?? null,
+    graphDigest: graphDigest(state.graph),
+    graphRevisionCount: state.graphRevisions?.length ?? 1,
+    pendingAmendment: state.pendingAmendment
+      ? {
+          id: state.pendingAmendment.id,
+          phase: state.pendingAmendment.phase,
+          expectedGraphDigest:
+            state.pendingAmendment.proposal.expectedGraphDigest,
+          error: state.pendingAmendment.error
+            ? redactDiagnosticDetail(state.pendingAmendment.error, secrets)
+            : null,
+        }
+      : null,
+    allowanceConsumption: state.allowanceConsumption ?? null,
     configuredSlots: configuredSlots ?? null,
     baseSha: state.baseSha,
     integratedSha: state.integratedSha ?? null,

@@ -1,3 +1,4 @@
+import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "../compiler.js";
@@ -89,7 +90,7 @@ export async function runRegularGraph(args: {
   ): Promise<void> => {
     const work = state.work[item.id]!;
     try {
-      if (item.kind === "qa") {
+      if (item.kind === "qa" || item.kind === "aggregate") {
         await runQaItem({
           config,
           root,
@@ -175,6 +176,8 @@ export async function runRegularGraph(args: {
         }
         const result = await driver.collect(handle);
         phases.release(item.id);
+        recordWorkerDiscovery(state, item.id, result.discovery);
+        save();
         if (result.collection)
           args.diagnostics?.emit({
             runId: state.runId,
@@ -429,7 +432,7 @@ export async function runRegularGraph(args: {
   for (const item of graph.items) {
     const work = state.work[item.id]!;
     if (work.status !== "running") continue;
-    if (item.kind === "qa") {
+    if (item.kind === "qa" || item.kind === "aggregate") {
       const promise = execute(item, state.integratedSha ?? baseSha).finally(
         () => active.delete(item.id),
       );
@@ -505,7 +508,7 @@ export async function runRegularGraph(args: {
           slots,
         ).filter((item) => {
           const blocked =
-            item.kind === "qa"
+            item.kind === "qa" || item.kind === "aggregate"
               ? undefined
               : (phases.reason(item.id, "coding") ??
                 (workerSlots <= 0
@@ -518,7 +521,7 @@ export async function runRegularGraph(args: {
             return false;
           }
           delete state.work[item.id]!.waitingReason;
-          if (item.kind !== "qa") workerSlots--;
+          if (item.kind !== "qa" && item.kind !== "aggregate") workerSlots--;
           return true;
         });
     if (ready.length) await args.reconcile?.();
@@ -529,6 +532,7 @@ export async function runRegularGraph(args: {
       work.status = "running";
       work.step = "execute";
       work.attempt = randomUUID();
+      work.graphRevisionDigest = graphDigest(state.graph);
       work.startedAt = new Date().toISOString();
       const itemBase = state.integratedSha ?? baseSha;
       work.baseSha = itemBase;

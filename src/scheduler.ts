@@ -60,7 +60,8 @@ export function validateAndOrderGraph(
       !item.brief ||
       !item.acceptance.length ||
       !item.nonGoals?.length ||
-      (item.kind !== "qa" && !item.ownedPaths.length) ||
+      (!["qa", "aggregate"].includes(item.kind ?? "work") &&
+        !item.ownedPaths.length) ||
       !item.ownedPaths.every(validPath) ||
       !item.citations.length ||
       !item.citations.every((citation) => sources.has(citation.path))
@@ -69,10 +70,13 @@ export function validateAndOrderGraph(
         `Work Item ${item.id} lacks acceptance, non-goals, ownership, or source citations`,
       );
     }
-    if (item.kind !== undefined && item.kind !== "qa" && item.kind !== "work")
+    if (
+      item.kind !== undefined &&
+      !["qa", "work", "aggregate"].includes(item.kind)
+    )
       throw new Error("Unknown Work Item kind");
     if (
-      item.kind === "qa" &&
+      ["qa", "aggregate"].includes(item.kind ?? "work") &&
       (item.ownedPaths.length ||
         item.sourceAssets?.length ||
         item.expectedOutputRoles?.length ||
@@ -98,7 +102,26 @@ export function validateAndOrderGraph(
       throw new Error(`Work Item ${item.id} has invalid priority`);
     byId.set(item.id, item);
   }
+  const parents = new Set<string>();
   for (const item of graph.items) {
+    const children = item.children ?? [];
+    if (
+      !Array.isArray(children) ||
+      (item.kind === "aggregate" ? !children.length : children.length)
+    )
+      throw new Error("Only aggregate parents have required children");
+    for (const child of children) {
+      if (
+        parents.has(child) ||
+        !byId.has(child) ||
+        child === item.id ||
+        !item.dependencies.includes(child)
+      )
+        throw new Error(
+          "Aggregate children require unique hierarchy and explicit dependencies",
+        );
+      parents.add(child);
+    }
     for (const dependency of item.dependencies) {
       if (!byId.has(dependency) || dependency === item.id)
         throw new Error(
@@ -162,7 +185,8 @@ export function rankPending(
     );
   return [...graph.items].sort(
     (a, b) =>
-      Number(b.kind === "qa") - Number(a.kind === "qa") ||
+      Number(b.kind === "qa" || b.kind === "aggregate") -
+        Number(a.kind === "qa" || a.kind === "aggregate") ||
       (b.priority ?? 0) - (a.priority ?? 0) ||
       Number(prerequisite(b.id)) - Number(prerequisite(a.id)),
   );

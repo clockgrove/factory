@@ -41,7 +41,9 @@ export interface ExecutionProfileChoices {
 
 export interface WorkItem {
   /** Read-only proof node; uses the ordinary scheduler without a worker or PR. */
-  kind?: "work" | "qa";
+  kind?: "work" | "qa" | "aggregate";
+  /** Hierarchy only; every required child also has an explicit dependency edge. */
+  children?: string[];
   executionProfile?: { id: string; reason: string };
   /** Controller-generated exact configuration identity; never model settings. */
   executionBinding?: ExecutionBinding;
@@ -215,6 +217,7 @@ export interface PlanCommandAuthorization {
 }
 
 export interface PlanReviewRequest {
+  amendment?: unknown;
   reviewPacket?: ReviewPacket;
   objective: string;
   baseSha: string;
@@ -311,7 +314,17 @@ export interface ExecutionObservation {
   detail?: string;
   authentication?: AuthenticationRequest;
 }
+export interface WorkDiscovery {
+  scope: "in-scope" | "backlog";
+  reason: string;
+  evidence: string[];
+  ownership: string[];
+  acceptance: string[];
+  dependencies: string[];
+}
+
 export interface ExecutionResult {
+  discovery?: WorkDiscovery;
   /** Driver observation during successful original-worktree collection, not continuous retention. */
   collection?: { acceptedIgnoredLinks: string[] };
   treeSha: string;
@@ -580,6 +593,8 @@ export interface AssetSelectionDecision {
 }
 
 export interface GraphProjection {
+  previousGraph?: WorkGraph;
+  completedItems?: string[];
   graph: WorkGraph;
   objectiveIssue: number;
   knownIssues?: Record<string, number>;

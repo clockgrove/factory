@@ -18,6 +18,7 @@ import {
   assetSelectionDigest,
   finalValidationLfsMembers,
 } from "./media.js";
+import { assertGraphRevisions } from "./graph-amendments.js";
 import { assertCompletedCoverage, assertCoverageShape } from "./qa.js";
 import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
 import { assertSelectedLfsValidation } from "./validation.js";
@@ -66,6 +67,9 @@ export interface WorkState {
   /** Reservation survives an uncertain effect; item ownership is separate. */
   phaseReservation?: import("./config.js").ResourcePhase;
   requestedPhase?: import("./config.js").ResourcePhase;
+  graphRevisionDigest?: string;
+  discovery?: import("./contracts.js").WorkDiscovery & { attempt: string };
+  discoveryDisposition?: "proposed" | "accepted";
   pendingEffect?: "review" | "publication" | "merge";
   qaChecks?: NamedCheckEvidence[];
   status: WorkStatus;
@@ -132,6 +136,10 @@ export interface PreparationState {
 export type ContinuationState = FactoryState | PreparationState;
 
 export interface FactoryState {
+  backlogDiscoveries?: import("./graph-amendments.js").AmendmentProposal[];
+  graphRevisions?: import("./graph-amendments.js").GraphRevision[];
+  pendingAmendment?: import("./graph-amendments.js").PendingAmendment;
+  allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
   coordinator?: CoordinatorDisposition;
   admission?: AutonomousAdmission;
   additionalSources?: SourceSelector[];
@@ -389,6 +397,7 @@ export function parseFactoryState(
   )
     throw new Error("graph identity or items are invalid");
   assertCoverageShape(graph as unknown as WorkGraph);
+  assertGraphRevisions(state as unknown as FactoryState);
   const ids = new Set<string>();
   for (const [index, raw] of graph.items.entries()) {
     const item = record(raw, `graph.items[${index}]`);
@@ -599,7 +608,7 @@ export function parseFactoryState(
       (candidate) => candidate.id === id,
     )!;
     if (
-      accepted.kind === "qa" &&
+      (accepted.kind === "qa" || accepted.kind === "aggregate") &&
       (item.execution !== undefined ||
         item.pullRequest !== undefined ||
         accepted.ownedPaths.length)

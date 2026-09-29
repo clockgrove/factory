@@ -1,6 +1,6 @@
 # Public release checklist
 
-Published [v0.1.37](https://github.com/clockgrove/factory/releases/tag/v0.1.37) has verified public download, offline installation and pinned plugin installation. Its aggregate public workspace/LFS qualification passed independent review; see the [exact artifact record](BUILD-STATUS.md#immutable-v0137-artifact-record) for evidence and limitations. Private adopter execution remains under [#206](https://github.com/clockgrove/factory/issues/206), with explicit final acceptance under [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
+Published [v0.1.38](https://github.com/clockgrove/factory/releases/tag/v0.1.38) has verified public download and offline installation. Its public workspace/LFS qualification passed independent review; see the [exact artifact record](BUILD-STATUS.md#immutable-v0138-artifact-record). Private adopter verification remains under [#206](https://github.com/clockgrove/factory/issues/206), with explicit final acceptance under [#207](https://github.com/clockgrove/factory/issues/207). Earlier artifact records remain immutable.
 
 Earlier published artifacts and their evidence remain intact. Distribution checks do not establish live qualification.
 

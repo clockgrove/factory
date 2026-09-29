@@ -83,6 +83,7 @@ export class GitHubClient {
     method: string,
     route: string,
     body?: Record<string, unknown>,
+    observation?: { etag?: string },
   ): Promise<T> {
     if (
       !/^repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\//.test(route) ||
@@ -118,11 +119,22 @@ export class GitHubClient {
         const response = await client.request(`${method} /${route}`, {
           ...body,
           baseUrl: "https://api.github.com",
-          headers: { "x-github-api-version": "2026-03-10" },
+          headers: {
+            "x-github-api-version": "2026-03-10",
+            ...(observation?.etag ? { "if-none-match": observation.etag } : {}),
+          },
           request: { signal },
         });
         this.observeRate(response.headers, response.status);
-        return response.data as T;
+        return (
+          observation
+            ? {
+                status: response.status,
+                etag: response.headers.etag,
+                data: response.data,
+              }
+            : response.data
+        ) as T;
       } catch (cause) {
         const error = cause as {
           status?: number;
@@ -134,6 +146,8 @@ export class GitHubClient {
           error.status ?? 0,
           error.message,
         );
+        if (observation && method === "GET" && error.status === 304)
+          return { status: 304, etag: error.response?.headers?.etag } as T;
         if (
           method !== "GET" &&
           (!error.status || error.status >= 500 || signal?.aborted)

@@ -1,3 +1,8 @@
+import {
+  enqueueIntake,
+  runIntake,
+  type IntakeAuthorization,
+} from "./intake.js";
 import { requestControl } from "./coordinator-control.js";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -49,6 +54,11 @@ import {
 import type { FactoryState } from "./state.js";
 
 export interface FactoryApplication {
+  enqueueIntake(
+    authority: ExecutionAuthority,
+    options?: { priorityLabels?: string[]; pollSeconds?: number },
+  ): Promise<IntakeAuthorization>;
+  runIntake(): Promise<IntakeAuthorization>;
   proposeAmendment(
     objective: number,
     proposal: import("./graph-amendments.js").AmendmentProposal,
@@ -158,6 +168,9 @@ export function createApplication(
   services: ApplicationServices,
 ): FactoryApplication {
   return {
+    enqueueIntake: (authority, options) =>
+      enqueueIntake(config, services.github, authority, options),
+    runIntake: () => runIntake(config, services),
     planObjective: (objective, additionalSources, authority) =>
       planObjective(config, objective, services, additionalSources, authority),
     admitObjective: (objective, candidate, authority) =>

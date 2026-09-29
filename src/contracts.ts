@@ -621,7 +621,13 @@ export interface PullRequestObservation {
   state: "open" | "merged" | "closed";
   checks: "pending" | "passing" | "failing";
 }
+export interface IntakeIssuePage {
+  status: number;
+  etag?: string;
+  data?: { number: number; state: "open" | "closed"; labels: string[] }[];
+}
 export interface ObjectiveIssue {
+  labels?: string[];
   state?: "open" | "closed";
   body: string;
   title: string;
@@ -641,6 +647,8 @@ export interface NamedCheckEvidence {
 }
 
 export interface GitHubGateway {
+  intakePage?(page: number, etag?: string): Promise<IntakeIssuePage>;
+  objectiveDependencies?(number: number): Promise<number[]>;
   namedCheck?(
     headSha: string,
     name: string,

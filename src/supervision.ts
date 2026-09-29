@@ -1,3 +1,5 @@
+import type { ContinuationState } from "./state.js";
+import { readIntake, intakeComplete } from "./intake.js";
 import { objectiveComplete } from "./completion.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -29,6 +31,7 @@ import { command, linuxProcessIdentity } from "./process.js";
 import { readContinuation, readControllerOwner } from "./state-store.js";
 
 interface ServiceBinding {
+  intake?: boolean;
   version: 1;
   node: string;
   cli: string;
@@ -143,8 +146,7 @@ export function renderService(value: ServiceBinding): string {
     "serve",
     "--config",
     value.config,
-    "--objective",
-    String(value.objective),
+    ...(value.intake ? ["--intake"] : ["--objective", String(value.objective)]),
     ...(value.plan ? ["--plan", value.plan] : []),
     ...(value.admission ? ["--admission", value.admission] : []),
   ];
@@ -156,24 +158,25 @@ export function renderService(value: ServiceBinding): string {
       "\n",
     )}\nKillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nRestartPreventExitStatus=1\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
 }
+function checkServiceContinuationFields(state: ContinuationState): void {
+  // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
+  const fields =
+    state.schemaVersion === 3
+      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest admission authority allowanceConsumption repairConsumption planningRecovery coordinator planning plan issueByItemId projectionPending error cancelRequested cancelledAt"
+      : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
+  for (const field of Object.keys(state))
+    if (!fields.split(" ").includes(field))
+      throw new Error(
+        `Artifact cannot validate continuation field ${field}; upgrade/rollback refused`,
+      );
+}
 export function checkServiceState(
   config: FactoryConfig,
   objective: number,
   admissionPath?: string,
 ): void {
   const state = readContinuation(config.repository, objective);
-  if (state) {
-    // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
-    const fields =
-      state.schemaVersion === 3
-        ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest admission authority allowanceConsumption repairConsumption planningRecovery coordinator planning plan issueByItemId projectionPending error cancelRequested cancelledAt"
-        : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
-    for (const field of Object.keys(state))
-      if (!fields.split(" ").includes(field))
-        throw new Error(
-          `Artifact cannot validate continuation field ${field}; upgrade/rollback refused`,
-        );
-  }
+  if (state) checkServiceContinuationFields(state);
   const admission =
     state?.admission ??
     (admissionPath
@@ -207,6 +210,21 @@ function hasOwner(config: FactoryConfig): boolean {
     current && current.startTime === owner?.startTime && current.state !== "Z",
   );
 }
+export function checkIntakeServiceState(config: FactoryConfig): void {
+  const intake = readIntake(config);
+  if (!intake?.authority.serviceConsent)
+    throw new Error(
+      "Intake background operation requires explicit service consent",
+    );
+  for (const id of intake.authority.objectives) {
+    const state = readContinuation(config.repository, id);
+    if (state) checkServiceContinuationFields(state);
+    if (state?.admission) checkServiceState(config, id);
+    else if (state && state.schemaVersion !== 3)
+      throw new Error("Intake continuation has no admission");
+  }
+}
+
 export async function handoffService(
   config: FactoryConfig,
   objective: number,
@@ -239,7 +257,7 @@ async function verifyServiceOwner(
     const pid = Number(inspect("show", name, "--property=MainPID", "--value"));
     if (
       owner?.pid === pid &&
-      owner.objective === objective &&
+      (owner.objective === objective || (objective === 0 && owner.intake)) &&
       hasOwner(config)
     ) {
       const reply = await requestControl(config.repository, {
@@ -248,6 +266,8 @@ async function verifyServiceOwner(
       });
       if (reply.handled) return;
     }
+    const intake = objective === 0 ? readIntake(config) : undefined;
+    if (intake && intakeComplete(config, intake)) return;
     const current = readContinuation(config.repository, objective);
     if (
       current?.cancelledAt ||
@@ -270,8 +290,9 @@ function validateArtifact(value: ServiceBinding): void {
       "check",
       "--config",
       value.config,
-      "--objective",
-      String(value.objective),
+      ...(value.intake
+        ? ["--intake"]
+        : ["--objective", String(value.objective)]),
       ...(value.admission ? ["--admission", value.admission] : []),
     ],
     undefined,
@@ -293,6 +314,7 @@ export async function supervise(
   configPath: string,
   input: {
     objective?: number;
+    intake?: boolean;
     plan?: string;
     admission?: string;
     cli?: string;
@@ -300,7 +322,8 @@ export async function supervise(
 ): Promise<unknown> {
   const config = readConfig(configPath);
   if (action === "check") {
-    checkServiceState(config, input.objective!, input.admission);
+    if (input.intake) checkIntakeServiceState(config);
+    else checkServiceState(config, input.objective!, input.admission);
     return "factory-supervision-compatible-v1";
   }
   const path = unitPath(config),
@@ -316,7 +339,10 @@ export async function supervise(
     };
   requireHost();
   if (action === "install") {
-    if (!Number.isSafeInteger(input.objective) || input.objective! <= 0)
+    if (
+      !input.intake &&
+      (!Number.isSafeInteger(input.objective) || input.objective! <= 0)
+    )
       throw new Error("supervisor install requires --objective N");
     const configFile = realpathSync(configPath);
     privateFile(configFile);
@@ -337,7 +363,8 @@ export async function supervise(
       node: realpathSync(process.execPath),
       cli: realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url))),
       config: configFile,
-      objective: input.objective!,
+      objective: input.intake ? 0 : input.objective!,
+      ...(input.intake ? { intake: true } : {}),
       stateHome: resolve(
         process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
       ),
@@ -346,11 +373,13 @@ export async function supervise(
       ...(input.admission ? { admission: realpathSync(input.admission) } : {}),
     };
     if (
+      !value.intake &&
       !readContinuation(config.repository, value.objective) &&
       !(value.plan && value.admission)
     )
       throw new Error("A new service requires both --plan and --admission");
-    checkServiceState(config, value.objective, value.admission);
+    if (value.intake) checkIntakeServiceState(config);
+    else checkServiceState(config, value.objective, value.admission);
     if (existsSync(path)) {
       if (JSON.stringify(binding(config)) !== JSON.stringify(value))
         throw new Error(

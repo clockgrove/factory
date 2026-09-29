@@ -1,3 +1,4 @@
+import { workspacePackageAdditions } from "./workspace-membership.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { userInfo } from "node:os";
@@ -970,6 +971,13 @@ async function runObjectivePass(
           `Objective stopped: ${state.error}. Use explicit retry or operator direction.`,
         );
       if (
+        !state.objectiveBodyDigest &&
+        workspacePackageAdditions(issue.body).length
+      )
+        throw new Error(
+          "Workspace package authority requires a digest-bound Objective; create a new plan",
+        );
+      if (
         state.objectiveBodyDigest &&
         state.objectiveBodyDigest !==
           createHash("sha256").update(issue.body).digest("hex")
@@ -1399,6 +1407,7 @@ async function runObjectivePass(
       {
         sourceDeclared:
           state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+        workspacePackageAdditions: workspacePackageAdditions(issue.body),
       },
     );
     const commandEvidence = await validateTree(

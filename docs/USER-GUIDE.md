@@ -129,6 +129,20 @@ To supply additional committed source files or an exact section, finish the issu
 
 Use paths that actually exist at the pinned base, and exact headings for section selection. A Work Item should have enough source-backed implementation detail to act without access to another item's brief. Required future outputs and checks belong at their appropriate dependency or final-validation phase.
 
+### Add packages to an existing pnpm workspace
+
+An Objective that adds package directories to an existing `pnpm-workspace.yaml` must explicitly authorize each exact directory:
+
+```markdown
+## Workspace package additions
+
+- `apps/runtime`
+```
+
+Use literal relative directories, not globs. One responsible Work Item must own both `pnpm-workspace.yaml` and the new package manifest, and name the directory in its brief. Each added directory must contain a regular, valid `package.json` at validation. Existing membership entries and their relative order remain intact; additions may be inserted between them.
+
+This declaration permits membership additions only. Registry settings, release-age policy, hooks, scripts and other non-membership configuration retain their existing validation boundaries. Undeclared workspace changes remain blocked, including changes made by a worker that runs no package-manager command. Existing accepted runs gain no permission from upgrading Factory; the declaration must belong to the pinned Objective and plan. Omit workspace ownership from a plan that leaves the existing file unchanged. New workspaces continue to use the existing greenfield validation rules.
+
 ## Preview and run
 
 ```sh

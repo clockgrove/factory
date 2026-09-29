@@ -1,3 +1,4 @@
+import { workspacePackageAdditions } from "../workspace-membership.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "../compiler.js";
@@ -136,6 +137,7 @@ export async function runNativeGraph(args: {
             config,
             root,
             state,
+            objectiveBody: args.objectiveBody,
             item,
             store: contentStore,
             baseSha: work.baseSha!,
@@ -326,6 +328,7 @@ export async function runNativeGraph(args: {
               config,
               root,
               state,
+              objectiveBody: args.objectiveBody,
               item,
               store: contentStore,
               baseSha: itemBase,
@@ -440,6 +443,7 @@ export async function runNativeGraph(args: {
             work.changeRef!,
           ),
           args.contentStore,
+          workspacePackageAdditions(args.objectiveBody),
         );
         const reviewResult = () =>
           reviewAcceptance({

@@ -1,3 +1,4 @@
+import { assertWorkspacePackageChange } from "./workspace-membership.js";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -1911,6 +1912,8 @@ export const PINNED_PNPM_BOOTSTRAP =
 export interface PackageScriptAuthority {
   /** Commands literally declared by a pinned source, not inferred by the model. */
   sourceDeclared?: readonly string[];
+  /** Exact package directories admitted by the pinned Objective. */
+  workspacePackageAdditions?: readonly string[];
   /** A plan may authorize creation of an entrypoint it cannot inspect yet. */
   preview?: boolean;
   /** Pin newly established scripts against the exact Work Item predecessor. */
@@ -1924,6 +1927,13 @@ export function assertPinnedNpmScripts(
   commands: string[],
   authority: PackageScriptAuthority = {},
 ): void {
+  assertWorkspacePackageChange(
+    checkout,
+    acceptedBaseSha,
+    commit,
+    authority.workspacePackageAdditions,
+    authority.predecessorSha,
+  );
   const managerToken = /\b(?:npm|pnpm)\b/;
   const selected = commands.filter((check) => managerToken.test(check));
   if (!selected.length) return;
@@ -2098,6 +2108,10 @@ export function assertPinnedNpmScripts(
         original === undefined &&
         predecessor === undefined &&
         selected.every((command) => declared.has(command))
+      ) &&
+      !(
+        path === "pnpm-workspace.yaml" &&
+        authority.workspacePackageAdditions?.length
       )
     )
       throw new Error(
@@ -2143,6 +2157,7 @@ export async function validateWorkItem(
   predecessorSha?: string,
   lfsMembers: ValidationLfsMember[] = [],
   contentStore?: ContentStore,
+  workspacePackageAdditions: readonly string[] = [],
 ): Promise<ValidationEvidence> {
   assertPinnedNpmScripts(
     checkout,
@@ -2154,6 +2169,7 @@ export async function validateWorkItem(
         .filter((v) => v.provenance === "source-declared")
         .map((v) => v.command),
       predecessorSha,
+      workspacePackageAdditions,
     },
   );
   return validateTree(

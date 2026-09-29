@@ -6,6 +6,10 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Existing workspace package membership (#263)
+
+This implementation extends the current compiler, immutable Git validation and delivery paths from the public issue's generic reproduction. The established `yaml` parser supplies YAML node and ambiguity checks; a compact Objective declaration provides exact directory authority through existing digest bindings. New temporary-Git regressions contain generic public data. No archived implementation, private adopter source, prompts or transcripts were copied, and no additional state store was introduced.
+
 ## Durable coordinator and asynchronous GitHub transport (#245)
 
 New coordinator work extends the current runner, atomic snapshot, process ownership and driver contracts. Preparation and per-issue projection use the same continuation path; local control uses a private socket owned by the existing installation lock. Async subprocess and Octokit transport replace blocking operations on that path, preserving delivery identities and uncertain-effect refusals. The shared rate gate follows GitHub's primary/secondary limits and does not retry mutations automatically. Newly written deterministic fixtures cover responsive control, restart and owned cancellation. No archived runtime, recovery protocol, private adopter source or transcripts were copied. Service supervision, graph amendments, automatic repair and exact-artifact live qualification remain separately owned capabilities.

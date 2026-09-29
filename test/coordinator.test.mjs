@@ -19,6 +19,7 @@ import {
   saveState,
   statePath,
 } from "../dist/state-store.js";
+import { withCoverage } from "./support/coverage.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -150,10 +151,10 @@ test("planning submission persists before provider entry and owner remains respo
       assert.equal(Object.keys(github.state().issues).length, 0);
     },
     (graph) => ({
-      async generateStructured() {
+      async generateStructured(request) {
         calls++;
         await pending.promise;
-        return graph;
+        return withCoverage(request, graph);
       },
       async reviewGraph() {
         return { findings: [] };
@@ -274,9 +275,9 @@ test("deadline elapsed during a hung planning call preserves unknown disposition
       await rejected;
     },
     (graph) => ({
-      async generateStructured() {
+      async generateStructured(request) {
         await pending.promise;
-        return graph;
+        return withCoverage(request, graph);
       },
       async reviewGraph() {
         return { findings: [] };
@@ -634,9 +635,9 @@ test("pause during planning stops issue projection until resumed or cancelled", 
       assert.ok(readContinuation(config.repository, 1).cancelledAt);
     },
     (graph) => ({
-      async generateStructured() {
+      async generateStructured(request) {
         await pending.promise;
-        return graph;
+        return withCoverage(request, graph);
       },
       async reviewGraph() {
         return { findings: [] };

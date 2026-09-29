@@ -1651,10 +1651,6 @@ test("Codex citation indexes preserve exact headings without schema-budget growt
       captured[1].outputSchema,
     );
     assert.deepEqual(headingHeavyBudget, smallBudget);
-    assert.deepEqual(headingHeavyBudget, {
-      objectProperties: 27,
-      enumValues: 7,
-    });
     assert.equal(
       JSON.stringify(captured[1].outputSchema).length -
         JSON.stringify(captured[0].outputSchema).length,

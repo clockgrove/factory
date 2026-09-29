@@ -6,8 +6,19 @@ import {
   CodexPlanningModel,
   graphSchema,
   graphSchemaForSources,
-  validateGraph,
+  validateGraph as validateCanonicalGraph,
 } from "../dist/compiler.js";
+import { coverageObligations, hydrateCoverageSources } from "../dist/qa.js";
+import { withCoverage } from "./support/coverage.mjs";
+
+function validateGraph(graph, ...args) {
+  const canonical = structuredClone(graph);
+  hydrateCoverageSources(
+    canonical,
+    coverageObligations(sources[0].content, ["Public result exists."]),
+  );
+  return validateCanonicalGraph(canonical, ...args);
+}
 
 // Use the existing locked ESLint development dependency's JSON-schema validator.
 const require = createRequire(import.meta.url);
@@ -17,7 +28,7 @@ const baseSha = "a".repeat(40);
 const sources = [
   { path: "OBJECTIVE", content: "## Acceptance\nPublic result exists.\n" },
 ];
-const requiredArrays = ["acceptance", "nonGoals", "ownedPaths", "citations"];
+const requiredArrays = ["acceptance", "nonGoals", "citations"];
 const requiredStrings = ["title", "goal", "brief"];
 const optionalArrays = [
   "dependencies",
@@ -29,31 +40,44 @@ const optionalArrays = [
 ];
 
 function graph(indexed = false) {
-  return {
-    objective: 1,
-    baseSha,
-    items: [
-      {
-        id: "policy",
-        title: "Public policy",
-        goal: "Create public result",
-        brief: "Create only result.txt",
-        acceptance: ["Public result exists."],
-        nonGoals: ["No deployment"],
-        citations: indexed
-          ? [{ choiceIndex: 0 }]
-          : [{ path: "OBJECTIVE", heading: "" }],
-        dependencies: [],
-        ownedPaths: ["result.txt"],
-        resources: [],
-        validation: [],
-        sourceAssets: [],
-        expectedOutputRoles: [],
-        minimumAssetSets: 0,
-        requiredLfsRoles: [],
-      },
-    ],
+  const result = withCoverage(
+    {
+      coverageObligations: coverageObligations(sources[0].content, [
+        "Public result exists.",
+      ]),
+    },
+    {
+      objective: 1,
+      baseSha,
+      items: [
+        {
+          id: "policy",
+          title: "Public policy",
+          goal: "Create public result",
+          brief: "Create only result.txt",
+          acceptance: ["Public result exists."],
+          nonGoals: ["No deployment"],
+          citations: indexed
+            ? [{ choiceIndex: 0 }]
+            : [{ path: "OBJECTIVE", heading: "" }],
+          dependencies: [],
+          ownedPaths: ["result.txt"],
+          resources: [],
+          validation: [],
+          sourceAssets: [],
+          expectedOutputRoles: [],
+          minimumAssetSets: 0,
+          requiredLfsRoles: [],
+        },
+      ],
+    },
+  );
+  result.coverage[0].oracle = {
+    kind: "controller",
+    reference: "post-integration-hydration",
+    targetItem: "",
   };
+  return result;
 }
 
 function emptyCases(indexed = false) {
@@ -68,6 +92,21 @@ function emptyCases(indexed = false) {
 }
 
 function assertBounds(schema) {
+  const strictObjects = (value) => {
+    if (!value || typeof value !== "object") return;
+    if (value.properties)
+      assert.deepEqual(
+        [...value.required].sort(),
+        Object.keys(value.properties).sort(),
+      );
+    for (const child of Object.values(value)) strictObjects(child);
+  };
+  strictObjects(schema);
+  assert.deepEqual(schema.properties.items.items.properties.kind.enum, [
+    "work",
+    "qa",
+  ]);
+
   assert.equal(schema.properties.items.minItems, 1);
   assert.equal(schema.properties.items.maxItems, undefined);
   const properties = schema.properties.items.items.properties;
@@ -91,7 +130,7 @@ function assertBounds(schema) {
   assert.equal(properties.ownedPaths.items.minLength, undefined);
 }
 
-test("generic and source-specific schemas reject all eight existing required-shape mismatches", () => {
+test("generic and source-specific schemas reject provider-supported required-shape constraints", () => {
   for (const schema of [graphSchema, graphSchemaForSources(sources)]) {
     assertBounds(schema);
     const conforms = ajv.compile(schema);
@@ -128,6 +167,8 @@ test("required shape does not constrain legitimate empty arrays, whole-source he
   const textEntries = graph();
   textEntries.items[0].acceptance = [""];
   textEntries.items[0].nonGoals = [""];
+  textEntries.coverage[0].oracle.reference = "Public result exists.";
+  textEntries.coverage = graph().coverage;
   const media = graph();
   media.items[0].sourceAssets = [
     {
@@ -243,5 +284,37 @@ test("production Codex indexed schema retains all lower bounds and decoder canno
     );
   } finally {
     Codex.prototype.startThread = original;
+  }
+});
+
+test("provider schema avoids unsupported conditionals while runtime rejects empty implementation ownership", () => {
+  for (const schema of [graphSchema, graphSchemaForSources(sources)]) {
+    const visit = (value) => {
+      if (!value || typeof value !== "object") return;
+      for (const [key, child] of Object.entries(value)) {
+        assert.equal(
+          [
+            "not",
+            "allOf",
+            "if",
+            "then",
+            "else",
+            "dependentRequired",
+            "dependentSchemas",
+          ].includes(key),
+          false,
+          key,
+        );
+        visit(child);
+      }
+    };
+    visit(schema);
+    const value = graph();
+    value.items[0].ownedPaths = [];
+    assert.equal(ajv.compile(schema)(value), true);
+    assert.throws(
+      () => validateGraph(value, 1, baseSha, new Set(["OBJECTIVE"])),
+      /ownership/,
+    );
   }
 });

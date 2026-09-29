@@ -38,6 +38,7 @@ import {
   validateTree,
   validateWorkItem,
 } from "../dist/validation.js";
+import { withCoverage } from "./support/coverage.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -100,8 +101,8 @@ test("preview blocks invented and mismatched commands, and admits exact pinned b
         },
       ]);
       const model = {
-        async generateStructured() {
-          return structuredClone(graph);
+        async generateStructured(request) {
+          return withCoverage(request, structuredClone(graph));
         },
         async reviewGraph() {
           return { findings: [] };
@@ -387,8 +388,8 @@ test("exact script-disabled pnpm bootstrap is source-authorized and plain instal
         },
       ]);
       const model = {
-        async generateStructured() {
-          return structuredClone(graph);
+        async generateStructured(request) {
+          return withCoverage(request, structuredClone(graph));
         },
         async reviewGraph() {
           return { findings: [] };
@@ -459,8 +460,8 @@ test("a source-declared pnpm workspace can be created, validated, and pinned for
       },
     ]);
     const model = {
-      async generateStructured() {
-        return structuredClone(graph);
+      async generateStructured(request) {
+        return withCoverage(request, structuredClone(graph));
       },
       async reviewGraph() {
         return { findings: [] };
@@ -488,14 +489,17 @@ test("a source-declared pnpm workspace can be created, validated, and pinned for
       target.checkout,
       {
         ...model,
-        async generateStructured() {
-          return item(target.baseSha, [
-            {
-              command: "pnpm run invented",
-              provenance: "source-declared",
-              source: "OBJECTIVE",
-            },
-          ]);
+        async generateStructured(request) {
+          return withCoverage(
+            request,
+            item(target.baseSha, [
+              {
+                command: "pnpm run invented",
+                provenance: "source-declared",
+                source: "OBJECTIVE",
+              },
+            ]),
+          );
         },
       },
     );

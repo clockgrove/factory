@@ -1,4 +1,3 @@
-import { resultFindings } from "./support/review-protocol.mjs";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,12 +7,14 @@ import { checkAuthority, validateAuthority } from "../dist/admission.js";
 import { compilePlan } from "../dist/compiler.js";
 import { factoryConfigDigest } from "../dist/config.js";
 import { readState, statePath } from "../dist/state-store.js";
+import { withCoverage } from "./support/coverage.mjs";
 import {
   createTarget,
   factoryConfig,
   makeApplication,
   readEvents,
 } from "./support/integration-fixture.mjs";
+import { resultFindings } from "./support/review-protocol.mjs";
 
 function authority(overrides = {}) {
   return {
@@ -328,8 +329,8 @@ test("admission binds the exact human plan decision", async () => {
         target.baseSha,
         target.checkout,
         {
-          async generateStructured() {
-            return graph;
+          async generateStructured(request) {
+            return withCoverage(request, graph);
           },
           async reviewGraph() {
             throw new Error("Fixture malformed review");

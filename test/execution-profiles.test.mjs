@@ -1,40 +1,48 @@
-import { resultFindings } from "./support/review-protocol.mjs";
-import { Octokit } from "@octokit/core";
-import { GitHubClient } from "../dist/github-client.js";
-import { RealGitHubGateway } from "../dist/github.js";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Octokit } from "@octokit/core";
+import { Codex } from "@openai/codex-sdk";
 import { composeWithLocalProfiles } from "../dist/application.js";
-import { validateConfig, factoryConfigDigest } from "../dist/config.js";
 import {
-  compilePlan,
-  verifyPlanCandidate,
   CodexPlanningModel,
+  compilePlan,
   graphSchemaForSources,
+  verifyPlanCandidate,
 } from "../dist/compiler.js";
-import {
-  executionProfileChoices,
-  normalizeExecutionProfiles,
-  verifyExecutionProfiles,
-  profileBinding,
-} from "../dist/execution-profiles.js";
-import { LocalExecutionDriver } from "../dist/execution/local.js";
+import { factoryConfigDigest, validateConfig } from "../dist/config.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import {
   statusDocument,
   summarizeDiagnosticUsage,
 } from "../dist/diagnostics.js";
+import { LocalExecutionDriver } from "../dist/execution/local.js";
+import {
+  executionProfileChoices,
+  normalizeExecutionProfiles,
+  profileBinding,
+  verifyExecutionProfiles,
+} from "../dist/execution-profiles.js";
+import { RealGitHubGateway } from "../dist/github.js";
+import { GitHubClient } from "../dist/github-client.js";
 import { parseFactoryState } from "../dist/state.js";
-import { Codex } from "@openai/codex-sdk";
+import { withCoverage } from "./support/coverage.mjs";
 import {
   createTarget,
   factoryConfig,
   git,
   StatefulGitHubFake,
 } from "./support/integration-fixture.mjs";
+import { resultFindings } from "./support/review-protocol.mjs";
 
 const capabilities = {
   protocolVersion: 1,
@@ -125,7 +133,7 @@ function modelFor(graph, seen = []) {
   return {
     async generateStructured(request) {
       seen.push(request);
-      return structuredClone(graph);
+      return withCoverage(request, structuredClone(graph));
     },
     async reviewGraph(request) {
       seen.push(request);
@@ -571,6 +579,16 @@ test("SDK compile and independent review prompts carry safe routing guidance and
       assert.match(prompt, /low latency preference/);
       assert.match(prompt, /Hints never grant permissions/);
     }
+    assert.ok(
+      captured[0].schema.properties.items.items.required.includes(
+        "executionProfile",
+      ),
+    );
+    assert.deepEqual(
+      captured[0].schema.properties.items.items.properties.executionProfile
+        .type,
+      ["object", "null"],
+    );
     assert.deepEqual(
       captured[0].schema.properties.items.items.properties.executionProfile
         .properties.id.enum,

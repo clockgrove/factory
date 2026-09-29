@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { composePlanning } from "../dist/application.js";
 import {
   compilePlan,
   resolvePlan,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
-import { composePlanning } from "../dist/application.js";
 import { stateRoot } from "../dist/config.js";
 import { readDiagnostics } from "../dist/diagnostics.js";
 import { statePath } from "../dist/state-store.js";
+import { withCoverage } from "./support/coverage.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -153,7 +154,7 @@ test("compiler schema binds citations to exact supplied path and bare heading pa
     const model = {
       async generateStructured(request) {
         requests.push(structuredClone(request));
-        return graph(target.baseSha);
+        return withCoverage(request, graph(target.baseSha));
       },
       async reviewGraph() {
         return { findings: [] };
@@ -212,11 +213,14 @@ test("compiler rejects a whole-source citation when only one heading was supplie
     });
     await assert.rejects(
       compilePlan(1, body, target.baseSha, target.checkout, {
-        async generateStructured() {
-          return graph(target.baseSha, {
-            path: "docs/plan.md",
-            heading: "",
-          });
+        async generateStructured(request) {
+          return withCoverage(
+            request,
+            graph(target.baseSha, {
+              path: "docs/plan.md",
+              heading: "",
+            }),
+          );
         },
         async reviewGraph() {
           throw new Error("review should not run");
@@ -240,11 +244,14 @@ test("compiler rejects a Markdown-prefixed citation heading without normalizatio
         target.baseSha,
         target.checkout,
         {
-          async generateStructured() {
-            return graph(target.baseSha, {
-              path: "OBJECTIVE",
-              heading: "## Acceptance",
-            });
+          async generateStructured(request) {
+            return withCoverage(
+              request,
+              graph(target.baseSha, {
+                path: "OBJECTIVE",
+                heading: "## Acceptance",
+              }),
+            );
           },
           async reviewGraph() {
             throw new Error("review should not run");
@@ -284,8 +291,8 @@ test("compiler rejects terminal line separators in section and whole-source cita
       ]) {
         await assert.rejects(
           compilePlan(1, objective, target.baseSha, target.checkout, {
-            async generateStructured() {
-              return graph(target.baseSha, citation);
+            async generateStructured(request) {
+              return withCoverage(request, graph(target.baseSha, citation));
             },
             async reviewGraph() {
               throw new Error("review should not run");
@@ -306,8 +313,8 @@ test("preview shows an undeclared command as blocked before host execution", asy
     const invented = graph(target.baseSha);
     invented.items[0].validation[0].command = "test -s one";
     const model = {
-      async generateStructured() {
-        return invented;
+      async generateStructured(request) {
+        return withCoverage(request, invented);
       },
       async reviewGraph() {
         return { findings: [] };
@@ -339,7 +346,7 @@ test("planning rejects missing selected heading without mutating run state", asy
   await fixture("missing", async (root) => {
     const target = createTarget(root, { "docs/plan.md": "# Plan\n" });
     const model = {
-      async generateStructured() {
+      async generateStructured(request) {
         throw new Error("model should not run");
       },
       async reviewGraph() {
@@ -385,8 +392,8 @@ test("read-only planning diagnostics redact configured secret values", async () 
     process.env.FACTORY_PLANNING_TEST_SECRET = "private-planning-secret";
     try {
       const planningModel = {
-        async generateStructured() {
-          return graph(target.baseSha);
+        async generateStructured(request) {
+          return withCoverage(request, graph(target.baseSha));
         },
         async reviewGraph(request) {
           request.invocation.observe({
@@ -445,7 +452,7 @@ test("one sourced review finding permits one revision and re-review", async () =
           objective: request.objective,
           invocation: request.invocation,
         });
-        return graph(target.baseSha);
+        return withCoverage(request, graph(target.baseSha));
       },
       async reviewGraph(request) {
         calls.push({ type: "review", invocation: request.invocation });
@@ -520,8 +527,8 @@ test("graph review identifies the exact supplied section among duplicate paths",
       target.baseSha,
       target.checkout,
       {
-        async generateStructured() {
-          return graph(target.baseSha);
+        async generateStructured(request) {
+          return withCoverage(request, graph(target.baseSha));
         },
         async reviewGraph(request) {
           reviews += 1;
@@ -573,7 +580,7 @@ test("review and verification bind controller capabilities, commands, and instal
     const model = {
       async generateStructured(request) {
         generated.push(structuredClone(request));
-        return graph(target.baseSha);
+        return withCoverage(request, graph(target.baseSha));
       },
       async reviewGraph(request) {
         reviewed.push(structuredClone(request));
@@ -691,8 +698,8 @@ test("unresolved review asks one human question and records a specific decision"
     });
     let reviewCount = 0;
     const model = {
-      async generateStructured() {
-        return graph(target.baseSha);
+      async generateStructured(request) {
+        return withCoverage(request, graph(target.baseSha));
       },
       async reviewGraph(request) {
         reviewCount += 1;
@@ -807,9 +814,9 @@ test("malformed graph review pauses on the pinned graph and an explicit decision
     let reviewCount = 0;
     const observations = [];
     const model = {
-      async generateStructured() {
+      async generateStructured(request) {
         generationCount += 1;
-        return graph(target.baseSha);
+        return withCoverage(request, graph(target.baseSha));
       },
       async reviewGraph() {
         reviewCount += 1;
@@ -959,8 +966,8 @@ test("graph review rejects malformed protocol fields without retaining finding c
         target.baseSha,
         target.checkout,
         {
-          async generateStructured() {
-            return graph(target.baseSha);
+          async generateStructured(request) {
+            return withCoverage(request, graph(target.baseSha));
           },
           async reviewGraph(request) {
             return {
@@ -1004,8 +1011,8 @@ test("graph review requires an array and accepts an explicit clean empty review"
       target.baseSha,
       target.checkout,
       {
-        async generateStructured() {
-          return graph(target.baseSha);
+        async generateStructured(request) {
+          return withCoverage(request, graph(target.baseSha));
         },
         async reviewGraph() {
           return { findings: null };
@@ -1032,8 +1039,8 @@ test("graph review requires an array and accepts an explicit clean empty review"
       target.baseSha,
       target.checkout,
       {
-        async generateStructured() {
-          return graph(target.baseSha);
+        async generateStructured(request) {
+          return withCoverage(request, graph(target.baseSha));
         },
         async reviewGraph() {
           return { findings: [] };
@@ -1062,7 +1069,7 @@ test("additional pinned selectors reach compilation and review and reload at ver
     const model = {
       async generateStructured(packet) {
         packets.push(packet);
-        return graph(target.baseSha);
+        return withCoverage(packet, graph(target.baseSha));
       },
       async reviewGraph(packet) {
         packets.push(packet);

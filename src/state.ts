@@ -8,6 +8,7 @@ import type {
   AuthenticationRequest,
   CapturedAssetSet,
   ExecutionHandle,
+  NamedCheckEvidence,
   ResultReviewCandidate,
   WorkGraph,
 } from "./contracts.js";
@@ -17,6 +18,7 @@ import {
   assetSelectionDigest,
   finalValidationLfsMembers,
 } from "./media.js";
+import { assertCompletedCoverage, assertCoverageShape } from "./qa.js";
 import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
 import { assertSelectedLfsValidation } from "./validation.js";
 
@@ -62,6 +64,7 @@ export interface AcceptancePending {
 
 export interface WorkState {
   pendingEffect?: "review" | "publication" | "merge";
+  qaChecks?: NamedCheckEvidence[];
   status: WorkStatus;
   step?: WorkStep;
   attempt?: string;
@@ -382,6 +385,7 @@ export function parseFactoryState(
     !graph.items.length
   )
     throw new Error("graph identity or items are invalid");
+  assertCoverageShape(graph as unknown as WorkGraph);
   const ids = new Set<string>();
   for (const [index, raw] of graph.items.entries()) {
     const item = record(raw, `graph.items[${index}]`);
@@ -561,6 +565,33 @@ export function parseFactoryState(
       (!Number.isSafeInteger(item.pullRequest) || !item.changeRef)
     )
       throw new Error(`Published Work Item ${id} lacks PR or change identity`);
+    if (item.qaChecks !== undefined) {
+      if (!Array.isArray(item.qaChecks))
+        throw new Error(`${id}.qaChecks is invalid`);
+      for (const raw of item.qaChecks) {
+        const check = record(raw, `${id}.qaChecks`);
+        if (
+          !Number.isSafeInteger(check.id) ||
+          Number(check.id) <= 0 ||
+          check.status !== "completed" ||
+          check.conclusion !== "success"
+        )
+          throw new Error(`${id}.qaChecks lacks successful result identity`);
+        sha(check.headSha, `${id}.qaChecks.headSha`);
+        string(check.name, `${id}.qaChecks.name`);
+        string(check.detailsUrl, `${id}.qaChecks.detailsUrl`);
+      }
+    }
+    const accepted = (graph.items as WorkGraph["items"]).find(
+      (candidate) => candidate.id === id,
+    )!;
+    if (
+      accepted.kind === "qa" &&
+      (item.execution !== undefined ||
+        item.pullRequest !== undefined ||
+        accepted.ownedPaths.length)
+    )
+      throw new Error(`Read-only QA ${id} cannot contain a worker or PR`);
     if (
       item.pullRequest !== undefined &&
       (!Number.isSafeInteger(item.pullRequest) || Number(item.pullRequest) <= 0)
@@ -948,5 +979,6 @@ export function parseFactoryState(
         );
     }
   }
+  if (validated.finalValidation?.passed) assertCompletedCoverage(validated);
   return validated;
 }

@@ -8,8 +8,11 @@ import { Codex } from "@openai/codex-sdk";
 import {
   CodexPlanningModel,
   compilePlan,
+  objectiveCriteria,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
+import { coverageObligations } from "../dist/qa.js";
+import { withCoverage } from "./support/coverage.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
 
 const image = readFileSync(
@@ -61,8 +64,8 @@ test("ordinary-byte source assertions retain exact standalone command authority"
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const target = createTarget(root, { "assets/source.png": image });
   const model = {
-    async generateStructured() {
-      return graph(target.baseSha);
+    async generateStructured(request) {
+      return withCoverage(request, graph(target.baseSha));
     },
     async reviewGraph() {
       return { findings: [] };
@@ -122,7 +125,15 @@ test("rendered compiler and plan reviewer distinguish current bytes from unsuppo
       prompts.push(prompt);
       let response;
       if (prompt.startsWith("Compile this human Objective")) {
-        response = graph(target.baseSha, unsupported);
+        response = withCoverage(
+          {
+            coverageObligations: coverageObligations(
+              objective(unsupported),
+              objectiveCriteria(objective(unsupported)),
+            ),
+          },
+          graph(target.baseSha, unsupported),
+        );
         response.items[0].citations = [{ choiceIndex: 0 }];
       } else {
         const packet = JSON.parse(

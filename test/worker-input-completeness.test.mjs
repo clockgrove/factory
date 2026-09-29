@@ -7,9 +7,12 @@ import { Codex } from "@openai/codex-sdk";
 import {
   CodexPlanningModel,
   compilePlan,
+  objectiveCriteria,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
+import { coverageObligations } from "../dist/qa.js";
+import { withCoverage } from "./support/coverage.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
 
 // Scripted SDK responses exercise the real planning/revision/prompt boundary,
@@ -104,7 +107,15 @@ test -s GUIDE.md
           compilePrompts.length <= 2,
           "only the existing single revision",
         );
-        response = compilePrompts.length === 1 ? incomplete : corrected;
+        response = withCoverage(
+          {
+            coverageObligations: coverageObligations(
+              objective,
+              objectiveCriteria(objective),
+            ),
+          },
+          compilePrompts.length === 1 ? incomplete : corrected,
+        );
       } else {
         assert.ok(
           prompt.startsWith(

@@ -12,6 +12,37 @@ export async function closeWorkItem(
 ): Promise<void> {
   const work = state.work[itemId]!;
   if (work.githubClosure === "complete") return;
+  if (state.graph.items.find((item) => item.id === itemId)?.kind === "qa") {
+    if (
+      work.status !== "done" ||
+      !work.changeRef ||
+      !work.treeSha ||
+      !work.validation ||
+      work.validation.treeSha !== work.treeSha ||
+      !state.issueByItemId[itemId] ||
+      work.pullRequest ||
+      work.execution
+    )
+      throw new Error(`Completed QA ${itemId} lacks read-only proof identity`);
+    work.githubClosure = "pending";
+    save();
+    try {
+      await github.closeIssue(
+        state.issueByItemId[itemId]!,
+        `QA completed at commit ${work.changeRef}; validated tree ${work.treeSha}.`,
+        { workItem: { objective: state.objective, id: itemId } },
+      );
+      work.githubClosure = "complete";
+      delete work.error;
+      delete state.githubClosureError;
+      save();
+      return;
+    } catch (error) {
+      state.githubClosureError = `QA ${itemId}: ${error instanceof Error ? error.message : String(error)}`;
+      save();
+      throw new GitHubClosureFailure(state.githubClosureError);
+    }
+  }
   if (
     work.status !== "done" ||
     !work.pullRequest ||

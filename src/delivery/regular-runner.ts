@@ -22,6 +22,7 @@ import {
   validationLfsMembersForItem,
 } from "../media.js";
 import { git, gitAsync } from "../process.js";
+import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
 import { readyItems } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
 import {
@@ -85,6 +86,31 @@ export async function runRegularGraph(args: {
   ): Promise<void> => {
     const work = state.work[item.id]!;
     try {
+      if (item.kind === "qa") {
+        await runQaItem({
+          config,
+          root,
+          state,
+          item,
+          github,
+          model: args.planningModel,
+          diagnostics: args.diagnostics,
+          objectiveBody: args.objectiveBody,
+          store: contentStore,
+          save,
+          cancelled: args.cancelled,
+        });
+        return;
+      }
+      if (!existingHandle && work.step === "execute")
+        await preflightItemEnvironment({
+          config,
+          root,
+          state,
+          item,
+          store: contentStore,
+          baseSha: itemBase,
+        });
       if (work.step === "approve-asset") {
         const selected = work.assets?.find(
           (set) => set.id === work.selectedAssetSet,
@@ -384,6 +410,14 @@ export async function runRegularGraph(args: {
   for (const item of graph.items) {
     const work = state.work[item.id]!;
     if (work.status !== "running") continue;
+    if (item.kind === "qa") {
+      const promise = execute(item, state.integratedSha ?? baseSha).finally(
+        () => active.delete(item.id),
+      );
+      void promise.catch(() => undefined);
+      active.set(item.id, promise);
+      continue;
+    }
     if (
       work.step === "validate" &&
       work.baseSha &&
@@ -425,13 +459,13 @@ export async function runRegularGraph(args: {
     const reported = await driver.availableSlots();
     const available =
       reported === "unknown" ? config.execution.concurrency : reported;
-    const slots = Math.min(
-      config.execution.concurrency - active.size,
-      available,
-    );
+    const slots = config.execution.concurrency - active.size;
+    let workerSlots = available;
     const ready = args.paused?.()
       ? []
-      : readyItems(graph, state.work, new Set(active.keys()), slots);
+      : readyItems(graph, state.work, new Set(active.keys()), slots).filter(
+          (item) => item.kind === "qa" || workerSlots-- > 0,
+        );
     if (ready.length) await args.reconcile?.();
     for (const item of ready) {
       if (args.cancelled()) throw new Error("Objective cancelled");

@@ -28,9 +28,18 @@ export function linearDeliveryUnits(graph: WorkGraph): DeliveryUnit[] {
   const continuation = new Map<string, string>();
   const childOf = new Set<string>();
   for (const item of graph.items) {
-    if (item.dependencies.length !== 1) continue;
+    if (item.kind === "qa" || item.dependencies.length !== 1) continue;
+    // Environment preparation must integrate before the consumer is admitted.
+    if (
+      graph.coverage?.some(
+        (entry) =>
+          entry.itemId === item.id && entry.environment.readiness === "prepare",
+      )
+    )
+      continue;
     const parent = item.dependencies[0]!;
-    if (children.get(parent)?.length !== 1) continue;
+    if (byId.get(parent)?.kind === "qa" || children.get(parent)?.length !== 1)
+      continue;
     continuation.set(parent, item.id);
     childOf.add(item.id);
   }

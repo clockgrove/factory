@@ -1,3 +1,8 @@
+import {
+  assertAdmissionBinding,
+  type AutonomousAdmission,
+} from "./admission.js";
+import type { SourceSelector } from "./compiler.js";
 import type {
   CapturedAssetSet,
   AuthenticationRequest,
@@ -86,6 +91,8 @@ export interface WorkState {
 }
 
 export interface FactoryState {
+  admission?: AutonomousAdmission;
+  additionalSources?: SourceSelector[];
   schemaVersion: 2;
   repository: string;
   objective: number;
@@ -296,6 +303,8 @@ export function parseFactoryState(
     throw new Error(
       "schema version, repository, or Objective identity differs from the installation",
     );
+  if (state.admission !== undefined)
+    assertAdmissionBinding(state.admission as AutonomousAdmission);
   string(state.runId, "runId");
   sha(state.configDigest, "configDigest", 64);
   sha(state.baseSha, "baseSha");

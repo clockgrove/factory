@@ -25,9 +25,6 @@ test("Objective sections ignore fenced examples and accept real closing hashes",
     "- Actual outcome",
     "## Final validation ###",
     "- `test -f result.txt`",
-    "~~~md",
-    "- `false`",
-    "~~~",
     "# Outside",
     "- `exit 1`",
   ].join("\n");
@@ -49,6 +46,15 @@ test("pinned sections and citation choices preserve literal hashes and ignore fe
     const target = createTarget(root, { "docs/languages.md": text });
     const body =
       "## Acceptance\n- Actual outcome\n```md\n## Planning sources\n- `missing.md`\n```\n## Planning sources ##\n- `docs/languages.md#C#`\n# End\nNo source entry here";
+    assert.throws(
+      () =>
+        planningSources(
+          "## Planning sources\n- docs",
+          target.baseSha,
+          target.checkout,
+        ),
+      /missing at base/,
+    );
     const selected = planningSources(
       body,
       target.baseSha,
@@ -87,5 +93,36 @@ test("pinned sections and citation choices preserve literal hashes and ignore fe
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("declared final validation and source selectors fail closed before model work", () => {
+  for (const entry of [
+    "",
+    "```sh\ntrue\n```",
+    "* true",
+    "- ` `",
+    "explanation",
+  ]) {
+    assert.throws(
+      () =>
+        planningSources(`## Final validation\n${entry}`, "unused", "/unused"),
+      /Final validation/,
+    );
+  }
+  assert.deepEqual(
+    finalObjectiveCommands("## Final validation\n- `second`\n- first"),
+    ["second", "first"],
+  );
+  for (const entry of [
+    "```md\n- docs/a.md\n```",
+    "- docs/a.md#",
+    "- #Heading",
+  ]) {
+    assert.throws(
+      () =>
+        planningSources(`## Planning sources\n${entry}`, "unused", "/unused"),
+      /Planning sources/,
+    );
   }
 });

@@ -214,6 +214,7 @@ export async function runRegularGraph(args: {
             args.objectiveBody,
             state.baseSha,
             config.checkout,
+            state.additionalSources,
           ),
           decisions: work.acceptanceDecisions,
           evidenceSources: workItemReviewEvidence({

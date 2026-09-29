@@ -6,6 +6,10 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Autonomous admission and prerequisite checks (#244)
+
+New admission and preflight work extends the current implementation's exact plan/configuration/source bindings. It reuses the concrete application, pinned source parser and atomic snapshot rather than copying archived activation or recovery protocols. No archived runtime, tests, private adopter source or transcripts are used. Background ownership, graph amendments and automatic recovery remain separate capabilities under #243; admission alone does not implement them.
+
 ## Compile-time assigned local execution profiles
 
 Issue #162 adds newly written installation-owned profiles, safe compiler/reviewer

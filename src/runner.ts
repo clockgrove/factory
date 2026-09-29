@@ -1,3 +1,13 @@
+import {
+  assertAdmissionBinding,
+  bindAdmission,
+  checkAuthority,
+  preflightObjective,
+  verifyAdmission,
+  type AutonomousAdmission,
+  type ExecutionAuthority,
+} from "./admission.js";
+import type { SourceSelector } from "./compiler.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { userInfo } from "node:os";
@@ -79,8 +89,11 @@ export async function planObjective(
   config: FactoryConfig,
   objective: number,
   services: Pick<ApplicationServices, "planningModel" | "github">,
+  additionalSources: SourceSelector[] = [],
+  authority?: ExecutionAuthority,
 ): Promise<PlanCandidate> {
   validateTarget(config.repository, config.checkout);
+  if (authority) checkAuthority(config, objective, authority);
   const diagnostics = new DiagnosticEmitter(
     config.repository,
     objective,
@@ -98,6 +111,8 @@ export async function planObjective(
   try {
     const issue = await services.github.objective(objective);
     const baseSha = git(config.checkout, "rev-parse", "HEAD");
+    planningSources(issue.body, baseSha, config.checkout, additionalSources);
+    preflightObjective(config, issue.body, baseSha);
     const result = await compilePlan(
       objective,
       issue.body,
@@ -107,6 +122,7 @@ export async function planObjective(
       factoryConfigDigest(config),
       diagnostics.modelObserver({ scopeId: planningScopeId }),
       executionProfileChoices(config),
+      additionalSources,
     );
     diagnostics.emit({
       operation: "planning-preview",
@@ -130,6 +146,70 @@ export async function planObjective(
     });
     throw error;
   }
+}
+
+function checkActiveAdmission(
+  config: FactoryConfig,
+  objective: number,
+  admission: AutonomousAdmission,
+): void {
+  const state = readState(config.repository, objective);
+  if (
+    state &&
+    (!state.admission || state.admission.digest !== admission.digest)
+  )
+    throw new Error("Active Objective admission cannot be added or replaced");
+  const directory = join(stateRoot(config.repository), "objectives");
+  if (existsSync(directory))
+    for (const name of readdirSync(directory)) {
+      if (!/^\d+$/.test(name) || Number(name) === objective) continue;
+      const other = readState(config.repository, Number(name));
+      if (other && !other.finalValidation?.passed && !other.cancelledAt)
+        throw new Error(
+          `Objective #${name} is already active in this installation`,
+        );
+    }
+}
+
+export async function admitObjective(
+  config: FactoryConfig,
+  objective: number,
+  services: Pick<ApplicationServices, "github">,
+  candidate: PlanCandidate,
+  authority: ExecutionAuthority,
+): Promise<AutonomousAdmission> {
+  validateTarget(config.repository, config.checkout);
+  const issue = await services.github.objective(objective);
+  const admission = bindAdmission(
+    config,
+    objective,
+    issue.body,
+    git(config.checkout, "rev-parse", "HEAD"),
+    candidate,
+    authority,
+  );
+  checkActiveAdmission(config, objective, admission);
+  return admission;
+}
+
+export async function checkAdmission(
+  config: FactoryConfig,
+  objective: number,
+  services: Pick<ApplicationServices, "github">,
+  candidate: PlanCandidate,
+  admission: AutonomousAdmission,
+): Promise<void> {
+  validateTarget(config.repository, config.checkout);
+  const issue = await services.github.objective(objective);
+  verifyAdmission(
+    config,
+    objective,
+    issue.body,
+    git(config.checkout, "rev-parse", "HEAD"),
+    candidate,
+    admission,
+  );
+  checkActiveAdmission(config, objective, admission);
 }
 
 export async function decidePlan(
@@ -189,6 +269,7 @@ export async function runObjective(
   objective: number,
   services: ApplicationServices,
   acceptedPlan?: PlanCandidate,
+  admission?: AutonomousAdmission,
 ): Promise<FactoryState> {
   validateTarget(config.repository, config.checkout);
   if (config.execution.kind !== "local")
@@ -247,7 +328,71 @@ export async function runObjective(
     assertObjectiveCriteria(issue.body);
     const installationConfigDigest = factoryConfigDigest(config);
     let state = readState(config.repository, objective);
+    if (admission && !state && !acceptedPlan)
+      throw new Error("Admission dispatch requires its exact reviewed plan");
+    if (!state)
+      preflightObjective(
+        config,
+        issue.body,
+        git(config.checkout, "rev-parse", "HEAD"),
+      );
     if (state) {
+      if (
+        admission &&
+        (!state.admission ||
+          JSON.stringify(admission) !== JSON.stringify(state.admission))
+      )
+        throw new Error(
+          "Active Objective admission cannot be added or replaced; existing runs gain no new authority",
+        );
+      if (state.admission) {
+        assertAdmissionBinding(state.admission);
+        checkAuthority(config, objective, state.admission.authority);
+        const sources = planningSources(
+          issue.body,
+          state.baseSha,
+          config.checkout,
+          state.admission.additionalSources,
+        );
+        const sourceDigests = sources.map(({ path, heading, content }) => ({
+          path,
+          ...(heading ? { heading } : {}),
+          digest: createHash("sha256").update(content).digest("hex"),
+        }));
+        if (
+          state.admission.graphDigest !==
+            createHash("sha256")
+              .update(JSON.stringify(state.graph))
+              .digest("hex") ||
+          JSON.stringify(state.admission.sourceDigests) !==
+            JSON.stringify(sourceDigests) ||
+          JSON.stringify(state.additionalSources) !==
+            JSON.stringify(state.admission.additionalSources)
+        )
+          throw new Error(
+            "Persisted admission differs from current graph or pinned source packet",
+          );
+        if (
+          state.admission.repository !== config.repository ||
+          state.admission.objective !== objective ||
+          state.admission.configDigest !== installationConfigDigest ||
+          state.admission.baseSha !== state.baseSha ||
+          state.admission.bodyDigest !==
+            createHash("sha256").update(issue.body).digest("hex")
+        )
+          throw new Error(
+            "Persisted admission differs from current Objective or installation",
+          );
+        if (acceptedPlan)
+          verifyAdmission(
+            config,
+            objective,
+            issue.body,
+            state.baseSha,
+            acceptedPlan,
+            state.admission,
+          );
+      }
       if (
         state.schemaVersion !== 2 ||
         state.repository !== config.repository ||
@@ -376,6 +521,15 @@ export async function runObjective(
         throw new Error(
           "Accepted plan execution profile policy differs from installation",
         );
+      if (admission)
+        verifyAdmission(
+          config,
+          objective,
+          issue.body,
+          baseSha,
+          plan,
+          admission,
+        );
       const graph = plan.graph;
       verifyExecutionProfiles(graph, executionProfileChoices(config));
       await driver.preflight?.(graph);
@@ -415,6 +569,16 @@ export async function runObjective(
       );
       state = {
         schemaVersion: 2,
+        ...(admission
+          ? {
+              admission: JSON.parse(
+                JSON.stringify(admission),
+              ) as AutonomousAdmission,
+            }
+          : {}),
+        ...(plan.additionalSources?.length
+          ? { additionalSources: plan.additionalSources }
+          : {}),
         repository: config.repository,
         objective,
         runId: randomUUID(),
@@ -442,7 +606,12 @@ export async function runObjective(
     await driver.preflight?.(graph);
     validateCommandProvenance(
       graph,
-      planningSources(issue.body, state.baseSha, config.checkout),
+      planningSources(
+        issue.body,
+        state.baseSha,
+        config.checkout,
+        state.additionalSources,
+      ),
       config.checkout,
     );
     stateForSignal = state;
@@ -587,7 +756,12 @@ export async function runObjective(
           commit: integratedSha,
           evidence: acceptanceEvidence,
           criteria: objectiveCriteria(issue.body),
-          sources: planningSources(issue.body, state.baseSha, config.checkout),
+          sources: planningSources(
+            issue.body,
+            state.baseSha,
+            config.checkout,
+            state.additionalSources,
+          ),
           evidenceSources: [
             ...objectiveEvidence.evidence,
             ...(hydrationReceipt

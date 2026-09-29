@@ -82,6 +82,34 @@ The default delivery mode is regular pull requests. Add `--delivery native-stack
 
 The default network policy is `host`; `--network off` selects the supported offline worker policy for the Codex path. GitHub operations and planning still need their own service access. Review the chosen harness's boundaries before selecting a policy. Local work consumes your provider account usage; unavailable usage is never zero. Managed cloud, sandbox execution, mixed execution modes, and automatic provider fallback are not available.
 
+## Admit an exact plan for autonomous work
+
+This admission surface is source-development work for #244; it is not in published v0.1.39. Check your installed `factory help` before using it. Background supervision and automatic repair are separate capabilities and are not enabled by admission alone.
+
+Plan the selected Objective under its ordinary planning authority. When an autonomous policy is already available, pass `factory plan --authority /absolute/private/authority.json` with the usual Objective/output options so known consent, membership, resource and required-environment errors fail before model calls. Then bind the reviewed candidate to that policy:
+
+```sh
+factory admit --objective 123 --plan /absolute/private/plan.json \
+  --authority /absolute/private/authority.json \
+  --output /absolute/private/admission.json
+factory check-admission --objective 123 --plan /absolute/private/plan.json \
+  --admission /absolute/private/admission.json
+factory run --objective 123 --plan /absolute/private/plan.json \
+  --admission /absolute/private/admission.json
+```
+
+The authority file records `schemaVersion: 1`, the operator's `actor` and `reason`, explicit `executionConsent: true`, separate boolean `serviceConsent`, and a finite `objectives` list. It requires numeric `allowances` for `planningRevisions`, `implementationRepairs` and `resultRereviews`, `repairClasses` selected from `implementation` and `review-evidence`, `resources.maxConcurrency`, and `requiredEnvironment` worker-secret variable names. Obtain these choices from the operator; zero allowances are valid and no unspecified allowance means unlimited. Required worker-secret names must already be permitted by the installation allowlist; the declaration checks availability without granting access or exposing values. This does not prove controller-validation credentials or complete phase readiness. The installation's provider, credential-access, network and delivery configuration still applies.
+
+Admission binds the repository, Objective body, pinned base and source packet, reviewed plan and configuration. It rejects an Objective outside the authorized list, changed inputs, unresolved acceptance or an installation worker ceiling exceeding the admitted maximum. A larger admitted maximum never raises the configured concurrency. Checking admission creates no worker or runnable queue. A batch list grants bounded membership; it is not an instruction to run every listed Objective now. Service consent does not install or start a service. Recorded repair allowances do not enable automatic repair before that capability exists.
+
+Existing explicit runs keep their current behavior. Their state cannot gain admission or retry authority on upgrade. A running admitted Objective keeps its recorded policy; changing a file does not expand an active attempt. Preserve state and resolve a refused change at a supported safe boundary.
+
+### Resolve source and prerequisite gaps
+
+Planning and activation use the same pinned-source and final-command parsing rules. A declared final-validation section with no recognized commands is an authoring error, not an empty successful check. Fix the Objective declaration before retrying planning. Required facts and host prerequisites must be available in the environment where their phase runs; passing worker diagnostics do not establish controller validation readiness.
+
+When an apparent missing contract already exists elsewhere in the authorized pinned repository, locate that canonical file or section read-only and include it with a repeated `factory plan --source 'path#Exact heading'` option. The corrected packet needs fresh compilation and review; retain the rejected candidate and do not reuse its decision. Uncommitted edits are not pinned source evidence. If the behavior is genuinely unspecified, obtain the exact product or security decision from its owner instead of inventing it. Source lookup does not authorize broader implementation scope.
+
 ## Write an Objective
 
 Create the issue in the repository that owns the work. The [copyable issue form](templates/objective.yml) asks for outcome, completion experience, acceptance, boundaries, authority, canonical sources, and known unknowns. Copy it into the target's `.github/ISSUE_TEMPLATE/` only as an ordinary approved repository change.

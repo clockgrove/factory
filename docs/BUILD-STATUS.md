@@ -4,9 +4,36 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under #206 and explicitly accepted under #207. Historical observations below retain their original artifact and scenario scope.
 
-## Source capabilities after v0.1.39
+## Immutable v0.1.40 artifact record
 
-Integrated source adds exact autonomous admission (#244), the durable responsive local coordinator (#245), and executable QA coverage (#248), with their issue/PR checks. Local supervision (#246) builds on that owner. These source capabilities are not part of the immutable v0.1.39 archive and do not inherit its installed or pilot qualification. The complete autonomous installed scenario remains #253.
+[Release v0.1.40](https://github.com/clockgrove/factory/releases/tag/v0.1.40)
+is tagged at source `9ccb612578e9b9835e44d009d4cb770113b39ce4`, tree
+`3fa67fce58a2ef14e44d0e118fa8e9ed20bc8958`. Reviewed candidate
+`d830dbd5282fb3adf52a10f2ffaaef0a26aae5c6` shares that tree.
+The archive is 151102525 bytes, SHA-256
+`8a19fee52f20ef439859e6921e4cddf95ddb734118ed3dc0ffe7148ba550179f`.
+[PR #268](https://github.com/clockgrove/factory/pull/268) records three independent
+review rounds, 438 passing deterministic tests and the coordinated source gates.
+[Integrated main CI](https://github.com/clockgrove/factory/actions/runs/36639985415)
+passed for that exact source.
+
+Independent public download matched both the frozen archive and its separately
+recorded [expected digest](https://github.com/clockgrove/factory/issues/263#issuecomment-5900417845).
+Normal empty-cache offline Node 24 installation passed; all 3577 regular installed
+files and 82 bundled dependency roots matched the archive, lockfile and notices.
+Installed CLI and secret-scanner clean/detected/error checks passed. Optional
+Claude adapter installation preserved Factory bytes. The pinned v0.1.40 marketplace
+plugin, manifest and skills matched the distribution.
+
+This artifact includes existing-workspace membership authority (#263), autonomous
+admission (#244), local coordinator/supervision (#245/#246), reviewed graph amendments
+and aggregates (#247), executable QA coverage (#248), resource scheduling (#251),
+and current-graph completion (#249). Distribution and model-free checks do not
+qualify every included capability. Live workspace/LFS acceptance belongs to
+[#263](https://github.com/clockgrove/factory/issues/263); full autonomous program
+qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
+Earlier live scenarios retain their original exact artifact and scope. No archive
+was rebuilt or retagged after publication.
 
 ## Immutable v0.1.39 artifact record
 

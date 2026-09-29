@@ -1,3 +1,4 @@
+import { recordWorkFailure, diagnoseWorkRepair } from "../work-repair.js";
 import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -160,7 +161,7 @@ export async function runRegularGraph(args: {
           existingHandle ??
           (await driver.start({
             captureContext: { objective, runId: state.runId },
-            item,
+            item: work.recovery?.correction ? { ...item, brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}` } : item,
             baseSha: itemBase,
             attemptId: work.attempt,
             objectiveBody: args.objectiveBody,
@@ -424,6 +425,13 @@ export async function runRegularGraph(args: {
       else delete work.authentication;
       if (!work.pendingEffect && work.phaseReservation !== "coding")
         phases.release(item.id);
+      const isolated = recordWorkFailure(state, item.id, error);
+      if (isolated && state.admission?.authority.repairPolicy && !args.cancelled()) {
+        phases.release(item.id);
+        save();
+        await diagnoseWorkRepair({state,item,model:args.planningModel,save,stopped:()=>args.cancelled() || Boolean(args.paused?.())});
+        return;
+      }
       save();
       failure ??= error;
       throw error;

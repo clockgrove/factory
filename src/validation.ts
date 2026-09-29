@@ -1,3 +1,4 @@
+import { CandidateValidationFailure } from "./work-repair.js";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -1868,7 +1869,7 @@ export async function validateTree(
         output,
       });
       if (result.status !== 0)
-        throw new Error(
+        throw new CandidateValidationFailure(
           `Validation command failed (${result.status}): ${check}: ${output}`,
         );
       evidence.commands.push({

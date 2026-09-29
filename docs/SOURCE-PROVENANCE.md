@@ -6,6 +6,10 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Existing workspace package membership (#263)
+
+This implementation extends the current compiler, immutable Git validation and delivery paths from the public issue's generic reproduction. The established `yaml` parser supplies YAML node and ambiguity checks; a compact Objective declaration provides exact directory authority through existing digest bindings. New temporary-Git regressions contain generic public data. No archived implementation, private adopter source, prompts or transcripts were copied, and no additional state store was introduced.
+
 ## Reviewed graph amendments and executable hierarchy (#247)
 
 New amendment behavior extends the current compiler, atomic snapshot, owner control,
@@ -731,3 +735,14 @@ The existing scheduler, atomic WorkState, driver available-slot contract and reg
 ### Local background supervision (#246)
 
 The new `supervision.ts` module registers a single systemd user unit over the existing #245 owner, atomic continuation and control socket. `runner.ts` adds a quiescent handoff; no separate queue or execution journal is introduced. Public CLI operations preserve explicit service consent, exact installed paths, model-free state compatibility, private configuration and retained evidence. No archived service implementation was copied. User-manager lifecycle tests remain distinct from the later full autonomous Objective qualification in #253.
+
+### Current-graph final acceptance (#249)
+
+The existing completion, coverage, graph revision, diagnostic and atomic snapshot
+contracts supplied this newly written terminal acceptance binding. The shared
+completion predicate replaces validation-success shortcuts in admission, owner,
+status and supervision paths. Public deterministic Git fixtures exercise remote
+head advancement, closure acknowledgement loss, amendment overlap and immutable
+binding checks; existing delivery/media/human-decision tests retain their scope.
+No archived runtime, private source or provider responses were copied. Source
+validation does not qualify the full installed autonomous scenario in #253.

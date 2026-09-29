@@ -993,25 +993,40 @@ test("Work Item review receives exact concurrent-attempt provenance from run sta
               recorded: true,
               integratedCommitSha: null,
             });
-            assert.match(attempts[id].resultCommitSha, /^[0-9a-f]{40}$/);
-            assert.match(attempts[id].resultTreeSha, /^[0-9a-f]{40}$/);
+            // The peer may still be collecting when completion becomes ready.
+            if (
+              id === observations.reviewedItemId ||
+              attempts[id].resultCommitSha !== null
+            ) {
+              assert.match(attempts[id].resultCommitSha, /^[0-9a-f]{40}$/);
+              assert.match(attempts[id].resultTreeSha, /^[0-9a-f]{40}$/);
+            } else {
+              assert.equal(attempts[id].resultTreeSha, null);
+            }
             assert.ok(Number.isFinite(Date.parse(attempts[id].startedAt)));
           }
-          if (observations.reviewedItemId === "rc-left") {
+          assert.ok(
+            ["rc-left", "rc-right"].includes(observations.reviewedItemId),
+          );
+          assert.equal(reviewed.has(observations.reviewedItemId), false);
+          assert.equal(
+            attempts[observations.reviewedItemId].integratedCommitSha,
+            null,
+          );
+          if (reviewed.size === 0) {
             assert.equal(observations.currentIntegratedCommitSha, null);
             assert.equal(attempts["rc-left"].integratedCommitSha, null);
             assert.equal(attempts["rc-right"].integratedCommitSha, null);
           } else {
-            assert.equal(observations.reviewedItemId, "rc-right");
+            const first = [...reviewed][0];
             assert.match(
               observations.currentIntegratedCommitSha,
               /^[0-9a-f]{40}$/,
             );
             assert.equal(
-              attempts["rc-left"].integratedCommitSha,
+              attempts[first].integratedCommitSha,
               observations.currentIntegratedCommitSha,
             );
-            assert.equal(attempts["rc-right"].integratedCommitSha, null);
           }
           reviewed.add(observations.reviewedItemId);
         }
@@ -1093,11 +1108,13 @@ test("Work Item review receives exact concurrent-attempt provenance from run sta
     assert.equal(completed.work["rc-right"].executionBaseSha, target.baseSha);
     assert.equal(completed.work["rc-left"].integratedShaAtStart, null);
     assert.equal(completed.work["rc-right"].integratedShaAtStart, null);
+    const [first, second] = [...reviewed];
+    assert.equal(completed.work[first].baseSha, target.baseSha);
     assert.equal(
-      completed.work["rc-right"].baseSha,
-      completed.work["rc-left"].integratedSha,
+      completed.work[second].baseSha,
+      completed.work[first].integratedSha,
     );
-    assert.notEqual(completed.work["rc-right"].baseSha, target.baseSha);
+    assert.notEqual(completed.work[second].baseSha, target.baseSha);
     for (const id of reviewed)
       assert.equal(
         completed.work[id].validation.criteria.at(-1).verdict,

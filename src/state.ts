@@ -1,3 +1,4 @@
+import { assertFinalAcceptance } from "./completion.js";
 import {
   type AutonomousAdmission,
   assertAdmissionBinding,
@@ -136,6 +137,7 @@ export interface PreparationState {
 export type ContinuationState = FactoryState | PreparationState;
 
 export interface FactoryState {
+  finalAcceptance?: import("./completion.js").FinalAcceptance;
   backlogDiscoveries?: import("./graph-amendments.js").AmendmentProposal[];
   graphRevisions?: import("./graph-amendments.js").GraphRevision[];
   pendingAmendment?: import("./graph-amendments.js").PendingAmendment;
@@ -1002,5 +1004,6 @@ export function parseFactoryState(
     }
   }
   if (validated.finalValidation?.passed) assertCompletedCoverage(validated);
+  assertFinalAcceptance(validated);
   return validated;
 }

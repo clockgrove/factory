@@ -476,19 +476,34 @@ export async function runObjective(
   services: ApplicationServices,
   acceptedPlan?: PlanCandidate,
   admission?: AutonomousAdmission,
-  options: { deadlineAt?: string } = {},
+  options: {
+    deadlineAt?: string;
+    ownerLock?: ControllerLock;
+    intakeControl?: (request: ControlRequest) => Promise<unknown>;
+  } = {},
 ): Promise<FactoryState> {
   if (options.deadlineAt && !Number.isFinite(Date.parse(options.deadlineAt)))
     throw new Error("Deadline must be an absolute timestamp");
   const root = stateRoot(config.repository);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const lockPath = join(root, "controller.lock");
-  const lock = acquireControllerLock(lockPath, objective);
+  const lock = options.ownerLock ?? acquireControllerLock(lockPath, objective);
+  if (options.ownerLock) {
+    const recorded = readControllerOwner(lockPath);
+    const identity = linuxProcessIdentity(process.pid);
+    if (
+      recorded?.token !== lock.token ||
+      recorded.pid !== process.pid ||
+      recorded.startTime !== identity?.startTime ||
+      recorded.objective !== objective
+    )
+      throw new Error("Borrowed Objective owner identity differs");
+  }
   let snapshot: ContinuationState | undefined;
   try {
     snapshot = readContinuation(config.repository, objective);
   } catch (error) {
-    releaseControllerLock(lockPath, lock);
+    if (!options.ownerLock) releaseControllerLock(lockPath, lock);
     throw error;
   }
   if (snapshot)
@@ -571,7 +586,7 @@ export async function runObjective(
       options.deadlineAt !== owner.snapshot.coordinator.deadlineAt
     ) {
       owners.delete(ownerKey(config, objective));
-      releaseControllerLock(lockPath, lock);
+      if (!options.ownerLock) releaseControllerLock(lockPath, lock);
       throw new Error(
         "Existing elapsed deadline cannot be replaced on restart",
       );
@@ -602,6 +617,8 @@ export async function runObjective(
   let server;
   try {
     server = await serveControl(config.repository, lock, async (request) => {
+      if (request.objective === 0 && options.intakeControl)
+        return options.intakeControl(request);
       if (request.objective !== objective)
         throw new Error("Objective identity differs from owner");
       const state = owner.snapshot;
@@ -686,7 +703,7 @@ export async function runObjective(
   } catch (error) {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     owners.delete(ownerKey(config, objective));
-    releaseControllerLock(lockPath, lock);
+    if (!options.ownerLock) releaseControllerLock(lockPath, lock);
     throw error;
   }
   const handoff = () => {
@@ -788,7 +805,7 @@ export async function runObjective(
     process.off("SIGTERM", handoff);
     await new Promise<void>((resolve) => server.close(() => resolve()));
     owners.delete(ownerKey(config, objective));
-    releaseControllerLock(lockPath, lock);
+    if (!options.ownerLock) releaseControllerLock(lockPath, lock);
   }
 }
 

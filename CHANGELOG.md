@@ -2,6 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.40 — 2026-09-29
+
+- Add explicit Objective-bound exact package additions to existing pnpm workspaces, preserving non-membership configuration and enforcing the same authority during planning, item/QA and final validation (#263 / PR #268).
+- Include reviewed autonomous admission, local coordinator/supervision, graph amendments and aggregates, executable QA coverage, resource scheduling and current-graph completion (#244–#249, #251). Dedicated autonomous program qualification remains #253.
+- Publication, independent public download, pinned plugin identity and offline installation passed. This does not transfer earlier live Objective evidence to these bytes; live acceptance is tracked separately. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0140-artifact-record).
+
 ## 0.1.39 — 2026-09-29
 
 - Clarify phase-available planning evidence: immutable ordinary blob equality can prove committed-byte preservation without proving hydration, opaque semantics or transient history (#197 / PR #239).

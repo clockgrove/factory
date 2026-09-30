@@ -4,6 +4,69 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.52 artifact record
+
+[Release v0.1.52](https://github.com/clockgrove/factory/releases/tag/v0.1.52)
+was built once from frozen independently reviewed and integrated source
+`7168acb39ecaf5411d96ef4b2390145459204108`, tree
+`e643a79ff26fb3cd5695ed07b45893d5113e9bbc`. The archive is 153582855 bytes,
+SHA-256 `2d4fc51fbfdf59b945fe621853dcceb4993332eda8b736091b61d0fa8a8d94ac`,
+recorded in the [independent prepublication checkpoint](https://github.com/clockgrove/factory/issues/350#issuecomment-5917165015).
+[PR #351](https://github.com/clockgrove/factory/pull/351) and
+[PR #352](https://github.com/clockgrove/factory/pull/352) record independent
+full-diff reviews, focused verification of reported metadata/privacy repairs,
+and guarded integration of the started-item amendment and status corrections.
+The final source passed [its own CI](https://github.com/clockgrove/factory/actions/runs/36756171113)
+and the coordinated source gate: all 632 deterministic tests passed without
+skips, plus build, typecheck, lint, formatting, notices and packaging.
+
+Independent empty-cache offline installation matched all 6357 regular archive
+files, 95 bundled lock-addressed dependency roots and 94 bundled license files.
+Installed CLI help, manifests, skills, notices and archived matching-version
+guidance passed. The frozen archive labels its source as a candidate and makes
+installation conditional on publication and independent public verification;
+this later record supplies those facts without changing the archived bytes.
+
+Publication completed on 2026-09-30 at 18:23:08 UTC. Annotated tag
+`a2646823c6250a2fc4c412e6c4ee927bd774ce69` resolves to the frozen source above.
+Exact-tag ruleset `24261592` prohibits updates and deletion with no bypass actors
+or exclusions. GitHub's published archive digest and byte size match the audited
+bytes. The public `SHA256SUMS` asset is 96 bytes, SHA-256
+`baa47f5a45fe10f41f4e0deb0a1342b39ebf90d259f19c6e1a99d10ea98eaad0`.
+[Independent public verification](https://github.com/clockgrove/factory/issues/350#issuecomment-5917330492) matched the anonymously downloaded archive and public `SHA256SUMS` to these audited bytes. The isolated pinned v0.1.52 marketplace plugin was enabled at the exact tagged source; its manifest and both skills matched the public archive byte for byte. Archived version-matched installation guidance passed. The existing 38-test installed proof applies to these identical public bytes without repeating the offline installation or runtime suite.
+
+This release retains exact controller-owned started Work Item definitions
+through explicit transient amendment references
+([#350](https://github.com/clockgrove/factory/issues/350)); the planner defines
+pending/new work and grounded coverage choices. Full canonical validation,
+independent review, source/result/history binding and original acceptance remain
+required. The original rejected response remains preserved and rejected.
+It exposes a controller-derived original amendment failure digest and redacts
+configured-secret error echoes on supported preparation/execution status paths
+([#348](https://github.com/clockgrove/factory/issues/348)), without changing
+snapshot authority, replacement binding, lifecycle or allowances.
+
+All 38 mandatory exact installed checks passed without skips. Compiler-wire,
+graph amendment and actual CLI tests cover retained references, editable pending
+work, source coverage, canonical/historical binding, operator amendments,
+restart accounting and redacted status. The complete preserved rejection replay
+retains the original refusal while the corrected contract succeeds. Production
+imports resolved to the audited package; there were no provider or actual
+GitHub calls. These tests do not establish model-backed Objective acceptance
+or actual protected delivery.
+
+Full installed autonomous qualification remains
+[#253](https://github.com/clockgrove/factory/issues/253), with
+[#331](https://github.com/clockgrove/factory/issues/331),
+[#254](https://github.com/clockgrove/factory/issues/254) and
+[#243](https://github.com/clockgrove/factory/issues/243) retaining their own
+acceptance surfaces. Earlier release records, public workspace qualification
+bound to v0.1.47 and the accepted Clockgrove pilot retain their original bytes
+and scenarios. Historical failures, identities and accounting are preserved;
+no published tag or archive was rebuilt or replaced. The later contributor
+procedure update in [PR #354](https://github.com/clockgrove/factory/pull/354)
+does not change this frozen source or gate an otherwise authorized pilot start.
+
 ## Immutable v0.1.51 artifact record
 
 [Release v0.1.51](https://github.com/clockgrove/factory/releases/tag/v0.1.51)

@@ -8,6 +8,7 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 - Derive exact source commands, coverage identities and pinned worker inputs, including operator-supplied graph amendments.
 - Use typed proof alternatives that reject unsupported published command/semantic evidence; preserve exact-head CI and integrated proof freshness.
 - Classify completed decoder failures through the existing bounded planning repair path.
+- Keep intake lifecycle control reachable across Objective handoffs without rebinding its socket.
 - Change current plan and state formats without compatibility adapters or migrations; preserve historical evidence.
 
 Source verification and publication do not establish installed Objective qualification. See [#285](https://github.com/clockgrove/factory/issues/285) and the continuing release gates.

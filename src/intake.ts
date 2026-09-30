@@ -351,6 +351,9 @@ export async function runIntake(
   const observations = new IntakeObservation(services.github);
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
   let activeObjective: number | undefined;
+  let objectiveControl:
+    | ((request: ControlRequest) => Promise<unknown>)
+    | undefined;
   let preparation: PreparationState | undefined;
   let planningAbort: AbortController | undefined;
   let handingOff = false;
@@ -363,8 +366,16 @@ export async function runIntake(
   };
   const handle = async (request: ControlRequest): Promise<unknown> => {
     if (request.objective !== 0) {
+      if (request.objective === activeObjective && objectiveControl)
+        return objectiveControl(request);
       const preparing =
         preparation ?? readContinuation(config.repository, request.objective);
+      if (
+        request.action === "status" &&
+        preparing?.objective === request.objective &&
+        record.authority.objectives.includes(request.objective)
+      )
+        return preparing.coordinator;
       if (
         preparing?.schemaVersion !== 5 ||
         preparing.objective !== request.objective ||
@@ -400,10 +411,10 @@ export async function runIntake(
     if (request.action === "handoff") handingOff = true;
     if (
       activeObjective &&
-      !preparation &&
+      objectiveControl &&
       ["pause", "resume", "drain", "handoff"].includes(request.action)
     )
-      await requestControl(config.repository, {
+      await objectiveControl({
         objective: activeObjective,
         action: request.action,
       });
@@ -567,10 +578,11 @@ export async function runIntake(
             state = readContinuation(config.repository, selected);
           }
           if (record.mode !== "running" || handingOff) continue;
-          await closeServer();
           await runObjective(config, selected, services, plan, admission, {
             ownerLock: lock,
-            intakeControl: handle,
+            observeControl: (handler) => {
+              objectiveControl = handler;
+            },
           });
         } catch (error) {
           if (record.mode !== "running" || handingOff) {
@@ -593,9 +605,9 @@ export async function runIntake(
         } finally {
           preparation = undefined;
           planningAbort = undefined;
+          objectiveControl = undefined;
           activeObjective = undefined;
           retargetControllerLock(lockPath, lock, 0);
-          if (!server && !handingOff) await serve();
         }
         continue;
       }

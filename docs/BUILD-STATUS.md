@@ -4,6 +4,55 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.49 artifact record
+
+[Release v0.1.49](https://github.com/clockgrove/factory/releases/tag/v0.1.49)
+was built once from reviewed source
+`071d1c39539f6f525bc3d1365f492640cc15c4d2`, tree
+`383bfd7e907cd557a97d0d6873e2e1fa3ac9d70e`. The archive is 153577617 bytes,
+SHA-256 `794515f4c8f4ad75a19b6c6d309cf2d58d8e790077b57942bcf73de6ff4d2d8d`,
+recorded in the [independent prepublication checkpoint](https://github.com/clockgrove/factory/issues/338#issuecomment-5911930803).
+[PR #339](https://github.com/clockgrove/factory/pull/339) records one independent
+full-diff review round and focused verification of the generated notice-header
+correction. Integrated main `04553c3b8a6537c2ee55bbf4b5ae88f9e89f1ea4`
+has the identical tree and passed [its own CI](https://github.com/clockgrove/factory/actions/runs/36718376428).
+The coordinated candidate gate passed all 623 deterministic tests without skips,
+build, typecheck, lint, formatting, notices and packaging.
+
+Independent empty-cache offline installation on Linux x64/WSL2 with Node
+24.20.0 and npm 11.19.0 matched all 6357 regular archive files, 95 bundled
+lock-addressed dependency roots and 94 bundled license files. Notices,
+installed CLI help, manifests, skills and archived installation guidance passed.
+The guidance pins the matching v0.1.49 plugin, Release and offline archive.
+Its source-candidate label and conditional publication wording remain frozen;
+this record supplies the later publication facts without changing those bytes.
+Publication completed on 2026-09-30. Annotated tag
+`31626f5d121c5efee1d67a5a31771c9b179c912a` resolves to the source above.
+Exact-tag ruleset `24245741` prohibits updates and deletion with no bypass actors
+or exclusions. [Independent public verification](https://github.com/clockgrove/factory/issues/338#issuecomment-5912020386)
+matched the anonymously downloaded archive and public `SHA256SUMS` to the
+audited bytes above. The isolated pinned v0.1.49 marketplace plugin was enabled
+at the exact tagged source; its manifest and both skills matched the actual
+public archive byte for byte. Archived version-matched guidance passed.
+
+This release corrects settled unpublished Work Item failure classification while
+an independent sibling's controller collection is active
+([#338](https://github.com/clockgrove/factory/issues/338)). Diagnosed repair still
+requires global quiescence. Both mandatory exact installed correction cases
+passed without skips, provider calls or actual GitHub calls. Production imports
+resolved to the audited package; the cases preserve original failure history and
+accounting while validating and independently reviewing the current repaired tree.
+These model-free checks do not establish actual GitHub delivery or model-backed
+Objective acceptance.
+
+Published v0.1.48 distribution evidence remains bound to its original bytes.
+Public workspace acceptance in [#263](https://github.com/clockgrove/factory/issues/263)
+remains bound to v0.1.47; full installed autonomous qualification remains
+[#253](https://github.com/clockgrove/factory/issues/253). Hosted managed execution and
+live sandbox-provider qualification remain in their own issues. Earlier
+candidates, failures and accounting are preserved. No published tag or archive
+was rebuilt or replaced.
+
 ## Immutable v0.1.48 artifact record
 
 [Release v0.1.48](https://github.com/clockgrove/factory/releases/tag/v0.1.48)

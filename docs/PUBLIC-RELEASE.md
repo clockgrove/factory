@@ -4,7 +4,7 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Published [v0.1.48](https://github.com/clockgrove/factory/releases/tag/v0.1.48) has verified public download, pinned plugin identity, offline installation and exact installed model-free checks under [#333](https://github.com/clockgrove/factory/issues/333). See the [exact artifact record](BUILD-STATUS.md#immutable-v0148-artifact-record). Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) is accepted for v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier artifact and adopter evidence remain bound to their original bytes and scenarios.
+Published [v0.1.49](https://github.com/clockgrove/factory/releases/tag/v0.1.49) has verified public download, pinned plugin identity, offline installation and both exact installed correction checks under [#338](https://github.com/clockgrove/factory/issues/338). See the [exact artifact record](BUILD-STATUS.md#immutable-v0149-artifact-record). Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) is accepted for v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier artifact and adopter evidence remain bound to their original bytes and scenarios.
 
 Earlier published artifacts and their evidence remain unchanged. Publication and installation checks do not establish Objective qualification.
 
@@ -65,7 +65,7 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The source candidate is v0.1.49. After that version is published and independently verified in the [release artifact record for this version](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md), install its matching tag and release assets:
+Install the published v0.1.49 tag and matching release assets after comparing their digest with the [exact artifact record](BUILD-STATUS.md#immutable-v0149-artifact-record):
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.49

@@ -2,6 +2,14 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.47 — 2026-09-30
+
+- Require an exact readiness-probe selection for real environments in the structured compiler contract. Distinguish pre-worker readiness from validation of work that has yet to be delivered, preserving canonical command authority (#319).
+- Include provider-neutral sandbox execution and the optional Daytona public-source adapter, with verified transfer and owned-resource cleanup. Private authentication and live Daytona qualification remain open (#8, #9).
+- Add explicit, preview-bound export of selected captures to LangSmith while retaining redaction, incomplete content and unknown usage (#218).
+
+Publication and source checks do not establish full installed Objective acceptance. Public workspace and autonomy qualification remain tracked in #263 and #253.
+
 ## 0.1.46 — 2026-09-29
 
 - Show the existing optional AssetSet format-metadata shape in worker inputs, and omit it when no authoritative format fields are supplied. Preserve strict manifest validation and source-byte identity (#310).

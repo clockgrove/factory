@@ -4,6 +4,8 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
+Candidate v0.1.53 delivers the successful repeated same-app/exact-head check receipt correction in [#357](https://github.com/clockgrove/factory/issues/357). Its source/artifact gates, publication and independent public byte/plugin verification are pending; no autonomous Objective or adopter qualification is claimed.
+
 Published [v0.1.52](https://github.com/clockgrove/factory/releases/tag/v0.1.52) has fresh-cache offline installation and 38 exact installed checks for retained started Work Items, original amendment failure digests and configured-secret status redaction under [#350](https://github.com/clockgrove/factory/issues/350) and [#348](https://github.com/clockgrove/factory/issues/348). [Independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/350#issuecomment-5917330492) passed. See the [exact artifact record](BUILD-STATUS.md#immutable-v0152-artifact-record). Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier evidence remains bound to its original bytes and scenarios.
 
 Earlier published artifacts and their evidence remain unchanged. Publication and installation checks do not establish Objective qualification.
@@ -73,16 +75,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-Install the published matching v0.1.52 plugin and CLI after comparing the tarball digest with the independent value in the [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md#immutable-v0152-artifact-record). Earlier evidence retains its historical artifact scope.
+The commands below select candidate v0.1.53. Use them only after its publication and independent public byte/pinned-plugin verification, and compare the tarball digest with the independent value in its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.52
+codex plugin marketplace add clockgrove/factory --ref v0.1.53
 codex plugin add factory@clockgrove
-gh release download v0.1.52 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.52.tgz --pattern SHA256SUMS
+gh release download v0.1.53 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.53.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the digest with the independent value in the release artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.52.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.53.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

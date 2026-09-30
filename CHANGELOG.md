@@ -2,6 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.53 — candidate
+
+- Retain one actual identified delivery check receipt when every current same-name run is completed and successful on the exact head and repeated runs identify the same valid GitHub app. Preserve refusal of failed, pending, stale, conflicting or incomplete evidence, target protections and singular QA ambiguity (#357).
+
+Release gates, publication and independent public archive and pinned-plugin verification are pending. This patch does not establish full autonomous Objective qualification or adopter acceptance. Earlier releases and qualification evidence retain their original bytes and scenarios.
+
 ## 0.1.52 — 2026-09-30
 
 - Retain exact controller-owned started Work Items through transient amendment references instead of asking the planner to regenerate historical definitions. Keep source-owned coverage choices and complete independent graph validation/review (#350).

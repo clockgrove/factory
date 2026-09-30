@@ -14,7 +14,13 @@ Keep tag, package version, plugin version, marketplace ref and artifact identity
 
 ## Build one candidate
 
-For a new release, freeze the reviewed candidate and its version before running the coordinated gates. Preserve all published releases and their evidence; never rebuild them to include later source changes.
+Prepare the complete candidate before independent review and freezing, including the guidance people will receive from its tag and tarball:
+
+1. Set the new version in the existing package, lockfile, plugin and marketplace metadata, update the changelog, and regenerate third-party notices with `npm run notices` after installing the locked dependencies.
+2. Use `package.json` as the version reference when updating the README's matching marketplace tag, Release download and archive installation commands. Check capability descriptions against the source included in this candidate, including optional-provider requirements and unqualified boundaries. Inspect the packaged `director` and `setup` skills and the use guides listed in `package.json` for the same consistency. Keep source-development and release procedures separate from plugin-use instructions.
+3. Distinguish instructions for the prepared version from publication and qualification facts. Before publication, label the new version as a candidate and make its public installation instructions conditional on publication and independent artifact verification. Retain earlier published evidence with its original version; do not claim that the candidate is published, installed or qualified. Append immutable artifact evidence and update current publication status only after those checks actually pass.
+
+Freeze the independently reviewed candidate, including these documentation changes and its version, before running the coordinated gates. Do not postpone version-matched installation or capability guidance to a post-publication documentation PR: that cannot repair the frozen tag or packed README. Preserve all published releases and their evidence; never rebuild them to include later source changes.
 
 From a clean Linux x64 source checkout at the accepted commit, with Node.js 22.12 or later, Git, Git LFS, and public npm access, with optional dependencies enabled for source checks and notice generation, confirm `git status --porcelain` is empty. Choose an empty absolute release directory outside the checkout, then run:
 
@@ -33,7 +39,19 @@ cd /absolute/empty/release-directory
 sha256sum "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" > SHA256SUMS
 ```
 
-Inspect the tarball file list for the manifest, installed skills, CLI, license, logo, notices, and bundled production dependency tree. In a separate empty prefix, install the tarball with `npm install --offline --prefix /absolute/private/check-prefix "./clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz"` using an empty npm cache; verify `factory help`, compare every installed bundled package version with `package-lock.json`, and check that notices cover the same tree. Record `git rev-parse HEAD`, package version, tarball SHA-256, and the passing CI run. Preserve all existing protected release tags and assets. Publication uses the operator-delegated release authority, normal controls and a protected tag at the exact accepted commit. Record the expected SHA-256 outside mutable Release assets in [BUILD-STATUS.md](BUILD-STATUS.md). This procedure does not itself publish or tag anything.
+Inspect the tarball file list for the manifest, installed skills, CLI, license, logo, notices, and bundled production dependency tree. Read the actual archived README, plugin manifest, both skills and packaged use guides, not just their paths in the file list. For example, from the release directory:
+
+```sh
+tar -xOf "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" package/package.json
+tar -xOf "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" package/README.md
+tar -xOf "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" package/.codex-plugin/plugin.json
+tar -xOf "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" package/skills/director/SKILL.md
+tar -xOf "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" package/skills/setup/SKILL.md
+```
+
+Check that every installation command selects the archived package/plugin version and matching marketplace ref, and that capability and optional-provider descriptions agree with the frozen source. Follow the packaged use-guide entries in `package.json` for the remaining inspection. Record this guidance check with the existing package inspection evidence. If it fails, correct the source and freeze a new candidate; do not patch the archive or rely on later main documentation. Post-publication status and ledger changes cannot change these bytes.
+
+In a separate empty prefix, install the tarball with `npm install --offline --prefix /absolute/private/check-prefix "./clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz"` using an empty npm cache; verify `factory help`, compare every installed bundled package version with `package-lock.json`, and check that notices cover the same tree. Record `git rev-parse HEAD`, package version, tarball SHA-256, and the passing CI run. Preserve all existing protected release tags and assets. Publication uses the operator-delegated release authority, normal controls and a protected tag at the exact accepted commit. Record the expected SHA-256 outside mutable Release assets in [BUILD-STATUS.md](BUILD-STATUS.md). This procedure does not itself publish or tag anything.
 
 ## Install from public artifacts
 

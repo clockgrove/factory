@@ -4,7 +4,7 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Published [v0.1.44](https://github.com/clockgrove/factory/releases/tag/v0.1.44) has verified public download, pinned plugin identity and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0144-artifact-record). Live workspace qualification remains in [#263](https://github.com/clockgrove/factory/issues/263); full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier artifact and adopter evidence remain bound to their original bytes and scenarios.
+Published [v0.1.45](https://github.com/clockgrove/factory/releases/tag/v0.1.45) has verified public download, pinned plugin identity and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0145-artifact-record). Live workspace qualification remains in [#263](https://github.com/clockgrove/factory/issues/263); full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier artifact and adopter evidence remain bound to their original bytes and scenarios.
 
 Earlier published artifacts and their evidence remain unchanged. Publication and installation checks do not establish Objective qualification.
 
@@ -47,16 +47,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-Install the published v0.1.44 tag and matching release assets:
+Install the published v0.1.45 tag and matching release assets:
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.44
+codex plugin marketplace add clockgrove/factory --ref v0.1.45
 codex plugin add factory@clockgrove
-gh release download v0.1.44 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.44.tgz --pattern SHA256SUMS
+gh release download v0.1.45 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.45.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the digest with the independent value in the release preparation PR.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.44.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.45.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

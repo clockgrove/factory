@@ -4,6 +4,55 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under #206 and explicitly accepted under #207. Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.45 artifact record
+
+[Release v0.1.45](https://github.com/clockgrove/factory/releases/tag/v0.1.45)
+is tagged at accepted source `29cf69779a592eba62e771c17649a8f28a196e7f`.
+The archive was built once from reviewed release head
+`428557e05d42c71a7c940cfe51aa792477b73da6`; both commits have tree
+`da2c10bf55c58d586e07a76923bf7d6a44946197`. The archive is 153524230 bytes,
+SHA-256 `03a602a4d7fda948106ac492f075db9a428156ef6664f9c84ff8eac092333b44`.
+[Release PR #305](https://github.com/clockgrove/factory/pull/305) records one
+independent review round. It includes safe configured profile summaries from
+[PR #302](https://github.com/clockgrove/factory/pull/302) and the already-integrated
+OpenAI hosted execution capability from
+[PR #300](https://github.com/clockgrove/factory/pull/300).
+[PR CI](https://github.com/clockgrove/factory/actions/runs/36670890027)
+and [integrated main CI](https://github.com/clockgrove/factory/actions/runs/36671284714)
+passed, including 527 deterministic tests. Typecheck, lint, formatting,
+third-party notices and package checks passed on the final candidate.
+
+Independent public download matched the audited artifact. Fresh-prefix offline
+Node 24 installation with an empty cache passed; all 6320
+regular installed files and 95 bundled dependency roots matched the archive and
+locked identities. Installed CLI help and secret-scanner clean/detected/error
+checks passed. The pinned v0.1.45 marketplace plugin was enabled; its manifest
+and both skills matched the archive. Annotated tag
+`5f995bc1620206567c00baa256440e9c54de134a` resolves to the accepted source above.
+Exact-tag ruleset `24227243` prohibits updates and deletion, with no bypass actors
+or exclusions, under the approved protection recorded in
+[#303](https://github.com/clockgrove/factory/issues/303).
+
+Independent installed compiler/profile preflight checked actual rendered inputs,
+schemas, decoders and runtime validators. Current profile summaries expose the
+configured MCP kind/version and instruction presence/equality while excluding
+private instruction text. Native tool permissions and exact runtime bindings
+remain intact. Historical response and current unaccepted graph replays are
+diagnostic only. The separate omitted-coverage revision remains rejected; its raw
+response was unavailable, so the preflight preserved its digest and checked a
+labeled synthetic omission. No accepted plan, provider call, target/state write,
+actual MCP read or live delivery is supplied by these checks. The offline default
+installation does not qualify optional or hosted provider execution.
+
+Publication and distribution checks do not establish live acceptance. The
+workspace scenario remains [#263](https://github.com/clockgrove/factory/issues/263),
+with scoped qualification evidence still tracked by
+[#293](https://github.com/clockgrove/factory/issues/293) and
+[#301](https://github.com/clockgrove/factory/issues/301); full autonomous program
+qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
+Earlier releases, acceptance, failures and accounting retain their original
+artifact and scenario scope. No published archive was rebuilt or retagged.
+
 ## Immutable v0.1.44 artifact record
 
 [Release v0.1.44](https://github.com/clockgrove/factory/releases/tag/v0.1.44)

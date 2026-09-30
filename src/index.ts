@@ -13,3 +13,5 @@ export type { AnalysisField, AnalysisOptions } from "./analysis.js";
 export * from "./admission.js";
 
 export * from "./capture-export.js";
+
+export * from "./capture-langsmith.js";

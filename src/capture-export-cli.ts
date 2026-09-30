@@ -1,4 +1,8 @@
 import {
+  prepareLangSmithExport,
+  sendLangSmithExport,
+} from "./capture-langsmith.js";
+import {
   prepareLangfuseExport,
   selectCaptures,
   sendLangfuseExport,
@@ -25,6 +29,8 @@ export function parseCaptureExportOptions(args: string[]) {
         "--run",
         "--invocation",
         "--authorize",
+        "--project-id",
+        "--workspace-id",
       ].includes(flag)
     )
       throw new Error(`Unknown export-captures option: ${flag}`);
@@ -37,8 +43,17 @@ export function parseCaptureExportOptions(args: string[]) {
     values.set(flag, [...previous, value]);
   }
   const get = (flag: string) => values.get(flag)?.[0];
-  if (get("--destination") !== "langfuse")
-    throw new Error("Select --destination langfuse");
+  const destination = get("--destination");
+  if (destination !== "langfuse" && destination !== "langsmith")
+    throw new Error("Select --destination langfuse or langsmith");
+  const projectId = get("--project-id"),
+    workspaceId = get("--workspace-id");
+  if (destination === "langsmith" && !projectId)
+    throw new Error("Select an existing LangSmith --project-id UUID");
+  if (destination === "langfuse" && (projectId || workspaceId))
+    throw new Error(
+      "Langfuse keys select the project; project/workspace options are for LangSmith",
+    );
   const endpoint = get("--endpoint");
   if (!endpoint)
     throw new Error("Select an explicit --endpoint HTTPS_BASE_URL");
@@ -58,6 +73,9 @@ export function parseCaptureExportOptions(args: string[]) {
         : {}),
     } as CaptureExportOptions,
     authorization,
+    destination,
+    projectId,
+    workspaceId,
   };
 }
 
@@ -66,10 +84,18 @@ export async function runCaptureExportCommand(
   objective: number,
   args: string[],
 ) {
-  const { options, authorization } = parseCaptureExportOptions(args);
-  const prepared = prepareLangfuseExport(
-    selectCaptures(config.repository, objective, options),
-  );
+  const { options, authorization, destination, projectId, workspaceId } =
+    parseCaptureExportOptions(args);
+  const selection = selectCaptures(config.repository, objective, options);
+  if (destination === "langsmith") {
+    const prepared = prepareLangSmithExport(selection, {
+      projectId: projectId!,
+      ...(workspaceId ? { workspaceId } : {}),
+    });
+    if (!authorization) return { status: "preview", ...prepared.preview };
+    return sendLangSmithExport(prepared, authorization);
+  }
+  const prepared = prepareLangfuseExport(selection);
   if (!authorization) return { status: "preview", ...prepared.preview };
   return sendLangfuseExport(prepared, authorization);
 }

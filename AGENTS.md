@@ -84,3 +84,7 @@ Prerelease interfaces may change coherently; preserve historical evidence, but a
 
 Test actual emitted schemas and decoders, current supported variants and refusals, and replay
 the complete preserved failing response rather than substituting a hand-built fragment.
+
+When changing a selected API version, check the official response contract and every affected
+consumer. Fixtures must match that version, including the absence of removed fields;
+asserting the version header alone does not prove a successful migration.

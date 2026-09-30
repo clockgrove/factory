@@ -7,7 +7,6 @@ type Pull = {
   merged_at?: string | null;
   head: { ref: string; sha: string };
   base: { ref: string };
-  merge_commit_sha?: string | null;
 };
 type Stack = {
   number: number;
@@ -39,13 +38,38 @@ export class NativeStackDelivery {
     return this.api<Pull>(`repos/${this.repository}/pulls/${number}`);
   }
 
-  private async mergedSha(number: number): Promise<string> {
-    const detail = await this.pull(number);
-    if (detail.state !== "closed" || !detail.merged || !detail.merge_commit_sha)
+  private async mergedSha(layer: StackLayer): Promise<string> {
+    const detail = await this.pull(layer.pullRequest);
+    if (
+      detail.state !== "closed" ||
+      detail.merged !== true ||
+      detail.head.sha !== layer.headSha ||
+      detail.head.ref !== layer.branch
+    )
       throw new Error(
-        `Native stack PR #${number} has no integrated commit yet`,
+        `Native stack PR #${layer.pullRequest} has no matching integrated head`,
       );
-    return detail.merge_commit_sha;
+    const events = await this.client.paginate<{
+      event?: string;
+      commit_id?: unknown;
+    }>(`repos/${this.repository}/issues/${layer.pullRequest}/timeline`);
+    const commits = new Set<string>();
+    for (const event of events) {
+      if (event?.event !== "merged") continue;
+      if (
+        typeof event.commit_id !== "string" ||
+        !/^[a-f0-9]{40}$/.test(event.commit_id)
+      )
+        throw new Error(
+          `Native stack PR #${layer.pullRequest} has malformed merge evidence`,
+        );
+      commits.add(event.commit_id);
+    }
+    if (commits.size !== 1)
+      throw new Error(
+        `Native stack PR #${layer.pullRequest} has missing or conflicting merge evidence`,
+      );
+    return [...commits][0]!;
   }
 
   private async assertLayers(
@@ -133,7 +157,7 @@ export class NativeStackDelivery {
             "Merged native stack head changed; operator direction required",
           );
       const merged = await Promise.all(
-        layers.map((layer) => this.mergedSha(layer.pullRequest)),
+        layers.map((layer) => this.mergedSha(layer)),
       );
       if (new Set(merged).size !== 1)
         throw new Error("Native stack layers have different merge commits");
@@ -183,7 +207,7 @@ export class NativeStackDelivery {
         if (pull.state === "closed" && pull.merged === true)
           observed = {
             status: "merged",
-            details: { sha: await this.mergedSha(top.pullRequest) },
+            details: { sha: await this.mergedSha(top) },
           };
       }
     }
@@ -207,7 +231,7 @@ export class NativeStackDelivery {
       await new Promise<void>((resolve) => setTimeout(resolve, 500));
     }
     const merged = await Promise.all(
-      layers.map((layer) => this.mergedSha(layer.pullRequest)),
+      layers.map((layer) => this.mergedSha(layer)),
     );
     if (new Set(merged).size !== 1 || merged[0] !== observed.details.sha)
       throw new Error(

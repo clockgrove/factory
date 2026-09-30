@@ -123,6 +123,24 @@ test("PR observation exposes only successful unambiguous checks on its exact hea
             state: "open",
             merged: false,
             head: { sha: head, ref: "factory/item" },
+            base: { ref: "main" },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      if (request.pathname === "/graphql")
+        return new Response(
+          JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  number: 1,
+                  headRefOid: head,
+                  headRefName: "factory/item",
+                  baseRefName: "main",
+                  mergeStateStatus: "CLEAN",
+                },
+              },
+            },
           }),
           { headers: { "content-type": "application/json" } },
         );

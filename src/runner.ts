@@ -1,3 +1,4 @@
+import { hasReadinessWait, isReadinessWait } from "./delivery/readiness.js";
 import { executionContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
 import { applyWorkCorrection } from "./work-repair.js";
@@ -457,9 +458,9 @@ function canHandoff(state: ContinuationState): boolean {
   return (
     !state.coordinator?.phase.endsWith("-submitted") &&
     !hasPendingAmendmentEffect(state) &&
-    !Object.values(state.work).some(
-      (work) =>
-        work.status === "running" ||
+    !Object.entries(state.work).some(
+      ([id, work]) =>
+        (work.status === "running" && !isReadinessWait(state, id)) ||
         (work.status === "published" &&
           (!work.pullRequest || !work.changeRef || !work.treeSha)) ||
         work.pendingEffect,
@@ -684,7 +685,7 @@ export async function runObjective(
     for (const resolve of waiters) resolve();
     waiters.clear();
   };
-  const wait = async () => {
+  const wait = async (observationDelay?: number) => {
     if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
       throw new CoordinatorHandoff();
     if (owner.changed) {
@@ -692,7 +693,16 @@ export async function runObjective(
       return;
     }
     await new Promise<void>((resolve) => {
-      waiters.add(resolve);
+      const finish = () => {
+        clearTimeout(timer);
+        waiters.delete(finish);
+        resolve();
+      };
+      const timer =
+        observationDelay === undefined
+          ? undefined
+          : setTimeout(finish, observationDelay);
+      waiters.add(finish);
     });
     owner.changed = false;
   };
@@ -950,8 +960,10 @@ export async function runObjective(
       if (objectiveComplete(result) || result.cancelledAt || !result.admission)
         return result;
       if (
+        result.coordinator?.mode === "running" &&
         amendmentBlocksDispatch(result) &&
-        result.pendingAmendment?.phase !== "rejected"
+        result.pendingAmendment?.phase !== "rejected" &&
+        !hasReadinessWait(result)
       )
         continue;
       if (
@@ -975,9 +987,16 @@ export async function runObjective(
           ? "Drained; no owned attempts remain"
           : stoppedRepair
             ? `Work Item ${stoppedRepair[0]}: ${stoppedRepair[1].recovery!.failure?.decision ?? "Inspect the retained recovery failure"}`
-            : "Awaiting exact candidate decision or resume";
+            : hasReadinessWait(result)
+              ? "Awaiting exact published checks or target protection readiness"
+              : "Awaiting exact candidate decision or resume";
       persist();
-      await wait();
+      // Read-only observations use the same owner and GitHub rate gate. No model work while idle.
+      await wait(
+        result.coordinator?.mode === "running" && hasReadinessWait(result)
+          ? 5_000
+          : undefined,
+      );
     }
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
@@ -1714,9 +1733,8 @@ async function runObjectivePass(
           save(state);
         },
         cancelled: cancellationRequested,
-        paused: () =>
-          state.coordinator?.mode !== "running" ||
-          amendmentBlocksDispatch(state),
+        paused: () => state.coordinator?.mode !== "running",
+        amendmentPending: () => amendmentBlocksDispatch(state),
         diagnostics,
       });
       if (awaitingSelection) return state;

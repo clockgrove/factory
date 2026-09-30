@@ -155,8 +155,16 @@ for (const delivery of ["regular", "native-stack"]) {
             );
             if (method === "mergeNativeStack") {
               stackMerges++;
-              if (slowFirst === "unknown-merge")
+              if (slowFirst === "unknown-merge") {
+                // Simulate a submitted mutation whose acknowledgement is lost,
+                // rather than a failure in the preceding read-only preparation.
+                args[3].beforeMerge();
+                assert.equal(
+                  readState(repository, 1).work.tail.pendingEffect,
+                  "merge",
+                );
                 throw new Error("Native merge response lost");
+              }
             }
             return original(...args);
           };
@@ -180,6 +188,11 @@ for (const delivery of ["regular", "native-stack"]) {
           const preserved = readState(repository, 1);
           assert.equal(preserved.work.tail.pendingEffect, "merge");
           assert.equal(preserved.work.tail.phaseReservation, "delivery");
+          assert.equal(stackMerges, 1);
+          await assert.rejects(
+            application.runObjective(1, plan),
+            /Objective stopped/,
+          );
           assert.equal(stackMerges, 1);
           return;
         }

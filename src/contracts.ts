@@ -512,6 +512,8 @@ export interface DeliveryObservation {
   namedChecks?: NamedCheckEvidence[];
   state: "open" | "merged" | "closed";
   checks: "pending" | "passing" | "failing";
+  /** Authenticated target protection readiness; absent only on custom gateways. */
+  mergeReadiness?: "ready" | "waiting" | "blocked";
 }
 export interface MergeResult {
   integratedSha: string;
@@ -671,6 +673,7 @@ export interface PullRequestPublication {
   body: string;
 }
 export interface PullRequestIdentity {
+  baseBranch?: string;
   number: number;
   branch: string;
   headSha: string;
@@ -737,6 +740,7 @@ export interface GitHubGateway {
     expectedStack: number,
     options: {
       resumeUuid?: string;
+      beforeMerge?: () => void;
       onPending: (uuid: string) => void;
       cancelled: () => boolean;
     },

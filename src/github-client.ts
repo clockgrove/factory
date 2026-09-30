@@ -93,6 +93,78 @@ export class GitHubClient {
       throw new Error("GitHub route is outside the approved repository API");
     if (!["GET", "POST", "PATCH", "PUT", "DELETE"].includes(method))
       throw new Error("Unsupported GitHub method");
+    return this.dispatch<T>(method, route, body, observation, method === "GET");
+  }
+
+  /** Fixed repository-scoped observation; callers cannot submit arbitrary GraphQL. */
+  async pullRequestReadiness(
+    repository: string,
+    number: number,
+  ): Promise<{
+    number: number;
+    headRefOid: string;
+    headRefName: string;
+    baseRefName: string;
+    mergeStateStatus: string;
+  }> {
+    if (
+      !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
+      !Number.isSafeInteger(number) ||
+      number <= 0
+    )
+      throw new Error("Invalid PR readiness identity");
+    const [owner, name] = repository.split("/");
+    const response = await this.dispatch<{
+      errors?: unknown[];
+      data?: {
+        repository?: {
+          pullRequest?: {
+            number: number;
+            headRefOid: string;
+            headRefName: string;
+            baseRefName: string;
+            mergeStateStatus: string;
+          } | null;
+        } | null;
+      } | null;
+    }>(
+      "POST",
+      "graphql",
+      {
+        query: `query FactoryPullRequestReadiness($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $number) {
+            number headRefOid headRefName baseRefName mergeStateStatus
+          }
+        }
+      }`,
+        variables: { owner, name, number },
+      },
+      undefined,
+      true,
+    );
+    const pull = response.data?.repository?.pullRequest;
+    if (
+      (response.errors !== undefined &&
+        (!Array.isArray(response.errors) || response.errors.length)) ||
+      !pull ||
+      pull.number !== number ||
+      typeof pull.headRefOid !== "string" ||
+      typeof pull.headRefName !== "string" ||
+      typeof pull.baseRefName !== "string" ||
+      typeof pull.mergeStateStatus !== "string"
+    )
+      throw new Error("GitHub PR readiness observation is unavailable");
+    return pull;
+  }
+
+  private async dispatch<T>(
+    method: string,
+    route: string,
+    body: Record<string, unknown> | undefined,
+    observation: { etag?: string } | undefined,
+    readOnly: boolean,
+  ): Promise<T> {
     const signal = currentProcessSignal();
     signal?.throwIfAborted();
     const previous = this.queue;
@@ -149,7 +221,7 @@ export class GitHubClient {
         if (observation && method === "GET" && error.status === 304)
           return { status: 304, etag: error.response?.headers?.etag } as T;
         if (
-          method !== "GET" &&
+          !readOnly &&
           (!error.status || error.status >= 500 || signal?.aborted)
         )
           throw new GitHubOutcomeUnknown();

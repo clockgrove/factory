@@ -194,7 +194,7 @@ On failure, stop and preserve the evidence, diagnose the concrete blocker, and e
 
 ## Open release decisions
 
-An interrupted regular Work Item still `running` at `deliver` is not a supported automatic continuation. Preserve its snapshot and exact remote evidence; do not replay delivery, edit state or treat a result decision as reconciliation. The interrupted run remains nonqualifying. A corrected successor must meet the existing qualification and resource requirements.
+A known `published` Work Item waiting for checks or target protection readiness can resume read-only observation of the same exact PR/head without rerunning implementation or review. An interrupted regular Work Item still `running` at `deliver` is not a supported automatic continuation. Preserve its snapshot and exact remote evidence; do not replay delivery, edit state or treat a result decision as reconciliation. The interrupted run remains nonqualifying. A corrected successor must meet the existing qualification and resource requirements.
 
 The published [`@azu/format-text@1.0.2` metadata](https://www.npmjs.com/package/@azu/format-text/v/1.0.2) declares BSD-3-Clause and names `azu` as author, but its tarball and [exact source tree](https://github.com/azu/format-text/tree/2f72a7bf808c0818a395c2323d77128352539297) omit a license file and copyright holder/year. [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) preserves canonical terms and the documented omission without inventing attribution. Retain maintainer review of that omission in the release evidence; do not represent generic terms as a supplied package-specific notice.
 

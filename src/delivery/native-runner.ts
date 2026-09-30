@@ -1,3 +1,4 @@
+import { assertDeliveryReady, DeliveryReadinessPending } from "./readiness.js";
 import { executionContext } from "../execution/checkpoint.js";
 import {
   recordWorkFailure,
@@ -425,6 +426,8 @@ export async function runNativeGraph(args: {
         if (args.paused?.() || args.amendmentPending?.())
           return settlePrepared();
       }
+      if (args.paused?.() && state.work[item.id]?.waitingReason)
+        return settlePrepared();
       await runQaItem({
         config,
         root,
@@ -437,6 +440,7 @@ export async function runNativeGraph(args: {
         store: contentStore,
         save,
         cancelled: args.cancelled,
+        paused: args.paused,
         phases,
       });
       if (state.work[item.id]?.status !== "done") return settlePrepared();
@@ -875,6 +879,11 @@ export async function runNativeGraph(args: {
       if (state.work[item.id]?.status === "failed") continue unitLoop;
       if (state.work[item.id]?.status === "waiting") return settlePrepared();
     }
+    const readinessWasWaiting = Boolean(
+      state.work[unit.items.at(-1)!.id]?.waitingReason,
+    );
+    if (args.paused?.() && readinessWasWaiting && !state.stackMerges?.[unit.id])
+      return settlePrepared();
     await phases.reserve(unit.items.at(-1)!.id, "delivery");
     const layers: NativeStackLayer[] = unit.items.map((item) => {
       const work = state.work[item.id]!;
@@ -888,11 +897,12 @@ export async function runNativeGraph(args: {
     });
     const pendingMerge = state.stackMerges?.[unit.id];
     const observations = await Promise.all(
-      layers.map((layer) =>
+      layers.map((layer, index) =>
         github.observe({
           number: layer.pullRequest,
           branch: layer.branch,
           headSha: layer.headSha,
+          baseBranch: index ? layers[index - 1]!.branch : defaultBranch,
         }),
       ),
     );
@@ -906,11 +916,25 @@ export async function runNativeGraph(args: {
         throw new Error(
           `Default branch moved before native unit ${unit.id}; operator direction required`,
         );
-      for (const [index, observation] of observations.entries())
-        if (observation.state !== "open" || observation.checks !== "passing")
-          throw new Error(
-            `Native PR #${layers[index]!.pullRequest} is not ready to merge`,
-          );
+      try {
+        // Check every layer before choosing a wait: another layer's genuine failure must still stop.
+        for (const observation of observations)
+          if (
+            observation.state !== "open" ||
+            observation.checks === "failing" ||
+            observation.mergeReadiness === "blocked"
+          )
+            assertDeliveryReady(observation);
+        for (const observation of observations)
+          assertDeliveryReady(observation);
+      } catch (error) {
+        if (!(error instanceof DeliveryReadinessPending)) throw error;
+        state.work[unit.items.at(-1)!.id]!.waitingReason = error.message;
+        phases.release(unit.items.at(-1)!.id);
+        save();
+        return settlePrepared();
+      }
+      delete state.work[unit.items.at(-1)!.id]!.waitingReason;
       for (const [index, observation] of observations.entries())
         state.work[unit.items[index]!.id]!.preIntegrationChecks =
           observation.namedChecks ?? [];
@@ -928,6 +952,11 @@ export async function runNativeGraph(args: {
     };
     const topWork = state.work[unit.items.at(-1)!.id]!;
     await args.reconcile?.();
+    if (args.cancelled()) throw new Error("Objective cancelled");
+    if (args.paused?.() && readinessWasWaiting && !pendingMerge) {
+      phases.release(unit.items.at(-1)!.id);
+      return settlePrepared();
+    }
     if (layers.length === 1) {
       topWork.pendingEffect = "merge";
       save();
@@ -988,11 +1017,16 @@ export async function runNativeGraph(args: {
         throw new Error(
           "Pending native merge identity changed; operator direction required",
         );
-      topWork.pendingEffect = "merge";
-      save();
       const mergeStack = () =>
         github.mergeNativeStack(layers, defaultBranch, stackNumber, {
           resumeUuid: pending?.uuid,
+          beforeMerge: () => {
+            if (args.cancelled()) throw new Error("Objective cancelled");
+            if (args.paused?.() && readinessWasWaiting)
+              throw new DeliveryReadinessPending();
+            topWork.pendingEffect = "merge";
+            save();
+          },
           onPending: (uuid) => {
             state.stackMerges ??= {};
             state.stackMerges[unit.id] = {
@@ -1004,13 +1038,21 @@ export async function runNativeGraph(args: {
           },
           cancelled: args.cancelled,
         });
-      integratedSha = args.diagnostics
-        ? await args.diagnostics.span(
-            mergeOperation,
-            mergeStack,
-            (headSha) => ({ integratedSha: headSha }),
-          )
-        : await mergeStack();
+      try {
+        integratedSha = args.diagnostics
+          ? await args.diagnostics.span(
+              mergeOperation,
+              mergeStack,
+              (headSha) => ({ integratedSha: headSha }),
+            )
+          : await mergeStack();
+      } catch (error) {
+        if (!(error instanceof DeliveryReadinessPending)) throw error;
+        topWork.waitingReason = error.message;
+        phases.release(unit.items.at(-1)!.id);
+        save();
+        return settlePrepared();
+      }
     }
     await gitAsync(config.checkout, "fetch", "origin", defaultBranch);
     const observedAfter = git(config.checkout, "rev-parse", "FETCH_HEAD");

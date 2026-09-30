@@ -135,6 +135,7 @@ export class NativeStackDelivery {
     expectedStack: number,
     options: {
       resumeUuid?: string;
+      beforeMerge?: () => void;
       onPending: (uuid: string) => void;
       cancelled: () => boolean;
     },
@@ -180,6 +181,7 @@ export class NativeStackDelivery {
         `repos/${this.repository}/pulls/${top.pullRequest}/merge-async/${uuid}`,
       );
     } else {
+      options.beforeMerge?.();
       observed = await this.api<AsyncResult>(
         `repos/${this.repository}/pulls/${top.pullRequest}/merge-async`,
         "PUT",

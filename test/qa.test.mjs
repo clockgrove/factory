@@ -21,6 +21,7 @@ import {
 import { runQaItem } from "../dist/qa-execution.js";
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
 import { readState } from "../dist/state-store.js";
+import { controlObjective } from "../dist/runner.js";
 import {
   createTarget,
   factoryConfig,
@@ -401,15 +402,117 @@ for (const failure of ["missing", "pending", "failure", "stale", "unrelated"])
               detailsUrl: "https://github.com/example/check/72",
             };
       const plan = await application.planObjective(1);
-      await assert.rejects(
-        application.runObjective(1, plan),
-        /Required named CI check/,
+      if (["missing", "pending"].includes(failure)) {
+        const waiting = await application.runObjective(1, plan);
+        assert.equal(waiting.work.qa.status, "running");
+        assert.equal(waiting.error, undefined);
+        assert.equal(waiting.work.qa.pendingEffect, undefined);
+        assert.equal(waiting.finalValidation, undefined);
+        const attempt = waiting.work.qa.attempt;
+        github.namedCheck = async (headSha, name) => ({
+          id: 72,
+          headSha,
+          name,
+          status: "completed",
+          conclusion: "success",
+          detailsUrl: "https://github.com/example/check/72",
+        });
+        const completed = await application.runObjective(1, plan);
+        assert.equal(completed.work.qa.attempt, attempt);
+        assert.equal(completed.work.qa.status, "done");
+        assert.equal(completed.finalValidation.passed, true);
+      } else {
+        await assert.rejects(
+          application.runObjective(1, plan),
+          /Required named CI check/,
+        );
+        const state = readState(`example/qa-${failure}`, 1);
+        assert.equal(state.work.qa.status, "failed");
+        assert.equal(state.finalValidation, undefined);
+      }
+      assert.equal(
+        readState(`example/qa-${failure}`, 1).work.integration.status,
+        "done",
       );
-      const state = readState(`example/qa-${failure}`, 1);
-      assert.equal(state.work.integration.status, "done");
-      assert.equal(state.work.qa.status, "failed");
-      assert.equal(state.finalValidation, undefined);
     }));
+
+for (const delivery of ["regular", "native-stack"])
+  for (const action of ["pause", "handoff"])
+    test(`${delivery}: ${action} acknowledged during resumed named-CI read submits no new QA review`, async () =>
+      fixture(async (root) => {
+        const target = createTarget(root, {
+          "real-environment.txt": "actual local resource",
+        });
+        const config = factoryConfig(
+          target.checkout,
+          `example/qa-wait-${delivery}-${action}`,
+          delivery,
+        );
+        const { application, github, planningPath, eventsPath } =
+          makeApplication({
+            config,
+            graph: graph(target.baseSha),
+            objectiveBody: body,
+            fakeRoot: join(root, "fake"),
+            actions: {
+              unit: { files: [{ path: "unit.txt", text: "unit" }] },
+              integration: {
+                files: [{ path: "integration.txt", text: "integration" }],
+              },
+            },
+          });
+        github.namedCheck = async () => undefined;
+        const plan = await application.planObjective(1);
+        const waiting = await application.runObjective(1, plan);
+        assert.equal(waiting.work.qa.status, "running");
+        const attempt = waiting.work.qa.attempt;
+        const before = readEvents(planningPath).filter(
+          (event) => event.type === "result-review",
+        ).length;
+        const completedCheck = (headSha, name) => ({
+          id: 72,
+          headSha,
+          name,
+          status: "completed",
+          conclusion: "success",
+          detailsUrl: "https://github.com/example/check/72",
+        });
+        let acknowledged = false;
+        github.namedCheck = async (headSha, name) => {
+          await controlObjective(config, { objective: 1, action });
+          acknowledged = true;
+          return completedCheck(headSha, name);
+        };
+        const paused = await application.runObjective(1, plan);
+        assert.equal(acknowledged, true);
+        assert.equal(
+          paused.coordinator.mode,
+          action === "pause" ? "paused" : "draining",
+        );
+        assert.equal(paused.work.qa.status, "running");
+        assert.equal(paused.work.qa.attempt, attempt);
+        assert.equal(paused.work.qa.pendingEffect, undefined);
+        assert.ok(paused.work.qa.waitingReason);
+        assert.equal(paused.error, undefined);
+        assert.equal(
+          readEvents(planningPath).filter(
+            (event) => event.type === "result-review",
+          ).length,
+          before,
+        );
+        github.namedCheck = async (headSha, name) =>
+          completedCheck(headSha, name);
+        await controlObjective(config, { objective: 1, action: "resume" });
+        const completed = await application.runObjective(1, plan);
+        assert.equal(completed.work.qa.attempt, attempt);
+        assert.equal(completed.work.qa.status, "done");
+        assert.equal(completed.finalValidation.passed, true);
+        assert.equal(
+          readEvents(eventsPath).filter((event) => event.type === "start")
+            .length,
+          2,
+        );
+      }));
 
 test("independent review blocks inadequate negative controls and unauthorized golden changes", async () =>
   fixture(async (root) => {

@@ -4,6 +4,8 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 
 ## 0.1.48 — candidate
 
+- Retain reviewed published results while required checks or target protections become ready, then continue exact-head delivery without rerunning workers (#335).
+
 - Correct supervisor registration and lifecycle when the installation uses an isolated XDG configuration directory (#327).
 - Supply supported controller review and protected-delivery guarantees during planning, and compact exact-result review and pre-integration check evidence during final acceptance (#331).
 - Allow diagnostics to inspect supported preparing continuations without treating them as executing Work Items (#328).

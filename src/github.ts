@@ -481,7 +481,9 @@ export class RealGitHubGateway implements GitHubGateway {
     );
     if (
       detail.head.sha !== identity.headSha ||
-      detail.head.ref !== identity.branch
+      detail.head.ref !== identity.branch ||
+      (identity.baseBranch !== undefined &&
+        detail.base?.ref !== identity.baseBranch)
     )
       throw new Error(
         `PR #${identity.number} identity changed; operator direction required`,
@@ -538,8 +540,48 @@ export class RealGitHubGateway implements GitHubGateway {
         conclusion: run.conclusion,
         detailsUrl: run.html_url,
       }));
+    let mergeReadiness: PullRequestObservation["mergeReadiness"];
+    if (!detail.merged && detail.state !== "closed") {
+      const readiness = await this.client.pullRequestReadiness(
+        this.repository,
+        identity.number,
+      );
+      if (
+        readiness.headRefOid !== identity.headSha ||
+        readiness.headRefName !== identity.branch ||
+        readiness.baseRefName !== detail.base?.ref
+      )
+        throw new Error(
+          `PR #${identity.number} readiness identity changed; operator direction required`,
+        );
+      switch (readiness.mergeStateStatus) {
+        case "CLEAN":
+        case "HAS_HOOKS":
+          mergeReadiness = "ready";
+          break;
+        case "UNKNOWN":
+        case "BLOCKED":
+          mergeReadiness = "waiting";
+          break;
+        case "UNSTABLE":
+          mergeReadiness =
+            runs.some((run) => run.status !== "completed") ||
+            (statuses.total_count > 0 && statuses.state === "pending")
+              ? "waiting"
+              : "blocked";
+          break;
+        case "DIRTY":
+        case "BEHIND":
+        case "DRAFT":
+          mergeReadiness = "blocked";
+          break;
+        default:
+          throw new Error("GitHub PR readiness status is unsupported");
+      }
+    }
     return {
       namedChecks,
+      ...(mergeReadiness ? { mergeReadiness } : {}),
       state: detail.merged
         ? "merged"
         : detail.state === "closed"
@@ -597,6 +639,7 @@ export class RealGitHubGateway implements GitHubGateway {
     expectedStack: number,
     options: {
       resumeUuid?: string;
+      beforeMerge?: () => void;
       onPending: (uuid: string) => void;
       cancelled: () => boolean;
     },

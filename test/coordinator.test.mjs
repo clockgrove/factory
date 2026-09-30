@@ -217,7 +217,8 @@ test("compound: interrupted projection and rate-limited refresh retain unknown d
       "result",
     );
     const original = readContinuation(config.repository, 1);
-    let reads = 0;
+    const observed = await github.objective(1);
+    const reads = [];
     const gateway = new RealGitHubGateway(
       config.repository,
       {},
@@ -225,14 +226,18 @@ test("compound: interrupted projection and rate-limited refresh retain unknown d
         new Octokit({
           request: {
             fetch: async () => {
-              reads++;
+              reads.push(Date.now());
               return new Response(
-                JSON.stringify({ message: "secondary rate limit" }),
+                JSON.stringify(
+                  reads.length === 1
+                    ? { message: "secondary rate limit" }
+                    : { number: 1, state: "open", ...observed },
+                ),
                 {
-                  status: 403,
+                  status: reads.length === 1 ? 403 : 200,
                   headers: {
                     "content-type": "application/json",
-                    "retry-after": "10",
+                    ...(reads.length === 1 ? { "retry-after": "0.1" } : {}),
                   },
                 },
               );
@@ -241,20 +246,40 @@ test("compound: interrupted projection and rate-limited refresh retain unknown d
         }),
       ),
     );
-    // Authenticated refresh is unavailable: it cannot establish the lost effect.
-    await assert.rejects(gateway.objective(1), /HTTP 403/);
+    github.objective = gateway.objective.bind(gateway);
+    const running = application.runObjective(1);
+    const stoppedRun = assert.rejects(
+      running,
+      /preparation stopped|unknown outcome/,
+    );
+    await until(
+      () =>
+        readContinuation(config.repository, 1)?.coordinator.observationError,
+    );
+    const paused = readContinuation(config.repository, 1);
+    assert.equal(paused.coordinator.mode, "paused");
+    assert.match(paused.coordinator.waitReason, /resume to observe again/);
+    assert.equal(paused.projectionPending, original.projectionPending);
+    assert.equal(paused.runId, original.runId);
+    assert.deepEqual(paused.plan, original.plan);
+    assert.deepEqual(
+      paused.allowanceConsumption,
+      original.allowanceConsumption,
+    );
+    assert.equal(creates, 1);
     const abort = new AbortController();
     const queued = withProcessCancellation(abort.signal, () =>
-      gateway.objective(1),
+      github.objective(1),
     );
     abort.abort();
     await assert.rejects(queued);
-    assert.equal(reads, 1);
-    assert.deepEqual(readContinuation(config.repository, 1), original);
-    await assert.rejects(
-      application.runObjective(1),
-      /preparation stopped|unknown outcome/,
-    );
+    assert.equal(reads.length, 1);
+    // Supported resume re-observes through the same rate gate, then encounters
+    // the original unknown projection fence rather than creating a replacement.
+    await controlObjective(config, { objective: 1, action: "resume" });
+    await stoppedRun;
+    assert.equal(reads.length, 2);
+    assert.ok(reads[1] - reads[0] >= 90);
     const stopped = readContinuation(config.repository, 1);
     assert.equal(stopped.runId, original.runId);
     assert.deepEqual(stopped.plan, original.plan);

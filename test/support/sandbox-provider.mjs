@@ -120,6 +120,7 @@ export class FixtureSandboxProvider {
     };
   }
   async destroy(h) {
+    if (!this.resources.has(h.identity)) return;
     this.own(h);
     if (this.destroyFailure) throw Error("sandbox destruction not confirmed");
     for (const s of this.processes.values())

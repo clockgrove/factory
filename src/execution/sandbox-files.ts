@@ -61,6 +61,15 @@ export function sandboxFiles(worktree: string): SandboxFile[] {
     visit(path);
   return [...paths].sort().flatMap((path) => {
     sandboxPath(path);
+    const parts = path.split("/");
+    for (let index = 1; index < parts.length; index++) {
+      const parent = lstatSync(join(worktree, ...parts.slice(0, index)), {
+        throwIfNoEntry: false,
+      });
+      if (!parent) return [];
+      if (!parent.isDirectory() || parent.isSymbolicLink())
+        throw new Error(`Unsupported sandbox result parent ${path}`);
+    }
     const stat = lstatSync(join(worktree, path), { throwIfNoEntry: false });
     if (!stat) return [];
     if (!stat.isFile() || stat.isSymbolicLink())

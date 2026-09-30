@@ -31,6 +31,8 @@ import type { SandboxInvocation, SandboxReply } from "./sandbox-worker.js";
 interface Active {
   request: ExecutionRequest;
   terminal?: "complete" | "cancelled";
+  result?: ExecutionResult;
+  harnessStarted?: boolean;
   phase:
     | "creating"
     | "preparing"
@@ -166,6 +168,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     )
       throw new Error("Sandbox reply identity mismatch");
     a.phase = "ready";
+    if (operation === "start") a.harnessStarted = true;
     delete a.process;
     delete a.operation;
     delete a.output;
@@ -240,6 +243,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<ExecutionObservation> {
     const a = this.active(handle);
+    if (a.result) return { state: "complete" };
     if (a.phase === "destroyed") return { state: a.terminal! };
     if (a.operation === "start") await this.invoke(handle, "start", context);
     const result = (await this.invoke(
@@ -258,6 +262,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
   ): Promise<void> {
     const a = this.active(handle);
     a.phase = "destroying";
+    a.terminal = terminal;
     this.save(handle, context);
     await this.options.provider.destroy(a.sandbox!);
     a.phase = "destroyed";
@@ -288,8 +293,8 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       delete a.process;
       this.save(handle, context);
     }
-    if (a.phase === "preparing") {
-      await this.destroy(handle, "cancelled", context);
+    if (a.phase === "destroying" || !a.harnessStarted) {
+      await this.destroy(handle, a.terminal ?? "cancelled", context);
       return;
     }
     if (a.inputDigest) {
@@ -308,6 +313,26 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<ExecutionResult> {
     const a = this.active(handle);
+    if (a.result) {
+      if (a.phase !== "destroyed")
+        await this.destroy(handle, "complete", context);
+      return a.result;
+    }
+    if (a.operation !== "collect") {
+      let observed = await this.observe(handle, context);
+      while (observed.state === "running") {
+        if (context?.cancelled())
+          throw new Error(
+            "Sandbox collection interrupted; owned attempt retained",
+          );
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        observed = await this.observe(handle, context);
+      }
+      if (observed.state !== "complete")
+        throw new Error(
+          `Sandbox harness ${observed.state}; no complete result`,
+        );
+    }
     const value = (await this.invoke(handle, "collect", context)) as {
       files: SandboxFile[];
       result: HarnessResult;
@@ -337,6 +362,8 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       result.changeRef,
     );
     delete result.collection;
+    a.result = result;
+    this.save(handle, context);
     await this.destroy(handle, "complete", context);
     return result;
   }

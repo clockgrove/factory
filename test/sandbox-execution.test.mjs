@@ -6,12 +6,14 @@ import {
   writeFileSync,
   readFileSync,
   rmSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import { SandboxExecutionDriver } from "../dist/index.js";
+import { sandboxFiles } from "../dist/execution/sandbox-files.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { executionContext } from "../dist/execution/checkpoint.js";
 import {
@@ -252,4 +254,95 @@ test("source and selected bytes reach the sandbox, and a complete AssetSet retur
   assert.equal(result.assets[0].members[0].ref.digest, selected.digest);
   assert.equal(result.assets[0].members[0].ref.bytes, 4);
   assert.equal(f.provider.resources.size, 0);
+});
+
+test("immediate collection waits for the running harness without a premature collect RPC", async (t) => {
+  const f = fixture(t);
+  const h = await f.driver.start(f.request, f.context);
+  let releaseAfterObservation;
+  const observed = new Promise((resolve) => {
+    releaseAfterObservation = resolve;
+  });
+  const download = f.provider.download.bind(f.provider);
+  f.provider.download = async (handle, output) => {
+    const transfer = await download(handle, output);
+    const reply = JSON.parse(readFileSync(output.localPath, "utf8"));
+    if (reply.operation === "observe" && reply.value.state === "running")
+      releaseAfterObservation();
+    return transfer;
+  };
+  const collecting = f.driver.collect(h, f.context);
+  await observed;
+  assert.equal(f.provider.resources.size, 1);
+  release(f, h);
+  const result = await collecting;
+  assert.equal(f.git("show", result.changeRef + ":keep.txt"), "changed");
+  assert.equal(f.provider.resources.size, 0);
+});
+
+test("completed result survives restart after destruction and a recoverable cleanup failure", async (t) => {
+  for (const failure of ["after-destroy", "cleanup"]) {
+    const f = fixture(t);
+    const h = await f.driver.start(f.request, f.context);
+    release(f, h);
+    if (failure === "cleanup") f.provider.destroyFailure = true;
+    let latest;
+    const context = {
+      cancelled: () => false,
+      checkpoint(handle) {
+        latest = structuredClone(handle);
+        if (failure === "after-destroy" && handle.data.phase === "destroyed")
+          throw Error("controller stopped");
+      },
+    };
+    await assert.rejects(
+      f.driver.collect(h, context),
+      /controller stopped|destruction/,
+    );
+    assert(latest.data.result.changeRef);
+    const starts = f.provider.starts;
+    f.provider.destroyFailure = false;
+    const restored = JSON.parse(JSON.stringify(latest));
+    const next = new SandboxExecutionDriver(f.options);
+    const result = await next.collect(restored);
+    assert.deepEqual(result, latest.data.result);
+    assert.equal(f.git("show", result.changeRef + ":keep.txt"), "changed");
+    assert.equal(f.provider.starts, starts);
+    assert.equal(f.provider.resources.size, 0);
+  }
+});
+
+test("tracked file beneath an ignored symlinked parent cannot export outside bytes", (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.checkout, "nested"));
+  writeFileSync(join(f.checkout, "nested/tracked.txt"), "inside");
+  f.git("add", ".");
+  f.git("commit", "-qm", "nested baseline");
+  writeFileSync(join(f.checkout, ".gitignore"), "nested\n");
+  const outside = join(f.root, "outside");
+  mkdirSync(outside);
+  writeFileSync(join(outside, "tracked.txt"), "outside-sensitive-bytes");
+  rmSync(join(f.checkout, "nested"), { recursive: true });
+  symlinkSync(outside, join(f.checkout, "nested"));
+  assert.throws(
+    () => sandboxFiles(f.checkout),
+    /Unsupported sandbox result parent/,
+  );
+});
+
+test("failed input verification can cancel its known resource without a nonexistent harness handle", async (t) => {
+  const f = fixture(t);
+  f.provider.corruptInput = true;
+  await assert.rejects(
+    f.driver.start(f.request, f.context),
+    /input digest mismatch/,
+  );
+  const starts = f.provider.starts;
+  await new SandboxExecutionDriver(f.options).cancel(
+    JSON.parse(JSON.stringify(f.work.execution)),
+    f.context,
+  );
+  assert.equal(f.provider.starts, starts);
+  assert.equal(f.provider.resources.size, 0);
+  assert.equal(f.work.execution.data.terminal, "cancelled");
 });

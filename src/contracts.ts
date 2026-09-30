@@ -477,7 +477,7 @@ export interface SandboxProvider {
     handle: SandboxHandle,
     output: SandboxOutput,
   ): Promise<{ digest: string; bytes: number }>;
-  /** Resolve destruction of this sandbox and all owned processes; uncertainty must throw. */
+  /** Confirm this owned sandbox and all its processes are absent, including after an earlier destruction; uncertainty must throw. */
   destroy(handle: SandboxHandle): Promise<void>;
 }
 

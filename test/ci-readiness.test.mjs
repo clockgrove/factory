@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -663,4 +665,18 @@ test("fixed read query shares REST rate gate, rejects partial data and never cla
   );
   controller.abort();
   await assert.rejects(waiting);
+});
+
+test("regular discovery and pending CI settle before amendment without starving owner controls", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-ci-amend-parent-"));
+  try {
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      [join(import.meta.dirname, "support/ci-readiness-amendment.mjs"), root],
+      { timeout: 15_000, killSignal: "SIGKILL", maxBuffer: 128 * 1024 },
+    );
+    assert.match(stdout, /discovery and CI wait completed/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

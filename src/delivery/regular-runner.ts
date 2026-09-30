@@ -59,6 +59,7 @@ export async function runRegularGraph(args: {
   active: Map<string, Promise<void>>;
   cancelled: () => boolean;
   paused?: () => boolean;
+  amendmentPending?: () => boolean;
   reconcile?: () => Promise<void>;
   diagnostics?: DiagnosticEmitter;
 }): Promise<boolean> {
@@ -189,6 +190,7 @@ export async function runRegularGraph(args: {
           store: contentStore,
           save,
           cancelled: args.cancelled,
+          paused: args.paused,
           phases,
         });
         return;
@@ -498,7 +500,7 @@ export async function runRegularGraph(args: {
         work.status = "waiting";
         work.step = "approve-result";
         work.acceptancePending = error.pending;
-        if (!args.cancelled() && !args.paused?.())
+        if (!args.cancelled() && !args.paused?.() && !args.amendmentPending?.())
           prepareEvidenceRecovery(state, item.id);
         save();
         return;
@@ -535,7 +537,10 @@ export async function runRegularGraph(args: {
               state.additionalSources,
             ),
             save,
-            stopped: () => args.cancelled() || Boolean(args.paused?.()),
+            stopped: () =>
+              args.cancelled() ||
+              Boolean(args.paused?.()) ||
+              Boolean(args.amendmentPending?.()),
           });
         } finally {
           phases.release(item.id);
@@ -618,42 +623,45 @@ export async function runRegularGraph(args: {
     });
     const slots = graph.items.length;
     let workerSlots = phases.availableSlots(reported);
-    const ready = args.paused?.()
-      ? []
-      : readyItems(
-          graph,
-          state.work,
-          new Set([
-            ...active.keys(),
-            ...graph.items
-              .filter((item) =>
-                ["waiting", "published"].includes(state.work[item.id]!.status),
-              )
-              .map((item) => item.id),
-          ]),
-          slots,
-        ).filter((item) => {
-          const blocked =
-            item.kind === "qa" || item.kind === "aggregate"
-              ? undefined
-              : (phases.reason(item.id, "coding") ??
-                (workerSlots <= 0
-                  ? reported === "unknown"
-                    ? "operator coding ceiling; provider capacity unknown"
-                    : "driver or operator coding capacity"
-                  : undefined));
-          if (blocked) {
-            state.work[item.id]!.waitingReason = blocked;
-            return false;
-          }
-          delete state.work[item.id]!.waitingReason;
-          if (item.kind !== "qa" && item.kind !== "aggregate") workerSlots--;
-          return true;
-        });
+    const ready =
+      args.paused?.() || args.amendmentPending?.()
+        ? []
+        : readyItems(
+            graph,
+            state.work,
+            new Set([
+              ...active.keys(),
+              ...graph.items
+                .filter((item) =>
+                  ["waiting", "published"].includes(
+                    state.work[item.id]!.status,
+                  ),
+                )
+                .map((item) => item.id),
+            ]),
+            slots,
+          ).filter((item) => {
+            const blocked =
+              item.kind === "qa" || item.kind === "aggregate"
+                ? undefined
+                : (phases.reason(item.id, "coding") ??
+                  (workerSlots <= 0
+                    ? reported === "unknown"
+                      ? "operator coding ceiling; provider capacity unknown"
+                      : "driver or operator coding capacity"
+                    : undefined));
+            if (blocked) {
+              state.work[item.id]!.waitingReason = blocked;
+              return false;
+            }
+            delete state.work[item.id]!.waitingReason;
+            if (item.kind !== "qa" && item.kind !== "aggregate") workerSlots--;
+            return true;
+          });
     if (ready.length) await args.reconcile?.();
     for (const item of ready) {
       if (args.cancelled()) throw new Error("Objective cancelled");
-      if (args.paused?.()) break;
+      if (args.paused?.() || args.amendmentPending?.()) break;
       const work = state.work[item.id]!;
       work.status = "running";
       work.step = "execute";

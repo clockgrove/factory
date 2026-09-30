@@ -440,6 +440,7 @@ export async function runNativeGraph(args: {
         store: contentStore,
         save,
         cancelled: args.cancelled,
+        paused: args.paused,
         phases,
       });
       if (state.work[item.id]?.status !== "done") return settlePrepared();

@@ -960,8 +960,10 @@ export async function runObjective(
       if (objectiveComplete(result) || result.cancelledAt || !result.admission)
         return result;
       if (
+        result.coordinator?.mode === "running" &&
         amendmentBlocksDispatch(result) &&
-        result.pendingAmendment?.phase !== "rejected"
+        result.pendingAmendment?.phase !== "rejected" &&
+        !hasReadinessWait(result)
       )
         continue;
       if (
@@ -1731,9 +1733,8 @@ async function runObjectivePass(
           save(state);
         },
         cancelled: cancellationRequested,
-        paused: () =>
-          state.coordinator?.mode !== "running" ||
-          amendmentBlocksDispatch(state),
+        paused: () => state.coordinator?.mode !== "running",
+        amendmentPending: () => amendmentBlocksDispatch(state),
         diagnostics,
       });
       if (awaitingSelection) return state;

@@ -81,11 +81,20 @@ export async function runQaItem(args: {
   store: ContentStore;
   save: () => void;
   cancelled: () => boolean;
+  paused?: () => boolean;
   diagnostics?: DiagnosticEmitter;
   phases?: PhaseAdmission;
 }): Promise<void> {
   const { state, item, save } = args;
   const work = state.work[item.id]!;
+  const readinessWasWaiting = Boolean(work.waitingReason);
+  const retainPausedWait = (): boolean => {
+    if (!readinessWasWaiting || !args.paused?.()) return false;
+    work.waitingReason ??= "Awaiting exact named CI before continuing QA";
+    args.phases?.release(item.id);
+    save();
+    return true;
+  };
   try {
     if (work.pendingEffect)
       throw new Error(
@@ -164,12 +173,14 @@ export async function runQaItem(args: {
         throw new Error(
           `Required named CI check ${proof.checkName} is stale, invalid, or failing at ${target.changeRef}`,
         );
+      if (retainPausedWait()) return;
       work.qaChecks.push(check);
       save();
     }
-    delete work.waitingReason;
     await args.phases?.reserve(item.id, "validation");
+    if (retainPausedWait()) return;
     await preflightItemEnvironment({ ...args, baseSha: commit });
+    if (retainPausedWait()) return;
     work.validation = await validateWorkItem(
       args.config.checkout,
       join(args.root, "validation"),
@@ -185,7 +196,10 @@ export async function runQaItem(args: {
       workspacePackageAdditions(args.objectiveBody),
     );
     if (args.cancelled()) throw new Error("Objective cancelled");
+    if (retainPausedWait()) return;
     await args.phases?.reserve(item.id, "review");
+    if (retainPausedWait()) return;
+    delete work.waitingReason;
     work.pendingEffect = "review";
     save();
     work.validation = await reviewAcceptance({

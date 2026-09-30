@@ -2,6 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.52 — 2026-09-30
+
+- Retain exact controller-owned started Work Items through transient amendment references instead of asking the planner to regenerate historical definitions. Keep source-owned coverage choices and complete independent graph validation/review (#350).
+
+Release candidate; publication and exact installed/public verification are pending. Full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier published artifact and qualification records retain their original scope.
+
 ## 0.1.51 — 2026-09-30
 
 - Require source-owned QA coverage at the emitted planner choice and strict decoder boundary, preserving work/aggregate alternatives and original final obligations (#345).

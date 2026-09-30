@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** [v0.1.51](https://github.com/clockgrove/factory/releases/tag/v0.1.51) is published with [independent public artifact and pinned plugin verification](https://github.com/clockgrove/factory/issues/345#issuecomment-5915659441), offline installation and four exact installed checks for source-owned QA coverage and diagnosed amendment replacement. Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) for exact artifact and scenario records, and [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) for operator intervention.
+**Status:** The v0.1.52 candidate preserves started Work Items during discovery amendments ([#350](https://github.com/clockgrove/factory/issues/350)); publication and exact installed/public verification are pending. Published [v0.1.51 evidence](https://github.com/clockgrove/factory/issues/345#issuecomment-5915659441) retains its original artifact scope. Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) for exact artifact and scenario records, and [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) for operator intervention.
 
 ## Requirements
 
@@ -24,14 +24,14 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The published v0.1.51 plugin and CLI have matching, independently verified bytes. Check the [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md#immutable-v0151-artifact-record) before installing:
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select the v0.1.52 candidate. Use them only after that release is published and its plugin/archive verification is recorded in the [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md); source integration alone is not installation acceptance:
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.51
+codex plugin marketplace add clockgrove/factory --ref v0.1.52
 codex plugin add factory@clockgrove
 
-gh release download v0.1.51 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.51.tgz --pattern SHA256SUMS
+gh release download v0.1.52 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.52.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
@@ -41,7 +41,7 @@ Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.51.tgz
+  ./clockgrove-factory-0.1.52.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

@@ -207,6 +207,7 @@ export interface PlanningRequest<T> {
     objectiveNumber: number;
     instructions: string;
     previousGraph?: WorkGraph;
+    immutableItemIds?: string[];
   };
   purpose?: "diagnosis";
   coverageObligations?: CoverageObligation[];

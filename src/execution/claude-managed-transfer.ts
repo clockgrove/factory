@@ -137,7 +137,7 @@ try{const sets=JSON.parse(readFileSync('.factory-assets.json','utf8')).sets;if(!
 const paths=[...new Set([...declared,...execFileSync('git',['ls-files','--cached','--others','--exclude-standard','-z'],{encoding:'utf8'}).split('\0').filter(Boolean)])];
 for(const path of paths){
  if(typeof path!=='string'||!path||path.includes('\\')||path.includes('\0')||path.split('/').some(p=>!p||p==='.'||p==='..'||p.toLowerCase()==='.git'))throw new Error('Unsafe output path');
- const parts=path.split('/');for(let i=1;i<parts.length;i++)if(!lstatSync(parts.slice(0,i).join('/')).isDirectory())throw new Error('Unsafe output parent');
+ const parts=path.split('/');let missingParent=false;for(let i=1;i<parts.length;i++){try{if(!lstatSync(parts.slice(0,i).join('/')).isDirectory())throw new Error('Unsafe output parent');}catch(e){if(e.code==='ENOENT'){missingParent=true;break;}throw e;}}if(missingParent)continue;
  let stat;try{stat=lstatSync(path);}catch(e){if(e.code==='ENOENT')continue;throw e;}
  if(!stat.isFile()&&!stat.isSymbolicLink())throw new Error('Unsupported output file type: '+path);
  const bytes=stat.isSymbolicLink()?Buffer.from(readlinkSync(path)):readFileSync(path);

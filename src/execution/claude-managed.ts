@@ -232,6 +232,14 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
           id: event.id,
           type: event.type,
           processed_at: event.processed_at ?? null,
+          ...(event.type === "session.status_idle" && {
+            stop_reason: event.stop_reason,
+          }),
+          ...(event.type === "agent.tool_use" && { name: event.name }),
+          ...(event.type === "agent.tool_result" && {
+            tool_use_id: event.tool_use_id,
+            is_error: event.is_error ?? false,
+          }),
         })),
       }),
     );
@@ -453,7 +461,13 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       });
       if (turn.state === "running") return { state: "running" };
       if (turn.state !== "output-pending")
-        return { state: "failed", detail: "Claude bootstrap failed" };
+        return {
+          state: "failed",
+          detail:
+            turn.state === "failed"
+              ? turn.detail
+              : "Claude bootstrap was interrupted",
+        };
       const output = await this.file(data, "factory-bootstrap.json");
       if (!output)
         return {
@@ -471,65 +485,6 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       data.bootstrap = proof;
       data.phase = "bootstrap-verified";
       this.save(handle, context);
-      if (!context || context.cancelled())
-        throw new Error("Claude implementation cancelled before submission");
-      await this.client.verifyEnvironment(this.remaining(data));
-      const current = await this.client.retrieve(
-        data.sessionId,
-        this.remaining(data),
-      );
-      this.assertSession(current, handle);
-      if (
-        current.status !== "idle" ||
-        historyDigest(
-          await this.client.events(data.sessionId, this.remaining(data)),
-        ) !== proof.historyDigest
-      )
-        throw new Error(
-          "Claude bootstrap changed before implementation submission",
-        );
-      const sources = data.request.sourceAssets ?? [];
-      let privateIndex = 0;
-      const prompt = workItemPrompt({
-        ...data.request,
-        worktree: workspace,
-        sourceAssets: sources.map((source) => ({
-          ...source,
-          ...((source.binding.kind === "local" ||
-            source.binding.kind === "github-attachment") && {
-            path: `${workspace}/.factory-inputs/source-${privateIndex++}`,
-          }),
-        })),
-        selectedAssets: (data.request.selectedAssets ?? []).map(
-          (asset, index) => ({
-            ...asset,
-            path: `${workspace}/.factory-inputs/selected-${index}`,
-          }),
-        ),
-      });
-      data.phase = "implementation-submitted";
-      this.save(handle, context);
-      const sent = await this.client.send(
-        data.sessionId,
-        {
-          type: "user.message",
-          content: [
-            {
-              type: "text",
-              text: `${prompt}\nWork in ${workspace}. When complete, export exact bytes using: cd ${workspace} && node ${uploads}/factory-export.mjs ${uploads}/factory-binding.json ${outputs}/factory-result.json . Do not encode binary bytes in your answer.`,
-            },
-          ],
-        },
-        this.remaining(data),
-      );
-      const event = sent.data?.[0];
-      if (sent.data?.length !== 1 || event?.type !== "user.message")
-        throw new Error(
-          "Claude implementation submission acknowledgement is ambiguous",
-        );
-      data.implementationEventId = event.id;
-      data.phase = "running";
-      this.save(handle, context);
       return { state: "running" };
     }
     if (!data.implementationEventId) return { state: "running" };
@@ -542,7 +497,8 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     if (turn.state !== "output-pending")
       return {
         state: "failed",
-        detail: "Claude turn did not complete normally",
+        detail:
+          turn.state === "failed" ? turn.detail : "Claude turn was interrupted",
       };
     if (session.status !== "idle") return { state: "running" };
     const output = await this.file(data, "factory-result.json");
@@ -566,6 +522,82 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     data.phase = "result-ready";
     this.save(handle, context);
     return { state: "complete" };
+  }
+  private async submitImplementation(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<void> {
+    const data = this.active(handle);
+    if (
+      data.phase !== "bootstrap-verified" ||
+      !data.bootstrap ||
+      !data.sessionId
+    )
+      throw new Error(
+        "Claude implementation requires verified bootstrap identity",
+      );
+    const proof = data.bootstrap;
+    if (!context || context.cancelled())
+      throw new Error("Claude implementation cancelled before submission");
+    await this.client.verifyEnvironment(this.remaining(data));
+    const current = await this.client.retrieve(
+      data.sessionId,
+      this.remaining(data),
+    );
+    this.assertSession(current, handle);
+    if (
+      current.status !== "idle" ||
+      historyDigest(
+        await this.client.events(data.sessionId, this.remaining(data)),
+      ) !== proof.historyDigest
+    )
+      throw new Error(
+        "Claude bootstrap changed before implementation submission",
+      );
+    const sources = data.request.sourceAssets ?? [];
+    let privateIndex = 0;
+    const prompt = workItemPrompt({
+      ...data.request,
+      worktree: workspace,
+      sourceAssets: sources.map((source) => ({
+        ...source,
+        ...((source.binding.kind === "local" ||
+          source.binding.kind === "github-attachment") && {
+          path: `${workspace}/.factory-inputs/source-${privateIndex++}`,
+        }),
+      })),
+      selectedAssets: (data.request.selectedAssets ?? []).map(
+        (asset, index) => ({
+          ...asset,
+          path: `${workspace}/.factory-inputs/selected-${index}`,
+        }),
+      ),
+    });
+    if (context.cancelled())
+      throw new Error("Claude implementation cancelled before submission");
+    data.phase = "implementation-submitted";
+    this.save(handle, context);
+    const sent = await this.client.send(
+      data.sessionId,
+      {
+        type: "user.message",
+        content: [
+          {
+            type: "text",
+            text: `${prompt}\nWork in ${workspace}. When complete, export exact bytes using: cd ${workspace} && node ${uploads}/factory-export.mjs ${uploads}/factory-binding.json ${outputs}/factory-result.json . Do not encode binary bytes in your answer.`,
+          },
+        ],
+      },
+      this.remaining(data),
+    );
+    const event = sent.data?.[0];
+    if (sent.data?.length !== 1 || event?.type !== "user.message")
+      throw new Error(
+        "Claude implementation submission acknowledgement is ambiguous",
+      );
+    data.implementationEventId = event.id;
+    data.phase = "running";
+    this.save(handle, context);
   }
   private async dispose(
     handle: ExecutionHandle,
@@ -735,7 +767,9 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       if (observation.state === "complete") break;
       if (observation.state !== "running")
         throw new Error(observation.detail ?? "Claude execution failed");
-      await this.wait(data);
+      if (data.phase === "bootstrap-verified")
+        await this.submitImplementation(handle, context);
+      else await this.wait(data);
     }
     const bytes = readFileSync(join(data.root, "result.json"));
     if (

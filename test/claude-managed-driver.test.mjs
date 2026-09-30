@@ -211,6 +211,10 @@ function fixture(t) {
       }));
     },
     async download(id) {
+      if (state.failDownload) {
+        state.failDownload = false;
+        throw new Error("transient output read");
+      }
       return new Response(state.outputs.get(id));
     },
     async deleteSession(id) {
@@ -277,8 +281,8 @@ test("Claude driver verifies bootstrap before implementation and collects exact 
   const handle = await f.driver().start(f.request, f.context);
   assert.equal(f.state.sends, 1);
   assert.equal((await f.driver().observe(handle, f.context)).state, "running");
-  assert.equal(f.state.sends, 2);
-  assert.equal((await f.driver().observe(handle, f.context)).state, "running"); // publication lag
+  assert.equal(f.state.sends, 1);
+  assert.equal((await f.driver().observe(handle, f.context)).state, "running"); // observation never submits
   f.output(handle);
   const result = await f.driver().collect(structuredClone(handle), f.context);
   assert.equal(f.git("show", `${result.changeRef}:keep.txt`), "changed");
@@ -330,7 +334,7 @@ test("Claude lost implementation send preserves bootstrap proof without replay",
   const f = fixture(t);
   const handle = await f.driver().start(f.request, f.context);
   f.state.failSend = true;
-  await assert.rejects(f.driver().observe(handle, f.context), /lost send/);
+  await assert.rejects(f.driver().collect(handle, f.context), /lost send/);
   assert.equal(f.saved.at(-1).data.phase, "implementation-submitted");
   assert.ok(f.saved.at(-1).data.bootstrap);
   await assert.rejects(
@@ -359,9 +363,28 @@ test("Claude refuses changed resources before implementation and reports budget 
         })),
     ),
   );
-  await f.driver().observe(handle, f.context);
   f.state.events.at(-1).stop_reason = { type: "budget_reached" };
-  assert.equal((await f.driver().observe(handle, f.context)).state, "failed");
+  f.state.events.find((e) => e.id === "toolresult").is_error = true;
+  assert.equal(
+    (await f.driver().observe(handle, f.context)).detail,
+    "Claude stopped: budget_reached",
+  );
+  await f.driver().cancel(handle, f.context);
+  const evidence = JSON.parse(
+    readFileSync(join(handle.data.root, "provider-evidence.json")),
+  );
+  assert.equal(
+    evidence.events.find((e) => e.id === "bootstrap_end").stop_reason.type,
+    "budget_reached",
+  );
+  assert.equal(
+    evidence.events.find((e) => e.id === "toolresult").tool_use_id,
+    "tool",
+  );
+  assert.equal(
+    evidence.events.find((e) => e.id === "toolresult").is_error,
+    true,
+  );
 });
 test("Claude verifies actual returned selected bytes instead of restoring originals", async (t) => {
   const f = fixture(t);
@@ -425,4 +448,20 @@ test("Claude preserves binary selected bytes through the ordinary collector", as
       .git("ls-tree", "-r", "--name-only", collected.changeRef)
       .includes(".factory-inputs"),
   );
+});
+
+test("failure cleanup observation after a bootstrap read error never submits implementation", async (t) => {
+  const f = fixture(t);
+  const handle = await f.driver().start(f.request, f.context);
+  f.state.failDownload = true;
+  await assert.rejects(
+    f.driver().collect(handle, f.context),
+    /transient output read/,
+  );
+  // Same observe-before-cancel sequence used by runner failure cleanup, even with cancelled() false.
+  assert.equal((await f.driver().observe(handle, f.context)).state, "running");
+  assert.equal(f.state.sends, 1);
+  await f.driver().cancel(handle, f.context);
+  assert.equal(f.state.sends, 1);
+  assert.equal(f.saved.at(-1).data.phase, "disposed");
 });

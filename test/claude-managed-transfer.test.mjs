@@ -44,6 +44,8 @@ test("Claude deterministic exporter round-trips binary, deletion, links and decl
     const git = (...args) => execFileSync("git", args, { cwd, stdio: "pipe" });
     git("init", "-q");
     writeFileSync(join(cwd, "removed"), "old");
+    mkdirSync(join(cwd, "deleted-directory"));
+    writeFileSync(join(cwd, "deleted-directory/file"), "old nested");
     writeFileSync(join(cwd, ".gitignore"), "media/\n");
     git("add", ".");
     git(
@@ -56,6 +58,7 @@ test("Claude deterministic exporter round-trips binary, deletion, links and decl
       "baseline",
     );
     unlinkSync(join(cwd, "removed"));
+    rmSync(join(cwd, "deleted-directory"), { recursive: true });
     const binary = Buffer.from(Array.from({ length: 4096 }, (_, i) => i % 256));
     writeFileSync(join(cwd, "binary.dat"), binary);
     symlinkSync("binary.dat", join(cwd, "link"));
@@ -73,6 +76,9 @@ test("Claude deterministic exporter round-trips binary, deletion, links and decl
     execFileSync(process.execPath, [script, receipt, output], { cwd });
     const result = parseClaudeResultSnapshot(readFileSync(output), binding);
     assert.ok(!result.files.some((f) => f.path === "removed"));
+    assert.ok(
+      !result.files.some((f) => f.path.startsWith("deleted-directory/")),
+    );
     assert.ok(result.files.some((f) => f.path === "media/approved.bin"));
     const dest = join(root, "result");
     materializeClaudeSnapshot(dest, result);

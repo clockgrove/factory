@@ -1,8 +1,64 @@
 # Release artifact records
 
-Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and [execution gates #206](https://github.com/clockgrove/factory/issues/206) and [final acceptance #207](https://github.com/clockgrove/factory/issues/207). This document records immutable distribution evidence, not a second work queue.
+Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and their issues. This document records immutable distribution evidence, not a second work queue.
 
-The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under #206 and explicitly accepted under #207. Historical observations below retain their original artifact and scenario scope.
+The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
+
+## Immutable v0.1.48 artifact record
+
+[Release v0.1.48](https://github.com/clockgrove/factory/releases/tag/v0.1.48)
+was built once from corrected reviewed source
+`47706bd9d46652c58307df50dcc8afeaf40feb77`, tree
+`39ceaa82f0e58a714d3b6eb40e3737fd4c14afb4`. The archive is 153577484 bytes,
+SHA-256 `79cba3622b9b10f1b78fde63de3368293f8ec673171cf27b4a4760c1c2898f19`,
+recorded in the [independent prepublication checkpoint](https://github.com/clockgrove/factory/issues/333#issuecomment-5910660120).
+[PR #336](https://github.com/clockgrove/factory/pull/336) records the corrected
+source and two independent review rounds. Integrated main
+`70b9ab6e7085e4244c93caef7858661451b7729c` has the identical tree and passed
+[its own CI](https://github.com/clockgrove/factory/actions/runs/36709319586).
+The coordinated candidate gate passed all 621 deterministic tests, build,
+typecheck, lint, formatting, notices and packaging.
+
+Independent empty-cache offline installation on Linux x64/WSL2 with Node
+24.20.0 and npm 11.19.0 matched all 6357 regular archive files, 95 bundled
+lock-addressed dependency roots and 94 bundled license files. Notices,
+installed CLI help, manifests, skills and archived installation guidance passed.
+The guidance pins the matching v0.1.48 plugin, Release and offline archive.
+Its candidate label and conditional publication wording remain frozen; this
+record supplies the later publication facts without changing those bytes.
+[Independent public verification](https://github.com/clockgrove/factory/issues/333#issuecomment-5910899384)
+matched the anonymously downloaded archive and public `SHA256SUMS` to the
+audited bytes above. The isolated pinned v0.1.48 marketplace plugin was enabled
+at the exact tagged source; its manifest and both skills matched the public
+archive byte for byte. Actual archived version-matched guidance passed.
+Annotated tag `1b588dc0424adac211b8d7cc46d34eee6c0bbc7d` resolves to the
+source above. Exact-tag ruleset `24239781` prohibits updates and deletion with
+no bypass actors or exclusions.
+
+This release retains exact reviewed published results while checks or target
+protection readiness wait, without another implementation or review call
+([#335](https://github.com/clockgrove/factory/issues/335)). It includes isolated-XDG
+supervisor registration/lifecycle
+([#327](https://github.com/clockgrove/factory/issues/327)), preparing diagnostics
+([#328](https://github.com/clockgrove/factory/issues/328)), phase-appropriate
+planning/final review and protected-delivery evidence
+([#331](https://github.com/clockgrove/factory/issues/331)), and version-matched
+archived installation guidance ([#325](https://github.com/clockgrove/factory/issues/325)).
+
+Exact installed model-free checks passed all 27 mandatory readiness cases
+without skips, all seven delivery-evidence cases and the isolated-config
+supervision lifecycle. All production imports resolved to the audited package;
+the lifecycle's owned unit was removed through packaged uninstall and ended
+not found, inactive, with PID zero. These checks made no provider calls and do
+not establish actual GitHub delivery or model-backed Objective acceptance.
+
+Public workspace acceptance in
+[#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47;
+full installed autonomous qualification remains
+[#253](https://github.com/clockgrove/factory/issues/253). Hosted managed execution and live
+sandbox-provider qualification remain in their own issues. Earlier unpublished
+candidates, failures and accounting are preserved. This corrected artifact was
+frozen before publication; no published tag or archive was rebuilt or replaced.
 
 ## Immutable v0.1.47 artifact record
 

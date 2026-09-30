@@ -361,7 +361,7 @@ For an existing admitted continuation, omit `--plan` and `--admission`. Registra
 
 To change installed artifacts, use `factory supervisor upgrade --cli /absolute/new-package/dist/cli.js --config /private/factory.json`. Factory asks that artifact to validate the actual continuation before draining and again after owned work settles, then switches the unit. Rollback uses the same operation and refuses if the older artifact cannot validate retained state. No state fields, allowances or evidence are reset. A failed activation leaves the selected unit and evidence inspectable; it does not silently choose another artifact.
 
-`supervisor disable` drains and stops before disabling future starts. `supervisor uninstall` also removes the owned unit. Both retain target binding, snapshots, results, logs and accounting. Neither removes the target repository or provider authentication. Raw systemd stop sends a graceful drain request only to the owner and does not kill detached workers; unresolved work can therefore keep it waiting. Prefer the packaged stop command for bounded diagnostics.
+`supervisor disable` drains and stops before disabling future automatic starts. The owned unit remains registered for explicit start, upgrade or uninstall. `supervisor uninstall` also removes the owned unit. Both retain target binding, snapshots, results, logs and accounting. Neither removes the target repository or provider authentication. Raw systemd stop sends a graceful drain request only to the owner and does not kill detached workers; unresolved work can therefore keep it waiting. Prefer the packaged stop command for bounded diagnostics.
 
 ## Run a finite batch of Objectives
 

@@ -244,6 +244,13 @@ try {
   assert.equal(snapshot().runId, state.runId);
   report.checks.push("compatible exact-artifact handoff and restart");
   run("supervisor", "disable");
+  const disabled = JSON.parse(run("supervisor", "status"));
+  assert.equal(disabled.registered, true);
+  assert.notEqual(disabled.enabled, "enabled");
+  assert.notEqual(disabled.enabled, "not-found");
+  run("supervisor", "upgrade", "--cli", cli);
+  assert.notEqual(JSON.parse(run("supervisor", "status")).enabled, "enabled");
+  run("supervisor", "disable");
   assert.equal(
     existsSync(join(stateRoot(config.repository), "controller.lock")),
     false,

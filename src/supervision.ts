@@ -459,6 +459,9 @@ export async function supervise(
       return { artifact: candidate.cli, restarted: wasActive };
     }
     if (action !== "stop") systemctl("disable", name);
+    // Disable removes external-unit links too. Keep the owned unit discoverable
+    // for explicit start, upgrade and uninstall, without enabling future starts.
+    if (action === "disable") systemctl("link", realpathSync(path));
     if (action === "uninstall") {
       rmSync(path);
       systemctl("daemon-reload");

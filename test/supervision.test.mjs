@@ -34,9 +34,29 @@ async function fixture(fn) {
   process.env.PATH = `${bin}:${process.env.PATH}`;
   writeFileSync(
     join(bin, "systemctl"),
-    '#!/bin/sh\nprintf "%s\\n" "$*" >> "' +
-      root +
-      '/calls"\ncase "$2" in enable) case "$3" in /*) test -f "$3" || exit 1;; *) echo "Unit not found in manager search path" >&2; exit 1;; esac;; is-system-running) echo running;; is-active) echo inactive;; is-enabled) echo enabled;; esac\n',
+    `#!/bin/sh
+printf "%s\\n" "$*" >> "${root}/calls"
+case "$2" in
+  enable|link)
+    case "$3" in
+      /*) test -f "$3" || exit 1;;
+      *) echo "Unit not found in manager search path" >&2; exit 1;;
+    esac
+    printf "%s" "$3" > "${root}/registered"
+    if test "$2" = enable; then touch "${root}/enabled"; fi;;
+  disable)
+    test -f "${root}/registered" || { echo "Unit not found" >&2; exit 1; }
+    rm -f "${root}/registered" "${root}/enabled";;
+  stop)
+    test -f "${root}/registered" || { echo "Unit not found" >&2; exit 1; };;
+  is-system-running) echo running;;
+  is-active) echo inactive;;
+  is-enabled)
+    if test -f "${root}/enabled"; then echo enabled
+    elif test -f "${root}/registered"; then echo linked
+    else echo not-found; fi;;
+esac
+`,
     { mode: 0o700 },
   );
   writeFileSync(join(bin, "loginctl"), "#!/bin/sh\necho no\n", { mode: 0o700 });
@@ -137,9 +157,33 @@ test("disable and uninstall retain identical admission, allowances and continuat
       before = readFileSync(stateFile);
     await supervise("install", configPath, { objective: 1 });
     await supervise("disable", configPath);
+    assert.equal((await supervise("status", configPath)).enabled, "linked");
+    await supervise("disable", configPath);
     await supervise("uninstall", configPath);
     await supervise("uninstall", configPath);
     assert.deepEqual(readFileSync(stateFile), before);
+    assert.equal((await supervise("status", configPath)).registered, false);
+  }));
+
+test("a disabled isolated unit remains upgradeable without enabling or starting it", () =>
+  fixture(async ({ root, config, configPath }) => {
+    await supervise("install", configPath, { objective: 1 });
+    await supervise("disable", configPath);
+    const candidate = join(root, "compatible-cli.mjs");
+    writeFileSync(
+      candidate,
+      'console.log("factory-supervision-compatible-v1")',
+    );
+    const result = await supervise("upgrade", configPath, { cli: candidate });
+    assert.equal(result.restarted, false);
+    const status = await supervise("status", configPath);
+    assert.equal(status.enabled, "linked");
+    assert.equal(status.binding.cli, candidate);
+    assert.doesNotMatch(
+      readFileSync(join(root, "calls"), "utf8"),
+      /--user start/,
+    );
+    await supervise("uninstall", configPath);
     assert.equal((await supervise("status", configPath)).registered, false);
   }));
 

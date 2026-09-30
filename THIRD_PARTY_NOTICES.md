@@ -13,7 +13,7 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `@anthropic-ai/claude-agent-sdk-linux-x64-musl` | 0.3.281 | SEE LICENSE IN LICENSE.md | `@anthropic-ai/claude-agent-sdk@0.3.281/LICENSE.md (same published SDK family)` |
 | `@anthropic-ai/claude-agent-sdk-win32-arm64` | 0.3.281 | SEE LICENSE IN LICENSE.md | `@anthropic-ai/claude-agent-sdk@0.3.281/LICENSE.md (same published SDK family)` |
 | `@anthropic-ai/claude-agent-sdk-win32-x64` | 0.3.281 | SEE LICENSE IN LICENSE.md | `@anthropic-ai/claude-agent-sdk@0.3.281/LICENSE.md (same published SDK family)` |
-| `@anthropic-ai/sdk` | 0.128.0 | MIT | `node_modules/@anthropic-ai/sdk/LICENSE` |
+| `@anthropic-ai/sdk` | 0.129.0 | MIT | `node_modules/@anthropic-ai/sdk/LICENSE` |
 | `@azu/format-text` | 1.0.2 | BSD-3-Clause | `npm @azu/format-text@1.0.2 metadata and SPDX license-list-data v3.29.0` |
 | `@azu/style-format` | 1.0.1 | WTFPL | `node_modules/@azu/style-format/LICENSE` |
 | `@babel/runtime` | 7.29.7 | MIT | `node_modules/@babel/runtime/LICENSE` |
@@ -27,6 +27,7 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `@github/copilot-sdk-win32-arm64` | 1.0.13 | MIT | `github/copilot-sdk v1.0.13 LICENSE (npm package omits the repository license file)` |
 | `@github/copilot-sdk-win32-x64` | 1.0.13 | MIT | `github/copilot-sdk v1.0.13 LICENSE (npm package omits the repository license file)` |
 | `@hono/node-server` | 2.1.1 | MIT | `node_modules/@hono/node-server/LICENSE` |
+| `@isaacs/fs-minipass` | 4.0.1 | ISC | `node_modules/@isaacs/fs-minipass/LICENSE` |
 | `@koromix/koffi-android-arm64` | 3.3.1 | MIT | `koffi@3.3.1/LICENSE.txt (same published package family)` |
 | `@koromix/koffi-android-x64` | 3.3.1 | MIT | `koffi@3.3.1/LICENSE.txt (same published package family)` |
 | `@koromix/koffi-darwin-arm64` | 3.3.1 | MIT | `koffi@3.3.1/LICENSE.txt (same published package family)` |
@@ -105,6 +106,7 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `bytes` | 3.1.2 | MIT | `node_modules/bytes/LICENSE` |
 | `call-bind-apply-helpers` | 1.0.2 | MIT | `node_modules/call-bind-apply-helpers/LICENSE` |
 | `call-bound` | 1.0.4 | MIT | `node_modules/call-bound/LICENSE` |
+| `chownr` | 3.0.0 | BlueOak-1.0.0 | `node_modules/chownr/LICENSE.md` |
 | `color-convert` | 2.0.1 | MIT | `node_modules/color-convert/LICENSE` |
 | `color-name` | 1.1.4 | MIT | `node_modules/color-name/LICENSE` |
 | `content-disposition` | 1.1.0 | MIT | `node_modules/content-disposition/LICENSE` |
@@ -166,6 +168,8 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `merge-descriptors` | 2.0.0 | MIT | `node_modules/merge-descriptors/license` |
 | `mime-db` | 1.54.0 | MIT | `node_modules/mime-db/LICENSE` |
 | `mime-types` | 3.0.2 | MIT | `node_modules/mime-types/LICENSE` |
+| `minipass` | 7.1.3 | BlueOak-1.0.0 | `node_modules/minipass/LICENSE.md` |
+| `minizlib` | 3.1.0 | MIT | `node_modules/minizlib/LICENSE` |
 | `ms` | 2.1.3 | MIT | `node_modules/ms/license.md` |
 | `negotiator` | 1.1.0 | MIT | `node_modules/negotiator/LICENSE` |
 | `content-type` | 2.1.0 | MIT | `node_modules/negotiator/node_modules/content-type/LICENSE` |
@@ -212,6 +216,7 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `ansi-regex` | 5.0.1 | MIT | `node_modules/table/node_modules/ansi-regex/license` |
 | `json-schema-traverse` | 1.0.0 | MIT | `node_modules/table/node_modules/json-schema-traverse/LICENSE` |
 | `strip-ansi` | 6.0.1 | MIT | `node_modules/table/node_modules/strip-ansi/license` |
+| `tar` | 7.5.22 | BlueOak-1.0.0 | `node_modules/tar/LICENSE.md` |
 | `terminal-link` | 5.0.0 | MIT | `node_modules/terminal-link/license` |
 | `text-table` | 0.2.0 | MIT | `node_modules/text-table/LICENSE` |
 | `textextensions` | 6.11.0 | Artistic-2.0 | `node_modules/textextensions/LICENSE.md` |
@@ -226,6 +231,7 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `vscode-jsonrpc` | 8.2.1 | MIT | `node_modules/vscode-jsonrpc/License.txt` |
 | `which` | 2.0.2 | ISC | `node_modules/which/LICENSE` |
 | `wrappy` | 1.0.2 | ISC | `node_modules/wrappy/LICENSE` |
+| `yallist` | 5.0.0 | BlueOak-1.0.0 | `node_modules/yallist/LICENSE.md` |
 | `yaml` | 2.9.0 | ISC | `node_modules/yaml/LICENSE` |
 | `zod` | 4.6.5 | MIT | `node_modules/zod/LICENSE` |
 | `zod-to-json-schema` | 3.25.2 | ISC | `node_modules/zod-to-json-schema/LICENSE` |
@@ -304,7 +310,7 @@ Source: `@anthropic-ai/claude-agent-sdk@0.3.281/LICENSE.md (same published SDK f
 © Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.
 ````
 
-### @anthropic-ai/sdk@0.128.0
+### @anthropic-ai/sdk@0.129.0
 
 Source: `node_modules/@anthropic-ai/sdk/LICENSE`
 
@@ -665,6 +671,28 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+````
+
+### @isaacs/fs-minipass@4.0.1
+
+Source: `node_modules/@isaacs/fs-minipass/LICENSE`
+
+````text
+The ISC License
+
+Copyright (c) Isaac Z. Schlueter and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
+IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ````
 
 ### @koromix/koffi-android-arm64@3.3.1
@@ -4757,6 +4785,76 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ````
 
+### chownr@3.0.0
+
+Source: `node_modules/chownr/LICENSE.md`
+
+````text
+All packages under `src/` are licensed according to the terms in
+their respective `LICENSE` or `LICENSE.md` files.
+
+The remainder of this project is licensed under the Blue Oak
+Model License, as follows:
+
+-----
+
+# Blue Oak Model License
+
+Version 1.0.0
+
+## Purpose
+
+This license gives everyone as much permission to work with
+this software as possible, while protecting contributors
+from liability.
+
+## Acceptance
+
+In order to receive this license, you must agree to its
+rules.  The rules of this license are both obligations
+under that agreement and conditions to your license.
+You must not do anything with this software that triggers
+a rule that you cannot or will not follow.
+
+## Copyright
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe that contributor's
+copyright in it.
+
+## Notices
+
+You must ensure that everyone who gets a copy of
+any part of this software from you, with or without
+changes, also gets the text of this license or a link to
+<https://blueoakcouncil.org/license/1.0.0>.
+
+## Excuse
+
+If anyone notifies you in writing that you have not
+complied with [Notices](#notices), you can keep your
+license by taking all practical steps to comply within 30
+days after the notice.  If you do not do so, your license
+ends immediately.
+
+## Patent
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe any patent claims
+they can license or become able to license.
+
+## Reliability
+
+No contributor can revoke this license.
+
+## No Liability
+
+***As far as the law allows, this software comes as is,
+without any warranty or condition, and no contributor
+will be liable to anyone for any damages related to this
+software or this license, under any kind of legal claim.***
+````
+
 ### color-convert@2.0.1
 
 Source: `node_modules/color-convert/LICENSE`
@@ -6684,6 +6782,101 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ````
 
+### minipass@7.1.3
+
+Source: `node_modules/minipass/LICENSE.md`
+
+````text
+# Blue Oak Model License
+
+Version 1.0.0
+
+## Purpose
+
+This license gives everyone as much permission to work with
+this software as possible, while protecting contributors
+from liability.
+
+## Acceptance
+
+In order to receive this license, you must agree to its
+rules.  The rules of this license are both obligations
+under that agreement and conditions to your license.
+You must not do anything with this software that triggers
+a rule that you cannot or will not follow.
+
+## Copyright
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe that contributor's
+copyright in it.
+
+## Notices
+
+You must ensure that everyone who gets a copy of
+any part of this software from you, with or without
+changes, also gets the text of this license or a link to
+<https://blueoakcouncil.org/license/1.0.0>.
+
+## Excuse
+
+If anyone notifies you in writing that you have not
+complied with [Notices](#notices), you can keep your
+license by taking all practical steps to comply within 30
+days after the notice.  If you do not do so, your license
+ends immediately.
+
+## Patent
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe any patent claims
+they can license or become able to license.
+
+## Reliability
+
+No contributor can revoke this license.
+
+## No Liability
+
+***As far as the law allows, this software comes as is,
+without any warranty or condition, and no contributor
+will be liable to anyone for any damages related to this
+software or this license, under any kind of legal claim.***
+````
+
+### minizlib@3.1.0
+
+Source: `node_modules/minizlib/LICENSE`
+
+````text
+Minizlib was created by Isaac Z. Schlueter.
+It is a derivative work of the Node.js project.
+
+"""
+Copyright (c) 2017-2023 Isaac Z. Schlueter and Contributors
+Copyright (c) 2017-2023 Node.js contributors. All rights reserved.
+Copyright (c) 2017-2023 Joyent, Inc. and other Node contributors. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+"""
+````
+
 ### ms@2.1.3
 
 Source: `node_modules/ms/license.md`
@@ -7822,6 +8015,68 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ````
 
+### tar@7.5.22
+
+Source: `node_modules/tar/LICENSE.md`
+
+````text
+# Blue Oak Model License
+
+Version 1.0.0
+
+## Purpose
+
+This license gives everyone as much permission to work with
+this software as possible, while protecting contributors
+from liability.
+
+## Acceptance
+
+In order to receive this license, you must agree to its
+rules.  The rules of this license are both obligations
+under that agreement and conditions to your license.
+You must not do anything with this software that triggers
+a rule that you cannot or will not follow.
+
+## Copyright
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe that contributor's
+copyright in it.
+
+## Notices
+
+You must ensure that everyone who gets a copy of
+any part of this software from you, with or without
+changes, also gets the text of this license or a link to
+<https://blueoakcouncil.org/license/1.0.0>.
+
+## Excuse
+
+If anyone notifies you in writing that you have not
+complied with [Notices](#notices), you can keep your
+license by taking all practical steps to comply within 30
+days after the notice.  If you do not do so, your license
+ends immediately.
+
+## Patent
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe any patent claims
+they can license or become able to license.
+
+## Reliability
+
+No contributor can revoke this license.
+
+## No Liability
+
+***As far as the law allows, this software comes as is,
+without any warranty or condition, and no contributor
+will be liable to anyone for any damages related to this
+software or this license, under any kind of legal claim.***
+````
+
 ### terminal-link@5.0.0
 
 Source: `node_modules/terminal-link/license`
@@ -8326,6 +8581,76 @@ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
 WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
 IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+````
+
+### yallist@5.0.0
+
+Source: `node_modules/yallist/LICENSE.md`
+
+````text
+All packages under `src/` are licensed according to the terms in
+their respective `LICENSE` or `LICENSE.md` files.
+
+The remainder of this project is licensed under the Blue Oak
+Model License, as follows:
+
+-----
+
+# Blue Oak Model License
+
+Version 1.0.0
+
+## Purpose
+
+This license gives everyone as much permission to work with
+this software as possible, while protecting contributors
+from liability.
+
+## Acceptance
+
+In order to receive this license, you must agree to its
+rules.  The rules of this license are both obligations
+under that agreement and conditions to your license.
+You must not do anything with this software that triggers
+a rule that you cannot or will not follow.
+
+## Copyright
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe that contributor's
+copyright in it.
+
+## Notices
+
+You must ensure that everyone who gets a copy of
+any part of this software from you, with or without
+changes, also gets the text of this license or a link to
+<https://blueoakcouncil.org/license/1.0.0>.
+
+## Excuse
+
+If anyone notifies you in writing that you have not
+complied with [Notices](#notices), you can keep your
+license by taking all practical steps to comply within 30
+days after the notice.  If you do not do so, your license
+ends immediately.
+
+## Patent
+
+Each contributor licenses you to do everything with this
+software that would otherwise infringe any patent claims
+they can license or become able to license.
+
+## Reliability
+
+No contributor can revoke this license.
+
+## No Liability
+
+***As far as the law allows, this software comes as is,
+without any warranty or condition, and no contributor
+will be liable to anyone for any damages related to this
+software or this license, under any kind of legal claim.***
 ````
 
 ### yaml@2.9.0

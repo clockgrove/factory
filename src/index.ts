@@ -11,3 +11,5 @@ export {
 export type { AnalysisField, AnalysisOptions } from "./analysis.js";
 
 export * from "./admission.js";
+
+export * from "./capture-export.js";

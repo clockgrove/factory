@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -15,6 +23,7 @@ import {
   recordWorkFailure,
   CandidateValidationFailure,
   CandidateEnvironmentFailure,
+  SettledAttemptFailure,
   prepareEvidenceRecovery,
 } from "../dist/work-repair.js";
 import { validateAuthority } from "../dist/admission.js";
@@ -210,6 +219,77 @@ test("exact candidate recovery retains failure and rejects ambiguity and unchang
     /unsettled/,
   );
 });
+test("settled failures ignore sibling processes while correction still requires global quiescence", () => {
+  for (const [error, classification] of [
+    [
+      new CandidateValidationFailure("required command failed"),
+      "implementation",
+    ],
+    [
+      new CandidateEnvironmentFailure("temporary path unavailable"),
+      "validation-environment",
+    ],
+    [new SettledAttemptFailure("worker stopped"), "interruption"],
+  ]) {
+    const state = {
+      admission: { authority: authority() },
+      graph: { items: [item()] },
+      coordinator: {
+        processes: [{ pid: 123, identity: "sibling collection" }],
+      },
+      work: {
+        result: {
+          status: "failed",
+          step: "validate",
+          attempt: "first",
+          baseSha: "a".repeat(40),
+          changeRef: "b".repeat(40),
+          treeSha: "c".repeat(40),
+        },
+      },
+    };
+    assert.equal(recordWorkFailure(state, "result", error), true);
+    assert.equal(
+      state.work.result.recovery.failure.classification,
+      classification,
+    );
+    assert.throws(
+      () =>
+        applyWorkCorrection(state, "result", {
+          kind: "validation-environment",
+          failureDigest: state.work.result.recovery.failure.digest,
+          actor: "fixture",
+          diagnosis: "Declared prerequisite absent",
+          correction: "Restore the same declared prerequisite",
+        }),
+      /unsettled/,
+    );
+    assert.equal(state.allowanceConsumption, undefined);
+    for (const guard of [
+      { work: { pendingEffect: "publication" } },
+      { work: { pullRequest: 1 } },
+      { coordinator: { cancelError: "owned cancellation unresolved" } },
+    ]) {
+      const uncertain = structuredClone(state);
+      Object.assign(uncertain.work.result, guard.work);
+      Object.assign(uncertain.coordinator, guard.coordinator);
+      assert.equal(recordWorkFailure(uncertain, "result", error), false);
+      assert.equal(
+        uncertain.work.result.recovery.failure.classification,
+        "uncertain",
+      );
+    }
+    assert.equal(
+      recordWorkFailure(state, "result", new Error("ownership unresolved")),
+      false,
+    );
+    assert.equal(
+      state.work.result.recovery.failure.classification,
+      "uncertain",
+    );
+  }
+});
+
 test("transport recovery never accepts semantic findings or invents accounting", () => {
   const state = {
     admission: { authority: authority() },
@@ -1089,6 +1169,254 @@ test("pause after known planning response preserves compilation for resume witho
     assert.equal(reviews, 1);
     assert.equal(state.allowanceConsumption, undefined);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native settled validation failure survives real sibling collection and diagnosed candidate repair", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-settled-sibling-"));
+  const previousState = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  const release = join(root, "release-collection");
+  let previousPath;
+  let running;
+  let outcome;
+  let fixture;
+  let config;
+  let ownershipReleased = false;
+  const timeout = setTimeout(
+    () => writeFileSync(release, "timeout release"),
+    15000,
+  );
+  try {
+    const target = createTarget(root);
+    config = factoryConfig(
+      target.checkout,
+      "example/settled-sibling",
+      "native-stack",
+      2,
+    );
+    const collectionStarted = join(root, "collection-started");
+    const alphaRelease = join(root, "alpha-release");
+    const prerequisite = join(root, "prerequisite");
+    const transportGit = execFileSync("which", ["git"], {
+      encoding: "utf8",
+    }).trim();
+    const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+    const shim = join(root, "shim");
+    mkdirSync(shim);
+    writeFileSync(
+      join(shim, "git"),
+      `#!/bin/sh
+if [ "$1" = '-C' ] && [ "$3" = 'add' ] && [ -f "$2/alpha.txt" ] && [ ! -f ${quote(collectionStarted)} ]; then
+  : > ${quote(collectionStarted)}
+  while [ ! -f ${quote(release)} ]; do sleep 0.02; done
+fi
+exec ${quote(transportGit)} "$@"
+`,
+    );
+    chmodSync(join(shim, "git"), 0o755);
+    previousPath = process.env.PATH;
+    process.env.PATH = `${shim}:${previousPath}`;
+    const check = join(root, "check.mjs");
+    writeFileSync(
+      check,
+      `import {existsSync} from 'node:fs';
+const started = Date.now();
+while (!existsSync(${JSON.stringify(collectionStarted)})) {
+  if (Date.now() - started > 10000) throw Error('collection barrier missing');
+  await new Promise(resolve => setTimeout(resolve, 10));
+}
+process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
+`,
+    );
+    const command = `${quote(process.execPath)} ${quote(check)}`;
+    const beta = {
+      ...item("beta"),
+      validation: [
+        ...item("beta").validation,
+        { command, provenance: "source-declared", source: "OBJECTIVE" },
+      ],
+    };
+    const graph = {
+      objective: 1,
+      baseSha: target.baseSha,
+      items: [item("alpha"), beta],
+    };
+    const source = `# Recovery fixture
+## Acceptance
+- alpha.txt exists
+- beta.txt exists
+## Commands
+- test -s alpha.txt
+- test -s beta.txt
+- ${command}
+## Final validation
+- test -s beta.txt
+`;
+    const betaReviewTrees = [];
+    const planner = model(graph, () => {
+      throw Error("Implementation diagnosis is not authorized");
+    });
+    planner.reviewResult = async (request) => {
+      if (
+        request.reviewPhase === "result-review" &&
+        request.criteria.includes("beta.txt exists")
+      )
+        betaReviewTrees.push(request.treeSha);
+      return reviewer(request);
+    };
+    const descriptor = {
+      config,
+      graph,
+      objectiveBody: source,
+      fakeRoot: join(root, "fake"),
+      actions: {
+        alpha: {
+          barrier: alphaRelease,
+          files: [{ path: "alpha.txt", text: "accepted\n" }],
+        },
+        beta: { files: [{ path: "beta.txt", text: "accepted\n" }] },
+      },
+      planningModel: planner,
+    };
+    fixture = makeApplication(descriptor);
+    const policy = authority();
+    policy.repairClasses = ["validation-environment"];
+    policy.allowances.implementationRepairs = 0;
+    policy.repairPolicy.perPath.implementationRepairs = 0;
+    const plan = await fixture.application.planObjective(1);
+    const admitted = await fixture.application.admitObjective(1, plan, policy);
+    const { readState, statePath } = await import("../dist/state-store.js");
+    const { requestControl } = await import("../dist/coordinator-control.js");
+    running = fixture.application.runObjective(1, plan, admitted);
+    outcome = running.then(
+      (state) => ({ state }),
+      (error) => ({ error }),
+    );
+    await waitForFile(
+      () =>
+        readEvents(fixture.eventsPath).some(
+          (event) => event.type === "complete" && event.item === "beta",
+        ),
+      fixture.eventsPath,
+      "beta collection ready",
+    );
+    writeFileSync(alphaRelease, "release alpha worker");
+    const failed = await waitForFile(
+      () => {
+        const state = readState(config.repository, 1);
+        return state?.work.beta.recovery?.failure ? state : undefined;
+      },
+      statePath(config.repository, 1),
+      "beta validation failure with live sibling collection",
+    );
+    assert.equal(
+      failed.work.beta.recovery.failure.classification,
+      "implementation",
+    );
+    assert.ok(failed.coordinator.processes.length > 0);
+    assert.equal(failed.error, undefined);
+    const correction = {
+      kind: "validation-environment",
+      failureDigest: failed.work.beta.recovery.failure.digest,
+      actor: "fixture",
+      diagnosis: "Declared local prerequisite was unavailable",
+      correction:
+        "Restore the same declared prerequisite and revalidate the preserved candidate",
+    };
+    assert.throws(
+      () => applyWorkCorrection(structuredClone(failed), "beta", correction),
+      /unsettled/,
+    );
+    writeFileSync(release, "settle sibling collection");
+    const settled = await waitForFile(
+      () => {
+        const state = readState(config.repository, 1);
+        return state?.work.alpha.status === "done" &&
+          state.coordinator.processes.length === 0
+          ? state
+          : undefined;
+      },
+      statePath(config.repository, 1),
+      "sibling completion and global quiescence",
+    );
+    assert.equal(settled.error, undefined);
+    assert.equal(settled.coordinator.cancelError, undefined);
+    const drained = assert.rejects(running, /drained and released ownership/);
+    await requestControl(config.repository, {
+      objective: 1,
+      action: "handoff",
+    });
+    await drained;
+    ownershipReleased = true;
+    writeFileSync(prerequisite, "ready");
+    const original = settled.work.beta;
+    fixture.application.repairWorkItem(1, {
+      item: "beta",
+      treeSha: original.treeSha,
+      correction,
+    });
+    const repaired = readState(config.repository, 1);
+    assert.equal(repaired.work.beta.attempt, original.attempt);
+    assert.equal(repaired.work.beta.treeSha, original.treeSha);
+    assert.equal(repaired.work.beta.changeRef, original.changeRef);
+    assert.equal(repaired.allowanceConsumption.implementationRepairs, 0);
+    assert.equal(repaired.allowanceConsumption.resultRereviews, 1);
+    const { controlObjective } = await import("../dist/runner.js");
+    await controlObjective(config, { objective: 1, action: "resume" });
+    const done = await makeApplication(descriptor).application.runObjective(1);
+    assert.equal(done.finalValidation.passed, true);
+    assert.equal(done.work.beta.attempt, original.attempt);
+    assert.equal(done.runId, settled.runId);
+    assert.equal(done.work.beta.validation.treeSha, done.work.beta.treeSha);
+    assert.deepEqual(betaReviewTrees, [done.work.beta.treeSha]);
+    assert.equal(
+      done.work.beta.recovery.history[0].work.changeRef,
+      original.changeRef,
+    );
+    assert.deepEqual(
+      done.work.beta.recovery.history[0].work.usage,
+      original.usage,
+    );
+    assert.equal(
+      git(config.checkout, "show", `${done.work.beta.changeRef}:beta.txt`),
+      "accepted",
+    );
+    assert.equal(
+      done.work.beta.recovery.history[0].work.treeSha,
+      original.treeSha,
+    );
+    assert.equal(
+      done.work.beta.recovery.history[0].failure.digest,
+      correction.failureDigest,
+    );
+    assert.equal(done.allowanceConsumption.resultRereviews, 1);
+    assert.deepEqual(
+      readEvents(fixture.eventsPath)
+        .filter((event) => event.type === "start")
+        .map((event) => event.item)
+        .sort(),
+      ["alpha", "beta"],
+    );
+  } finally {
+    clearTimeout(timeout);
+    writeFileSync(release, "release cleanup");
+    if (running && outcome) {
+      if (!ownershipReleased && fixture && config) {
+        const { requestControl } = await import(
+          "../dist/coordinator-control.js"
+        );
+        await requestControl(config.repository, {
+          objective: 1,
+          action: "handoff",
+        }).catch(() => {});
+      }
+      await outcome;
+    }
+    if (previousPath !== undefined) process.env.PATH = previousPath;
+    if (previousState === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previousState;
     rmSync(root, { recursive: true, force: true });
   }
 });

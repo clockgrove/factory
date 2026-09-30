@@ -4,6 +4,44 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under #206 and explicitly accepted under #207. Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.47 artifact record
+
+[Release v0.1.47](https://github.com/clockgrove/factory/releases/tag/v0.1.47)
+was built once from reviewed release head and tagged source
+`79ed3a7867584fcc29ac54847b9a0750329c8605`, tree
+`8f5485816e4ece5e1e0cf14a3bccfcafdac85853`. The archive is 153572969 bytes,
+SHA-256 `06097a4f624e2d810ba14b60d0ad0f1383b2e0c04c5c53f8b2f3f4b762fc5f06`.
+[Release PR #323](https://github.com/clockgrove/factory/pull/323) records one
+independent full-diff metadata review round, with no findings or accepted risks.
+[Candidate CI](https://github.com/clockgrove/factory/actions/runs/36688456225)
+passed, including 595 deterministic tests. Typecheck, lint, formatting,
+third-party notices and package checks passed on that exact candidate.
+Integrated main `1880ec12e9747964db5f61122ad760393ca95a98` has the identical
+tree and passed [its own CI](https://github.com/clockgrove/factory/actions/runs/36689024412).
+
+[Independent distribution verification](https://github.com/clockgrove/factory/issues/322#issuecomment-5907325707)
+matched the downloaded archive to the audited bytes and published `SHA256SUMS`.
+Fresh-cache offline installation verified all 6355 regular files and 95 bundled
+dependency roots, notices and licenses; CLI help passed. The isolated pinned
+v0.1.47 plugin manifest and both skills matched the archive. The qualification
+runtime's separately installed Claude SDK/native `0.3.281` was ready, and all
+6355 shipped files remained unchanged. Annotated tag
+`af27351958bbba43c644b69eb291d11af372845f` resolves to the source above.
+Exact-tag ruleset `24233751` prohibits updates and deletion with no bypass actors.
+
+This release includes the readiness-probe schema correction from
+[PR #321](https://github.com/clockgrove/factory/pull/321), provider-neutral sandbox
+composition, the optional Daytona public-source adapter and LangSmith export.
+[Installed compiler preflight](https://github.com/clockgrove/factory/issues/319#issuecomment-5907259560)
+passed without model calls or runtime mutation. The optional Daytona SDK is
+installed separately; private-source authentication and live hosted execution
+remain unqualified. Publication, installation and preflight do not establish
+live acceptance: workspace qualification remains
+[#263](https://github.com/clockgrove/factory/issues/263), and full autonomous
+qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
+Earlier artifacts, acceptance, failures and accounting retain their original
+scope. No published archive was rebuilt or retagged.
+
 ## Immutable v0.1.46 artifact record
 
 [Release v0.1.46](https://github.com/clockgrove/factory/releases/tag/v0.1.46)

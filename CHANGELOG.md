@@ -2,6 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.54 — candidate
+
+- Align compilation, graph review and planning diagnosis around one owner and complete proof for each whole source obligation. Use the existing final-review proof for compound final criteria that no single controller guarantee covers; preserve unique obligation indices, duplicate rejection and independent final acceptance (#370).
+
+Source integration, release gates, publication and independent public archive/pinned-plugin verification are pending. Earlier release evidence remains bound to its original bytes and scenarios; full autonomous Objective qualification remains #253.
+
 ## 0.1.53 — 2026-09-30
 
 - Retain one actual identified delivery check receipt when every current same-name run is completed and successful on the exact head and repeated runs identify the same valid GitHub app. Preserve refusal of failed, pending, stale, conflicting or incomplete evidence, target protections and singular QA ambiguity (#357).

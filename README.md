@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** Published [v0.1.53](https://github.com/clockgrove/factory/releases/tag/v0.1.53) passed [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/357#issuecomment-5920335558), fresh-cache offline installation and all 109 installed regression checks. It retains successful repeated same-app delivery checks ([#357](https://github.com/clockgrove/factory/issues/357)), complete read-only QA and aggregate dependency evidence, review submission fences after local packet preparation ([#361](https://github.com/clockgrove/factory/issues/361)), and explicit permanent abandonment of an exact stopped run with uncertain read-only reviews after verified owned cessation ([#363](https://github.com/clockgrove/factory/issues/363)). Abandonment preserves uncertainty, evidence and accounting; it does not accept the run. Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) for exact artifact and scenario records, and [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) for operator intervention.
+**Status:** v0.1.54 is a release candidate for coherent whole-obligation proof guidance in compilation, graph review and planning diagnosis ([#370](https://github.com/clockgrove/factory/issues/370)). Each whole obligation keeps one owner and complete proof; compound final criteria can use the existing final-review proof. Its source integration, release gates, publication and independent public verification are pending. Published [v0.1.53](https://github.com/clockgrove/factory/releases/tag/v0.1.53) passed [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/357#issuecomment-5920335558), fresh-cache offline installation and all 109 installed regression checks. It retains successful repeated same-app delivery checks ([#357](https://github.com/clockgrove/factory/issues/357)), complete read-only QA and aggregate dependency evidence, review submission fences after local packet preparation ([#361](https://github.com/clockgrove/factory/issues/361)), and explicit permanent abandonment of an exact stopped run with uncertain read-only reviews after verified owned cessation ([#363](https://github.com/clockgrove/factory/issues/363)). Abandonment preserves uncertainty, evidence and accounting; it does not accept the run. Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) for exact artifact and scenario records, and [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) for operator intervention.
 
 ## Requirements
 
@@ -24,24 +24,24 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select published v0.1.53, whose [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/357#issuecomment-5920335558) passed. Compare the archive with its independently recorded prepublication digest in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/pull/360), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md#immutable-v0153-artifact-record).
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select candidate v0.1.54 and become usable after publication and independent public archive and enabled pinned-plugin verification. Compare the archive with the independently recorded prepublication digest for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/370), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its original artifact scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.53
+codex plugin marketplace add clockgrove/factory --ref v0.1.54
 codex plugin add factory@clockgrove
 
-gh release download v0.1.53 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.53.tgz --pattern SHA256SUMS
+gh release download v0.1.54 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.54.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/pull/360), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. Do not install until that digest and independent public byte/pinned-plugin verification are available.
+Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/370), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. Do not install until that digest and independent public byte/pinned-plugin verification are available.
 
 Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.53.tgz
+  ./clockgrove-factory-0.1.54.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

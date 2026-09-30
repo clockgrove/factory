@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** [v0.1.46](https://github.com/clockgrove/factory/releases/tag/v0.1.46) is published with verified public download, pinned plugin identity and offline installation. Live workspace qualification remains in [#263](https://github.com/clockgrove/factory/issues/263); full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](docs/BUILD-STATUS.md) for what has been qualified. Some interrupted deliveries require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
+**Status:** [v0.1.47](https://github.com/clockgrove/factory/releases/tag/v0.1.47) is published with verified public download, pinned plugin identity and offline installation. Live workspace qualification remains in [#263](https://github.com/clockgrove/factory/issues/263); full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](docs/BUILD-STATUS.md) for what has been qualified. Some interrupted deliveries require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
 
 ## Requirements
 
@@ -20,18 +20,18 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - Your target's build and validation tools; Git LFS for LFS-backed media work.
 - A trusted repository with committed instructions and requirements. Local workers run under your OS account; they are not a security boundary for hostile code.
 
-Planning, review, and workers consume your provider's usage. Factory currently runs one active Objective per installation, with a configured local harness or compile-time assigned local execution profiles. Later source on `main` adds provider-neutral [sandbox application composition](docs/SANDBOX-EXECUTION.md); it is absent from the published v0.1.46 artifact. Hosted execution remains unqualified. See [local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md) for optional-provider requirements and boundaries.
+Planning, review, and workers consume your provider's usage. Factory currently runs one active Objective per installation, with a configured local harness or compile-time assigned local execution profiles. The release includes provider-neutral [sandbox application composition](docs/SANDBOX-EXECUTION.md) and an optional Daytona adapter for public sources. Private-source authentication and live hosted execution remain unqualified. See [local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md) for optional-provider requirements and boundaries.
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The following commands install published v0.1.46 (do not combine versions):
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The following commands install published v0.1.47 (do not combine versions):
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.46
+codex plugin marketplace add clockgrove/factory --ref v0.1.47
 codex plugin add factory@clockgrove
 
-gh release download v0.1.46 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.46.tgz --pattern SHA256SUMS
+gh release download v0.1.47 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.47.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
@@ -41,7 +41,7 @@ Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.46.tgz
+  ./clockgrove-factory-0.1.47.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

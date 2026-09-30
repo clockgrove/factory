@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Codex } from "@openai/codex-sdk";
+import { CodexPlanningModel } from "../dist/compiler.js";
 import { parseFactoryState } from "../dist/state.js";
 import { readState } from "../dist/state-store.js";
 import { objectiveReviewEvidence } from "../dist/validation.js";
@@ -12,10 +14,13 @@ import {
   git,
   makeApplication,
 } from "./support/integration-fixture.mjs";
-import { resultFindings } from "./support/review-protocol.mjs";
+import {
+  packetFromPrompt,
+  resultFindings,
+} from "./support/review-protocol.mjs";
 
 for (const delivery of ["regular", "native-stack"]) {
-  test(`${delivery} retains preintegration check and independent review facts for final review`, async () => {
+  test(`${delivery} retains preintegration check and independent review facts for final review`, async (t) => {
     const root = mkdtempSync(
       join(tmpdir(), "factory-delivery-review-evidence-"),
     );
@@ -123,6 +128,57 @@ for (const delivery of ["regular", "native-stack"]) {
       assert.equal(completed.finalValidation.passed, true);
       assert.ok(mergeCalls > 0);
       assert.ok(finalPacket);
+      let renderedPrompt;
+      t.mock.method(Codex.prototype, "startThread", () => ({
+        async runStreamed(prompt) {
+          renderedPrompt = prompt;
+          const packet = packetFromPrompt(prompt);
+          return {
+            events: (async function* () {
+              yield {
+                type: "item.completed",
+                item: {
+                  id: "scripted",
+                  type: "agent_message",
+                  text: JSON.stringify({
+                    packetId: packet.packetId,
+                    findings: resultFindings(
+                      finalPacket,
+                      finalPacket.criteria.map((criterion) => ({
+                        criterion,
+                        verdict: "pass",
+                        source: "OBJECTIVE",
+                        detail: "Scripted renderer replay.",
+                        question: "",
+                      })),
+                    ),
+                  }),
+                },
+              };
+              yield {
+                type: "turn.completed",
+                usage: {
+                  input_tokens: 1,
+                  cached_input_tokens: 0,
+                  output_tokens: 1,
+                },
+              };
+            })(),
+          };
+        },
+      }));
+      const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
+      await new CodexPlanningModel(
+        "/unused",
+        selection,
+        selection,
+      ).reviewResult(finalPacket);
+      assert.match(
+        renderedPrompt,
+        /automaticPass is derived from all current accepted criteria/,
+      );
+      assert.ok(renderedPrompt.includes("Delivery lifecycle proof: first"));
+      assert.ok(renderedPrompt.includes("protected-exact-head-integration"));
       const observations = JSON.parse(finalPacket.observations);
       for (const record of observations.work) {
         assert.equal(record.independentReview.automaticPass, true);

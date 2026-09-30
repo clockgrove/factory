@@ -32,9 +32,9 @@ export function verifyClaudeBootstrap(
     !tool ||
     tool.name !== "bash" ||
     tool.input.command !== command ||
-      Object.keys(tool.input).some(
-        (key) => !["command", "timeout_ms"].includes(key),
-      ) ||
+    Object.keys(tool.input).some(
+      (key) => !["command", "timeout_ms"].includes(key),
+    ) ||
     (tool.input.timeout_ms !== undefined &&
       (!Number.isSafeInteger(tool.input.timeout_ms) ||
         Number(tool.input.timeout_ms) < 0))

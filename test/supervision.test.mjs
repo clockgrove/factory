@@ -36,7 +36,7 @@ async function fixture(fn) {
     join(bin, "systemctl"),
     '#!/bin/sh\nprintf "%s\\n" "$*" >> "' +
       root +
-      '/calls"\ncase "$2" in is-system-running) echo running;; is-active) echo inactive;; is-enabled) echo enabled;; esac\n',
+      '/calls"\ncase "$2" in enable) case "$3" in /*) test -f "$3" || exit 1;; *) echo "Unit not found in manager search path" >&2; exit 1;; esac;; is-system-running) echo running;; is-active) echo inactive;; is-enabled) echo enabled;; esac\n',
     { mode: 0o700 },
   );
   writeFileSync(join(bin, "loginctl"), "#!/bin/sh\necho no\n", { mode: 0o700 });
@@ -101,7 +101,7 @@ async function fixture(fn) {
   }
 }
 
-test("registers one private exact-artifact service idempotently without starting work", () =>
+test("registers the exact isolated-XDG unit with the manager idempotently without starting work", () =>
   fixture(async ({ root, config, configPath }) => {
     await supervise("install", configPath, { objective: 1 });
     await supervise("install", configPath, { objective: 1 });
@@ -119,6 +119,13 @@ test("registers one private exact-artifact service idempotently without starting
       readFileSync(join(root, "calls"), "utf8"),
       /--user start/,
     );
+    const calls = readFileSync(join(root, "calls"), "utf8");
+    assert.equal(
+      calls.split("\n").filter((line) => line === `--user enable ${path}`)
+        .length,
+      2,
+    );
+    assert.doesNotMatch(calls, /--force|--global|--now/);
     const status = await supervise("status", configPath);
     assert.equal(status.logoutPersistence, "not-enabled");
     assert.equal(status.registered, true);

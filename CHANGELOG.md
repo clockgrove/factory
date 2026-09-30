@@ -5,8 +5,9 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 ## 0.1.52 — 2026-09-30
 
 - Retain exact controller-owned started Work Items through transient amendment references instead of asking the planner to regenerate historical definitions. Keep source-owned coverage choices and complete independent graph validation/review (#350).
+- Expose a controller-derived original amendment failure digest and redact configured-secret echoes in existing preparation/execution status projections, retaining original rejection binding and snapshot authority (#348).
 
-Release candidate; publication and exact installed/public verification are pending. Full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier published artifact and qualification records retain their original scope.
+Published with fresh-cache offline installation and 38 exact installed correction checks. [Independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/350#issuecomment-5917330492) passed. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0152-artifact-record). Full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253); earlier published records retain their original bytes and scenarios.
 
 ## 0.1.51 — 2026-09-30
 

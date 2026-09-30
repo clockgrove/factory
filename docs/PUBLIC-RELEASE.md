@@ -4,7 +4,7 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Published [v0.1.49](https://github.com/clockgrove/factory/releases/tag/v0.1.49) has verified public download, pinned plugin identity, offline installation and both exact installed correction checks under [#338](https://github.com/clockgrove/factory/issues/338). See the [exact artifact record](BUILD-STATUS.md#immutable-v0149-artifact-record). Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) is accepted for v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier artifact and adopter evidence remain bound to their original bytes and scenarios.
+Published [v0.1.50](https://github.com/clockgrove/factory/releases/tag/v0.1.50) has [independent public download and pinned plugin verification](https://github.com/clockgrove/factory/issues/341#issuecomment-5913718125), offline installation and seven exact installed aggregate/discovery/historical-plan correction checks under [#341](https://github.com/clockgrove/factory/issues/341) and [#342](https://github.com/clockgrove/factory/issues/342). See the [exact artifact record](BUILD-STATUS.md#immutable-v0150-artifact-record). Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier evidence remains bound to its original bytes and scenarios.
 
 Earlier published artifacts and their evidence remain unchanged. Publication and installation checks do not establish Objective qualification.
 
@@ -65,7 +65,7 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-This source tree prepares v0.1.50. Use the matching installation commands below only after that version's tagged plugin, release assets, independent artifact record and public-download verification are available. Compare the tarball digest with the independent value for that same version in the [current artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier published v0.1.49 distribution evidence remains in its [historical artifact record](BUILD-STATUS.md#immutable-v0149-artifact-record).
+Install the published matching v0.1.50 plugin and CLI after comparing the tarball digest with the independent value in the [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md#immutable-v0150-artifact-record). Earlier release evidence remains in its historical artifact records.
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.50

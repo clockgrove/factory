@@ -28,8 +28,10 @@ import {
   aggregateAcceptance,
   assertCoverageShape,
   assertCoverageSources,
+  assertCompletedCoverage,
   coverageObligations,
 } from "../dist/qa.js";
+import { decodeGraphReview, reviewPacket } from "../dist/review-evidence.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import { createTarget } from "./support/integration-fixture.mjs";
 const Ajv = createRequire(import.meta.url)("ajv");
@@ -167,6 +169,171 @@ test("QA choices require source-owned coverage while work and aggregates may lea
   assert.throws(
     () => wire.decode(unmappedQa),
     /Planner QA node has no acceptance coverage/,
+  );
+});
+
+test("rendered planning contracts retain one whole compound proof and substantive review refusal", async (t) => {
+  const criterion =
+    "Every delivered result has a separate automatic independent review and successful source-check on its exact published head before protected integration.";
+  const commandCriterion = "Source-defined result command passes.";
+  const objective = body.replace(
+    "- Source-defined result exists.",
+    `- ${criterion}\n- ${commandCriterion}`,
+  );
+  const input = request({
+    objective,
+    sources: [{ path: "OBJECTIVE", content: objective }],
+    coverageObligations: coverageObligations(
+      objective,
+      objectiveCriteria(objective),
+    ),
+  });
+  const { wire, value, conforms } = setup(input);
+  value.items[0].validation[0].lineIndex = 7;
+  value.items[0].coverage = [
+    entry(),
+    {
+      ...entry({ kind: "result-command", validationIndex: 0 }),
+      obligationIndex: 1,
+    },
+  ];
+  const captured = [];
+  let response = value;
+  t.mock.method(Codex.prototype, "startThread", () => ({
+    async runStreamed(prompt, options) {
+      captured.push({ prompt, schema: options.outputSchema });
+      return {
+        events: (async function* () {
+          yield {
+            type: "item.completed",
+            item: {
+              id: "scripted",
+              type: "agent_message",
+              text: JSON.stringify(response),
+            },
+          };
+          yield { type: "turn.completed", usage: null };
+        })(),
+      };
+    },
+  }));
+  const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
+  const model = new CodexPlanningModel(
+    "/tmp/planning-proof-test",
+    selection,
+    selection,
+  );
+  const graph = await model.generateStructured(input);
+  assert(conforms(value), JSON.stringify(conforms.errors));
+  hydrateWorkerInputSources(graph, input.sources);
+  validateGraph(graph, 17, input.baseSha, new Set(["OBJECTIVE"]));
+  assertCoverageSources(graph, input.sources, input.coverageObligations);
+  assert.equal(graph.coverage[0].source.text, criterion);
+  assert.deepEqual(graph.coverage[0].proof, { kind: "final-review" });
+  assert.deepEqual(graph.coverage[1].proof, {
+    kind: "result-command",
+    validationIndex: 0,
+  });
+  const duplicated = structuredClone(value);
+  duplicated.items[0].coverage.push(
+    entry({ kind: "final-controller", guaranteeIndex: 0 }),
+  );
+  assert.throws(() => wire.decode(duplicated), /obligationIndex is duplicated/);
+
+  // A mechanically valid single guarantee can still receive a substantive refusal.
+  const incomplete = structuredClone(value);
+  incomplete.items[0].coverage[0].proof = {
+    kind: "final-controller",
+    guaranteeIndex: 2,
+  };
+  const incompleteGraph = wire.decode(incomplete);
+  const packet = reviewPacket(
+    [],
+    [{ origin: "source", path: "OBJECTIVE", content: objective }],
+  );
+  const finding = {
+    evidenceIndices: [0],
+    detail:
+      "The integration guarantee does not cover the independent automatic review clause; retain the whole criterion once with final-review.",
+    question: "Can the whole criterion be covered once with final-review?",
+  };
+  response = { packetId: packet.id, findings: [finding] };
+  const refusal = await model.reviewGraph({
+    objective,
+    baseSha: input.baseSha,
+    sources: input.sources,
+    graph: incompleteGraph,
+    commands: [],
+    finalCommands: [],
+    controllerCapabilities: input.controllerCapabilities,
+    controllerCapabilitiesDigest: input.controllerCapabilitiesDigest,
+    reviewPacket: packet,
+  });
+  assert.equal(decodeGraphReview(refusal, packet).length, 1);
+  assert.deepEqual(refusal.findings, [finding]);
+  response = { diagnosis: finding.detail };
+  await model.generateStructured({
+    ...input,
+    purpose: "diagnosis",
+    objective: finding.detail,
+    schema: {
+      type: "object",
+      properties: { diagnosis: { type: "string" } },
+      required: ["diagnosis"],
+      additionalProperties: false,
+    },
+  });
+  for (const { prompt } of captured) {
+    assert.match(
+      prompt,
+      /one whole criterion with one owner and one complete proof/,
+    );
+    assert.match(prompt, /one globally unique obligationIndex/);
+    assert.match(prompt, /Check every clause/);
+    assert.match(
+      prompt,
+      /one final-review proof for the unchanged whole criterion/,
+    );
+    assert.match(
+      prompt,
+      /actual evidence at final independent Objective acceptance/,
+    );
+    assert.match(
+      prompt,
+      /never request duplicate coverage rows, invented clause identities/,
+    );
+    assert.match(
+      prompt,
+      /does not automatically pass, prove future receipts, or replace source-required commands, named checks or earlier-phase proof/,
+    );
+    assert.match(prompt, /not premature planning/);
+  }
+  assert.equal(captured.length, 3);
+
+  const treeSha = "b".repeat(40);
+  const state = {
+    graph,
+    work: {
+      implementation: {
+        status: "done",
+        treeSha,
+        validation: {
+          treeSha,
+          commands: [{ command: "test -d .", treeSha, passed: true }],
+        },
+      },
+    },
+    finalValidation: { passed: true, criteria: [] },
+  };
+  assert.throws(() => assertCompletedCoverage(state), /exact criterion proof/);
+  state.finalValidation.criteria = [{ criterion, verdict: "fail" }];
+  assert.throws(() => assertCompletedCoverage(state), /exact criterion proof/);
+  state.finalValidation.criteria = [{ criterion, verdict: "pass" }];
+  assert.doesNotThrow(() => assertCompletedCoverage(state));
+  state.work.implementation.validation.commands = [];
+  assert.throws(
+    () => assertCompletedCoverage(state),
+    /command proof is missing/,
   );
 });
 

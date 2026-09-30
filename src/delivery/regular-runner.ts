@@ -1,3 +1,4 @@
+import { DeliveryReadinessPending } from "./readiness.js";
 import { executionContext } from "../execution/checkpoint.js";
 import {
   recordWorkFailure,
@@ -14,6 +15,7 @@ import type { FactoryConfig } from "../config.js";
 import type {
   ContentStore,
   DeliveryStrategy,
+  DeliveryResult,
   ExecutionDriver,
   GitHubGateway,
   PlanningModel,
@@ -90,6 +92,74 @@ export async function runRegularGraph(args: {
   }
   let failure: unknown;
   let mergeTail: Promise<void> = Promise.resolve();
+  const integratePublished = async (
+    item: WorkItem,
+    published: DeliveryResult,
+  ): Promise<void> => {
+    const work = state.work[item.id]!;
+    const readinessWasWaiting = Boolean(work.waitingReason);
+    if (args.paused?.() && readinessWasWaiting) return;
+    await phases.reserve(item.id, "delivery");
+    const integrate = mergeTail.then(async () => {
+      const merge = async () => {
+        if (args.cancelled()) throw new Error("Objective cancelled");
+        await args.reconcile?.();
+        const merged = await delivery.merge(published, (observation) => {
+          if (args.cancelled()) throw new Error("Objective cancelled");
+          if (args.paused?.() && readinessWasWaiting)
+            throw new DeliveryReadinessPending();
+          work.preIntegrationChecks = observation.namedChecks ?? [];
+          delete work.waitingReason;
+          work.pendingEffect = "merge";
+          save();
+        });
+        delete work.pendingEffect;
+        await gitAsync(
+          config.checkout,
+          "fetch",
+          "origin",
+          await github.defaultBranch(),
+        );
+        const observedHead = git(config.checkout, "rev-parse", "FETCH_HEAD");
+        if (observedHead !== merged.integratedSha) {
+          throw new Error(
+            `Default branch moved after PR #${published.pullRequest} merged; expected ${merged.integratedSha}, observed ${observedHead}`,
+          );
+        }
+        return observedHead;
+      };
+      const observedHead = args.diagnostics
+        ? await args.diagnostics.span(
+            {
+              runId: state.runId,
+              itemId: item.id,
+              attemptId: work.attempt,
+              operation: "github-merge",
+              metadata: {
+                pullRequest: published.pullRequest,
+                headSha: work.changeRef!,
+              },
+            },
+            merge,
+            (headSha) => ({ integratedSha: headSha }),
+          )
+        : await merge();
+      state.integratedSha = observedHead;
+      work.integratedSha = observedHead;
+      work.status = "done";
+      work.completedAt = new Date().toISOString();
+      delete work.step;
+      delete work.waitingReason;
+      save();
+    });
+    mergeTail = integrate.then(
+      () => undefined,
+      () => undefined,
+    );
+    await integrate;
+    phases.release(item.id);
+    await closeWorkItem(state, item.id, github, save, false);
+  };
   const execute = async (
     item: WorkItem,
     itemBase: string,
@@ -97,7 +167,16 @@ export async function runRegularGraph(args: {
   ): Promise<void> => {
     const work = state.work[item.id]!;
     try {
+      if (work.status === "published") {
+        await integratePublished(item, {
+          branch: `factory/objective-${objective}/${item.id}`,
+          pullRequest: work.pullRequest!,
+          headSha: work.changeRef!,
+        });
+        return;
+      }
       if (item.kind === "qa" || item.kind === "aggregate") {
+        if (args.paused?.() && work.waitingReason) return;
         await runQaItem({
           config,
           root,
@@ -400,62 +479,17 @@ export async function runRegularGraph(args: {
       work.pullRequest = published.pullRequest;
       delete work.pendingEffect;
       save();
-      const integrate = mergeTail.then(async () => {
-        const merge = async () => {
-          if (args.cancelled()) throw new Error("Objective cancelled");
-          await args.reconcile?.();
-          work.pendingEffect = "merge";
-          save();
-          const merged = await delivery.merge(published, (observation) => {
-            work.preIntegrationChecks = observation.namedChecks ?? [];
-            save();
-          });
-          delete work.pendingEffect;
-          await gitAsync(
-            config.checkout,
-            "fetch",
-            "origin",
-            await github.defaultBranch(),
-          );
-          const observedHead = git(config.checkout, "rev-parse", "FETCH_HEAD");
-          if (observedHead !== merged.integratedSha) {
-            throw new Error(
-              `Default branch moved after PR #${published.pullRequest} merged; expected ${merged.integratedSha}, observed ${observedHead}`,
-            );
-          }
-          return observedHead;
-        };
-        const observedHead = args.diagnostics
-          ? await args.diagnostics.span(
-              {
-                runId: state.runId,
-                itemId: item.id,
-                attemptId: work.attempt,
-                operation: "github-merge",
-                metadata: {
-                  pullRequest: published.pullRequest,
-                  headSha: work.changeRef!,
-                },
-              },
-              merge,
-              (headSha) => ({ integratedSha: headSha }),
-            )
-          : await merge();
-        state.integratedSha = observedHead;
-        work.integratedSha = observedHead;
-        work.status = "done";
-        work.completedAt = new Date().toISOString();
-        delete work.step;
-        save();
-      });
-      mergeTail = integrate.then(
-        () => undefined,
-        () => undefined,
-      );
-      await integrate;
-      phases.release(item.id);
-      await closeWorkItem(state, item.id, github, save, false);
+      work.status = "published";
+      delete work.step;
+      save();
+      await integratePublished(item, published);
     } catch (error) {
+      if (error instanceof DeliveryReadinessPending) {
+        work.waitingReason = error.message;
+        phases.release(item.id);
+        save();
+        return;
+      }
       if (error instanceof CompletedModelInvocationError)
         delete work.pendingEffect;
       if (error instanceof AcceptanceDecisionRequired) {
@@ -515,6 +549,14 @@ export async function runRegularGraph(args: {
   };
   for (const item of graph.items) {
     const work = state.work[item.id]!;
+    if (work.status === "published") {
+      const promise = execute(item, work.baseSha!).finally(() =>
+        active.delete(item.id),
+      );
+      void promise.catch(() => undefined);
+      active.set(item.id, promise);
+      continue;
+    }
     if (work.status !== "running") continue;
     if (item.kind === "qa" || item.kind === "aggregate") {
       const promise = execute(item, state.integratedSha ?? baseSha).finally(

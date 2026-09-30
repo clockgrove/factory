@@ -840,6 +840,7 @@ export class StatefulGitHubFake {
       await this.ensureNativeStack(layers, baseBranch),
       expectedStack,
     );
+    options.beforeMerge?.();
     const integratedSha = this.integrate(layers.at(-1).branch);
     this.update((state) => {
       for (const layer of layers) {

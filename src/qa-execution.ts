@@ -102,6 +102,8 @@ export async function runQaItem(args: {
     if (!state.integratedSha) throw new Error("QA has no integrated candidate");
     if (args.cancelled()) throw new Error("Objective cancelled");
     const commit = state.integratedSha;
+    if (work.waitingReason && work.changeRef !== commit)
+      throw new Error("QA candidate changed while awaiting exact named CI");
     work.status = "running";
     work.step = "validate";
     work.attempt ??= randomUUID();
@@ -116,22 +118,6 @@ export async function runQaItem(args: {
       `${commit}^{tree}`,
     );
     save();
-    await args.phases?.reserve(item.id, "validation");
-    await preflightItemEnvironment({ ...args, baseSha: commit });
-    work.validation = await validateWorkItem(
-      args.config.checkout,
-      join(args.root, "validation"),
-      item,
-      commit,
-      work.treeSha,
-      state.baseSha,
-      undefined,
-      undefined,
-      commit,
-      validationLfsMembersForItem(state, item, args.config.checkout, commit),
-      args.store,
-      workspacePackageAdditions(args.objectiveBody),
-    );
     work.qaChecks = [];
     for (const entry of itemCoverage(state.graph, item.id).filter(
       (entry) =>
@@ -156,6 +142,18 @@ export async function runQaItem(args: {
       );
       if (
         !check ||
+        (check.status !== "completed" &&
+          check.name === proof.checkName &&
+          check.headSha === target.changeRef &&
+          Number.isSafeInteger(check.id) &&
+          check.id > 0)
+      ) {
+        work.waitingReason = `Awaiting named CI check ${proof.checkName} at ${target.changeRef}`;
+        args.phases?.release(item.id);
+        save();
+        return;
+      }
+      if (
         check.name !== proof.checkName ||
         check.headSha !== target.changeRef ||
         !Number.isSafeInteger(check.id) ||
@@ -164,11 +162,28 @@ export async function runQaItem(args: {
         check.conclusion !== "success"
       )
         throw new Error(
-          `Required named CI check ${proof.checkName} is missing, stale, pending, or failing at ${target.changeRef}`,
+          `Required named CI check ${proof.checkName} is stale, invalid, or failing at ${target.changeRef}`,
         );
       work.qaChecks.push(check);
       save();
     }
+    delete work.waitingReason;
+    await args.phases?.reserve(item.id, "validation");
+    await preflightItemEnvironment({ ...args, baseSha: commit });
+    work.validation = await validateWorkItem(
+      args.config.checkout,
+      join(args.root, "validation"),
+      item,
+      commit,
+      work.treeSha,
+      state.baseSha,
+      undefined,
+      undefined,
+      commit,
+      validationLfsMembersForItem(state, item, args.config.checkout, commit),
+      args.store,
+      workspacePackageAdditions(args.objectiveBody),
+    );
     if (args.cancelled()) throw new Error("Objective cancelled");
     await args.phases?.reserve(item.id, "review");
     work.pendingEffect = "review";

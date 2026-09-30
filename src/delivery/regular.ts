@@ -1,3 +1,4 @@
+import { assertDeliveryReady } from "./readiness.js";
 import type {
   DeliveryObservation,
   DeliveryRequest,
@@ -57,6 +58,7 @@ export class RegularDelivery implements DeliveryStrategy {
       number: result.pullRequest,
       branch: result.branch,
       headSha: result.headSha,
+      baseBranch: await this.github.defaultBranch(),
     });
   }
 
@@ -65,11 +67,7 @@ export class RegularDelivery implements DeliveryStrategy {
     beforeMerge?: (observation: DeliveryObservation) => void,
   ): Promise<MergeResult> {
     const observation = await this.observe(result);
-    if (observation.state !== "open" || observation.checks !== "passing") {
-      throw new Error(
-        `PR is not mergeable: ${observation.state}, checks ${observation.checks}`,
-      );
-    }
+    assertDeliveryReady(observation);
     beforeMerge?.(observation);
     return this.github.merge(
       {

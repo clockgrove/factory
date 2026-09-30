@@ -401,14 +401,38 @@ for (const failure of ["missing", "pending", "failure", "stale", "unrelated"])
               detailsUrl: "https://github.com/example/check/72",
             };
       const plan = await application.planObjective(1);
-      await assert.rejects(
-        application.runObjective(1, plan),
-        /Required named CI check/,
+      if (["missing", "pending"].includes(failure)) {
+        const waiting = await application.runObjective(1, plan);
+        assert.equal(waiting.work.qa.status, "running");
+        assert.equal(waiting.error, undefined);
+        assert.equal(waiting.work.qa.pendingEffect, undefined);
+        assert.equal(waiting.finalValidation, undefined);
+        const attempt = waiting.work.qa.attempt;
+        github.namedCheck = async (headSha, name) => ({
+          id: 72,
+          headSha,
+          name,
+          status: "completed",
+          conclusion: "success",
+          detailsUrl: "https://github.com/example/check/72",
+        });
+        const completed = await application.runObjective(1, plan);
+        assert.equal(completed.work.qa.attempt, attempt);
+        assert.equal(completed.work.qa.status, "done");
+        assert.equal(completed.finalValidation.passed, true);
+      } else {
+        await assert.rejects(
+          application.runObjective(1, plan),
+          /Required named CI check/,
+        );
+        const state = readState(`example/qa-${failure}`, 1);
+        assert.equal(state.work.qa.status, "failed");
+        assert.equal(state.finalValidation, undefined);
+      }
+      assert.equal(
+        readState(`example/qa-${failure}`, 1).work.integration.status,
+        "done",
       );
-      const state = readState(`example/qa-${failure}`, 1);
-      assert.equal(state.work.integration.status, "done");
-      assert.equal(state.work.qa.status, "failed");
-      assert.equal(state.finalValidation, undefined);
     }));
 
 test("independent review blocks inadequate negative controls and unauthorized golden changes", async () =>

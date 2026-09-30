@@ -2,6 +2,17 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.43 — 2026-09-29
+
+- Replace model-authored controller bookkeeping with one compiler choice protocol and packet-bound reviewer indices.
+- Derive exact source commands, coverage identities and pinned worker inputs, including operator-supplied graph amendments.
+- Use typed proof alternatives that reject unsupported published command/semantic evidence; preserve exact-head CI and integrated proof freshness.
+- Classify completed decoder failures through the existing bounded planning repair path.
+- Keep intake lifecycle control reachable across Objective handoffs without rebinding its socket.
+- Change current plan and state formats without compatibility adapters or migrations; preserve historical evidence.
+
+Source verification and publication do not establish installed Objective qualification. See [#285](https://github.com/clockgrove/factory/issues/285) and the continuing release gates.
+
 ## 0.1.42 — 2026-09-29
 
 - Select Codex readiness probes by an owning validation-command index or null, preserving canonical command authority and rejecting prose probes. Failed bounded plan revisions retain the original graph and findings while reporting the actual failure and attempted revision (#280 / PR #282).

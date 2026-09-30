@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +15,8 @@ import {
   compilePlan,
   hydrateWorkerInputSources,
   objectiveCriteria,
+  verifyPlanCandidate,
+  planReviewPacket,
   validateGraph,
   validateGraphSources,
 } from "../dist/compiler.js";
@@ -770,5 +773,96 @@ test("trusted prior graph retains aggregate and decomposed work acceptance exact
       /Aggregate acceptance/,
     );
     assert.equal(previousGraph.items[0].acceptance.length, 2);
+  }
+});
+
+test("unchanged historical aggregate review receipts remain verifiable without relaxing new candidate checks", async () => {
+  const root = mkdtempSync(
+    join(tmpdir(), "factory-historical-aggregate-review-"),
+  );
+  try {
+    const target = createTarget(root);
+    const { wire, value } = setup({ baseSha: target.baseSha });
+    const parent = item({
+      kind: "aggregate",
+      id: "parent",
+      children: ["implementation"],
+      dependencies: ["implementation"],
+      coverage: [],
+    });
+    for (const field of [
+      "acceptance",
+      "ownedPaths",
+      "sourceAssets",
+      "expectedOutputRoles",
+      "requiredLfsRoles",
+      "minimumAssetSets",
+    ])
+      delete parent[field];
+    value.items.push(parent);
+    const candidate = await compilePlan(
+      17,
+      body,
+      target.baseSha,
+      target.checkout,
+      {
+        async generateStructured() {
+          return wire.decode(value);
+        },
+        async reviewGraph(request) {
+          return { packetId: request.reviewPacket.id, findings: [] };
+        },
+      },
+    );
+    // Reconstruct immutable pre-correction fixture receipts for a valid source
+    // semantic parent. This is historical test data, never runtime output repair.
+    const historical = structuredClone(candidate);
+    historical.graph.items[1].acceptance = ["Source-defined result exists."];
+    const hash = (value) =>
+      createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    historical.graphDigest = hash(historical.graph);
+    historical.packetDigest = hash(
+      planReviewPacket(
+        body,
+        target.baseSha,
+        historical.sources,
+        historical.graph,
+        target.checkout,
+      ),
+    );
+    historical.reviewDigest = hash({
+      packetDigest: historical.packetDigest,
+      revisions: historical.review.revisions,
+      findings: historical.review.findings,
+    });
+    assert.doesNotThrow(() =>
+      verifyPlanCandidate(
+        historical,
+        17,
+        body,
+        target.baseSha,
+        target.checkout,
+      ),
+    );
+    const changed = structuredClone(historical);
+    changed.graph.items[1].acceptance.push("Unreviewed future obligation");
+    assert.throws(
+      () =>
+        verifyPlanCandidate(changed, 17, body, target.baseSha, target.checkout),
+      /Plan candidate differs/,
+    );
+    await assert.rejects(
+      compileObjective(17, body, target.baseSha, target.checkout, {
+        async generateStructured() {
+          return historical.graph;
+        },
+        async reviewGraph() {
+          assert.fail("invalid new graph must fail before review");
+        },
+      }),
+      /Aggregate acceptance/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

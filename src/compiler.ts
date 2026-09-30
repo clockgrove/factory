@@ -2069,7 +2069,9 @@ export function verifyPlanCandidate(
     throw new Error(
       "Plan contains a command without established host execution authority",
     );
-  validateGraph(
+  // Verify already reviewed bytes, including historical aggregate acceptance.
+  // New compilation and amendments enforce controller derivation before review.
+  validateAndOrderGraph(
     candidate.graph,
     objective,
     baseSha,

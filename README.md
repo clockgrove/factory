@@ -35,7 +35,7 @@ gh release download v0.1.50 --repo clockgrove/factory \
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independent artifact digest recorded for that same version in the [release artifact record](docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. Do not install until that record and public-download verification are available.
+Before installing, compare the tarball's SHA-256 with the independent artifact digest recorded for that same version in the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. Do not install until that record and public-download verification are available.
 
 Choose an absolute installation directory outside your target repository:
 

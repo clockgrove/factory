@@ -34,7 +34,8 @@
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
-    "docs/OPENAI-MANAGED.md"
+    "docs/OPENAI-MANAGED.md",
+    "docs/CLAUDE-MANAGED.md"
   ],
   "publishConfig": {
     "access": "public"

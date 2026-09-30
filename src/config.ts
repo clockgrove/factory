@@ -1,3 +1,4 @@
+import { validateClaudeManagedConfig } from "./execution/claude-managed.js";
 import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -115,7 +116,7 @@ export type ExecutionConfig =
   | {
       kind: "managed-agent";
       concurrency: number;
-      provider: "openai-agents";
+      provider: "openai-agents" | "claude-managed-agents";
       config: { [key: string]: JsonValue };
     }
   | {
@@ -559,9 +560,11 @@ export function validateConfig(value: unknown): FactoryConfig {
       ["kind", "concurrency", "provider", "config"],
       "execution",
     );
-    if (value.execution.provider !== "openai-agents")
-      throw new Error("Unsupported managed execution provider");
-    validateOpenAIManagedConfig(value.execution.config);
+    if (value.execution.provider === "openai-agents")
+      validateOpenAIManagedConfig(value.execution.config);
+    else if (value.execution.provider === "claude-managed-agents")
+      validateClaudeManagedConfig(value.execution.config);
+    else throw new Error("Unsupported managed execution provider");
   } else if (value.execution.profiles !== undefined) {
     if (value.execution.harness !== undefined)
       throw new Error(

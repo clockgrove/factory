@@ -1,4 +1,8 @@
 import {
+  ClaudeManagedExecutionDriver,
+  validateClaudeManagedConfig,
+} from "./execution/claude-managed.js";
+import {
   OpenAIManagedExecutionDriver,
   validateOpenAIManagedConfig,
 } from "./execution/openai-managed.js";
@@ -512,12 +516,21 @@ export function compose(input: FactoryConfig): FactoryApplication {
       config.repository,
       new NativeStackDelivery(config.repository),
     );
-    const driver = new OpenAIManagedExecutionDriver({
+    const managed = {
       checkout: config.checkout,
       workRoot: join(root, "managed"),
       contentStore,
-      config: validateOpenAIManagedConfig(config.execution.config),
-    });
+    };
+    const driver =
+      config.execution.provider === "claude-managed-agents"
+        ? new ClaudeManagedExecutionDriver({
+            ...managed,
+            config: validateClaudeManagedConfig(config.execution.config),
+          })
+        : new OpenAIManagedExecutionDriver({
+            ...managed,
+            config: validateOpenAIManagedConfig(config.execution.config),
+          });
     return createApplication(config, {
       planningModel: new CodexPlanningModel(
         config.checkout,

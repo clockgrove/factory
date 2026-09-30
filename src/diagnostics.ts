@@ -1150,6 +1150,22 @@ export function statusDocument(
     coordinator: state.coordinator
       ? {
           ...state.coordinator,
+          ...(state.coordinator.observationError
+            ? {
+                observationError: redactDiagnosticDetail(
+                  state.coordinator.observationError,
+                  secrets,
+                ),
+              }
+            : {}),
+          ...(state.coordinator.cancelError
+            ? {
+                cancelError: redactDiagnosticDetail(
+                  state.coordinator.cancelError,
+                  secrets,
+                ),
+              }
+            : {}),
           ...(state.coordinator.waitReason
             ? {
                 waitReason: redactDiagnosticDetail(

@@ -495,6 +495,7 @@ export class RealGitHubGateway implements GitHubGateway {
       status: string;
       conclusion: string | null;
       html_url: string;
+      app?: { id?: number } | null;
     }[] = [];
     for (let page = 1; ; page++) {
       const result = await this.client.request<{ check_runs: typeof runs }>(
@@ -518,28 +519,48 @@ export class RealGitHubGateway implements GitHubGateway {
           run.conclusion !== null &&
           !["success", "neutral", "skipped"].includes(run.conclusion),
       ) || ["error", "failure"].includes(statuses.state);
-    const namedChecks = runs
-      .filter(
-        (run) =>
-          run.head_sha === identity.headSha &&
-          run.status === "completed" &&
-          run.conclusion === "success" &&
-          Number.isSafeInteger(run.id) &&
-          run.id > 0 &&
-          typeof run.name === "string" &&
-          run.name.length > 0 &&
-          typeof run.html_url === "string" &&
-          run.html_url.length > 0 &&
-          runs.filter((candidate) => candidate.name === run.name).length === 1,
+    const checksByName = new Map<string, typeof runs>();
+    for (const run of runs) {
+      const group = checksByName.get(run.name);
+      if (group) group.push(run);
+      else checksByName.set(run.name, [run]);
+    }
+    const namedChecks = [...checksByName.values()].flatMap((group) => {
+      const run = group[0]!;
+      const appId = run.app?.id;
+      if (
+        !group.every(
+          (candidate) =>
+            candidate.head_sha === identity.headSha &&
+            candidate.status === "completed" &&
+            candidate.conclusion === "success" &&
+            Number.isSafeInteger(candidate.id) &&
+            candidate.id > 0 &&
+            typeof candidate.name === "string" &&
+            candidate.name.length > 0 &&
+            typeof candidate.html_url === "string" &&
+            candidate.html_url.length > 0,
+        ) ||
+        // Repeated triggers are equivalent proof only when every current run
+        // succeeds and the authenticated response identifies the same app.
+        (group.length > 1 &&
+          (typeof appId !== "number" ||
+            !Number.isSafeInteger(appId) ||
+            appId <= 0 ||
+            !group.every((candidate) => candidate.app?.id === appId)))
       )
-      .map((run) => ({
-        id: run.id,
-        headSha: run.head_sha,
-        name: run.name,
-        status: run.status,
-        conclusion: run.conclusion,
-        detailsUrl: run.html_url,
-      }));
+        return [];
+      return [
+        {
+          id: run.id,
+          headSha: run.head_sha,
+          name: run.name,
+          status: run.status,
+          conclusion: run.conclusion,
+          detailsUrl: run.html_url,
+        },
+      ];
+    });
     let mergeReadiness: PullRequestObservation["mergeReadiness"];
     if (!detail.merged && detail.state !== "closed") {
       const readiness = await this.client.pullRequestReadiness(

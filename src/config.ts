@@ -123,7 +123,8 @@ export type ExecutionConfig =
       kind: "sandbox";
       concurrency: number;
       provider: string;
-      harness: { kind: string };
+      harness: Extract<LocalHarnessConfig, { kind: "registered" }>;
+      argv: string[];
     };
 
 export type ResourcePhase = "coding" | "validation" | "review" | "delivery";
@@ -540,7 +541,8 @@ export function validateConfig(value: unknown): FactoryConfig {
   assertObject(value.execution, "execution");
   if (
     value.execution.kind !== "local" &&
-    value.execution.kind !== "managed-agent"
+    value.execution.kind !== "managed-agent" &&
+    value.execution.kind !== "sandbox"
   ) {
     throw new Error(
       `Execution mode ${String(value.execution.kind)} is not implemented; select local`,
@@ -554,7 +556,29 @@ export function validateConfig(value: unknown): FactoryConfig {
       "execution.concurrency must be a positive operator-selected integer",
     );
   }
-  if (value.execution.kind === "managed-agent") {
+  if (value.execution.kind === "sandbox") {
+    assertOnlyKeys(
+      value.execution,
+      ["kind", "concurrency", "provider", "harness", "argv"],
+      "execution",
+    );
+    if (
+      typeof value.execution.provider !== "string" ||
+      !value.execution.provider.trim()
+    )
+      throw new Error("Sandbox provider identity required");
+    validateLocalHarness(value.execution.harness);
+    if (value.execution.harness.kind !== "registered")
+      throw new Error("Sandbox requires the installed registered harness seam");
+    if (
+      !Array.isArray(value.execution.argv) ||
+      !value.execution.argv.length ||
+      !value.execution.argv.every(
+        (x) => typeof x === "string" && x.length && !x.includes("\0"),
+      )
+    )
+      throw new Error("Sandbox requires installed invocation argv");
+  } else if (value.execution.kind === "managed-agent") {
     assertOnlyKeys(
       value.execution,
       ["kind", "concurrency", "provider", "config"],

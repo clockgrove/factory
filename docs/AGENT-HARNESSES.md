@@ -331,9 +331,10 @@ These are local processes running as the developer's OS account. Worktree path
 checks, SDK permission callbacks, filtered environments, and disabled extension
 surfaces reduce accidental authority; they are not an OS sandbox for hostile
 repository code. Source-authorized validation commands also run locally under
-operator authority. Managed agents, remote Copilot sessions, sandbox execution,
-Daytona, dynamic provider installation, and a provider marketplace are outside
-this seam.
+operator authority. The [sandbox driver](SANDBOX-EXECUTION.md) consumes this same
+registered harness seam inside an installed separate process. Managed agents, remote
+Copilot sessions, Daytona, dynamic provider installation, and a provider marketplace
+remain separate capabilities.
 
 Credential-free CI packs Factory, installs it while omitting optional packages,
 imports only `@clockgrove/factory`, injects a scripted non-Codex harness, and

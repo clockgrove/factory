@@ -623,9 +623,15 @@ export async function runObjective(
   options: {
     deadlineAt?: string;
     ownerLock?: ControllerLock;
-    intakeControl?: (request: ControlRequest) => Promise<unknown>;
+    observeControl?: (
+      handler: ((request: ControlRequest) => Promise<unknown>) | undefined,
+    ) => void;
   } = {},
 ): Promise<FactoryState> {
+  if (!!options.ownerLock !== !!options.observeControl)
+    throw new Error(
+      "Borrowed Objective ownership requires its intake control handler",
+    );
   if (options.deadlineAt && !Number.isFinite(Date.parse(options.deadlineAt)))
     throw new Error("Deadline must be an absolute timestamp");
   const root = stateRoot(config.repository);
@@ -760,9 +766,7 @@ export async function runObjective(
   let controlTail: Promise<unknown> = Promise.resolve();
   let server;
   try {
-    server = await serveControl(config.repository, lock, async (request) => {
-      if (request.objective === 0 && options.intakeControl)
-        return options.intakeControl(request);
+    const handle = async (request: ControlRequest) => {
       if (request.objective !== objective)
         throw new Error("Objective identity differs from owner");
       const state = owner.snapshot;
@@ -849,8 +853,11 @@ export async function runObjective(
       const result = controlTail.then(apply);
       controlTail = result.catch(() => undefined);
       return result;
-    });
+    };
+    if (options.observeControl) options.observeControl(handle);
+    else server = await serveControl(config.repository, lock, handle);
   } catch (error) {
+    options.observeControl?.(undefined);
     if (deadlineTimer) clearTimeout(deadlineTimer);
     owners.delete(ownerKey(config, objective));
     if (!options.ownerLock) releaseControllerLock(lockPath, lock);
@@ -969,7 +976,10 @@ export async function runObjective(
     if (deadlineTimer) clearTimeout(deadlineTimer);
     process.off("SIGUSR1", cancel);
     process.off("SIGTERM", handoff);
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    options.observeControl?.(undefined);
+    if (server)
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    await controlTail;
     owners.delete(ownerKey(config, objective));
     if (!options.ownerLock) releaseControllerLock(lockPath, lock);
   }

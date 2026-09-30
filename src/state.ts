@@ -148,7 +148,62 @@ export interface PreparationState {
 }
 export type ContinuationState = FactoryState | PreparationState;
 
+/** Explicit operator evidence is bound to one immutable stopped snapshot. */
+export interface ReadOnlyReviewAbandonmentRequest {
+  kind: "abandon-read-only-review";
+  repository: string;
+  objective: number;
+  runId: string;
+  configDigest: string;
+  /** SHA-256 of the exact state.json bytes before cancellation. */
+  snapshotDigest: string;
+  actor: string;
+  reason: string;
+  cessation: {
+    kind: "operator-verified-local-cessation";
+    verifiedAt: string;
+    /** Identity-bound verification of all workers, descendants and model activity. */
+    basis: string;
+    workers: "ceased";
+    subprocesses: "ceased";
+    models: "ceased";
+    unknownOwnedResources: false;
+  };
+}
+
+export function assertReadOnlyReviewAbandonmentRequest(
+  value: unknown,
+): asserts value is ReadOnlyReviewAbandonmentRequest {
+  const request = record(value, "Read-only review abandonment");
+  if (
+    request.kind !== "abandon-read-only-review" ||
+    !Number.isSafeInteger(request.objective) ||
+    Number(request.objective) <= 0
+  )
+    throw new Error("Invalid read-only review abandonment disposition");
+  for (const key of ["repository", "runId", "actor", "reason"])
+    if (!string(request[key], `abandonment.${key}`).trim())
+      throw new Error(`abandonment.${key} must be nonempty`);
+  sha(request.configDigest, "abandonment.configDigest", 64);
+  sha(request.snapshotDigest, "abandonment.snapshotDigest", 64);
+  const cessation = record(request.cessation, "abandonment.cessation");
+  if (
+    cessation.kind !== "operator-verified-local-cessation" ||
+    cessation.workers !== "ceased" ||
+    cessation.subprocesses !== "ceased" ||
+    cessation.models !== "ceased" ||
+    cessation.unknownOwnedResources !== false ||
+    typeof cessation.verifiedAt !== "string" ||
+    !Number.isFinite(Date.parse(cessation.verifiedAt)) ||
+    !string(cessation.basis, "abandonment.cessation.basis").trim()
+  )
+    throw new Error(
+      "Full trusted worker, subprocess and model cessation evidence is required",
+    );
+}
+
 export interface FactoryState {
+  readOnlyReviewAbandonment?: ReadOnlyReviewAbandonmentRequest & { at: string };
   finalAcceptance?: import("./completion.js").FinalAcceptance;
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
   repairConsumption?: Record<
@@ -396,6 +451,25 @@ export function parseFactoryState(
 ): FactoryState {
   const state = record(value, "state");
   assertCoordinator(state.coordinator);
+  if (state.readOnlyReviewAbandonment !== undefined) {
+    assertReadOnlyReviewAbandonmentRequest(state.readOnlyReviewAbandonment);
+    const abandonment =
+      state.readOnlyReviewAbandonment as ReadOnlyReviewAbandonmentRequest & {
+        at: string;
+      };
+    if (
+      abandonment.repository !== state.repository ||
+      abandonment.objective !== state.objective ||
+      abandonment.runId !== state.runId ||
+      abandonment.configDigest !== state.configDigest ||
+      !Number.isFinite(Date.parse(abandonment.at)) ||
+      state.cancelledAt !== abandonment.at ||
+      state.cancelRequested !== true ||
+      state.finalAcceptance ||
+      Date.parse(abandonment.cessation.verifiedAt) > Date.parse(abandonment.at)
+    )
+      throw new Error("Invalid permanent read-only review abandonment binding");
+  }
   if (
     state.schemaVersion !== 4 ||
     state.repository !== repository ||

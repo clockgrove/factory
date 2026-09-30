@@ -138,6 +138,7 @@ const paths=[...new Set([...declared,...execFileSync('git',['ls-files','--cached
 for(const path of paths){
  if(typeof path!=='string'||!path||path.includes('\\')||path.includes('\0')||path.split('/').some(p=>!p||p==='.'||p==='..'||p.toLowerCase()==='.git'))throw new Error('Unsafe output path');
  if(path.split('/').some(p=>p==='.factory-inputs'))continue;
+ const parts=path.split('/');for(let i=1;i<parts.length;i++)if(!lstatSync(parts.slice(0,i).join('/')).isDirectory())throw new Error('Unsafe output parent');
  let stat;try{stat=lstatSync(path);}catch(e){if(e.code==='ENOENT')continue;throw e;}
  if(!stat.isFile()&&!stat.isSymbolicLink())throw new Error('Unsupported output file type: '+path);
  const bytes=stat.isSymbolicLink()?Buffer.from(readlinkSync(path)):readFileSync(path);

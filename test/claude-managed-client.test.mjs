@@ -83,3 +83,20 @@ test('attempt history rejects unrelated turns and missing tool correlations', ()
   assert.equal(claudeTurnDisposition([input, { ...idle, stop_reason: { type: 'budget_reached' } }], { inputEventId: 'input' }).state, 'failed');
   assert.throws(() => claudeTurnDisposition([input, input], { inputEventId: 'input' }));
 });
+
+const { readClaudeManagedOutput } = await import('../dist/execution/claude-managed-output.js');
+test('delayed output readiness remains pending; complete bytes bind exact session, turn and input', async () => {
+ const cfg=validateClaudeManagedConfig(config());const binding={attemptId:'attempt',baseSha:'a'.repeat(40),inputDigest:'b'.repeat(64)};
+ const bytes=Buffer.from(JSON.stringify({...binding,files:[]}));let available=false;let wrongScope=false;let truncated=false;
+ const client=new ClaudeManagedClient(cfg,{apiKey:'not-a-real-key',fetch:async url=>{
+  const path=new URL(url).pathname;
+  if(path.endsWith('/events'))return json({data:[input,idle],has_more:false,next_page:null});
+  if(path.endsWith('/content'))return new Response(truncated?bytes.subarray(1):bytes);
+  if(path==='/v1/files')return json({data:available?[{id:'file_output',filename:'factory-result.json',size_bytes:bytes.length,downloadable:true,scope:{type:'session',id:wrongScope?'sesn_other':'sesn_owned'}}]:[],has_more:false,next_page:null});
+  return json(session(cfg));
+ }});
+ assert.equal(await readClaudeManagedOutput(client,'sesn_owned',{inputEventId:'input'},binding),undefined);
+ available=true;const output=await readClaudeManagedOutput(client,'sesn_owned',{inputEventId:'input'},binding);assert.equal(output.receipt.endEventId,'idle');assert.equal(output.receipt.fileId,'file_output');
+ wrongScope=true;await assert.rejects(()=>readClaudeManagedOutput(client,'sesn_owned',{inputEventId:'input'},binding),/scope/);
+ wrongScope=false;truncated=true;await assert.rejects(()=>readClaudeManagedOutput(client,'sesn_owned',{inputEventId:'input'},binding),/truncated/);
+});

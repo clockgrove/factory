@@ -25,3 +25,26 @@ test('Claude rejects corrupt, truncated, misbound and unsafe output before mater
  }
  assert.equal(decode([entry]).files.length,1);
 });
+
+const { prepareClaudeInput, CLAUDE_BOOTSTRAP_SCRIPT } = await import('../dist/execution/claude-managed-input.js');
+const { LocalContentStore } = await import('../dist/content/local.js');
+const { verifyClaudeBootstrap } = await import('../dist/execution/claude-managed-bootstrap.js');
+test('Claude exact bootstrap materializes shallow base and verifies real script receipt, not model prose', async () => {
+ const root=mkdtempSync(join(tmpdir(),'claude-bootstrap-'));try{
+ const repo=join(root,'source');mkdirSync(repo);const git=(...args)=>execFileSync('git',args,{cwd:repo,encoding:'utf8'}).trim();git('init','-q');writeFileSync(join(repo,'first'),'unrelated history');git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','old');const predecessor=git('rev-parse','HEAD');unlinkSync(join(repo,'first'));writeFileSync(join(repo,'source.bin'),Buffer.from([0,255,128,1]));git('add','-A');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','base');const baseSha=git('rev-parse','HEAD');git('config','remote.private.url','https://credential:must-not-leak@example.invalid/repo');
+ const request={baseSha,item:{sourceAssets:[]}};const prepared=await prepareClaudeInput(repo,join(root,'prepared'),request,new LocalContentStore(join(root,'content')));
+ const script=join(root,'bootstrap.mjs');writeFileSync(script,CLAUDE_BOOTSTRAP_SCRIPT);const workspace=join(root,'hosted');const output=join(root,'receipt.json');execFileSync(process.execPath,[script,prepared.path,workspace,output,prepared.digest]);assert.deepEqual(readFileSync(join(workspace,'source.bin')),Buffer.from([0,255,128,1]));assert.throws(()=>execFileSync('git',['cat-file','-e',predecessor],{cwd:workspace,stdio:'pipe'}));assert.ok(!readFileSync(prepared.path,'utf8').includes('must-not-leak'));
+ const stamp='2026-09-30T00:00:00Z';const ev=(id,type,rest={})=>({id,type,processed_at:stamp,...rest});const command='node /mnt/session/uploads/factory-bootstrap.mjs fixed';const events=[ev('input','user.message',{content:[]}),ev('tool','agent.tool_use',{name:'bash',input:{command}}),ev('result','agent.tool_result',{tool_use_id:'tool',is_error:false}),ev('end','session.status_idle',{stop_reason:{type:'end_turn'}})];
+ const proof=verifyClaudeBootstrap(events,'input',command,readFileSync(output),{...prepared,baseSha});assert.equal(proof.toolEventId,'tool');
+ assert.throws(()=>verifyClaudeBootstrap(events.filter(e=>e.type!=='agent.tool_use'),'input',command,readFileSync(output),{...prepared,baseSha}));
+ const altered=structuredClone(events);altered[1].input.command+=' &';assert.throws(()=>verifyClaudeBootstrap(altered,'input',command,readFileSync(output),{...prepared,baseSha}));
+ const receipt=JSON.parse(readFileSync(output));receipt.files[0].sha256='0'.repeat(64);assert.throws(()=>verifyClaudeBootstrap(events,'input',command,Buffer.from(JSON.stringify(receipt)),{...prepared,baseSha}));
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('Claude exporter refuses a declared file through a symlink parent before reading it', () => {
+ const root=mkdtempSync(join(tmpdir(),'claude-export-parent-'));try{
+ const cwd=join(root,'work');mkdirSync(cwd);execFileSync('git',['init','-q'],{cwd});mkdirSync(join(root,'private'));writeFileSync(join(root,'private','secret'),'do-not-export');symlinkSync(join(root,'private'),join(cwd,'linked'));
+ writeFileSync(join(cwd,'.factory-assets.json'),JSON.stringify({sets:[{members:[{path:'linked/secret'}]}]}));const script=join(root,'export.mjs');writeFileSync(script,CLAUDE_EXPORT_SCRIPT);const input=join(root,'binding.json');writeFileSync(input,JSON.stringify(binding));assert.throws(()=>execFileSync(process.execPath,[script,input,join(root,'out.json')],{cwd,stdio:'pipe'}));
+ }finally{rmSync(root,{recursive:true,force:true});}
+});

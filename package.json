@@ -33,7 +33,8 @@
     ".codex-plugin",
     "README.md",
     "LICENSE",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "docs/OPENAI-MANAGED.md"
   ],
   "publishConfig": {
     "access": "public"

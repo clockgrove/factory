@@ -43,6 +43,10 @@ An unavailable result retains its diagnostic explanation; it never certifies rea
 
 If the harness reports a socket directory or permission error, inspect the host and enclosing sandbox before another model call. An outer agent sandbox can deliberately hide a correctly configured host socket directory. Do not chmod, unmask, relocate credentials, bypass a security control, or retry a worker as a readiness probe. Correct the authorized controller launch context and repeat the model-free check. Then use the already requested bounded Objective to exercise real tools; ordinary plugin use does not require creating or qualifying a Factory release fixture.
 
+## Managed execution development candidate
+
+The [OpenAI managed execution guide](OPENAI-MANAGED.md) describes explicit provider configuration and current qualification limitations. It changes Work Item execution only; installing Factory retains local defaults and grants no additional provider, disclosure or spending authority.
+
 ## Bind a checkout
 
 After installing the CLI, choose the maximum number of concurrent local workers and bind your target:

@@ -75,7 +75,7 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select candidate v0.1.53. Use them only after its publication and independent public byte/pinned-plugin verification, and compare the tarball digest with the independent value in its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
+The commands below select candidate v0.1.53. Use them only after its publication and independent public byte/pinned-plugin verification, and compare the tarball digest with the independently recorded prepublication value in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/pull/360), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.53
@@ -83,7 +83,7 @@ codex plugin add factory@clockgrove
 gh release download v0.1.53 --repo clockgrove/factory \
   --pattern clockgrove-factory-0.1.53.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
-# Also compare the digest with the independent value in the release artifact record.
+# Also compare the independently recorded prepublication digest in the owning issue/PR or artifact record.
 npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.53.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help

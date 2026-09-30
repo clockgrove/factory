@@ -24,7 +24,7 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select candidate v0.1.53 and become usable only after publication and independent public archive and pinned-plugin verification. Wait for its independent digest and exact artifact evidence in the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md).
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select candidate v0.1.53 and become usable only after publication and independent public archive and pinned-plugin verification. Wait for its independently recorded prepublication digest and exact public archive/plugin evidence in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/pull/360), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md).
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.53
@@ -35,7 +35,7 @@ gh release download v0.1.53 --repo clockgrove/factory \
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independent artifact digest recorded for that same version in the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. Do not install until that record and public-download verification are available.
+Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/pull/360), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. Do not install until that digest and independent public byte/pinned-plugin verification are available.
 
 Choose an absolute installation directory outside your target repository:
 

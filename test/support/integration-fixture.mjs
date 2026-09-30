@@ -871,14 +871,16 @@ export function makeApplication(descriptor) {
     descriptor.actions,
     eventsPath,
   );
-  const driver = new LocalExecutionDriver(
-    descriptor.config.checkout,
-    join(root, "worktrees"),
-    harness,
-    descriptor.config.execution.concurrency,
-    contentStore,
-    "scripted-test@1",
-  );
+  const driver =
+    descriptor.driver ??
+    new LocalExecutionDriver(
+      descriptor.config.checkout,
+      join(root, "worktrees"),
+      harness,
+      descriptor.config.execution.concurrency,
+      contentStore,
+      "scripted-test@1",
+    );
   return {
     application: createApplication(descriptor.config, {
       planningModel:

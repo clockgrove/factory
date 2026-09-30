@@ -4,6 +4,50 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under #206 and explicitly accepted under #207. Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.44 artifact record
+
+[Release v0.1.44](https://github.com/clockgrove/factory/releases/tag/v0.1.44)
+is tagged at accepted source `20d4993175b63be5a2b0c325fb97abd4edee767f`.
+The archive was built once from reviewed release head
+`97dae13b59e9f58b32a6ba8e11bfbea8392d3de4`; both commits have tree
+`2c9a694351cefe9c6e52d8d20f4994bf7b37946d`. The archive is 151123395 bytes,
+SHA-256 `a256b634c72c8efddf89aa3a9db601d8c3e1b5dd8428efecc54bc4270e194ddb`.
+[Release PR #296](https://github.com/clockgrove/factory/pull/296) records one
+independent review round and includes the current GitHub API merge evidence
+correction in [PR #294](https://github.com/clockgrove/factory/pull/294).
+[PR CI](https://github.com/clockgrove/factory/actions/runs/36665485640)
+and [integrated main CI](https://github.com/clockgrove/factory/actions/runs/36665882810)
+passed, including 509 deterministic tests. Typecheck, lint, formatting,
+third-party notices and package checks passed on the final candidate.
+
+Independent public download matched the audited artifact. Fresh-prefix offline
+Node 24 installation with an empty cache passed; all 3587 regular installed files
+and 82 bundled dependency roots matched the archive and locked identities.
+Installed CLI help and secret-scanner clean/detected/error checks passed.
+The pinned v0.1.44 marketplace plugin was enabled; its manifest and both skills
+matched the archive. Annotated tag `c9b28d9a41bba805460e2acbd8be237adafd9565`
+resolves to the accepted source above. Exact-tag ruleset `24224778` prohibits
+updates and deletion, with no bypass actors or exclusions, under the explicit
+approval recorded in [#295](https://github.com/clockgrove/factory/issues/295).
+
+Independent installed compiler preflight checked the emitted schemas, decoders,
+full runtime validators and hydrated worker inputs using all seven complete
+selected sources, 23 source-declared commands and four worker/profile bindings.
+The installed merge evidence preflight checked the selected GitHub API response
+contract against authenticated read-only evidence, using a synthetic merge
+acknowledgment for regular delivery and local fixtures for native stack delivery.
+These model-free checks supplied no accepted plan, actual merge or live native
+stack qualification, and made no provider calls or target/state writes.
+
+Publication and distribution checks do not establish live acceptance. Live
+workspace qualification remains [#263](https://github.com/clockgrove/factory/issues/263);
+full autonomous program qualification remains
+[#253](https://github.com/clockgrove/factory/issues/253). Compiler-scoped
+[#276](https://github.com/clockgrove/factory/issues/276) and
+[#280](https://github.com/clockgrove/factory/issues/280) are closed separately.
+Earlier releases, acceptance, failures and accounting retain their original
+artifact and scenario scope. No published archive was rebuilt or retagged.
+
 ## Immutable v0.1.43 artifact record
 
 [Release v0.1.43](https://github.com/clockgrove/factory/releases/tag/v0.1.43)

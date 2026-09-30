@@ -1,3 +1,4 @@
+import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
@@ -111,7 +112,12 @@ export type ExecutionConfig =
       defaultProfile?: string;
       profiles?: Record<string, ExecutionProfile>;
     }
-  | { kind: "managed-agent"; concurrency: number; provider: string }
+  | {
+      kind: "managed-agent";
+      concurrency: number;
+      provider: "openai-agents";
+      config: { [key: string]: JsonValue };
+    }
   | {
       kind: "sandbox";
       concurrency: number;
@@ -531,7 +537,10 @@ export function validateConfig(value: unknown): FactoryConfig {
     }
   }
   assertObject(value.execution, "execution");
-  if (value.execution.kind !== "local") {
+  if (
+    value.execution.kind !== "local" &&
+    value.execution.kind !== "managed-agent"
+  ) {
     throw new Error(
       `Execution mode ${String(value.execution.kind)} is not implemented; select local`,
     );
@@ -544,7 +553,16 @@ export function validateConfig(value: unknown): FactoryConfig {
       "execution.concurrency must be a positive operator-selected integer",
     );
   }
-  if (value.execution.profiles !== undefined) {
+  if (value.execution.kind === "managed-agent") {
+    assertOnlyKeys(
+      value.execution,
+      ["kind", "concurrency", "provider", "config"],
+      "execution",
+    );
+    if (value.execution.provider !== "openai-agents")
+      throw new Error("Unsupported managed execution provider");
+    validateOpenAIManagedConfig(value.execution.config);
+  } else if (value.execution.profiles !== undefined) {
     if (value.execution.harness !== undefined)
       throw new Error(
         "execution.harness and execution.profiles are mutually exclusive",
@@ -638,11 +656,23 @@ export function validateConfig(value: unknown): FactoryConfig {
   assertObject(value.policy, "policy");
   if (value.policy.network !== "host" && value.policy.network !== "off")
     throw new Error("Unsupported network policy");
-  const harnesses = value.execution.profiles
-    ? Object.values(
-        value.execution.profiles as Record<string, ExecutionProfile>,
-      ).map((p) => p.harness)
-    : [value.execution.harness as LocalHarnessConfig];
+  const harnesses =
+    value.execution.kind === "managed-agent"
+      ? []
+      : value.execution.profiles
+        ? Object.values(
+            value.execution.profiles as Record<string, ExecutionProfile>,
+          ).map((p) => p.harness)
+        : [value.execution.harness as LocalHarnessConfig];
+  if (
+    value.execution.kind === "managed-agent" &&
+    (value.policy.network !== "off" ||
+      !Array.isArray(value.policy.allowedSecretNames) ||
+      value.policy.allowedSecretNames.length !== 0)
+  )
+    throw new Error(
+      "OpenAI managed workers require network off and no worker secrets",
+    );
   for (const harness of harnesses) {
     if (
       (harness.kind === "claude-agent-sdk" ||

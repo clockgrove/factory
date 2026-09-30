@@ -1,10 +1,87 @@
 # Release artifact records
 
-Source capability [#363](https://github.com/clockgrove/factory/issues/363) adds explicit permanent abandonment of an exact stopped uncertain read-only result review after verified local cessation, preserving all original evidence and consumption. It remains a trunk source change until the matching installed artifact gate verifies the supported surface; actual run disposition belongs to its operator.
-
 Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and their issues. This document records immutable distribution evidence, not a second work queue.
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
+
+## Immutable v0.1.53 artifact record
+
+[Release v0.1.53](https://github.com/clockgrove/factory/releases/tag/v0.1.53)
+was built once from frozen independently reviewed and integrated source
+`b20cf7b880354cc097f014f6bffd9ee867ae95be`, tree
+`9795a94777e16c4c4d7f836551abe16d6421c38c`. The archive is 153586682 bytes,
+SHA-256 `5495c29b8673458863d4ec73bfd58644ffe92471ac6631e0907dda9a39ee9e79`,
+recorded in the [prepublication checkpoint](https://github.com/clockgrove/factory/issues/357#issuecomment-5919809809).
+[PR #359](https://github.com/clockgrove/factory/pull/359),
+[PR #362](https://github.com/clockgrove/factory/pull/362) and
+[PR #364](https://github.com/clockgrove/factory/pull/364) record independent
+source reviews and guarded integration of the three corrections.
+[Release PR #360](https://github.com/clockgrove/factory/pull/360) records complete
+metadata/guidance review and focused verification of its installation-record
+repair. [Required PR CI](https://github.com/clockgrove/factory/actions/runs/36776236480)
+and [integrated main CI](https://github.com/clockgrove/factory/actions/runs/36776995149)
+passed. The exact coordinated source gate passed all 697 deterministic tests
+without skips, plus build, typecheck, lint, formatting, notices and packaging.
+
+[Independent empty-cache offline installation and whole installed proof](https://github.com/clockgrove/factory/issues/357#issuecomment-5920123428)
+matched all 6357 regular archive files, 95 bundled lock-addressed dependency roots
+and 94 bundled license files. CLI help, manifests, both skills, notices and
+archived matching-version guidance passed. All seven mandatory committed test
+files ran against installed production imports: compiler-wire, graph-amendments,
+diagnostics-cli, qa-github, delivery-review-evidence, review-submission and
+read-only-review-abandonment. All 109 tests passed with zero failures,
+cancellations, skips or todos. A contributor wrapper rejection for two obsolete
+test names was preserved; every recorded case was revalidated against the frozen
+source without repeating installation or execution. The accepted installed
+receipt SHA-256 is `e9f67cefc7deec88af48d287bf5a6704ff2e032275a8551473d8427890a1b12d`.
+
+The [focused retained-scenario preflight](https://github.com/clockgrove/factory/issues/253#issuecomment-5920158801)
+passed independent review of actual five-item aggregate and final evidence,
+commands, criteria and rendered model requests through that same installation,
+with scripted transports and the original run unchanged.
+[One read-only production gateway observation](https://github.com/clockgrove/factory/issues/357#issuecomment-5920237451)
+retained a real successful receipt from the approved historical public duplicate
+checks on their exact head and app. Its seven GETs made no mutations, retries or
+provider calls; it does not claim current merge readiness. These are scoped
+installed/preparation checks, not completed autonomous Objectives.
+
+Publication completed on 2026-09-30 at 21:48:30 UTC. Annotated tag
+`98ce08ac02fcded3970511dc274a62b0d022ebcc` resolves to the frozen source above.
+Exact-tag ruleset `24266918` prohibits updates and deletion with no bypass actors
+or exclusions. GitHub's archive digest and size match the audited bytes.
+The public `SHA256SUMS` asset is 96 bytes, SHA-256
+`7ba9493337c60778d6454067e2eb3b4847131a0390d7ca97ea440dc6f1694cdc`.
+[Independent public verification](https://github.com/clockgrove/factory/issues/357#issuecomment-5920335558)
+matched the anonymous archive and checksum download. One fresh isolated pinned
+v0.1.53 marketplace/plugin installation was enabled at the exact source; its
+manifest and both skills matched the public archive byte for byte. Public proof
+receipt SHA-256: `31c162f23d4a025e58bd16f1c521fcf8a14894c7ea80862933313b8de5b2ceb9`.
+The byte-identical public archive retains the single offline audit and 109-test
+proof without repeating either. The archived candidate wording remains unchanged;
+this later record supplies its verified publication facts.
+
+This release retains successful repeated same-app delivery receipts without
+weakening exact-head, failure, protection or singular QA ambiguity checks
+([#357](https://github.com/clockgrove/factory/issues/357)). It retains structural
+QA/aggregate evidence outside coding integration groups and prepares item/final
+review packets before submission fences, preserving actual or uncertain submitted
+outcomes ([#361](https://github.com/clockgrove/factory/issues/361)). Its explicit
+permanent abandonment surface requires exact stopped-run identity, verified owned
+cessation and exclusive ownership; original markers, results, errors, evidence,
+consumed limits and unknown accounting remain preserved. Abandoned runs remain
+unaccepted and cannot continue; unresolved mutating effects remain fenced
+([#363](https://github.com/clockgrove/factory/issues/363)). Installed capability
+verification does not apply that operation to the historical run.
+
+Full installed autonomous qualification remains
+[#253](https://github.com/clockgrove/factory/issues/253), with
+[#331](https://github.com/clockgrove/factory/issues/331),
+[#254](https://github.com/clockgrove/factory/issues/254) and
+[#243](https://github.com/clockgrove/factory/issues/243) retaining their own
+acceptance. Earlier releases, accepted v0.1.47 public workspace and Clockgrove
+pilot scenarios retain their exact historical scope. No release was rebuilt or
+retagged. This publication ledger is parallel maintenance and does not gate an
+otherwise authorized pilot start or resume deferred provider work.
 
 ## Immutable v0.1.52 artifact record
 

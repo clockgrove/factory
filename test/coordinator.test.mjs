@@ -10,6 +10,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Octokit } from "@octokit/core";
+import { GitHubClient } from "../dist/github-client.js";
+import { RealGitHubGateway } from "../dist/github.js";
+import { withProcessCancellation } from "../dist/process.js";
 import { stateRoot } from "../dist/config.js";
 import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
@@ -199,7 +203,7 @@ test("partial projection saves each known identity and resumes without planning 
   );
 });
 
-test("unknown projection acknowledgement stops restart without another create", async () => {
+test("compound: interrupted projection and rate-limited refresh retain unknown disposition without replay", async () => {
   await fixture("unknown", async ({ application, config, github }) => {
     let creates = 0;
     github.projectGraph = async (request) => {
@@ -212,10 +216,53 @@ test("unknown projection acknowledgement stops restart without another create", 
       readContinuation(config.repository, 1).projectionPending,
       "result",
     );
+    const original = readContinuation(config.repository, 1);
+    let reads = 0;
+    const gateway = new RealGitHubGateway(
+      config.repository,
+      {},
+      new GitHubClient(
+        new Octokit({
+          request: {
+            fetch: async () => {
+              reads++;
+              return new Response(
+                JSON.stringify({ message: "secondary rate limit" }),
+                {
+                  status: 403,
+                  headers: {
+                    "content-type": "application/json",
+                    "retry-after": "10",
+                  },
+                },
+              );
+            },
+          },
+        }),
+      ),
+    );
+    // Authenticated refresh is unavailable: it cannot establish the lost effect.
+    await assert.rejects(gateway.objective(1), /HTTP 403/);
+    const abort = new AbortController();
+    const queued = withProcessCancellation(abort.signal, () =>
+      gateway.objective(1),
+    );
+    abort.abort();
+    await assert.rejects(queued);
+    assert.equal(reads, 1);
+    assert.deepEqual(readContinuation(config.repository, 1), original);
     await assert.rejects(
       application.runObjective(1),
       /preparation stopped|unknown outcome/,
     );
+    const stopped = readContinuation(config.repository, 1);
+    assert.equal(stopped.runId, original.runId);
+    assert.deepEqual(stopped.plan, original.plan);
+    assert.deepEqual(
+      stopped.allowanceConsumption,
+      original.allowanceConsumption,
+    );
+    assert.equal(stopped.projectionPending, "result");
     assert.equal(creates, 1);
   });
 });

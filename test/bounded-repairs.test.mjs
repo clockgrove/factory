@@ -657,7 +657,7 @@ test("durable plan --authority carries consumed planning allowance into exact ac
 });
 
 for (const delivery of ["regular", "native-stack"])
-  test(`${delivery}: supported repair control revalidates an unchanged candidate after an external prerequisite is restored`, async () => {
+  test(`${delivery}: compound: persisted repair survives controller handoff and restart without resetting allowance`, async () => {
     const root = mkdtempSync(join(tmpdir(), "factory-env-control-"));
     const previous = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = join(root, "state");
@@ -690,7 +690,7 @@ for (const delivery of ["regular", "native-stack"])
         reviews++;
         return reviewer(request);
       };
-      const fixture = makeApplication({
+      const descriptor = {
         config,
         graph,
         objectiveBody: source,
@@ -699,7 +699,8 @@ for (const delivery of ["regular", "native-stack"])
           result: { files: [{ path: "result.txt", text: "accepted\n" }] },
         },
         planningModel: planner,
-      });
+      };
+      const fixture = makeApplication(descriptor);
       const policy = authority();
       policy.repairClasses = ["validation-environment"];
       policy.allowances.implementationRepairs = 0;
@@ -722,24 +723,43 @@ for (const delivery of ["regular", "native-stack"])
       );
       writeFileSync(gate, "ready\n");
       const work = failed.work.result;
-      const reply = await requestControl(config.repository, {
+      const drained = assert.rejects(running, /drained and released ownership/);
+      await requestControl(config.repository, {
         objective: 1,
-        action: "repair",
-        input: {
-          item: "result",
-          treeSha: work.treeSha,
-          correction: {
-            kind: "validation-environment",
-            failureDigest: work.recovery.failure.digest,
-            actor: "fixture",
-            diagnosis: "Declared controller prerequisite was unavailable",
-            correction:
-              "The same declared prerequisite is now provisioned; revalidate the preserved exact candidate",
-          },
+        action: "handoff",
+      });
+      await drained;
+      fixture.application.repairWorkItem(1, {
+        item: "result",
+        treeSha: work.treeSha,
+        correction: {
+          kind: "validation-environment",
+          failureDigest: work.recovery.failure.digest,
+          actor: "fixture",
+          diagnosis: "Declared controller prerequisite was unavailable",
+          correction:
+            "The same declared prerequisite is now provisioned; revalidate the preserved exact candidate",
         },
       });
-      assert.equal(reply.handled, true);
-      const done = await running;
+      const charged = readState(config.repository, 1);
+      assert.equal(charged.allowanceConsumption.resultRereviews, 1);
+      assert.equal(charged.work.result.attempt, work.attempt);
+      const { controlObjective } = await import("../dist/runner.js");
+      await controlObjective(config, { objective: 1, action: "resume" });
+      const restarted = makeApplication(descriptor);
+      const done = await restarted.application.runObjective(1);
+      assert.equal(done.runId, charged.runId);
+      assert.throws(
+        () =>
+          chargeRepair(structuredClone(done), "validation-environment", [
+            "result",
+          ]),
+        /exhausted/,
+      );
+      assert.deepEqual(
+        done.work.result.recovery.history,
+        charged.work.result.recovery.history,
+      );
       assert.equal(done.finalValidation.passed, true);
       assert.equal(done.work.result.attempt, work.attempt);
       assert.equal(done.work.result.treeSha, work.treeSha);

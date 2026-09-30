@@ -2,6 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.49 — candidate
+
+- Classify settled, unpublished Work Item failures from their own outcome while an independent sibling's controller collection remains active. Keep diagnosed candidate repair fenced until global quiescence (#338).
+
+Publication, independent distribution verification and installed qualification remain pending. Published v0.1.48 distribution evidence and accepted v0.1.47 public workspace evidence retain their original artifact and scenario scope; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
+
 ## 0.1.48 — 2026-09-30
 
 - Retain reviewed published results while required checks or target protections become ready, then continue exact-head delivery without rerunning workers (#335).

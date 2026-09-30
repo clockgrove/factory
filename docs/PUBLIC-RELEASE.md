@@ -65,16 +65,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-Install the published v0.1.48 tag and matching release assets:
+The source candidate is v0.1.49. After that version is published and independently verified in the [release artifact record for this version](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md), install its matching tag and release assets:
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.48
+codex plugin marketplace add clockgrove/factory --ref v0.1.49
 codex plugin add factory@clockgrove
-gh release download v0.1.48 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.48.tgz --pattern SHA256SUMS
+gh release download v0.1.49 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.49.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the digest with the independent value in the release artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.48.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.49.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

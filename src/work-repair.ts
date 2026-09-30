@@ -41,7 +41,6 @@ export function recordWorkFailure(
     !work.pendingEffect &&
     !work.pullRequest &&
     !state.coordinator?.cancelError &&
-    !state.coordinator?.processes?.length &&
     (error instanceof SettledAttemptFailure ||
       error instanceof CandidateValidationFailure ||
       error instanceof CandidateEnvironmentFailure);

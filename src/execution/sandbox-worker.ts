@@ -128,7 +128,9 @@ export async function runSandboxHarness(
         path: path(s.path),
       })),
     };
-    const handle = await registration.harness.start(request);
+    const handle = sandboxJsonValue(
+      await registration.harness.start(request),
+    ) as HarnessHandle;
     assertDurableValue(handle, "Sandbox harness handle");
     if (!handle.identity) throw new Error("Missing harness identity");
     writeFileSync(handlePath, JSON.stringify(handle), {
@@ -188,11 +190,14 @@ export function sandboxJsonValue(value: unknown): unknown {
     typeof value === "object" &&
     (Object.getPrototypeOf(value) === Object.prototype ||
       Object.getPrototypeOf(value) === null)
-  )
+  ) {
+    // Keep unsupported symbol keys visible to the durable-value validator.
+    if (Object.getOwnPropertySymbols(value).length) return value;
     return Object.fromEntries(
       Object.entries(value)
         .filter(([, entry]) => entry !== undefined)
         .map(([key, entry]) => [key, sandboxJsonValue(entry)]),
     );
+  }
   return value;
 }

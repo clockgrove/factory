@@ -130,10 +130,17 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       a.phase = "submitting";
       delete a.process;
       this.save(handle, context);
-      a.process = await this.options.provider.execute(a.sandbox!, {
-        argv: [...this.options.argv, a.sandbox!.workspace, operation, a.output],
-        cwd: a.sandbox!.workspace,
-      });
+      a.process = sandboxJsonValue(
+        await this.options.provider.execute(a.sandbox!, {
+          argv: [
+            ...this.options.argv,
+            a.sandbox!.workspace,
+            operation,
+            a.output,
+          ],
+          cwd: a.sandbox!.workspace,
+        }),
+      ) as RemoteProcess;
       a.phase = "invoked";
       this.save(handle, context);
     }
@@ -203,7 +210,9 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     };
     const a = this.active(handle);
     this.save(handle, context);
-    a.sandbox = await this.options.provider.create({ attemptId: identity });
+    a.sandbox = sandboxJsonValue(
+      await this.options.provider.create({ attemptId: identity }),
+    ) as SandboxHandle;
     a.phase = "preparing";
     this.save(handle, context);
     const root = join(this.options.workRoot, identity);
@@ -432,13 +441,15 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       if (actual.digest !== source.digest || actual.bytes !== source.bytes)
         throw new Error("Sandbox LFS input changed");
     }
-    const result = await collectWorktreeResult(
-      this.options.checkout,
-      worktree,
-      a.request,
-      this.options.contentStore,
-      value.result,
-    );
+    const result = sandboxJsonValue(
+      await collectWorktreeResult(
+        this.options.checkout,
+        worktree,
+        a.request,
+        this.options.contentStore,
+        value.result,
+      ),
+    ) as ExecutionResult;
     // Import the exact collected commit; no remote Git configuration is trusted.
     const { pinnedGitAsync } = await import("../process.js");
     await pinnedGitAsync(

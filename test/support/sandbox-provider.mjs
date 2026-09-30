@@ -172,6 +172,11 @@ export class FixtureSandboxProvider {
     const handlePath = join(h.workspace, "harness.json");
     if (existsSync(handlePath)) {
       const harness = JSON.parse(readFileSync(handlePath, "utf8"));
+      if (!harness.data) {
+        rmSync(h.workspace, { recursive: true });
+        this.resources.delete(h.identity);
+        return;
+      }
       assert.equal(harness.data.root, h.workspace);
       assert.equal(harness.identity, h.attemptId);
       const proc = `/proc/${harness.data.pid}/cmdline`;

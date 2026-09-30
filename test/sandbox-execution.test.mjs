@@ -604,3 +604,77 @@ test("authorized private local input is explicitly transferred and verified thro
   );
   assert.equal(f.provider.resources.size, 0);
 });
+
+test("optional undefined properties in resource, process, harness and collected result checkpoints are omitted", async (t) => {
+  const f = fixture(t);
+  const create = f.provider.create.bind(f.provider);
+  f.provider.create = async (request) => ({
+    ...(await create(request)),
+    data: undefined,
+  });
+  const execute = f.provider.execute.bind(f.provider);
+  f.provider.execute = async (handle, command) => ({
+    ...(await execute(handle, command)),
+    data: undefined,
+  });
+  writeFileSync(
+    join(f.root, "sandbox-entry.mjs"),
+    `
+    import {runSandboxHarness} from ${JSON.stringify(pathToFileURL(resolve("dist/index.js")).href)};
+    import {writeFileSync} from 'node:fs';
+    import {join} from 'node:path';
+    await runSandboxHarness({identity:'fixture-harness@1',config:{},harness:{
+      capabilities:{protocolVersion:1,worktree:'factory-owned-read-write',head:'preserve',lifecycle:'restart-safe-durable-handle',publication:'controller-only',assetSets:true,authentication:'none'},
+      async start(request){writeFileSync(join(request.worktree,'keep.txt'),'optional result');return {identity:request.attemptId,data:undefined};},
+      async observe(){return {state:'complete',detail:undefined};},
+      async cancel(){},
+      async collect(){return {evidence:undefined,assets:undefined};}
+    }});
+  `,
+  );
+  const h = await f.driver.start(f.request, f.context);
+  assert.equal(Object.hasOwn(h.data.sandbox, "data"), false);
+  const resource = h.data.sandbox.workspace;
+  assert.equal(
+    Object.hasOwn(
+      JSON.parse(readFileSync(join(resource, "harness.json"), "utf8")),
+      "data",
+    ),
+    false,
+  );
+  const result = await f.driver.collect(h, f.context);
+  assert.equal(Object.hasOwn(result, "evidence"), false);
+  assert.equal(Object.hasOwn(f.work.execution.data.result, "evidence"), false);
+  assert.equal(
+    f.git("show", result.changeRef + ":keep.txt"),
+    "optional result",
+  );
+  assert.equal(f.provider.resources.size, 0);
+  assert.deepEqual(
+    await new SandboxExecutionDriver(f.options).collect(
+      structuredClone(f.work.execution),
+    ),
+    result,
+  );
+});
+
+test("optional normalization does not accept invalid array values or non-JSON values", async () => {
+  const { sandboxJsonValue } = await import(
+    "../dist/execution/sandbox-worker.js"
+  );
+  const { assertDurableValue } = await import(
+    "../dist/execution/checkpoint.js"
+  );
+  for (const value of [
+    [undefined],
+    { value: NaN },
+    { value: 1n },
+    { value: () => true },
+    { value: new Date() },
+    { [Symbol("unsupported")]: "value" },
+  ])
+    assert.throws(
+      () => assertDurableValue(sandboxJsonValue(value), "reply"),
+      /JSON/,
+    );
+});

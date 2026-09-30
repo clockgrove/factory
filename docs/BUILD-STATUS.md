@@ -4,6 +4,43 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under #206 and explicitly accepted under #207. Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.42 artifact record
+
+[Release v0.1.42](https://github.com/clockgrove/factory/releases/tag/v0.1.42)
+is tagged at source `b3e2dd2f04d08159d9d7a0415baaa1772ddb5088`, tree
+`64c13efbf931ea55ce230d0635e6c3fea4d14758`. The archive is 151123144 bytes,
+SHA-256 `0482b41aed0020b59389984b0e59de597ad2adc28b7bb048627c85e7bde4f715`.
+[PR #282](https://github.com/clockgrove/factory/pull/282) records one independent
+code review round for the readiness-probe protocol and bounded revision diagnosis
+corrections in #280. [PR CI](https://github.com/clockgrove/factory/actions/runs/36647584685)
+and [integrated main CI](https://github.com/clockgrove/factory/actions/runs/36647947425)
+passed, including 487 deterministic tests on the integrated source.
+
+Independent public download matched the audited artifact. Fresh-prefix offline
+Node 24 installation with an empty cache passed; all 3585 regular installed files
+and 82 bundled dependency roots matched the archive and locked identities.
+Installed CLI and secret-scanner clean/detected/error checks passed. The pinned
+v0.1.42 marketplace plugin was enabled, with manifest and skills matching the
+artifact. Its exact source tag prohibits updates and deletion without bypass
+actors under the approved protection recorded in
+[#283](https://github.com/clockgrove/factory/issues/283).
+
+Installed compiler diagnostics rejected the preserved prose readiness response,
+invalid selectors and invented command authority. Explicit in-memory diagnostic
+conversions passed the actual emitted schema, decoder and complete runtime
+validators. All four rendered worker inputs retain required implementation literals,
+including the direct Node assertion; the reviewer receives every complete selected
+source, including immutable workspace contents. No accepted plan, provider response
+or live execution is supplied by these diagnostics.
+
+Publication and these checks do not establish live acceptance. Workspace/compiler
+qualification remains in [#263](https://github.com/clockgrove/factory/issues/263),
+[#276](https://github.com/clockgrove/factory/issues/276) and
+[#280](https://github.com/clockgrove/factory/issues/280); full autonomous program
+qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
+Earlier private acceptance, public scenarios, failures and accounting retain their
+original artifact and scope. No published archive was rebuilt or retagged.
+
 ## Immutable v0.1.41 artifact record
 
 [Release v0.1.41](https://github.com/clockgrove/factory/releases/tag/v0.1.41)

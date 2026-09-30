@@ -281,7 +281,65 @@ Source assets may be pinned repository files, explicitly cited absolute private 
 factory cancel --objective ISSUE_NUMBER
 ```
 
-Cancellation stops owned local work. Inspect its resulting status before attempting anything else. For a failed or cancelled unpublished item without an admitted repair policy, an explicit new-attempt decision can use:
+Cancellation stops owned local work. Inspect its resulting status before attempting anything else.
+
+An uncertain read-only result review normally prevents terminal cancellation. An
+operator may explicitly **permanently abandon** an exact stopped failed run with
+built-in local workers, after verifying that all owned workers, SDK descendants,
+subprocesses and model activity have ceased. Stop the service/controller first.
+An empty controller lock or process list does not prove SDK/model cessation.
+Unknown live resources, unsupported harnesses, sealed final acceptance, planning,
+projection, publication, merge or other unresolved mutations remain refused.
+
+Use `factory status --objective ISSUE_NUMBER --json` to inspect the identities,
+then hash the exact private `objectives/ISSUE_NUMBER/state.json` bytes with
+`sha256sum` while the installation is stopped. The private state directory
+is derived from the repository configuration. Save an explicit JSON request in a
+private file, using the exact observed values:
+
+```json
+{
+  "kind": "abandon-read-only-review",
+  "repository": "OWNER/REPO",
+  "objective": 123,
+  "runId": "EXACT_RUN_ID",
+  "configDigest": "EXACT_CONFIGURATION_SHA256",
+  "snapshotDigest": "EXACT_STATE_FILE_SHA256",
+  "actor": "OPERATOR_NAME",
+  "reason": "Retire this failed run without accepting its uncertain review",
+  "cessation": {
+    "kind": "operator-verified-local-cessation",
+    "verifiedAt": "ACTUAL_VERIFICATION_ISO_TIMESTAMP",
+    "basis": "Actual identity-bound observations of stopped workers, SDK descendants, subprocesses, retained model sessions and service/controller",
+    "workers": "ceased",
+    "subprocesses": "ceased",
+    "models": "ceased",
+    "unknownOwnedResources": false
+  }
+}
+```
+
+```sh
+factory cancel --objective ISSUE_NUMBER --abandon-read-only-review PRIVATE_REQUEST_FILE
+```
+
+The request is trusted operator evidence, not a claim Factory can infer from
+absent diagnostics. Its run/configuration/snapshot binding must still match under
+exclusive stopped ownership. Factory checks the recorded local identities for
+live processes without cancelling, collecting or cleaning resources. The
+operation adds the operator disposition and terminal cancellation to the existing
+atomic snapshot. Every original review marker, error, accepted/failed Work Item,
+evidence, consumed allowance and unknown outcome/accounting stays intact; no
+non-submission or successful cleanup is asserted. Historical submission and
+billing uncertainty need not be resolved to abandon a ceased read-only review.
+
+An abandoned run can never run, retry, repair, rereview or resume again. A
+separately authorized successor uses normal preflight/admission, its own finite
+limits and the existing installation state root. Original consumption remains
+recorded and unknown usage remains unknown; obtain accounting if needed to enforce
+a binding budget before further calls.
+
+For an ordinary failed or cancelled unpublished item without an admitted repair policy, an explicit new-attempt decision can use:
 
 ```sh
 factory retry --objective ISSUE_NUMBER --item WORK_ITEM_ID

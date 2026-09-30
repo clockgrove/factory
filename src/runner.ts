@@ -12,7 +12,7 @@ import {
   type AmendmentProposal,
 } from "./graph-amendments.js";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { userInfo } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import {
@@ -44,7 +44,13 @@ import {
   GitHubClosureFailure,
 } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
-import { factoryConfigDigest, stateRoot, validateTarget } from "./config.js";
+import {
+  CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
+  GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
+  factoryConfigDigest,
+  stateRoot,
+  validateTarget,
+} from "./config.js";
 import type {
   ContentStore,
   DeliveryStrategy,
@@ -85,6 +91,10 @@ import type {
   ContinuationState,
   FactoryState,
   PreparationState,
+} from "./state.js";
+import {
+  assertReadOnlyReviewAbandonmentRequest,
+  type ReadOnlyReviewAbandonmentRequest,
 } from "./state.js";
 import {
   acquireControllerLock,
@@ -488,7 +498,12 @@ function mutationState(
   const snapshot = owners.get(ownerKey(config, objective))?.snapshot;
   if (snapshot?.schemaVersion === 5)
     throw new Error("Objective is still preparing");
-  return snapshot ?? readState(config.repository, objective);
+  const state = snapshot ?? readState(config.repository, objective);
+  if (state?.readOnlyReviewAbandonment)
+    throw new Error(
+      "Objective was permanently abandoned; create a normally admitted successor",
+    );
+  return state;
 }
 function mutationLock(
   config: FactoryConfig,
@@ -523,6 +538,10 @@ export async function controlObjective(
     const state = readContinuation(config.repository, request.objective);
     if (!state) throw new Error("Objective has no Factory state");
     if (request.action === "status") return state.coordinator;
+    if (state.schemaVersion === 4 && state.readOnlyReviewAbandonment)
+      throw new Error(
+        "Objective was permanently abandoned; create a normally admitted successor",
+      );
     if (request.action === "propose-amendment") {
       if (state.schemaVersion !== 4 || !request.input?.replacement)
         throw new Error(
@@ -678,6 +697,10 @@ export async function runObjective(
   let snapshot: ContinuationState | undefined;
   try {
     snapshot = readContinuation(config.repository, objective);
+    if (snapshot?.schemaVersion === 4 && snapshot.readOnlyReviewAbandonment)
+      throw new Error(
+        "Objective was permanently abandoned; create a normally admitted successor",
+      );
   } catch (error) {
     if (!options.ownerLock) releaseControllerLock(lockPath, lock);
     throw error;
@@ -1200,6 +1223,10 @@ async function runObjectivePass(
         git(config.checkout, "rev-parse", "HEAD"),
       );
     if (state) {
+      if (state.readOnlyReviewAbandonment)
+        throw new Error(
+          "Objective was permanently abandoned; create a normally admitted successor",
+        );
       if (
         state.coordinator?.processes?.some((entry) =>
           processGroupExists(entry.pid),
@@ -2091,11 +2118,163 @@ async function runObjectivePass(
   }
 }
 
+/** No cancellation, collection, model call or cleanup is inferred by abandonment. */
+function abandonStoppedReadOnlyReview(
+  config: FactoryConfig,
+  objective: number,
+  request: ReadOnlyReviewAbandonmentRequest,
+): "cancelled" {
+  assertReadOnlyReviewAbandonmentRequest(request);
+  if (owners.has(ownerKey(config, objective)))
+    throw new Error(
+      "Read-only review abandonment requires a stopped controller",
+    );
+  const lockPath = join(stateRoot(config.repository), "controller.lock");
+  const lock = acquireControllerLock(lockPath, objective);
+  try {
+    const path = statePath(config.repository, objective);
+    const state = readContinuation(config.repository, objective);
+    if (!state || state.schemaVersion !== 4)
+      throw new Error(
+        "Only an active-graph stopped result review can be abandoned",
+      );
+    if (
+      request.repository !== config.repository ||
+      request.objective !== objective ||
+      request.runId !== state.runId ||
+      request.configDigest !== state.configDigest ||
+      request.configDigest !== factoryConfigDigest(config) ||
+      request.snapshotDigest !==
+        createHash("sha256").update(readFileSync(path)).digest("hex")
+    )
+      throw new Error(
+        "Read-only review abandonment differs from the exact run, configuration or stopped snapshot",
+      );
+    if (
+      state.cancelledAt ||
+      state.readOnlyReviewAbandonment ||
+      state.finalAcceptance ||
+      state.finalValidation?.passed ||
+      state.objectiveClosure
+    )
+      throw new Error(
+        "Terminal or sealed final acceptance cannot be abandoned",
+      );
+    if (config.execution.kind !== "local")
+      throw new Error(
+        "Read-only review abandonment supports verified local execution only",
+      );
+    const harnesses = config.execution.profiles
+      ? Object.values(config.execution.profiles).map(
+          (profile) => profile.harness,
+        )
+      : [config.execution.harness];
+    if (harnesses.some((harness) => !harness || harness.kind === "registered"))
+      throw new Error("Configured harness has unsupported cessation identity");
+    if (
+      !state.coordinator ||
+      (!state.error &&
+        !Object.values(state.work).some((work) => work.status === "failed")) ||
+      Date.parse(request.cessation.verifiedAt) > Date.now() ||
+      Date.parse(request.cessation.verifiedAt) <
+        Date.parse(state.coordinator.phaseStartedAt)
+    )
+      throw new Error(
+        "Read-only review abandonment requires a stopped failure and current cessation evidence",
+      );
+    if (
+      hasPendingAmendmentEffect(state) ||
+      state.planningRecovery?.phase === "submitted" ||
+      (state.coordinator.phase.includes("submitted") &&
+        state.coordinator.phase !== "objective-review-submitted") ||
+      Object.keys(state.stackMerges ?? {}).length
+    )
+      throw new Error(
+        "Planning, projection or mutating effect remains unresolved",
+      );
+    const knownAdapters = [
+      "codex-sdk",
+      CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
+      GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
+    ];
+    let uncertainReview =
+      state.coordinator.phase === "objective-review-submitted";
+    for (const process of state.coordinator.processes ?? []) {
+      const identity = linuxProcessIdentity(process.pid);
+      if (
+        processGroupExists(process.pid) ||
+        (identity && identity.state !== "Z")
+      )
+        throw new Error(
+          "Owned subprocess remains live or its identity is unresolved",
+        );
+    }
+    for (const work of Object.values(state.work)) {
+      if (work.pendingEffect && work.pendingEffect !== "review")
+        throw new Error("Publication or merge effect remains unresolved");
+      uncertainReview ||= work.pendingEffect === "review";
+      if (
+        work.status === "running" ||
+        work.status === "published" ||
+        (work.step === "deliver" && work.status !== "done") ||
+        work.githubClosure === "pending"
+      )
+        throw new Error("Active work or mutating delivery remains unresolved");
+      if (work.execution) {
+        const active = work.execution.data as {
+          adapterIdentity?: string;
+          handle?: { data?: { pid?: number; startTime?: string } };
+        };
+        const process = active?.handle?.data;
+        if (
+          work.execution.provider !== "local" ||
+          !knownAdapters.includes(active?.adapterIdentity ?? "") ||
+          !Number.isSafeInteger(process?.pid) ||
+          Number(process?.pid) <= 0 ||
+          typeof process?.startTime !== "string" ||
+          !process.startTime
+        )
+          throw new Error(
+            "Owned worker has unsupported or unresolved cessation identity",
+          );
+        const identity = linuxProcessIdentity(process.pid!);
+        if (
+          processGroupExists(process.pid!) ||
+          (identity && identity.state !== "Z")
+        )
+          throw new Error(
+            "Owned worker remains live or its identity is unresolved",
+          );
+      } else if (
+        work.step === "execute" &&
+        work.status !== "pending" &&
+        work.status !== "done" &&
+        work.status !== "cancelled"
+      ) {
+        throw new Error("Owned worker has no stable cessation identity");
+      }
+    }
+    if (!uncertainReview)
+      throw new Error("No uncertain read-only result review exists to abandon");
+    const at = new Date().toISOString();
+    state.readOnlyReviewAbandonment = { ...structuredClone(request), at };
+    state.cancelRequested = true;
+    state.cancelledAt = at;
+    saveState(path, state);
+    return "cancelled";
+  } finally {
+    releaseControllerLock(lockPath, lock);
+  }
+}
+
 export async function cancelObjective(
   config: FactoryConfig,
   objective: number,
   driver: ExecutionDriver,
+  abandonment?: ReadOnlyReviewAbandonmentRequest,
 ): Promise<"requested" | "cancelled"> {
+  if (abandonment !== undefined)
+    return abandonStoppedReadOnlyReview(config, objective, abandonment);
   const root = stateRoot(config.repository);
   const lock = join(root, "controller.lock");
   const control = await requestControl(config.repository, {

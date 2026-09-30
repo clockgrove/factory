@@ -1,5 +1,7 @@
 # Release artifact records
 
+Source capability [#363](https://github.com/clockgrove/factory/issues/363) adds explicit permanent abandonment of an exact stopped uncertain read-only result review after verified local cessation, preserving all original evidence and consumption. It remains a trunk source change until the matching installed artifact gate verifies the supported surface; actual run disposition belongs to its operator.
+
 Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and their issues. This document records immutable distribution evidence, not a second work queue.
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.

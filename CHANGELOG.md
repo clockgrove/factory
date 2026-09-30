@@ -2,6 +2,14 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.45 — 2026-09-29
+
+- Expose configured built-in MCP capability and additive-instruction presence/equality to planning and graph review while retaining private instruction text, opaque registered configuration and exact runtime bindings (#301 / PR #302).
+- Distinguish configured capability from successful readiness or invocation, and instruction equality from instruction semantics; preserve native tool and permission restrictions.
+- Include the integrated OpenAI hosted Work Item execution adapter and durable provider checkpoints from PR #300. Deterministic source checks do not establish live provider qualification.
+
+Publication and source checks do not establish installed Objective qualification; see [#303](https://github.com/clockgrove/factory/issues/303) and the continuing release gates.
+
 ## 0.1.44 — 2026-09-29
 
 - Confirm ordinary guarded merges from the successful merge response and current PR identity under GitHub REST API `2026-03-10`, which no longer returns `merge_commit_sha` (#293 / PR #294).

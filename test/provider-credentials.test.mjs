@@ -96,3 +96,43 @@ test("fresh service processes resolve rotated private credentials without ambien
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("loaded controller key authenticates the actual OpenAI client without environment injection", async () => {
+  const { OpenAIAgentsClient } = await import(
+    "../dist/execution/openai-managed.js"
+  );
+  const root = mkdtempSync(join(tmpdir(), "factory-client-credential-"));
+  const previous = {
+    directory: process.env.CREDENTIALS_DIRECTORY,
+    key: process.env.FACTORY_DUMMY_KEY,
+  };
+  try {
+    process.env.CREDENTIALS_DIRECTORY = root;
+    process.env.FACTORY_DUMMY_KEY = "dummy-ambient";
+    for (const value of ["dummy-loaded-first", "dummy-loaded-second"]) {
+      writeFileSync(join(root, "FACTORY_DUMMY_KEY"), value, { mode: 0o600 });
+      const key = resolveProviderCredential(cfg, "FACTORY_DUMMY_KEY");
+      const client = new OpenAIAgentsClient(
+        "FACTORY_DUMMY_KEY",
+        async (_url, options) => {
+          assert.equal(options.headers.Authorization, `Bearer ${value}`);
+          return new Response(JSON.stringify({}), { status: 200 });
+        },
+        1000,
+        key,
+      );
+      await client.request("GET", "/agents/sessions/fixture");
+      assert.equal(process.env.FACTORY_DUMMY_KEY, "dummy-ambient");
+      assert.ok(!JSON.stringify(cfg).includes(value));
+    }
+  } finally {
+    for (const [name, old] of [
+      ["CREDENTIALS_DIRECTORY", previous.directory],
+      ["FACTORY_DUMMY_KEY", previous.key],
+    ]) {
+      if (old === undefined) delete process.env[name];
+      else process.env[name] = old;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import type { BetaCloudConfig } from "@anthropic-ai/sdk/resources/beta/environments/environments";
 import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -21,16 +22,7 @@ export interface ClaudeManagedConfig {
   /** Complete resolved agent snapshot, checked again before each submission. */
   agent: BetaManagedAgentsSession["agent"];
   /** This is a configured expectation, not a provider-issued immutable snapshot. */
-  environment: {
-    type: "cloud";
-    networking: {
-      type: "limited";
-      allowed_hosts: string[];
-      allow_mcp_servers: false;
-      allow_package_managers: false;
-    };
-    packages: Record<string, string[]>;
-  };
+  environment: BetaCloudConfig;
   /** Explicit operator-authorized list-cost threshold; crossing requests can exceed it. */
   budgetCents?: string;
 }
@@ -117,8 +109,12 @@ export function validateClaudeManagedConfig(
       "Claude managed workers require denied outbound networking",
     );
   if (
-    Object.values(environment.packages).some(
-      (packages) => !Array.isArray(packages) || packages.length,
+    Object.entries(environment.packages).some(([key, packages]) =>
+      key === "type"
+        ? packages !== "packages"
+        : !["apt", "cargo", "gem", "go", "npm", "pip"].includes(key) ||
+          !Array.isArray(packages) ||
+          packages.length,
     )
   )
     throw new Error(

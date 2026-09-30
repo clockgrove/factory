@@ -3,7 +3,7 @@ import test from 'node:test';
 import { ClaudeManagedClient, validateClaudeManagedConfig } from '../dist/execution/claude-managed-client.js';
 const config = () => ({
   agentId: 'agent_pinned', agentVersion: 3, environmentId: 'env_isolated', workspaceId: 'wrkspc_public', credentialEnv: 'FACTORY_CLAUDE_MANAGED_KEY',
-  environment: { type: 'cloud', packages: {}, networking: { type: 'limited', allowed_hosts: [], allow_mcp_servers: false, allow_package_managers: false } },
+  environment: { type: 'cloud', packages: { apt: [], cargo: [], gem: [], go: [], npm: [], pip: [], type: 'packages' }, networking: { type: 'limited', allowed_hosts: [], allow_mcp_servers: false, allow_package_managers: false } },
   agent: { id: 'agent_pinned', version: 3, type: 'agent', name: 'fixture', description: null, model: { id: 'claude-sonnet-5' }, system: null, skills: [], multiagent: null, mcp_servers: [], tools: [{ type: 'agent_toolset_20260401', default_config: { enabled: false, permission_policy: { type: 'always_ask' } }, configs: [{ name: 'bash', type: 'bash', enabled: true, permission_policy: { type: 'always_allow' } }] }] },
 });
 const session = (cfg) => ({ id: 'sesn_owned', agent: cfg.agent, environment_id: cfg.environmentId, vault_ids: [], resources: [], metadata: { factory_attempt: 'attempt' }, budget: null, status: 'idle' });

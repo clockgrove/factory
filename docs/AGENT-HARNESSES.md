@@ -424,8 +424,14 @@ Issue #164 extends the existing installation-owned profile with an optional
 `environment`. Additive `instructions` are supported by Codex, Claude and Copilot.
 Factory appends them to the private worker prompt, explicitly subordinate to its
 mandatory worker constraints and approved Work Item. They cannot replace the
-system prompt, grant permissions or change the assigned model. Instructions are
+system prompt, grant permissions or change the assigned model. Literal instructions are
 not copied into the graph, compiler/reviewer metadata, issue body or diagnostics.
+Planner and graph-review profile summaries expose only built-in MCP kind/version
+and instruction presence with an opaque identity for exact text equality or
+distinctness across profiles. That identity does not disclose instruction semantics.
+The MCP summary is separate from native tool selections and permissions; it proves
+configuration, not successful readiness or invocation. Registered adapter
+configuration remains opaque: an omitted summary does not establish absence.
 Do not put credentials into instructions or any other profile value.
 
 The first MCP capability is **Claude only**:

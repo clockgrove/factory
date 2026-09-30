@@ -28,6 +28,11 @@ export interface ExecutionBinding {
 export interface ExecutionProfileSummary extends ExecutionBinding {
   description: string;
   selectionHints: string[];
+  /** Built-in configuration only; omitted for opaque registered adapters. */
+  environment?: {
+    instructions: { present: false } | { present: true; identity: string };
+    mcp?: { kind: "factory-worktree-read"; version: 1 };
+  };
   constraints: {
     network: "host" | "off";
     tools?: string[];

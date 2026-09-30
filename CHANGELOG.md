@@ -2,12 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.50 — candidate
+## 0.1.50 — 2026-09-30
 
 - Derive new aggregate acceptance from completed, integrated child results; retain prior accepted criteria exactly and keep semantic QA and final Objective obligations at their supported phases (#341).
 - Supply the harness discovery captured for the current attempt in independent result review, bound to the reviewed result and marked as untrusted proposal data (#342).
 
-Publication and independent installed/public correction verification remain required before installation. Published v0.1.49 and v0.1.48 distribution evidence and accepted v0.1.47 workspace evidence retain their original artifact and scenario scope; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
+Published with [independent public artifact/plugin verification](https://github.com/clockgrove/factory/issues/341#issuecomment-5913718125), fresh-cache offline installation and seven exact installed correction cases. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0150-artifact-record). Earlier release and v0.1.47 workspace evidence retain their original artifact and scenario scope; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
 
 ## 0.1.49 — 2026-09-30
 

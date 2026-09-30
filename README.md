@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** [v0.1.49](https://github.com/clockgrove/factory/releases/tag/v0.1.49) is published with [independent public artifact and plugin verification](https://github.com/clockgrove/factory/issues/338#issuecomment-5912020386) for the settled concurrent-failure correction in [#338](https://github.com/clockgrove/factory/issues/338). [v0.1.48](https://github.com/clockgrove/factory/releases/tag/v0.1.48) is published with [independent public artifact and plugin verification](https://github.com/clockgrove/factory/issues/333#issuecomment-5910899384). The published [v0.1.47](https://github.com/clockgrove/factory/releases/tag/v0.1.47) passed public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263). That evidence applies to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](docs/BUILD-STATUS.md) for what has been qualified. Some interrupted deliveries require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
+**Status:** [v0.1.50](https://github.com/clockgrove/factory/releases/tag/v0.1.50) is published with [independent public artifact and plugin verification](https://github.com/clockgrove/factory/issues/341#issuecomment-5913718125) and installed checks for the aggregate/discovery corrections. Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) for exact artifact and scenario records, and [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) for operator intervention.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. This source tree prepares v0.1.50. Use the following matching plugin and CLI commands only after that version's tagged plugin, release assets, independent artifact record and public-download verification are published:
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The published v0.1.50 plugin and CLI have matching, independently verified bytes. Check the independent artifact record below before installing:
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.50

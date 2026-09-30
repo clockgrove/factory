@@ -4,6 +4,62 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.50 artifact record
+
+[Release v0.1.50](https://github.com/clockgrove/factory/releases/tag/v0.1.50)
+was built once from independently reviewed source
+`ed1c0c2651a420ad494bc41c2330cb9737faf53d`, tree
+`9c4a30607a4b950ae9f18519481f59cb98db1e75`. The archive is 153579576 bytes,
+SHA-256 `9e1b98e21235cc860bb45b550514d987d8739ca6f0754d681dafe59b42cacf81`,
+recorded in the [independent prepublication checkpoint](https://github.com/clockgrove/factory/issues/341#issuecomment-5913637802).
+[PR #343](https://github.com/clockgrove/factory/pull/343) records one complete
+independent review round and focused verification of the consolidated metadata,
+emitted-schema and historical reviewed-plan repairs. Integrated main
+`09cc488b2a09e5434fc6edeb36e1eb0acb84cdf7` has the identical tree and passed
+[its own CI](https://github.com/clockgrove/factory/actions/runs/36729994491). The coordinated
+candidate gate passed all 627 deterministic tests without skips, plus build,
+typecheck, lint, formatting, notices and packaging.
+
+Independent empty-cache offline installation on Linux x64/WSL2 with Node
+24.20.0 and npm 11.19.0 matched all 6357 regular archive files, 95 bundled
+lock-addressed dependency roots and 94 bundled license files. Notices, installed
+CLI help, manifests, skills and archived matching-version guidance passed.
+The frozen archive labels its source as a candidate and makes installation
+conditional on publication, public verification and this independent main record;
+this record supplies the later facts without changing those bytes.
+
+Publication completed on 2026-09-30. Annotated tag
+`092b5e5f4b6331b8e3a2ab645f20bf1ba161be9b` resolves to the source above.
+Exact-tag ruleset `24249164` prohibits updates and deletion with no bypass actors
+or exclusions. [Independent public verification](https://github.com/clockgrove/factory/issues/341#issuecomment-5913718125)
+matched the anonymously downloaded archive and public `SHA256SUMS` to these audited
+bytes. The isolated pinned v0.1.50 marketplace plugin was enabled at the exact tagged
+source; its manifest and both skills matched the public archive byte for byte.
+Archived version-matched installation guidance passed.
+
+This release derives new aggregate acceptance from completed integrated children,
+retains historical accepted criteria exactly and keeps semantic QA and final
+Objective obligations at their supported phases
+([#341](https://github.com/clockgrove/factory/issues/341)). It exposes the captured
+current-attempt discovery to independent result review, bound to the reviewed
+commit/tree and explicitly marked as untrusted proposal data
+([#342](https://github.com/clockgrove/factory/issues/342)). Seven mandatory exact
+installed aggregate, discovery, schema and historical-plan cases passed without
+skips, provider calls or actual GitHub calls. Production imports resolved to the
+audited package. The initial contributor-test staging failure lacked the test-only
+AJV validator; its preserved failure and one corrected model-free check use existing
+locked contributor tools without modifying the archive or acceptance.
+These checks do not establish model-backed Objective acceptance or actual protected
+delivery.
+
+Earlier artifact records and public workspace acceptance in
+[#263](https://github.com/clockgrove/factory/issues/263) retain their original bytes
+and scenarios; that workspace evidence remains bound to v0.1.47. Full installed
+autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
+Hosted-provider and live sandbox qualification remain in their own issues.
+Historical failures, identities and accounting are preserved; no published tag or
+archive was rebuilt or replaced.
+
 ## Immutable v0.1.49 artifact record
 
 [Release v0.1.49](https://github.com/clockgrove/factory/releases/tag/v0.1.49)

@@ -68,7 +68,8 @@ limit; larger inputs currently require another execution mode.
 
 The worker exports ordinary file bytes, including untracked files and declared
 media staging, into a tar artifact. Factory checks session, environment, turn,
-path, length and binding, rejects unsafe entries, and computes its own digest.
+path, length and binding, rejects unsafe entries, and verifies every file against
+the exported inventory of paths, modes, byte lengths and SHA-256 digests.
 Deleted files and executable modes survive import. The normal media capture,
 whole-AssetSet selection, target-owned LFS rules, secret scan and independent
 acceptance then apply. An artifact, successful turn or final response is not
@@ -81,6 +82,12 @@ continuation snapshot. It never resends an ambiguous create or Work Item input.
 A stopped stream and an idle session do not establish success. Restart reads
 current session and paginated turn/artifact history. Unresolved identity or
 unexpected additional turns stop for operator direction.
+
+The configured `timeoutSeconds` bounds the whole attempt, including setup and
+artifact retrieval; each request uses only the remaining time. Cancellation and
+resource deletion receive a separate window of the same duration, recorded in the
+continuation snapshot so restart cannot reset it. Thus attempt and cleanup can
+together take up to twice the configured duration.
 
 Cancellation requests a stop and then confirms owned environment disposition.
 Successful collection retains its result, artifact identities and best-effort

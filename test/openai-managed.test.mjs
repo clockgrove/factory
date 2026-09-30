@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -6,6 +7,7 @@ import {
   writeFileSync,
   readFileSync,
   chmodSync,
+  lstatSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -109,7 +111,21 @@ function fixture(t) {
         chmodSync(join(repo, "run.sh"), 0o755);
         writeFileSync(
           join(repo, ".factory-result.json"),
-          JSON.stringify(state.binding),
+          JSON.stringify({
+            ...state.binding,
+            files: ["keep.txt", "new.bin", "run.sh"].map((path) => {
+              const bytes = readFileSync(join(repo, path));
+              return {
+                path,
+                bytes: bytes.length,
+                digest: createHash("sha256").update(bytes).digest("hex"),
+                mode:
+                  lstatSync(join(repo, path)).mode & 0o111
+                    ? "100755"
+                    : "100644",
+              };
+            }),
+          }),
         );
         const archive = join(root, "output.tar");
         await create(
@@ -283,19 +299,29 @@ test("configured API origin and beta header are exact; ambiguous mutation is nev
 });
 
 test("result import refuses corrupted bytes, wrong binding and unsafe entries before publication", async (t) => {
-  for (const kind of ["truncated", "wrong-base", "symlink"]) {
+  for (const kind of [
+    "truncated",
+    "wrong-base",
+    "symlink",
+    "same-length-corruption",
+    "omitted-entry",
+  ]) {
     const f = fixture(t);
     const handle = await f.driver.start(f.request, f.context);
     if (kind === "truncated")
       f.state.artifact = f.state.artifact.subarray(0, 100);
-    else {
+    else if (kind === "same-length-corruption") {
+      const offset = f.state.artifact.indexOf(Buffer.from("changed\n"));
+      assert.ok(offset > 0);
+      f.state.artifact[offset] ^= 1;
+    } else {
       const repo = join(f.root, "work", "attempt-one", "repo");
       if (kind === "wrong-base")
         writeFileSync(
           join(repo, ".factory-result.json"),
           JSON.stringify({ ...f.state.binding, baseSha: "0".repeat(40) }),
         );
-      else {
+      else if (kind === "symlink") {
         const { symlinkSync } = await import("node:fs");
         symlinkSync("/tmp/escape", join(repo, "link"));
       }
@@ -310,7 +336,7 @@ test("result import refuses corrupted bytes, wrong binding and unsafe entries be
     }
     await assert.rejects(
       f.driver.collect(handle, f.context),
-      /archive|TAR|binding|different|unsafe/i,
+      /archive|TAR|binding|different|unsafe|inventory/i,
     );
     assert.equal(f.state.deleted, false);
   }
@@ -416,4 +442,67 @@ test("documented void event acknowledgements accept empty successful HTTP bodies
     if (previous === undefined) delete process.env.FACTORY_TEST_UNUSED_KEY;
     else process.env.FACTORY_TEST_UNUSED_KEY = previous;
   }
+});
+
+test("connected setup after deadline does not submit work; cleanup receives a separate bounded window", async (t) => {
+  const f = fixture(t);
+  const actualNow = Date.now;
+  let now = actualNow();
+  Date.now = () => now;
+  t.after(() => {
+    Date.now = actualNow;
+  });
+  const transport = f.driver.args.transport;
+  const original = transport.json.bind(transport);
+  const remaining = [];
+  transport.json = async (method, path, body, timeoutMs) => {
+    remaining.push(timeoutMs);
+    const response = await original(method, path, body);
+    if (path === "/agents/environments/environment_one" && !f.state.deleted)
+      now += 10001;
+    return response;
+  };
+  await assert.rejects(
+    f.driver.start(f.request, f.context),
+    /attempt deadline expired/,
+  );
+  assert.equal(
+    f.state.calls.filter((c) => c.path.endsWith("/events")).length,
+    0,
+  );
+  assert.equal(f.work.execution.data.phase, "prepared");
+  await f.driver.cancel(
+    structuredClone(f.work.execution),
+    executionContext(f.work, () => {}),
+  );
+  assert.equal(f.work.execution.data.phase, "disposed");
+  assert.ok(remaining.every((ms) => ms > 0 && ms <= 10000));
+});
+
+test("remaining attempt time bounds each request and rejects collection after expiry", async (t) => {
+  const f = fixture(t);
+  const actualNow = Date.now;
+  let now = actualNow();
+  Date.now = () => now;
+  t.after(() => {
+    Date.now = actualNow;
+  });
+  const transport = f.driver.args.transport;
+  const original = transport.json.bind(transport);
+  const limits = [];
+  transport.json = async (method, path, body, timeoutMs) => {
+    limits.push(timeoutMs);
+    const response = await original(method, path, body);
+    now += 1000;
+    return response;
+  };
+  const handle = await f.driver.start(f.request, f.context);
+  assert.deepEqual(limits.slice(0, 3), [10000, 9000, 8000]);
+  now += 10000;
+  const calls = f.state.calls.length;
+  await assert.rejects(
+    f.driver.collect(handle, f.context),
+    /attempt deadline expired/,
+  );
+  assert.equal(f.state.calls.length, calls);
 });

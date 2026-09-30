@@ -62,8 +62,9 @@ export interface OpenAIManagedTransport {
     method: "GET" | "POST" | "DELETE",
     path: string,
     body?: unknown,
+    timeoutMs?: number,
   ): Promise<unknown>;
-  content(path: string): Promise<Response>;
+  content(path: string, timeoutMs?: number): Promise<Response>;
 }
 /** Fixed official API origin; no mutation retries, credentials remain controller-only. */
 export class OpenAIAgentsClient implements OpenAIManagedTransport {
@@ -76,6 +77,7 @@ export class OpenAIAgentsClient implements OpenAIManagedTransport {
     method: string,
     path: string,
     body?: unknown,
+    timeoutMs = this.timeoutMs,
   ): Promise<Response> {
     if (!/^\/agents\//.test(path) || path.includes(".."))
       throw new Error("Invalid Agents API path");
@@ -86,9 +88,7 @@ export class OpenAIAgentsClient implements OpenAIManagedTransport {
       );
     return this.fetcher(`https://api.openai.com/v1${path}`, {
       method,
-      ...(this.timeoutMs
-        ? { signal: AbortSignal.timeout(this.timeoutMs) }
-        : {}),
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
       headers: {
         Authorization: `Bearer ${key}`,
         "OpenAI-Beta": "agents=v1",
@@ -101,8 +101,9 @@ export class OpenAIAgentsClient implements OpenAIManagedTransport {
     method: "GET" | "POST" | "DELETE",
     path: string,
     body?: unknown,
+    timeoutMs?: number,
   ): Promise<unknown> {
-    const response = await this.request(method, path, body);
+    const response = await this.request(method, path, body, timeoutMs);
     if (response.status === 404 && method === "GET") return null;
     if (response.status === 404 && method === "DELETE") return null;
     if (!response.ok)
@@ -112,8 +113,8 @@ export class OpenAIAgentsClient implements OpenAIManagedTransport {
     const text = await response.text();
     return text.trim() ? JSON.parse(text) : null;
   }
-  async content(path: string): Promise<Response> {
-    const response = await this.request("GET", path);
+  async content(path: string, timeoutMs?: number): Promise<Response> {
+    const response = await this.request("GET", path, undefined, timeoutMs);
     if (!response.ok)
       throw new Error(`Agents artifact download failed (${response.status})`);
     return response;
@@ -134,6 +135,7 @@ interface Active {
   root: string;
   inputDigest: string;
   startedAt: number;
+  cleanupStartedAt?: number;
   phase:
     | "create-submitted"
     | "prepared"
@@ -196,13 +198,41 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       );
     context.checkpoint(handle);
   }
-  private async pages(path: string): Promise<Record<string, unknown>[]> {
+  private remaining(data: Active): number {
+    const cleanup =
+      data.phase === "cancel-submitted" || data.phase === "delete-submitted";
+    const started = cleanup ? data.cleanupStartedAt : data.startedAt;
+    const remaining =
+      (started ?? data.startedAt) +
+      this.args.config.timeoutSeconds * 1000 -
+      Date.now();
+    if (remaining <= 0)
+      throw new Error(
+        cleanup
+          ? "OpenAI managed cleanup deadline expired; cessation remains unresolved"
+          : "OpenAI managed attempt deadline expired; cessation must be confirmed",
+      );
+    return remaining;
+  }
+  private async request(
+    data: Active,
+    method: "GET" | "POST" | "DELETE",
+    path: string,
+    body?: unknown,
+  ): Promise<unknown> {
+    return this.client.json(method, path, body, this.remaining(data));
+  }
+  private async pages(
+    data: Active,
+    path: string,
+  ): Promise<Record<string, unknown>[]> {
     const all: Record<string, unknown>[] = [];
     const seen = new Set<string>();
     let after: string | undefined;
     do {
       const page = object(
-        await this.client.json(
+        await this.request(
+          data,
           "GET",
           `${path}${path.includes("?") ? "&" : "?"}order=asc${after ? `&after=${encodeURIComponent(after)}` : ""}`,
         ),
@@ -253,7 +283,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       inputDigest: data.inputDigest,
     });
     const session = object(
-      await this.client.json("POST", "/agents/sessions", {
+      await this.request(data, "POST", "/agents/sessions", {
         agent: {
           model: this.args.config.model,
           reasoning: { effort: this.args.config.reasoningEffort },
@@ -301,7 +331,8 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     this.save(handle, context);
     while (true) {
       const environment = object(
-        await this.client.json(
+        await this.request(
+          data,
           "GET",
           `/agents/environments/${data.environmentId}`,
         ),
@@ -313,9 +344,11 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     }
     if (context.cancelled())
       throw new Error("Managed input cancelled before submission");
+    this.remaining(data);
     data.phase = "input-submitted";
     this.save(handle, context);
-    await this.client.json(
+    await this.request(
+      data,
       "POST",
       `/agents/sessions/${data.sessionId}/events`,
       {
@@ -344,12 +377,11 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     return handle;
   }
   private async wait(data: Active): Promise<void> {
-    if (Date.now() - data.startedAt >= this.args.config.timeoutSeconds * 1000)
-      throw new Error(
-        "OpenAI managed attempt reached the configured deadline; cessation must be confirmed",
-      );
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(250, this.remaining(data))),
+    );
   }
+
   async observe(
     handle: ExecutionHandle,
     context?: ExecutionContext,
@@ -364,9 +396,12 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
         "Managed creation/input disposition is unresolved; no duplicate submission is permitted",
       );
     const session = object(
-      await this.client.json("GET", `/agents/sessions/${data.sessionId}`),
+      await this.request(data, "GET", `/agents/sessions/${data.sessionId}`),
     );
-    const turns = await this.pages(`/agents/sessions/${data.sessionId}/turns`);
+    const turns = await this.pages(
+      data,
+      `/agents/sessions/${data.sessionId}/turns`,
+    );
     if (turns.some((turn) => turn.subagent_id != null) || turns.length > 1)
       throw new Error(
         "Managed session has unexpected work outside its owned single turn",
@@ -444,11 +479,13 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     const data = this.active(handle);
     if (!data.sessionId || !data.environmentId)
       throw new Error("Cannot establish owned managed resource identity");
+    data.cleanupStartedAt ??= Date.now();
     data.phase = "delete-submitted";
     this.save(handle, context);
-    await this.client.json("DELETE", `/agents/sessions/${data.sessionId}`);
+    await this.request(data, "DELETE", `/agents/sessions/${data.sessionId}`);
     if (
-      await this.client.json(
+      await this.request(
+        data,
         "GET",
         `/agents/environments/${data.environmentId}`,
       )
@@ -476,9 +513,11 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       data.phase !== "cancel-submitted" &&
       data.phase !== "delete-submitted"
     ) {
+      data.cleanupStartedAt ??= Date.now();
       data.phase = "cancel-submitted";
       this.save(handle, context);
-      await this.client.json(
+      await this.request(
+        data,
         "POST",
         `/agents/sessions/${data.sessionId}/events`,
         { events: [{ type: "agent.session.input.cancel" }] },
@@ -510,6 +549,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       await this.wait(data);
     }
     const artifacts = await this.pages(
+      data,
       `/agents/sessions/${data.sessionId}/artifacts`,
     );
     const matches = artifacts.filter(
@@ -531,6 +571,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     const artifactId = id(artifact.id);
     const response = await this.client.content(
       `/agents/sessions/${data.sessionId}/artifacts/${artifactId}/content`,
+      this.remaining(data),
     );
     if (!response.body) throw new Error("Managed artifact response is empty");
     const chunks: Buffer[] = [];
@@ -571,6 +612,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       usage: data.usage ?? null,
       model: this.args.config.model,
     };
+    this.remaining(data);
     data.result = await collectWorktreeResult(
       this.args.checkout,
       worktree,

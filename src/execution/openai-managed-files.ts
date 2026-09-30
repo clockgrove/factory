@@ -24,7 +24,7 @@ export const sha256 = (bytes: Buffer): string =>
   createHash("sha256").update(bytes).digest("hex");
 
 /** Hosted Python and tar operate on ordinary bytes, never model-encoded file content. */
-export const openAIExportScript = `import os, json, subprocess, tarfile
+export const openAIExportScript = `import os, json, subprocess, tarfile, hashlib
 root = '/workspace/repo'
 os.chdir(root)
 with open('/workspace/factory-binding.json') as f: binding=json.load(f)
@@ -35,6 +35,16 @@ for name in ['.factory-inputs','.factory-media','.factory-assets.json','.factory
   for directory,dirs,files in os.walk(name):
    paths.update(os.path.join(directory,f) for f in files)
  elif os.path.lexists(name): paths.add(name)
+paths.discard('.factory-result.json')
+files=[]
+for path in sorted(paths):
+ if not os.path.lexists(path): continue
+ if not os.path.isfile(path) or os.path.islink(path): raise RuntimeError('Unsupported result entry '+path)
+ digest=hashlib.sha256()
+ with open(path,'rb') as f:
+  for chunk in iter(lambda:f.read(1024*1024),b''): digest.update(chunk)
+ files.append({'path':path,'mode':'100755' if os.stat(path).st_mode & 0o111 else '100644','bytes':os.stat(path).st_size,'digest':digest.hexdigest()})
+binding['files']=files
 with open('.factory-result.json','w') as f: json.dump(binding,f)
 paths.add('.factory-result.json')
 os.makedirs('/workspace/outputs',exist_ok=True)
@@ -186,5 +196,36 @@ export async function importOpenAIResult(args: {
     (binding as Record<string, unknown>).inputDigest !== inputDigest
   )
     throw new Error("Managed result belongs to a different base or attempt");
+  const entries = (binding as Record<string, unknown>).files;
+  if (!Array.isArray(entries) || entries.length !== names.size - 1)
+    throw new Error("Managed result inventory does not match archive entries");
+  const remaining = new Set(names);
+  remaining.delete(".factory-result.json");
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      throw new Error("Invalid managed result inventory entry");
+    const value = entry as Record<string, unknown>;
+    if (
+      typeof value.path !== "string" ||
+      !remaining.delete(value.path) ||
+      !["100644", "100755"].includes(String(value.mode)) ||
+      !Number.isSafeInteger(value.bytes) ||
+      Number(value.bytes) < 0 ||
+      typeof value.digest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(value.digest)
+    )
+      throw new Error("Invalid managed result inventory identity");
+    const path = join(worktree, value.path);
+    const bytes = readFileSync(path);
+    const mode = lstatSync(path).mode & 0o111 ? "100755" : "100644";
+    if (
+      bytes.length !== value.bytes ||
+      sha256(bytes) !== value.digest ||
+      mode !== value.mode
+    )
+      throw new Error("Managed result content differs from exported inventory");
+  }
+  if (remaining.size)
+    throw new Error("Managed result inventory omits archive entries");
   rmSync(join(worktree, ".factory-result.json"));
 }

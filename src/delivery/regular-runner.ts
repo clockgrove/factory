@@ -406,7 +406,10 @@ export async function runRegularGraph(args: {
           await args.reconcile?.();
           work.pendingEffect = "merge";
           save();
-          const merged = await delivery.merge(published);
+          const merged = await delivery.merge(published, (observation) => {
+            work.preIntegrationChecks = observation.namedChecks ?? [];
+            save();
+          });
           delete work.pendingEffect;
           await gitAsync(
             config.checkout,

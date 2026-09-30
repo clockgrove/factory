@@ -60,13 +60,17 @@ export class RegularDelivery implements DeliveryStrategy {
     });
   }
 
-  async merge(result: DeliveryResult): Promise<MergeResult> {
+  async merge(
+    result: DeliveryResult,
+    beforeMerge?: (observation: DeliveryObservation) => void,
+  ): Promise<MergeResult> {
     const observation = await this.observe(result);
     if (observation.state !== "open" || observation.checks !== "passing") {
       throw new Error(
         `PR is not mergeable: ${observation.state}, checks ${observation.checks}`,
       );
     }
+    beforeMerge?.(observation);
     return this.github.merge(
       {
         number: result.pullRequest,

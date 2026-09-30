@@ -486,14 +486,23 @@ export class RealGitHubGateway implements GitHubGateway {
       throw new Error(
         `PR #${identity.number} identity changed; operator direction required`,
       );
-    const runs: { conclusion: string | null; status: string }[] = [];
+    const runs: {
+      id: number;
+      name: string;
+      head_sha: string;
+      status: string;
+      conclusion: string | null;
+      html_url: string;
+    }[] = [];
     for (let page = 1; ; page++) {
       const result = await this.client.request<{ check_runs: typeof runs }>(
         "GET",
         this.route(
-          `commits/${identity.headSha}/check-runs?per_page=100&page=${page}`,
+          `commits/${identity.headSha}/check-runs?filter=latest&per_page=100&page=${page}`,
         ),
       );
+      if (!Array.isArray(result.check_runs))
+        throw new Error("PR CI response lacks check runs");
       runs.push(...result.check_runs);
       if (result.check_runs.length < 100) break;
     }
@@ -507,7 +516,30 @@ export class RealGitHubGateway implements GitHubGateway {
           run.conclusion !== null &&
           !["success", "neutral", "skipped"].includes(run.conclusion),
       ) || ["error", "failure"].includes(statuses.state);
+    const namedChecks = runs
+      .filter(
+        (run) =>
+          run.head_sha === identity.headSha &&
+          run.status === "completed" &&
+          run.conclusion === "success" &&
+          Number.isSafeInteger(run.id) &&
+          run.id > 0 &&
+          typeof run.name === "string" &&
+          run.name.length > 0 &&
+          typeof run.html_url === "string" &&
+          run.html_url.length > 0 &&
+          runs.filter((candidate) => candidate.name === run.name).length === 1,
+      )
+      .map((run) => ({
+        id: run.id,
+        headSha: run.head_sha,
+        name: run.name,
+        status: run.status,
+        conclusion: run.conclusion,
+        detailsUrl: run.html_url,
+      }));
     return {
+      namedChecks,
       state: detail.merged
         ? "merged"
         : detail.state === "closed"

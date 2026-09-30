@@ -508,6 +508,8 @@ export interface DeliveryResult {
   headSha: string;
 }
 export interface DeliveryObservation {
+  /** Successful uniquely named check runs observed on this exact PR head. */
+  namedChecks?: NamedCheckEvidence[];
   state: "open" | "merged" | "closed";
   checks: "pending" | "passing" | "failing";
 }
@@ -517,7 +519,10 @@ export interface MergeResult {
 export interface DeliveryStrategy {
   publish(request: DeliveryRequest): Promise<DeliveryResult>;
   observe(result: DeliveryResult): Promise<DeliveryObservation>;
-  merge(result: DeliveryResult): Promise<MergeResult>;
+  merge(
+    result: DeliveryResult,
+    beforeMerge?: (observation: DeliveryObservation) => void,
+  ): Promise<MergeResult>;
 }
 
 export interface ContentMetadata {
@@ -670,10 +675,7 @@ export interface PullRequestIdentity {
   branch: string;
   headSha: string;
 }
-export interface PullRequestObservation {
-  state: "open" | "merged" | "closed";
-  checks: "pending" | "passing" | "failing";
-}
+export type PullRequestObservation = DeliveryObservation;
 export interface IntakeIssuePage {
   status: number;
   etag?: string;

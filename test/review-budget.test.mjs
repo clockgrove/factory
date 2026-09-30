@@ -20,6 +20,7 @@ function fixture(run) {
       const item = {
         id,
         title: id,
+        acceptance: [`${id} result is present`],
         dependencies,
         ownedPaths: Object.keys(files),
         validation: [],
@@ -152,7 +153,9 @@ test("oversized UTF-8 patches stay bounded and explicit omissions retain identit
         patchBytes(evidence) <= budget,
         `${patchBytes(evidence)} > ${budget}`,
       );
-      for (const entry of evidence) {
+      for (const entry of evidence.filter((source) =>
+        source.path.startsWith("Work Item Git delta:"),
+      )) {
         assert.doesNotMatch(entry.content, /�/);
         const metadata = JSON.parse(entry.content.split("\n")[0]);
         assert.match(metadata.resultTreeSha, /^[a-f0-9]{40}$/);

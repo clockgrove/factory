@@ -397,3 +397,23 @@ test("managed artifact usage is cumulative diagnostic data and absent counters r
   assert.equal(observations[0].usage, undefined);
   assert.equal(observations[1].invocationId, handle.identity);
 });
+
+test("documented void event acknowledgements accept empty successful HTTP bodies", async () => {
+  const previous = process.env.FACTORY_TEST_UNUSED_KEY;
+  process.env.FACTORY_TEST_UNUSED_KEY = "fixture-only";
+  try {
+    const client = new OpenAIAgentsClient(
+      "FACTORY_TEST_UNUSED_KEY",
+      async () => new Response(null, { status: 200 }),
+    );
+    assert.equal(
+      await client.json("POST", "/agents/sessions/session/events", {
+        events: [],
+      }),
+      null,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.FACTORY_TEST_UNUSED_KEY;
+    else process.env.FACTORY_TEST_UNUSED_KEY = previous;
+  }
+});

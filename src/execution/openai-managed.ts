@@ -109,7 +109,8 @@ export class OpenAIAgentsClient implements OpenAIManagedTransport {
       throw new Error(
         `Agents API ${method} failed (${response.status}); request ${response.headers.get("x-request-id") ?? "unknown"}; no mutation retried`,
       );
-    return response.status === 204 ? null : response.json();
+    const text = await response.text();
+    return text.trim() ? JSON.parse(text) : null;
   }
   async content(path: string): Promise<Response> {
     const response = await this.request("GET", path);

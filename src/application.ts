@@ -1,3 +1,4 @@
+import { DaytonaSandboxProvider } from "./execution/daytona.js";
 import { resolveProviderCredential } from "./provider-credentials.js";
 import {
   ClaudeManagedExecutionDriver,
@@ -515,6 +516,17 @@ export function compose(
   serviceCredential?: string,
 ): FactoryApplication {
   const config = cloneAndValidateConfig(input);
+  if (
+    config.execution.kind === "sandbox" &&
+    config.execution.provider === "daytona"
+  )
+    return composeWithSandbox(config, {
+      identity: "daytona",
+      provider: new DaytonaSandboxProvider(
+        config.execution.config,
+        resolveProviderCredential(config, serviceCredential)!,
+      ),
+    });
   if (config.execution.kind === "managed-agent") {
     const apiKey = resolveProviderCredential(config, serviceCredential);
     const root = stateRoot(config.repository);

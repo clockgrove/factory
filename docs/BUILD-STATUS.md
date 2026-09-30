@@ -598,3 +598,5 @@ transport and lifecycle; they do not qualify Daytona or an arbitrary provider/ha
 See [the sandbox guide](SANDBOX-EXECUTION.md). The start gate rests on accepted foundations,
 #55 and successor adopter gates #206/#207; historical #26 was retired without acceptance.
 Daytona remains #9 and requires its own adapter and authorized installed live proof.
+
+Daytona #9 has a public-repository adapter source candidate: anonymous pinned Git/LFS, streamed verified transfer and confirmed owned sandbox destruction. Private Git/LFS authentication and installed live Daytona acceptance remain open; no provider calls or qualification are claimed by credential-free tests.

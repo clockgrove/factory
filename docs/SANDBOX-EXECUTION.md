@@ -36,8 +36,8 @@ cannot establish this separation.
 
 Uploads
 and downloads transfer ordinary binary files with SHA-256 and byte counts; execution takes argv,
-not a shell command. `cancel` must confirm termination of the owned process and descendants;
-`destroy` must confirm removal of the sandbox and its owned processes. Unknown outcomes
+not a shell command. Cancellation requires confirmed removal of the owned sandbox and all its processes;
+`destroy` supplies that proof. Unknown outcomes
 and failed cleanup must throw. Provider credentials stay in the controller adapter and
 are never included in the input archive or worker request.
 
@@ -93,3 +93,90 @@ It does not prove a concrete provider's private Git/LFS authentication or secret
 facility. Daytona must demonstrate those properties in #9. Model-service authentication
 is separate from repository preparation; no sandbox control-plane credential belongs in
 the harness. Typed harness login failures retain their existing status information.
+
+## Daytona public-repository adapter
+
+The built-in `daytona` adapter declares `@daytonaio/sdk@0.220.0` as an optional peer.
+Explicitly install that exact package alongside Factory and configure the existing sandbox mode:
+
+```json
+{
+  "kind": "sandbox",
+  "concurrency": 1,
+  "provider": "daytona",
+  "config": {
+    "snapshot": "your-installed-factory-snapshot",
+    "target": "us",
+    "apiKeyEnv": "DAYTONA_API_KEY",
+    "timeoutSeconds": 60,
+    "factoryRoot": "/opt/factory/node_modules/@clockgrove/factory"
+  },
+  "harness": {
+    "kind": "registered",
+    "adapter": "your-harness@1",
+    "config": {}
+  },
+  "argv": ["node", "/opt/factory/sandbox-entry.mjs"]
+}
+```
+
+`apiKeyEnv` names a controller credential, resolved through the existing environment
+or private systemd credential-file binding. Its value never enters the sandbox,
+configuration, checkpoint or harness request. Snapshot resources and account capacity
+remain provider/operator constraints; concurrency is the configured attempt count,
+not a claim of available Daytona capacity. The adapter creates from that existing
+snapshot and disables automatic stop/pause/delete so owned lifecycle remains explicit.
+It does not create snapshots, install tools, or provision secrets.
+
+Use a trusted snapshot without GitHub credentials, credential-bearing home directories
+or repository authentication services. Trusted preparation checks Node 22 or newer,
+Git, Git LFS and the configured installed Factory package's exact version before
+starting a harness. The snapshot must also contain the configured entrypoint and
+harness dependencies. This version check is readiness, not installed-artifact or
+live-provider qualification.
+
+Repository preparation supports anonymous public `github.com` Git and LFS only.
+It fetches the exact commit, checks the tree, and uses native Git LFS smudge for each
+declared pointer into private staging. System/global Git configuration, credential
+helpers and interactive authentication are disabled. Required raw bytes are hashed;
+repository paths remain pointers. Authentication-required repositories or objects,
+unpublished commits and unavailable tools fail before harness start. Existing explicit
+private local inputs and selected assets still use the verified input archive.
+
+Sandbox harnesses must keep their owned execution resources within the attempt's
+sandbox. Confirmed destruction of that owned sandbox is terminal cancellation,
+including descendant processes. Factory does not subsequently invoke a helper in a
+stopped or deleted resource. A failed or unknown deletion remains unresolved and a
+restart cleans up the same resource. This does not promise cleanup of arbitrary
+external jobs created by a registered harness; separately managed remote agent tasks
+belong to managed execution. No controller environment is forwarded to the harness;
+its existing authentication contract remains independent. No organization secret
+bindings are added by this adapter. A missing harness authentication route is a typed
+unavailability, not a successful provider qualification.
+
+The adapter uses SDK streaming upload/download, remote and local SHA-256/size checks,
+opaque sandbox/session/command identities, and `delete(timeout, true)` to await
+confirmed destruction. It adds no retry loop. SDK connection retries distinguish
+pre-send connection failures from ambiguous submissions; no replacement sandbox is
+created after an uncertain create/start acknowledgement.
+
+Private repository authentication remains unsupported: Daytona's
+[secret detachment](https://www.daytona.io/docs/en/typescript-sdk/sandbox/#updatesecrets)
+propagates asynchronously, and its
+[secret placeholders](https://www.daytona.io/docs/en/secrets/)
+retain outbound authentication capability. The current API mapping does not prove a
+revocation barrier before harness startup, or the token's lifetime and repository
+permissions. No sleep or hidden-placeholder workaround is accepted. Issue #9 remains
+open for that boundary and separately scoped installed live qualification. Credential-free
+SDK mapping and real local Git/LFS/process tests prove only the source slice; they do
+not prove Daytona capacity, authentication, billing, network behavior or live cleanup.
+
+Default/offline installation does not resolve or install Daytona's dependency tree.
+The adapter checks the installed SDK version and returns `DAYTONA_SDK_UNAVAILABLE`
+when it is absent or mismatched. SDK construction uses its supported polling-only
+option and refuses ambient tracing selectors; this avoids
+a constructor-created event connection or an implicit trace export destination.
+When the SDK can load dotenv and a dotenv file exists, explicitly set both
+`DAYTONA_OTEL_ENABLED=false` and `DAYTONA_EXPERIMENTAL_OTEL_ENABLED=false` in the
+controller environment. Factory checks selector availability without reading those
+files or mutating the process environment.

@@ -156,7 +156,7 @@ test("restarted controller cancels the same owned attempt without another harnes
     JSON.parse(JSON.stringify(h)),
     f.context,
   );
-  assert.equal(f.provider.starts, starts + 1);
+  assert.equal(f.provider.starts, starts);
   assert.equal(f.provider.resources.size, 0);
   assert.equal(f.work.execution.data.terminal, "cancelled");
 });

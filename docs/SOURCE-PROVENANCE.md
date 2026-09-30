@@ -768,3 +768,7 @@ transfers. Binary result archives avoid repository-sized JSON strings. No archiv
 or vendor-specific transport was copied. `src/execution/sandbox*.ts` owns serialized transfer,
 remote lifecycle and safe import; ordinary collection, validation and delivery remain authoritative.
 Credential-free fixture evidence does not qualify a live sandbox provider.
+
+## Daytona public repository adapter (#9)
+
+Written from the current SandboxProvider contract and official `@daytonaio/sdk@0.220.0` APIs. No archived runtime or fixtures copied. Reuses shared sandbox transport/checkpoints, native Git/LFS, registered harnesses and controller delivery. Private repository authentication and live provider evidence remain outside this implemented source slice.

@@ -72,6 +72,7 @@ export class OpenAIAgentsClient implements OpenAIManagedTransport {
     private keyName: string,
     private fetcher: typeof fetch = fetch,
     private timeoutMs?: number,
+    private apiKey?: string,
   ) {}
   private async request(
     method: string,
@@ -81,7 +82,7 @@ export class OpenAIAgentsClient implements OpenAIManagedTransport {
   ): Promise<Response> {
     if (!/^\/agents\//.test(path) || path.includes(".."))
       throw new Error("Invalid Agents API path");
-    const key = process.env[this.keyName];
+    const key = this.apiKey ?? process.env[this.keyName];
     if (!key)
       throw new Error(
         `OpenAI Agents API requires controller credential ${this.keyName}`,
@@ -162,6 +163,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       contentStore: ContentStore;
       config: OpenAIManagedConfig;
       transport?: OpenAIManagedTransport;
+      apiKey?: string;
     },
   ) {
     validateOpenAIManagedConfig(args.config);
@@ -171,6 +173,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
         args.config.apiKeyEnv,
         fetch,
         args.config.timeoutSeconds * 1000,
+        args.apiKey,
       );
   }
   async availableSlots(): Promise<"unknown"> {

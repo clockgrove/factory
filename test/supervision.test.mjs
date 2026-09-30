@@ -267,3 +267,71 @@ test("intake service start requires an owner while pending but accepts an exhaus
     await intakeControl(config, "dequeue", 1);
     await supervise("start", configPath);
   }));
+
+test("managed CLI readiness and fresh supervised starts use loaded private credentials", () =>
+  fixture(async ({ root, config, configPath, state }) => {
+    const { spawnSync } = await import("node:child_process");
+    const { intakeControl } = await import("../dist/intake.js");
+    config.execution = {
+      kind: "managed-agent",
+      provider: "openai-agents",
+      concurrency: 1,
+      config: {
+        model: "fixture",
+        reasoningEffort: "low",
+        containerSize: "small",
+        apiKeyEnv: "FACTORY_SERVICE_TEST_KEY",
+        timeoutSeconds: 10,
+      },
+    };
+    writeFileSync(configPath, JSON.stringify(config));
+    await registerIntake(config, state);
+    await intakeControl(config, "dequeue", 1);
+    const credentials = join(root, "loaded");
+    mkdirSync(credentials);
+    const file = join(credentials, "FACTORY_SERVICE_TEST_KEY");
+    const cli = new URL("../dist/cli.js", import.meta.url);
+    const run = (args, ambient) =>
+      spawnSync(
+        process.execPath,
+        [cli.pathname, ...args, "--config", configPath],
+        {
+          encoding: "utf8",
+          timeout: 10000,
+          env: {
+            ...process.env,
+            CREDENTIALS_DIRECTORY: credentials,
+            FACTORY_SERVICE_TEST_KEY: ambient,
+          },
+        },
+      );
+    const absent = run(["readiness"], "");
+    assert.equal(absent.status, 1);
+    assert.match(absent.stdout, /FACTORY_SERVICE_TEST_KEY/);
+    assert.doesNotMatch(absent.stderr, /outside-directory/);
+    const present = run(["readiness"], "dummy-ambient");
+    assert.equal(present.status, 0);
+    assert.match(present.stdout, /not verified/);
+    assert.doesNotMatch(present.stdout, /dummy-ambient/);
+    const args = [
+      "supervisor",
+      "serve",
+      "--intake",
+      "--service-credential",
+      "FACTORY_SERVICE_TEST_KEY",
+    ];
+    const missing = run(args, "dummy-ambient");
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /unavailable/);
+    assert.doesNotMatch(missing.stderr, /dummy-ambient/);
+    writeFileSync(file, "", { mode: 0o600 });
+    const empty = run(args, "dummy-ambient");
+    assert.equal(empty.status, 1);
+    assert.match(empty.stderr, /empty/);
+    for (const key of ["dummy-first-loaded", "dummy-second-loaded"]) {
+      writeFileSync(file, key);
+      const started = run(args, "dummy-ambient");
+      assert.equal(started.status, 0, started.stderr);
+      assert.doesNotMatch(started.stdout + started.stderr, /dummy-/);
+    }
+  }));

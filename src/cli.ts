@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import {
+  requiredProviderCredential,
+  resolveProviderCredential,
+} from "./provider-credentials.js";
 import { objectiveComplete } from "./completion.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -57,7 +61,7 @@ function options(args: string[], name: string): string[] {
 
 function help(): void {
   console.log(
-    `Factory CLI\n\nCommands:\n  intake enqueue --authority FILE [--priority-label LABEL ...] [--poll-seconds N] [--config PATH]\n  intake run|status|pause|resume|drain [--config PATH]\n  intake dequeue --objective N [--config PATH]\n  readiness --outside-directory ABSOLUTE_EXISTING_DIRECTORY [--config PATH]\n  supervisor install|status|start|stop|disable|uninstall|upgrade [--intake | --objective N] [--plan PATH --admission PATH] [--cli ABSOLUTE_INSTALLED_CLI] [--config PATH]\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  propose-amendment --objective N --proposal FILE [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--config PATH]\n  repair --objective N --proposal FILE [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
+    `Factory CLI\n\nCommands:\n  intake enqueue --authority FILE [--priority-label LABEL ...] [--poll-seconds N] [--config PATH]\n  intake run|status|pause|resume|drain [--config PATH]\n  intake dequeue --objective N [--config PATH]\n  readiness [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--config PATH]\n  supervisor install|status|start|stop|disable|uninstall|upgrade [--intake | --objective N] [--plan PATH --admission PATH] [--cli ABSOLUTE_INSTALLED_CLI] [--credential-file ABSOLUTE_PRIVATE_FILE] [--config PATH]\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  propose-amendment --objective N --proposal FILE [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--config PATH]\n  repair --objective N --proposal FILE [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
   );
 }
 
@@ -67,6 +71,31 @@ async function main(): Promise<void> {
   const path = option(args, "config") ?? configPath();
   if (command === "readiness") {
     const config = readConfig(path);
+    const credentialName = requiredProviderCredential(config);
+    if (credentialName) {
+      try {
+        resolveProviderCredential(config);
+        console.log(
+          JSON.stringify({
+            status: "present",
+            credential: credentialName,
+            source: "controller environment",
+            accountAccess: "not verified",
+          }),
+        );
+      } catch (error) {
+        console.log(
+          JSON.stringify({
+            status: "missing",
+            credential: credentialName,
+            detail: String(error),
+            accountAccess: "not verified",
+          }),
+        );
+        process.exitCode = 1;
+      }
+      return;
+    }
     const outsideDirectory = option(args, "outside-directory");
     if (!outsideDirectory)
       throw new Error(
@@ -160,17 +189,25 @@ async function main(): Promise<void> {
       plan: option(args, "plan"),
       admission: option(args, "admission"),
       cli: option(args, "cli"),
+      credentialFile: option(args, "credential-file"),
     };
     if (action === "serve") {
       const config = readConfig(path);
+      if (
+        requiredProviderCredential(config) &&
+        !option(args, "service-credential")
+      )
+        throw new Error(
+          "Managed supervision requires a registered LoadCredential binding; reinstall with --credential-file",
+        );
       if (input.intake) {
         checkIntakeServiceState(config);
-        await compose(config).runIntake();
+        await compose(config, option(args, "service-credential")).runIntake();
         return;
       }
       checkServiceState(config, input.objective, input.admission);
       try {
-        await compose(config).runObjective(
+        await compose(config, option(args, "service-credential")).runObjective(
           input.objective,
           input.plan ? JSON.parse(readFileSync(input.plan, "utf8")) : undefined,
           input.admission

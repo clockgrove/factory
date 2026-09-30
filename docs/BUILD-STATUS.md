@@ -586,3 +586,15 @@ work, original attempt cleanup and accounting availability, inherited allowance
 exhaustion, source-packet corrections and real policy decisions. This source
 capability does not qualify the published plugin; installed program evidence
 remains with #253 and the finite interruption cases with #254.
+
+## Provider-neutral sandbox execution
+
+Issue [#8](https://github.com/clockgrove/factory/issues/8) adds the sandbox driver and installed
+registered-harness process boundary, reusing ordinary collection, validation and delivery.
+The replacement design uses trusted pinned Git/LFS preparation, explicit bound inputs and
+binary result collection; prior PR #307 remains preserved design evidence.
+Credential-free separate-workspace tests and an installed package-root consumer cover its
+transport and lifecycle; they do not qualify Daytona or an arbitrary provider/harness pair.
+See [the sandbox guide](SANDBOX-EXECUTION.md). The start gate rests on accepted foundations,
+#55 and successor adopter gates #206/#207; historical #26 was retired without acceptance.
+Daytona remains #9 and requires its own adapter and authorized installed live proof.

@@ -426,43 +426,70 @@ export interface AgentHarness {
   collect(handle: HarnessHandle): Promise<HarnessResult>;
 }
 
+/** Infrastructure only; the configured AgentHarness runs in a separate installed process. */
 export interface SandboxRequest {
-  item: WorkItem;
-  baseSha: string;
+  attemptId: string;
 }
 export interface SandboxHandle {
   identity: string;
+  attemptId: string;
+  workspace: string;
   data?: unknown;
 }
 export interface SandboxInput {
-  path: string;
+  localPath: string;
+  remotePath: string;
   digest: string;
+  bytes: number;
 }
 export interface SandboxCommand {
-  command: string;
-  cwd?: string;
+  argv: string[];
+  cwd: string;
 }
 export interface RemoteProcess {
   identity: string;
+  sandboxIdentity: string;
+  attemptId: string;
   data?: unknown;
 }
 export interface RemoteObservation {
-  state: "running" | "complete" | "failed";
+  state: "running" | "complete" | "failed" | "cancelled";
   detail?: string;
 }
 export interface SandboxOutput {
-  path: string;
-  digest?: string;
+  remotePath: string;
+  localPath: string;
+}
+export interface SandboxRepositoryInput {
+  repository: string;
+  baseSha: string;
+  treeSha: string;
+  /** Fetch only these declared LFS sources into workspace/lfs/<index>. Keep repository paths as pointers. */
+  lfsSources: { path: string; digest: string; bytes: number }[];
 }
 export interface SandboxProvider {
   create(request: SandboxRequest): Promise<SandboxHandle>;
+  /** Trusted preparation, before any harness runs: fetch exact Git objects into workspace/repo and selected LFS objects into workspace/lfs/<index>. Remove all usable GitHub authentication, credential helpers and auth-bearing remotes before returning. Never put credentials in handles, config, argv or returned data. Failure must not start a harness. */
+  prepareRepository(
+    handle: SandboxHandle,
+    input: SandboxRepositoryInput,
+  ): Promise<void>;
   upload(handle: SandboxHandle, input: SandboxInput): Promise<void>;
   execute(
     handle: SandboxHandle,
     command: SandboxCommand,
   ): Promise<RemoteProcess>;
-  observe(process: RemoteProcess): Promise<RemoteObservation>;
-  download(handle: SandboxHandle, output: SandboxOutput): Promise<void>;
+  observe(
+    handle: SandboxHandle,
+    process: RemoteProcess,
+  ): Promise<RemoteObservation>;
+  /** Resolve termination of this process and its descendants; uncertainty must throw. */
+  cancel(handle: SandboxHandle, process: RemoteProcess): Promise<void>;
+  download(
+    handle: SandboxHandle,
+    output: SandboxOutput,
+  ): Promise<{ digest: string; bytes: number }>;
+  /** Confirm this owned sandbox and all its processes are absent, including after an earlier destruction; uncertainty must throw. */
   destroy(handle: SandboxHandle): Promise<void>;
 }
 

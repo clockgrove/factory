@@ -36,6 +36,7 @@
     "THIRD_PARTY_NOTICES.md",
     "docs/OPENAI-MANAGED.md",
     "docs/CLAUDE-MANAGED.md",
+    "docs/SANDBOX-EXECUTION.md",
     "docs/CAPTURE-EXPORT.md"
   ],
   "publishConfig": {

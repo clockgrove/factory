@@ -758,3 +758,13 @@ The existing admission contract, single installation owner, per-Objective prepar
 ## Literal ownership grammar (#256)
 
 The existing exact-file and trailing-slash directory-prefix predicates supplied the shared stateless ownership functions. Deterministic graph validation now rejects unsupported wildcard declarations before review or dispatch; brackets and braces remain literal filename characters. Public temporary Git fixtures cover nested files, sibling rejection and dynamic route filenames. No archived code, private source or provider calls were used.
+
+## Sandbox driver (#8)
+
+New provider-neutral execution and installed process invocation consume the existing #55
+registration, checkpoint and collection contracts. Trusted provider preparation fetches
+pinned published Git bases and declared LFS objects; private/selected inputs remain explicit
+transfers. Binary result archives avoid repository-sized JSON strings. No archived runtime
+or vendor-specific transport was copied. `src/execution/sandbox*.ts` owns serialized transfer,
+remote lifecycle and safe import; ordinary collection, validation and delivery remain authoritative.
+Credential-free fixture evidence does not qualify a live sandbox provider.

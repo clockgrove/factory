@@ -680,13 +680,14 @@ async function main(): Promise<void> {
     if (args.includes("--follow") && args.includes("--summary"))
       throw new Error("diagnostics accepts only one of --follow or --summary");
     if (args.includes("--summary")) {
+      const continuation = readContinuation(config.repository, objective);
       console.log(
         JSON.stringify(
           summarizeDiagnosticUsage(
             readUsageSummaryEvents(
               config.repository,
               objective,
-              readState(config.repository, objective),
+              continuation?.schemaVersion === 4 ? continuation : undefined,
             ),
           ),
         ),
@@ -695,10 +696,11 @@ async function main(): Promise<void> {
     }
     const seen = new Set<string>();
     const printNew = () => {
+      const continuation = readContinuation(config.repository, objective);
       const timeline = readAgentTimeline(
         config.repository,
         objective,
-        readState(config.repository, objective),
+        continuation?.schemaVersion === 4 ? continuation : undefined,
       );
       for (const event of timeline) {
         const json = JSON.stringify(event);

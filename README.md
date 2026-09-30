@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** v0.1.49 is a source candidate for the settled concurrent-failure correction in [#338](https://github.com/clockgrove/factory/issues/338); publication, independent distribution verification and installed qualification remain pending. [v0.1.48](https://github.com/clockgrove/factory/releases/tag/v0.1.48) is published with [independent public artifact and plugin verification](https://github.com/clockgrove/factory/issues/333#issuecomment-5910899384). The published [v0.1.47](https://github.com/clockgrove/factory/releases/tag/v0.1.47) passed public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263). That evidence applies to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](docs/BUILD-STATUS.md) for what has been qualified. Some interrupted deliveries require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
+**Status:** [v0.1.49](https://github.com/clockgrove/factory/releases/tag/v0.1.49) is published with [independent public artifact and plugin verification](https://github.com/clockgrove/factory/issues/338#issuecomment-5912020386) for the settled concurrent-failure correction in [#338](https://github.com/clockgrove/factory/issues/338). [v0.1.48](https://github.com/clockgrove/factory/releases/tag/v0.1.48) is published with [independent public artifact and plugin verification](https://github.com/clockgrove/factory/issues/333#issuecomment-5910899384). The published [v0.1.47](https://github.com/clockgrove/factory/releases/tag/v0.1.47) passed public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263). That evidence applies to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](docs/BUILD-STATUS.md) for what has been qualified. Some interrupted deliveries require operator intervention; see [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery).
 
 ## Requirements
 
@@ -24,7 +24,7 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The following commands select the matching v0.1.49 candidate plugin and CLI. Use them only after v0.1.49 is published and independently verified; keep the plugin and CLI versions aligned:
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The following commands install the matching v0.1.49 plugin and CLI; keep the plugin and CLI versions aligned:
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.49
@@ -35,7 +35,7 @@ gh release download v0.1.49 --repo clockgrove/factory \
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independent artifact digest in the [release artifact record for this version](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. Do not install until that record and public-download verification are available.
+Before installing, compare the tarball's SHA-256 with the independent artifact digest in the [release artifact record](docs/BUILD-STATUS.md#immutable-v0149-artifact-record). A checksum downloaded beside the tarball is not the independent record. Do not install until that record and public-download verification are available.
 
 Choose an absolute installation directory outside your target repository:
 

@@ -11,3 +11,7 @@ export {
 export type { AnalysisField, AnalysisOptions } from "./analysis.js";
 
 export * from "./admission.js";
+
+export { SandboxExecutionDriver } from "./execution/sandbox.js";
+export type { SandboxDriverOptions } from "./execution/sandbox.js";
+export { runSandboxHarness } from "./execution/sandbox-worker.js";

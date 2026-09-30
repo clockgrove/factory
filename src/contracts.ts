@@ -426,33 +426,39 @@ export interface AgentHarness {
   collect(handle: HarnessHandle): Promise<HarnessResult>;
 }
 
+/** Infrastructure only; the configured AgentHarness runs in a separate installed process. */
 export interface SandboxRequest {
-  item: WorkItem;
-  baseSha: string;
+  attemptId: string;
 }
 export interface SandboxHandle {
   identity: string;
+  attemptId: string;
+  workspace: string;
   data?: unknown;
 }
 export interface SandboxInput {
-  path: string;
+  localPath: string;
+  remotePath: string;
   digest: string;
+  bytes: number;
 }
 export interface SandboxCommand {
-  command: string;
-  cwd?: string;
+  argv: string[];
+  cwd: string;
 }
 export interface RemoteProcess {
   identity: string;
+  sandboxIdentity: string;
+  attemptId: string;
   data?: unknown;
 }
 export interface RemoteObservation {
-  state: "running" | "complete" | "failed";
+  state: "running" | "complete" | "failed" | "cancelled";
   detail?: string;
 }
 export interface SandboxOutput {
-  path: string;
-  digest?: string;
+  remotePath: string;
+  localPath: string;
 }
 export interface SandboxProvider {
   create(request: SandboxRequest): Promise<SandboxHandle>;
@@ -461,8 +467,17 @@ export interface SandboxProvider {
     handle: SandboxHandle,
     command: SandboxCommand,
   ): Promise<RemoteProcess>;
-  observe(process: RemoteProcess): Promise<RemoteObservation>;
-  download(handle: SandboxHandle, output: SandboxOutput): Promise<void>;
+  observe(
+    handle: SandboxHandle,
+    process: RemoteProcess,
+  ): Promise<RemoteObservation>;
+  /** Resolve termination of this process and its descendants; uncertainty must throw. */
+  cancel(handle: SandboxHandle, process: RemoteProcess): Promise<void>;
+  download(
+    handle: SandboxHandle,
+    output: SandboxOutput,
+  ): Promise<{ digest: string; bytes: number }>;
+  /** Resolve destruction of this sandbox and all owned processes; uncertainty must throw. */
   destroy(handle: SandboxHandle): Promise<void>;
 }
 

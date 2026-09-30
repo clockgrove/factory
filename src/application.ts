@@ -1,3 +1,5 @@
+import { SandboxExecutionDriver } from "./execution/sandbox.js";
+import type { SandboxProvider } from "./contracts.js";
 import {
   OpenAIManagedExecutionDriver,
   validateOpenAIManagedConfig,
@@ -542,4 +544,51 @@ export function compose(input: FactoryConfig): FactoryApplication {
     builtInHarness(config, harness),
     harness.kind === "codex-sdk" ? harness.kind : harness.adapter,
   );
+}
+
+/** Provider infrastructure stays in the controller; the configured harness is constructed only by the installed sandbox entrypoint. */
+export function composeWithSandbox(
+  input: FactoryConfig,
+  registration: { identity: string; provider: SandboxProvider },
+  options: LocalHarnessCompositionOptions = {},
+): FactoryApplication {
+  const config = cloneAndValidateConfig(input);
+  if (config.execution.kind !== "sandbox")
+    throw new Error("Sandbox execution configuration required");
+  if (config.execution.provider !== registration.identity)
+    throw new Error("Sandbox provider registration mismatch");
+  const root = stateRoot(config.repository);
+  const contentStore = new LocalContentStore(join(root, "content"));
+  const github =
+    options.github ??
+    new RealGitHubGateway(
+      config.repository,
+      new NativeStackDelivery(config.repository),
+    );
+  return createApplication(config, {
+    planningModel:
+      options.planningModel ??
+      new CodexPlanningModel(
+        config.checkout,
+        config.planning.planner,
+        config.planning.reviewer,
+      ),
+    driver: new SandboxExecutionDriver({
+      checkout: config.checkout,
+      workRoot: join(root, "sandboxes"),
+      contentStore,
+      providerIdentity: registration.identity,
+      provider: registration.provider,
+      harness: {
+        identity: config.execution.harness.adapter,
+        config: config.execution.harness.config,
+      },
+      argv: config.execution.argv,
+      concurrency: config.execution.concurrency,
+    }),
+    github,
+    delivery: new RegularDelivery(config.checkout, github),
+    contentStore,
+    reportRunStatus: (message) => console.error(message),
+  });
 }

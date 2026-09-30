@@ -31,7 +31,6 @@ type Pull = {
   merged: boolean;
   head: { sha: string; ref: string };
   base: { ref: string };
-  merge_commit_sha: string | null;
 };
 
 export function projectedIssueBody(item: WorkItem, objective: number): string {
@@ -534,17 +533,21 @@ export class RealGitHubGateway implements GitHubGateway {
       this.route(`pulls/${identity.number}/merge`),
       { sha: expectedHead, merge_method: "merge" },
     );
-    if (!result.merged || !result.sha)
+    if (
+      result.merged !== true ||
+      typeof result.sha !== "string" ||
+      !/^[a-f0-9]{40}$/.test(result.sha)
+    )
       throw new Error("PR merge did not produce an integrated commit");
     const detail = await this.client.request<Pull>(
       "GET",
       this.route(`pulls/${identity.number}`),
     );
     if (
-      !detail.merged ||
+      detail.state !== "closed" ||
+      detail.merged !== true ||
       detail.head.sha !== expectedHead ||
-      detail.head.ref !== identity.branch ||
-      detail.merge_commit_sha !== result.sha
+      detail.head.ref !== identity.branch
     )
       throw new Error("PR merge has not confirmed the exact integrated commit");
     return { integratedSha: result.sha };

@@ -12,6 +12,8 @@ const json = (data, status = 200, headers = {}) =>
   });
 const clientFor = (fetch) =>
   new GitHubClient(new Octokit({ request: { fetch } }));
+const integratedSha = "c".repeat(40);
+const headSha = "a".repeat(40);
 const item = {
   id: "one",
   title: "One",
@@ -138,30 +140,32 @@ test("regular merge sends the exact expected head and verifies integrated identi
   const client = clientFor(async (_url, options) => {
     calls.push(options);
     return options.method === "PUT"
-      ? json({ merged: true, sha: "integrated" })
+      ? json({ merged: true, sha: integratedSha })
       : json({
+          state: "closed",
           merged: true,
-          head: { sha: "head", ref: "branch" },
-          merge_commit_sha: "integrated",
+          head: { sha: headSha, ref: "branch" },
         });
   });
   const gateway = new RealGitHubGateway("a/b", {}, client);
   assert.deepEqual(
-    await gateway.merge(
-      { number: 4, headSha: "head", branch: "branch" },
-      "head",
-    ),
-    { integratedSha: "integrated" },
+    await gateway.merge({ number: 4, headSha, branch: "branch" }, headSha),
+    { integratedSha },
   );
   assert.deepEqual(JSON.parse(calls[0].body), {
-    sha: "head",
+    sha: headSha,
     merge_method: "merge",
   });
   await assert.rejects(
-    gateway.merge({ number: 4, headSha: "head", branch: "branch" }, "other"),
+    gateway.merge({ number: 4, headSha, branch: "branch" }, "other"),
     /expected head/,
   );
   assert.equal(calls.length, 2);
+  assert.ok(
+    calls.every(
+      (call) => call.headers["x-github-api-version"] === "2026-03-10",
+    ),
+  );
 });
 
 test("cancelled in-flight mutation retains unknown outcome", async () => {
@@ -242,8 +246,10 @@ test("native merge resumes its UUID without submitting another mutation", async 
     });
     if (String(url).endsWith("/merge-async/saved-uuid")) {
       completed = true;
-      return json({ status: "merged", details: { sha: "integrated" } });
+      return json({ status: "merged", details: { sha: integratedSha } });
     }
+    if (String(url).includes("/timeline?"))
+      return json([{ event: "merged", commit_id: integratedSha }]);
     const number = Number(String(url).split("/").at(-1));
     return json({
       number,
@@ -252,7 +258,6 @@ test("native merge resumes its UUID without submitting another mutation", async 
       merged_at: completed ? "2026-09-29T00:00:00Z" : null,
       head: { ref: `branch-${number}`, sha: `head-${number}` },
       base: { ref: number === 1 ? "main" : "branch-1" },
-      merge_commit_sha: completed ? "integrated" : null,
     });
   });
   const delivery = new NativeStackDelivery("a/b", client);
@@ -270,12 +275,202 @@ test("native merge resumes its UUID without submitting another mutation", async 
         cancelled: () => false,
       },
     ),
-    "integrated",
+    integratedSha,
   );
   assert.ok(calls.every((call) => call.method === "GET"));
   assert.ok(
     calls.every(
       (call) => call.headers["x-github-api-version"] === "2026-03-10",
     ),
+  );
+});
+
+test("regular merge rejects unsuccessful acknowledgement and changed current PR identity", async () => {
+  for (const [result, detail, expected] of [
+    [{ merged: false, sha: integratedSha }, undefined, /did not produce/],
+    [{ merged: true }, undefined, /did not produce/],
+    [{ merged: true, sha: "not-a-commit" }, undefined, /did not produce/],
+    [{ merged: true, sha: integratedSha }, { state: "open" }, /not confirmed/],
+    [{ merged: true, sha: integratedSha }, { merged: false }, /not confirmed/],
+    [
+      { merged: true, sha: integratedSha },
+      { head: { sha: "b".repeat(40), ref: "branch" } },
+      /not confirmed/,
+    ],
+    [
+      { merged: true, sha: integratedSha },
+      { head: { sha: headSha, ref: "changed" } },
+      /not confirmed/,
+    ],
+  ]) {
+    const methods = [];
+    const client = clientFor(async (_url, options) => {
+      methods.push(options.method);
+      assert.equal(options.headers["x-github-api-version"], "2026-03-10");
+      return options.method === "PUT"
+        ? json(result)
+        : json({
+            number: 4,
+            state: "closed",
+            merged: true,
+            head: { sha: headSha, ref: "branch" },
+            ...detail,
+          });
+    });
+    await assert.rejects(
+      new RealGitHubGateway("a/b", {}, client).merge(
+        { number: 4, headSha, branch: "branch" },
+        headSha,
+      ),
+      expected,
+    );
+    assert.equal(methods.filter((method) => method === "PUT").length, 1);
+  }
+});
+
+// Current 2026-03-10 PR responses omit merge_commit_sha. Merge identity comes
+// from successful merge acknowledgements or the authenticated issue timeline.
+async function nativeMergeFixture(mode, options = {}) {
+  const { NativeStackDelivery } = await import(
+    "../dist/delivery/native-stack.js"
+  );
+  const layers = [1, 2].map((number) => ({
+    pullRequest: number,
+    branch: `branch-${number}`,
+    headSha: String(number).repeat(40),
+  }));
+  const calls = [];
+  const pending = [];
+  let completed = mode === "already";
+  const pull = (number) => ({
+    number,
+    state: completed ? "closed" : "open",
+    merged: completed,
+    merged_at: completed ? "2026-09-29T00:00:00Z" : null,
+    head: { ref: `branch-${number}`, sha: String(number).repeat(40) },
+    base: { ref: number === 1 ? "main" : "branch-1" },
+    ...(completed && options.changedHead
+      ? { head: { ref: `branch-${number}`, sha: "e".repeat(40) } }
+      : {}),
+  });
+  const client = clientFor(async (url, request) => {
+    const path = new URL(url).pathname;
+    const query = new URL(url).searchParams;
+    assert.equal(request.headers["x-github-api-version"], "2026-03-10");
+    calls.push({ path, method: request.method, page: query.get("page") });
+    if (path.endsWith("/timeline")) {
+      const number = Number(path.split("/").at(-2));
+      const events = options.events?.(number) ?? [
+        { event: "merged", commit_id: integratedSha },
+      ];
+      const page = Number(query.get("page"));
+      return json(events.slice((page - 1) * 100, page * 100));
+    }
+    if (path.endsWith("/merge-async/saved-uuid")) {
+      completed = true;
+      return json({
+        status: "merged",
+        details: { sha: options.asyncSha ?? integratedSha },
+      });
+    }
+    if (path.endsWith("/merge-async")) {
+      assert.deepEqual(JSON.parse(request.body), {
+        sha: layers[1].headSha,
+        merge_method: "merge",
+        merge_action: "default",
+      });
+      completed = true;
+      if (mode === "pending")
+        return json({ status: "pending", details: { uuid: "saved-uuid" } });
+      if (mode === "no-uuid") return json({ status: "queued", details: {} });
+      return json({
+        status: "merged",
+        details: { sha: options.asyncSha ?? integratedSha },
+      });
+    }
+    if (path.endsWith("/stacks"))
+      return json([
+        {
+          number: 10,
+          base: { ref: "main" },
+          pull_requests: layers.map((layer) => pull(layer.pullRequest)),
+        },
+      ]);
+    return json(pull(Number(path.split("/").at(-1))));
+  });
+  const delivery = new NativeStackDelivery("a/b", client);
+  const result = await delivery.mergeStack(layers, "main", 10, {
+    ...(mode === "resume" ? { resumeUuid: "saved-uuid" } : {}),
+    onPending: (uuid) => pending.push(uuid),
+    cancelled: () => false,
+  });
+  return { result, calls, pending };
+}
+
+for (const mode of ["immediate", "pending", "no-uuid", "resume", "already"])
+  test(`native ${mode} merge resolves current timeline evidence without obsolete PR fields`, async () => {
+    const { result, calls, pending } = await nativeMergeFixture(mode);
+    assert.equal(result, integratedSha);
+    assert.equal(
+      calls.filter((call) => call.method === "PUT").length,
+      ["resume", "already"].includes(mode) ? 0 : 1,
+    );
+    assert.deepEqual(pending, mode === "pending" ? ["saved-uuid"] : []);
+    assert.ok(calls.some((call) => call.path.endsWith("/issues/1/timeline")));
+    assert.ok(calls.some((call) => call.path.endsWith("/issues/2/timeline")));
+  });
+
+test("native merge evidence spans every timeline page and ignores unrelated events", async () => {
+  const { result, calls } = await nativeMergeFixture("already", {
+    events: () => [
+      ...Array.from({ length: 100 }, () => ({
+        event: "commented",
+        commit_id: "irrelevant",
+      })),
+      { event: "merged", commit_id: integratedSha },
+    ],
+  });
+  assert.equal(result, integratedSha);
+  assert.equal(
+    calls.filter((call) => call.path.endsWith("/timeline") && call.page === "2")
+      .length,
+    2,
+  );
+});
+
+test("native merge refuses missing, malformed, conflicting and disagreeing commit evidence", async () => {
+  for (const [events, expected] of [
+    [() => [], /missing or conflicting/],
+    [
+      () => [{ event: "closed", commit_id: integratedSha }],
+      /missing or conflicting/,
+    ],
+    [() => [{ event: "merged" }], /malformed/],
+    [() => [{ event: "merged", commit_id: null }], /malformed/],
+    [() => [{ event: "merged", commit_id: "abbreviated" }], /malformed/],
+    [
+      () => [
+        { event: "merged", commit_id: integratedSha },
+        { event: "merged", commit_id: "d".repeat(40) },
+      ],
+      /missing or conflicting/,
+    ],
+    [
+      (number) => [{ event: "merged", commit_id: String(number).repeat(40) }],
+      /different merge commits/,
+    ],
+  ])
+    await assert.rejects(nativeMergeFixture("already", { events }), expected);
+  await assert.rejects(
+    nativeMergeFixture("resume", { asyncSha: "d".repeat(40) }),
+    /differs from the async result/,
+  );
+  await assert.rejects(
+    nativeMergeFixture("resume", { changedHead: true }),
+    /matching integrated head/,
+  );
+  await assert.rejects(
+    nativeMergeFixture("already", { changedHead: true }),
+    /Merged native stack head changed/,
   );
 });

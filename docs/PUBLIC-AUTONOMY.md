@@ -58,9 +58,12 @@ check identity; do not infer protection from the workflow file. Factory's local
 QA and independent semantic reviews supply the product acceptance.
 
 The source-authorized `factory-fixture-prerequisite` is a task-private host tool
-that reports the availability of a named disposable test environment. Prepare it
+that reports a named disposable acceptance condition. The dependency-free local
+Node.js implementation environment is available independently of this condition;
+the command belongs to beta result validation and final validation, not pre-worker
+readiness. Prepare it
 before planning so executable preflight succeeds. Its implementation must have
-only a local readiness observation, no model calls, credential access or target
+only a local condition observation, no model calls, credential access or target
 writes. Record its exact bytes, path and readiness condition. Keep the condition
 unavailable until beta has produced its exact candidate and validation fails.
 Then restore only that condition; do not change target bytes, Factory policy,

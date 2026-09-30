@@ -3,13 +3,16 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Server } from "node:net";
+import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
 import { intakeControl, readIntake } from "../dist/intake.js";
-import { factoryConfigDigest } from "../dist/config.js";
+import { stateRoot, factoryConfigDigest } from "../dist/config.js";
 import { createHash } from "node:crypto";
 import { objectiveComplete } from "../dist/completion.js";
 import {
   readState,
+  readControllerOwner,
   readContinuation,
   saveState,
   statePath,
@@ -204,6 +207,117 @@ test("two explicitly authorized Objectives advance with accepted predecessor bas
       readEvents(f.eventsPath).filter((event) => event.type === "start").length,
       2,
     );
+  }));
+
+test("one intake listener serves entry and terminal return controls under the same owner", async (t) =>
+  fixture(async (f) => {
+    const servers = new Set();
+    let closes = 0;
+    const listen = Server.prototype.listen;
+    const close = Server.prototype.close;
+    t.mock.method(Server.prototype, "listen", function (...args) {
+      if (String(args[0]).endsWith("/control.sock")) servers.add(this);
+      return listen.apply(this, args);
+    });
+    t.mock.method(Server.prototype, "close", function (...args) {
+      if (servers.has(this)) closes++;
+      return close.apply(this, args);
+    });
+    const entry = Promise.withResolvers();
+    const releaseEntry = Promise.withResolvers();
+    const returned = Promise.withResolvers();
+    const releaseReturn = Promise.withResolvers();
+    const objective = f.github.objective.bind(f.github);
+    let entryHeld = false;
+    f.github.objective = async (id) => {
+      if (
+        !entryHeld &&
+        id === 1 &&
+        readContinuation(f.config.repository, 1)?.planning === "complete"
+      ) {
+        entryHeld = true;
+        entry.resolve();
+        await releaseEntry.promise;
+      }
+      return objective(id);
+    };
+    const scan = f.github.intakePage.bind(f.github);
+    f.github.intakePage = async (...args) => {
+      if (
+        readContinuation(f.config.repository, 1)?.objectiveClosure ===
+        "complete"
+      ) {
+        returned.resolve();
+        await releaseReturn.promise;
+      }
+      return scan(...args);
+    };
+    await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
+    const running = f.application.runIntake();
+    const ownerPath = join(stateRoot(f.config.repository), "controller.lock");
+    try {
+      await entry.promise;
+      const owner = readControllerOwner(ownerPath);
+      assert.equal(owner.objective, 1);
+      assert.equal(servers.size, 1);
+      assert.equal(closes, 0);
+      await intakeControl(f.config, "pause");
+      assert.equal(
+        (await controlObjective(f.config, { objective: 1, action: "status" }))
+          .mode,
+        "paused",
+      );
+      await intakeControl(f.config, "drain");
+      assert.equal(
+        (await controlObjective(f.config, { objective: 1, action: "status" }))
+          .mode,
+        "draining",
+      );
+      assert.equal(
+        readEvents(f.eventsPath).filter((event) => event.type === "start")
+          .length,
+        0,
+      );
+      assert.equal(readControllerOwner(ownerPath).token, owner.token);
+      await intakeControl(f.config, "resume");
+      releaseEntry.resolve();
+      await returned.promise;
+      assert.equal(objectiveComplete(readState(f.config.repository, 1)), true);
+      assert.equal(readControllerOwner(ownerPath).objective, 0);
+      assert.equal(readControllerOwner(ownerPath).token, owner.token);
+      assert.equal(servers.size, 1);
+      assert.equal(closes, 0);
+      assert.ok(
+        await controlObjective(f.config, { objective: 1, action: "status" }),
+      );
+      await intakeControl(f.config, "pause");
+      assert.equal((await intakeControl(f.config, "status")).mode, "paused");
+      await intakeControl(f.config, "drain");
+      assert.equal((await intakeControl(f.config, "status")).mode, "draining");
+      releaseReturn.resolve();
+      await running;
+      assert.equal(closes, 1);
+      assert.equal(readControllerOwner(ownerPath), undefined);
+      assert.equal(readContinuation(f.config.repository, 2), undefined);
+      assert.deepEqual(
+        f.plans.map((entry) => entry.objective),
+        [1],
+      );
+      assert.equal(
+        readEvents(f.eventsPath).filter((event) => event.type === "start")
+          .length,
+        1,
+      );
+    } finally {
+      releaseEntry.resolve();
+      releaseReturn.resolve();
+      if (readControllerOwner(ownerPath))
+        await requestControl(f.config.repository, {
+          objective: 0,
+          action: "handoff",
+        });
+      await running;
+    }
   }));
 
 test("pause after predecessor completion and restart keep accepted work and preserve one active Objective", async () =>

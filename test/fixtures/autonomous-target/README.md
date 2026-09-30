@@ -17,7 +17,11 @@ and empty cases. A passing word-presence guide check is only a structural check;
 independent review must judge whether the usage explanation is correct.
 
 A contributor qualification may additionally require the source-declared command
-`factory-fixture-prerequisite`. This is a task-private host readiness probe supplied
-by the qualification operator. It must exist before planning; its successful exit
-means the named public test environment is ready. It does not inspect source,
-modify target files, or call a model. Workers must not create or change this tool.
+`factory-fixture-prerequisite`. This is a task-private acceptance probe supplied
+by the qualification operator for a named disposable test condition. It must exist
+before planning and run during beta result validation and final validation. The
+local Node.js implementation environment is already available; this condition is
+not required to implement the utility and is not a pre-worker readiness probe. A
+failed acceptance probe must retain the produced candidate for an authorized,
+diagnosed environment correction. It does not inspect source, modify target files,
+or call a model. Workers must not create or change this tool.

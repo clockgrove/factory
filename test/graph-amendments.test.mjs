@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   applyPendingAmendment,
@@ -16,7 +17,9 @@ import {
   objectiveCriteria,
 } from "../dist/compiler.js";
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
-import { readState } from "../dist/state-store.js";
+import { readState, statePath } from "../dist/state-store.js";
+import { failureDigest } from "../dist/repair-policy.js";
+import { parseFactoryState } from "../dist/state.js";
 import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
 import { checkServiceState } from "../dist/supervision.js";
@@ -1171,3 +1174,283 @@ test("owner handoff after known amendment review resumes without repeating model
     );
   });
 });
+
+for (const transport of ["stopped CLI", "live owner"])
+  test(`${transport}: diagnosed QA amendment replacement retains accepted work and charges one remaining revision`, async () => {
+    await fixture("rejected-correction", async ({ root, config, initial }) => {
+      let first;
+      let compilations = 0;
+      let graphReviews = 0;
+      const planningModel = {
+        async generateStructured(request) {
+          compilations++;
+          if (!first) return (first = withCoverage(request, initial));
+          if (compilations === 2) {
+            const invalid = qaGraph(first);
+            // All source obligations still belong to work; QA is uncovered.
+            invalid.coverage = first.coverage;
+            return invalid;
+          }
+          assert.equal(
+            JSON.parse(
+              request.compileContext.instructions.trim().split("\n").at(-1),
+            ).discovery.replacement.correction.kind,
+            "planning-output",
+          );
+          return qaGraph(first);
+        },
+        async reviewGraph(request) {
+          graphReviews++;
+          if (request.amendment)
+            assert.equal(request.amendment.work.result.status, "done");
+          return { packetId: request.reviewPacket.id, findings: [] };
+        },
+        async reviewResult(request) {
+          return {
+            packetId: request.reviewPacket.id,
+            findings: request.reviewPacket.criteria.map(
+              (_, criterionIndex) => ({
+                criterionIndex,
+                evidenceIndices: [
+                  request.reviewPacket.evidence.findIndex(
+                    (entry) => entry.path === "OBJECTIVE",
+                  ),
+                ],
+                verdict: "pass",
+                detail: "Fixture source-backed acceptance",
+                question: "",
+              }),
+            ),
+          };
+        },
+      };
+      const setup = makeApplication({
+        config,
+        graph: initial,
+        objectiveBody: body,
+        fakeRoot: join(root, "fake"),
+        planningModel,
+        actions: {
+          result: {
+            files: [
+              { path: "result.txt", text: "done\n" },
+              {
+                path: ".factory-discovery.json",
+                text: JSON.stringify(discovery),
+              },
+            ],
+          },
+        },
+      });
+      const candidate = await setup.application.planObjective(1);
+      const admission = await setup.application.admitObjective(1, candidate, {
+        ...authority,
+        serviceConsent: true,
+        allowances: { ...authority.allowances, planningRevisions: 2 },
+        repairClasses: ["planning-output"],
+        repairPolicy: {
+          perPath: { ...authority.allowances, planningRevisions: 2 },
+        },
+      });
+      await assert.rejects(
+        setup.application.runObjective(1, candidate, admission),
+        /QA node has no acceptance coverage/,
+      );
+      const stopped = readState(config.repository, 1);
+      assert.equal(stopped.work.result.status, "done");
+      assert.equal(stopped.pendingAmendment.phase, "rejected");
+      assert.equal(stopped.pendingAmendment.rejectionStage, "compilation");
+      assert.equal(stopped.allowanceConsumption.planningRevisions, 1);
+      const proposal = {
+        ...stopped.pendingAmendment.proposal,
+        actor: "operator",
+        replacement: {
+          amendmentId: stopped.pendingAmendment.id,
+          correction: {
+            failureDigest: failureDigest(stopped.pendingAmendment.error),
+            kind: "planning-output",
+            diagnosis: "Emitted choice contract allowed uncovered QA",
+            correction:
+              "QA choices now require a feasible existing source obligation",
+            actor: "operator",
+          },
+        },
+      };
+      // Refuse unsupported disposition before changing any authoritative bytes.
+      for (const mutate of [
+        (s, p) => {
+          p.replacement.amendmentId = "stale";
+        },
+        (s, p) => {
+          p.replacement.correction.failureDigest = "0".repeat(64);
+        },
+        (s, p) => {
+          p.expectedGraphDigest = "0".repeat(64);
+        },
+        (s, p) => {
+          p.ownership = ["outside.txt"];
+        },
+        (s) => {
+          s.pendingAmendment.phase = "compiling";
+        },
+        (s) => {
+          s.pendingAmendment.projectionPending = "qa";
+        },
+        (s) => {
+          s.pendingAmendment.rejectionStage = "review";
+        },
+        (s) => {
+          s.pendingAmendment.rejectionStage = "projection";
+        },
+        (s) => {
+          s.pendingAmendment.reviewDigest = "0".repeat(64);
+        },
+        (s) => {
+          s.pendingAmendment.issueByItemId.qa = 99;
+        },
+        (s) => {
+          s.coordinator.mode = "running";
+        },
+        (s) => {
+          s.coordinator.processes = [{ pid: 1, startTime: "1" }];
+        },
+        (s) => {
+          s.work.result.pendingEffect = "merge";
+        },
+        (s) => {
+          s.error = "unrelated error";
+        },
+        (s) => {
+          s.cancelRequested = true;
+        },
+        (s) => {
+          s.objectiveClosure = "complete";
+        },
+        (s) => {
+          s.admission.authority.repairClasses = [];
+        },
+        (s) => {
+          s.allowanceConsumption.planningRevisions = 2;
+        },
+        (s) => {
+          s.repairConsumption.$planning.planningRevisions = 2;
+        },
+      ]) {
+        const altered = structuredClone(stopped);
+        const input = structuredClone(proposal);
+        mutate(altered, input);
+        const unchanged = JSON.stringify(altered);
+        assert.throws(() => submitAmendment(altered, input));
+        assert.equal(JSON.stringify(altered), unchanged);
+      }
+      let running;
+      if (transport === "stopped CLI") {
+        const configPath = join(root, "factory.json");
+        const proposalPath = join(root, "proposal.json");
+        writeFileSync(configPath, JSON.stringify(config));
+        writeFileSync(proposalPath, JSON.stringify(proposal));
+        const result = JSON.parse(
+          execFileSync(
+            process.execPath,
+            [
+              resolve(import.meta.dirname, "../dist/cli.js"),
+              "propose-amendment",
+              "--objective",
+              "1",
+              "--proposal",
+              proposalPath,
+              "--config",
+              configPath,
+            ],
+            { encoding: "utf8" },
+          ),
+        );
+        assert.equal(result.phase, "ready");
+      } else {
+        running = setup.application.runObjective(1);
+        for (let attempt = 0; attempt < 100; attempt++) {
+          if (
+            (
+              await requestControl(config.repository, {
+                objective: 1,
+                action: "status",
+              })
+            ).handled
+          )
+            break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        await setup.application.proposeAmendment(1, proposal);
+      }
+      const replaced = readState(config.repository, 1);
+      assert.doesNotThrow(() => checkServiceState(config, 1));
+      for (const mutate of [
+        (s) => {
+          delete s.allowanceConsumption;
+          delete s.repairConsumption;
+        },
+        (s) => {
+          s.allowanceConsumption.planningRevisions = 0;
+          s.repairConsumption.$planning.planningRevisions = 0;
+        },
+        (s) => {
+          s.repairConsumption.$planning.planningRevisions = 0;
+        },
+        (s) => {
+          delete s.repairConsumption;
+        },
+      ]) {
+        const reset = structuredClone(replaced);
+        mutate(reset);
+        assert.throws(
+          () => parseFactoryState(reset, config.repository, 1),
+          /Known amendment attempts exceed retained planning consumption/,
+        );
+      }
+      assert.deepEqual(replaced.rejectedAmendments, [stopped.pendingAmendment]);
+      assert.deepEqual(replaced.graph, stopped.graph);
+      assert.deepEqual(replaced.work, stopped.work);
+      assert.deepEqual(replaced.admission, stopped.admission);
+      assert.equal(replaced.runId, stopped.runId);
+      assert.equal(replaced.error, undefined);
+      assert.equal(replaced.coordinator.mode, "paused");
+      assert.equal(replaced.allowanceConsumption.planningRevisions, 1);
+      assert.equal(compilations, 2);
+      assert.equal(graphReviews, 1);
+      const beforeDuplicate = readFileSync(
+        statePath(config.repository, 1),
+        "utf8",
+      );
+      await assert.rejects(
+        setup.application.proposeAmendment(1, proposal),
+        /known unprojected/,
+      );
+      assert.equal(
+        readFileSync(statePath(config.repository, 1), "utf8"),
+        beforeDuplicate,
+      );
+      await controlObjective(config, { objective: 1, action: "resume" });
+      const completed = await (running ?? setup.application.runObjective(1));
+      assert.equal(completed.finalValidation.passed, true);
+      assert.equal(completed.objectiveClosure, "complete");
+      assert.equal(completed.allowanceConsumption.planningRevisions, 2);
+      assert.equal(completed.repairConsumption.$planning.planningRevisions, 2);
+      assert.equal(compilations, 3);
+      assert.equal(graphReviews, 2);
+      assert.equal(completed.work.result.attempt, stopped.work.result.attempt);
+      assert.equal(
+        completed.work.result.integratedSha,
+        stopped.work.result.integratedSha,
+      );
+      assert.equal(completed.work.qa.status, "done");
+      assert.equal(
+        readEvents(setup.eventsPath).filter((event) => event.type === "start")
+          .length,
+        1,
+      );
+      assert.deepEqual(completed.rejectedAmendments, [
+        stopped.pendingAmendment,
+      ]);
+      assertGraphRevisions(readState(config.repository, 1));
+    });
+  });

@@ -528,16 +528,12 @@ async function main(): Promise<void> {
     const proposalPath = option(args, "proposal");
     if (!proposalPath)
       throw new Error("propose-amendment requires --proposal FILE");
-    const reply = await requestControl(config.repository, {
+    const result = await controlObjective(config, {
       objective,
       action: "propose-amendment",
       input: JSON.parse(readFileSync(proposalPath, "utf8")),
     });
-    if (!reply.handled)
-      throw new Error(
-        "Start the existing Objective owner before proposing an amendment",
-      );
-    console.log(JSON.stringify(reply.result, null, 2));
+    console.log(JSON.stringify(result, null, 2));
     return;
   }
   if (["pause", "drain", "resume"].includes(command)) {

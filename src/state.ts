@@ -158,6 +158,8 @@ export interface FactoryState {
   backlogDiscoveries?: import("./graph-amendments.js").AmendmentProposal[];
   graphRevisions?: import("./graph-amendments.js").GraphRevision[];
   pendingAmendment?: import("./graph-amendments.js").PendingAmendment;
+  /** Superseded known rejections retain their original proposal and evidence. */
+  rejectedAmendments?: import("./graph-amendments.js").PendingAmendment[];
   allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
   coordinator?: CoordinatorDisposition;
   admission?: AutonomousAdmission;

@@ -340,6 +340,34 @@ projection outcomes pause affected work without repeating possibly completed cal
 Inspect the preserved pending proposal and original evidence before choosing a
 supported continuation; editing state or running a fresh root cannot bypass a fence.
 
+A known compiler-generated amendment rejection can be replaced after diagnosing and
+correcting its cause. Keep the original discovery fields and current graph digest,
+set `actor` to the correcting operator, and add `replacement`:
+
+```json
+{
+  "amendmentId": "rejected-amendment-id-from-status",
+  "correction": {
+    "failureDigest": "sha256-of-the-exact-rejected-error",
+    "kind": "planning-output",
+    "diagnosis": "Concrete cause of the rejected compiler output",
+    "correction": "Meaningful correction already established",
+    "actor": "operator"
+  }
+}
+```
+
+Submit that proposal with the same `propose-amendment` command. Factory requires
+a paused, settled, nonterminal Objective, an admitted planning repair class and
+remaining total/per-path planning allowance. The operation also works while the
+owner is stopped, under the existing controller lock. It retains the rejected
+proposal and leaves the Objective paused; resume and start the existing owner to
+compile a fresh candidate through normal validation, independent review and
+projection. The new compilation consumes one remaining revision. Unknown calls,
+projection outcomes, independent-review refusals and unchanged failed corrections
+cannot use this operation. It does not accept or edit the rejected response, alter
+the accepted graph or restart completed Work Items.
+
 ## Local background supervision
 
 A supported Linux or WSL host needs a running systemd user manager. Factory never changes login persistence or gains administrator privileges. A user manager can survive the chat closing; sleeping pauses execution, shutdown stops it, and logout behavior depends on the host's existing linger policy.

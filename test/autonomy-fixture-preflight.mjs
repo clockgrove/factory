@@ -61,6 +61,19 @@ try {
   cpSync(new URL("./fixtures/autonomous-target/", import.meta.url), root, {
     recursive: true,
   });
+  const workflow = readFileSync(
+    join(root, ".github/workflows/quality.yml"),
+    "utf8",
+  );
+  const events = workflow
+    .match(/^on: \[([^\]]+)\]$/m)?.[1]
+    .split(",")
+    .map((event) => event.trim());
+  assert.deepEqual(
+    events,
+    ["push"],
+    "Each exact published head needs one unambiguous source-check receipt",
+  );
   git("init", "-b", "main");
   sourcePacket(
     "autonomy-first",

@@ -2,12 +2,12 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.51 — prepared candidate
+## 0.1.51 — 2026-09-30
 
 - Require source-owned QA coverage at the emitted planner choice and strict decoder boundary, preserving work/aggregate alternatives and original final obligations (#345).
 - Allow explicit diagnosed replacement of a known unprojected compiler amendment rejection through existing controls and the same planning allowance, retaining rejected evidence and accepted work (#346).
 
-Publication, installed/public correction verification and full autonomous qualification remain pending. Earlier release evidence retains its original artifact and scenario.
+Published with [independent public artifact/plugin verification](https://github.com/clockgrove/factory/issues/345#issuecomment-5915659441), fresh-cache offline installation and four exact installed correction cases. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0151-artifact-record). Full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253); earlier release evidence retains its original artifact and scenario.
 
 ## 0.1.50 — 2026-09-30
 

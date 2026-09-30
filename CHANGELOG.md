@@ -2,6 +2,14 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.44 — 2026-09-29
+
+- Confirm ordinary guarded merges from the successful merge response and current PR identity under GitHub REST API `2026-03-10`, which no longer returns `merge_commit_sha` (#293 / PR #294).
+- Resolve native-stack merge commits from authenticated, paginated merge timeline events, rejecting missing, malformed or conflicting evidence while preserving layer identity, async-result agreement and exact default-head checks.
+- Exercise current-version response fixtures across regular delivery and native completion, saved-UUID and already-merged reconciliation without adding merge replay or API fallback.
+
+Publication and source checks do not establish installed Objective qualification; see [#295](https://github.com/clockgrove/factory/issues/295) and the continuing release gates.
+
 ## 0.1.43 — 2026-09-29
 
 - Replace model-authored controller bookkeeping with one compiler choice protocol and packet-bound reviewer indices.

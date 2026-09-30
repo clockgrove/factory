@@ -29,3 +29,5 @@ Choose an absolute, unused filename in an existing directory outside the target 
 - **Cost and content:** provider estimates retain their currency, provenance and independent completeness; they are not invoices or pricing calculations. Capture-disabled, redacted, truncated and unavailable content stay distinct. Summaries never recover missing content or infer success from its absence.
 
 The exported `analyzeInteractions` function accepts metadata arrays for explicitly selected repositories or Objectives when a local tool needs a broader comparison. The CLI stays within one configured Objective. Neither surface starts work, changes a plan, retries a call or sends telemetry to another service.
+
+A [bounded synthetic pattern-analysis exercise](OFFLINE-PATTERN-DISCOVERY.md) demonstrates when metadata and ordinary text search suffice, including false matches, incomplete captures and retry bias. It is contributor evidence, not a production frequency or model-quality report.

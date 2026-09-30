@@ -25,6 +25,7 @@ export interface ClaudeManagedConfig {
   environment: BetaCloudConfig;
   /** Explicit operator-authorized list-cost threshold; crossing requests can exceed it. */
   budgetCents?: string;
+  timeoutSeconds?: number;
 }
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -43,6 +44,7 @@ export function validateClaudeManagedConfig(
     "agent",
     "environment",
     "budgetCents",
+    "timeoutSeconds",
   ]);
   if (Object.keys(value).some((key) => !allowed.has(key)))
     throw new Error("Unknown Claude managed configuration field");
@@ -72,6 +74,12 @@ export function validateClaudeManagedConfig(
     throw new Error(
       "Claude managed budgetCents must be a positive integer string",
     );
+  if (
+    value.timeoutSeconds !== undefined &&
+    (!Number.isSafeInteger(value.timeoutSeconds) ||
+      Number(value.timeoutSeconds) <= 0)
+  )
+    throw new Error("Claude managed timeoutSeconds must be positive");
   const environment = value.environment;
   if (
     !record(environment) ||
@@ -173,6 +181,12 @@ export function validateClaudeManagedConfig(
   return structuredClone(value) as unknown as ClaudeManagedConfig;
 }
 
+function requestOptions(timeout?: number) {
+  return timeout === undefined
+    ? {}
+    : { timeout, signal: AbortSignal.timeout(timeout) };
+}
+
 /** No credentials are serialized into driver handles or worker resources. */
 export class ClaudeManagedClient {
   readonly sdk: Anthropic;
@@ -190,6 +204,7 @@ export class ClaudeManagedClient {
       authToken: null,
       baseURL: "https://api.anthropic.com",
       maxRetries: 0,
+      timeout: (config.timeoutSeconds ?? 900) * 1000,
       ...(options.fetch && { fetch: options.fetch }),
     });
   }
@@ -199,10 +214,11 @@ export class ClaudeManagedClient {
       betas: [CLAUDE_MANAGED_BETA],
     };
   }
-  async verifyEnvironment(): Promise<void> {
+  async verifyEnvironment(timeout?: number): Promise<void> {
     const environment = await this.sdk.beta.environments.retrieve(
       this.config.environmentId,
       this.headers,
+      requestOptions(timeout),
     );
     if (!isDeepStrictEqual(environment.config, this.config.environment))
       throw new Error("Claude managed environment configuration changed");
@@ -231,63 +247,132 @@ export class ClaudeManagedClient {
         "Claude managed session has undeclared resource authority",
       );
   }
-  async upload(path: string) {
-    return this.sdk.beta.files.upload({
-      file: createReadStream(path),
-      ...this.headers,
-    });
+  async upload(path: string, timeout?: number) {
+    return this.sdk.beta.files.upload(
+      {
+        file: createReadStream(path),
+        ...this.headers,
+      },
+      requestOptions(timeout),
+    );
   }
   async create(
     identity: string,
     resources: NonNullable<SessionCreateParams["resources"]>,
+    timeout?: number,
   ) {
-    return this.sdk.beta.sessions.create({
-      ...this.headers,
-      agent: {
-        type: "agent",
-        id: this.config.agentId,
-        version: this.config.agentVersion,
-      },
-      environment_id: this.config.environmentId,
-      metadata: { factory_attempt: identity },
-      resources,
-      vault_ids: [],
-      ...(this.config.budgetCents && {
-        budget: {
-          type: "limit",
-          max_list_cost: { amount: this.config.budgetCents, currency: "USD" },
+    return this.sdk.beta.sessions.create(
+      {
+        ...this.headers,
+        agent: {
+          type: "agent",
+          id: this.config.agentId,
+          version: this.config.agentVersion,
         },
-      }),
-    });
+        environment_id: this.config.environmentId,
+        metadata: { factory_attempt: identity },
+        resources,
+        vault_ids: [],
+        ...(this.config.budgetCents && {
+          budget: {
+            type: "limit",
+            max_list_cost: { amount: this.config.budgetCents, currency: "USD" },
+          },
+        }),
+      },
+      requestOptions(timeout),
+    );
   }
-  async retrieve(sessionId: string) {
-    return this.sdk.beta.sessions.retrieve(sessionId, this.headers);
+  async retrieve(sessionId: string, timeout?: number) {
+    return this.sdk.beta.sessions.retrieve(
+      sessionId,
+      this.headers,
+      requestOptions(timeout),
+    );
   }
-  async send(sessionId: string, event: BetaManagedAgentsEventParams) {
-    return this.sdk.beta.sessions.events.send(sessionId, {
-      ...this.headers,
-      events: [event],
-    });
+  async send(
+    sessionId: string,
+    event: BetaManagedAgentsEventParams,
+    timeout?: number,
+  ) {
+    return this.sdk.beta.sessions.events.send(
+      sessionId,
+      {
+        ...this.headers,
+        events: [event],
+      },
+      requestOptions(timeout),
+    );
   }
-  async events(sessionId: string): Promise<BetaManagedAgentsSessionEvent[]> {
+  async events(
+    sessionId: string,
+    timeout?: number,
+  ): Promise<BetaManagedAgentsSessionEvent[]> {
     const result: BetaManagedAgentsSessionEvent[] = [];
-    for await (const event of this.sdk.beta.sessions.events.list(sessionId, {
-      ...this.headers,
-      order: "asc",
-    }))
+    for await (const event of this.sdk.beta.sessions.events.list(
+      sessionId,
+      {
+        ...this.headers,
+        order: "asc",
+      },
+      requestOptions(timeout),
+    ))
       result.push(event);
     return result;
   }
-  async files(sessionId: string) {
+  async files(sessionId: string, timeout?: number) {
     const result = [];
-    for await (const file of this.sdk.beta.files.list({
-      ...this.headers,
-      scope_id: sessionId,
-    }))
+    for await (const file of this.sdk.beta.files.list(
+      {
+        ...this.headers,
+        scope_id: sessionId,
+      },
+      requestOptions(timeout),
+    ))
       result.push(file);
     return result;
   }
-  async download(fileId: string) {
-    return this.sdk.beta.files.download(fileId, this.headers);
+  async download(fileId: string, timeout?: number) {
+    return this.sdk.beta.files.download(
+      fileId,
+      this.headers,
+      requestOptions(timeout),
+    );
+  }
+  async deleteSession(sessionId: string, timeout?: number) {
+    return this.sdk.beta.sessions.delete(
+      sessionId,
+      this.headers,
+      requestOptions(timeout),
+    );
+  }
+  async sessionAbsent(sessionId: string, timeout?: number): Promise<boolean> {
+    try {
+      await this.retrieve(sessionId, timeout);
+      return false;
+    } catch (error) {
+      if (error instanceof Anthropic.NotFoundError) return true;
+      throw error;
+    }
+  }
+  async deleteFile(fileId: string, timeout?: number) {
+    return this.sdk.beta.files.delete(
+      fileId,
+      this.headers,
+      requestOptions(timeout),
+    );
+  }
+  async fileAbsent(fileId: string, timeout?: number): Promise<boolean> {
+    try {
+      await this.sdk.beta.files.retrieveMetadata(
+        fileId,
+        this.headers,
+        requestOptions(timeout),
+      );
+      return false;
+    } catch (error) {
+      if (error instanceof Anthropic.NotFoundError) return true;
+      throw error;
+    }
   }
 }

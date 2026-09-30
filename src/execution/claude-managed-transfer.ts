@@ -33,8 +33,7 @@ function safePath(path: string): boolean {
           part &&
           part !== "." &&
           part !== ".." &&
-          part.toLowerCase() !== ".git" &&
-          part !== ".factory-inputs",
+          part.toLowerCase() !== ".git",
       )
   );
 }
@@ -127,17 +126,17 @@ export function materializeClaudeSnapshot(
  * LFS working-tree bytes are exported, not fetched or encoded by the language model.
  */
 export const CLAUDE_EXPORT_SCRIPT = String.raw`import {execFileSync} from 'node:child_process';
-import {readFileSync,lstatSync,readlinkSync,writeFileSync} from 'node:fs';
+import {readFileSync,lstatSync,readlinkSync,writeFileSync,readdirSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 const [bindingPath,output] = process.argv.slice(2);
 const binding = JSON.parse(readFileSync(bindingPath,'utf8'));
 const files=[];
 const declared=[];
+try{if(!lstatSync('.factory-inputs').isDirectory())throw new Error('Unsafe input directory');for(const name of readdirSync('.factory-inputs')){if(!/^(selected|source)-[0-9]+$/.test(name))throw new Error('Unexpected private input');declared.push('.factory-inputs/'+name);}}catch(e){if(e.code!=='ENOENT')throw e;}
 try{const sets=JSON.parse(readFileSync('.factory-assets.json','utf8')).sets;if(!Array.isArray(sets))throw new Error('Invalid AssetSet declaration');for(const set of sets)for(const member of set.members)declared.push(member.path);declared.push('.factory-assets.json');}catch(e){if(e.code!=='ENOENT')throw e;}
 const paths=[...new Set([...declared,...execFileSync('git',['ls-files','--cached','--others','--exclude-standard','-z'],{encoding:'utf8'}).split('\0').filter(Boolean)])];
 for(const path of paths){
  if(typeof path!=='string'||!path||path.includes('\\')||path.includes('\0')||path.split('/').some(p=>!p||p==='.'||p==='..'||p.toLowerCase()==='.git'))throw new Error('Unsafe output path');
- if(path.split('/').some(p=>p==='.factory-inputs'))continue;
  const parts=path.split('/');for(let i=1;i<parts.length;i++)if(!lstatSync(parts.slice(0,i).join('/')).isDirectory())throw new Error('Unsafe output parent');
  let stat;try{stat=lstatSync(path);}catch(e){if(e.code==='ENOENT')continue;throw e;}
  if(!stat.isFile()&&!stat.isSymbolicLink())throw new Error('Unsupported output file type: '+path);

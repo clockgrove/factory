@@ -1,6 +1,6 @@
 # Public release checklist
 
-Published [v0.1.43](https://github.com/clockgrove/factory/releases/tag/v0.1.43) has verified public download, pinned plugin identity and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0143-artifact-record). Live workspace/compiler qualification remains in [#263](https://github.com/clockgrove/factory/issues/263), [#276](https://github.com/clockgrove/factory/issues/276) and [#280](https://github.com/clockgrove/factory/issues/280); full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier artifact and adopter evidence remain bound to their original bytes and scenarios.
+Published [v0.1.44](https://github.com/clockgrove/factory/releases/tag/v0.1.44) has verified public download, pinned plugin identity and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0144-artifact-record). Live workspace qualification remains in [#263](https://github.com/clockgrove/factory/issues/263); full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier artifact and adopter evidence remain bound to their original bytes and scenarios.
 
 Earlier published artifacts and their evidence remain intact. Distribution checks do not establish live qualification.
 

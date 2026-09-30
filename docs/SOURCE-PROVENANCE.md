@@ -10,6 +10,17 @@ The MIT license text is retained from the archived repository. Runtime code does
 
 This implementation extends the current compiler, immutable Git validation and delivery paths from the public issue's generic reproduction. The established `yaml` parser supplies YAML node and ambiguity checks; a compact Objective declaration provides exact directory authority through existing digest bindings. New temporary-Git regressions contain generic public data. No archived implementation, private adopter source, prompts or transcripts were copied, and no additional state store was introduced.
 
+## Phase-correct aggregate and discovery evidence (#341, #342)
+
+These corrections extend the existing compiler choice/decoder, canonical candidate
+validator and controller result observations. New aggregate acceptance derives
+from the child join; trusted prior acceptance stays unchanged, and semantic QA
+and final Objective coverage remain separate. Discovery projects the existing
+attempt record without adding a store or committing its private staging file.
+New deterministic regressions use public synthetic data. Preserved local failed
+responses were replayed without provider calls; raw evidence is not copied into
+Git. Independent installed and full autonomy evidence remain separately owned.
+
 ## Reviewed graph amendments and executable hierarchy (#247)
 
 New amendment behavior extends the current compiler, atomic snapshot, owner control,

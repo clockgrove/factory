@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.50 — candidate
+
+- Derive new aggregate acceptance from completed, integrated child results; retain prior accepted criteria exactly and keep semantic QA and final Objective obligations at their supported phases (#341).
+- Supply the harness discovery captured for the current attempt in independent result review, bound to the reviewed result and marked as untrusted proposal data (#342).
+
+Publication and independent installed/public correction verification remain required before installation. Published v0.1.49 and v0.1.48 distribution evidence and accepted v0.1.47 workspace evidence retain their original artifact and scenario scope; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
+
 ## 0.1.49 — 2026-09-30
 
 - Classify settled, unpublished Work Item failures from their own outcome while an independent sibling's controller collection remains active. Keep diagnosed candidate repair fenced until global quiescence (#338).

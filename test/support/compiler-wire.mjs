@@ -102,6 +102,7 @@ export function encodeCompilerWire(input, promptOrChoices) {
             "executionProfile",
           ])
             delete item[field];
+        if (item.kind === "aggregate") delete item.acceptance;
         return item;
       }),
   };

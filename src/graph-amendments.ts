@@ -344,6 +344,7 @@ export function validateAmendment(
     state.objective,
     state.baseSha,
     new Set(sources.map((source) => source.path)),
+    state.graph,
   );
   validateCommandProvenance(graph, sources, config.checkout);
   validateGraphSources(graph, sources, config.checkout, body, state.baseSha);

@@ -203,7 +203,11 @@ export interface ModelInvocationContext {
 
 export interface PlanningRequest<T> {
   /** Trusted transient compile input; not part of canonical or persisted graphs. */
-  compileContext?: { objectiveNumber: number; instructions: string };
+  compileContext?: {
+    objectiveNumber: number;
+    instructions: string;
+    previousGraph?: WorkGraph;
+  };
   purpose?: "diagnosis";
   coverageObligations?: CoverageObligation[];
   objective: string;

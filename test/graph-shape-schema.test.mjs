@@ -98,7 +98,14 @@ function assertSchema(schema) {
   assert.equal(schema.properties.items.minItems, 1);
   assert.equal(schema.properties.items.maxItems, undefined);
   for (const variant of schema.properties.items.items.anyOf) {
-    for (const field of ["acceptance", "nonGoals", "citations"]) {
+    const aggregate = variant.properties.kind.enum[0] === "aggregate";
+    assert.equal("acceptance" in variant.properties, !aggregate);
+    assert.equal(variant.required.includes("acceptance"), !aggregate);
+    for (const field of [
+      ...(aggregate ? [] : ["acceptance"]),
+      "nonGoals",
+      "citations",
+    ]) {
       assert.equal(variant.properties[field].minItems, 1);
       assert.equal(variant.properties[field].maxItems, undefined);
     }

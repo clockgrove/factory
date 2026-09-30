@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,13 +15,20 @@ import {
   compilePlan,
   hydrateWorkerInputSources,
   objectiveCriteria,
+  verifyPlanCandidate,
+  planReviewPacket,
+  validateGraph,
   validateGraphSources,
 } from "../dist/compiler.js";
 import {
   installedControllerCapabilities,
   CONTROLLER_CAPABILITIES_DIGEST,
 } from "../dist/controller-capabilities.js";
-import { assertCoverageShape, coverageObligations } from "../dist/qa.js";
+import {
+  aggregateAcceptance,
+  assertCoverageShape,
+  coverageObligations,
+} from "../dist/qa.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import { createTarget } from "./support/integration-fixture.mjs";
 const Ajv = createRequire(import.meta.url)("ajv");
@@ -151,6 +159,7 @@ test("actual choice schema and decoder admit supported proof forms and refuse ow
   ]) {
     const choice = structuredClone(value);
     choice.items[0].kind = kind;
+    if (kind === "aggregate") delete choice.items[0].acceptance;
     choice.items[0].coverage = [entry(proof)];
     if (kind !== "work") {
       for (const field of [
@@ -612,4 +621,248 @@ test("completed SDK decoder failure enters the admitted bounded planning repair 
       (invocation) => invocation.resultDigest,
     ),
   );
+});
+
+test("aggregate choices derive the child join while preserving real QA semantics and final coverage", () => {
+  const { input, wire, value, conforms } = setup();
+  const aggregate = item({
+    kind: "aggregate",
+    id: "parent",
+    children: ["implementation", "qa"],
+    dependencies: ["implementation", "qa"],
+    coverage: [entry()],
+  });
+  for (const field of [
+    "acceptance",
+    "ownedPaths",
+    "sourceAssets",
+    "expectedOutputRoles",
+    "requiredLfsRoles",
+    "minimumAssetSets",
+  ])
+    delete aggregate[field];
+  const qa = item({
+    kind: "qa",
+    id: "qa",
+    dependencies: ["implementation"],
+    acceptance: [
+      "The integrated negative control passes without mutating input.",
+    ],
+    coverage: [],
+  });
+  for (const field of [
+    "ownedPaths",
+    "sourceAssets",
+    "expectedOutputRoles",
+    "requiredLfsRoles",
+    "minimumAssetSets",
+  ])
+    delete qa[field];
+  value.items = [item(), qa, aggregate];
+  assert(conforms(value), JSON.stringify(conforms.errors));
+  const graph = wire.decode(value);
+  assert.deepEqual(
+    graph.items[2].acceptance,
+    aggregateAcceptance({ id: "parent" }),
+  );
+  assert.deepEqual(graph.items[1].acceptance, qa.acceptance);
+  assert.deepEqual(graph.coverage[0].proof, { kind: "final-review" });
+  assert.equal(
+    graph.coverage[0].source.text,
+    input.coverageObligations[0].source.text,
+  );
+  // Final coverage never becomes an earlier parent criterion.
+  assert(!graph.items[2].acceptance.includes(graph.coverage[0].source.text));
+  const future = structuredClone(value);
+  future.items[2].acceptance = [
+    "Successful final Objective review proves the published check before parent acceptance.",
+  ];
+  assert.equal(conforms(future), false);
+  assert.throws(() => wire.decode(future), /unexpected or missing fields/);
+  const direct = structuredClone(graph);
+  direct.coverage.push({
+    ...coverageObligations(body, [
+      "Independent integrated negative control",
+    ])[0],
+    itemId: "qa",
+    proof: { kind: "integrated-semantic", acceptanceIndex: 0 },
+    environment: {
+      kind: "local",
+      readiness: "available",
+      preparedBy: "",
+      probe: "",
+    },
+  });
+  assert.doesNotThrow(() =>
+    validateGraph(direct, 17, input.baseSha, new Set(["OBJECTIVE"])),
+  );
+  direct.items[2].acceptance = future.items[2].acceptance;
+  assert.throws(
+    () => validateGraph(direct, 17, input.baseSha, new Set(["OBJECTIVE"])),
+    /Aggregate acceptance/,
+  );
+});
+
+test("trusted prior graph retains aggregate and decomposed work acceptance exactly", () => {
+  for (const kind of ["aggregate", "work"]) {
+    const previousGraph = {
+      objective: 17,
+      baseSha: "a".repeat(40),
+      items: [
+        item({
+          id: "parent",
+          kind,
+          acceptance: [
+            "Original accepted semantic requirement",
+            "Second original criterion",
+          ],
+        }),
+      ],
+    };
+    const { wire, value, conforms } = setup({
+      compileContext: {
+        objectiveNumber: 17,
+        instructions: "Amend the trusted graph",
+        previousGraph,
+      },
+    });
+    const parent = item({
+      kind: "aggregate",
+      id: "parent",
+      children: ["implementation"],
+      dependencies: ["implementation"],
+      coverage: [entry()],
+    });
+    for (const field of [
+      "acceptance",
+      "ownedPaths",
+      "sourceAssets",
+      "expectedOutputRoles",
+      "requiredLfsRoles",
+      "minimumAssetSets",
+    ])
+      delete parent[field];
+    value.items = [item(), parent];
+    assert(conforms(value), JSON.stringify(conforms.errors));
+    const graph = wire.decode(value);
+    assert.deepEqual(
+      graph.items[1].acceptance,
+      previousGraph.items[0].acceptance,
+    );
+    assert.doesNotThrow(() =>
+      validateGraph(
+        graph,
+        17,
+        graph.baseSha,
+        new Set(["OBJECTIVE"]),
+        previousGraph,
+      ),
+    );
+    graph.items[1].acceptance.push(
+      "An invented future final-review obligation",
+    );
+    assert.throws(
+      () =>
+        validateGraph(
+          graph,
+          17,
+          graph.baseSha,
+          new Set(["OBJECTIVE"]),
+          previousGraph,
+        ),
+      /Aggregate acceptance/,
+    );
+    assert.equal(previousGraph.items[0].acceptance.length, 2);
+  }
+});
+
+test("unchanged historical aggregate review receipts remain verifiable without relaxing new candidate checks", async () => {
+  const root = mkdtempSync(
+    join(tmpdir(), "factory-historical-aggregate-review-"),
+  );
+  try {
+    const target = createTarget(root);
+    const { wire, value } = setup({ baseSha: target.baseSha });
+    const parent = item({
+      kind: "aggregate",
+      id: "parent",
+      children: ["implementation"],
+      dependencies: ["implementation"],
+      coverage: [],
+    });
+    for (const field of [
+      "acceptance",
+      "ownedPaths",
+      "sourceAssets",
+      "expectedOutputRoles",
+      "requiredLfsRoles",
+      "minimumAssetSets",
+    ])
+      delete parent[field];
+    value.items.push(parent);
+    const candidate = await compilePlan(
+      17,
+      body,
+      target.baseSha,
+      target.checkout,
+      {
+        async generateStructured() {
+          return wire.decode(value);
+        },
+        async reviewGraph(request) {
+          return { packetId: request.reviewPacket.id, findings: [] };
+        },
+      },
+    );
+    // Reconstruct immutable pre-correction fixture receipts for a valid source
+    // semantic parent. This is historical test data, never runtime output repair.
+    const historical = structuredClone(candidate);
+    historical.graph.items[1].acceptance = ["Source-defined result exists."];
+    const hash = (value) =>
+      createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    historical.graphDigest = hash(historical.graph);
+    historical.packetDigest = hash(
+      planReviewPacket(
+        body,
+        target.baseSha,
+        historical.sources,
+        historical.graph,
+        target.checkout,
+      ),
+    );
+    historical.reviewDigest = hash({
+      packetDigest: historical.packetDigest,
+      revisions: historical.review.revisions,
+      findings: historical.review.findings,
+    });
+    assert.doesNotThrow(() =>
+      verifyPlanCandidate(
+        historical,
+        17,
+        body,
+        target.baseSha,
+        target.checkout,
+      ),
+    );
+    const changed = structuredClone(historical);
+    changed.graph.items[1].acceptance.push("Unreviewed future obligation");
+    assert.throws(
+      () =>
+        verifyPlanCandidate(changed, 17, body, target.baseSha, target.checkout),
+      /Plan candidate differs/,
+    );
+    await assert.rejects(
+      compileObjective(17, body, target.baseSha, target.checkout, {
+        async generateStructured() {
+          return historical.graph;
+        },
+        async reviewGraph() {
+          assert.fail("invalid new graph must fail before review");
+        },
+      }),
+      /Aggregate acceptance/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -340,6 +340,28 @@ export function workItemReviewObservations(
     currentIntegratedCommitSha: state.integratedSha ?? null,
     reviewedItemId: item.id,
     delivery,
+    harnessDiscovery:
+      current.discovery &&
+      current.attempt &&
+      current.discovery.attempt === current.attempt &&
+      current.changeRef &&
+      current.treeSha
+        ? {
+            itemId: item.id,
+            attemptId: current.attempt,
+            resultCommitSha: current.changeRef,
+            resultTreeSha: current.treeSha,
+            contentOrigin: "harness-declared-proposal",
+            proposal: {
+              scope: current.discovery.scope,
+              reason: current.discovery.reason,
+              evidence: current.discovery.evidence,
+              ownership: current.discovery.ownership,
+              acceptance: current.discovery.acceptance,
+              dependencies: current.discovery.dependencies,
+            },
+          }
+        : null,
     attempts: relevant.map((candidate) => {
       const work = state.work[candidate.id]!;
       return {

@@ -2,6 +2,15 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.48 — candidate
+
+- Correct supervisor registration and lifecycle when the installation uses an isolated XDG configuration directory (#327).
+- Supply supported controller review and protected-delivery guarantees during planning, and compact exact-result review and pre-integration check evidence during final acceptance (#331).
+- Allow diagnostics to inspect supported preparing continuations without treating them as executing Work Items (#328).
+- Include version-matched installation guidance in the frozen package and check the actual archived guidance before publication (#325).
+
+This candidate is not yet published or qualified. Earlier release and qualification evidence remains bound to its original artifact and scenario.
+
 ## 0.1.47 — 2026-09-30
 
 - Require an exact readiness-probe selection for real environments in the structured compiler contract. Distinguish pre-worker readiness from validation of work that has yet to be delivered, preserving canonical command authority (#319).

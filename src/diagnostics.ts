@@ -27,6 +27,7 @@ import type {
   ModelInvocationUsage,
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
+import { failureDigest } from "./repair-policy.js";
 import { itemsConflict } from "./scheduler.js";
 import type { FactoryState, WorkState } from "./state.js";
 import { normalizeTokenUsage, tokenCategories } from "./usage.js";
@@ -1146,7 +1147,19 @@ export function statusDocument(
             ? ("complete" as const)
             : ("active" as const),
     runId: state.runId,
-    coordinator: state.coordinator ?? null,
+    coordinator: state.coordinator
+      ? {
+          ...state.coordinator,
+          ...(state.coordinator.waitReason
+            ? {
+                waitReason: redactDiagnosticDetail(
+                  state.coordinator.waitReason,
+                  secrets,
+                ),
+              }
+            : {}),
+        }
+      : null,
     graphDigest: graphDigest(state.graph),
     graphRevisionCount: state.graphRevisions?.length ?? 1,
     pendingAmendment: state.pendingAmendment
@@ -1155,6 +1168,9 @@ export function statusDocument(
           phase: state.pendingAmendment.phase,
           expectedGraphDigest:
             state.pendingAmendment.proposal.expectedGraphDigest,
+          failureDigest: state.pendingAmendment.error
+            ? failureDigest(state.pendingAmendment.error)
+            : null,
           error: state.pendingAmendment.error
             ? redactDiagnosticDetail(state.pendingAmendment.error, secrets)
             : null,

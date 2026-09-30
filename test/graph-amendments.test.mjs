@@ -1178,6 +1178,7 @@ test("owner handoff after known amendment review resumes without repeating model
 for (const transport of ["stopped CLI", "live owner"])
   test(`${transport}: diagnosed QA amendment replacement retains accepted work and charges one remaining revision`, async () => {
     await fixture("rejected-correction", async ({ root, config, initial }) => {
+      config.policy.allowedSecretNames = ["FACTORY_TEST_AMENDMENT_SECRET"];
       let first;
       let compilations = 0;
       let graphReviews = 0;
@@ -1256,7 +1257,45 @@ for (const transport of ["stopped CLI", "live owner"])
         setup.application.runObjective(1, candidate, admission),
         /QA node has no acceptance coverage/,
       );
+      const configPath = join(root, "factory.json");
+      writeFileSync(configPath, JSON.stringify(config));
+      const status = () =>
+        JSON.parse(
+          execFileSync(
+            process.execPath,
+            [
+              resolve(import.meta.dirname, "../dist/cli.js"),
+              "status",
+              "--objective",
+              "1",
+              "--json",
+              "--config",
+              configPath,
+            ],
+            {
+              encoding: "utf8",
+              env: {
+                ...process.env,
+                FACTORY_TEST_AMENDMENT_SECRET: "coverage",
+              },
+            },
+          ),
+        );
       const stopped = readState(config.repository, 1);
+      const rejectedDocument = status();
+      assert.doesNotMatch(JSON.stringify(rejectedDocument), /coverage/);
+      const rejectedStatus = rejectedDocument.pendingAmendment;
+      assert.equal(rejectedStatus.phase, "rejected");
+      assert.match(rejectedStatus.error, /\[REDACTED\]/);
+      assert.doesNotMatch(rejectedStatus.error, /coverage/);
+      assert.equal(
+        rejectedStatus.failureDigest,
+        failureDigest(stopped.pendingAmendment.error),
+      );
+      assert.notEqual(
+        rejectedStatus.failureDigest,
+        failureDigest(rejectedStatus.error),
+      );
       assert.equal(stopped.work.result.status, "done");
       assert.equal(stopped.pendingAmendment.phase, "rejected");
       assert.equal(stopped.pendingAmendment.rejectionStage, "compilation");
@@ -1267,7 +1306,7 @@ for (const transport of ["stopped CLI", "live owner"])
         replacement: {
           amendmentId: stopped.pendingAmendment.id,
           correction: {
-            failureDigest: failureDigest(stopped.pendingAmendment.error),
+            failureDigest: rejectedStatus.failureDigest,
             kind: "planning-output",
             diagnosis: "Emitted choice contract allowed uncovered QA",
             correction:
@@ -1283,6 +1322,11 @@ for (const transport of ["stopped CLI", "live owner"])
         },
         (s, p) => {
           p.replacement.correction.failureDigest = "0".repeat(64);
+        },
+        (s, p) => {
+          p.replacement.correction.failureDigest = failureDigest(
+            rejectedStatus.error,
+          );
         },
         (s, p) => {
           p.expectedGraphDigest = "0".repeat(64);
@@ -1345,9 +1389,7 @@ for (const transport of ["stopped CLI", "live owner"])
       }
       let running;
       if (transport === "stopped CLI") {
-        const configPath = join(root, "factory.json");
         const proposalPath = join(root, "proposal.json");
-        writeFileSync(configPath, JSON.stringify(config));
         writeFileSync(proposalPath, JSON.stringify(proposal));
         const result = JSON.parse(
           execFileSync(
@@ -1383,6 +1425,10 @@ for (const transport of ["stopped CLI", "live owner"])
         await setup.application.proposeAmendment(1, proposal);
       }
       const replaced = readState(config.repository, 1);
+      const readyStatus = status().pendingAmendment;
+      assert.equal(readyStatus.phase, "ready");
+      assert.equal(readyStatus.error, null);
+      assert.equal(readyStatus.failureDigest, null);
       assert.doesNotThrow(() => checkServiceState(config, 1));
       for (const mutate of [
         (s) => {
@@ -1433,6 +1479,7 @@ for (const transport of ["stopped CLI", "live owner"])
       const completed = await (running ?? setup.application.runObjective(1));
       assert.equal(completed.finalValidation.passed, true);
       assert.equal(completed.objectiveClosure, "complete");
+      assert.equal(status().pendingAmendment, null);
       assert.equal(completed.allowanceConsumption.planningRevisions, 2);
       assert.equal(completed.repairConsumption.$planning.planningRevisions, 2);
       assert.equal(compilations, 3);

@@ -2,6 +2,11 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.42 — 2026-09-29
+
+- Select Codex readiness probes by an owning validation-command index or null, preserving canonical command authority and rejecting prose probes. Failed bounded plan revisions retain the original graph and findings while reporting the actual failure and attempted revision (#280 / PR #282).
+- Publication, independent public download, offline installation and pinned plugin verification passed. Installed schema/input diagnostics pass without creating an accepted plan; live workspace/compiler qualification remains in #263/#276/#280 and full autonomous qualification in #253. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0142-artifact-record).
+
 ## 0.1.41 — 2026-09-29
 
 - Constrain planner schema identities: non-CI coverage uses an empty target, and source-declared commands reference exact supplied source paths. Preserve runtime validators and base-observed command provenance (#276 / PR #278).

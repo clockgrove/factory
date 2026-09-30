@@ -40,3 +40,21 @@ Usage and provider estimates stay in provenance-bearing Factory metadata, rather
 One explicit send makes one HTTP request, with a 30-second request timeout, no redirects and no retries. The OTLP response reader enforces the protocol's recommended 4 MiB response bound. A valid full acknowledgement produces `accepted`; a partial acknowledgement or warning produces `partial-or-warning`; HTTP refusal produces `rejected-or-unknown`; transport failure or invalid acknowledgement produces `unknown`. Non-accepted receipts exit unsuccessfully. Response prose is withheld because it can echo secrets or private content. Local originals and execution acceptance stay unchanged.
 
 Repeated selection produces the same span identities, not another invocation or usage observation. Destination deduplication is not guaranteed: a repeat may update or duplicate records. Inspect the destination after an uncertain/partial upload before deciding whether to resend; honor its rate-limit guidance. Factory neither retries nor reconstructs accepted records from telemetry, and never increments execution accounting for an export.
+
+## LangSmith
+
+Use an existing LangSmith project; Factory does not provision projects or accounts. Set `LANGSMITH_API_KEY` through the controller's secure environment. Select the API base URL, existing project UUID and, for a multi-workspace key, the workspace UUID explicitly. Factory sends the workspace as `x-tenant-id`; it never discovers or silently changes the destination.
+
+```sh
+factory export-captures --objective 123 --destination langsmith \
+  --endpoint https://api.smith.langchain.com --project-id PROJECT_UUID \
+  --workspace-id WORKSPACE_UUID --content metadata
+```
+
+The same run/invocation/content selection and preview/send digest rules apply. Repeat that exact command with `--send --authorize PREVIEW_AUTHORIZATION_DIGEST` only after reviewing and authorizing its scope. Omit `--workspace-id` only when the key unambiguously identifies the intended workspace. Regional and self-hosted endpoints must be selected explicitly.
+
+Factory uses the supported [direct run REST API](https://docs.langchain.com/langsmith/trace-with-api) at `BASE_URL/api/v1/runs`, with the [public API contract](https://api.smith.langchain.com/docs)'s HTTP 202 acknowledgement. Each invocation/attempt becomes a separate root chain run with a deterministic UUIDv5, existing project ID and recorded timestamps. Incomplete intervals omit `end_time`; they never claim completion. Ordered observations remain in `events` with roles/tool-call IDs/content descriptors intact. Inputs/responses are included only in retained mode; model configuration, reported models, outcomes, scoped usage, estimate provenance and existing validation/delivery evidence remain distinct metadata. Native model/billing fields are deliberately unpopulated, so partial captures are not presented as billed LLM conversations.
+
+Sending makes one request per selected invocation, stops at the first failure and never retries. The receipt identifies each acknowledged, rejected-or-unknown, unknown and not-sent run ID. HTTP 202 acknowledges asynchronous ingestion; it does not prove eventual indexed visibility. Response content is discarded to prevent incidental disclosure. Each request has a 30-second timeout.
+
+Repeat exports retain the same IDs. A 409 conflict is visible failure, not proof that matching prior data was accepted. Other destinations may update or duplicate records; inspect the existing project after partial/uncertain responses before authorizing another send. No local replay ledger, worker accounting change or native billing calculation is introduced. Source acceptance is covered by synthetic REST tests; a live upload still requires separately authorized destination/data.

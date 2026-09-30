@@ -4,6 +4,8 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
+Candidate v0.1.54 aligns existing compiler, graph-review and planning-diagnosis guidance with one owner and complete proof for each whole source obligation ([#370](https://github.com/clockgrove/factory/issues/370)). Compound final criteria can use the existing final-review proof when one controller guarantee does not cover every clause. Unique obligation indices, duplicate rejection and independent final criterion acceptance remain required. Source integration, release gates, publication and independent public byte/pinned-plugin verification are pending; this candidate makes no autonomous Objective or adopter acceptance claim.
+
 Published [v0.1.53](https://github.com/clockgrove/factory/releases/tag/v0.1.53) delivers successful repeated same-app/exact-head check receipts ([#357](https://github.com/clockgrove/factory/issues/357)), complete read-only QA and aggregate dependency evidence, and submission fences after local item/final review preparation ([#361](https://github.com/clockgrove/factory/issues/361)). It also adds explicit permanent abandonment of an exact stopped Objective with uncertain read-only reviews after verified owned cessation ([#363](https://github.com/clockgrove/factory/issues/363)). Original markers, results, errors, evidence, consumed limits and unknown accounting are retained; the abandoned run cannot continue and remains unaccepted. Unresolved mutating effects remain fenced. Its source gates, fresh-cache offline audit and all 109 whole-file installed checks passed without skips. [Independent public byte and pinned-plugin verification](https://github.com/clockgrove/factory/issues/357#issuecomment-5920335558) passed. See the [exact artifact record](BUILD-STATUS.md#immutable-v0153-artifact-record). Actual historical run disposition, full autonomous Objective qualification and adopter acceptance remain separate outcomes.
 
 Published [v0.1.52](https://github.com/clockgrove/factory/releases/tag/v0.1.52) has fresh-cache offline installation and 38 exact installed checks for retained started Work Items, original amendment failure digests and configured-secret status redaction under [#350](https://github.com/clockgrove/factory/issues/350) and [#348](https://github.com/clockgrove/factory/issues/348). [Independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/350#issuecomment-5917330492) passed. See the [exact artifact record](BUILD-STATUS.md#immutable-v0152-artifact-record). Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier evidence remains bound to its original bytes and scenarios.
@@ -75,16 +77,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select published v0.1.53, whose [independent public byte and pinned-plugin verification](https://github.com/clockgrove/factory/issues/357#issuecomment-5920335558) passed. Compare the tarball digest with the independently recorded prepublication value in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/pull/360), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md#immutable-v0153-artifact-record). Earlier evidence retains its historical artifact scope.
+The commands below select candidate v0.1.54. Use them after publication and independent public byte/enabled pinned-plugin verification, and compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/370), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.53
+codex plugin marketplace add clockgrove/factory --ref v0.1.54
 codex plugin add factory@clockgrove
-gh release download v0.1.53 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.53.tgz --pattern SHA256SUMS
+gh release download v0.1.54 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.54.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the independently recorded prepublication digest in the owning issue/PR or artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.53.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.54.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

@@ -30,6 +30,8 @@ import {
   readEvents,
 } from "./support/integration-fixture.mjs";
 import { withCoverage } from "./support/coverage.mjs";
+import { compilerWire } from "../dist/compiler-wire.js";
+import { encodeCompilerWire } from "./support/compiler-wire.mjs";
 
 const discovery = {
   scope: "in-scope",
@@ -131,7 +133,20 @@ for (const delivery of ["regular", "native-stack"])
               first = withCoverage(request, initial);
               return first;
             }
-            return qaGraph(first);
+            assert.deepEqual(request.compileContext.immutableItemIds, [
+              "result",
+            ]);
+            const wire = compilerWire(
+              request,
+              compilerCitationChoices(request.sources),
+            );
+            const value = encodeCompilerWire(qaGraph(first), wire.data);
+            assert.deepEqual(value.items[0], {
+              kind: "retained",
+              id: "result",
+              coverage: [],
+            });
+            return wire.decode(value);
           },
           async reviewGraph(request) {
             reviews++;

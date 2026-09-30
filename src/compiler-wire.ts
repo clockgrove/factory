@@ -57,6 +57,21 @@ export function compilerWire(
     context.objectiveNumber < 1
   )
     throw new Error("Codex compilation requires trusted compile context");
+  const retainedItems = new Map<string, WorkGraph["items"][number]>();
+  for (const id of context.immutableItemIds ?? []) {
+    const previous = context.previousGraph;
+    const item = previous?.items.find((entry) => entry.id === id);
+    if (
+      !item ||
+      retainedItems.has(id) ||
+      previous?.objective !== context.objectiveNumber ||
+      previous.baseSha !== request.baseSha
+    )
+      throw new Error(
+        "Planner retained item lacks trusted current-graph identity",
+      );
+    retainedItems.set(id, structuredClone(item));
+  }
   const obligations = request.coverageObligations ?? [];
   if (!obligations.length)
     throw new Error("Codex compilation requires controller obligations");
@@ -189,6 +204,22 @@ export function compilerWire(
       "final-controller",
     ],
   };
+  const coverageSchema = (kind: string): Schema => ({
+    type: "array",
+    ...(kind === "qa" ? { minItems: 1 } : {}),
+    items: strict({
+      obligationIndex: integer(obligations.length),
+      proof: {
+        anyOf: modes[kind]!.map((form) =>
+          strict({
+            kind: { type: "string", enum: [form] },
+            ...proofForms[form],
+          }),
+        ),
+      },
+      environment,
+    }),
+  });
   const readonlyConstants = {
     ownedPaths: [],
     sourceAssets: [],
@@ -206,46 +237,59 @@ export function compilerWire(
       type: "array",
       minItems: 1,
       items: {
-        anyOf: Object.entries(modes).map(([kind, forms]) => {
-          const item = structuredClone(itemSchema);
-          item.properties!.kind = { type: "string", enum: [kind] };
-          item.properties!.coverage = {
-            type: "array",
-            ...(kind === "qa" ? { minItems: 1 } : {}),
-            items: strict({
-              obligationIndex: integer(obligations.length),
-              proof: {
-                anyOf: forms.map((form) =>
+        anyOf: [
+          ...Object.entries(modes).map(([kind]) => {
+            const item = structuredClone(itemSchema);
+            item.properties!.kind = { type: "string", enum: [kind] };
+            item.properties!.coverage = coverageSchema(kind);
+            item.required!.push("coverage");
+            if (kind !== "work") {
+              for (const field of readonlyFields)
+                delete item.properties![field];
+              item.required = item.required!.filter(
+                (field) => !readonlyFields.includes(field),
+              );
+            }
+            if (kind === "aggregate") {
+              delete item.properties!.acceptance;
+              item.required = item.required!.filter(
+                (field) => field !== "acceptance",
+              );
+            }
+            return item;
+          }),
+          ...Object.keys(modes).flatMap((kind) => {
+            const ids = [...retainedItems.values()]
+              .filter((item) => (item.kind ?? "work") === kind)
+              .map((item) => item.id);
+            return ids.length
+              ? [
                   strict({
-                    kind: { type: "string", enum: [form] },
-                    ...proofForms[form],
+                    kind: { type: "string", enum: ["retained"] },
+                    id: { type: "string", enum: ids },
+                    coverage: coverageSchema(kind),
                   }),
-                ),
-              },
-              environment,
-            }),
-          };
-          item.required!.push("coverage");
-          if (kind !== "work") {
-            for (const field of readonlyFields) delete item.properties![field];
-            item.required = item.required!.filter(
-              (field) => !readonlyFields.includes(field),
-            );
-          }
-          if (kind === "aggregate") {
-            delete item.properties!.acceptance;
-            item.required = item.required!.filter(
-              (field) => field !== "acceptance",
-            );
-          }
-          return item;
-        }),
+                ]
+              : [];
+          }),
+        ],
       },
     },
   });
   const data = {
     contextId,
     instructions: context.instructions,
+    ...(retainedItems.size
+      ? {
+          retainedItems: [...retainedItems.values()].map((item) => ({
+            id: item.id,
+            kind: item.kind ?? "work",
+            acceptance: item.acceptance,
+            validation: item.validation,
+            dependencies: item.dependencies,
+          })),
+        }
+      : {}),
     obligations: obligations.map((entry, obligationIndex) => ({
       obligationIndex,
       text: entry.source.text,
@@ -286,88 +330,114 @@ export function compilerWire(
         coverage: [],
       };
       const seen = new Set<number>();
+      const referenced = new Set<string>();
       for (const raw of wire.items) {
-        const item = structuredClone(object(raw, "item"));
-        if (typeof item.kind !== "string" || !modes[item.kind])
-          throw new Error("Planner Work Item kind is invalid");
-        const expected = [...itemSchema.required!, "coverage"].filter(
-          (field) =>
-            (item.kind === "work" || !readonlyFields.includes(field)) &&
-            (item.kind !== "aggregate" || field !== "acceptance"),
-        );
-        keys(item, expected, "item");
-        if (item.kind === "aggregate")
-          item.acceptance = aggregateAcceptance(
-            item as unknown as WorkGraph["items"][number],
-            context.previousGraph,
+        let item = structuredClone(object(raw, "item"));
+        if (item.kind === "retained") {
+          keys(item, ["kind", "id", "coverage"], "retained item");
+          const retained =
+            typeof item.id === "string"
+              ? retainedItems.get(item.id)
+              : undefined;
+          if (!retained || referenced.has(retained.id))
+            throw new Error(
+              "Planner retained item is unavailable or duplicated",
+            );
+          referenced.add(retained.id);
+          item = { ...structuredClone(retained), coverage: item.coverage };
+        } else {
+          if (typeof item.id === "string" && retainedItems.has(item.id))
+            throw new Error(
+              "Planner must reference started Work Items instead of redefining them",
+            );
+          if (typeof item.kind !== "string" || !modes[item.kind])
+            throw new Error("Planner Work Item kind is invalid");
+          const expected = [...itemSchema.required!, "coverage"].filter(
+            (field) =>
+              (item.kind === "work" || !readonlyFields.includes(field)) &&
+              (item.kind !== "aggregate" || field !== "acceptance"),
           );
-        if (item.kind !== "work")
-          Object.assign(item, structuredClone(readonlyConstants));
-        if (!Array.isArray(item.citations) || !item.citations.length)
-          throw new Error("Planner item needs citations");
-        const chosen = item.citations.map((value) => {
-          const choice = object(value, "citation");
-          keys(choice, ["choiceIndex"], "citation");
-          return citations[
-            index(choice.choiceIndex, citations.length, "citation choiceIndex")
-          ]!;
-        });
-        item.citations = chosen.map(({ path, heading }) => ({ path, heading }));
-        if (!Array.isArray(item.validation))
-          throw new Error("Planner validation must be an array");
-        item.validation = item.validation.map((value) => {
-          const selection = object(value, "validation selection");
-          if (selection.kind === "source-line") {
+          keys(item, expected, "item");
+          if (item.kind === "aggregate")
+            item.acceptance = aggregateAcceptance(
+              item as unknown as WorkGraph["items"][number],
+              context.previousGraph,
+            );
+          if (item.kind !== "work")
+            Object.assign(item, structuredClone(readonlyConstants));
+          if (!Array.isArray(item.citations) || !item.citations.length)
+            throw new Error("Planner item needs citations");
+          const chosen = item.citations.map((value) => {
+            const choice = object(value, "citation");
+            keys(choice, ["choiceIndex"], "citation");
+            return citations[
+              index(
+                choice.choiceIndex,
+                citations.length,
+                "citation choiceIndex",
+              )
+            ]!;
+          });
+          item.citations = chosen.map(({ path, heading }) => ({
+            path,
+            heading,
+          }));
+          if (!Array.isArray(item.validation))
+            throw new Error("Planner validation must be an array");
+          item.validation = item.validation.map((value) => {
+            const selection = object(value, "validation selection");
+            if (selection.kind === "source-line") {
+              keys(
+                selection,
+                ["kind", "sourceIndex", "lineIndex"],
+                "source line",
+              );
+              const source =
+                request.sources[
+                  index(
+                    selection.sourceIndex,
+                    request.sources.length,
+                    "sourceIndex",
+                  )
+                ]!;
+              const lines = source.content.split("\n");
+              let command = lines[
+                index(selection.lineIndex, lines.length, "lineIndex")
+              ]!.trim()
+                .replace(/^[-*]\s+/, "")
+                .trim();
+              if (
+                command.startsWith("`") &&
+                command.endsWith("`") &&
+                command.length > 1
+              )
+                command = command.slice(1, -1);
+              if (!command)
+                throw new Error("Planner source command line is empty");
+              return {
+                command,
+                provenance: "source-declared",
+                source: source.path,
+              };
+            }
             keys(
               selection,
-              ["kind", "sourceIndex", "lineIndex"],
-              "source line",
+              ["kind", "command", "source"],
+              "base-observed command",
             );
-            const source =
-              request.sources[
-                index(
-                  selection.sourceIndex,
-                  request.sources.length,
-                  "sourceIndex",
-                )
-              ]!;
-            const lines = source.content.split("\n");
-            let command = lines[
-              index(selection.lineIndex, lines.length, "lineIndex")
-            ]!.trim()
-              .replace(/^[-*]\s+/, "")
-              .trim();
             if (
-              command.startsWith("`") &&
-              command.endsWith("`") &&
-              command.length > 1
+              selection.kind !== "base-observed" ||
+              typeof selection.command !== "string" ||
+              typeof selection.source !== "string"
             )
-              command = command.slice(1, -1);
-            if (!command)
-              throw new Error("Planner source command line is empty");
+              throw new Error("Planner base-observed command is invalid");
             return {
-              command,
-              provenance: "source-declared",
-              source: source.path,
+              command: selection.command,
+              provenance: "base-observed",
+              source: selection.source,
             };
-          }
-          keys(
-            selection,
-            ["kind", "command", "source"],
-            "base-observed command",
-          );
-          if (
-            selection.kind !== "base-observed" ||
-            typeof selection.command !== "string" ||
-            typeof selection.source !== "string"
-          )
-            throw new Error("Planner base-observed command is invalid");
-          return {
-            command: selection.command,
-            provenance: "base-observed",
-            source: selection.source,
-          };
-        });
+          });
+        }
         if (!Array.isArray(item.coverage))
           throw new Error("Planner item coverage must be an array");
         if (item.kind === "qa" && item.coverage.length === 0)
@@ -390,7 +460,7 @@ export function compilerWire(
           const proof = object(entry.proof, "proof");
           if (
             typeof proof.kind !== "string" ||
-            !modes[owner.kind!]!.includes(proof.kind)
+            !modes[owner.kind ?? "work"]!.includes(proof.kind)
           )
             throw new Error(
               "Planner proof form is not supported by its owning node",
@@ -494,6 +564,8 @@ export function compilerWire(
         }
         graph.items.push(owner);
       }
+      if (referenced.size !== retainedItems.size)
+        throw new Error("Planner omitted retained Work Items");
       if (seen.size !== obligations.length)
         throw new Error("Planner omitted Objective coverage");
       return graph;

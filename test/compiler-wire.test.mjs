@@ -950,3 +950,259 @@ test("unchanged historical aggregate review receipts remain verifiable without r
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("amendment references retain exact started definitions while moving source coverage to QA", () => {
+  const pinned = [
+    ...sources,
+    {
+      path: "README.md",
+      content: "# Usage\n\nKeep the existing source unchanged.\n",
+    },
+  ];
+  const initial = setup({ sources: pinned });
+  const whole = initial.wire.data.citations.find(
+    (x) => x.path === "README.md" && x.heading === "",
+  );
+  initial.value.items[0].citations.push({ choiceIndex: whole.choiceIndex });
+  const previousGraph = initial.wire.decode(initial.value);
+  hydrateWorkerInputSources(previousGraph, pinned);
+  const trusted = structuredClone(previousGraph.items[0]);
+  const next = setup({
+    sources: pinned,
+    compileContext: {
+      objectiveNumber: 17,
+      instructions: "Amend required QA",
+      previousGraph,
+      immutableItemIds: [trusted.id],
+    },
+  });
+  const qa = item({
+    kind: "qa",
+    id: "verify",
+    dependencies: [trusted.id],
+    coverage: [entry({ kind: "integrated-command", validationIndex: 0 })],
+  });
+  for (const field of [
+    "ownedPaths",
+    "sourceAssets",
+    "expectedOutputRoles",
+    "requiredLfsRoles",
+    "minimumAssetSets",
+  ])
+    delete qa[field];
+  const value = {
+    contextId: next.wire.data.contextId,
+    items: [{ kind: "retained", id: trusted.id, coverage: [] }, qa],
+  };
+  assert(next.conforms(value), JSON.stringify(next.conforms.errors));
+  const graph = next.wire.decode(value);
+  hydrateWorkerInputSources(graph, pinned);
+  assert.deepEqual(graph.items[0], trusted);
+  assert.deepEqual(previousGraph.items[0], trusted);
+  assert.doesNotThrow(() =>
+    validateGraph(
+      graph,
+      17,
+      graph.baseSha,
+      new Set(pinned.map((x) => x.path)),
+      previousGraph,
+    ),
+  );
+  assert.doesNotThrow(() =>
+    assertCoverageSources(graph, pinned, next.input.coverageObligations),
+  );
+  assert.equal(graph.coverage[0].itemId, "verify");
+  assert.deepEqual(graph.coverage[0].proof, {
+    kind: "integrated-command",
+    validationIndex: 0,
+  });
+  assert.equal(graph.items[0].citations.at(-1).heading, "");
+  const defaultKindGraph = structuredClone(previousGraph);
+  delete defaultKindGraph.items[0].kind;
+  const defaultKind = setup({
+    sources: pinned,
+    compileContext: {
+      objectiveNumber: 17,
+      instructions: "Amend",
+      previousGraph: defaultKindGraph,
+      immutableItemIds: [trusted.id],
+    },
+  });
+  const defaultValue = {
+    contextId: defaultKind.wire.data.contextId,
+    items: [{ kind: "retained", id: trusted.id, coverage: [entry()] }],
+  };
+  assert(
+    defaultKind.conforms(defaultValue),
+    JSON.stringify(defaultKind.conforms.errors),
+  );
+  assert.deepEqual(
+    defaultKind.wire.decode(defaultValue).items[0],
+    defaultKindGraph.items[0],
+  );
+
+  // Reproduce the observed equivalent-heading edit as a submitted definition.
+  const redefined = structuredClone(value);
+  const named = next.wire.data.citations.find(
+    (x) => x.path === "README.md" && x.heading === "Usage",
+  );
+  redefined.items[0] = item({
+    citations: [{ choiceIndex: 0 }, { choiceIndex: named.choiceIndex }],
+    coverage: [],
+  });
+  assert.throws(
+    () => next.wire.decode(redefined),
+    /must reference started Work Items/,
+  );
+  const changedReference = structuredClone(value);
+  changedReference.items[0].brief = "Change historical result";
+  assert.equal(next.conforms(changedReference), false);
+  assert.throws(
+    () => next.wire.decode(changedReference),
+    /retained item has unexpected/,
+  );
+  const unknown = structuredClone(value);
+  unknown.items[0].id = "unknown";
+  assert.equal(next.conforms(unknown), false);
+  assert.throws(
+    () => next.wire.decode(unknown),
+    /retained item is unavailable/,
+  );
+  const duplicate = structuredClone(value);
+  duplicate.items.push(structuredClone(value.items[0]));
+  assert.throws(
+    () => next.wire.decode(duplicate),
+    /retained item is unavailable or duplicated/,
+  );
+  const omitted = structuredClone(value);
+  omitted.items.shift();
+  assert.throws(() => next.wire.decode(omitted), /omitted retained Work Items/);
+  const wrongPhase = structuredClone(value);
+  wrongPhase.items[0].coverage = [
+    entry({ kind: "integrated-command", validationIndex: 0 }),
+  ];
+  wrongPhase.items[1].coverage = [];
+  assert.equal(next.conforms(wrongPhase), false);
+  assert.throws(
+    () => next.wire.decode(wrongPhase),
+    /proof form is not supported/,
+  );
+  const stale = structuredClone(value);
+  stale.contextId = initial.wire.data.contextId;
+  assert.equal(next.conforms(stale), false);
+  assert.throws(() => next.wire.decode(stale), /context identity differs/);
+});
+
+test("compileObjective supplies trusted retained identity and keeps pending items editable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-retained-compiler-"));
+  try {
+    const target = createTarget(root);
+    let calls = 0;
+    const model = {
+      async generateStructured(input) {
+        const wire = compilerWire(
+          input,
+          compilerCitationChoices(input.sources),
+        );
+        calls++;
+        if (calls === 1)
+          return wire.decode({
+            contextId: wire.data.contextId,
+            items: [
+              item({ coverage: [entry()] }),
+              item({
+                id: "pending",
+                ownedPaths: ["pending.txt"],
+                brief: "Original pending brief",
+                coverage: [],
+              }),
+            ],
+          });
+        assert.deepEqual(input.compileContext.immutableItemIds, [
+          "implementation",
+        ]);
+        const qa = item({
+          kind: "qa",
+          id: "verify",
+          dependencies: ["implementation", "pending"],
+          coverage: [entry({ kind: "integrated-command", validationIndex: 0 })],
+        });
+        for (const field of [
+          "ownedPaths",
+          "sourceAssets",
+          "expectedOutputRoles",
+          "requiredLfsRoles",
+          "minimumAssetSets",
+        ])
+          delete qa[field];
+        const pending = item({
+          id: "pending",
+          ownedPaths: ["pending.txt"],
+          brief: "An eligible revised brief",
+          coverage: [],
+        });
+        return wire.decode({
+          contextId: wire.data.contextId,
+          items: [
+            { kind: "retained", id: "implementation", coverage: [] },
+            pending,
+            qa,
+          ],
+        });
+      },
+    };
+    const previous = await compileObjective(
+      17,
+      body,
+      target.baseSha,
+      target.checkout,
+      model,
+    );
+    const graph = await compileObjective(
+      17,
+      body,
+      target.baseSha,
+      target.checkout,
+      model,
+      [],
+      [],
+      undefined,
+      undefined,
+      [],
+      {
+        currentGraph: previous,
+        discovery: { reason: "required QA" },
+        immutableItemIds: ["implementation"],
+      },
+    );
+    assert.deepEqual(graph.items[0], previous.items[0]);
+    assert.equal(
+      graph.items.find((x) => x.id === "pending").brief,
+      "An eligible revised brief",
+    );
+    assert.equal(graph.coverage[0].itemId, "verify");
+    const invalid = request({
+      compileContext: {
+        objectiveNumber: 17,
+        instructions: "",
+        previousGraph: previous,
+        immutableItemIds: ["unknown"],
+      },
+      baseSha: target.baseSha,
+    });
+    assert.throws(
+      () => compilerWire(invalid, compilerCitationChoices(invalid.sources)),
+      /lacks trusted current-graph identity/,
+    );
+    invalid.compileContext.immutableItemIds = [
+      "implementation",
+      "implementation",
+    ];
+    assert.throws(
+      () => compilerWire(invalid, compilerCitationChoices(invalid.sources)),
+      /lacks trusted current-graph identity/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

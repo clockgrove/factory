@@ -92,6 +92,10 @@ export function encodeCompilerWire(input, promptOrChoices) {
         }),
       }))
       .map((item) => {
+        if (choices.retainedItems?.some((retained) => retained.id === item.id))
+          return { kind: "retained", id: item.id, coverage: item.coverage };
+        delete item.inputSources;
+        delete item.executionBinding;
         if (item.kind !== "work")
           for (const field of [
             "ownedPaths",

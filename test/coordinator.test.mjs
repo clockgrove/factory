@@ -10,6 +10,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Octokit } from "@octokit/core";
+import { GitHubClient } from "../dist/github-client.js";
+import { RealGitHubGateway } from "../dist/github.js";
+import { withProcessCancellation } from "../dist/process.js";
 import { stateRoot } from "../dist/config.js";
 import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
@@ -199,7 +203,7 @@ test("partial projection saves each known identity and resumes without planning 
   );
 });
 
-test("unknown projection acknowledgement stops restart without another create", async () => {
+test("compound: interrupted projection and rate-limited refresh retain unknown disposition without replay", async () => {
   await fixture("unknown", async ({ application, config, github }) => {
     let creates = 0;
     github.projectGraph = async (request) => {
@@ -212,10 +216,78 @@ test("unknown projection acknowledgement stops restart without another create", 
       readContinuation(config.repository, 1).projectionPending,
       "result",
     );
-    await assert.rejects(
-      application.runObjective(1),
+    const original = readContinuation(config.repository, 1);
+    const observed = await github.objective(1);
+    const reads = [];
+    const gateway = new RealGitHubGateway(
+      config.repository,
+      {},
+      new GitHubClient(
+        new Octokit({
+          request: {
+            fetch: async () => {
+              reads.push(Date.now());
+              return new Response(
+                JSON.stringify(
+                  reads.length === 1
+                    ? { message: "secondary rate limit" }
+                    : { number: 1, state: "open", ...observed },
+                ),
+                {
+                  status: reads.length === 1 ? 403 : 200,
+                  headers: {
+                    "content-type": "application/json",
+                    ...(reads.length === 1 ? { "retry-after": "0.1" } : {}),
+                  },
+                },
+              );
+            },
+          },
+        }),
+      ),
+    );
+    github.objective = gateway.objective.bind(gateway);
+    const running = application.runObjective(1);
+    const stoppedRun = assert.rejects(
+      running,
       /preparation stopped|unknown outcome/,
     );
+    await until(
+      () =>
+        readContinuation(config.repository, 1)?.coordinator.observationError,
+    );
+    const paused = readContinuation(config.repository, 1);
+    assert.equal(paused.coordinator.mode, "paused");
+    assert.match(paused.coordinator.waitReason, /resume to observe again/);
+    assert.equal(paused.projectionPending, original.projectionPending);
+    assert.equal(paused.runId, original.runId);
+    assert.deepEqual(paused.plan, original.plan);
+    assert.deepEqual(
+      paused.allowanceConsumption,
+      original.allowanceConsumption,
+    );
+    assert.equal(creates, 1);
+    const abort = new AbortController();
+    const queued = withProcessCancellation(abort.signal, () =>
+      github.objective(1),
+    );
+    abort.abort();
+    await assert.rejects(queued);
+    assert.equal(reads.length, 1);
+    // Supported resume re-observes through the same rate gate, then encounters
+    // the original unknown projection fence rather than creating a replacement.
+    await controlObjective(config, { objective: 1, action: "resume" });
+    await stoppedRun;
+    assert.equal(reads.length, 2);
+    assert.ok(reads[1] - reads[0] >= 90);
+    const stopped = readContinuation(config.repository, 1);
+    assert.equal(stopped.runId, original.runId);
+    assert.deepEqual(stopped.plan, original.plan);
+    assert.deepEqual(
+      stopped.allowanceConsumption,
+      original.allowanceConsumption,
+    );
+    assert.equal(stopped.projectionPending, "result");
     assert.equal(creates, 1);
   });
 });

@@ -436,7 +436,7 @@ test("partial/unknown projection retains exact intent and prevents duplicate iss
   });
 });
 
-test("discovery during final review invalidates that result and runs accepted QA before a new final review", async () => {
+test("compound: amendment invalidates final review before lost closure acknowledgement is reconciled", async () => {
   await fixture("final-race", async ({ config, initial, root }) => {
     let accepted;
     let finals = 0;
@@ -494,7 +494,43 @@ test("discovery during final review invalidates that result and runs accepted QA
       accepted,
       authority,
     );
-    const state = await setup.application.runObjective(1, accepted, admission);
+    const close = setup.github.closeIssue.bind(setup.github);
+    let closures = 0;
+    let sealed;
+    setup.github.closeIssue = async (...parameters) => {
+      await close(...parameters);
+      if (parameters[0] === 1 && ++closures === 1) {
+        sealed = readState(config.repository, 1).finalAcceptance;
+        throw new Error("Acknowledgement lost after amended Objective closure");
+      }
+    };
+    const running = setup.application.runObjective(1, accepted, admission);
+    for (let i = 0; i < 300; i++) {
+      const state = readState(config.repository, 1);
+      if (
+        state?.objectiveClosure === "pending" &&
+        state.coordinator.mode === "paused"
+      )
+        break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const pending = readState(config.repository, 1);
+    assert.equal(pending.objectiveClosure, "pending");
+    assert.equal(pending.coordinator.mode, "paused");
+    assert.equal(pending.graphRevisions.length, 2);
+    assert.equal(pending.work.qa.status, "done");
+    assert.equal(finals, 2);
+    const consumption = structuredClone(pending.allowanceConsumption);
+    assert.equal(sealed.graphDigest, graphDigest(pending.graph));
+    assert.notEqual(sealed.graphDigest, graphDigest(accepted.graph));
+    assert.equal(sealed.usage.availability, "unavailable");
+    await controlObjective(config, { objective: 1, action: "resume" });
+    const state = await running;
+    assert.equal(closures, 2);
+    assert.equal(state.objectiveClosure, "complete");
+    assert.deepEqual(state.finalAcceptance, sealed);
+    assert.deepEqual(state.allowanceConsumption, consumption);
+    assert.deepEqual(state.work, pending.work);
     assert.equal(finals, 2);
     assert.equal(state.finalValidation.passed, true);
     assert.equal(state.work.qa.status, "done");

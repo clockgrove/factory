@@ -5,6 +5,9 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 ## 0.1.53 — candidate
 
 - Retain one actual identified delivery check receipt when every current same-name run is completed and successful on the exact head and repeated runs identify the same valid GitHub app. Preserve refusal of failed, pending, stale, conflicting or incomplete evidence, target protections and singular QA ambiguity (#357).
+- Retain read-only QA and aggregate dependency evidence while excluding those structural nodes from coding merge groups. Place item and final review submission fences after local evidence and packet preparation; preserve uncertain provider outcomes and historical markers (#361).
+
+- Allow explicit permanent abandonment of an exact stopped Objective whose only unresolved effects are read-only result reviews, after identity-bound cessation evidence and ownership checks. Preserve original markers, results, errors, evidence, consumed limits and unknown accounting; permanently refuse continuation of the abandoned run and retain refusal of unresolved mutating effects (#363).
 
 Release gates, publication and independent public archive and pinned-plugin verification are pending. This patch does not establish full autonomous Objective qualification or adopter acceptance. Earlier releases and qualification evidence retain their original bytes and scenarios.
 

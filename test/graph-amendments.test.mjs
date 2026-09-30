@@ -19,6 +19,7 @@ import {
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
 import { readState, statePath } from "../dist/state-store.js";
 import { failureDigest } from "../dist/repair-policy.js";
+import { parseFactoryState } from "../dist/state.js";
 import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
 import { checkServiceState } from "../dist/supervision.js";
@@ -1382,6 +1383,30 @@ for (const transport of ["stopped CLI", "live owner"])
         await setup.application.proposeAmendment(1, proposal);
       }
       const replaced = readState(config.repository, 1);
+      assert.doesNotThrow(() => checkServiceState(config, 1));
+      for (const mutate of [
+        (s) => {
+          delete s.allowanceConsumption;
+          delete s.repairConsumption;
+        },
+        (s) => {
+          s.allowanceConsumption.planningRevisions = 0;
+          s.repairConsumption.$planning.planningRevisions = 0;
+        },
+        (s) => {
+          s.repairConsumption.$planning.planningRevisions = 0;
+        },
+        (s) => {
+          delete s.repairConsumption;
+        },
+      ]) {
+        const reset = structuredClone(replaced);
+        mutate(reset);
+        assert.throws(
+          () => parseFactoryState(reset, config.repository, 1),
+          /Known amendment attempts exceed retained planning consumption/,
+        );
+      }
       assert.deepEqual(replaced.rejectedAmendments, [stopped.pendingAmendment]);
       assert.deepEqual(replaced.graph, stopped.graph);
       assert.deepEqual(replaced.work, stopped.work);

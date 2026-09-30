@@ -263,6 +263,21 @@ export function assertGraphRevisions(state: FactoryState): void {
         "Amendment replacement lost its diagnosed rejection binding",
       );
   }
+  const knownPlanningCharges =
+    (state.graphRevisions?.length ?? 1) -
+    1 +
+    (state.rejectedAmendments?.length ?? 0) +
+    (pending && !["ready", "backlog"].includes(pending.phase) ? 1 : 0);
+  if (
+    knownPlanningCharges >
+      (state.allowanceConsumption?.planningRevisions ?? 0) ||
+    (state.admission?.authority.repairPolicy &&
+      knownPlanningCharges >
+        (state.repairConsumption?.$planning?.planningRevisions ?? 0))
+  )
+    throw new Error(
+      "Known amendment attempts exceed retained planning consumption",
+    );
 }
 
 export function hasPendingAmendmentEffect(state: FactoryState): boolean {

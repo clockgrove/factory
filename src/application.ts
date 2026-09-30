@@ -1,3 +1,4 @@
+import { resolveProviderCredential } from "./provider-credentials.js";
 import {
   ClaudeManagedExecutionDriver,
   validateClaudeManagedConfig,
@@ -507,9 +508,13 @@ function builtInHarness(
 }
 
 /** The single production composition point for the installed application. */
-export function compose(input: FactoryConfig): FactoryApplication {
+export function compose(
+  input: FactoryConfig,
+  serviceCredential?: string,
+): FactoryApplication {
   const config = cloneAndValidateConfig(input);
   if (config.execution.kind === "managed-agent") {
+    const apiKey = resolveProviderCredential(config, serviceCredential);
     const root = stateRoot(config.repository);
     const contentStore = new LocalContentStore(join(root, "content"));
     const github = new RealGitHubGateway(
@@ -525,10 +530,12 @@ export function compose(input: FactoryConfig): FactoryApplication {
       config.execution.provider === "claude-managed-agents"
         ? new ClaudeManagedExecutionDriver({
             ...managed,
+            apiKey,
             config: validateClaudeManagedConfig(config.execution.config),
           })
         : new OpenAIManagedExecutionDriver({
             ...managed,
+            apiKey,
             config: validateOpenAIManagedConfig(config.execution.config),
           });
     return createApplication(config, {

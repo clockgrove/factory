@@ -108,10 +108,13 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       contentStore: ContentStore;
       config: ClaudeManagedConfig;
       client?: ClaudeManagedClient;
+      apiKey?: string;
     },
   ) {
     validateClaudeManagedConfig(args.config);
-    this.client = args.client ?? new ClaudeManagedClient(args.config);
+    this.client =
+      args.client ??
+      new ClaudeManagedClient(args.config, { apiKey: args.apiKey });
   }
   async availableSlots(): Promise<"unknown"> {
     return "unknown";

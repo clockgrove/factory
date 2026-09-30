@@ -109,3 +109,30 @@ Official references: [hosted environments](https://developers.openai.com/api/doc
 [session lifecycle](https://developers.openai.com/api/docs/guides/agents-api/sessions),
 [artifacts and limits](https://developers.openai.com/api/docs/guides/agents-api/environments/files),
 [usage](https://developers.openai.com/api/docs/guides/agents-api/observability).
+
+## Controller credentials and supervision
+
+The configured credential variable belongs to this Factory installation. For
+foreground execution, supply it securely in the controller environment.
+`factory readiness --config /absolute/config.json` checks presence without
+provider calls; it does not verify account access, billing or hosted support.
+Local harness login and subscription routes remain unchanged.
+
+For a background controller, use an existing owner-private regular file outside
+the target checkout containing only the API key. Enter the value through your
+secure local credential workflow; do not paste it into chat, issues or command
+arguments. Keep the file owned by your user with mode `0600`. Register the service
+with `factory supervisor install ... --credential-file /absolute/private/key`.
+Factory uses systemd `LoadCredential` and retains only the variable name and file
+reference. It never copies the key into configuration, service metadata, model
+inputs or sandbox environment. A terminal export alone does not authenticate the
+service. A LoadCredential-capable Linux user manager is required; unsupported
+hosts must use foreground execution.
+
+On each service start the credential is read from the systemd credential
+directory into the provider client's private memory. Missing or empty explicit
+credentials stop execution without falling back to ambient variables. Restore
+the private file, then stop/start the service using the supported lifecycle; key
+rotation takes effect on the next start. Unattended workers never ask for keys.
+Factory-operated sandbox harness authentication is configured separately through
+its provider-supported mechanism; controller keys are not forwarded.

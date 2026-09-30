@@ -1,3 +1,7 @@
+import {
+  requiredProviderCredential,
+  validateCredentialFile,
+} from "./provider-credentials.js";
 import type { ContinuationState } from "./state.js";
 import { readIntake, intakeComplete } from "./intake.js";
 import { objectiveComplete } from "./completion.js";
@@ -31,6 +35,7 @@ import { command, linuxProcessIdentity } from "./process.js";
 import { readContinuation, readControllerOwner } from "./state-store.js";
 
 interface ServiceBinding {
+  credential?: { name: string; file: string };
   intake?: boolean;
   version: 1;
   node: string;
@@ -146,6 +151,9 @@ export function renderService(value: ServiceBinding): string {
     "serve",
     "--config",
     value.config,
+    ...(value.credential
+      ? ["--service-credential", value.credential.name]
+      : []),
     ...(value.intake ? ["--intake"] : ["--objective", String(value.objective)]),
     ...(value.plan ? ["--plan", value.plan] : []),
     ...(value.admission ? ["--admission", value.admission] : []),
@@ -156,7 +164,7 @@ export function renderService(value: ServiceBinding): string {
     .map(([key, val]) => `Environment=${quoted(`${key}=${val}`, false)}`)
     .join(
       "\n",
-    )}\nKillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nRestartPreventExitStatus=1\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
+    )}\n${value.credential ? `LoadCredential=${quoted(`${value.credential.name}:${value.credential.file}`, false)}\n` : ""}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nRestartPreventExitStatus=1\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
 }
 function checkServiceContinuationFields(state: ContinuationState): void {
   // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
@@ -318,6 +326,7 @@ export async function supervise(
     plan?: string;
     admission?: string;
     cli?: string;
+    credentialFile?: string;
   } = {},
 ): Promise<unknown> {
   const config = readConfig(configPath);
@@ -358,7 +367,24 @@ export async function supervise(
       "GH_CONFIG_DIR",
     ])
       if (process.env[key]) environment[key] = process.env[key]!;
+    const credentialName = requiredProviderCredential(config);
+    if (credentialName && !input.credentialFile)
+      throw new Error(
+        `Managed supervision requires --credential-file for ${credentialName}`,
+      );
+    if (!credentialName && input.credentialFile)
+      throw new Error(
+        "Credential file is only supported for managed execution",
+      );
     const value: ServiceBinding = {
+      ...(credentialName
+        ? {
+            credential: {
+              name: credentialName,
+              file: validateCredentialFile(config, input.credentialFile!),
+            },
+          }
+        : {}),
       version: 1,
       node: realpathSync(process.execPath),
       cli: realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url))),
@@ -394,6 +420,12 @@ export async function supervise(
     return { registered: false };
   const value = binding(config);
   if (action === "start") {
+    const required = requiredProviderCredential(config);
+    if (required && value.credential?.name !== required)
+      throw new Error(
+        "Managed service credential binding is missing or differs; reinstall with --credential-file",
+      );
+    if (value.credential) validateCredentialFile(config, value.credential.file);
     validateArtifact(value);
     if (hasOwner(config) && inspect("is-active", name) !== "active")
       throw new Error(

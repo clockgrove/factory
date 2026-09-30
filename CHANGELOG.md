@@ -2,16 +2,15 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.48 — candidate
+## 0.1.48 — 2026-09-30
 
 - Retain reviewed published results while required checks or target protections become ready, then continue exact-head delivery without rerunning workers (#335).
-
 - Correct supervisor registration and lifecycle when the installation uses an isolated XDG configuration directory (#327).
 - Supply supported controller review and protected-delivery guarantees during planning, and compact exact-result review and pre-integration check evidence during final acceptance (#331).
 - Allow diagnostics to inspect supported preparing continuations without treating them as executing Work Items (#328).
 - Include version-matched installation guidance in the frozen package and check the actual archived guidance before publication (#325).
 
-This candidate is not yet published or qualified. Earlier release and qualification evidence remains bound to its original artifact and scenario.
+Publication, independent public download, pinned plugin verification, offline installation and exact installed model-free checks passed under [#333](https://github.com/clockgrove/factory/issues/333). Full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier release and qualification evidence remains bound to its original artifact and scenario. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0148-artifact-record).
 
 ## 0.1.47 — 2026-09-30
 

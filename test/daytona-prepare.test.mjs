@@ -38,6 +38,7 @@ function fixture(t) {
     `version https://git-lfs.github.com/spec/v1\noid sha256:${digest}\nsize 4\n`,
   );
   writeFileSync(join(repo, "keep.txt"), "pinned\n");
+  writeFileSync(join(repo, ".lfsconfig"), "[lfs]\n fetchexclude = asset.bin\n");
   git("add", ".");
   git("commit", "-qm", "base");
   execFileSync("git", ["clone", "--bare", repo, remote], { stdio: "pipe" });

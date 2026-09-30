@@ -33,7 +33,7 @@ const {execFileSync, spawnSync} = require('node:child_process');
   const fd = fs.openSync(output,'wx',0o600);
   let result;
   try {
-   result = spawnSync('git',['-C',repo,'-c','credential.helper=','-c','lfs.url='+url+'/info/lfs','-c','lfs.skipdownloaderrors=false','lfs','smudge','--',source.path],{env:{...env,GIT_LFS_SKIP_SMUDGE:'0'},input:pointer,stdio:['pipe',fd,'pipe']});
+   result = spawnSync('git',['-C',repo,'-c','credential.helper=','-c','lfs.url='+url+'/info/lfs','-c','lfs.skipdownloaderrors=false','-c','lfs.fetchinclude=','-c','lfs.fetchexclude=','lfs','smudge','--',source.path],{env:{...env,GIT_LFS_SKIP_SMUDGE:'0'},input:pointer,stdio:['pipe',fd,'pipe']});
   } finally { fs.closeSync(fd); }
   if(result.error || result.status !== 0) throw Error('Anonymous LFS acquisition unavailable');
   const hash = crypto.createHash('sha256'); let bytes=0;

@@ -65,3 +65,22 @@ Use low reasoning effort for focused implementation and routine tests, medium fo
 Keep the tracking GitHub issue useful while work is in progress, not only when it closes. Post a concise comment at meaningful checkpoints: a merged change or published artifact, the start or result of an acceptance gate, a blocker or changed plan, and the end of a long workday if the issue would otherwise appear idle. State what is done, link durable public evidence, say what remains, and name the next action. Do not post routine activity pings or rely on agent-session messages, private workspace files, or local artifacts as the public status record. The parent agent is responsible for keeping the issue current when subagents do the work.
 
 After a slice gate, update [BUILD-STATUS.md](docs/BUILD-STATUS.md), the tracking issue, and the provenance ledger so a new contributor can resume from the public repo alone. Report current slice, proven behavior, blocker, next action, and whether remaining work is trunk, branch, or leaf.
+
+### Model-facing contracts
+
+Ask models for semantic decisions; keep controller-known identities, hashes, constants and
+derived relationships in deterministic code. Use existing typed alternatives or local references
+and hydrate canonical facts from verified inputs instead of requiring exact bookkeeping copies
+or independent fields that permit invalid combinations. Apply this to demonstrated supported
+paths, not every opaque string; do not invent finite catalogs for base-observed commands.
+
+Before patching or releasing a model contract, review related fields together through producers,
+actual provider schemas, decoders, canonical validators and review inputs. Prefer direct changes
+at those existing boundaries; do not compensate with generic frameworks, extra model calls or
+persistent state. Preserve evidence grounding and completeness, security, source and command
+authority, and fail-closed validation. Never repair invalid responses into accepted facts.
+
+Prerelease interfaces may change coherently; preserve historical evidence, but add no fallback, migration or duplicate format solely for compatibility without an explicit requirement.
+
+Test actual emitted schemas and decoders, current supported variants and refusals, and replay
+the complete preserved failing response rather than substituting a hand-built fragment.

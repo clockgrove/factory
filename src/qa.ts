@@ -23,7 +23,7 @@ export function coverageObligations(
   }));
 }
 
-/** Model output selects IDs; source facts are restored exclusively by the controller. */
+/** Canonical criterion references resolve only against controller-owned obligations. */
 export function hydrateCoverageSources(
   graph: WorkGraph,
   obligations: CoverageObligation[],
@@ -40,16 +40,39 @@ export function hydrateCoverageSources(
   }
 }
 
-function indexReference(reference: string, length: number): boolean {
-  return /^(0|[1-9][0-9]*)$/.test(reference) && Number(reference) < length;
+function indexReference(index: number, length: number): boolean {
+  return Number.isSafeInteger(index) && index >= 0 && index < length;
+}
+
+function assertProofShape(entry: AcceptanceCoverage): void {
+  const proof = entry.proof;
+  if ("phase" in entry || "oracle" in entry)
+    throw new Error(
+      "Obsolete coverage representation; typed proof is required",
+    );
+  const fields: Record<string, string[]> = {
+    "result-command": ["kind", "validationIndex"],
+    "integrated-command": ["kind", "validationIndex"],
+    "result-semantic": ["kind", "acceptanceIndex"],
+    "integrated-semantic": ["kind", "acceptanceIndex"],
+    "final-review": ["kind"],
+    "final-controller": ["kind", "guaranteeId"],
+    "integrated-ci": ["kind", "checkName"],
+    "published-ci": ["kind", "checkName", "targetItem"],
+  };
+  if (
+    !proof ||
+    typeof proof !== "object" ||
+    Array.isArray(proof) ||
+    !Object.hasOwn(fields, proof.kind) ||
+    Object.keys(proof).sort().join() !== [...fields[proof.kind]!].sort().join()
+  )
+    throw new Error(
+      "Coverage requires a supported typed proof; published ordinary proof is unsupported",
+    );
 }
 
 export function assertCoverageShape(graph: WorkGraph): void {
-  if (graph.coverage === undefined) {
-    if (graph.items.some((item) => item.kind === "qa"))
-      throw new Error("QA nodes require an accepted coverage map");
-    return;
-  }
   if (!Array.isArray(graph.coverage) || !graph.coverage.length)
     throw new Error("Acceptance coverage must be a nonempty collection");
   const ids = new Set<string>();
@@ -71,82 +94,70 @@ export function assertCoverageShape(graph: WorkGraph): void {
       throw new Error("Coverage lacks pinned source identity");
     const item = graph.items.find((item) => item.id === entry.itemId);
     if (!item) throw new Error("Coverage owner is absent from the graph");
-    if (!["result", "integrated", "published", "final"].includes(entry.phase))
-      throw new Error("Coverage phase is invalid");
+    assertProofShape(entry);
+    const proof = entry.proof;
+    const integrated = proof.kind.startsWith("integrated-");
+    const final =
+      proof.kind === "final-review" || proof.kind === "final-controller";
+    const ci = proof.kind === "integrated-ci" || proof.kind === "published-ci";
     if (
-      !entry.oracle ||
-      !["command", "semantic", "controller", "ci"].includes(
-        entry.oracle.kind,
-      ) ||
-      !entry.oracle.reference
-    )
-      throw new Error(
-        "Coverage requires an explicit command or semantic oracle",
-      );
-    const { kind, reference, targetItem } = entry.oracle;
-    if (
-      kind === "command" &&
-      !indexReference(reference, item.validation.length)
+      "validationIndex" in proof &&
+      !indexReference(proof.validationIndex, item.validation.length)
     )
       throw new Error(
         "Coverage command is not an owning node validation command",
       );
     if (
-      kind === "semantic" &&
-      (entry.phase === "final"
-        ? reference !== entry.criterionId
-        : !indexReference(reference, item.acceptance.length))
+      "acceptanceIndex" in proof &&
+      !indexReference(proof.acceptanceIndex, item.acceptance.length)
     )
       throw new Error(
-        "Coverage semantic oracle is not an owning node acceptance criterion",
+        "Coverage semantic proof is not an owning node acceptance criterion",
       );
     if (
-      kind === "controller" &&
+      proof.kind === "final-controller" &&
       !installedControllerCapabilities().guarantees.some(
-        (guarantee) => guarantee.id === reference,
+        (guarantee) => guarantee.id === proof.guaranteeId,
       )
     )
       throw new Error("Coverage names an unknown controller guarantee");
-    if (entry.phase === "final" && !["semantic", "controller"].includes(kind))
+    if (
+      ci &&
+      (item.kind !== "qa" ||
+        typeof proof.checkName !== "string" ||
+        !proof.checkName.trim())
+    )
       throw new Error(
-        "Final coverage uses existing Objective semantic review or controller guarantees; executable checks need a QA node",
+        "Named CI needs a late read-only QA node and exact check name",
       );
-    if (kind === "controller" && entry.phase !== "final")
-      throw new Error(
-        "Controller guarantee coverage must retain final Objective review",
+    if (proof.kind === "published-ci") {
+      const target = graph.items.find(
+        (candidate) => candidate.id === proof.targetItem,
       );
-    if (kind === "ci") {
       if (
-        item.kind !== "qa" ||
-        !["published", "integrated"].includes(entry.phase)
-      )
-        throw new Error("Named CI needs a late read-only QA node");
-      if (
-        entry.phase === "published" &&
-        (!targetItem ||
-          !item.dependencies.includes(targetItem) ||
-          graph.items.find((candidate) => candidate.id === targetItem)?.kind ===
-            "qa")
+        !target ||
+        !item.dependencies.includes(proof.targetItem) ||
+        target.kind === "qa" ||
+        target.kind === "aggregate"
       )
         throw new Error("Published CI requires the actual delivery dependency");
-    } else if (targetItem)
-      throw new Error("Only CI coverage names a candidate Work Item");
+    }
     if (
       item.kind !== "qa" &&
       item.kind !== "aggregate" &&
-      !["result", "final"].includes(entry.phase)
+      !final &&
+      !proof.kind.startsWith("result-")
     )
       throw new Error("Late proof requires a read-only QA node");
     if (
       item.kind === "qa" &&
       (!item.dependencies.length ||
-        entry.phase === "result" ||
-        entry.phase === "final")
+        (!integrated && proof.kind !== "published-ci"))
     )
       throw new Error(
         "QA proof needs integrated dependencies and a feasible late phase",
       );
-    if (item.kind === "qa" && entry.phase === "integrated") {
+    if (item.kind === "qa" && integrated) {
       const ancestors = new Set<string>();
       const visit = (id: string): void => {
         if (ancestors.has(id)) return;
@@ -217,7 +228,6 @@ export function assertCoverageSources(
   obligations: CoverageObligation[],
 ): void {
   assertCoverageShape(graph);
-  if (graph.coverage === undefined) return;
   for (const required of obligations) {
     const actual = graph.coverage.find(
       (entry) => entry.criterionId === required.criterionId,
@@ -256,12 +266,14 @@ export function itemCoverage(
   graph: WorkGraph,
   itemId: string,
 ): AcceptanceCoverage[] {
-  return (graph.coverage ?? []).filter((entry) => entry.itemId === itemId);
+  return graph.coverage.filter((entry) => entry.itemId === itemId);
 }
 
 export function assertCompletedCoverage(state: FactoryState): void {
-  for (const entry of state.graph.coverage ?? []) {
-    if (entry.phase === "final") {
+  for (const entry of state.graph.coverage) {
+    assertProofShape(entry);
+    const proof = entry.proof;
+    if (proof.kind === "final-review" || proof.kind === "final-controller") {
       if (
         state.finalValidation?.passed &&
         !state.finalValidation.criteria?.some(
@@ -284,39 +296,40 @@ export function assertCompletedCoverage(state: FactoryState): void {
       work.validation.treeSha !== work.treeSha
     )
       throw new Error("Acceptance coverage lacks completed exact-tree proof");
-    if (entry.phase === "integrated" && work.changeRef !== state.integratedSha)
+    if (
+      proof.kind.startsWith("integrated-") &&
+      work.changeRef !== state.integratedSha
+    )
       throw new Error("Integrated QA proof is stale at the final candidate");
     if (
-      entry.oracle.kind === "command" &&
+      "validationIndex" in proof &&
       !work.validation.commands.some(
         (command) =>
-          command.command ===
-            item.validation[Number(entry.oracle.reference)]?.command &&
+          command.command === item.validation[proof.validationIndex]?.command &&
           command.treeSha === work.treeSha &&
           command.passed,
       )
     )
       throw new Error("Required coverage command proof is missing");
     if (
-      entry.oracle.kind === "semantic" &&
+      "acceptanceIndex" in proof &&
       !work.validation.criteria?.some(
         (criterion) =>
-          criterion.criterion ===
-            item.acceptance[Number(entry.oracle.reference)] &&
+          criterion.criterion === item.acceptance[proof.acceptanceIndex] &&
           ["pass", "human-accept"].includes(criterion.verdict),
       )
     )
       throw new Error("Required semantic coverage proof is missing");
-    if (entry.oracle.kind === "ci") {
+    if (proof.kind === "integrated-ci" || proof.kind === "published-ci") {
       const head =
-        entry.phase === "published"
-          ? state.work[entry.oracle.targetItem]?.changeRef
+        proof.kind === "published-ci"
+          ? state.work[proof.targetItem]?.changeRef
           : state.integratedSha;
       if (
         !head ||
         !work.qaChecks?.some(
           (check) =>
-            check.name === entry.oracle.reference &&
+            check.name === proof.checkName &&
             check.headSha === head &&
             check.status === "completed" &&
             check.conclusion === "success" &&

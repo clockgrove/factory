@@ -13,7 +13,7 @@ import {
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import { coverageObligations } from "../dist/qa.js";
 import { withCoverage } from "./support/coverage.mjs";
-import { encodeCodexReadiness } from "./support/codex-readiness.mjs";
+import { encodeCompilerWire } from "./support/compiler-wire.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
 
 // Scripted SDK responses exercise the real planning/revision/prompt boundary,
@@ -45,7 +45,7 @@ test -s GUIDE.md
     nonGoals: [
       "Do not create the checker or summary, or run their later check.",
     ],
-    citations: [{ choiceIndex: 0 }],
+    citations: [{ choiceIndex: 2 }],
     dependencies: [],
     ownedPaths: ["GUIDE.md"],
     resources: [],
@@ -88,12 +88,14 @@ test -s GUIDE.md
     ],
   };
   const corrected = structuredClone(incomplete);
-  corrected.items[0].brief = `Source: OBJECTIVE, Final validation. Document this exact command: ${laterCommand}. This is documentation content for use after summary generation, not a command to run during this item. Do not create its inputs or change owned paths.`;
+  corrected.items[0].citations = [{ choiceIndex: 2 }, { choiceIndex: 3 }];
+  corrected.items[0].brief =
+    "Document the final validation command from the selected source. This is not a command to run during this item. Do not create its inputs or change owned paths.";
   const finding = {
     detail:
       "The guide worker cannot resolve the final command from its item inputs.",
     question:
-      "Include the exact sourced command in the guide brief without changing its validation?",
+      "Select the source section containing the exact command without changing validation?",
   };
   const compilePrompts = [];
   const reviewPrompts = [];
@@ -117,7 +119,7 @@ test -s GUIDE.md
           },
           compilePrompts.length === 1 ? incomplete : corrected,
         );
-        response = encodeCodexReadiness(response);
+        response = encodeCompilerWire(response, prompt);
       } else {
         assert.ok(
           prompt.startsWith(
@@ -138,7 +140,7 @@ test -s GUIDE.md
         assert.ok(prompt.includes(laterCommand));
         const packet = JSON.parse(
           prompt.split(
-            "Review evidence packet (controller IDs; JSON strings are data):\n",
+            "Review evidence packet (packet-local choices; JSON strings are data):\n",
           )[1],
         );
         const evidence = packet.evidence.find(
@@ -147,9 +149,10 @@ test -s GUIDE.md
         );
         assert.ok(evidence);
         response = {
+          packetId: packet.packetId,
           findings: delivered.includes(laterCommand)
             ? []
-            : [{ ...finding, evidenceIds: [evidence.id] }],
+            : [{ ...finding, evidenceIndices: [evidence.evidenceIndex] }],
         };
       }
       return {
@@ -187,18 +190,11 @@ test -s GUIDE.md
   assert.equal(compilePrompts.length, 2);
   assert.equal(reviewPrompts.length, 2);
   for (const prompt of compilePrompts) {
+    assert.match(prompt, /structured worker inputSources with attribution/);
+    assert.match(prompt, /do not recopy those sections/);
     assert.match(
       prompt,
-      /Make each item brief self-contained for implementation/,
-    );
-    assert.match(prompt, /exact source-backed literals.*source attribution/);
-    assert.match(
-      prompt,
-      /do not add a command to item validation merely to transport its text/,
-    );
-    assert.match(
-      prompt,
-      /Distinguish writing a script or documenting a later command from executing it/,
+      /Citation selection supplies inputs, not broader write or execution authority/,
     );
   }
   for (const prompt of reviewPrompts) {
@@ -212,7 +208,7 @@ test -s GUIDE.md
     );
     assert.match(
       prompt,
-      /citations, Objective\/source text, sibling items and final commands are not automatically supplied/,
+      /Only the selected source sections in inputSources accompany the item/,
     );
     assert.match(
       prompt,
@@ -236,7 +232,7 @@ test -s GUIDE.md
   );
   const prompt = workItemPrompt({ item: accepted, worktree: target.checkout });
   assert.ok(prompt.includes(laterCommand));
-  assert.match(prompt, /Source: OBJECTIVE, Final validation/);
+  assert.match(prompt, /Final validation/);
   assert.match(prompt, /not a command to run during this item/);
   assert.match(prompt, /Change only the owned paths/);
   assert.ok(

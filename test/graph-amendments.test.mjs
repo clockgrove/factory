@@ -11,7 +11,10 @@ import {
   validateAmendment,
 } from "../dist/graph-amendments.js";
 import { coverageObligations } from "../dist/qa.js";
-import { objectiveCriteria } from "../dist/compiler.js";
+import {
+  compilerCitationChoices,
+  objectiveCriteria,
+} from "../dist/compiler.js";
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
 import { readState } from "../dist/state-store.js";
 import { requestControl } from "../dist/coordinator-control.js";
@@ -54,6 +57,10 @@ const body =
 function item(id = "result", dependencies = []) {
   return {
     kind: "work",
+    children: [],
+    inputSources: compilerCitationChoices([
+      { path: "OBJECTIVE", content: body },
+    ]).filter((choice) => choice.heading === "Acceptance"),
     id,
     title: id,
     goal: `Write ${id}.txt`,
@@ -83,8 +90,7 @@ function qaGraph(graph) {
   next.coverage = next.coverage.map((entry) => ({
     ...entry,
     itemId: "qa",
-    phase: "integrated",
-    oracle: { kind: "semantic", reference: "0", targetItem: "" },
+    proof: { kind: "integrated-semantic", acceptanceIndex: 0 },
   }));
   return next;
 }
@@ -128,21 +134,27 @@ for (const delivery of ["regular", "native-stack"])
             reviews++;
             if (request.amendment)
               assert.equal(request.amendment.work.result.status, "done");
-            return { findings: [] };
+            return {
+              packetId: request.reviewPacket.id,
+              findings: [],
+            };
           },
           async reviewResult(request) {
             return {
-              findings: request.reviewPacket.criteria.map((criterion) => ({
-                criterionId: criterion.id,
-                evidenceIds: [
-                  request.reviewPacket.evidence.find(
-                    (entry) => entry.path === "OBJECTIVE",
-                  ).id,
-                ],
-                verdict: "pass",
-                detail: "Fixture source-backed acceptance",
-                question: "",
-              })),
+              packetId: request.reviewPacket.id,
+              findings: request.reviewPacket.criteria.map(
+                (criterion, criterionIndex) => ({
+                  criterionIndex,
+                  evidenceIndices: [
+                    request.reviewPacket.evidence.findIndex(
+                      (entry) => entry.path === "OBJECTIVE",
+                    ),
+                  ],
+                  verdict: "pass",
+                  detail: "Fixture source-backed acceptance",
+                  question: "",
+                }),
+              ),
             };
           },
         };
@@ -263,6 +275,19 @@ test("aggregate hierarchy is explicit, children run independently, parent joins 
     objective: 1,
     baseSha: "a".repeat(40),
     items: [parent, item("one"), item("two")],
+    coverage: [
+      {
+        ...coverageObligations(body, objectiveCriteria(body))[0],
+        itemId: "parent",
+        proof: { kind: "final-review" },
+        environment: {
+          kind: "local",
+          readiness: "available",
+          probe: "",
+          preparedBy: "",
+        },
+      },
+    ],
   };
   assert.equal(
     validateAndOrderGraph(graph, 1, graph.baseSha, new Set(["OBJECTIVE"])).at(
@@ -288,6 +313,71 @@ test("aggregate hierarchy is explicit, children run independently, parent joins 
       validateAndOrderGraph(graph, 1, graph.baseSha, new Set(["OBJECTIVE"])),
     /explicit dependencies/,
   );
+});
+
+test("operator amendment source inputs are hydrated from pinned citations before review", async () => {
+  await fixture("operator-inputs", async ({ config, initial }) => {
+    const obligations = coverageObligations(body, objectiveCriteria(body));
+    const graph = withCoverage({ coverageObligations: obligations }, initial);
+    graph.coverage[0].source = obligations[0].source;
+    const state = {
+      graph,
+      objective: 1,
+      baseSha: initial.baseSha,
+      runId: "fixture",
+      issueByItemId: { result: 2 },
+      work: { result: { status: "done", attempt: "preserved" } },
+      admission: { graphDigest: graphDigest(graph), authority },
+      coordinator: { mode: "running" },
+    };
+    const candidate = qaGraph(graph);
+    delete candidate.items[0].inputSources;
+    candidate.items[1].inputSources = [
+      { path: "OBJECTIVE", content: "forged" },
+    ];
+    const originalProposal = JSON.stringify(candidate);
+    submitAmendment(state, {
+      ...discovery,
+      actor: "operator",
+      expectedGraphDigest: graphDigest(graph),
+      graph: candidate,
+    });
+    let reviews = 0;
+    assert.equal(
+      await applyPendingAmendment({
+        state,
+        config,
+        body,
+        model: {
+          async generateStructured() {
+            throw new Error("Unexpected compilation");
+          },
+          async reviewGraph(request) {
+            reviews++;
+            for (const workItem of request.graph.items)
+              assert.deepEqual(
+                workItem.inputSources,
+                graph.items[0].inputSources,
+              );
+            return { packetId: request.reviewPacket.id, findings: [] };
+          },
+        },
+        github: {
+          async projectGraph() {
+            return { issueByItemId: { result: 2, qa: 3 } };
+          },
+        },
+        save() {},
+        cancelled: () => false,
+      }),
+      true,
+    );
+    assert.equal(reviews, 1);
+    assert.equal(JSON.stringify(candidate), originalProposal);
+    assert.deepEqual(state.graph.items[0], graph.items[0]);
+    assert.equal(state.work.result.attempt, "preserved");
+    assert.equal(state.allowanceConsumption.planningRevisions, 1);
+  });
 });
 
 test("partial/unknown projection retains exact intent and prevents duplicate issue creation on restart", async () => {
@@ -317,8 +407,11 @@ test("partial/unknown projection retains exact intent and prevents duplicate iss
       config,
       body,
       model: {
-        async reviewGraph() {
-          return { findings: [] };
+        async reviewGraph(request) {
+          return {
+            packetId: request.reviewPacket.id,
+            findings: [],
+          };
         },
       },
       github: {
@@ -352,8 +445,11 @@ test("discovery during final review invalidates that result and runs accepted QA
       async generateStructured(request) {
         return withCoverage(request, initial);
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
       async reviewResult(request) {
         if (request.invocation.phase === "objective-review") {
@@ -367,17 +463,20 @@ test("discovery during final review invalidates that result and runs accepted QA
             });
         }
         return {
-          findings: request.reviewPacket.criteria.map((criterion) => ({
-            criterionId: criterion.id,
-            evidenceIds: [
-              request.reviewPacket.evidence.find(
-                (entry) => entry.path === "OBJECTIVE",
-              ).id,
-            ],
-            verdict: "pass",
-            detail: "Fixture acceptance",
-            question: "",
-          })),
+          packetId: request.reviewPacket.id,
+          findings: request.reviewPacket.criteria.map(
+            (criterion, criterionIndex) => ({
+              criterionIndex,
+              evidenceIndices: [
+                request.reviewPacket.evidence.findIndex(
+                  (entry) => entry.path === "OBJECTIVE",
+                ),
+              ],
+              verdict: "pass",
+              detail: "Fixture acceptance",
+              question: "",
+            }),
+          ),
         };
       },
     };
@@ -552,8 +651,11 @@ test("planning consumption survives acceptance and cannot reset for a second rev
       config,
       body,
       model: {
-        async reviewGraph() {
-          return { findings: [] };
+        async reviewGraph(request) {
+          return {
+            packetId: request.reviewPacket.id,
+            findings: [],
+          };
         },
       },
       github: {
@@ -735,22 +837,28 @@ for (const delivery of ["regular", "native-stack"])
             next.items.push(item("one", ["result"]), item("two", ["result"]));
             return next;
           },
-          async reviewGraph() {
-            return { findings: [] };
+          async reviewGraph(request) {
+            return {
+              packetId: request.reviewPacket.id,
+              findings: [],
+            };
           },
           async reviewResult(request) {
             return {
-              findings: request.reviewPacket.criteria.map((criterion) => ({
-                criterionId: criterion.id,
-                evidenceIds: [
-                  request.reviewPacket.evidence.find(
-                    (entry) => entry.path === "OBJECTIVE",
-                  ).id,
-                ],
-                verdict: "pass",
-                detail: "Fixture acceptance",
-                question: "",
-              })),
+              packetId: request.reviewPacket.id,
+              findings: request.reviewPacket.criteria.map(
+                (criterion, criterionIndex) => ({
+                  criterionIndex,
+                  evidenceIndices: [
+                    request.reviewPacket.evidence.findIndex(
+                      (entry) => entry.path === "OBJECTIVE",
+                    ),
+                  ],
+                  verdict: "pass",
+                  detail: "Fixture acceptance",
+                  question: "",
+                }),
+              ),
             };
           },
         };
@@ -814,8 +922,6 @@ for (const mode of ["paused", "draining"])
           initial,
         );
         graph.coverage[0].source = obligations[0].source;
-        // Earlier accepted graphs omitted the now-required empty hierarchy field.
-        delete graph.items[0].kind;
         let state = {
           graph,
           objective: 1,
@@ -866,10 +972,13 @@ for (const mode of ["paused", "draining"])
               );
               return candidate;
             },
-            async reviewGraph() {
+            async reviewGraph(request) {
               calls.review++;
               stop("reviewed");
-              return { findings: [] };
+              return {
+                packetId: request.reviewPacket.id,
+                findings: [],
+              };
             },
           },
           github: {
@@ -935,21 +1044,27 @@ test("owner handoff after known amendment review resumes without repeating model
             objective: 1,
             action: "handoff",
           });
-        return { findings: [] };
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
       async reviewResult(request) {
         return {
-          findings: request.reviewPacket.criteria.map((criterion) => ({
-            criterionId: criterion.id,
-            evidenceIds: [
-              request.reviewPacket.evidence.find(
-                (entry) => entry.path === "OBJECTIVE",
-              ).id,
-            ],
-            verdict: "pass",
-            detail: "Fixture source-backed acceptance",
-            question: "",
-          })),
+          packetId: request.reviewPacket.id,
+          findings: request.reviewPacket.criteria.map(
+            (criterion, criterionIndex) => ({
+              criterionIndex,
+              evidenceIndices: [
+                request.reviewPacket.evidence.findIndex(
+                  (entry) => entry.path === "OBJECTIVE",
+                ),
+              ],
+              verdict: "pass",
+              detail: "Fixture source-backed acceptance",
+              question: "",
+            }),
+          ),
         };
       },
     };

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
   compileObjective,
+  hydrateWorkerInputSources,
   objectiveCriteria,
   planningSources,
   planReviewPacket,
@@ -461,6 +462,15 @@ export async function applyPendingAmendment(args: {
       if (pending.proposal.graph) {
         pending.graph = structuredClone(pending.proposal.graph);
         for (const item of pending.graph.items) delete item.executionBinding;
+        hydrateWorkerInputSources(
+          pending.graph,
+          planningSources(
+            args.body,
+            state.baseSha,
+            config.checkout,
+            state.additionalSources,
+          ),
+        );
         normalizeExecutionProfiles(pending.graph, choices);
       } else {
         pending.phase = "compiling";

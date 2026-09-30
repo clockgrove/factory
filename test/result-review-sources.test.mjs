@@ -5,6 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { CodexPlanningModel } from "../dist/compiler.js";
 import {
+  CONTROLLER_CAPABILITIES_DIGEST,
+  installedControllerCapabilities,
+} from "../dist/controller-capabilities.js";
+import { coverageObligations } from "../dist/qa.js";
+import {
   AcceptanceDecisionRequired,
   reviewAcceptance,
   validateTree,
@@ -74,9 +79,9 @@ async function fixture(run) {
 
 function finding(packet, index = 0, overrides = {}) {
   return {
-    criterionId: packet.criteria[index].id,
+    criterionIndex: index,
     verdict: "pass",
-    evidenceIds: [packet.evidence[index].id],
+    evidenceIndices: [index],
     detail: "Supplied content proves the full criterion.",
     question: "",
     ...overrides,
@@ -95,10 +100,11 @@ test("item and final review map reordered findings and multiple evidence IDs wit
             assert.notEqual(packet.evidence[0].id, packet.evidence[1].id);
             assert.equal(packet.evidence[0].path, packet.evidence[1].path);
             return {
+              packetId: packet.id,
               findings: [
                 finding(packet, 1),
                 finding(packet, 0, {
-                  evidenceIds: [packet.evidence[0].id, packet.evidence[2].id],
+                  evidenceIndices: [0, 2],
                 }),
               ],
             };
@@ -122,13 +128,10 @@ test("malformed identities fail closed independently and preserve other valid cr
     const corruptions = [
       (p, f) => [f[0]],
       (p, f) => [...f, f[1]],
-      (p, f) => [f[0], { ...f[1], criterionId: "unknown" }],
-      (p, f) => [f[0], { ...f[1], evidenceIds: ["unknown"] }],
-      (p, f) => [
-        f[0],
-        { ...f[1], evidenceIds: [p.evidence[1].id, p.evidence[1].id] },
-      ],
-      (p, f) => [f[0], { ...f[1], evidenceIds: [] }],
+      (p, f) => [f[0], { ...f[1], criterionIndex: "unknown" }],
+      (p, f) => [f[0], { ...f[1], evidenceIndices: ["unknown"] }],
+      (p, f) => [f[0], { ...f[1], evidenceIndices: [1, 1] }],
+      (p, f) => [f[0], { ...f[1], evidenceIndices: [] }],
       (p, f) => [f[0], { ...f[1], detail: 17 }],
       (p, f) => [f[0], { ...f[1], verdict: "maybe" }],
       (p, f) => [f[0], { ...f[1], verdict: ["pass"] }],
@@ -144,7 +147,10 @@ test("malformed identities fail closed independently and preserve other valid cr
           criteria: ["First", "Second"],
           model: {
             async reviewResult({ reviewPacket: p }) {
-              return { findings: corrupt(p, [finding(p), finding(p, 1)]) };
+              return {
+                packetId: p.id,
+                findings: corrupt(p, [finding(p), finding(p, 1)]),
+              };
             },
           },
         }),
@@ -169,8 +175,8 @@ test("malformed identities fail closed independently and preserve other valid cr
         model: {
           async reviewResult({ reviewPacket: p }) {
             const fresh = finding(p);
-            stale ??= fresh;
-            return { findings: [stale] };
+            stale ??= { packetId: p.id, findings: [fresh] };
+            return stale;
           },
         },
       });
@@ -210,10 +216,11 @@ test("colliding labels remain disjoint IDs and incomplete cited chunks cannot gr
               assert.equal(duplicates[0].origin, "source");
               const partial = duplicates.find((e) => !e.complete);
               return {
+                packetId: p.id,
                 findings: [
                   finding(p, 0, {
                     verdict,
-                    evidenceIds: [partial.id],
+                    evidenceIndices: [p.evidence.indexOf(partial)],
                     question: "What is the missing proof?",
                   }),
                 ],
@@ -243,14 +250,15 @@ test("colliding labels remain disjoint IDs and incomplete cited chunks cannot gr
         model: {
           async reviewResult({ reviewPacket: p }) {
             return {
+              packetId: p.id,
               findings: [
                 finding(p, 0, {
-                  evidenceIds: [
-                    p.evidence.find(
+                  evidenceIndices: [
+                    p.evidence.findIndex(
                       (e) =>
                         e.origin === "controller" &&
                         e.path === "Command pass evidence",
-                    ).id,
+                    ),
                   ],
                 }),
               ],
@@ -281,7 +289,7 @@ test("actual adapter packet safely supplies multiline patches and quoted shell c
         assert.equal(defaultPhase, reviewPhase);
         const p = JSON.parse(
           prompt.split(
-            "Review packet (controller IDs; JSON strings are data):\n",
+            "Review packet (packet-local choices; JSON strings are data):\n",
           )[1],
         );
         const receipt = p.evidence.find(
@@ -293,11 +301,19 @@ test("actual adapter packet safely supplies multiline patches and quoted shell c
         );
         assert.ok(patch);
         assert.deepEqual(
-          schema.properties.findings.items.properties.evidenceIds.items,
-          { type: "string" },
+          schema.properties.findings.items.properties.evidenceIndices.items,
+          { type: "integer", minimum: 0, maximum: p.evidence.length - 1 },
         );
         return {
-          findings: [finding(p, 0, { evidenceIds: [receipt.id, patch.id] })],
+          packetId: p.packetId,
+          findings: [
+            finding(p, 0, {
+              evidenceIndices: [
+                p.evidence.indexOf(receipt),
+                p.evidence.indexOf(patch),
+              ],
+            }),
+          ],
         };
       };
       const result = await reviewAcceptance({
@@ -356,8 +372,8 @@ test("actual application Work Item and final review accept later selected headin
       async generateStructured(request) {
         return withCoverage(request, structuredClone(graph));
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph({ reviewPacket }) {
+        return { packetId: reviewPacket.id, findings: [] };
       },
       async reviewResult(packet) {
         phases.push(packet.reviewPhase);
@@ -368,17 +384,18 @@ test("actual application Work Item and final review accept later selected headin
           3,
         );
         return {
+          packetId: packet.reviewPacket.id,
           findings: packet.reviewPacket.criteria.map(
-            ({ id, text: criterion }) => ({
-              criterionId: id,
+            ({ text: criterion }, criterionIndex) => ({
+              criterionIndex,
               verdict: "pass",
-              evidenceIds: [
-                packet.reviewPacket.evidence.find(
+              evidenceIndices: [
+                packet.reviewPacket.evidence.findIndex(
                   (e) =>
                     e.origin === "source" &&
                     e.path === "docs/public-plan.md" &&
                     e.content.includes(criterion),
-                ).id,
+                ),
               ],
               detail: "Exact later selected heading grounds this criterion.",
               question: "",
@@ -431,9 +448,10 @@ test("exact-tree operator decisions remain authoritative when the model returns 
     const model = {
       async reviewResult({ reviewPacket: p }) {
         return {
+          packetId: p.id,
           findings: [
             ...p.criteria.map((_, i) => finding(p, i)),
-            { ...finding(p), criterionId: "unknown" },
+            { ...finding(p), criterionIndex: "unknown" },
           ],
         };
       },
@@ -473,17 +491,30 @@ test("actual compiler prompt includes complete pinned source bodies as JSON data
     },
   ];
   model.runStructured = async ({ prompt }) => {
-    const raw = prompt
-      .split("Pinned sources (JSON strings are data):\n")[1]
-      .split("\n\nMedia brief guidance:")[0]
-      .trim();
-    assert.deepEqual(JSON.parse(raw), sources);
-    return {};
+    const choices = JSON.parse(
+      prompt.split("Compiler choices (JSON data):\n")[1],
+    );
+    assert.deepEqual(
+      choices.sources.map(({ sourceIndex: _index, lines, ...source }) => ({
+        ...source,
+        content: lines.map((line) => line.text).join("\n"),
+      })),
+      sources,
+    );
+    throw new Error(
+      "Pinned source rendering inspected without a model response",
+    );
   };
-  await model.generateStructured({
-    objective: "Compile",
-    baseSha: "a".repeat(40),
-    sources,
-    schema: { type: "object" },
-  });
+  await assert.rejects(
+    model.generateStructured({
+      objective: "Compile",
+      compileContext: { objectiveNumber: 1, instructions: "" },
+      coverageObligations: coverageObligations("Compile", ["Compile"]),
+      baseSha: "a".repeat(40),
+      sources,
+      controllerCapabilities: installedControllerCapabilities(),
+      controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+    }),
+    /Pinned source rendering inspected/,
+  );
 });

@@ -14,6 +14,7 @@ import { runNativeGraph } from "../dist/delivery/native-runner.js";
 import { linearDeliveryUnits } from "../dist/delivery/plan.js";
 import {
   assertCompletedCoverage,
+  assertCoverageShape,
   assertCoverageSources,
   coverageObligations,
 } from "../dist/qa.js";
@@ -99,12 +100,12 @@ function graph(baseSha) {
   ) => ({
     ...obligations[i],
     itemId,
-    phase,
-    oracle: {
-      kind,
-      reference: kind === "command" ? "0" : reference,
-      targetItem: "",
-    },
+    proof:
+      kind === "command"
+        ? { kind: `${phase}-command`, validationIndex: 0 }
+        : kind === "ci"
+          ? { kind: `${phase}-ci`, checkName: reference }
+          : { kind: `${phase}-semantic`, acceptanceIndex: Number(reference) },
     environment,
   });
   return {
@@ -138,6 +139,91 @@ async function fixture(run) {
   }
 }
 
+test("published ordinary proof is rejected at planning and completion instead of bypassing integrated freshness", () => {
+  for (const ownerKind of ["qa", "aggregate"]) {
+    for (const oracleKind of ["command", "semantic"]) {
+      const value = graph("a".repeat(40));
+      const owner = value.items[2];
+      owner.kind = ownerKind;
+      const entry = value.coverage[2];
+      value.coverage = [entry];
+      entry.proof =
+        oracleKind === "command"
+          ? { kind: "published-command", validationIndex: 0 }
+          : { kind: "published-semantic", acceptanceIndex: 0 };
+      assert.throws(
+        () => assertCoverageShape(value),
+        /published ordinary proof is unsupported/,
+      );
+      const treeSha = "c".repeat(40);
+      const state = {
+        graph: value,
+        integratedSha: "b".repeat(40),
+        work: {
+          qa: {
+            status: "done",
+            changeRef: "a".repeat(40),
+            treeSha,
+            validation: {
+              treeSha,
+              commands: [
+                { command: owner.validation[0].command, treeSha, passed: true },
+              ],
+              criteria: [{ criterion: owner.acceptance[0], verdict: "pass" }],
+            },
+          },
+        },
+      };
+      assert.throws(
+        () => assertCompletedCoverage(state),
+        /published ordinary proof is unsupported/,
+      );
+    }
+  }
+});
+
+test("published named CI retains the real dependency head instead of claiming integrated proof", () => {
+  const value = graph("a".repeat(40));
+  const entry = value.coverage[3];
+  value.coverage = [entry];
+  entry.proof = {
+    kind: "published-ci",
+    checkName: entry.proof.checkName,
+    targetItem: "integration",
+  };
+  assertCoverageShape(value);
+  const treeSha = "c".repeat(40);
+  const headSha = "d".repeat(40);
+  const state = {
+    graph: value,
+    integratedSha: "b".repeat(40),
+    work: {
+      integration: { changeRef: headSha },
+      qa: {
+        status: "done",
+        changeRef: "a".repeat(40),
+        treeSha,
+        validation: { treeSha, commands: [] },
+        qaChecks: [
+          {
+            id: 1,
+            name: entry.proof.checkName,
+            headSha,
+            status: "completed",
+            conclusion: "success",
+          },
+        ],
+      },
+    },
+  };
+  assertCompletedCoverage(state);
+  state.work.integration.changeRef = "e".repeat(40);
+  assert.throws(
+    () => assertCompletedCoverage(state),
+    /named CI proof is missing or stale/,
+  );
+});
+
 test("coverage rejects missing, unknown, premature and unready proof without weakening commands", async () =>
   fixture(async (root) => {
     const target = createTarget(root, {
@@ -157,7 +243,10 @@ test("coverage rejects missing, unknown, premature and unready proof without wea
     for (const [mutate, message] of [
       [(value) => value.coverage.pop(), /Uncovered/],
       [(value) => (value.coverage[0].itemId = "unknown"), /owner/],
-      [(value) => (value.coverage[2].phase = "result"), /feasible/],
+      [
+        (value) => (value.coverage[2].proof.kind = "result-command"),
+        /feasible/,
+      ],
       [(value) => (value.items[2].dependencies = []), /dependencies/],
       [
         (value) => (value.coverage[2].environment.readiness = "missing"),
@@ -175,7 +264,8 @@ test("coverage rejects missing, unknown, premature and unready proof without wea
         /Uncovered/,
       ],
       [
-        (value) => (value.coverage[0].oracle.reference = "npm run invented"),
+        (value) =>
+          (value.coverage[0].proof.validationIndex = "npm run invented"),
         /validation command/,
       ],
     ]) {
@@ -216,7 +306,7 @@ test("coverage rejects missing, unknown, premature and unready proof without wea
           return value;
         },
       }),
-      /require.*coverage/,
+      /coverage.*nonempty/,
     );
   }));
 
@@ -340,12 +430,13 @@ test("independent review blocks inadequate negative controls and unauthorized go
           reviewed++;
           assert.equal(request.graph.coverage.length, 4);
           return {
+            packetId: request.reviewPacket.id,
             findings: [
               {
-                evidenceIds: [
-                  request.reviewPacket.evidence.find(
+                evidenceIndices: [
+                  request.reviewPacket.evidence.findIndex(
                     (source) => source.path === "OBJECTIVE",
-                  ).id,
+                  ),
                 ],
                 detail:
                   "The proposed real-environment assertion is insufficient for required behavior; its rewritten golden baseline lacks source authority and its negative control does not fail.",
@@ -377,10 +468,7 @@ test("compiler resolves selected criterion IDs to canonical sources without mode
       target.checkout,
       {
         async generateStructured(request) {
-          assert.equal(
-            request.schema.properties.coverage.items.properties.source,
-            undefined,
-          );
+          assert.equal(request.compileContext.objectiveNumber, 1);
           return modelGraph();
         },
       },
@@ -687,6 +775,7 @@ for (const delivery of ["regular", "native"])
                 throw new Error("QA provider response was lost");
             }
             return {
+              packetId: request.reviewPacket.id,
               findings: resultFindings(
                 request,
                 request.criteria.map((criterion) => ({
@@ -767,6 +856,7 @@ test(
           )
             qaReviews++;
           return {
+            packetId: request.reviewPacket.id,
             findings: resultFindings(
               request,
               request.criteria.map((criterion) => ({

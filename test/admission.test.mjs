@@ -429,6 +429,7 @@ for (const delivery of ["regular", "native-stack"]) {
             "## Contract\nThe canonical result is result.txt.\n",
           );
           return {
+            packetId: request.reviewPacket.id,
             findings: resultFindings(
               request,
               request.criteria.map((criterion) => ({

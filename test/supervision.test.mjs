@@ -73,7 +73,7 @@ async function fixture(fn) {
     digest: createHash("sha256").update(JSON.stringify(raw)).digest("hex"),
   };
   const state = {
-    schemaVersion: 3,
+    schemaVersion: 5,
     kind: "preparing",
     repository: config.repository,
     objective: 1,

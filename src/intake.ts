@@ -142,7 +142,7 @@ function continuations(config: FactoryConfig): ContinuationState[] {
 function terminal(state: ContinuationState): boolean {
   return (
     !!state.cancelledAt ||
-    (state.schemaVersion === 2 && objectiveComplete(state))
+    (state.schemaVersion === 4 && objectiveComplete(state))
   );
 }
 export function intakeComplete(
@@ -307,7 +307,7 @@ async function resolveBase(
   for (const objective of predecessors) {
     const previous = readContinuation(config.repository, objective);
     if (
-      previous?.schemaVersion !== 2 ||
+      previous?.schemaVersion !== 4 ||
       !objectiveComplete(previous) ||
       !previous.finalAcceptance
     )
@@ -366,7 +366,7 @@ export async function runIntake(
       const preparing =
         preparation ?? readContinuation(config.repository, request.objective);
       if (
-        preparing?.schemaVersion !== 3 ||
+        preparing?.schemaVersion !== 5 ||
         preparing.objective !== request.objective ||
         !record.authority.objectives.includes(request.objective)
       )
@@ -412,7 +412,7 @@ export async function runIntake(
         preparation ??
         continuations(config).find(
           (state): state is PreparationState =>
-            state.schemaVersion === 3 && !terminal(state),
+            state.schemaVersion === 5 && !terminal(state),
         );
       if (preparing) {
         preparing.coordinator.mode = record.mode;
@@ -490,7 +490,7 @@ export async function runIntake(
               const missing = predecessors.find((before) => {
                 const state = readContinuation(config.repository, before);
                 return (
-                  state?.schemaVersion !== 2 ||
+                  state?.schemaVersion !== 4 ||
                   !objectiveComplete(state) ||
                   !state.finalAcceptance
                 );
@@ -529,7 +529,7 @@ export async function runIntake(
             );
           let plan;
           let admission;
-          if (!state || state.schemaVersion === 3) {
+          if (!state || state.schemaVersion === 5) {
             const issue = await services.github.objective(selected);
             if (
               issue.state !== "open" ||

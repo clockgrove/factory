@@ -126,7 +126,7 @@ export interface PreparationState {
     string,
     import("./graph-amendments.js").AllowanceConsumption
   >;
-  schemaVersion: 3;
+  schemaVersion: 5;
   kind: "preparing";
   repository: string;
   objective: number;
@@ -160,7 +160,7 @@ export interface FactoryState {
   coordinator?: CoordinatorDisposition;
   admission?: AutonomousAdmission;
   additionalSources?: SourceSelector[];
-  schemaVersion: 2;
+  schemaVersion: 4;
   repository: string;
   objective: number;
   runId: string;
@@ -393,7 +393,7 @@ export function parseFactoryState(
   const state = record(value, "state");
   assertCoordinator(state.coordinator);
   if (
-    state.schemaVersion !== 2 ||
+    state.schemaVersion !== 4 ||
     state.repository !== repository ||
     state.objective !== objective
   )

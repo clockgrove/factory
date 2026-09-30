@@ -1,3 +1,5 @@
+import { compilerCitationChoices } from "../dist/compiler.js";
+import { compilerWire } from "../dist/compiler-wire.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -156,8 +158,11 @@ test("compiler schema binds citations to exact supplied path and bare heading pa
         requests.push(structuredClone(request));
         return withCoverage(request, graph(target.baseSha));
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
     };
 
@@ -171,14 +176,10 @@ test("compiler schema binds citations to exact supplied path and bare heading pa
     assert.equal(candidate.review.status, "clean");
     assert.equal(requests.length, 1);
 
-    const choices =
-      requests[0].schema.properties.items.items.properties.citations.items
-        .anyOf;
+    const choices = compilerCitationChoices(requests[0].sources);
     const allows = (path, heading) =>
       choices.some(
-        (choice) =>
-          choice.properties.path.enum[0] === path &&
-          choice.properties.heading.enum.includes(heading),
+        (choice) => choice.path === path && choice.heading === heading,
       );
     assert.ok(allows("OBJECTIVE", "Acceptance"));
     assert.ok(allows("docs/plan.md", "Wave 0"));
@@ -190,17 +191,8 @@ test("compiler schema binds citations to exact supplied path and bare heading pa
     assert.ok(allows("docs/plain.txt", ""));
     assert.equal(allows("docs/plan.md", "Acceptance"), false);
     assert.equal(
-      choices.some((choice) =>
-        choice.properties.heading.enum.some((heading) =>
-          heading.startsWith("#"),
-        ),
-      ),
+      choices.some((choice) => choice.heading.startsWith("#")),
       false,
-    );
-    assert.equal(
-      choices.length,
-      new Set(requests[0].sources.map((source) => source.path)).size,
-      "schema must add one object branch per source path, not per heading",
     );
   });
 });
@@ -226,7 +218,7 @@ test("compiler rejects a whole-source citation when only one heading was supplie
           throw new Error("review should not run");
         },
       }),
-      /cites missing heading "" in docs\/plan\.md; expected exact bare heading \["Wave 0"\]/,
+      /unavailable pinned section/,
     );
   });
 });
@@ -260,7 +252,7 @@ test("compiler rejects a Markdown-prefixed citation heading without normalizatio
         undefined,
         (event) => observations.push(event),
       ),
-      /cites missing heading ## Acceptance in OBJECTIVE; expected exact bare heading .*"Acceptance"/,
+      /unavailable pinned section/,
     );
     assert.ok(
       observations.some(
@@ -298,7 +290,7 @@ test("compiler rejects terminal line separators in section and whole-source cita
               throw new Error("review should not run");
             },
           }),
-          /cites missing heading/,
+          /unavailable pinned section/,
         );
       }
     }
@@ -316,8 +308,11 @@ test("preview shows an undeclared command as blocked before host execution", asy
       async generateStructured(request) {
         return withCoverage(request, invented);
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
     };
     const candidate = await compilePlan(
@@ -457,14 +452,15 @@ test("one sourced review finding permits one revision and re-review", async () =
       async reviewGraph(request) {
         calls.push({ type: "review", invocation: request.invocation });
         return {
+          packetId: request.reviewPacket.id,
           findings:
             calls.filter((call) => call.type === "review").length === 1
               ? [
                   {
-                    evidenceIds: [
-                      request.reviewPacket.evidence.find(
+                    evidenceIndices: [
+                      request.reviewPacket.evidence.findIndex(
                         (e) => e.path === "OBJECTIVE",
-                      ).id,
+                      ),
                     ],
                     detail: "Missing obligation",
                     question: "Which requirement owns this obligation?",
@@ -533,16 +529,17 @@ test("graph review identifies the exact supplied section among duplicate paths",
         async reviewGraph(request) {
           reviews += 1;
           return {
+            packetId: request.reviewPacket.id,
             findings:
               reviews === 1
                 ? [
                     {
-                      evidenceIds: [
-                        request.reviewPacket.evidence.find(
+                      evidenceIndices: [
+                        request.reviewPacket.evidence.findIndex(
                           (e) =>
                             e.content.includes("Later-only obligation") &&
                             e.path === "docs/plan.md",
-                        ).id,
+                        ),
                       ],
                       detail: "The later obligation is missing",
                       question: "Which Work Item owns the later obligation?",
@@ -584,7 +581,10 @@ test("review and verification bind controller capabilities, commands, and instal
       },
       async reviewGraph(request) {
         reviewed.push(structuredClone(request));
-        return { findings: [] };
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
     };
     const installationDigest = "c".repeat(64);
@@ -704,12 +704,13 @@ test("unresolved review asks one human question and records a specific decision"
       async reviewGraph(request) {
         reviewCount += 1;
         return {
+          packetId: request.reviewPacket.id,
           findings: [
             {
-              evidenceIds: [
-                request.reviewPacket.evidence.find(
+              evidenceIndices: [
+                request.reviewPacket.evidence.findIndex(
                   (e) => e.path === "OBJECTIVE",
-                ).id,
+                ),
               ],
               detail: "Authority unresolved",
               question: "Which source authorizes this?",
@@ -818,12 +819,13 @@ test("malformed graph review pauses on the pinned graph and an explicit decision
         generationCount += 1;
         return withCoverage(request, graph(target.baseSha));
       },
-      async reviewGraph() {
+      async reviewGraph(request) {
         reviewCount += 1;
         return {
+          packetId: request.reviewPacket.id,
           findings: [
             {
-              evidenceIds: ["not-in-this-packet"],
+              evidenceIndices: ["not-in-this-packet"],
               detail: "Unsupported finding",
               question: "Approve this?",
             },
@@ -844,7 +846,7 @@ test("malformed graph review pauses on the pinned graph and an explicit decision
     assert.equal(candidate.review.findings.length, 0);
     assert.match(
       candidate.review.failure.detail,
-      /evidence ID is unknown to this packet/,
+      /evidence index is invalid for this packet/,
     );
     assert.match(candidate.review.failure.question, /pinned Factory plan/);
     assert.match(
@@ -939,20 +941,20 @@ test("graph review rejects malformed protocol fields without retaining finding c
     const cases = [
       () => privateContent,
       () => ({
-        evidenceIds: [privateContent],
+        evidenceIndices: [privateContent],
         detail: "detail",
         question: "question",
       }),
-      () => ({ evidenceIds: [], detail: "detail", question: "question" }),
+      () => ({ evidenceIndices: [], detail: "detail", question: "question" }),
       (id) => ({
-        evidenceIds: [id, id],
+        evidenceIndices: [id, id],
         detail: "detail",
         question: "question",
       }),
-      (id) => ({ evidenceIds: [id], detail: " ", question: "question" }),
-      (id) => ({ evidenceIds: [id], detail: "detail", question: " " }),
+      (id) => ({ evidenceIndices: [id], detail: " ", question: "question" }),
+      (id) => ({ evidenceIndices: [id], detail: "detail", question: " " }),
       (id) => ({
-        evidenceIds: [id],
+        evidenceIndices: [id],
         detail: "detail",
         question: "question",
         quote: privateContent,
@@ -971,7 +973,8 @@ test("graph review rejects malformed protocol fields without retaining finding c
           },
           async reviewGraph(request) {
             return {
-              findings: [makeFinding(request.reviewPacket.evidence[0].id)],
+              packetId: request.reviewPacket.id,
+              findings: [makeFinding(0)],
             };
           },
         },
@@ -1014,15 +1017,21 @@ test("graph review requires an array and accepts an explicit clean empty review"
         async generateStructured(request) {
           return withCoverage(request, graph(target.baseSha));
         },
-        async reviewGraph() {
-          return { findings: null };
+        async reviewGraph(request) {
+          return {
+            packetId: request.reviewPacket.id,
+            findings: null,
+          };
         },
       },
       undefined,
       (event) => invalidObservations.push(event),
     );
     assert.equal(invalid.review.status, "needs-human");
-    assert.match(invalid.review.failure.detail, /only a findings array/);
+    assert.match(
+      invalid.review.failure.detail,
+      /exact packetId and a findings array/,
+    );
     assert.ok(
       invalidObservations.some(
         (event) =>
@@ -1042,8 +1051,11 @@ test("graph review requires an array and accepts an explicit clean empty review"
         async generateStructured(request) {
           return withCoverage(request, graph(target.baseSha));
         },
-        async reviewGraph() {
-          return { findings: [] };
+        async reviewGraph(request) {
+          return {
+            packetId: request.reviewPacket.id,
+            findings: [],
+          };
         },
       },
       undefined,
@@ -1073,7 +1085,10 @@ test("additional pinned selectors reach compilation and review and reload at ver
       },
       async reviewGraph(packet) {
         packets.push(packet);
-        return { findings: [] };
+        return {
+          packetId: packet.reviewPacket.id,
+          findings: [],
+        };
       },
     };
     const candidate = await compilePlan(
@@ -1130,17 +1145,21 @@ test("compiler rejects wildcard ownership before independent review with actiona
         compilePlan(1, body, target.baseSha, target.checkout, {
           async generateStructured(request) {
             assert.match(
-              request.schema.properties.items.items.properties.ownedPaths.items
-                .description,
-              /Wildcards \* and \? are unsupported/,
+              compilerWire(request, compilerCitationChoices(request.sources))
+                .schema.properties.items.items.anyOf[0].properties.ownedPaths
+                .items.description,
+              /no wildcard/,
             );
             const proposed = graph(target.baseSha);
             proposed.items[0].ownedPaths = [path];
             return withCoverage(request, proposed);
           },
-          async reviewGraph() {
+          async reviewGraph(request) {
             reviews++;
-            return { findings: [] };
+            return {
+              packetId: request.reviewPacket.id,
+              findings: [],
+            };
           },
         }),
         /Work Item one has invalid ownership path.*Wildcards \* and \? are unsupported/,

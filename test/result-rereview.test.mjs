@@ -71,10 +71,17 @@ for (const delivery of ["regular", "native-stack"]) {
         resultReviewer(request) {
           const current = JSON.parse(request.observations).reviewedItemId;
           if (current === "second" && ++itemReviews === 1)
-            return { findings: "malformed completed response" };
+            return {
+              packetId: request.reviewPacket.id,
+              findings: "malformed completed response",
+            };
           if (!current && ++finalReviews === 1)
-            return { findings: "malformed completed response" };
+            return {
+              packetId: request.reviewPacket.id,
+              findings: "malformed completed response",
+            };
           return {
+            packetId: request.reviewPacket.id,
             findings: resultFindings(
               request,
               request.criteria.map((criterion) => ({

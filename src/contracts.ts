@@ -2,7 +2,7 @@ import type { ExecutionProfileEnvironment } from "./config.js";
 import type { ControllerCapabilitiesManifest } from "./controller-capabilities.js";
 import type {
   GraphReviewFinding,
-  ReviewFinding,
+  ReviewChoiceFinding,
   ReviewPacket,
 } from "./review-evidence.js";
 
@@ -64,6 +64,8 @@ export interface WorkItem {
     source?: string;
   }[];
   brief: string;
+  /** Exact controller-selected pinned inputs, separate from authored instructions. */
+  inputSources?: { path: string; heading?: string; content: string }[];
   sourceAssets?: SourceAssetBinding[];
   expectedOutputRoles?: string[];
   minimumAssetSets?: number;
@@ -75,17 +77,17 @@ export interface CoverageObligation {
   source: { path: string; digest: string; text: string };
 }
 
+export type CoverageProof =
+  | { kind: "result-command" | "integrated-command"; validationIndex: number }
+  | { kind: "result-semantic" | "integrated-semantic"; acceptanceIndex: number }
+  | { kind: "final-review" }
+  | { kind: "final-controller"; guaranteeId: string }
+  | { kind: "integrated-ci"; checkName: string }
+  | { kind: "published-ci"; checkName: string; targetItem: string };
+
 export interface AcceptanceCoverage extends CoverageObligation {
   itemId: string;
-  /** Dependencies remain authoritative on the owning Work Item. */
-  phase: "result" | "integrated" | "published" | "final";
-  oracle: {
-    kind: "command" | "semantic" | "controller" | "ci";
-    /** Validation/acceptance index, final criterion ID, controller guarantee ID, or named CI check. */
-    reference: string;
-    /** For published CI, the existing dependency whose PR head is checked. */
-    targetItem: string;
-  };
+  proof: CoverageProof;
   environment: {
     kind: "local" | "real";
     readiness: "available" | "prepare" | "missing";
@@ -97,8 +99,8 @@ export interface AcceptanceCoverage extends CoverageObligation {
 }
 
 export interface WorkGraph {
-  /** Absent only on legacy explicit graphs. New compiler output supplies coverage. */
-  coverage?: AcceptanceCoverage[];
+  /** Complete Objective-wide mapping from source obligations to executable proof. */
+  coverage: AcceptanceCoverage[];
   objective: number;
   baseSha: string;
   items: WorkItem[];
@@ -195,6 +197,8 @@ export interface ModelInvocationContext {
 }
 
 export interface PlanningRequest<T> {
+  /** Trusted transient compile input; not part of canonical or persisted graphs. */
+  compileContext?: { objectiveNumber: number; instructions: string };
   purpose?: "diagnosis";
   coverageObligations?: CoverageObligation[];
   objective: string;
@@ -203,7 +207,7 @@ export interface PlanningRequest<T> {
   controllerCapabilities: ControllerCapabilitiesManifest;
   controllerCapabilitiesDigest: string;
   executionProfiles?: ExecutionProfileChoices;
-  schema: unknown;
+  schema?: unknown;
   resultType?: T;
   invocation?: ModelInvocationContext;
 }
@@ -256,13 +260,13 @@ export interface ResultReviewCandidate {
   question: string;
 }
 
-export type ResultReviewFinding = ReviewFinding;
+export type ResultReviewFinding = ReviewChoiceFinding;
 
 export interface PlanningModel {
   generateStructured<T>(request: PlanningRequest<T>): Promise<T>;
   reviewGraph(
     request: PlanReviewRequest,
-  ): Promise<{ findings: GraphReviewFinding[] }>;
+  ): Promise<{ packetId: string; findings: GraphReviewFinding[] }>;
   reviewResult?(request: {
     reviewPhase?: "result-review" | "objective-review";
     criteria: string[];
@@ -276,6 +280,7 @@ export interface PlanningModel {
     observations?: string;
     invocation?: ModelInvocationContext;
   }): Promise<{
+    packetId: string;
     findings: ResultReviewFinding[];
   }>;
 }

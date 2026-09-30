@@ -1,3 +1,4 @@
+import { hydrateWorkerInputSources } from "../dist/compiler.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -60,6 +61,7 @@ test("accepted reprioritization changes pending order without resetting running 
       },
     );
     graph.coverage[0].source = obligations[0].source;
+    hydrateWorkerInputSources(graph, [{ path: "OBJECTIVE", content: body }]);
     const state = {
       objective: 1,
       baseSha: target.baseSha,
@@ -108,9 +110,12 @@ test("accepted reprioritization changes pending order without resetting running 
       config,
       body,
       model: {
-        async reviewGraph() {
+        async reviewGraph(request) {
           reviews++;
-          return { findings: [] };
+          return {
+            packetId: request.reviewPacket.id,
+            findings: [],
+          };
         },
       },
       github: {

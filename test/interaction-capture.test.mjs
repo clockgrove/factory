@@ -1,3 +1,4 @@
+import { compilerRequest, compilerResponse } from "./support/compiler-wire.mjs";
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import {
@@ -161,7 +162,13 @@ test("all four model phases retain actual request/schema/original evidence IDs a
             yield { type: "thread.started", thread_id: "session" };
             yield {
               type: "item.completed",
-              item: { id: "message", type: "agent_message", text: response },
+              item: {
+                id: "message",
+                type: "agent_message",
+                text: prompt.startsWith("Compile this human Objective")
+                  ? JSON.stringify(compilerResponse(prompt))
+                  : response,
+              },
             };
             yield {
               type: "turn.completed",
@@ -201,15 +208,17 @@ test("all four model phases retain actual request/schema/original evidence IDs a
     ordinal: 0,
     observe: emitter.modelObserver({ scopeId: "scope" }),
   });
-  await model.generateStructured({
-    objective: "objective",
-    baseSha: "a".repeat(40),
-    sources: [{ path: "source", content: "pinned literal" }],
-    schema: { type: "object" },
-    controllerCapabilities: {},
-    controllerCapabilitiesDigest: "cap",
-    invocation: invocation("compile"),
-  });
+  await model.generateStructured(
+    compilerRequest({
+      objective: "objective",
+      baseSha: "a".repeat(40),
+      sources: [{ path: "source", content: "pinned literal" }],
+      schema: { type: "object" },
+      controllerCapabilities: {},
+      controllerCapabilitiesDigest: "cap",
+      invocation: invocation("compile"),
+    }),
+  );
   await model.reviewGraph({
     objective: "objective",
     baseSha: "a".repeat(40),
@@ -243,7 +252,7 @@ test("all four model phases retain actual request/schema/original evidence IDs a
   assert.ok(
     JSON.parse(
       readInteractionContent(context.repository, requests[2].content.reference),
-    ).prompt.includes(packet.evidence[0].id),
+    ).prompt.includes(`"evidenceIndex":0`),
   );
   response = "not JSON";
   await assert.rejects(

@@ -113,6 +113,7 @@ for (const inheritedConfig of [false, true])
                     id: "review",
                     type: "agent_message",
                     text: JSON.stringify({
+                      packetId: reviewPacket.packetId,
                       findings: resultFindings({ reviewPacket }, [
                         finding(content, inheritedConfig ? "refuse" : "pass"),
                       ]),
@@ -190,6 +191,7 @@ test("bounded incomplete inventory cannot ground a pass; larger existing budget 
               assert.equal(inventory.treeSha, treeSha);
             }
             return {
+              packetId: request.reviewPacket.id,
               findings: resultFindings(request, [
                 finding(source.content || "invented absence"),
               ]),
@@ -258,6 +260,7 @@ test("non-UTF-8 tracked names cannot produce a complete inventory", async () => 
               paths: [],
             });
             return {
+              packetId: request.reviewPacket.id,
               findings: resultFindings(request, [finding(source.content)]),
             };
           },

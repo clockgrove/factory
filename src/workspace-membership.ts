@@ -217,7 +217,11 @@ export function validateWorkspacePackagePlan(
     if (
       !owners.some(
         (item) =>
-          item.brief.includes(entry) && ownsPath(manifest, item.ownedPaths),
+          (item.brief.includes(entry) ||
+            item.inputSources?.some((source) =>
+              source.content.includes(entry),
+            )) &&
+          ownsPath(manifest, item.ownedPaths),
       )
     )
       throw new Error(

@@ -161,7 +161,7 @@ export function renderService(value: ServiceBinding): string {
 function checkServiceContinuationFields(state: ContinuationState): void {
   // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
   const fields =
-    state.schemaVersion === 3
+    state.schemaVersion === 5
       ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest admission authority allowanceConsumption repairConsumption planningRecovery coordinator planning plan issueByItemId projectionPending error cancelRequested cancelledAt"
       : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
   for (const field of Object.keys(state))
@@ -220,7 +220,7 @@ export function checkIntakeServiceState(config: FactoryConfig): void {
     const state = readContinuation(config.repository, id);
     if (state) checkServiceContinuationFields(state);
     if (state?.admission) checkServiceState(config, id);
-    else if (state && state.schemaVersion !== 3)
+    else if (state && state.schemaVersion !== 5)
       throw new Error("Intake continuation has no admission");
   }
 }
@@ -271,7 +271,7 @@ async function verifyServiceOwner(
     const current = readContinuation(config.repository, objective);
     if (
       current?.cancelledAt ||
-      (current?.schemaVersion === 2 && objectiveComplete(current))
+      (current?.schemaVersion === 4 && objectiveComplete(current))
     )
       return;
     if (inspect("is-active", name) === "failed") break;

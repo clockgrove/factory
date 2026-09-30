@@ -26,8 +26,15 @@ export interface ReviewFinding {
   detail: string;
   question: string;
 }
+export interface ReviewChoiceFinding {
+  criterionIndex: number;
+  verdict: "pass" | "needs-human" | "refuse";
+  evidenceIndices: number[];
+  detail: string;
+  question: string;
+}
 export interface GraphReviewFinding {
-  evidenceIds: string[];
+  evidenceIndices: number[];
   detail: string;
   question: string;
 }
@@ -65,15 +72,33 @@ export function reviewPacket(
   };
 }
 
-/** JSON escaping prevents repository text from closing a controller delimiter. */
+/** Provider choices omit opaque identities; the packet envelope binds their meaning. */
 export function renderReviewPacket(packet: ReviewPacket): string {
-  return JSON.stringify(packet);
+  return JSON.stringify({
+    packetId: packet.id,
+    criteria: packet.criteria.map(({ text }, criterionIndex) => ({
+      criterionIndex,
+      text,
+    })),
+    evidence: packet.evidence.map(({ id: _id, ...entry }, evidenceIndex) => ({
+      evidenceIndex,
+      ...entry,
+    })),
+  });
 }
 
-export function reviewSchema(_packet: ReviewPacket, graph = false): unknown {
+/** Bounds grow numerically, never by enumerating every criterion/evidence identity. */
+export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
+  const index = (length: number) => ({
+    type: "integer",
+    minimum: 0,
+    // An empty packet has no valid selection; the decoder also checks membership.
+    maximum: Math.max(0, length - 1),
+  });
   return {
     type: "object",
     properties: {
+      packetId: { type: "string", enum: [packet.id] },
       findings: {
         type: "array",
         items: {
@@ -82,22 +107,23 @@ export function reviewSchema(_packet: ReviewPacket, graph = false): unknown {
             ...(graph
               ? {}
               : {
-                  criterionId: { type: "string" },
+                  criterionIndex: index(packet.criteria.length),
                   verdict: {
                     type: "string",
                     enum: ["pass", "needs-human", "refuse"],
                   },
                 }),
-            evidenceIds: {
+            evidenceIndices: {
               type: "array",
-              items: { type: "string" },
+              minItems: 1,
+              items: index(packet.evidence.length),
             },
             detail: { type: "string" },
             question: { type: "string" },
           },
           required: [
-            ...(graph ? [] : ["criterionId", "verdict"]),
-            "evidenceIds",
+            ...(graph ? [] : ["criterionIndex", "verdict"]),
+            "evidenceIndices",
             "detail",
             "question",
           ],
@@ -105,7 +131,7 @@ export function reviewSchema(_packet: ReviewPacket, graph = false): unknown {
         },
       },
     },
-    required: ["findings"],
+    required: ["packetId", "findings"],
     additionalProperties: false,
   };
 }
@@ -149,6 +175,41 @@ export function resolveReviewReferences(
     return reference;
   });
 }
+function reviewResponse(response: unknown, packet: ReviewPacket): unknown[] {
+  const root = object(response);
+  if (
+    root.packetId !== packet.id ||
+    Object.keys(root).some((key) => !["packetId", "findings"].includes(key)) ||
+    !Array.isArray(root.findings)
+  )
+    throw new ReviewProtocolError(
+      "Review response requires this exact packetId and a findings array",
+    );
+  return root.findings;
+}
+
+function reviewEvidenceIds(value: unknown, packet: ReviewPacket): string[] {
+  if (
+    !Array.isArray(value) ||
+    !value.length ||
+    new Set(value).size !== value.length
+  )
+    throw new ReviewProtocolError(
+      "Review evidence indices must be a nonempty unique array",
+    );
+  return value.map((index) => {
+    if (
+      !Number.isSafeInteger(index) ||
+      index < 0 ||
+      index >= packet.evidence.length
+    )
+      throw new ReviewProtocolError(
+        "Review evidence index is invalid for this packet",
+      );
+    return packet.evidence[index]!.id;
+  });
+}
+
 export function decodeReview(
   response: unknown,
   packet: ReviewPacket,
@@ -157,47 +218,41 @@ export function decodeReview(
   errors: (string | undefined)[];
   packetError?: string;
 } {
-  const root = object(response);
-  if (
-    Object.keys(root).some((key) => key !== "findings") ||
-    !Array.isArray(root.findings)
-  )
-    throw new ReviewProtocolError(
-      "Review response must contain only a findings array",
-    );
-  const grouped = new Map<string, unknown[]>();
+  const rawFindings = reviewResponse(response, packet);
+  const grouped = new Map<number, unknown[]>();
   let packetError: string | undefined;
-  for (const raw of root.findings) {
+  for (const raw of rawFindings) {
     if (
       !raw ||
       typeof raw !== "object" ||
       Array.isArray(raw) ||
-      !packet.criteria.some(
-        (c) => c.id === (raw as Record<string, unknown>).criterionId,
-      )
+      !Number.isSafeInteger((raw as Record<string, unknown>).criterionIndex) ||
+      ((raw as Record<string, unknown>).criterionIndex as number) < 0 ||
+      ((raw as Record<string, unknown>).criterionIndex as number) >=
+        packet.criteria.length
     ) {
-      packetError = "Review contains an unknown or malformed criterion ID";
+      packetError = "Review contains an unknown or malformed criterion index";
       continue;
     }
-    const id = (raw as Record<string, unknown>).criterionId as string;
-    grouped.set(id, [...(grouped.get(id) ?? []), raw]);
+    const index = (raw as Record<string, unknown>).criterionIndex as number;
+    grouped.set(index, [...(grouped.get(index) ?? []), raw]);
   }
   const errors: (string | undefined)[] = [];
   const findings = packet.criteria.map((criterion, index) => {
     try {
-      const candidates = grouped.get(criterion.id) ?? [];
+      const candidates = grouped.get(index) ?? [];
       if (candidates.length !== 1)
         throw new ReviewProtocolError(
-          "Review criterion ID is missing or duplicated",
+          "Review criterion index is missing or duplicated",
         );
       const value = object(candidates[0]);
       if (
         Object.keys(value).some(
           (key) =>
             ![
-              "criterionId",
+              "criterionIndex",
               "verdict",
-              "evidenceIds",
+              "evidenceIndices",
               "detail",
               "question",
             ].includes(key),
@@ -210,11 +265,12 @@ export function decodeReview(
       )
         throw new ReviewProtocolError("Review verdict is invalid");
       const verdict = value.verdict as ReviewFinding["verdict"];
-      resolveReviewReferences(value.evidenceIds, packet, verdict === "pass");
+      const evidenceIds = reviewEvidenceIds(value.evidenceIndices, packet);
+      resolveReviewReferences(evidenceIds, packet, verdict === "pass");
       return {
         criterionId: criterion.id,
         verdict,
-        evidenceIds: value.evidenceIds as string[],
+        evidenceIds,
         detail: text(value.detail, "detail"),
         question: text(value.question, "question", verdict === "needs-human"),
       };
@@ -229,24 +285,20 @@ export function decodeGraphReview(
   response: unknown,
   packet: ReviewPacket,
 ): ResolvedGraphFinding[] {
-  const root = object(response);
-  if (
-    Object.keys(root).some((key) => key !== "findings") ||
-    !Array.isArray(root.findings)
-  )
-    throw new ReviewProtocolError(
-      "Graph review must contain only a findings array",
-    );
-  return root.findings.map((raw) => {
+  return reviewResponse(response, packet).map((raw) => {
     const value = object(raw);
     if (
       Object.keys(value).some(
-        (key) => !["evidenceIds", "detail", "question"].includes(key),
+        (key) => !["evidenceIndices", "detail", "question"].includes(key),
       )
     )
       throw new ReviewProtocolError("Graph finding contains unknown fields");
     return {
-      evidence: resolveReviewReferences(value.evidenceIds, packet, false),
+      evidence: resolveReviewReferences(
+        reviewEvidenceIds(value.evidenceIndices, packet),
+        packet,
+        false,
+      ),
       detail: text(value.detail, "detail"),
       question: text(value.question, "question"),
     };

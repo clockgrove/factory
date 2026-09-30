@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   finalObjectiveCommands,
-  graphSchemaForSources,
+  compilerCitationChoices,
   objectiveCriteria,
   planningSources,
 } from "../dist/compiler.js";
@@ -65,16 +65,13 @@ test("pinned sections and citation choices preserve literal hashes and ignore fe
       selected.content,
       "## C# ###\nReal content\n~~~\n## Next\nexample\n~~~",
     );
-    const schema = graphSchemaForSources([
+    const choices = compilerCitationChoices([
       { path: "docs/languages.md", content: text },
     ]);
-    const choices = schema.properties.items.items.properties.citations.items;
-    assert.deepEqual(choices.anyOf[0].properties.heading.enum, [
-      "",
-      "Source",
-      "C#",
-      "Next",
-    ]);
+    assert.deepEqual(
+      choices.map((entry) => entry.heading),
+      ["", "Source", "C#", "Next"],
+    );
     assert.throws(
       () =>
         planningSources(

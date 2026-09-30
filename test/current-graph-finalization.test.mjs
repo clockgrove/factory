@@ -259,13 +259,16 @@ test("remote default advancement during final review cannot seal acceptance or c
         git(args.config.checkout, "push", "origin", "HEAD:main");
       }
       return {
-        findings: request.reviewPacket.criteria.map((criterion) => ({
-          criterionId: criterion.id,
-          evidenceIds: [request.reviewPacket.evidence[0].id],
-          verdict: "pass",
-          detail: "Fixture acceptance",
-          question: "",
-        })),
+        packetId: request.reviewPacket.id,
+        findings: request.reviewPacket.criteria.map(
+          (criterion, criterionIndex) => ({
+            criterionIndex,
+            evidenceIndices: [0],
+            verdict: "pass",
+            detail: "Fixture acceptance",
+            question: "",
+          }),
+        ),
       };
     });
     await assert.rejects(

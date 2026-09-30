@@ -8,14 +8,18 @@ import { Codex } from "@openai/codex-sdk";
 import {
   CodexPlanningModel,
   compilePlan,
-  graphSchemaForSources,
+  compilerCitationChoices,
   validateCommandProvenance,
   validateGraph,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
 import { coverageObligations, hydrateCoverageSources } from "../dist/qa.js";
 import { withCoverage } from "./support/coverage.mjs";
-import { encodeCodexReadiness } from "./support/codex-readiness.mjs";
+import {
+  encodeCompilerWire,
+  compilerRequest,
+} from "./support/compiler-wire.mjs";
+import { compilerWire } from "../dist/compiler-wire.js";
 import { createTarget } from "./support/integration-fixture.mjs";
 
 const require = createRequire(import.meta.url);
@@ -57,10 +61,19 @@ function graph(baseSha) {
     },
   );
 }
+function request(baseSha) {
+  return compilerRequest({
+    objective: body,
+    baseSha,
+    sources,
+    coverageObligations: obligations,
+  });
+}
 function wire(input) {
-  const result = encodeCodexReadiness(input);
-  for (const item of result.items) item.citations = [{ choiceIndex: 0 }];
-  return result;
+  return encodeCompilerWire(
+    input,
+    compilerWire(request(input.baseSha), compilerCitationChoices(sources)).data,
+  );
 }
 function validate(value, target) {
   hydrateCoverageSources(value, obligations);
@@ -99,18 +112,12 @@ function transport(t, target) {
     calls,
     async decode(value) {
       response = value;
-      return model.generateStructured({
-        objective: body,
-        baseSha: target.baseSha,
-        sources,
-        schema: graphSchemaForSources(sources),
-        coverageObligations: obligations,
-      });
+      return model.generateStructured(request(target.baseSha));
     },
   };
 }
 
-test("actual Codex schema selects owning readiness commands and canonical generic schemas retain probe", async (t) => {
+test("actual Codex schema selects owning readiness commands", async (t) => {
   const target = await fixture(t);
   const sdk = transport(t, target);
   for (const kind of ["local", "real"]) {
@@ -122,7 +129,10 @@ test("actual Codex schema selects owning readiness commands and canonical generi
       preparedBy: "",
     };
     const encoded = wire(value);
-    assert.equal(encoded.coverage[0].environment.probeValidationIndex, 0);
+    assert.equal(
+      encoded.items[0].coverage[0].environment.probeValidationIndex,
+      0,
+    );
     const decoded = await sdk.decode(encoded);
     assert.deepEqual(
       decoded.coverage[0].environment,
@@ -137,28 +147,17 @@ test("actual Codex schema selects owning readiness commands and canonical generi
   const conforms = new Ajv({ allErrors: true }).compile(schema);
   assert.equal(conforms(wire(graph(target.baseSha))), true);
   assert.equal(conforms(graph(target.baseSha)), false);
-  const environment = schema.properties.coverage.items.properties.environment;
+  const environment =
+    schema.properties.items.items.anyOf[0].properties.coverage.items.properties
+      .environment;
   assert.deepEqual(environment.properties.probeValidationIndex.type, [
     "integer",
     "null",
   ]);
   assert.equal(environment.additionalProperties, false);
-  assert.match(
-    environment.properties.preparedBy.description,
-    /dependency.*prepare/,
-  );
-  assert.match(sdk.calls[0].prompt, /before worker execution/);
-  assert.match(sdk.calls[0].prompt, /future result.*not readiness probes/);
-  const canonicalSchema = graphSchemaForSources(sources);
-  assert.ok(
-    canonicalSchema.properties.coverage.items.properties.environment.properties
-      .probe,
-  );
-  assert.equal(
-    canonicalSchema.properties.coverage.items.properties.environment.properties
-      .probeValidationIndex,
-    undefined,
-  );
+  assert.equal(environment.properties.preparedBy.type, "string");
+  assert.match(sdk.calls[0].prompt, /before work/);
+  assert.match(sdk.calls[0].prompt, /future result.*not a readiness probe/);
 });
 
 test("decoded base-observed probe may cite an unselected immutable file but cannot invent authority", async (t) => {
@@ -229,28 +228,28 @@ test("Codex decoder rejects prose, invalid selectors, unknown owners and old or 
     Number.MAX_SAFE_INTEGER + 1,
   ]) {
     const value = structuredClone(original);
-    value.coverage[0].environment.probeValidationIndex = index;
+    value.items[0].coverage[0].environment.probeValidationIndex = index;
     if (typeof index !== "number" || index < 0 || !Number.isInteger(index))
       assert.equal(conforms(value), false);
     await assert.rejects(sdk.decode(value), /probeValidationIndex/);
   }
   for (const mutate of [
     (value) => {
-      value.coverage[0].itemId = "unknown";
+      value.items[0].coverage[0].itemId = "unknown";
     },
     (value) => {
-      value.coverage[0].environment.probe = "test -d .";
+      value.items[0].coverage[0].environment.probe = "test -d .";
     },
     (value) => {
-      delete value.coverage[0].environment.probeValidationIndex;
+      delete value.items[0].coverage[0].environment.probeValidationIndex;
     },
     (value) => {
-      value.coverage[0].environment = "Use final review";
+      value.items[0].coverage[0].environment = "Use final review";
     },
   ]) {
     const value = structuredClone(original);
     mutate(value);
-    await assert.rejects(sdk.decode(value), /owner|selector/);
+    await assert.rejects(sdk.decode(value), /fields|environment/);
   }
   const wrongOwner = structuredClone(original);
   wrongOwner.items.push({
@@ -258,36 +257,10 @@ test("Codex decoder rejects prose, invalid selectors, unknown owners and old or 
     id: "other",
     validation: [],
   });
-  wrongOwner.coverage[0].itemId = "other";
-  wrongOwner.coverage[0].environment.probeValidationIndex = 0;
+  wrongOwner.items[1].coverage = wrongOwner.items[0].coverage;
+  wrongOwner.items[0].coverage = [];
+  wrongOwner.items[1].coverage[0].environment.probeValidationIndex = 0;
   await assert.rejects(sdk.decode(wrongOwner), /probeValidationIndex/);
-});
-
-test("generic PlanningModel still uses canonical readiness strings without Codex encoding", async (t) => {
-  const target = await fixture(t);
-  const candidate = await compilePlan(
-    1,
-    body,
-    target.baseSha,
-    target.checkout,
-    {
-      async generateStructured(request) {
-        assert.ok(
-          request.schema.properties.coverage.items.properties.environment
-            .properties.probe,
-        );
-        const value = graph(target.baseSha);
-        value.coverage[0].environment.probe = command;
-        return value;
-      },
-      async reviewGraph() {
-        return { findings: [] };
-      },
-    },
-  );
-  assert.equal(candidate.review.status, "clean");
-  assert.equal(candidate.graph.coverage[0].environment.probe, command);
-  verifyPlanCandidate(candidate, 1, body, target.baseSha, target.checkout);
 });
 
 for (const phase of ["provider", "invalid-probe"]) {
@@ -318,12 +291,13 @@ for (const phase of ["provider", "invalid-probe"]) {
           "a failed revision must not reach another review",
         );
         return {
+          packetId: request.reviewPacket.id,
           findings: [
             {
-              evidenceIds: [
-                request.reviewPacket.evidence.find(
+              evidenceIndices: [
+                request.reviewPacket.evidence.findIndex(
                   (entry) => entry.path === "OBJECTIVE",
-                ).id,
+                ),
               ],
               detail: "The original graph needs an explicit readiness decision",
               question: "Which approved readiness command is required?",

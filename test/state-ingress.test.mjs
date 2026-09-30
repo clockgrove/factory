@@ -1,3 +1,4 @@
+import { coverageObligations } from "../dist/qa.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,7 +16,7 @@ const sha = "a".repeat(40);
 
 function state() {
   return {
-    schemaVersion: 2,
+    schemaVersion: 4,
     repository,
     objective,
     runId: "run-1",
@@ -24,6 +25,19 @@ function state() {
     graph: {
       objective,
       baseSha: sha,
+      coverage: [
+        {
+          ...coverageObligations("File exists", ["File exists"])[0],
+          itemId: "asset",
+          proof: { kind: "final-review" },
+          environment: {
+            kind: "local",
+            readiness: "available",
+            probe: "",
+            preparedBy: "",
+          },
+        },
+      ],
       items: [
         {
           id: "asset",
@@ -121,6 +135,13 @@ function withFinalValidation(selected) {
   selected.objectiveCommands = ["test -s approved/image.png"];
   const set = selected.work.asset.assets[0];
   selected.finalValidation = {
+    criteria: [
+      {
+        criterion: "File exists",
+        verdict: "pass",
+        detail: "Fixture final acceptance",
+      },
+    ],
     ...structuredClone(selected.work.asset.validation),
     hydrationReceipt: {
       schemaVersion: 1,
@@ -198,13 +219,21 @@ test("persisted state validates identities and graph/work keys before use", () =
   );
 });
 
-test("schemaVersion 2 state requires ordered exact-tree command receipts", () => {
-  const legacyVersion = state();
-  legacyVersion.schemaVersion = 1;
-  assert.throws(
-    () => parseFactoryState(legacyVersion, repository, objective),
-    /schema version/,
-  );
+test("schemaVersion 4 state requires ordered exact-tree command receipts", () => {
+  for (const schemaVersion of [1, 2, 3]) {
+    const previousVersion = state();
+    previousVersion.schemaVersion = schemaVersion;
+    const preserved = structuredClone(previousVersion);
+    assert.throws(
+      () => parseFactoryState(previousVersion, repository, objective),
+      /schema version/,
+    );
+    assert.deepEqual(
+      previousVersion,
+      preserved,
+      "unsupported historical state remains unchanged",
+    );
+  }
 
   const treeSha = "c".repeat(40);
   const valid = state();
@@ -298,6 +327,13 @@ test("schemaVersion 2 state requires ordered exact-tree command receipts", () =>
   const final = state();
   final.objectiveCommands = ["test -s approved/image.png"];
   final.finalValidation = {
+    criteria: [
+      {
+        criterion: "File exists",
+        verdict: "pass",
+        detail: "Fixture final acceptance",
+      },
+    ],
     treeSha,
     commands: [
       {
@@ -395,7 +431,7 @@ test("item receipts may reference selected dependency or already-present sibling
   }
 });
 
-test("schemaVersion 2 state rejects legacy source paths and accepts explicit bindings", () => {
+test("schemaVersion 4 state rejects legacy source paths and accepts explicit bindings", () => {
   const legacy = state();
   legacy.graph.items[0].sourceAssets = ["assets/source.png"];
   assert.throws(
@@ -576,6 +612,7 @@ test("review observations expose the exact dependency result head", () => {
 test("review observations expose declared ownership and resources for named peers", () => {
   const concurrent = state();
   concurrent.graph.items[0].id = "rc-lfs-policy";
+  concurrent.graph.coverage[0].itemId = "rc-lfs-policy";
   concurrent.graph.items[0].title = "Verify LFS policy";
   concurrent.graph.items[0].acceptance = [
     "rc-lfs-policy may run in parallel with rc-stack-foundation because their ownership and resources are disjoint",

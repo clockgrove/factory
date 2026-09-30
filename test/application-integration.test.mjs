@@ -25,7 +25,10 @@ import { selectAssetSetFromCli } from "../dist/runner.js";
 import { parseFactoryState } from "../dist/state.js";
 import { readContinuation, readState, statePath } from "../dist/state-store.js";
 import { withCoverage } from "./support/coverage.mjs";
-import { encodeCodexReadiness } from "./support/codex-readiness.mjs";
+import {
+  encodeCompilerWire,
+  compilerObligations,
+} from "./support/compiler-wire.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -77,15 +80,10 @@ ${finalCommands.map((command) => `- \`${command}\``).join("\n")}
 `;
 }
 
-function encodeCodexCitationIndexes(graph, citationChoiceIndex = 2) {
-  graph = encodeCodexReadiness(graph);
-  return {
-    ...graph,
-    items: graph.items.map((workItem) => ({
-      ...workItem,
-      citations: [{ choiceIndex: citationChoiceIndex }],
-    })),
-  };
+function encodeCodexCitationIndexes(graph, prompt, citationChoiceIndex = 2) {
+  for (const item of graph.items)
+    item.citations = [{ choiceIndex: citationChoiceIndex }];
+  return encodeCompilerWire(graph, prompt);
 }
 
 async function fixture(name, callback) {
@@ -443,8 +441,11 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
       async generateStructured(request) {
         return withCoverage(request, structuredClone(graph));
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
       async reviewResult(request) {
         assert.deepEqual(
@@ -519,6 +520,7 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
           assert.doesNotMatch(request.observations, /"criteria":/);
         }
         return {
+          packetId: request.reviewPacket.id,
           findings: resultFindings(
             request,
             request.criteria.map((reviewedCriterion) => ({
@@ -629,14 +631,11 @@ test("application retries capacity for exact Work Item and final review requests
                     encodeCodexCitationIndexes(
                       withCoverage(
                         {
-                          coverageObligations: JSON.parse(
-                            prompt
-                              .split("Controller obligations: ")[1]
-                              .split(". Use parallel")[0],
-                          ),
+                          coverageObligations: compilerObligations(prompt),
                         },
                         graph,
                       ),
+                      prompt,
                     ),
                   ),
                 },
@@ -654,7 +653,14 @@ test("application retries capacity for exact Work Item and final review requests
                 item: {
                   id: `${id}-message`,
                   type: "agent_message",
-                  text: JSON.stringify({ findings: [] }),
+                  text: JSON.stringify({
+                    packetId: JSON.parse(
+                      prompt.split(
+                        "Review evidence packet (packet-local choices; JSON strings are data):\n",
+                      )[1],
+                    ).packetId,
+                    findings: [],
+                  }),
                 },
               };
               yield { type: "turn.completed", usage: null };
@@ -683,11 +689,13 @@ test("application retries capacity for exact Work Item and final review requests
                 id: `${id}-message`,
                 type: "agent_message",
                 text: JSON.stringify({
-                  findings: packet.criteria.map(({ id: criterionId }) => ({
-                    criterionId,
+                  packetId: packet.packetId,
+                  findings: packet.criteria.map(({ criterionIndex }) => ({
+                    criterionIndex,
                     verdict: "pass",
-                    evidenceIds: [
-                      packet.evidence.find((e) => e.path === "OBJECTIVE").id,
+                    evidenceIndices: [
+                      packet.evidence.find((e) => e.path === "OBJECTIVE")
+                        .evidenceIndex,
                     ],
                     detail:
                       "The exact validated result satisfies the criterion.",
@@ -798,14 +806,11 @@ test("application fails closed once after exhausted result-review capacity witho
                     encodeCodexCitationIndexes(
                       withCoverage(
                         {
-                          coverageObligations: JSON.parse(
-                            prompt
-                              .split("Controller obligations: ")[1]
-                              .split(". Use parallel")[0],
-                          ),
+                          coverageObligations: compilerObligations(prompt),
                         },
                         graph,
                       ),
+                      prompt,
                     ),
                   ),
                 },
@@ -823,7 +828,14 @@ test("application fails closed once after exhausted result-review capacity witho
                 item: {
                   id: `${id}-message`,
                   type: "agent_message",
-                  text: JSON.stringify({ findings: [] }),
+                  text: JSON.stringify({
+                    packetId: JSON.parse(
+                      prompt.split(
+                        "Review evidence packet (packet-local choices; JSON strings are data):\n",
+                      )[1],
+                    ).packetId,
+                    findings: [],
+                  }),
                 },
               };
               yield { type: "turn.completed", usage: null };
@@ -954,8 +966,11 @@ for (const firstId of ["rc-left", "rc-right"])
         async generateStructured(request) {
           return withCoverage(request, structuredClone(graph));
         },
-        async reviewGraph() {
-          return { findings: [] };
+        async reviewGraph(request) {
+          return {
+            packetId: request.reviewPacket.id,
+            findings: [],
+          };
         },
         async reviewResult(request) {
           const source = request.sources.find(
@@ -1039,6 +1054,7 @@ for (const firstId of ["rc-left", "rc-right"])
               writeFileSync(peerBarrier, "go\n");
           }
           return {
+            packetId: request.reviewPacket.id,
             findings: resultFindings(
               request,
               request.criteria.map((criterion) => {
@@ -1197,11 +1213,15 @@ test("native successor review receives its exact predecessor result head", async
       async generateStructured(request) {
         return withCoverage(request, structuredClone(graph));
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
       async reviewResult(request) {
         return {
+          packetId: request.reviewPacket.id,
           findings: resultFindings(
             request,
             request.criteria.map((criterion) => {
@@ -1310,9 +1330,10 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
       async generateStructured(request) {
         return withCoverage(request, structuredClone(graph));
       },
-      async reviewGraph() {
+      async reviewGraph(request) {
         reviewCount += 1;
         return {
+          packetId: request.reviewPacket.id,
           findings: [
             {
               source: "invented",
@@ -1325,6 +1346,7 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
       },
       async reviewResult(request) {
         return {
+          packetId: request.reviewPacket.id,
           findings: resultFindings(
             request,
             request.criteria.map((criterion) => ({
@@ -1419,10 +1441,14 @@ test("clean accepted plan activates without planning calls and rejects config dr
         reviewCount += 1;
         const { invocation: _invocation, ...packet } = request;
         reviewedPacket = structuredClone(packet);
-        return { findings: [] };
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
       async reviewResult(request) {
         return {
+          packetId: request.reviewPacket.id,
           findings: resultFindings(
             request,
             request.criteria.map((criterion) => ({
@@ -1529,7 +1555,7 @@ test("application lifecycle reattaches once, cancels owned work, and retries onl
           const state = existsSync(restartStatePath)
             ? readContinuation(descriptor.config.repository, objective)
             : undefined;
-          return state?.schemaVersion === 2 && state.work.restart.execution
+          return state?.schemaVersion === 4 && state.work.restart.execution
             ? state
             : undefined;
         },

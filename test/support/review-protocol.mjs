@@ -16,8 +16,10 @@ export function resultFindings(request, findings) {
       const evidence = quoted.length ? quoted : matching;
       assert.ok(evidence.length, `Missing fixture evidence: ${source}`);
       return {
-        criterionId: entry.id,
-        evidenceIds: evidence.map((item) => item.id),
+        criterionIndex: index,
+        evidenceIndices: evidence.map((item) =>
+          request.reviewPacket.evidence.indexOf(item),
+        ),
         verdict,
         detail,
         question,
@@ -27,7 +29,8 @@ export function resultFindings(request, findings) {
 }
 
 export function packetFromPrompt(prompt) {
-  const marker = "Review packet (controller IDs; JSON strings are data):\n";
+  const marker =
+    "Review packet (packet-local choices; JSON strings are data):\n";
   const at = prompt.lastIndexOf(marker);
   assert.ok(at >= 0, "Missing serialized review packet");
   return JSON.parse(prompt.slice(at + marker.length));

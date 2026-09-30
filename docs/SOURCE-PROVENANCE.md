@@ -6,6 +6,16 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Repeated successful delivery checks (#357)
+
+This correction extends the existing authenticated GitHub delivery observation.
+Transient grouping preserves one actual check identity for repeated successful
+same-app/name/head runs using the existing receipt schema. Singular QA selection
+and current protection readiness remain separate. New public synthetic regressions
+cover duplicate-trigger receipts, conflicting and incomplete results, pagination,
+and regular/native final-review evidence. No archived implementation, private
+adopter material, provider calls or additional durable store supplied this change.
+
 ## Existing workspace package membership (#263)
 
 This implementation extends the current compiler, immutable Git validation and delivery paths from the public issue's generic reproduction. The established `yaml` parser supplies YAML node and ambiguity checks; a compact Objective declaration provides exact directory authority through existing digest bindings. New temporary-Git regressions contain generic public data. No archived implementation, private adopter source, prompts or transcripts were copied, and no additional state store was introduced.

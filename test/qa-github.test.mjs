@@ -8,6 +8,7 @@ const head = "a".repeat(40);
 const name = "required / dependency versions";
 const run = (overrides = {}) => ({
   id: 71,
+  app: { id: 15368 },
   head_sha: head,
   name,
   status: "completed",
@@ -104,7 +105,7 @@ test("named CI reads later result pages and preserves transport failures", async
   assert.equal(calls, 1);
 });
 
-test("PR observation exposes only successful unambiguous checks on its exact head", async () => {
+test("PR observation retains successful exact-head checks and same-app repeated triggers", async () => {
   for (const [candidates, expected] of [
     [[run()], [71]],
     [[], []],
@@ -113,57 +114,21 @@ test("PR observation exposes only successful unambiguous checks on its exact hea
     [[run({ conclusion: "failure" })], []],
     [[run({ conclusion: "neutral" })], []],
     [[run({ conclusion: "skipped" })], []],
-    [[run(), run({ id: 72 })], []],
+    [[run(), run({ id: 72 })], [71]],
+    [[run({ app: undefined })], [71]],
+    [[run(), run({ id: 72, app: { id: 99 } })], []],
+    [[run(), run({ id: 72, app: undefined })], []],
+    [[run({ app: null }), run({ id: 72, app: null })], []],
+    [[run({ app: { id: 0 } }), run({ id: 72, app: { id: 0 } })], []],
+    [[run(), run({ id: 72, head_sha: "b".repeat(40) })], []],
+    [[run(), run({ id: 72, status: "queued", conclusion: null })], []],
+    [[run(), run({ id: 72, conclusion: "failure" })], []],
+    [[run(), run({ id: 72, conclusion: "neutral" })], []],
+    [[run(), run({ id: 72, conclusion: "skipped" })], []],
+    [[run(), run({ id: 0 })], []],
+    [[run(), run({ id: 72, html_url: "" })], []],
   ]) {
-    const github = gateway(async (url) => {
-      const request = new URL(url);
-      if (request.pathname.endsWith("/pulls/1"))
-        return new Response(
-          JSON.stringify({
-            state: "open",
-            merged: false,
-            head: { sha: head, ref: "factory/item" },
-            base: { ref: "main" },
-          }),
-          { headers: { "content-type": "application/json" } },
-        );
-      if (request.pathname === "/graphql")
-        return new Response(
-          JSON.stringify({
-            data: {
-              repository: {
-                pullRequest: {
-                  number: 1,
-                  headRefOid: head,
-                  headRefName: "factory/item",
-                  baseRefName: "main",
-                  mergeStateStatus: "CLEAN",
-                },
-              },
-            },
-          }),
-          { headers: { "content-type": "application/json" } },
-        );
-      if (request.pathname.endsWith("/check-runs")) {
-        assert.equal(request.searchParams.get("filter"), "latest");
-        return response(candidates);
-      }
-      assert.equal(
-        request.pathname,
-        `/repos/example/target/commits/${head}/status`,
-      );
-      return new Response(
-        JSON.stringify({ state: "success", total_count: 0 }),
-        {
-          headers: { "content-type": "application/json" },
-        },
-      );
-    });
-    const actual = await github.observe({
-      number: 1,
-      branch: "factory/item",
-      headSha: head,
-    });
+    const actual = await observeChecks([candidates]);
     assert.deepEqual(
       actual.namedChecks.map((check) => check.id),
       expected,
@@ -172,8 +137,106 @@ test("PR observation exposes only successful unambiguous checks on its exact hea
       assert.equal(check.headSha, head);
       assert.equal(check.name, name);
       assert.equal(check.conclusion, "success");
+      assert.equal(
+        check.detailsUrl,
+        candidates.find((run) => run.id === check.id).html_url,
+      );
     }
     if (candidates.some((check) => check.conclusion === "failure"))
       assert.equal(actual.checks, "failing");
+    else if (candidates.some((check) => check.status !== "completed"))
+      assert.equal(actual.checks, "pending");
+    else assert.equal(actual.checks, "passing");
+    assert.equal(actual.mergeReadiness, "ready");
+  }
+});
+
+async function observeChecks(pages, readiness = "CLEAN") {
+  const github = gateway(async (url) => {
+    const request = new URL(url);
+    if (request.pathname.endsWith("/pulls/1"))
+      return new Response(
+        JSON.stringify({
+          state: "open",
+          merged: false,
+          head: { sha: head, ref: "factory/item" },
+          base: { ref: "main" },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    if (request.pathname === "/graphql")
+      return new Response(
+        JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                number: 1,
+                headRefOid: head,
+                headRefName: "factory/item",
+                baseRefName: "main",
+                mergeStateStatus: readiness,
+              },
+            },
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    if (request.pathname.endsWith("/check-runs")) {
+      assert.equal(request.searchParams.get("filter"), "latest");
+      const page = Number(request.searchParams.get("page"));
+      return response(pages[page - 1] ?? []);
+    }
+    assert.equal(
+      request.pathname,
+      `/repos/example/target/commits/${head}/status`,
+    );
+    return new Response(JSON.stringify({ state: "success", total_count: 0 }), {
+      headers: { "content-type": "application/json" },
+    });
+  });
+  return github.observe({
+    number: 1,
+    branch: "factory/item",
+    headSha: head,
+  });
+}
+
+test("PR receipt grouping considers every latest-check page", async () => {
+  const firstPage = [
+    run(),
+    ...Array.from({ length: 99 }, (_, index) =>
+      run({
+        id: 100 + index,
+        name: `other-${index}`,
+      }),
+    ),
+  ];
+  for (const [last, retained, checks] of [
+    [run({ id: 72 }), true, "passing"],
+    [run({ id: 72, conclusion: "failure" }), false, "failing"],
+    [
+      run({ id: 72, status: "in_progress", conclusion: null }),
+      false,
+      "pending",
+    ],
+    [run({ id: 72, app: { id: 99 } }), false, "passing"],
+  ]) {
+    const actual = await observeChecks([firstPage, [last]]);
+    assert.equal(
+      actual.namedChecks.some((check) => check.name === name),
+      retained,
+    );
+    assert.equal(actual.checks, checks);
+  }
+});
+
+test("successful repeated-check receipts preserve current protection readiness", async () => {
+  for (const [readiness, expected] of [
+    ["BLOCKED", "waiting"],
+    ["DIRTY", "blocked"],
+  ]) {
+    const actual = await observeChecks([[run(), run({ id: 72 })]], readiness);
+    assert.equal(actual.namedChecks.length, 1);
+    assert.equal(actual.mergeReadiness, expected);
   }
 });

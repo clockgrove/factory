@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
+import { Octokit } from "@octokit/core";
+import { RealGitHubGateway } from "../dist/github.js";
+import { GitHubClient } from "../dist/github-client.js";
 import { CodexPlanningModel } from "../dist/compiler.js";
 import { parseFactoryState } from "../dist/state.js";
 import { readState } from "../dist/state-store.js";
@@ -90,19 +93,64 @@ for (const delivery of ["regular", "native-stack"]) {
       };
       const { application, github } = makeApplication(descriptor);
       const observe = github.observe.bind(github);
-      github.observe = async (identity) => ({
-        ...(await observe(identity)),
-        namedChecks: [
-          {
-            id: identity.number,
-            headSha: identity.headSha,
-            name: "source-check",
-            status: "completed",
-            conclusion: "success",
-            detailsUrl: `https://github.com/example/target/runs/${identity.number}`,
-          },
-        ],
-      });
+      github.observe = async (identity) => {
+        const observed = await observe(identity);
+        const runs = [1000, 2000].map((offset) => ({
+          id: offset + identity.number,
+          head_sha: identity.headSha,
+          name: "source-check",
+          app: { id: 15368 },
+          status: "completed",
+          conclusion: "success",
+          html_url: `https://github.com/example/target/runs/${offset + identity.number}`,
+        }));
+        const client = new GitHubClient(
+          new Octokit({
+            request: {
+              async fetch(url) {
+                const path = new URL(url).pathname;
+                let body;
+                if (path.endsWith(`/pulls/${identity.number}`))
+                  body = {
+                    state: "open",
+                    merged: false,
+                    head: { sha: identity.headSha, ref: identity.branch },
+                    base: { ref: identity.baseBranch ?? "main" },
+                  };
+                else if (path.endsWith("/check-runs"))
+                  body = { check_runs: runs };
+                else if (path.endsWith("/status"))
+                  body = { state: "success", total_count: 0 };
+                else {
+                  assert.equal(path, "/graphql");
+                  body = {
+                    data: {
+                      repository: {
+                        pullRequest: {
+                          number: identity.number,
+                          headRefOid: identity.headSha,
+                          headRefName: identity.branch,
+                          baseRefName: identity.baseBranch ?? "main",
+                          mergeStateStatus: "CLEAN",
+                        },
+                      },
+                    },
+                  };
+                }
+                return new Response(JSON.stringify(body), {
+                  headers: { "content-type": "application/json" },
+                });
+              },
+            },
+          }),
+        );
+        const actual = await new RealGitHubGateway(
+          config.repository,
+          {},
+          client,
+        ).observe(identity);
+        return { ...observed, namedChecks: actual.namedChecks };
+      };
       let mergeCalls = 0;
       const assertSaved = () => {
         const snapshot = readState(config.repository, 1);
@@ -111,6 +159,11 @@ for (const delivery of ["regular", "native-stack"]) {
         )) {
           assert.equal(work.preIntegrationChecks?.[0].headSha, work.changeRef);
           assert.equal(work.preIntegrationChecks[0].name, "source-check");
+          assert.equal(work.preIntegrationChecks.length, 1);
+          assert.equal(
+            work.preIntegrationChecks[0].id,
+            1000 + work.pullRequest,
+          );
         }
         mergeCalls++;
       };
@@ -182,6 +235,11 @@ for (const delivery of ["regular", "native-stack"]) {
       const observations = JSON.parse(finalPacket.observations);
       for (const record of observations.work) {
         assert.equal(record.independentReview.automaticPass, true);
+        assert.equal(record.preIntegrationChecks.length, 1);
+        assert.equal(
+          record.preIntegrationChecks[0].id,
+          1000 + record.pullRequest,
+        );
         assert.equal(
           record.independentReview.resultCommitSha,
           record.resultCommitSha,

@@ -140,12 +140,22 @@ export function compilerWire(
     });
     itemSchema.required!.push("executionProfile");
   }
-  const environment = strict({
-    kind: { type: "string", enum: ["local", "real"] },
-    readiness: { type: "string", enum: ["available", "prepare", "missing"] },
-    probeValidationIndex: { type: ["integer", "null"], minimum: 0 },
-    preparedBy: text,
-  });
+  const environment = {
+    anyOf: ["local", "real"].map((kind) =>
+      strict({
+        kind: { type: "string", enum: [kind] },
+        readiness: {
+          type: "string",
+          enum: ["available", "prepare", "missing"],
+        },
+        probeValidationIndex:
+          kind === "real"
+            ? integer()
+            : { type: ["integer", "null"], minimum: 0 },
+        preparedBy: text,
+      }),
+    ),
+  };
   const proofForms: Record<string, Record<string, Schema>> = {
     "result-command": { validationIndex: integer() },
     "result-semantic": { acceptanceIndex: integer() },

@@ -150,12 +150,16 @@ test("actual Codex schema selects owning readiness commands", async (t) => {
   const environment =
     schema.properties.items.items.anyOf[0].properties.coverage.items.properties
       .environment;
-  assert.deepEqual(environment.properties.probeValidationIndex.type, [
-    "integer",
-    "null",
-  ]);
-  assert.equal(environment.additionalProperties, false);
-  assert.equal(environment.properties.preparedBy.type, "string");
+  assert.equal(environment.anyOf.length, 2);
+  for (const alternative of environment.anyOf) {
+    const kind = alternative.properties.kind.enum[0];
+    assert.deepEqual(
+      alternative.properties.probeValidationIndex.type,
+      kind === "real" ? "integer" : ["integer", "null"],
+    );
+    assert.equal(alternative.additionalProperties, false);
+    assert.equal(alternative.properties.preparedBy.type, "string");
+  }
   assert.match(sdk.calls[0].prompt, /before work/);
   assert.match(sdk.calls[0].prompt, /future result.*not a readiness probe/);
 });

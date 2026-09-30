@@ -20,7 +20,7 @@ import {
   installedControllerCapabilities,
   CONTROLLER_CAPABILITIES_DIGEST,
 } from "../dist/controller-capabilities.js";
-import { coverageObligations } from "../dist/qa.js";
+import { assertCoverageShape, coverageObligations } from "../dist/qa.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import { createTarget } from "./support/integration-fixture.mjs";
 const Ajv = createRequire(import.meta.url)("ajv");
@@ -291,6 +291,114 @@ test("invalid bound choices fail closed without repairing output or inventing co
   };
   assert.equal(conforms(old), false);
   assert.throws(() => wire.decode(old), /fields/);
+});
+
+test("actual initial and revision SDK schemas require real probes without inventing late-proof prerequisites", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-readiness-wire-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const target = createTarget(root);
+  const captured = [];
+  t.mock.method(Codex.prototype, "startThread", () => ({
+    async runStreamed(prompt, options) {
+      const choices = JSON.parse(
+        prompt.split("\nCompiler choices (JSON data):\n")[1],
+      );
+      const value = {
+        contextId: choices.contextId,
+        items: [item({ coverage: [entry()] })],
+      };
+      captured.push({ prompt, schema: options.outputSchema, value });
+      return {
+        events: (async function* () {
+          yield {
+            type: "item.completed",
+            item: {
+              id: "scripted",
+              type: "agent_message",
+              text: JSON.stringify(value),
+            },
+          };
+          yield { type: "turn.completed", usage: null };
+        })(),
+      };
+    },
+  }));
+  const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
+  const model = new CodexPlanningModel(target.checkout, selection, selection);
+  for (const findings of [
+    [],
+    [
+      {
+        category: "coverage",
+        detail: "Preserve final evidence at its proper phase.",
+      },
+    ],
+  ]) {
+    const graph = await compileObjective(
+      17,
+      body,
+      target.baseSha,
+      target.checkout,
+      model,
+      [],
+      findings,
+    );
+    assertCoverageShape(graph);
+    const { prompt, schema, value } = captured.at(-1);
+    assert(
+      prompt.includes(
+        "source-required execution resource available before the owning item runs",
+      ),
+    );
+    assert(
+      prompt.includes(
+        "configured native MCP capability do not by themselves authorize real/prepare",
+      ),
+    );
+    assert(prompt.includes("retaining every later proof obligation"));
+    const conforms = new Ajv({ strict: false, allErrors: true }).compile(
+      schema,
+    );
+    assert(conforms(value));
+    for (const readiness of ["available", "prepare", "missing"]) {
+      const choice = structuredClone(value);
+      const environment = choice.items[0].coverage[0].environment;
+      Object.assign(environment, {
+        kind: "real",
+        readiness,
+        preparedBy: readiness === "prepare" ? "media" : "",
+      });
+      assert.equal(
+        conforms(choice),
+        false,
+        `real/${readiness}/null must be excluded`,
+      );
+      environment.probeValidationIndex = 0;
+      assert(conforms(choice), JSON.stringify(conforms.errors));
+    }
+    const real = structuredClone(graph);
+    real.coverage[0].environment.kind = "real";
+    assert.throws(
+      () => assertCoverageShape(real),
+      /Real environment requires an exact authorized readiness probe/,
+    );
+    real.coverage[0].environment.probe = real.items[0].validation[0].command;
+    assertCoverageShape(real);
+    real.coverage[0].environment.probe = "invented readiness command";
+    assert.throws(
+      () => assertCoverageShape(real),
+      /exact authorized readiness probe/,
+    );
+    const localProbe = structuredClone(value);
+    localProbe.items[0].coverage[0].environment.probeValidationIndex = 0;
+    assert(conforms(localProbe));
+  }
+  assert.equal(captured.length, 2);
+  assert(
+    captured[1].prompt.includes(
+      "One independent review found these sourced defects",
+    ),
+  );
 });
 
 test("controller hydration supplies exact selected literals and remains stable across revisions and source reselection", () => {

@@ -1899,6 +1899,19 @@ async function runObjectivePass(
       });
       const reviewFinal = () =>
         reviewAcceptance({
+          beforeSubmit: () => {
+            if (cancellationRequested())
+              throw new Error("Objective cancellation requested");
+            const coordinator = state.coordinator!;
+            const previousPhase = coordinator.phase;
+            coordinator.phase = "objective-review-submitted";
+            try {
+              saveState(path, state);
+            } catch (error) {
+              coordinator.phase = previousPhase;
+              throw error;
+            }
+          },
           model: planningModel,
           reviewPhase: "objective-review",
           checkout: config.checkout,
@@ -1935,10 +1948,6 @@ async function runObjectivePass(
             }),
           },
         });
-      if (cancellationRequested())
-        throw new Error("Objective cancellation requested");
-      state.coordinator.phase = "objective-review-submitted";
-      saveState(path, state);
       finalEvidence = await diagnostics.span(
         {
           runId: state.runId,

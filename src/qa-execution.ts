@@ -200,9 +200,16 @@ export async function runQaItem(args: {
     await args.phases?.reserve(item.id, "review");
     if (retainPausedWait()) return;
     delete work.waitingReason;
-    work.pendingEffect = "review";
-    save();
     work.validation = await reviewAcceptance({
+      beforeSubmit: () => {
+        work.pendingEffect = "review";
+        try {
+          save();
+        } catch (error) {
+          delete work.pendingEffect;
+          throw error;
+        }
+      },
       model: args.model,
       invocation: {
         invocationId: randomUUID(),

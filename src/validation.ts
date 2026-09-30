@@ -1344,7 +1344,9 @@ export function workItemReviewEvidence(args: {
     checkout,
     dependencies.flatMap((dependency) => {
       const work = state.work[dependency.id]!;
-      return work.integratedSha
+      return work.integratedSha &&
+        dependency.kind !== "qa" &&
+        dependency.kind !== "aggregate"
         ? [
             {
               item: dependency,
@@ -1482,6 +1484,7 @@ export async function reviewAcceptance(args: {
   decisions?: AcceptanceDecision[];
   observations?: string;
   invocation?: ModelInvocationContext;
+  beforeSubmit?: () => void;
 }): Promise<ValidationEvidence> {
   const { model, checkout, baseSha, commit, evidence, criteria, sources } =
     args;
@@ -1537,6 +1540,19 @@ export async function reviewAcceptance(args: {
       origin: "controller" as const,
     })),
   ]);
+  const request = {
+    reviewPhase: args.reviewPhase ?? ("result-review" as const),
+    criteria,
+    reviewPacket: packet,
+    baseSha,
+    treeSha: evidence.treeSha,
+    sources,
+    change,
+    commands: evidence.commands,
+    evidence: suppliedEvidence,
+    observations: args.observations,
+    invocation: args.invocation,
+  };
   let decoded: ReturnType<typeof decodeReview> | undefined;
   let reviewFailure: string | undefined;
   let responseReceived = false;
@@ -1545,19 +1561,9 @@ export async function reviewAcceptance(args: {
       throw new CompletedModelInvocationError(
         "No independent result reviewer is configured",
       );
-    const response = await model.reviewResult({
-      reviewPhase: args.reviewPhase ?? "result-review",
-      criteria,
-      reviewPacket: packet,
-      baseSha,
-      treeSha: evidence.treeSha,
-      sources,
-      change,
-      commands: evidence.commands,
-      evidence: suppliedEvidence,
-      observations: args.observations,
-      invocation: args.invocation,
-    });
+    // Local evidence and packet preparation must not claim provider submission.
+    args.beforeSubmit?.();
+    const response = await model.reviewResult(request);
     responseReceived = true;
     decoded = decodeReview(response, packet);
   } catch (error) {

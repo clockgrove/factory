@@ -11,6 +11,7 @@ import {
   submitAmendment,
   validateAmendment,
 } from "../dist/graph-amendments.js";
+import { workItemReviewEvidence } from "../dist/validation.js";
 import { aggregateAcceptance, coverageObligations } from "../dist/qa.js";
 import {
   compilerCitationChoices,
@@ -580,7 +581,7 @@ test("compound: amendment invalidates final review before lost closure acknowled
 });
 
 for (const delivery of ["regular", "native-stack"])
-  test(`${delivery}: aggregate parent proves child results without a competing worker or PR`, async () => {
+  test(`${delivery}: aggregate parent retains completed coding and read-only QA proofs without a worker or PR`, async () => {
     await fixture(
       `aggregate-${delivery}`,
       async ({ config, initial, root }) => {
@@ -588,14 +589,33 @@ for (const delivery of ["regular", "native-stack"])
         one.dependencies = ["result"];
         const two = item("two");
         two.dependencies = ["result"];
+        const qa = {
+          ...item("qa", ["one", "two"]),
+          kind: "qa",
+          ownedPaths: [],
+        };
         const parent = {
-          ...item("parent", ["one", "two"]),
+          ...item("parent", ["one", "two", "qa"]),
           kind: "aggregate",
           acceptance: aggregateAcceptance({ id: "parent" }),
           ownedPaths: [],
-          children: ["one", "two"],
+          children: ["one", "two", "qa"],
         };
-        initial.items.push(one, two, parent);
+        initial.items.push(one, two, qa, parent);
+        initial.coverage = coverageObligations(
+          body,
+          objectiveCriteria(body),
+        ).map((entry) => ({
+          ...entry,
+          itemId: "qa",
+          proof: { kind: "integrated-command", validationIndex: 0 },
+          environment: {
+            kind: "local",
+            readiness: "available",
+            probe: "",
+            preparedBy: "",
+          },
+        }));
         const setup = makeApplication({
           config,
           graph: initial,
@@ -612,6 +632,88 @@ for (const delivery of ["regular", "native-stack"])
         assert.equal(state.work.parent.status, "done");
         assert.equal(state.work.parent.pullRequest, undefined);
         assert.equal(state.work.parent.execution, undefined);
+        assert.equal(state.work.qa.status, "done");
+        const sources = workItemReviewEvidence({
+          state,
+          item: parent,
+          checkout: config.checkout,
+          delivery,
+        });
+        const proof = JSON.parse(
+          sources.find(
+            (source) => source.path === "Completed dependency results",
+          ).content,
+        );
+        assert.deepEqual(
+          proof.work.map((record) => record.id),
+          ["result", "one", "two", "qa"],
+        );
+        const qaProof = proof.work.at(-1);
+        assert.equal(qaProof.kind, "qa");
+        assert.equal(qaProof.resultCommitSha, state.integratedSha);
+        assert.equal(
+          qaProof.validationCommands[0].command,
+          "test -s result.txt",
+        );
+        assert.equal(
+          qaProof.validationCommands[0].treeSha,
+          state.work.qa.treeSha,
+        );
+        assert.ok(
+          sources.some((source) => source.path === "Read-only QA proof: qa"),
+        );
+        assert.ok(
+          sources.some(
+            (source) => source.path === "Delivery lifecycle proof: two",
+          ),
+        );
+        // A structural dependency stays in the packet without becoming a merge layer.
+        const structural = {
+          ...parent,
+          id: "later",
+          dependencies: ["parent"],
+          children: ["parent"],
+        };
+        const nested = structuredClone(state);
+        nested.graph.items.push(structural);
+        nested.work.later = { ...nested.work.parent };
+        const nestedProof = workItemReviewEvidence({
+          state: nested,
+          item: structural,
+          checkout: config.checkout,
+          delivery,
+        });
+        assert.ok(
+          nestedProof.some(
+            (source) => source.path === "Read-only QA proof: parent",
+          ),
+        );
+        for (const mutate of [
+          (candidate) => {
+            candidate.work.qa.validation.commands[0].treeSha =
+              candidate.baseSha;
+          },
+          (candidate) => {
+            candidate.work.qa.pullRequest = 999;
+          },
+          (candidate) => {
+            candidate.work.two.integratedSha = candidate.work.two.changeRef;
+          },
+        ]) {
+          const candidate = structuredClone(state);
+          mutate(candidate);
+          assert.throws(
+            () =>
+              workItemReviewEvidence({
+                state: candidate,
+                item: parent,
+                checkout: config.checkout,
+                delivery,
+              }),
+            /exact result tree|worker or delivery identity|exact delivered result head|first result base/,
+          );
+        }
+
         assert.deepEqual(
           readEvents(setup.eventsPath)
             .filter((event) => event.type === "start")

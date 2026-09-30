@@ -27,8 +27,13 @@ import type {
   ModelInvocationUsage,
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
+import { failureDigest } from "./repair-policy.js";
 import { itemsConflict } from "./scheduler.js";
-import type { FactoryState, WorkState } from "./state.js";
+import type {
+  CoordinatorDisposition,
+  FactoryState,
+  WorkState,
+} from "./state.js";
 import { normalizeTokenUsage, tokenCategories } from "./usage.js";
 
 export interface DiagnosticEvent {
@@ -64,6 +69,42 @@ export function redactDiagnosticDetail(
     for (const line of secret.split(/\r?\n/))
       if (line.length) result = result.split(line).join("[REDACTED]");
   return result;
+}
+
+/** Project private coordinator error strings without changing the snapshot. */
+export function redactCoordinatorDisposition(
+  coordinator: CoordinatorDisposition | undefined,
+  secrets: string[] = [],
+): CoordinatorDisposition | undefined {
+  return coordinator
+    ? {
+        ...coordinator,
+        ...(coordinator.observationError
+          ? {
+              observationError: redactDiagnosticDetail(
+                coordinator.observationError,
+                secrets,
+              ),
+            }
+          : {}),
+        ...(coordinator.cancelError
+          ? {
+              cancelError: redactDiagnosticDetail(
+                coordinator.cancelError,
+                secrets,
+              ),
+            }
+          : {}),
+        ...(coordinator.waitReason
+          ? {
+              waitReason: redactDiagnosticDetail(
+                coordinator.waitReason,
+                secrets,
+              ),
+            }
+          : {}),
+      }
+    : undefined;
 }
 
 /** Keep only a suffix that could become a secret when the next chunk arrives. */
@@ -1146,7 +1187,8 @@ export function statusDocument(
             ? ("complete" as const)
             : ("active" as const),
     runId: state.runId,
-    coordinator: state.coordinator ?? null,
+    coordinator:
+      redactCoordinatorDisposition(state.coordinator, secrets) ?? null,
     graphDigest: graphDigest(state.graph),
     graphRevisionCount: state.graphRevisions?.length ?? 1,
     pendingAmendment: state.pendingAmendment
@@ -1155,6 +1197,9 @@ export function statusDocument(
           phase: state.pendingAmendment.phase,
           expectedGraphDigest:
             state.pendingAmendment.proposal.expectedGraphDigest,
+          failureDigest: state.pendingAmendment.error
+            ? failureDigest(state.pendingAmendment.error)
+            : null,
           error: state.pendingAmendment.error
             ? redactDiagnosticDetail(state.pendingAmendment.error, secrets)
             : null,

@@ -9,7 +9,7 @@ import { saveState, statePath } from "../dist/state-store.js";
 import { coverageObligations } from "../dist/qa.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 
-test("diagnostics CLI reads preparing and execution continuations without mutating or losing unknown usage", (t) => {
+test("diagnostics and status CLI preserve snapshots, unknown usage and coordinator error redaction", (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-diagnostics-cli-"));
   const previous = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = join(root, "state");
@@ -20,6 +20,7 @@ test("diagnostics CLI reads preparing and execution continuations without mutati
   });
   const target = createTarget(root);
   const config = factoryConfig(target.checkout, "example/diagnostics-cli");
+  config.policy.allowedSecretNames = ["FACTORY_TEST_STATUS_SECRET"];
   const configPath = join(root, "config.json");
   writeFileSync(configPath, JSON.stringify(config));
   const snapshotPath = statePath(config.repository, 1);
@@ -156,6 +157,68 @@ test("diagnostics CLI reads preparing and execution continuations without mutati
         assert.equal(invalid.stdout, "");
         assert.match(invalid.stderr, /Invalid.*(?:state|snapshot)/);
       }
+    }
+  }
+  const privateValue = "configured-private-value";
+  const coordinator = {
+    ...preparation.coordinator,
+    mode: "paused",
+    waitReason: `Paused: ${privateValue}`,
+    cancelError: `Cessation unknown: ${privateValue}`,
+    observationError: `Observation failed: ${privateValue}`,
+  };
+  preparation.coordinator = coordinator;
+  preparation.error = `Preparation failed: ${privateValue}`;
+  execution.coordinator = coordinator;
+  execution.error = `Execution failed: ${privateValue}`;
+  execution.githubClosureError = `Closure failed: ${privateValue}`;
+  for (const snapshot of [
+    preparation,
+    execution,
+    { ...execution, error: undefined },
+  ]) {
+    saveState(snapshotPath, snapshot);
+    const beforeStatus = readFileSync(snapshotPath, "utf8");
+    for (const flags of [[], ["--json"]]) {
+      const status = spawnSync(
+        process.execPath,
+        [
+          new URL("../dist/cli.js", import.meta.url).pathname,
+          "status",
+          "--objective",
+          "1",
+          "--config",
+          configPath,
+          ...flags,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, FACTORY_TEST_STATUS_SECRET: privateValue },
+        },
+      );
+      assert.equal(status.status, 0, status.stderr);
+      assert.doesNotMatch(status.stdout, /configured-private-value/);
+      assert.match(status.stdout, /\[REDACTED\]/);
+      if (snapshot.schemaVersion === 5 || flags.length) {
+        const document = JSON.parse(status.stdout);
+        for (const field of ["waitReason", "cancelError", "observationError"])
+          assert.equal(
+            document.coordinator[field],
+            coordinator[field].replace(privateValue, "[REDACTED]"),
+          );
+        assert.equal(
+          document.error ?? document.lastError,
+          (snapshot.error ?? snapshot.githubClosureError).replace(
+            privateValue,
+            "[REDACTED]",
+          ),
+        );
+      } else {
+        assert.match(status.stdout, /GitHub: Closure failed: \[REDACTED\]/);
+        if (snapshot.error)
+          assert.match(status.stdout, /error: Execution failed: \[REDACTED\]/);
+      }
+      assert.equal(readFileSync(snapshotPath, "utf8"), beforeStatus);
     }
   }
 });

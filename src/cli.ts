@@ -29,6 +29,7 @@ import {
   readAgentTimeline,
   readUsageSummaryEvents,
   readWorkerOutput,
+  redactCoordinatorDisposition,
   redactDiagnosticDetail,
   statusDocument,
   summarizeDiagnosticUsage,
@@ -548,6 +549,9 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "status") {
+    const secrets = config.policy.allowedSecretNames
+      .map((name) => process.env[name])
+      .filter((value): value is string => Boolean(value));
     const continuation = readContinuation(config.repository, objective);
     if (continuation?.schemaVersion === 5) {
       console.log(
@@ -556,11 +560,16 @@ async function main(): Promise<void> {
           objective,
           runId: continuation.runId,
           state: "preparing",
-          coordinator: continuation.coordinator,
+          coordinator: redactCoordinatorDisposition(
+            continuation.coordinator,
+            secrets,
+          ),
           planning: continuation.planning,
           issueByItemId: continuation.issueByItemId,
           projectionPending: continuation.projectionPending,
-          error: continuation.error,
+          error: continuation.error
+            ? redactDiagnosticDetail(continuation.error, secrets)
+            : continuation.error,
           nextAction:
             continuation.planning === "submitted" ||
             continuation.projectionPending
@@ -579,9 +588,7 @@ async function main(): Promise<void> {
             config.repository,
             objective,
             config.delivery.kind,
-            config.policy.allowedSecretNames
-              .map((name) => process.env[name])
-              .filter((value): value is string => Boolean(value)),
+            secrets,
             config.execution.concurrency,
           ),
         ),
@@ -589,6 +596,8 @@ async function main(): Promise<void> {
     } else if (!state)
       console.log(`Factory for ${config.repository}: no active Objective`);
     else {
+      const printStatus = (text: string): void =>
+        console.log(redactDiagnosticDetail(text, secrets));
       const unitByItem = new Map(
         linearDeliveryUnits(state.graph).flatMap((unit) =>
           unit.items.map((item) => [item.id, unit.id] as const),
@@ -620,12 +629,12 @@ async function main(): Promise<void> {
           ? `${id} waiting for ${conflict.id} path/resource`
           : `${id} ready`;
       };
-      console.log(
+      printStatus(
         `Objective #${objective}: ${state.graph.items.map((item) => describe(item.id)).join(", ")}; final validation ${state.finalValidation?.passed ? "passed" : state.cancelledAt ? "cancelled" : state.error ? "failed" : "pending"}${state.finalValidation?.passed && state.objectiveClosure !== "complete" ? "; Objective GitHub close pending" : ""}${state.error ? `; error: ${state.error}` : ""}${state.githubClosureError ? `; GitHub: ${state.githubClosureError}` : ""}`,
       );
       for (const [id, work] of Object.entries(state.work)) {
         if (work.authentication)
-          console.log(
+          printStatus(
             `Work Item ${id} requires ${work.authentication.provider} authentication; run \`${work.authentication.command}\` in the developer environment, then retry it.`,
           );
         if (
@@ -633,26 +642,26 @@ async function main(): Promise<void> {
           work.step === "approve-result" &&
           work.acceptancePending
         ) {
-          console.log(
+          printStatus(
             `Work Item ${id} awaits criterion decision at tree ${work.acceptancePending.treeSha}: ${work.acceptancePending.criterion}`,
           );
-          console.log(`  ${work.acceptancePending.question}`);
-          console.log(`  Evidence: ${work.acceptancePending.detail}`);
+          printStatus(`  ${work.acceptancePending.question}`);
+          printStatus(`  Evidence: ${work.acceptancePending.detail}`);
         }
         if (work.status !== "waiting" || work.step !== "approve-asset")
           continue;
-        console.log(`Work Item ${id} awaits selection. Candidate AssetSets:`);
+        printStatus(`Work Item ${id} awaits selection. Candidate AssetSets:`);
         for (const set of work.assets ?? [])
-          console.log(
+          printStatus(
             `  ${set.id}: ${set.members.map((member) => `${member.role} → ${member.destination} (${member.ref.digest})`).join(", ")}`,
           );
       }
       if (state.finalAcceptancePending) {
-        console.log(
+        printStatus(
           `Objective awaits criterion decision at tree ${state.finalAcceptancePending.treeSha}: ${state.finalAcceptancePending.criterion}`,
         );
-        console.log(`  ${state.finalAcceptancePending.question}`);
-        console.log(`  Evidence: ${state.finalAcceptancePending.detail}`);
+        printStatus(`  ${state.finalAcceptancePending.question}`);
+        printStatus(`  Evidence: ${state.finalAcceptancePending.detail}`);
       }
     }
   } else if (command === "export-captures") {

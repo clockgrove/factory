@@ -4,6 +4,48 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under #206 and explicitly accepted under #207. Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.46 artifact record
+
+[Release v0.1.46](https://github.com/clockgrove/factory/releases/tag/v0.1.46)
+was built once from reviewed release head and tagged source
+`41949d5246fd86bf9cc7225806aef9f216458f9a`, tree
+`aa9239b91ac6e2a9ceb32562dfdd44a6ef12f267`. The archive is 153552389 bytes,
+SHA-256 `ee7a4b45770ae641a7b55fc4a9a7a4bcec78e8077e7da8337163c53d1f396fed`.
+[Release PR #317](https://github.com/clockgrove/factory/pull/317) records one
+independent full-diff review round and focused verification of the one-line
+notices-header correction. [Candidate CI](https://github.com/clockgrove/factory/actions/runs/36680437043)
+passed, including 559 deterministic tests. Typecheck, lint, formatting,
+third-party notices and package checks passed on that exact candidate.
+
+[Independent public verification](https://github.com/clockgrove/factory/issues/316#issuecomment-5906037510)
+matched the downloaded archive to the audited bytes and published `SHA256SUMS`. Fresh-prefix offline installation passed; the distribution audit
+verified 6342 regular files and 95 bundled dependency roots. Installed CLI
+checks passed, the optional local Claude SDK reported version `0.3.281` ready,
+and all 6342 archive files remained unchanged. The isolated pinned v0.1.46
+marketplace plugin was enabled; its manifest and both skills matched the archive.
+Annotated tag `aef549cc37803eaf2c5b4d92b2a25b13da68297f` resolves to the source above.
+Exact-tag ruleset `24231595` prohibits updates and deletion with no bypass actors.
+
+The release includes the optional media-metadata input correction from
+[PR #314](https://github.com/clockgrove/factory/pull/314), managed-provider
+credential readiness, Claude Managed Agents, preview-bound Langfuse export,
+and bounded offline analysis. Independent installed-input preflight in
+[#310](https://github.com/clockgrove/factory/issues/310) passed; it made no
+provider calls and does not establish live worker acceptance or hosted execution.
+
+The archive excludes later sandbox integration
+[PR #313](https://github.com/clockgrove/factory/pull/313) and LangSmith export
+[PR #315](https://github.com/clockgrove/factory/pull/315). Composed main
+`cd8d6e8077029087c17bf578816099c46aeadaed` passed
+[its own CI](https://github.com/clockgrove/factory/actions/runs/36680903782);
+that is a separate source identity and does not change the published bytes.
+Hosted providers remain unqualified. Publication, installation and preflight
+do not establish live acceptance: workspace qualification remains
+[#263](https://github.com/clockgrove/factory/issues/263), and full autonomous
+qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
+Earlier artifacts, acceptance, failures and accounting retain their original
+scope. No published archive was rebuilt or retagged.
+
 ## Immutable v0.1.45 artifact record
 
 [Release v0.1.45](https://github.com/clockgrove/factory/releases/tag/v0.1.45)

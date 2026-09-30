@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel } from "../dist/compiler.js";
+import { parseProducedAssetSets } from "../dist/media.js";
 import * as configModule from "../dist/config.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
 import {
@@ -2633,6 +2634,45 @@ test("actual worker packets preserve media requirements and isolate controller o
         "visibility",
         "lineage",
       ]);
+      // Exercise the examples from the actual SDK worker input, not a copied prompt.
+      assert.deepEqual(parseProducedAssetSets(manifest.sets), manifest.sets);
+      const metadata = JSON.parse(
+        captured.match(/exact optional shape: (\{"source":.*?\})\. Put all/)[1],
+      );
+      assert.deepEqual(metadata, {
+        source: "<authoritative tool or source>",
+        values: {},
+      });
+      const withMetadata = structuredClone(manifest.sets);
+      withMetadata[0].members[0].formatMetadata = {
+        ...metadata,
+        source: "fixture-format-tool",
+        values: { format: "fixture-format", nested: { field: true } },
+      };
+      assert.deepEqual(parseProducedAssetSets(withMetadata), withMetadata);
+      const malformed = structuredClone(manifest.sets);
+      malformed[0].members[0].formatMetadata = {
+        source: "fixture-format-tool",
+        byteLength: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      };
+      assert.throws(
+        () => parseProducedAssetSets(malformed),
+        /AssetSet candidate-a format metadata is invalid/,
+      );
+      assert.match(captured, /Put all supplied format fields inside values/);
+      assert.match(
+        captured,
+        /Omit formatMetadata when no authoritative format fields are supplied/,
+      );
+      assert.match(
+        captured,
+        /Source byte identity alone does not require formatMetadata/,
+      );
+      assert.match(
+        captured,
+        /controller source\/content receipts already bind byte count and digest/,
+      );
       assert.match(
         captured,
         /preserve source bytes exactly when byte identity is required/,

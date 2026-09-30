@@ -3,9 +3,37 @@ import type {
   AcceptanceCoverage,
   CoverageObligation,
   WorkGraph,
+  WorkItem,
 } from "./contracts.js";
 import { installedControllerCapabilities } from "./controller-capabilities.js";
 import type { FactoryState } from "./state.js";
+
+/** New parents join accepted child results; semantic assertions belong to QA. */
+const aggregateJoinCriterion =
+  "Every explicit child Work Item has completed acceptance and its result is integrated into this aggregate's exact candidate.";
+
+export function aggregateAcceptance(
+  item: Pick<WorkItem, "id">,
+  previousGraph?: WorkGraph,
+): string[] {
+  const previous = previousGraph?.items.find((entry) => entry.id === item.id);
+  return previous ? [...previous.acceptance] : [aggregateJoinCriterion];
+}
+
+/** Candidate boundary only: existing admitted graph bytes remain immutable. */
+export function assertAggregateAcceptance(
+  graph: WorkGraph,
+  previousGraph?: WorkGraph,
+): void {
+  for (const item of graph.items.filter((entry) => entry.kind === "aggregate"))
+    if (
+      JSON.stringify(item.acceptance) !==
+      JSON.stringify(aggregateAcceptance(item, previousGraph))
+    )
+      throw new Error(
+        "Aggregate acceptance must retain prior obligations or the controller-derived child join; new semantic assertions require QA",
+      );
+}
 
 export function sourceDigest(content: string): string {
   return createHash("sha256").update(content).digest("hex");

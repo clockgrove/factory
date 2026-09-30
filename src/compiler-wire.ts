@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { CoverageProof, PlanningRequest, WorkGraph } from "./contracts.js";
+import { aggregateAcceptance } from "./qa.js";
 
 type Schema = {
   [key: string]: unknown;
@@ -230,6 +231,12 @@ export function compilerWire(
               (field) => !readonlyFields.includes(field),
             );
           }
+          if (kind === "aggregate") {
+            delete item.properties!.acceptance;
+            item.required = item.required!.filter(
+              (field) => field !== "acceptance",
+            );
+          }
           return item;
         }),
       },
@@ -283,9 +290,16 @@ export function compilerWire(
         if (typeof item.kind !== "string" || !modes[item.kind])
           throw new Error("Planner Work Item kind is invalid");
         const expected = [...itemSchema.required!, "coverage"].filter(
-          (field) => item.kind === "work" || !readonlyFields.includes(field),
+          (field) =>
+            (item.kind === "work" || !readonlyFields.includes(field)) &&
+            (item.kind !== "aggregate" || field !== "acceptance"),
         );
         keys(item, expected, "item");
+        if (item.kind === "aggregate")
+          item.acceptance = aggregateAcceptance(
+            item as unknown as WorkGraph["items"][number],
+            context.previousGraph,
+          );
         if (item.kind !== "work")
           Object.assign(item, structuredClone(readonlyConstants));
         if (!Array.isArray(item.citations) || !item.citations.length)

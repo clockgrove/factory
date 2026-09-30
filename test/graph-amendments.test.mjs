@@ -10,7 +10,7 @@ import {
   submitAmendment,
   validateAmendment,
 } from "../dist/graph-amendments.js";
-import { coverageObligations } from "../dist/qa.js";
+import { aggregateAcceptance, coverageObligations } from "../dist/qa.js";
 import {
   compilerCitationChoices,
   objectiveCriteria,
@@ -140,6 +140,24 @@ for (const delivery of ["regular", "native-stack"])
             };
           },
           async reviewResult(request) {
+            if (
+              request.observations &&
+              JSON.parse(request.observations).reviewedItemId === "result"
+            ) {
+              const observation = request.reviewPacket.evidence.find(
+                (entry) => entry.path === "Delivery observations",
+              );
+              const captured = JSON.parse(observation.content).harnessDiscovery;
+              assert.equal(observation.origin, "controller");
+              assert.equal(observation.complete, true);
+              assert.equal(captured.itemId, "result");
+              assert.equal(captured.resultTreeSha, request.treeSha);
+              assert.equal(captured.contentOrigin, "harness-declared-proposal");
+              assert.deepEqual(captured.proposal, discovery);
+              assert(captured.attemptId);
+              assert.match(captured.resultCommitSha, /^[a-f0-9]{40}$/);
+              assert(!request.change.includes(".factory-discovery.json"));
+            }
             return {
               packetId: request.reviewPacket.id,
               findings: request.reviewPacket.criteria.map(
@@ -555,6 +573,7 @@ for (const delivery of ["regular", "native-stack"])
         const parent = {
           ...item("parent", ["one", "two"]),
           kind: "aggregate",
+          acceptance: aggregateAcceptance({ id: "parent" }),
           ownedPaths: [],
           children: ["one", "two"],
         };

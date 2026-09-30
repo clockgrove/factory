@@ -1150,3 +1150,69 @@ test("state ingress rejects an attempt handle pointing outside Factory state", (
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("retained discovery review binds current attempt and result, omitting absent or stale captures", () => {
+  const captured = state();
+  captured.work.asset = {
+    status: "running",
+    step: "validate",
+    attempt: "11111111-1111-4111-8111-111111111111",
+    baseSha: sha,
+    executionBaseSha: sha,
+    changeRef: "c".repeat(40),
+    treeSha: "d".repeat(40),
+    discovery: {
+      attempt: "11111111-1111-4111-8111-111111111111",
+      scope: "backlog",
+      reason: "Observed independent verification gap",
+      evidence: ["Exact worker observation"],
+      ownership: ["read-only verification"],
+      acceptance: ["Requested independent semantic check"],
+      dependencies: ["predecessor"],
+    },
+  };
+  const parsed = parseFactoryState(
+    JSON.parse(JSON.stringify(captured)),
+    repository,
+    objective,
+  );
+  for (const delivery of [
+    { kind: "regular" },
+    {
+      kind: "native-stack",
+      unitId: "asset",
+      layerNumber: 1,
+      layerCount: 1,
+      predecessorItemId: null,
+    },
+  ]) {
+    const observation = () =>
+      JSON.parse(
+        workItemReviewObservations(parsed, parsed.graph.items[0], delivery),
+      ).harnessDiscovery;
+    const discovery = observation();
+    assert.equal(discovery.attemptId, parsed.work.asset.attempt);
+    assert.equal(discovery.resultCommitSha, parsed.work.asset.changeRef);
+    assert.equal(discovery.resultTreeSha, parsed.work.asset.treeSha);
+    assert.equal(discovery.contentOrigin, "harness-declared-proposal");
+    const { attempt, ...proposal } = parsed.work.asset.discovery;
+    assert.deepEqual(discovery.proposal, proposal);
+    parsed.work.asset.discovery.attempt =
+      "22222222-2222-4222-8222-222222222222";
+    assert.equal(observation(), null);
+    parsed.work.asset.discovery.attempt = attempt;
+    const tree = parsed.work.asset.treeSha;
+    delete parsed.work.asset.treeSha;
+    assert.equal(observation(), null);
+    parsed.work.asset.treeSha = tree;
+  }
+  delete parsed.work.asset.discovery;
+  assert.equal(
+    JSON.parse(
+      workItemReviewObservations(parsed, parsed.graph.items[0], {
+        kind: "regular",
+      }),
+    ).harnessDiscovery,
+    null,
+  );
+});

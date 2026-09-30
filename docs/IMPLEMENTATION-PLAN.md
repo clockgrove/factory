@@ -73,6 +73,23 @@ that recorded phase without repeating known model/projection work or consuming
 another planning allowance. A discovery arriving during final review invalidates
 that completion result.
 
+New aggregate compiler choices omit free-form acceptance. The controller supplies
+one structural child acceptance/integration criterion; new semantic assertions
+belong to read-only QA children. Existing parent acceptance, or the acceptance of
+unstarted work decomposed into a parent, remains exactly as accepted through the
+trusted previous graph. Candidate validation enforces that derivation without
+rewriting admitted snapshots. Final-review/controller coverage retains the
+original Objective obligations separately from parent acceptance. Aggregate
+validation and independent review still run after actual child integration.
+
+Result review receives the harness discovery retained on the current Work Item
+attempt, with that attempt and the current reviewed result commit/tree. The
+controller proves capture binding; the proposal's facts, requested scope,
+ownership, acceptance and dependencies remain untrusted harness data. It proves
+proposal submission, not accepted amendment authority or completed QA. Missing,
+stale-attempt or incomplete-result records provide no discovery evidence, and the
+private staging file remains outside Git.
+
 ### Compiler plan review
 
 [Trunk issue #19](https://github.com/clockgrove/factory/issues/19) defines the routine path: one structured compiler output from a complete, pinned source packet, deterministic graph checks, then one independent LLM review of the complete proposed plan. The review surface includes the Objective, base, pinned sources, Work Item graph, command-authority receipts, and exact final integrated-head commands. The reviewer must cite source-backed findings for missing Objective obligations, unsupported scope, citation defects, dependency or ownership mistakes, unobservable acceptance, or command/final-validation gaps. Deterministic checks remain authoritative for machine-checkable facts; the reviewer cannot grant authority or silently edit the plan.

@@ -24,24 +24,24 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The following commands install the matching v0.1.49 plugin and CLI; keep the plugin and CLI versions aligned:
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. This source tree prepares v0.1.50. Use the following matching plugin and CLI commands only after that version's tagged plugin, release assets, independent artifact record and public-download verification are published:
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.49
+codex plugin marketplace add clockgrove/factory --ref v0.1.50
 codex plugin add factory@clockgrove
 
-gh release download v0.1.49 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.49.tgz --pattern SHA256SUMS
+gh release download v0.1.50 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.50.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independent artifact digest in the [release artifact record](docs/BUILD-STATUS.md#immutable-v0149-artifact-record). A checksum downloaded beside the tarball is not the independent record. Do not install until that record and public-download verification are available.
+Before installing, compare the tarball's SHA-256 with the independent artifact digest recorded for that same version in the [release artifact record](docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. Do not install until that record and public-download verification are available.
 
 Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.49.tgz
+  ./clockgrove-factory-0.1.50.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

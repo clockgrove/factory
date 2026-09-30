@@ -32,6 +32,7 @@ import type { FactoryState, WorkState } from "./state.js";
 import { normalizeTokenUsage, tokenCategories } from "./usage.js";
 
 export interface DiagnosticEvent {
+  workerUsage?: import("./contracts.js").WorkerUsageObservation;
   capture?: InteractionMetadata;
   eventId: string;
   at: string;

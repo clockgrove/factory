@@ -1,3 +1,4 @@
+import { assertDurableValue } from "./checkpoint.js";
 import { SettledAttemptFailure } from "../work-repair.js";
 import { assertDiscovery } from "../graph-amendments.js";
 import { spawn } from "node:child_process";
@@ -307,39 +308,6 @@ async function verifyBoundInput(path: string, ref: ContentRef): Promise<void> {
     throw new Error("Bound asset input differs from its captured digest");
 }
 
-function assertDurableValue(
-  value: unknown,
-  name: string,
-  seen = new Set<unknown>(),
-): void {
-  if (value === null || typeof value === "string" || typeof value === "boolean")
-    return;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error(`${name} is not JSON-safe`);
-    return;
-  }
-  if (typeof value !== "object") throw new Error(`${name} is not JSON-safe`);
-  if (seen.has(value)) throw new Error(`${name} contains a cycle`);
-  seen.add(value);
-  try {
-    if (Array.isArray(value)) {
-      for (const [index, entry] of value.entries())
-        assertDurableValue(entry, `${name}[${index}]`, seen);
-    } else {
-      if (
-        (Object.getPrototypeOf(value) !== Object.prototype &&
-          Object.getPrototypeOf(value) !== null) ||
-        Object.getOwnPropertySymbols(value).length
-      )
-        throw new Error(`${name} must contain only JSON objects`);
-      for (const [key, entry] of Object.entries(value))
-        assertDurableValue(entry, `${name}.${key}`, seen);
-    }
-  } finally {
-    seen.delete(value);
-  }
-}
-
 function assertDurableHandle(handle: HarnessHandle): void {
   if (!handle || typeof handle.identity !== "string" || !handle.identity)
     throw new Error("Harness returned no durable identity");
@@ -379,6 +347,107 @@ async function preserveControllerAssetDestinations(
     await verifyBoundInput(path, source.ref);
   }
   return destinations;
+}
+
+/** Shared exact collection boundary for local work and imported managed bytes. */
+export async function collectWorktreeResult(
+  checkout: string,
+  worktree: string,
+  request: ExecutionRequest,
+  store: ContentStore,
+  result: HarnessResult,
+): Promise<ExecutionResult> {
+  const discoveryPath = join(worktree, ".factory-discovery.json");
+  let discovery: import("../contracts.js").WorkDiscovery | undefined;
+  if (existsSync(discoveryPath)) {
+    if (
+      !lstatSync(discoveryPath).isFile() ||
+      realpathSync(discoveryPath) !== discoveryPath
+    )
+      throw new Error(
+        "Discovery manifest must be a regular private staging file",
+      );
+    discovery = JSON.parse(readFileSync(discoveryPath, "utf8"));
+    assertDiscovery(discovery!);
+    rmSync(discoveryPath);
+  }
+  if (pinnedGit(worktree, "rev-parse", "HEAD") !== request.baseSha) {
+    throw new Error(
+      "Worker changed HEAD; expected uncommitted changes at exact base",
+    );
+  }
+  const assets = await captureAssetSets(
+    store,
+    worktree,
+    request.item,
+    result.assets ?? [],
+    result.evidence,
+    request.sourceAssets,
+  );
+  for (const [index, source] of (request.selectedAssets ?? []).entries()) {
+    await verifyBoundInput(
+      join(worktree, ".factory-inputs", `selected-${index}`),
+      source.ref,
+    );
+  }
+  const privateSources = (request.sourceAssets ?? []).filter(
+    (source) =>
+      source.binding.kind === "local" ||
+      source.binding.kind === "github-attachment",
+  );
+  for (const [index, source] of privateSources.entries()) {
+    await verifyBoundInput(
+      join(worktree, ".factory-inputs", `source-${index}`),
+      source.ref,
+    );
+  }
+  rmSync(join(worktree, ".factory-inputs"), {
+    recursive: true,
+    force: true,
+  });
+  rmSync(join(worktree, ".factory-assets.json"), { force: true });
+  if (
+    request.item.expectedOutputRoles?.length &&
+    assets.length < (request.item.minimumAssetSets ?? 1)
+  )
+    throw new Error("Media Work Item did not produce the requested AssetSets");
+  const assetDestinations = await preserveControllerAssetDestinations(
+    worktree,
+    assets,
+  );
+  await pinnedGitAsync(worktree, "add", "-A");
+  if (assetDestinations.length)
+    await pinnedGitAsync(worktree, "reset", "HEAD", "--", ...assetDestinations);
+  const acceptedIgnoredLinks: string[] = [];
+  const paths = await checkStagedCandidate(
+    worktree,
+    checkout,
+    request.item.ownedPaths,
+    acceptedIgnoredLinks,
+  );
+  if (!paths.length && !assets.length)
+    throw new Error("Worker produced no repository change");
+  if (paths.length)
+    await pinnedGitAsync(
+      worktree,
+      "-c",
+      "user.name=Factory",
+      "-c",
+      "user.email=factory@users.noreply.github.com",
+      "commit",
+      "-m",
+      `Factory: ${request.item.title}`,
+    );
+  const commit = pinnedGit(worktree, "rev-parse", "HEAD");
+  const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
+  return {
+    changeRef: commit,
+    treeSha,
+    evidence: result.evidence,
+    ...(discovery ? { discovery } : {}),
+    collection: { acceptedIgnoredLinks },
+    assets,
+  };
 }
 
 export class LocalExecutionDriver implements ExecutionDriver {
@@ -643,110 +712,13 @@ export class LocalExecutionDriver implements ExecutionDriver {
         active.request.item,
         active.executionBinding,
       ).collect(active.handle);
-      const discoveryPath = join(active.worktree, ".factory-discovery.json");
-      let discovery: import("../contracts.js").WorkDiscovery | undefined;
-      if (existsSync(discoveryPath)) {
-        if (
-          !lstatSync(discoveryPath).isFile() ||
-          realpathSync(discoveryPath) !== discoveryPath
-        )
-          throw new Error(
-            "Discovery manifest must be a regular private staging file",
-          );
-        discovery = JSON.parse(readFileSync(discoveryPath, "utf8"));
-        assertDiscovery(discovery!);
-        rmSync(discoveryPath);
-      }
-      if (
-        pinnedGit(active.worktree, "rev-parse", "HEAD") !==
-        active.request.baseSha
-      ) {
-        throw new Error(
-          "Worker changed HEAD; expected uncommitted changes at exact base",
-        );
-      }
-      const assets = await captureAssetSets(
-        this.contentStore,
-        active.worktree,
-        active.request.item,
-        result.assets ?? [],
-        result.evidence,
-        active.request.sourceAssets,
-      );
-      for (const [index, source] of (
-        active.request.selectedAssets ?? []
-      ).entries()) {
-        await verifyBoundInput(
-          join(active.worktree, ".factory-inputs", `selected-${index}`),
-          source.ref,
-        );
-      }
-      const privateSources = (active.request.sourceAssets ?? []).filter(
-        (source) =>
-          source.binding.kind === "local" ||
-          source.binding.kind === "github-attachment",
-      );
-      for (const [index, source] of privateSources.entries()) {
-        await verifyBoundInput(
-          join(active.worktree, ".factory-inputs", `source-${index}`),
-          source.ref,
-        );
-      }
-      rmSync(join(active.worktree, ".factory-inputs"), {
-        recursive: true,
-        force: true,
-      });
-      rmSync(join(active.worktree, ".factory-assets.json"), { force: true });
-      if (
-        active.request.item.expectedOutputRoles?.length &&
-        assets.length < (active.request.item.minimumAssetSets ?? 1)
-      )
-        throw new Error(
-          "Media Work Item did not produce the requested AssetSets",
-        );
-      const assetDestinations = await preserveControllerAssetDestinations(
-        active.worktree,
-        assets,
-      );
-      await pinnedGitAsync(active.worktree, "add", "-A");
-      if (assetDestinations.length)
-        await pinnedGitAsync(
-          active.worktree,
-          "reset",
-          "HEAD",
-          "--",
-          ...assetDestinations,
-        );
-      const acceptedIgnoredLinks: string[] = [];
-      const paths = await checkStagedCandidate(
-        active.worktree,
+      collected = await collectWorktreeResult(
         this.checkout,
-        active.request.item.ownedPaths,
-        acceptedIgnoredLinks,
+        active.worktree,
+        active.request,
+        this.contentStore,
+        result,
       );
-      if (!paths.length && !assets.length)
-        throw new Error("Worker produced no repository change");
-      if (paths.length)
-        await pinnedGitAsync(
-          active.worktree,
-          "-c",
-          "user.name=Factory",
-          "-c",
-          "user.email=factory@users.noreply.github.com",
-          "commit",
-          "-m",
-          `Factory: ${active.request.item.title}`,
-        );
-      const commit = pinnedGit(active.worktree, "rev-parse", "HEAD");
-      const treeSha = pinnedGit(active.worktree, "rev-parse", "HEAD^{tree}");
-      collected = {
-        changeRef: commit,
-        treeSha,
-        evidence: result.evidence,
-        ...(discovery ? { discovery } : {}),
-        collection: { acceptedIgnoredLinks },
-        assets,
-      };
     } catch (error) {
       failed = true;
       collectionError = error;

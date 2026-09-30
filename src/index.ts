@@ -18,3 +18,9 @@ export { runSandboxHarness } from "./execution/sandbox-worker.js";
 export * from "./capture-export.js";
 
 export * from "./capture-langsmith.js";
+
+export {
+  DaytonaSandboxProvider,
+  DaytonaUnavailableError,
+  validateDaytonaConfig,
+} from "./execution/daytona.js";

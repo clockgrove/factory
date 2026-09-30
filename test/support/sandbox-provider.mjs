@@ -167,7 +167,10 @@ export class FixtureSandboxProvider {
     this.own(h);
     if (this.destroyFailure) throw Error("sandbox destruction not confirmed");
     for (const s of this.processes.values())
-      if (s.sandboxIdentity === h.identity) assert.notEqual(s.state, "running");
+      if (s.sandboxIdentity === h.identity && s.state === "running") {
+        s.child.kill("SIGTERM");
+        await new Promise((r) => s.child.once("exit", r));
+      }
     // This fixture's harness creates one leaf child. Dispose only its recorded owned PID.
     const handlePath = join(h.workspace, "harness.json");
     if (existsSync(handlePath)) {
@@ -187,6 +190,17 @@ export class FixtureSandboxProvider {
             process.kill(harness.data.pid, "SIGTERM");
           } catch (error) {
             if (error.code !== "ESRCH") throw error;
+          }
+          for (let i = 0; i < 100; i++) {
+            const statPath = `/proc/${harness.data.pid}/stat`;
+            if (
+              !existsSync(statPath) ||
+              /\) Z /.test(readFileSync(statPath, "utf8"))
+            )
+              break;
+            if (i === 99)
+              throw Error("Owned fixture child termination unresolved");
+            await new Promise((r) => setTimeout(r, 10));
           }
         }
       }

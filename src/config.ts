@@ -1,3 +1,4 @@
+import { validateDaytonaConfig } from "./execution/daytona.js";
 import { validateClaudeManagedConfig } from "./execution/claude-managed.js";
 import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
 import { execFileSync } from "node:child_process";
@@ -123,6 +124,7 @@ export type ExecutionConfig =
       kind: "sandbox";
       concurrency: number;
       provider: string;
+      config?: { [key: string]: JsonValue };
       harness: Extract<LocalHarnessConfig, { kind: "registered" }>;
       argv: string[];
     };
@@ -559,7 +561,7 @@ export function validateConfig(value: unknown): FactoryConfig {
   if (value.execution.kind === "sandbox") {
     assertOnlyKeys(
       value.execution,
-      ["kind", "concurrency", "provider", "harness", "argv"],
+      ["kind", "concurrency", "provider", "config", "harness", "argv"],
       "execution",
     );
     if (
@@ -567,6 +569,10 @@ export function validateConfig(value: unknown): FactoryConfig {
       !value.execution.provider.trim()
     )
       throw new Error("Sandbox provider identity required");
+    if (value.execution.provider === "daytona")
+      validateDaytonaConfig(value.execution.config);
+    else if (value.execution.config !== undefined)
+      throw new Error("Only Daytona accepts sandbox provider configuration");
     validateLocalHarness(value.execution.harness);
     if (value.execution.harness.kind !== "registered")
       throw new Error("Sandbox requires the installed registered harness seam");

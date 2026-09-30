@@ -343,26 +343,9 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       throw new Error(
         "Sandbox process start outcome unknown; operator direction required",
       );
-    if (a.process) {
-      await this.options.provider.cancel(a.sandbox, a.process);
-      a.phase = "ready";
-      delete a.process;
-      this.save(handle, context);
-    }
-    if (a.phase === "destroying" || !a.harnessStarted) {
-      await this.destroy(handle, a.terminal ?? "cancelled", context);
-      return;
-    }
-    if (a.inputDigest) {
-      const result = (await this.invoke(
-        handle,
-        "cancel",
-        context,
-      )) as ExecutionObservation;
-      if (!["cancelled", "failed", "complete"].includes(result.state))
-        throw new Error("Sandbox harness cancellation unresolved");
-    }
-    await this.destroy(handle, "cancelled", context);
+    // All supported sandbox-harness execution resources belong to this attempt's
+    // sandbox. Confirmed destruction is cancellation; no helper can run afterward.
+    await this.destroy(handle, a.terminal ?? "cancelled", context);
   }
   async collect(
     handle: ExecutionHandle,

@@ -39,6 +39,22 @@ test("packed package root composes the driver and invokes its registered harness
   const api = await import(pathToFileURL(join(installed, "dist/index.js")));
   assert.equal(typeof api.composeWithSandbox, "function");
   assert.equal(typeof api.runSandboxHarness, "function");
+  const unavailable = new api.DaytonaSandboxProvider(
+    {
+      snapshot: "fixture",
+      target: "test",
+      apiKeyEnv: "DAYTONA_API_KEY",
+      timeoutSeconds: 30,
+      factoryRoot: installed,
+    },
+    "not-a-real-key",
+  );
+  await assert.rejects(
+    unavailable.create({ attemptId: "never-submitted" }),
+    (error) =>
+      error.code === "DAYTONA_SDK_UNAVAILABLE" &&
+      /explicitly install/.test(error.message),
+  );
   const checkout = join(root, "target");
   mkdirSync(checkout);
   const git = (...args) =>

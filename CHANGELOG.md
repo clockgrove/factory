@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.51 — prepared candidate
+
+- Require source-owned QA coverage at the emitted planner choice and strict decoder boundary, preserving work/aggregate alternatives and original final obligations (#345).
+- Allow explicit diagnosed replacement of a known unprojected compiler amendment rejection through existing controls and the same planning allowance, retaining rejected evidence and accepted work (#346).
+
+Publication, installed/public correction verification and full autonomous qualification remain pending. Earlier release evidence retains its original artifact and scenario.
+
 ## 0.1.50 — 2026-09-30
 
 - Derive new aggregate acceptance from completed, integrated child results; retain prior accepted criteria exactly and keep semantic QA and final Objective obligations at their supported phases (#341).

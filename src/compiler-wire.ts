@@ -211,6 +211,7 @@ export function compilerWire(
           item.properties!.kind = { type: "string", enum: [kind] };
           item.properties!.coverage = {
             type: "array",
+            ...(kind === "qa" ? { minItems: 1 } : {}),
             items: strict({
               obligationIndex: integer(obligations.length),
               proof: {
@@ -369,6 +370,8 @@ export function compilerWire(
         });
         if (!Array.isArray(item.coverage))
           throw new Error("Planner item coverage must be an array");
+        if (item.kind === "qa" && item.coverage.length === 0)
+          throw new Error("Planner QA node has no acceptance coverage");
         const coverage = item.coverage;
         delete item.coverage;
         const owner = item as unknown as WorkGraph["items"][number];

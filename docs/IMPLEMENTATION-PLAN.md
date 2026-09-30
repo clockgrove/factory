@@ -73,6 +73,19 @@ that recorded phase without repeating known model/projection work or consuming
 another planning allowance. A discovery arriving during final review invalidates
 that completion result.
 
+A known, unprojected compiler-generated rejection may be explicitly replaced through
+the same proposal/control boundary. The replacement binds the current graph,
+rejected amendment ID and exact failure digest to a concrete diagnosed correction;
+the discovery scope is unchanged. It requires paused settled ownership, an admitted
+planning repair class and remaining total/per-path allowance. A stopped owner uses
+the existing controller lock. The atomic snapshot retains superseded rejected
+proposals alongside their original model captures and accounting. Replacement
+leaves the Objective paused and grants no acceptance: fresh compilation charges the
+existing planning ledger once, then canonical validation, independent review and
+projection apply normally. Unknown effects, projected work, review refusals and
+terminal states remain fenced. No automatic retry loop or second state root is
+introduced.
+
 New aggregate compiler choices omit free-form acceptance. The controller supplies
 one structural child acceptance/integration criterion; new semantic assertions
 belong to read-only QA children. Existing parent acceptance, or the acceptance of

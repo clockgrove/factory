@@ -4,6 +4,8 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
+v0.1.51 is the prepared candidate for source-owned QA coverage and diagnosed replacement of a known unprojected amendment rejection (#345/#346). Publication, independent installation/public verification and full autonomous qualification are pending.
+
 Published [v0.1.50](https://github.com/clockgrove/factory/releases/tag/v0.1.50) has [independent public download and pinned plugin verification](https://github.com/clockgrove/factory/issues/341#issuecomment-5913718125), offline installation and seven exact installed aggregate/discovery/historical-plan correction checks under [#341](https://github.com/clockgrove/factory/issues/341) and [#342](https://github.com/clockgrove/factory/issues/342). See the [exact artifact record](BUILD-STATUS.md#immutable-v0150-artifact-record). Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier evidence remains bound to its original bytes and scenarios.
 
 Earlier published artifacts and their evidence remain unchanged. Publication and installation checks do not establish Objective qualification.
@@ -65,16 +67,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-Install the published matching v0.1.50 plugin and CLI after comparing the tarball digest with the independent value in the [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md#immutable-v0150-artifact-record). Earlier release evidence remains in its historical artifact records.
+The commands below select prepared v0.1.51. Use them only after that version is published, independently verified and its digest is recorded in the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Compare that independent digest before installation. Until then, use the last published version and its corresponding record. Earlier evidence retains its historical artifact scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.50
+codex plugin marketplace add clockgrove/factory --ref v0.1.51
 codex plugin add factory@clockgrove
-gh release download v0.1.50 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.50.tgz --pattern SHA256SUMS
+gh release download v0.1.51 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.51.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the digest with the independent value in the release artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.50.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.51.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

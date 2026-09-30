@@ -15,7 +15,6 @@ import {
   runIntake,
   type IntakeAuthorization,
 } from "./intake.js";
-import { requestControl } from "./coordinator-control.js";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -53,6 +52,7 @@ import {
   admitObjective,
   cancelObjective,
   checkAdmission,
+  controlObjective,
   decidePlan,
   decideResult,
   exportAssetSetForReview,
@@ -191,18 +191,12 @@ export function createApplication(
       checkAdmission(config, objective, services, candidate, admission),
     decidePlan: (objective, candidate, input) =>
       decidePlan(config, objective, services, candidate, input),
-    proposeAmendment: async (objective, proposal) => {
-      const reply = await requestControl(config.repository, {
+    proposeAmendment: (objective, proposal) =>
+      controlObjective(config, {
         objective,
         action: "propose-amendment",
         input: proposal as unknown as Record<string, unknown>,
-      });
-      if (!reply.handled)
-        throw new Error(
-          "Start the existing Objective owner before proposing an amendment",
-        );
-      return reply.result;
-    },
+      }),
     runObjective: (objective, acceptedPlan, admission, options) =>
       runObjective(
         config,

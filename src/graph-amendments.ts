@@ -1,4 +1,9 @@
-import { consumeAllowance } from "./repair-policy.js";
+import {
+  chargeRepair,
+  consumeAllowance,
+  failureDigest,
+  type RepairCorrection,
+} from "./repair-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -37,6 +42,8 @@ export interface AmendmentProposal extends WorkDiscovery {
   /** Operator supplied candidate; worker discoveries are compiled by the controller. */
   graph?: WorkGraph;
   worker?: { itemId: string; attempt: string };
+  /** Explicit disposition of a known compiler rejection, never an effect replay. */
+  replacement?: { amendmentId: string; correction: RepairCorrection };
 }
 export interface PendingAmendment {
   id: string;
@@ -56,6 +63,7 @@ export interface PendingAmendment {
   issueByItemId: Record<string, number>;
   projectionPending?: string;
   error?: string;
+  rejectionStage?: "compilation" | "validation" | "review" | "projection";
 }
 export interface GraphRevision {
   graph: WorkGraph;
@@ -112,6 +120,20 @@ export function assertDiscovery(value: WorkDiscovery): void {
 
 /** Validate the immutable succession, never rewrite the admitted initial digest. */
 export function assertGraphRevisions(state: FactoryState): void {
+  for (const rejected of state.rejectedAmendments ?? []) {
+    assertDiscovery(rejected.proposal);
+    if (
+      !rejected.id ||
+      rejected.phase !== "rejected" ||
+      !rejected.error ||
+      rejected.projectionPending ||
+      ![
+        state.admission?.graphDigest,
+        ...(state.graphRevisions ?? []).map((revision) => revision.digest),
+      ].includes(rejected.proposal.expectedGraphDigest)
+    )
+      throw new Error("Invalid retained amendment rejection");
+  }
   for (const proposal of state.backlogDiscoveries ?? []) {
     assertDiscovery(proposal);
     if (proposal.scope !== "backlog")
@@ -213,6 +235,34 @@ export function assertGraphRevisions(state: FactoryState): void {
     )
       throw new Error("Pending amendment lacks candidate graph");
   }
+  for (const proposal of [
+    ...(state.graphRevisions ?? []).flatMap((revision) =>
+      revision.proposal ? [revision.proposal] : [],
+    ),
+    ...(pending ? [pending.proposal] : []),
+    ...(state.rejectedAmendments ?? []).map((entry) => entry.proposal),
+  ]) {
+    if (!proposal.replacement) continue;
+    const rejected = state.rejectedAmendments?.find(
+      (entry) => entry.id === proposal.replacement!.amendmentId,
+    );
+    const correction = proposal.replacement.correction;
+    if (
+      !rejected ||
+      correction.failureDigest !== failureDigest(rejected.error!) ||
+      !["planning-output", "planning-evidence", "planning-choice"].includes(
+        correction.kind,
+      ) ||
+      ![correction.actor, correction.diagnosis, correction.correction].every(
+        (text) => typeof text === "string" && text.trim(),
+      ) ||
+      correction.actor !== proposal.actor ||
+      proposal.expectedGraphDigest !== rejected.proposal.expectedGraphDigest
+    )
+      throw new Error(
+        "Amendment replacement lost its diagnosed rejection binding",
+      );
+  }
 }
 
 export function hasPendingAmendmentEffect(state: FactoryState): boolean {
@@ -251,6 +301,8 @@ export function submitAmendment(
   )
     throw new Error("Amendment requires a nonterminal admitted Objective");
   if (proposal.scope === "backlog") {
+    if (proposal.replacement)
+      throw new Error("A rejected amendment replacement must remain in scope");
     state.backlogDiscoveries ??= [];
     state.backlogDiscoveries.push(structuredClone(proposal));
     return {
@@ -260,12 +312,21 @@ export function submitAmendment(
       issueByItemId: {},
     };
   }
-  if (state.pendingAmendment)
+  const rejected = proposal.replacement
+    ? validateAmendmentReplacement(state, proposal)
+    : undefined;
+  if (state.pendingAmendment && !rejected)
     throw new Error("An amendment already awaits disposition");
   if (proposal.worker) {
     const work = state.work[proposal.worker.itemId];
     if (!work || work.attempt !== proposal.worker.attempt)
       throw new Error("Discovery has stale worker attempt identity");
+  }
+  if (rejected) {
+    state.rejectedAmendments ??= [];
+    state.rejectedAmendments.push(structuredClone(rejected));
+    // Only this exact known rejection may be cleared; all other state is retained.
+    if (state.error === rejected.error) delete state.error;
   }
   state.pendingAmendment = {
     id: randomUUID(),
@@ -278,6 +339,94 @@ export function submitAmendment(
   delete state.finalAcceptancePending;
   delete state.finalAcceptanceDecisions;
   return state.pendingAmendment;
+}
+
+function validateAmendmentReplacement(
+  state: FactoryState,
+  proposal: AmendmentProposal,
+): PendingAmendment {
+  const rejected = state.pendingAmendment;
+  const replacement = proposal.replacement!;
+  const correction = replacement.correction;
+  if (
+    !rejected ||
+    rejected.id !== replacement.amendmentId ||
+    rejected.phase !== "rejected" ||
+    !rejected.error ||
+    rejected.proposal.graph ||
+    proposal.graph ||
+    rejected.projectionPending ||
+    rejected.reviewDigest ||
+    (rejected.rejectionStage !== undefined
+      ? !["compilation", "validation"].includes(rejected.rejectionStage)
+      : !!rejected.graph) ||
+    !isDeepStrictEqual(rejected.issueByItemId, state.issueByItemId)
+  )
+    throw new Error(
+      "Replacement requires a known unprojected compiler rejection",
+    );
+  if (
+    state.coordinator?.mode !== "paused" ||
+    state.coordinator.cancelError ||
+    state.coordinator.processes?.length ||
+    state.coordinator.phase === "objective-review-submitted" ||
+    (state.error !== undefined && state.error !== rejected.error) ||
+    Object.values(state.work).some(
+      (work) =>
+        work.status === "running" ||
+        work.status === "published" ||
+        work.pendingEffect ||
+        (work.execution && work.status !== "done" && work.step === "execute") ||
+        work.recovery?.failure?.classification === "uncertain",
+    )
+  )
+    throw new Error("Amendment replacement requires paused, settled ownership");
+  const discovery = (value: AmendmentProposal) => ({
+    scope: value.scope,
+    reason: value.reason,
+    evidence: value.evidence,
+    ownership: value.ownership,
+    acceptance: value.acceptance,
+    dependencies: value.dependencies,
+    worker: value.worker,
+  });
+  if (!isDeepStrictEqual(discovery(proposal), discovery(rejected.proposal)))
+    throw new Error("Replacement cannot change the rejected discovery scope");
+  if (
+    !correction ||
+    correction.failureDigest !== failureDigest(rejected.error) ||
+    !["planning-output", "planning-evidence", "planning-choice"].includes(
+      correction.kind,
+    ) ||
+    ![correction.actor, correction.diagnosis, correction.correction].every(
+      (text) => typeof text === "string" && text.trim(),
+    ) ||
+    correction.actor !== proposal.actor ||
+    (rejected.proposal.replacement?.correction.failureDigest ===
+      correction.failureDigest &&
+      rejected.proposal.replacement.correction.correction ===
+        correction.correction) ||
+    state.rejectedAmendments?.some(
+      (entry) =>
+        entry.error === rejected.error &&
+        entry.proposal.replacement?.correction.correction ===
+          correction.correction,
+    )
+  )
+    throw new Error(
+      "Replacement requires a new diagnosis bound to the rejection",
+    );
+  // Check availability without charging or mutating the authoritative ledger.
+  chargeRepair(
+    {
+      admission: state.admission,
+      allowanceConsumption: structuredClone(state.allowanceConsumption),
+      repairConsumption: structuredClone(state.repairConsumption),
+    },
+    correction.kind,
+    ["$planning"],
+  );
+  return rejected;
 }
 
 export function recordWorkerDiscovery(
@@ -450,12 +599,18 @@ export async function applyPendingAmendment(args: {
     resultRereviews: 0,
   };
   const consumption = state.allowanceConsumption;
-  if (pending.phase === "ready")
-    consumeAllowance(state, "planningRevisions", ["$planning"]);
+  if (pending.phase === "ready") {
+    if (pending.proposal.replacement)
+      chargeRepair(state, pending.proposal.replacement.correction.kind, [
+        "$planning",
+      ]);
+    else consumeAllowance(state, "planningRevisions", ["$planning"]);
+  }
   state.graphRevisions ??= [
     { graph: structuredClone(state.graph), digest: graphDigest(state.graph) },
   ];
   let compilationResponseObserved = false;
+  let stage: NonNullable<PendingAmendment["rejectionStage"]> = "compilation";
   try {
     if (args.cancelled()) throw new Error("Objective cancelled");
     const choices = executionProfileChoices(config);
@@ -517,9 +672,11 @@ export async function applyPendingAmendment(args: {
     }
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (stopped()) return false;
+    stage = "validation";
     validateAmendment(state, pending.graph!, config, args.body);
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (pending.phase === "compiled") {
+      stage = "review";
       const sources = planningSources(
         args.body,
         state.baseSha,
@@ -587,6 +744,7 @@ export async function applyPendingAmendment(args: {
     validateAmendment(state, pending.graph!, config, args.body);
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (pending.phase === "reviewed") {
+      stage = "projection";
       pending.phase = "projecting";
       save();
       const projected = await args.github.projectGraph({
@@ -642,8 +800,10 @@ export async function applyPendingAmendment(args: {
       !["compiling", "reviewing", "projecting"].includes(pending.phase) ||
       error instanceof CompletedModelInvocationError ||
       (pending.phase === "compiling" && compilationResponseObserved)
-    )
+    ) {
+      pending.rejectionStage = stage;
       pending.phase = "rejected";
+    }
     pending.error = error instanceof Error ? error.message : String(error);
     if (state.coordinator) {
       state.coordinator.mode = "paused";

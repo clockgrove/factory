@@ -511,7 +511,11 @@ export async function controlObjective(
 ): Promise<unknown> {
   const reply = await requestControl(config.repository, request);
   if (reply.handled) return reply.result;
-  if (!["pause", "drain", "resume", "status"].includes(request.action))
+  if (
+    !["pause", "drain", "resume", "status", "propose-amendment"].includes(
+      request.action,
+    )
+  )
     throw new Error("No active coordinator owns this Objective");
   const lockPath = join(stateRoot(config.repository), "controller.lock");
   const lock = acquireControllerLock(lockPath, request.objective);
@@ -519,6 +523,20 @@ export async function controlObjective(
     const state = readContinuation(config.repository, request.objective);
     if (!state) throw new Error("Objective has no Factory state");
     if (request.action === "status") return state.coordinator;
+    if (request.action === "propose-amendment") {
+      if (state.schemaVersion !== 4 || !request.input?.replacement)
+        throw new Error(
+          "Only diagnosed rejected-amendment replacement is supported without an active owner",
+        );
+      if (state.configDigest !== factoryConfigDigest(config))
+        throw new Error("Objective differs from this Factory installation");
+      const result = submitAmendment(
+        state,
+        request.input as unknown as AmendmentProposal,
+      );
+      saveState(statePath(config.repository, request.objective), state);
+      return result;
+    }
     state.coordinator ??= {
       mode: "running",
       phase: "idle",
@@ -800,6 +818,10 @@ export async function runObjective(
       if (request.action === "propose-amendment") {
         if (state.schemaVersion !== 4)
           throw new Error("Planning has no active graph to amend");
+        if (owner.abort.signal.aborted)
+          throw new Error(
+            "Cancellation is in progress; amendment intake is fenced",
+          );
         const result = submitAmendment(
           state,
           request.input as unknown as AmendmentProposal,

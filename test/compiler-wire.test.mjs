@@ -27,6 +27,7 @@ import {
 import {
   aggregateAcceptance,
   assertCoverageShape,
+  assertCoverageSources,
   coverageObligations,
 } from "../dist/qa.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
@@ -97,6 +98,77 @@ function setup(extra = {}) {
     conforms: new Ajv({ strict: false, allErrors: true }).compile(wire.schema),
   };
 }
+
+test("QA choices require source-owned coverage while work and aggregates may leave coverage to QA", () => {
+  const objective =
+    "# Objective\n\n## Acceptance\n- result.txt exists.\n\n## Validation\n- `test -f result.txt`\n";
+  const pinnedSources = [{ path: "OBJECTIVE", content: objective }];
+  const obligations = coverageObligations(
+    objective,
+    objectiveCriteria(objective),
+  );
+  const { wire, value, conforms } = setup({
+    objective,
+    sources: pinnedSources,
+    coverageObligations: obligations,
+  });
+  const implementation = item({ acceptance: ["result.txt exists."] });
+  const qa = item({
+    kind: "qa",
+    id: "verify-result",
+    title: "Verify the integrated result",
+    goal: "Check the source-required file against the integrated candidate.",
+    acceptance: ["result.txt exists."],
+    dependencies: [implementation.id],
+    coverage: [entry({ kind: "integrated-command", validationIndex: 0 })],
+  });
+  const parent = item({
+    kind: "aggregate",
+    id: "accepted-result",
+    children: [implementation.id, qa.id],
+    dependencies: [implementation.id, qa.id],
+    validation: [],
+  });
+  for (const readOnly of [qa, parent]) {
+    for (const field of [
+      "ownedPaths",
+      "sourceAssets",
+      "expectedOutputRoles",
+      "requiredLfsRoles",
+      "minimumAssetSets",
+    ])
+      delete readOnly[field];
+  }
+  delete parent.acceptance;
+  value.items = [implementation, qa, parent];
+  assert(conforms(value), JSON.stringify(conforms.errors));
+  const graph = wire.decode(value);
+  hydrateWorkerInputSources(graph, pinnedSources);
+  assert.doesNotThrow(() =>
+    validateGraph(graph, 17, graph.baseSha, new Set(["OBJECTIVE"])),
+  );
+  assert.doesNotThrow(() =>
+    assertCoverageSources(graph, pinnedSources, obligations),
+  );
+  assert.equal(graph.coverage[0].itemId, qa.id);
+  assert.deepEqual(graph.coverage[0].proof, {
+    kind: "integrated-command",
+    validationIndex: 0,
+  });
+  assert.deepEqual(implementation.coverage, []);
+  assert.deepEqual(parent.coverage, []);
+
+  // Overall coverage stays complete, but the required QA cannot be ornamental.
+  const unmappedQa = structuredClone(value);
+  unmappedQa.items[0].coverage = [entry()];
+  unmappedQa.items[1].coverage = [];
+  assert.equal(conforms(unmappedQa), false);
+  assert(conforms.errors.some((error) => error.keyword === "minItems"));
+  assert.throws(
+    () => wire.decode(unmappedQa),
+    /Planner QA node has no acceptance coverage/,
+  );
+});
 
 test("compile choices derive bound identities, source commands and canonical proof without transcription", () => {
   const { wire, value, conforms } = setup();
@@ -624,13 +696,28 @@ test("completed SDK decoder failure enters the admitted bounded planning repair 
 });
 
 test("aggregate choices derive the child join while preserving real QA semantics and final coverage", () => {
-  const { input, wire, value, conforms } = setup();
+  const qaCriterion =
+    "The integrated negative control passes without mutating input.";
+  const objective = body.replace(
+    "- Source-defined result exists.",
+    `- Source-defined result exists.\n- ${qaCriterion}`,
+  );
+  const { input, wire, value, conforms } = setup({
+    objective,
+    sources: [{ path: "OBJECTIVE", content: objective }],
+    coverageObligations: coverageObligations(
+      objective,
+      objectiveCriteria(objective),
+    ),
+  });
+  const validation = [{ kind: "source-line", sourceIndex: 0, lineIndex: 7 }];
   const aggregate = item({
     kind: "aggregate",
     id: "parent",
     children: ["implementation", "qa"],
     dependencies: ["implementation", "qa"],
     coverage: [entry()],
+    validation,
   });
   for (const field of [
     "acceptance",
@@ -645,10 +732,14 @@ test("aggregate choices derive the child join while preserving real QA semantics
     kind: "qa",
     id: "qa",
     dependencies: ["implementation"],
-    acceptance: [
-      "The integrated negative control passes without mutating input.",
+    acceptance: [qaCriterion],
+    validation,
+    coverage: [
+      {
+        ...entry({ kind: "integrated-semantic", acceptanceIndex: 0 }),
+        obligationIndex: 1,
+      },
     ],
-    coverage: [],
   });
   for (const field of [
     "ownedPaths",
@@ -658,7 +749,7 @@ test("aggregate choices derive the child join while preserving real QA semantics
     "minimumAssetSets",
   ])
     delete qa[field];
-  value.items = [item(), qa, aggregate];
+  value.items = [item({ validation }), qa, aggregate];
   assert(conforms(value), JSON.stringify(conforms.errors));
   const graph = wire.decode(value);
   assert.deepEqual(
@@ -666,13 +757,16 @@ test("aggregate choices derive the child join while preserving real QA semantics
     aggregateAcceptance({ id: "parent" }),
   );
   assert.deepEqual(graph.items[1].acceptance, qa.acceptance);
-  assert.deepEqual(graph.coverage[0].proof, { kind: "final-review" });
+  const finalCoverage = graph.coverage.find(
+    (coverage) => coverage.itemId === "parent",
+  );
+  assert.deepEqual(finalCoverage.proof, { kind: "final-review" });
   assert.equal(
-    graph.coverage[0].source.text,
+    finalCoverage.source.text,
     input.coverageObligations[0].source.text,
   );
   // Final coverage never becomes an earlier parent criterion.
-  assert(!graph.items[2].acceptance.includes(graph.coverage[0].source.text));
+  assert(!graph.items[2].acceptance.includes(finalCoverage.source.text));
   const future = structuredClone(value);
   future.items[2].acceptance = [
     "Successful final Objective review proves the published check before parent acceptance.",
@@ -680,19 +774,9 @@ test("aggregate choices derive the child join while preserving real QA semantics
   assert.equal(conforms(future), false);
   assert.throws(() => wire.decode(future), /unexpected or missing fields/);
   const direct = structuredClone(graph);
-  direct.coverage.push({
-    ...coverageObligations(body, [
-      "Independent integrated negative control",
-    ])[0],
-    itemId: "qa",
-    proof: { kind: "integrated-semantic", acceptanceIndex: 0 },
-    environment: {
-      kind: "local",
-      readiness: "available",
-      preparedBy: "",
-      probe: "",
-    },
-  });
+  assert.doesNotThrow(() =>
+    assertCoverageSources(direct, input.sources, input.coverageObligations),
+  );
   assert.doesNotThrow(() =>
     validateGraph(direct, 17, input.baseSha, new Set(["OBJECTIVE"])),
   );

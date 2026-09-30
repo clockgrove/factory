@@ -311,7 +311,7 @@ test("membership permission preserves npmrc and root script guards", async () =>
   });
 });
 
-test("plan ownership and brief must carry the exact human-declared addition", async () => {
+test("plan ownership and worker inputs must carry the exact human-declared addition", async () => {
   await fixture(async (_root, target) => {
     const accepted = graph(target.baseSha);
     assert.doesNotThrow(() =>
@@ -357,6 +357,27 @@ test("plan ownership and brief must carry the exact human-declared addition", as
         validateWorkspacePackagePlan(missingBrief, objective, target.checkout),
       /workspace|package|brief/i,
     );
+    missingBrief.items[0].inputSources = [
+      { path: "OBJECTIVE", content: objective },
+    ];
+    assert.doesNotThrow(() =>
+      validateWorkspacePackagePlan(missingBrief, objective, target.checkout),
+    );
+    assert.throws(
+      () =>
+        validateWorkspacePackagePlan(
+          missingBrief,
+          "# No authority\n",
+          target.checkout,
+        ),
+      /explicit.*authority/,
+    );
+    missingBrief.items[0].ownedPaths = ["pnpm-workspace.yaml"];
+    assert.throws(
+      () =>
+        validateWorkspacePackagePlan(missingBrief, objective, target.checkout),
+      /responsible item/,
+    );
   });
 });
 
@@ -368,8 +389,11 @@ test("compiler admits declared workspace ownership and rejects model-invented au
         generated++;
         return withCoverage(request, graph(target.baseSha));
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
     };
     const accepted = await compilePlan(

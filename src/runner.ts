@@ -191,7 +191,7 @@ export async function planObjective(
         lock = options.ownerLock;
       } else lock = mutationLock(config, objective);
       const previous = readContinuation(config.repository, objective);
-      if (previous && previous.schemaVersion !== 3)
+      if (previous && previous.schemaVersion !== 5)
         throw new Error("An activated Objective cannot be recompiled");
       preparation = previous as PreparationState | undefined;
       const bodyDigest = createHash("sha256").update(issue.body).digest("hex");
@@ -207,7 +207,7 @@ export async function planObjective(
           "Planning authority or immutable preparation identity changed",
         );
       preparation ??= {
-        schemaVersion: 3,
+        schemaVersion: 5,
         kind: "preparing",
         repository: config.repository,
         objective,
@@ -326,7 +326,7 @@ function checkActiveAdmission(
     state &&
     (!state.admission || state.admission.digest !== admission.digest) &&
     !(
-      state.schemaVersion === 3 &&
+      state.schemaVersion === 5 &&
       state.authority &&
       JSON.stringify(state.authority) === JSON.stringify(admission.authority) &&
       state.plan?.graphDigest === admission.graphDigest
@@ -340,7 +340,7 @@ function checkActiveAdmission(
       const other = readContinuation(config.repository, Number(name));
       if (
         other &&
-        !(other.schemaVersion === 2 && objectiveComplete(other)) &&
+        !(other.schemaVersion === 4 && objectiveComplete(other)) &&
         !other.cancelledAt
       )
         throw new Error(
@@ -451,7 +451,7 @@ export class CoordinatorHandoff extends Error {
 function canHandoff(state: ContinuationState): boolean {
   if (state.coordinator?.processes?.length || state.coordinator?.cancelError)
     return false;
-  if (state.schemaVersion === 3)
+  if (state.schemaVersion === 5)
     return state.planning !== "submitted" && !state.projectionPending;
   return (
     !state.coordinator?.phase.endsWith("-submitted") &&
@@ -484,7 +484,7 @@ function mutationState(
   objective: number,
 ): FactoryState | undefined {
   const snapshot = owners.get(ownerKey(config, objective))?.snapshot;
-  if (snapshot?.schemaVersion === 3)
+  if (snapshot?.schemaVersion === 5)
     throw new Error("Objective is still preparing");
   return snapshot ?? readState(config.repository, objective);
 }
@@ -574,13 +574,13 @@ async function cancelKnownWork(
   const errors: string[] = [];
   const tasks: Promise<void>[] = [];
   if (
-    state.schemaVersion === 3 &&
+    state.schemaVersion === 5 &&
     (state.planning === "submitted" || state.projectionPending)
   )
     errors.push(
       "Submitted preparation effect has unknown outcome; operator direction required",
     );
-  if (state.schemaVersion === 2 && hasPendingAmendmentEffect(state))
+  if (state.schemaVersion === 4 && hasPendingAmendmentEffect(state))
     errors.push(
       "Submitted amendment effect has unknown outcome; operator direction required",
     );
@@ -588,7 +588,7 @@ async function cancelKnownWork(
     errors.push(
       "Submitted Objective review outcome is unknown; operator direction required",
     );
-  if (state.schemaVersion === 2)
+  if (state.schemaVersion === 4)
     for (const work of Object.values(state.work)) {
       if (work.pendingEffect)
         errors.push(
@@ -690,7 +690,7 @@ export async function runObjective(
   };
   const cancel = (): void => {
     if (!owner.snapshot) return;
-    if (owner.snapshot.schemaVersion === 2 && owner.snapshot.finalAcceptance) {
+    if (owner.snapshot.schemaVersion === 4 && owner.snapshot.finalAcceptance) {
       owner.snapshot.coordinator!.waitReason =
         "Acceptance is sealed; reconcile Objective closure before successor work";
       persist();
@@ -777,7 +777,7 @@ export async function runObjective(
       };
       if (request.action === "status") return state.coordinator;
       if (request.action === "propose-amendment") {
-        if (state.schemaVersion !== 2)
+        if (state.schemaVersion !== 4)
           throw new Error("Planning has no active graph to amend");
         const result = submitAmendment(
           state,
@@ -788,7 +788,7 @@ export async function runObjective(
         return result;
       }
       if (request.action === "cancel") {
-        if (state.schemaVersion === 2 && state.finalAcceptance)
+        if (state.schemaVersion === 4 && state.finalAcceptance)
           throw new Error(
             "Acceptance is sealed; resume to reconcile Objective closure",
           );
@@ -874,7 +874,7 @@ export async function runObjective(
         await owner.cancellation;
         if (!state.coordinator?.cancelError) {
           state.cancelledAt = new Date().toISOString();
-          if (state.schemaVersion === 2)
+          if (state.schemaVersion === 4)
             for (const work of Object.values(state.work))
               if (work.status === "pending" || work.status === "running")
                 work.status = "cancelled";
@@ -886,7 +886,7 @@ export async function runObjective(
         state?.coordinator?.mode !== "running" &&
         state?.coordinator &&
         !(
-          state.schemaVersion === 2 &&
+          state.schemaVersion === 4 &&
           Object.values(state.work).some(
             (work) => work.status === "running" || work.status === "published",
           )
@@ -922,7 +922,7 @@ export async function runObjective(
         const current = owner.snapshot;
         if (
           !(error instanceof GitHubClosureFailure) ||
-          current?.schemaVersion !== 2 ||
+          current?.schemaVersion !== 4 ||
           !current.admission
         )
           throw error;
@@ -1074,8 +1074,8 @@ async function runObjectivePass(
       saveState(path, continuation);
     }
     let preparation =
-      continuation?.schemaVersion === 3 ? continuation : undefined;
-    let state = continuation?.schemaVersion === 2 ? continuation : undefined;
+      continuation?.schemaVersion === 5 ? continuation : undefined;
+    let state = continuation?.schemaVersion === 4 ? continuation : undefined;
     if (preparation?.plan && acceptedPlan && !preparation.admission) {
       if (!samePreparedPlan(preparation.plan, acceptedPlan))
         throw new Error(
@@ -1146,7 +1146,7 @@ async function runObjectivePass(
         throw new Error(
           "Interrupted coordinator subprocess remains owned; cancel or resolve ownership before continuing",
         );
-      if (state.schemaVersion === 2 && hasPendingAmendmentEffect(state))
+      if (state.schemaVersion === 4 && hasPendingAmendmentEffect(state))
         throw new Error(
           "Submitted amendment effect has unknown outcome; operator direction required",
         );
@@ -1209,7 +1209,7 @@ async function runObjectivePass(
           );
       }
       if (
-        state.schemaVersion !== 2 ||
+        state.schemaVersion !== 4 ||
         state.repository !== config.repository ||
         state.configDigest !== installationConfigDigest
       ) {
@@ -1311,7 +1311,7 @@ async function runObjectivePass(
           const other = readContinuation(config.repository, Number(name));
           if (
             other &&
-            !(other.schemaVersion === 2 && objectiveComplete(other)) &&
+            !(other.schemaVersion === 4 && objectiveComplete(other)) &&
             !other.cancelledAt
           )
             throw new Error(
@@ -1341,7 +1341,7 @@ async function runObjectivePass(
       }
       if (!preparation) {
         preparation = {
-          schemaVersion: 3,
+          schemaVersion: 5,
           kind: "preparing",
           repository: config.repository,
           objective,
@@ -1515,7 +1515,7 @@ async function runObjectivePass(
           }),
       );
       state = {
-        schemaVersion: 2,
+        schemaVersion: 4,
         ...(preparation.planningRecovery
           ? { planningRecovery: preparation.planningRecovery }
           : {}),
@@ -1943,7 +1943,7 @@ async function runObjectivePass(
     });
     const current = owner.snapshot;
     if (
-      current?.schemaVersion === 2 &&
+      current?.schemaVersion === 4 &&
       current.finalAcceptance &&
       !(error instanceof GitHubClosureFailure)
     ) {
@@ -1954,7 +1954,7 @@ async function runObjectivePass(
     }
     if (
       active.size &&
-      current?.schemaVersion === 2 &&
+      current?.schemaVersion === 4 &&
       !cancellationRequested()
     ) {
       for (const work of Object.values(current.work)) {
@@ -1967,7 +1967,7 @@ async function runObjectivePass(
       }
       await Promise.allSettled(active.values());
     }
-    if (current?.schemaVersion === 2 && !cancellationRequested()) {
+    if (current?.schemaVersion === 4 && !cancellationRequested()) {
       for (const work of Object.values(current.work)) {
         if (
           !work.execution ||
@@ -1991,18 +1991,18 @@ async function runObjectivePass(
         await Promise.allSettled(active.values());
         if (!current.coordinator?.cancelError && active.size === 0) {
           current.cancelledAt = new Date().toISOString();
-          if (current.schemaVersion === 2)
+          if (current.schemaVersion === 4)
             for (const work of Object.values(current.work))
               if (work.status !== "done" && work.status !== "published")
                 work.status = "cancelled";
         }
       } else if (
         error instanceof GitHubClosureFailure &&
-        current.schemaVersion === 2
+        current.schemaVersion === 4
       ) {
         current.githubClosureError = error.message;
       } else if (
-        current.schemaVersion === 3 &&
+        current.schemaVersion === 5 &&
         current.planning === "complete" &&
         !current.projectionPending
       ) {
@@ -2044,11 +2044,11 @@ export async function cancelObjective(
     const continuation = readContinuation(config.repository, objective);
     if (!continuation) throw new Error("Objective has no Factory state");
     if (
-      (continuation.schemaVersion === 2 && objectiveComplete(continuation)) ||
+      (continuation.schemaVersion === 4 && objectiveComplete(continuation)) ||
       continuation.cancelledAt
     )
       return "cancelled";
-    if (continuation.schemaVersion === 2 && continuation.finalAcceptance)
+    if (continuation.schemaVersion === 4 && continuation.finalAcceptance)
       throw new Error(
         "Acceptance is sealed; resume to reconcile Objective closure",
       );
@@ -2068,7 +2068,7 @@ export async function cancelObjective(
       saveState(statePath(config.repository, objective), continuation);
       throw error;
     }
-    if (continuation.schemaVersion === 2)
+    if (continuation.schemaVersion === 4)
       for (const work of Object.values(continuation.work)) {
         if (work.execution && work.step === "execute")
           await driver.collect(work.execution).catch(() => undefined);

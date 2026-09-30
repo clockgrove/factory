@@ -90,9 +90,10 @@ const body =
   "# Recovery fixture\n## Acceptance\n- result.txt exists\n## Commands\n- test -s result.txt\n## Final validation\n- test -s result.txt\n";
 function reviewer(request) {
   return {
+    packetId: request.reviewPacket.id,
     findings: resultFindings(
       request,
-      request.criteria.map((criterion) => ({
+      request.criteria.map((criterion, criterionIndex) => ({
         criterion,
         verdict: "pass",
         source: "OBJECTIVE",
@@ -118,7 +119,10 @@ function model(
       request.purpose === "diagnosis"
         ? diagnosis(request)
         : withCoverage(request, graph),
-    reviewGraph: async () => ({ findings: [] }),
+    reviewGraph: async (request) => ({
+      packetId: request.reviewPacket.id,
+      findings: [],
+    }),
     reviewResult: async (request) => reviewer(request),
   };
 }
@@ -369,11 +373,12 @@ for (const kind of [
           if (kind === "planning-evidence" && reviews > 1)
             assert.match(request.graph.items[0].brief, /RELEASE_TOKEN/);
           return {
+            packetId: request.reviewPacket.id,
             findings:
               reviews === 1 && kind !== "planning-output"
                 ? [
                     {
-                      evidenceIds: [request.reviewPacket.evidence[0].id],
+                      evidenceIndices: [0],
                       detail:
                         kind === "operator"
                           ? "A security owner must choose policy"
@@ -430,7 +435,10 @@ test("planning allowance survives restart and stops before a new model call", as
         calls++;
         return { bad: "shape" };
       },
-      reviewGraph: async () => ({ findings: [] }),
+      reviewGraph: async (request) => ({
+        packetId: request.reviewPacket.id,
+        findings: [],
+      }),
     };
     await assert.rejects(
       compilePlan(
@@ -509,7 +517,7 @@ for (const delivery of ["regular", "native-stack"])
         objectiveIssue: 1,
       });
       const state = {
-        schemaVersion: 2,
+        schemaVersion: 4,
         repository: config.repository,
         objective: 1,
         runId: "fixture",
@@ -774,9 +782,9 @@ for (const delivery of ["regular", "native-stack"])
             return {
               findings: [
                 {
-                  criterionId: request.reviewPacket.criteria[0].id,
+                  criterionIndex: 0,
                   verdict: "pass",
-                  evidenceIds: ["invented-source-id"],
+                  evidenceIndices: ["invented-source-id"],
                   detail: "transport only",
                   question: "",
                 },
@@ -969,7 +977,7 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
     planner.reviewGraph = async (request) => ({
       findings: [
         {
-          evidenceIds: [request.reviewPacket.evidence[0].id],
+          evidenceIndices: [0],
           detail: "Source needs an owner interpretation",
           question: "Which delivery policy applies?",
         },
@@ -1028,9 +1036,12 @@ test("pause after known planning response preserves compilation for resume witho
         paused = true;
         return withCoverage(request, graph);
       },
-      reviewGraph: async () => {
+      reviewGraph: async (request) => {
         reviews++;
-        return { findings: [] };
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
     };
     const compile = () =>

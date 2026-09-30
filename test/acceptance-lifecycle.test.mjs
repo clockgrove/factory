@@ -1,3 +1,4 @@
+import { compilerRequest, compilerResponse } from "./support/compiler-wire.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
@@ -22,8 +23,7 @@ test("compile and independent graph review expose the pre-delivery boundary for 
     items: [{ id: "media", acceptance: [correctedCriterion] }],
   };
   const finding = {
-    source: "OBJECTIVE",
-    quote: source,
+    evidenceIndices: [0],
     detail:
       "The compound media criterion requires post-delivery evidence before publication.",
     question:
@@ -47,7 +47,17 @@ test("compile and independent graph review expose the pre-delivery boundary for 
   t.mock.method(Codex.prototype, "startThread", () => ({
     async runStreamed(prompt) {
       prompts.push(prompt);
-      const response = responses.shift();
+      const scripted = responses.shift();
+      const response = prompt.startsWith("Compile this human Objective")
+        ? compilerResponse(prompt, scripted.items)
+        : {
+            packetId: JSON.parse(
+              prompt.split(
+                "Review evidence packet (packet-local choices; JSON strings are data):\n",
+              )[1],
+            ).packetId,
+            ...scripted,
+          };
       return {
         events: (async function* () {
           yield {
@@ -79,46 +89,54 @@ test("compile and independent graph review expose the pre-delivery boundary for 
     controllerCapabilities: installedControllerCapabilities(),
     controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
   };
-  // A custom schema keeps this test focused on lifecycle instructions, rather
-  // than the independently covered indexed citation/schema decoder.
-  assert.deepEqual(
-    await model.generateStructured({ ...request, schema: { type: "object" } }),
-    graph,
-  );
+  const compiled = await model.generateStructured(compilerRequest(request));
+  assert.deepEqual(compiled.items[0].acceptance, [correctedCriterion]);
   const badGraph = structuredClone(graph);
   badGraph.items[0].acceptance = [badCriterion];
   assert.deepEqual(
-    await model.reviewGraph({
-      ...request,
-      graph: badGraph,
-      commands: [],
-      finalCommands: [],
-    }),
-    { findings: [finding] },
+    (
+      await model.reviewGraph({
+        ...request,
+        graph: badGraph,
+        commands: [],
+        finalCommands: [],
+      })
+    ).findings,
+    [finding],
   );
   assert.deepEqual(
-    await model.reviewGraph({
-      ...request,
-      graph,
-      commands: [],
-      finalCommands: [],
-    }),
-    { findings: [] },
+    (
+      await model.reviewGraph({
+        ...request,
+        graph,
+        commands: [],
+        finalCommands: [],
+      })
+    ).findings,
+    [],
   );
   assert.deepEqual(
-    await model.reviewGraph({
-      ...request,
-      sources: [
-        ...request.sources,
-        { path: "docs/local-dag.md", content: dependencyCriterion },
-      ],
-      graph: downstreamGraph,
-      commands: [],
-      finalCommands: [],
-    }),
-    { findings: [] },
+    (
+      await model.reviewGraph({
+        ...request,
+        sources: [
+          ...request.sources,
+          { path: "docs/local-dag.md", content: dependencyCriterion },
+        ],
+        graph: downstreamGraph,
+        commands: [],
+        finalCommands: [],
+      })
+    ).findings,
+    [],
   );
-  for (const prompt of prompts) {
+  assert.match(prompts[0], /Work-item result proof precedes its own delivery/);
+  assert.match(
+    prompts[0],
+    /later obligations.*final Objective acceptance|Final review selects the original Objective criterion/,
+  );
+  assert.ok(prompts[0].includes(source));
+  for (const prompt of prompts.slice(1)) {
     assert.match(prompt, /BEFORE the current item's own delivery/);
     assert.match(prompt, /compound criteria/);
     assert.match(prompt, /upload.*before branch\/PR publication/);

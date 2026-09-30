@@ -514,7 +514,7 @@ async function main(): Promise<void> {
   }
   if (command === "status") {
     const continuation = readContinuation(config.repository, objective);
-    if (continuation?.schemaVersion === 3) {
+    if (continuation?.schemaVersion === 5) {
       console.log(
         JSON.stringify({
           repository: config.repository,

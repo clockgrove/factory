@@ -82,6 +82,7 @@ for (const attributes of [undefined, "*.bin filter=lfs # café\n"])
                 ).content,
               );
               return {
+                packetId: request.reviewPacket.id,
                 findings: resultFindings(request, [
                   {
                     criterion: "notes complete",
@@ -274,6 +275,7 @@ test("binary same-path selected LFS validation supplies exact pointer and inheri
                   id: "review",
                   type: "agent_message",
                   text: JSON.stringify({
+                    packetId: packetFromPrompt(input).packetId,
                     findings: resultFindings(
                       { reviewPacket: packetFromPrompt(input) },
                       [

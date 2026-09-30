@@ -1,3 +1,4 @@
+import { coverageObligations } from "../dist/qa.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -380,13 +381,30 @@ test("regular execution persists authentication requests for status", async () =
     requiredLfsRoles: [],
   };
   const state = {
-    schemaVersion: 2,
+    schemaVersion: 4,
     repository: "example/auth",
     objective: 1,
     runId: "run-auth",
     configDigest: "a".repeat(64),
     baseSha: "b".repeat(40),
-    graph: { objective: 1, baseSha: "b".repeat(40), items: [item] },
+    graph: {
+      objective: 1,
+      baseSha: "b".repeat(40),
+      items: [item],
+      coverage: [
+        {
+          ...coverageObligations(item.acceptance[0], [item.acceptance[0]])[0],
+          itemId: item.id,
+          proof: { kind: "result-semantic", acceptanceIndex: 0 },
+          environment: {
+            kind: "local",
+            readiness: "available",
+            probe: "",
+            preparedBy: "",
+          },
+        },
+      ],
+    },
     issueByItemId: { auth: 2 },
     work: { auth: { status: "pending" } },
   };

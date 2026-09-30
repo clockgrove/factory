@@ -245,7 +245,10 @@ test("fresh packed artifact composes a registered harness through the package ro
           },
           async reviewGraph(request) {
             observeInvocation(request);
-            return { findings: [] };
+            return {
+              packetId: request.reviewPacket.id,
+              findings: [],
+            };
           },
         },
       },

@@ -119,6 +119,7 @@ for (const delivery of ["regular", "native-stack"]) {
               writeFileSync(barrier, "release");
             }
             return {
+              packetId: request.reviewPacket.id,
               findings: resultFindings(
                 request,
                 request.criteria.map((criterion) => ({

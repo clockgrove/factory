@@ -325,8 +325,9 @@ factory propose-amendment --objective 123 --proposal /absolute/path/proposal.jso
 The proposal includes `scope` (`in-scope` or `backlog`), `reason`, nonempty `evidence`,
 `ownership` and `acceptance` arrays, a `dependencies` array of known Work Item IDs,
 `actor`, and `expectedGraphDigest` from the current status graph. An optional `graph`
-is a complete proposed replacement graph; it undergoes the same deterministic and
-independent checks. The owner rejects stale proposals. A started/completed node's
+is a complete proposed replacement graph; Factory regenerates its worker source inputs
+from the selected pinned citations before the same deterministic and independent checks.
+Callers do not copy source contents into `inputSources`. The owner rejects stale proposals. A started/completed node's
 identity cannot be repurposed; propose successor or revalidation work instead.
 
 A decomposed parent waits for every explicit child dependency and proves its own

@@ -134,26 +134,29 @@ export async function runQaItem(args: {
     );
     work.qaChecks = [];
     for (const entry of itemCoverage(state.graph, item.id).filter(
-      (entry) => entry.oracle.kind === "ci",
+      (entry) =>
+        entry.proof.kind === "integrated-ci" ||
+        entry.proof.kind === "published-ci",
     )) {
+      const proof = entry.proof;
+      if (proof.kind !== "integrated-ci" && proof.kind !== "published-ci")
+        continue;
       const target =
-        entry.phase === "published"
-          ? state.work[entry.oracle.targetItem]
-          : work;
+        proof.kind === "published-ci" ? state.work[proof.targetItem] : work;
       if (
         !target?.changeRef ||
-        (entry.phase === "published" && !target.pullRequest)
+        (proof.kind === "published-ci" && !target.pullRequest)
       )
         throw new Error("Required CI candidate has not been published");
       if (!args.github.namedCheck)
         throw new Error("Authenticated named CI observation is unavailable");
       const check = await args.github.namedCheck(
         target.changeRef,
-        entry.oracle.reference,
+        proof.checkName,
       );
       if (
         !check ||
-        check.name !== entry.oracle.reference ||
+        check.name !== proof.checkName ||
         check.headSha !== target.changeRef ||
         !Number.isSafeInteger(check.id) ||
         check.id <= 0 ||
@@ -161,7 +164,7 @@ export async function runQaItem(args: {
         check.conclusion !== "success"
       )
         throw new Error(
-          `Required named CI check ${entry.oracle.reference} is missing, stale, pending, or failing at ${target.changeRef}`,
+          `Required named CI check ${proof.checkName} is missing, stale, pending, or failing at ${target.changeRef}`,
         );
       work.qaChecks.push(check);
       save();

@@ -5,12 +5,7 @@ export function withCoverage(request, input) {
   graph.coverage ??= (request.coverageObligations ?? []).map((obligation) => ({
     criterionId: obligation.criterionId,
     itemId: graph.items[0].id,
-    phase: "final",
-    oracle: {
-      kind: "semantic",
-      reference: obligation.criterionId,
-      targetItem: "",
-    },
+    proof: { kind: "final-review" },
     environment: {
       kind: "local",
       readiness: "available",
@@ -205,22 +200,28 @@ const planningModel = {
   async generateStructured(request) {
     return withCoverage(request, graph);
   },
-  async reviewGraph() {
-    return { findings: [] };
+  async reviewGraph(request) {
+    return {
+      packetId: request.reviewPacket.id,
+      findings: [],
+    };
   },
   async reviewResult(request) {
     return {
-      findings: request.reviewPacket.criteria.map(({ id: criterionId }) => ({
-        criterionId,
-        verdict: "pass",
-        evidenceIds: [
-          request.reviewPacket.evidence.find(
-            (e) => e.path === 'Exact Git change packet file "one.txt"',
-          ).id,
-        ],
-        detail: "The exact Git change packet contains the required file text",
-        question: "",
-      })),
+      packetId: request.reviewPacket.id,
+      findings: request.reviewPacket.criteria.map(
+        (_criterion, criterionIndex) => ({
+          criterionIndex,
+          verdict: "pass",
+          evidenceIndices: [
+            request.reviewPacket.evidence.findIndex(
+              (e) => e.path === 'Exact Git change packet file "one.txt"',
+            ),
+          ],
+          detail: "The exact Git change packet contains the required file text",
+          question: "",
+        }),
+      ),
     };
   },
 };

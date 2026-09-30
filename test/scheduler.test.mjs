@@ -1,3 +1,4 @@
+import { coverageObligations } from "../dist/qa.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -33,17 +34,34 @@ function item(
   };
 }
 
-test("dependency readiness admits independent lanes and waits for the join", () => {
-  const graph = {
+function schedulerGraph(items) {
+  const criteria = items.map((item) => item.acceptance[0]);
+  const obligations = coverageObligations(criteria.join("\n"), criteria);
+  return {
     objective: 1,
     baseSha: "base",
-    items: [
-      item("foundation"),
-      item("left", ["foundation"]),
-      item("right", ["foundation"]),
-      item("join", ["left", "right"]),
-    ],
+    items,
+    coverage: obligations.map((obligation, index) => ({
+      ...obligation,
+      itemId: items[index].id,
+      proof: { kind: "result-semantic", acceptanceIndex: 0 },
+      environment: {
+        kind: "local",
+        readiness: "available",
+        probe: "",
+        preparedBy: "",
+      },
+    })),
   };
+}
+
+test("dependency readiness admits independent lanes and waits for the join", () => {
+  const graph = schedulerGraph([
+    item("foundation"),
+    item("left", ["foundation"]),
+    item("right", ["foundation"]),
+    item("join", ["left", "right"]),
+  ]);
   assert.deepEqual(
     validateAndOrderGraph(graph, 1, "base", new Set(["OBJECTIVE"])).map(
       (x) => x.id,
@@ -82,11 +100,7 @@ test("path and named resource conflicts serialize otherwise ready items", () => 
   assert.equal(itemsConflict(first, second), true);
   assert.equal(itemsConflict(first, third), true);
   assert.equal(itemsConflict(first, fourth), false);
-  const graph = {
-    objective: 1,
-    baseSha: "base",
-    items: [first, second, third, fourth],
-  };
+  const graph = schedulerGraph([first, second, third, fourth]);
   const work = Object.fromEntries(
     graph.items.map((x) => [x.id, { status: "pending" }]),
   );
@@ -97,7 +111,7 @@ test("path and named resource conflicts serialize otherwise ready items", () => 
   assert.throws(
     () =>
       validateAndOrderGraph(
-        { ...graph, items: [item("a", ["b"]), item("b", ["a"])] },
+        schedulerGraph([item("a", ["b"]), item("b", ["a"])]),
         1,
         "base",
         new Set(["OBJECTIVE"]),
@@ -132,11 +146,7 @@ test("ownership is literal exact files and canonical directory prefixes", () => 
     "app/{literal}.tsx",
   ];
   for (const path of accepted) {
-    const graph = {
-      objective: 1,
-      baseSha: "base",
-      items: [item("one", [], [path])],
-    };
+    const graph = schedulerGraph([item("one", [], [path])]);
     assert.equal(
       validateAndOrderGraph(graph, 1, "base", new Set(["OBJECTIVE"]))[0],
       graph.items[0],
@@ -156,7 +166,7 @@ test("ownership is literal exact files and canonical directory prefixes", () => 
     assert.throws(
       () =>
         validateAndOrderGraph(
-          { objective: 1, baseSha: "base", items: [item("one", [], [path])] },
+          schedulerGraph([item("one", [], [path])]),
           1,
           "base",
           new Set(["OBJECTIVE"]),

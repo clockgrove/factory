@@ -97,22 +97,28 @@ async function fixture(fn) {
           items: [item(objective)],
         });
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
       async reviewResult(request) {
         return {
-          findings: request.reviewPacket.criteria.map((criterion) => ({
-            criterionId: criterion.id,
-            verdict: "pass",
-            evidenceIds: [
-              request.reviewPacket.evidence.find(
-                (entry) => entry.path === "OBJECTIVE",
-              ).id,
-            ],
-            detail: "Fixture exact-tree acceptance",
-            question: "",
-          })),
+          packetId: request.reviewPacket.id,
+          findings: request.reviewPacket.criteria.map(
+            (criterion, criterionIndex) => ({
+              criterionIndex,
+              verdict: "pass",
+              evidenceIndices: [
+                request.reviewPacket.evidence.findIndex(
+                  (entry) => entry.path === "OBJECTIVE",
+                ),
+              ],
+              detail: "Fixture exact-tree acceptance",
+              question: "",
+            }),
+          ),
         };
       },
     };
@@ -312,7 +318,7 @@ for (const disposition of ["failed", "cancelled"])
     fixture(async (f) => {
       await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
       saveState(statePath(f.config.repository, 1), {
-        schemaVersion: 3,
+        schemaVersion: 5,
         kind: "preparing",
         repository: f.config.repository,
         objective: 1,

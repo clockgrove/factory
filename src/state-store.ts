@@ -59,7 +59,7 @@ export function readContinuation(
   const path = statePath(repository, objective);
   if (!existsSync(path)) return undefined;
   const value = JSON.parse(readFileSync(path, "utf8"));
-  if (value.schemaVersion !== 3) return readState(repository, objective);
+  if (value.schemaVersion !== 5) return readState(repository, objective);
   if (
     value.kind !== "preparing" ||
     value.repository !== repository ||

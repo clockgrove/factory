@@ -267,7 +267,10 @@ class ScriptedPlanningModel {
 
   async reviewGraph(request) {
     this.observe(request);
-    return { findings: [] };
+    return {
+      packetId: request.reviewPacket.id,
+      findings: [],
+    };
   }
 
   async reviewResult(request) {
@@ -283,6 +286,7 @@ class ScriptedPlanningModel {
     if (this.resultReviewer) return this.resultReviewer(request);
     const source = request.sources.find((item) => item.path === "OBJECTIVE");
     return {
+      packetId: request.reviewPacket.id,
       findings: resultFindings(
         request,
         request.criteria.map((criterion) => {

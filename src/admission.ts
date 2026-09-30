@@ -218,7 +218,12 @@ export function preflightObjective(
     preflightLocalExecutables({
       checkout: config.checkout,
       baseSha,
-      graph: candidate?.graph ?? { objective: 1, baseSha, items: [] },
+      graph: candidate?.graph ?? {
+        objective: 1,
+        baseSha,
+        items: [],
+        coverage: [],
+      },
       finalCommands: finalObjectiveCommands(body),
       privateRoot: root,
       credentialDirectory: join(root, "empty-gh-config"),

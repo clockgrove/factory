@@ -373,6 +373,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
         };
       };
       return {
+        packetId: packet.packetId,
         findings: resultFindings(
           { reviewPacket: packet },
           criteria.map((criterion) => {

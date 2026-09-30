@@ -1,3 +1,6 @@
+import { compilerCitationChoices } from "../dist/compiler.js";
+import { compilerWire } from "../dist/compiler-wire.js";
+import { compilerRequest, compilerResponse } from "./support/compiler-wire.mjs";
 import assert from "node:assert/strict";
 import {
   chmodSync,
@@ -16,7 +19,6 @@ import { composeWithLocalProfiles } from "../dist/application.js";
 import {
   CodexPlanningModel,
   compilePlan,
-  graphSchemaForSources,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
 import { factoryConfigDigest, validateConfig } from "../dist/config.js";
@@ -137,10 +139,14 @@ function modelFor(graph, seen = []) {
     },
     async reviewGraph(request) {
       seen.push(request);
-      return { findings: [] };
+      return {
+        packetId: request.reviewPacket.id,
+        findings: [],
+      };
     },
     async reviewResult(request) {
       return {
+        packetId: request.reviewPacket.id,
         findings: resultFindings(
           request,
           request.criteria.map((criterion) => ({
@@ -250,8 +256,9 @@ test("profile configuration, safe compiler choices, default normalization and im
       choices.profiles[0].digest,
     );
     assert.deepEqual(
-      seen[0].schema.properties.items.items.properties.executionProfile
-        .properties.id.enum,
+      compilerWire(seen[0], compilerCitationChoices(seen[0].sources)).schema
+        .properties.items.items.anyOf[0].properties.executionProfile.properties
+        .id.enum,
       ["standard", "focused"],
     );
     verifyPlanCandidate(
@@ -512,11 +519,16 @@ test("SDK compile and independent review prompts carry safe routing guidance and
                 type: "agent_message",
                 text:
                   captured.length === 1
-                    ? JSON.stringify({
-                        objective: 1,
-                        baseSha: "a".repeat(40),
-                        items: [],
-                      })
+                    ? JSON.stringify(
+                        compilerResponse(prompt, [
+                          {
+                            executionProfile: {
+                              id: "standard",
+                              reason: "Suitable default",
+                            },
+                          },
+                        ]),
+                      )
                     : '{"findings":[]}',
               },
             };
@@ -563,10 +575,11 @@ test("SDK compile and independent review prompts carry safe routing guidance and
       controllerCapabilities: {},
       controllerCapabilitiesDigest: "c".repeat(64),
     };
-    await model.generateStructured({
-      ...request,
-      schema: graphSchemaForSources(sources, choices),
-    });
+    await model.generateStructured(
+      compilerRequest({
+        ...request,
+      }),
+    );
     await model.reviewGraph({
       ...request,
       graph: { objective: 1, baseSha: request.baseSha, items: [] },
@@ -574,24 +587,30 @@ test("SDK compile and independent review prompts carry safe routing guidance and
       finalCommands: [],
     });
     for (const { prompt } of captured) {
-      assert.match(prompt, /eligible default only when suitable/);
-      assert.match(prompt, /write ownership is not a read boundary/);
+      assert.match(prompt, /eligible.*suitable/);
+      assert.match(
+        prompt,
+        /write ownership is not a read boundary|Membership permits reading inputs/,
+      );
       assert.match(prompt, /low latency preference/);
-      assert.match(prompt, /Hints never grant permissions/);
+      assert.match(
+        prompt,
+        /Hints never grant permissions|hints grant no permissions/,
+      );
     }
     assert.ok(
-      captured[0].schema.properties.items.items.required.includes(
+      captured[0].schema.properties.items.items.anyOf[0].required.includes(
         "executionProfile",
       ),
     );
     assert.deepEqual(
-      captured[0].schema.properties.items.items.properties.executionProfile
-        .type,
-      ["object", "null"],
+      captured[0].schema.properties.items.items.anyOf[0].properties
+        .executionProfile.type,
+      "object",
     );
     assert.deepEqual(
-      captured[0].schema.properties.items.items.properties.executionProfile
-        .properties.id.enum,
+      captured[0].schema.properties.items.items.anyOf[0].properties
+        .executionProfile.properties.id.enum,
       ["standard"],
     );
   } finally {

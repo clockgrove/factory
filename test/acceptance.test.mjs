@@ -1,3 +1,4 @@
+import { coverageObligations } from "../dist/qa.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
@@ -104,8 +105,8 @@ test("preview blocks invented and mismatched commands, and admits exact pinned b
         async generateStructured(request) {
           return withCoverage(request, structuredClone(graph));
         },
-        async reviewGraph() {
-          return { findings: [] };
+        async reviewGraph({ reviewPacket }) {
+          return { packetId: reviewPacket.id, findings: [] };
         },
       };
       const accepted = await compilePlan(
@@ -391,8 +392,8 @@ test("exact script-disabled pnpm bootstrap is source-authorized and plain instal
         async generateStructured(request) {
           return withCoverage(request, structuredClone(graph));
         },
-        async reviewGraph() {
-          return { findings: [] };
+        async reviewGraph({ reviewPacket }) {
+          return { packetId: reviewPacket.id, findings: [] };
         },
       };
       const plan = await compilePlan(
@@ -463,8 +464,8 @@ test("a source-declared pnpm workspace can be created, validated, and pinned for
       async generateStructured(request) {
         return withCoverage(request, structuredClone(graph));
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph({ reviewPacket }) {
+        return { packetId: reviewPacket.id, findings: [] };
       },
     };
     const plan = await compilePlan(
@@ -1012,7 +1013,10 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         ...request,
         model: {
           async reviewResult(_reviewRequest) {
-            return { findings: "not-an-array" };
+            return {
+              packetId: _reviewRequest.reviewPacket.id,
+              findings: "not-an-array",
+            };
           },
         },
         invocation: invocation(malformedEvents),
@@ -1063,13 +1067,14 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
           model: {
             async reviewResult(_reviewRequest) {
               return {
+                packetId: _reviewRequest.reviewPacket.id,
                 findings: [
                   {
                     criterion: "result.txt exists",
                     verdict: "pass",
                     source: "OBJECTIVE",
                     quote: "not present in the source",
-                    evidenceIds: ["unknown"],
+                    evidenceIndices: ["unknown"],
                     detail: "Invalid semantic evidence",
                     question: "",
                   },
@@ -1106,6 +1111,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
       model: {
         async reviewResult(_reviewRequest) {
           return {
+            packetId: _reviewRequest.reviewPacket.id,
             findings: resultFindings(_reviewRequest, [
               {
                 criterion: "result.txt exists",
@@ -1146,6 +1152,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         async reviewResult(review) {
           assert.deepEqual(review.commands, resultEvidence.commands);
           return {
+            packetId: review.reviewPacket.id,
             findings: resultFindings(review, [
               {
                 criterion: "result.txt exists",
@@ -1190,7 +1197,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
           model: {
             async reviewResult(_reviewRequest) {
               invalidReceiptReviewCalls++;
-              return { findings: [] };
+              return { packetId: _reviewRequest.reviewPacket.id, findings: [] };
             },
           },
         }),
@@ -1222,6 +1229,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         model: {
           async reviewResult(_reviewRequest) {
             return {
+              packetId: _reviewRequest.reviewPacket.id,
               findings: resultFindings(_reviewRequest, [
                 {
                   criterion: "result.txt exists",
@@ -1285,6 +1293,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         model: {
           async reviewResult(_reviewRequest) {
             return {
+              packetId: _reviewRequest.reviewPacket.id,
               findings: resultFindings(_reviewRequest, [
                 {
                   criterion: "result.txt exists",
@@ -1319,6 +1328,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
     const unsure = {
       async reviewResult(_reviewRequest) {
         return {
+          packetId: _reviewRequest.reviewPacket.id,
           findings: resultFindings(_reviewRequest, [
             {
               criterion: "result.txt exists",
@@ -1491,7 +1501,7 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
       acceptance: ["follow-up is exact and preserves bootstrap paths"],
     });
     const state = {
-      schemaVersion: 2,
+      schemaVersion: 4,
       repository: "example/objective-item-deltas",
       objective: 1,
       runId: "delta-review",
@@ -1603,6 +1613,7 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
             objectiveEvidence.evidence,
           );
           return {
+            packetId: request.reviewPacket.id,
             findings: resultFindings(request, [
               {
                 criterion,
@@ -1747,7 +1758,7 @@ test("truncated per-Work-Item evidence cannot ground an automatic pass", async (
     const graph = item(target.baseSha, []);
     graph.items[0].ownedPaths = ["result.txt"];
     const state = {
-      schemaVersion: 2,
+      schemaVersion: 4,
       repository: "example/objective-item-delta-budget",
       objective: 1,
       runId: "delta-budget",
@@ -1794,6 +1805,7 @@ test("truncated per-Work-Item evidence cannot ground an automatic pass", async (
           model: {
             async reviewResult(_reviewRequest) {
               return {
+                packetId: _reviewRequest.reviewPacket.id,
                 findings: resultFindings(_reviewRequest, [
                   {
                     criterion: "result is complete",
@@ -1993,7 +2005,7 @@ test("final review shares one text budget across ordinary and materialization pa
         },
       });
       const state = {
-        schemaVersion: 2,
+        schemaVersion: 4,
         repository: "example/objective-materialization-budget",
         objective: 1,
         runId: "materialization-budget",
@@ -2149,6 +2161,7 @@ test("final review shares one text budget across ordinary and materialization pa
             model: {
               async reviewResult(_reviewRequest) {
                 return {
+                  packetId: _reviewRequest.reviewPacket.id,
                   findings: resultFindings(_reviewRequest, [
                     {
                       criterion: "both selected assets are grounded",
@@ -2302,6 +2315,7 @@ test("a reviewer pass cannot auto-accept truncated result text", async () => {
               );
               assert.ok(review.change.length < 4000);
               return {
+                packetId: review.reviewPacket.id,
                 findings: resultFindings(review, [
                   {
                     criterion: "result meets requirements",
@@ -2380,7 +2394,7 @@ test("operator decision records criterion and exact tree before resuming validat
       const treeSha = git(target.checkout, "rev-parse", "HEAD^{tree}");
       const config = factoryConfig(target.checkout, "example/acceptance");
       const state = {
-        schemaVersion: 2,
+        schemaVersion: 4,
         repository: config.repository,
         objective: 1,
         runId: "acceptance-test",
@@ -2419,6 +2433,19 @@ test("operator decision records criterion and exact tree before resuming validat
           },
         },
       };
+      state.graph.coverage = [
+        {
+          ...coverageObligations("result.txt exists", ["result.txt exists"])[0],
+          itemId: "one",
+          proof: { kind: "result-semantic", acceptanceIndex: 0 },
+          environment: {
+            kind: "local",
+            readiness: "available",
+            probe: "",
+            preparedBy: "",
+          },
+        },
+      ];
       saveState(statePath(config.repository, 1), state);
       assert.throws(
         () =>

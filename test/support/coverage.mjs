@@ -5,12 +5,7 @@ export function withCoverage(request, input) {
   graph.coverage ??= (request.coverageObligations ?? []).map((obligation) => ({
     criterionId: obligation.criterionId,
     itemId: graph.items[0].id,
-    phase: "final",
-    oracle: {
-      kind: "semantic",
-      reference: obligation.criterionId,
-      targetItem: "",
-    },
+    proof: { kind: "final-review" },
     environment: {
       kind: "local",
       readiness: "available",

@@ -241,7 +241,7 @@ for (const planning of ["ready", "submitted"]) {
         },
       };
       saveState(statePath(config.repository, 1), {
-        schemaVersion: 3,
+        schemaVersion: 5,
         kind: "preparing",
         repository: config.repository,
         objective: 1,
@@ -311,7 +311,7 @@ test("offline cancellation verifies recorded subprocess cessation and refuses a 
       const target = createTarget(root);
       const config = factoryConfig(target.checkout, "example/offline-cancel");
       saveState(statePath(config.repository, 1), {
-        schemaVersion: 3,
+        schemaVersion: 5,
         kind: "preparing",
         repository: config.repository,
         objective: 1,
@@ -434,7 +434,7 @@ test("persisted drain reattaches an existing worker and leaves its dependent pen
       await waitForFile(
         () => {
           const state = readContinuation(config.repository, 1);
-          return state?.schemaVersion === 2 && state.work.first.execution;
+          return state?.schemaVersion === 4 && state.work.first.execution;
         },
         path,
         "existing drain worker",

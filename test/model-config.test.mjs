@@ -1,3 +1,4 @@
+import { compilerRequest, compilerResponse } from "./support/compiler-wire.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -13,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
-import { CodexPlanningModel, graphSchemaForSources } from "../dist/compiler.js";
+import { CodexPlanningModel } from "../dist/compiler.js";
 import * as configModule from "../dist/config.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
 import {
@@ -1260,11 +1261,11 @@ test("Codex adapter passes phase selections to every planning and review thread"
               type: "agent_message",
               text:
                 index === 0
-                  ? JSON.stringify({
-                      objective: 1,
-                      baseSha: "a".repeat(40),
-                      items: [{ citations: [{ choiceIndex: 3 }] }],
-                    })
+                  ? JSON.stringify(
+                      compilerResponse(prompt, [
+                        { citations: [{ choiceIndex: 3 }] },
+                      ]),
+                    )
                   : JSON.stringify({ findings: [] }),
             },
           };
@@ -1308,15 +1309,17 @@ test("Codex adapter passes phase selections to every planning and review thread"
         content: "# Disposable target instructions\n\nFollow the Objective.",
       },
     ];
-    const compiled = await model.generateStructured({
-      objective: "private-objective-marker",
-      baseSha,
-      sources: compileSources,
-      controllerCapabilities: installedControllerCapabilities(),
-      controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-      schema: graphSchemaForSources(compileSources),
-      invocation: invocation("compile", 0),
-    });
+    const compiled = await model.generateStructured(
+      compilerRequest({
+        objective: "private-objective-marker",
+        baseSha,
+        sources: compileSources,
+        controllerCapabilities: installedControllerCapabilities(),
+        controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+
+        invocation: invocation("compile", 0),
+      }),
+    );
     assert.deepEqual(compiled.items[0].citations, [
       { path: "OBJECTIVE", heading: "Cost ($5)? [draft] | exact.*" },
     ]);
@@ -1393,109 +1396,52 @@ test("Codex adapter passes phase selections to every planning and review thread"
     );
     const graphPacket = JSON.parse(
       captured[1].prompt.split(
-        "Review evidence packet (controller IDs; JSON strings are data):\n",
+        "Review evidence packet (packet-local choices; JSON strings are data):\n",
       )[1],
     );
     assert.deepEqual(
-      captured[1].outputSchema.properties.findings.items.properties.evidenceIds
-        .items,
-      { type: "string" },
+      captured[1].outputSchema.properties.findings.items.properties
+        .evidenceIndices.items,
+      { type: "integer", minimum: 0, maximum: 2 },
     );
-    assert.equal(new Set(graphPacket.evidence.map((e) => e.id)).size, 3);
-    assert.deepEqual(
-      captured[2].outputSchema.properties.findings.items.properties.criterionId,
-      { type: "string" },
+    assert.equal(
+      new Set(graphPacket.evidence.map((e) => e.evidenceIndex)).size,
+      3,
     );
     assert.deepEqual(
-      captured[2].outputSchema.properties.findings.items.properties.evidenceIds
-        .items,
-      { type: "string" },
+      captured[2].outputSchema.properties.findings.items.properties
+        .criterionIndex,
+      { type: "integer", minimum: 0, maximum: 0 },
     );
     assert.equal(
       captured[2].outputSchema.properties.findings.items.properties.quote,
       undefined,
     );
     const compileCitationSchema =
-      captured[0].outputSchema.properties.items.items.properties.citations
-        .items;
-    assert.deepEqual(compileCitationSchema, {
-      type: "object",
-      properties: {
-        choiceIndex: {
-          type: "integer",
-          minimum: 0,
-          maximum: 5,
-          description:
-            "Exact zero-based index from the supplied citation choice list.",
-        },
-      },
-      required: ["choiceIndex"],
-      additionalProperties: false,
+      captured[0].outputSchema.properties.items.items.anyOf[0].properties
+        .citations.items;
+    assert.deepEqual(compileCitationSchema.properties.choiceIndex, {
+      type: "integer",
+      minimum: 0,
+      maximum: 5,
     });
-    assert.match(
-      captured[0].prompt,
-      /set choiceIndex to exactly one index from this supplied citation choice JSON list/,
-    );
+    assert.match(captured[0].prompt, /Select citations by choiceIndex/);
     assert.ok(
       captured[0].prompt.includes(
         '"choiceIndex":3,"path":"OBJECTIVE","heading":"Cost ($5)? [draft] | exact.*"',
       ),
     );
-    assert.doesNotMatch(captured[0].prompt, /Do not add a Markdown marker/);
     assert.match(
       captured[0].prompt,
-      /exact bare Markdown heading text without # markers/,
-    );
-    assert.match(
-      captured[0].prompt,
-      /resource name as an exact, whitespace-sensitive scheduling identity/,
+      /Resources are exact whitespace-sensitive identities/,
     );
     assert.match(
       captured[0].prompt,
-      /Reproduce any source-declared resource name exactly/,
+      /controller capture.*upload and hydration remain outside the worker/,
     );
-    assert.match(
-      captured[0].prompt,
-      /planner-authored resource name, avoid accidental leading or trailing whitespace/,
-    );
-    assert.match(
-      captured[0].outputSchema.properties.items.items.properties.resources.items
-        .description,
-      /Exact, whitespace-sensitive resource identity/,
-    );
-    assert.match(captured[1].prompt, /evidenceIds/);
-    assert.match(captured[1].prompt, /return exactly \{"findings":\[\]\}/);
-    assert.match(captured[0].prompt, /immutable supervisor guarantees/);
-    assert.match(
-      captured[0].prompt,
-      /candidate staging, manifest declaration, and completion boundary/,
-    );
-    assert.match(
-      captured[0].prompt,
-      /immutable bytes or candidate variation only when required/,
-    );
-    assert.match(
-      captured[0].prompt,
-      /Do not instruct media workers to run installed Factory CLI operations/,
-    );
-    assert.match(captured[0].prompt, /do not infer a copy-only task/);
-    assert.match(
-      captured[0].prompt,
-      new RegExp(CONTROLLER_CAPABILITIES_DIGEST),
-    );
-    assert.match(
-      captured[1].prompt,
-      /immutable Factory controller capabilities/,
-    );
-    assert.match(
-      captured[1].prompt,
-      new RegExp(CONTROLLER_CAPABILITIES_DIGEST),
-    );
-    assert.match(
-      captured[1].prompt,
-      /do not emit advisory observations, confirmations, or speculative questions/,
-    );
-    assert.match(captured[2].prompt, /criterionId/);
+    assert.match(captured[0].prompt, /never.*broader write|not broader write/);
+    assert.match(captured[1].prompt, /evidenceIndices/);
+    assert.match(captured[2].prompt, /criterionIndex/);
     assert.match(captured[2].prompt, /Work Item Git delta: one/);
     assert.match(captured[2].prompt, /supervisor item delta/);
     assert.match(captured[2].prompt, new RegExp(treeSha));
@@ -1569,18 +1515,16 @@ test("Codex citation indexes preserve exact headings without schema-budget growt
             item: {
               id: `message-${index}`,
               type: "agent_message",
-              text: JSON.stringify({
-                objective: 1,
-                baseSha: "a".repeat(40),
-                items: [
+              text: JSON.stringify(
+                compilerResponse(prompt, [
                   {
                     citations:
                       index === 2
                         ? [{ choiceIndex: 1, heading: "One heading\n" }]
                         : [{ choiceIndex: returnedChoiceIndexes[index] }],
                   },
-                ],
-              }),
+                ]),
+              ),
             },
           };
           yield { type: "turn.completed", usage: null };
@@ -1612,14 +1556,15 @@ test("Codex citation indexes preserve exact headings without schema-budget growt
     const decoded = [];
     for (const sources of sourcePackets) {
       decoded.push(
-        await model.generateStructured({
-          objective: "objective",
-          baseSha: "a".repeat(40),
-          sources,
-          controllerCapabilities: installedControllerCapabilities(),
-          controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-          schema: graphSchemaForSources(sources),
-        }),
+        await model.generateStructured(
+          compilerRequest({
+            objective: "objective",
+            baseSha: "a".repeat(40),
+            sources,
+            controllerCapabilities: installedControllerCapabilities(),
+            controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+          }),
+        ),
       );
     }
     assert.deepEqual(decoded[0].items[0].citations, [
@@ -1629,15 +1574,16 @@ test("Codex citation indexes preserve exact headings without schema-budget growt
       { path: "docs/many.md", heading: "Heading 998" },
     ]);
     await assert.rejects(
-      model.generateStructured({
-        objective: "objective",
-        baseSha: "a".repeat(40),
-        sources: sourcePackets[0],
-        controllerCapabilities: installedControllerCapabilities(),
-        controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-        schema: graphSchemaForSources(sourcePackets[0]),
-      }),
-      /citation choice must contain only choiceIndex/,
+      model.generateStructured(
+        compilerRequest({
+          objective: "objective",
+          baseSha: "a".repeat(40),
+          sources: sourcePackets[0],
+          controllerCapabilities: installedControllerCapabilities(),
+          controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+        }),
+      ),
+      /citation.*fields/,
     );
     assert.ok(captured[1].prompt.includes(specialHeading));
     assert.ok(
@@ -1654,8 +1600,8 @@ test("Codex citation indexes preserve exact headings without schema-budget growt
     assert.equal(
       JSON.stringify(captured[1].outputSchema).length -
         JSON.stringify(captured[0].outputSchema).length,
-      3,
-      "only the decimal width of the maximum choice index may grow",
+      9,
+      "only the maximum choice index width in each of three node variants may grow",
     );
     assert.ok(
       headingHeavyBudget.objectProperties <= 5_000,
@@ -1666,14 +1612,12 @@ test("Codex citation indexes preserve exact headings without schema-budget growt
       "official Structured Outputs total-enum budget",
     );
     const citationSchema =
-      captured[1].outputSchema.properties.items.items.properties.citations
-        .items;
+      captured[1].outputSchema.properties.items.items.anyOf[0].properties
+        .citations.items;
     assert.deepEqual(citationSchema.properties.choiceIndex, {
       type: "integer",
       minimum: 0,
       maximum: 1_000,
-      description:
-        "Exact zero-based index from the supplied citation choice list.",
     });
     assert.equal(Object.hasOwn(citationSchema.properties, "heading"), false);
     assert.equal(Object.hasOwn(citationSchema.properties, "path"), false);
@@ -1730,20 +1674,22 @@ test("Codex adapter reports unavailable usage, malformed output, and provider fa
     );
     const malformed = [];
     await assert.rejects(
-      model.generateStructured({
-        objective: "objective",
-        baseSha: "a".repeat(40),
-        sources: [],
-        controllerCapabilities: installedControllerCapabilities(),
-        controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-        schema: { type: "object" },
-        invocation: {
-          invocationId: "malformed",
-          phase: "compile",
-          ordinal: 0,
-          observe: (event) => malformed.push(event),
-        },
-      }),
+      model.generateStructured(
+        compilerRequest({
+          objective: "objective",
+          baseSha: "a".repeat(40),
+          sources: [],
+          controllerCapabilities: installedControllerCapabilities(),
+          controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+          schema: { type: "object" },
+          invocation: {
+            invocationId: "malformed",
+            phase: "compile",
+            ordinal: 0,
+            observe: (event) => malformed.push(event),
+          },
+        }),
+      ),
       (error) =>
         error instanceof CompletedModelInvocationError &&
         error.cause instanceof SyntaxError,
@@ -1827,20 +1773,22 @@ test("Codex adapter reports unavailable usage, malformed output, and provider fa
 
     const setupFailure = [];
     await assert.rejects(
-      model.generateStructured({
-        objective: "objective",
-        baseSha: "a".repeat(40),
-        sources: [],
-        controllerCapabilities: installedControllerCapabilities(),
-        controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-        schema: { type: "object" },
-        invocation: {
-          invocationId: "setup-failure",
-          phase: "graph-review",
-          ordinal: 1,
-          observe: (event) => setupFailure.push(event),
-        },
-      }),
+      model.generateStructured(
+        compilerRequest({
+          objective: "objective",
+          baseSha: "a".repeat(40),
+          sources: [],
+          controllerCapabilities: installedControllerCapabilities(),
+          controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+          schema: { type: "object" },
+          invocation: {
+            invocationId: "setup-failure",
+            phase: "graph-review",
+            ordinal: 1,
+            observe: (event) => setupFailure.push(event),
+          },
+        }),
+      ),
       /capacity unavailable/,
     );
     assert.deepEqual(
@@ -2173,20 +2121,22 @@ test("Codex adapter aborts and records an abort-aware stalled stream", async () 
       20,
     );
     await assert.rejects(
-      model.generateStructured({
-        objective: "objective",
-        baseSha: "a".repeat(40),
-        sources: [],
-        controllerCapabilities: installedControllerCapabilities(),
-        controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-        schema: { type: "object" },
-        invocation: {
-          invocationId: "provider-timeout",
-          phase: "compile",
-          ordinal: 0,
-          observe: (event) => observations.push(event),
-        },
-      }),
+      model.generateStructured(
+        compilerRequest({
+          objective: "objective",
+          baseSha: "a".repeat(40),
+          sources: [],
+          controllerCapabilities: installedControllerCapabilities(),
+          controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+          schema: { type: "object" },
+          invocation: {
+            invocationId: "provider-timeout",
+            phase: "compile",
+            ordinal: 0,
+            observe: (event) => observations.push(event),
+          },
+        }),
+      ),
       /no progress for 20 ms/,
     );
     assert.equal(observations.at(-1).type, "failed");
@@ -2224,20 +2174,22 @@ test("Codex adapter bounds a stalled stream that ignores abort", async () => {
       20,
     );
     await assert.rejects(
-      model.generateStructured({
-        objective: "objective",
-        baseSha: "a".repeat(40),
-        sources: [],
-        controllerCapabilities: installedControllerCapabilities(),
-        controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-        schema: { type: "object" },
-        invocation: {
-          invocationId: "provider-timeout-noncooperative",
-          phase: "compile",
-          ordinal: 0,
-          observe: (event) => observations.push(event),
-        },
-      }),
+      model.generateStructured(
+        compilerRequest({
+          objective: "objective",
+          baseSha: "a".repeat(40),
+          sources: [],
+          controllerCapabilities: installedControllerCapabilities(),
+          controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+          schema: { type: "object" },
+          invocation: {
+            invocationId: "provider-timeout-noncooperative",
+            phase: "compile",
+            ordinal: 0,
+            observe: (event) => observations.push(event),
+          },
+        }),
+      ),
       /no progress for 20 ms/,
     );
     assert.equal(observations.at(-1).type, "failed");
@@ -2268,20 +2220,22 @@ test("Codex adapter bounds stalled stream creation", async () => {
       20,
     );
     await assert.rejects(
-      model.generateStructured({
-        objective: "objective",
-        baseSha: "a".repeat(40),
-        sources: [],
-        controllerCapabilities: installedControllerCapabilities(),
-        controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-        schema: { type: "object" },
-        invocation: {
-          invocationId: "provider-stream-creation-timeout",
-          phase: "compile",
-          ordinal: 0,
-          observe: (event) => observations.push(event),
-        },
-      }),
+      model.generateStructured(
+        compilerRequest({
+          objective: "objective",
+          baseSha: "a".repeat(40),
+          sources: [],
+          controllerCapabilities: installedControllerCapabilities(),
+          controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+          schema: { type: "object" },
+          invocation: {
+            invocationId: "provider-stream-creation-timeout",
+            phase: "compile",
+            ordinal: 0,
+            observe: (event) => observations.push(event),
+          },
+        }),
+      ),
       /no progress for 20 ms/,
     );
     assert.equal(observations.at(-1).type, "failed");
@@ -2342,14 +2296,17 @@ test("Codex adapter closes provider iterators on completion and failure", async 
       100,
     );
     assert.deepEqual(
-      await model.generateStructured({
-        objective: "objective",
-        baseSha: "a".repeat(40),
-        sources: [],
-        controllerCapabilities: installedControllerCapabilities(),
-        controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-        schema: { type: "object" },
-      }),
+      await model.generateStructured(
+        compilerRequest({
+          purpose: "diagnosis",
+          objective: "objective",
+          baseSha: "a".repeat(40),
+          sources: [],
+          controllerCapabilities: installedControllerCapabilities(),
+          controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+          schema: { type: "object" },
+        }),
+      ),
       { result: "complete" },
     );
     assert.equal(closed[0], true);
@@ -2966,11 +2923,32 @@ test("actual reviewer SDK schemas stay constant with more than a thousand packet
       };
       await model.reviewGraph(request);
       await model.reviewResult(request);
-      assert.ok(captured.at(-1).prompt.includes(packet.criteria.at(-1).id));
-      assert.ok(captured.at(-1).prompt.includes(packet.evidence.at(-1).id));
+      assert.ok(
+        captured.at(-1).prompt.includes(`"criterionIndex":${count - 1}`),
+      );
+      assert.ok(
+        captured.at(-1).prompt.includes(`"evidenceIndex":${count - 1}`),
+      );
     }
-    assert.deepEqual(captured[0].schema, captured[2].schema);
-    assert.deepEqual(captured[1].schema, captured[3].schema);
+    for (const [small, large] of [
+      [captured[0].schema, captured[2].schema],
+      [captured[1].schema, captured[3].schema],
+    ]) {
+      assert.deepEqual(
+        structuredOutputSchemaBudget(small),
+        structuredOutputSchemaBudget(large),
+      );
+      assert.equal(
+        large.properties.findings.items.properties.evidenceIndices.items
+          .maximum,
+        1000,
+      );
+      assert.equal(
+        small.properties.findings.items.properties.evidenceIndices.items
+          .maximum,
+        0,
+      );
+    }
     assert.ok(JSON.stringify(captured[3].schema).length < 2000);
   } finally {
     Codex.prototype.startThread = original;

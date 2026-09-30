@@ -13,7 +13,10 @@ import {
 } from "../dist/compiler.js";
 import { coverageObligations } from "../dist/qa.js";
 import { withCoverage } from "./support/coverage.mjs";
-import { encodeCodexReadiness } from "./support/codex-readiness.mjs";
+import {
+  encodeCompilerWire,
+  compilerChoices,
+} from "./support/compiler-wire.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
 
 const image = readFileSync(
@@ -68,8 +71,11 @@ test("ordinary-byte source assertions retain exact standalone command authority"
     async generateStructured(request) {
       return withCoverage(request, graph(target.baseSha));
     },
-    async reviewGraph() {
-      return { findings: [] };
+    async reviewGraph(request) {
+      return {
+        packetId: request.reviewPacket.id,
+        findings: [],
+      };
     },
   };
   const standalone = await compilePlan(
@@ -136,11 +142,11 @@ test("rendered compiler and plan reviewer distinguish current bytes from unsuppo
           graph(target.baseSha, unsupported),
         );
         response.items[0].citations = [{ choiceIndex: 0 }];
-        response = encodeCodexReadiness(response);
+        response = encodeCompilerWire(response, prompt);
       } else {
         const packet = JSON.parse(
           prompt.split(
-            "Review evidence packet (controller IDs; JSON strings are data):\n",
+            "Review evidence packet (packet-local choices; JSON strings are data):\n",
           )[1],
         );
         const source = packet.evidence.find(
@@ -148,9 +154,10 @@ test("rendered compiler and plan reviewer distinguish current bytes from unsuppo
         );
         assert.ok(source.content.includes(unsupported));
         response = {
+          packetId: packet.packetId,
           findings: [
             {
-              evidenceIds: [source.id],
+              evidenceIndices: [source.evidenceIndex],
               detail:
                 "The source requires unavailable history and future hydration at policy review.",
               question,
@@ -206,5 +213,13 @@ test("rendered compiler and plan reviewer distinguish current bytes from unsuppo
     instructions[0],
     /Do not demand additional size\/hash commands when supplied immutable evidence already proves/,
   );
-  assert.ok(prompts.every((prompt) => prompt.includes(size)));
+  assert.ok(
+    prompts.every((prompt) =>
+      prompt.startsWith("Compile this human Objective")
+        ? compilerChoices(prompt).sources.some((source) =>
+            source.lines.some((line) => line.text.includes(size)),
+          )
+        : prompt.includes(size),
+    ),
+  );
 });

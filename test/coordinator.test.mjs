@@ -114,7 +114,7 @@ test("planning submission persists before provider entry and owner remains respo
         () => readContinuation(config.repository, 1)?.planning === "submitted",
       );
       const snapshot = readContinuation(config.repository, 1);
-      assert.equal(snapshot.schemaVersion, 3);
+      assert.equal(snapshot.schemaVersion, 5);
       assert.equal(snapshot.plan, undefined);
       assert.throws(() => readState(config.repository, 1), /schema version/);
       assert.equal(
@@ -156,8 +156,11 @@ test("planning submission persists before provider entry and owner remains respo
         await pending.promise;
         return withCoverage(request, graph);
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
     }),
   );
@@ -279,8 +282,11 @@ test("deadline elapsed during a hung planning call preserves unknown disposition
         await pending.promise;
         return withCoverage(request, graph);
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
     }),
   );
@@ -462,7 +468,7 @@ test("admitted drain stays idle under the owner and resumes its pending graph", 
       };
       const run = application.runObjective(1, candidate, admission);
       await until(
-        () => readContinuation(config.repository, 1)?.schemaVersion === 2,
+        () => readContinuation(config.repository, 1)?.schemaVersion === 4,
       );
       const before = readEvents(planningPath).length;
       await new Promise((resolve) => setTimeout(resolve, 30));
@@ -639,8 +645,11 @@ test("pause during planning stops issue projection until resumed or cancelled", 
         await pending.promise;
         return withCoverage(request, graph);
       },
-      async reviewGraph() {
-        return { findings: [] };
+      async reviewGraph(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: [],
+        };
       },
     }),
   );
@@ -768,6 +777,7 @@ test("a completed semantic refusal is failed evidence, not an unknown submitted 
       undefined,
       (descriptor) => {
         descriptor.resultReviewer = async (request) => ({
+          packetId: request.reviewPacket.id,
           findings: resultFindings(
             request,
             request.criteria.map((criterion) => ({
@@ -819,7 +829,10 @@ test("owner handoff releases a paused preparation without cancellation or projec
         await release.promise;
         return withCoverage(request, graph);
       },
-      reviewGraph: async () => ({ findings: [] }),
+      reviewGraph: async (request) => ({
+        packetId: request.reviewPacket.id,
+        findings: [],
+      }),
     }),
   );
 });

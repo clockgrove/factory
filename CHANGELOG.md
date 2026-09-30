@@ -2,6 +2,15 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.46 — 2026-09-29
+
+- Show the existing optional AssetSet format-metadata shape in worker inputs, and omit it when no authoritative format fields are supplied. Preserve strict manifest validation and source-byte identity (#310).
+- Include the Claude Managed Agents adapter and managed-provider credential readiness and private systemd credential bindings (#259, #308). Source integration does not establish hosted-provider qualification.
+- Add explicit, preview-bound export of selected captures to Langfuse, retaining redaction, incomplete content and unknown usage (#217).
+- Add reproducible offline pattern-analysis evidence and the bounded deterministic interruption matrix (#220, #254), without a new analysis or recovery framework.
+
+Publication and source checks do not establish full installed Objective acceptance. Public workspace and autonomy qualification remain tracked in #263 and #253.
+
 ## 0.1.45 — 2026-09-29
 
 - Expose configured built-in MCP capability and additive-instruction presence/equality to planning and graph review while retaining private instruction text, opaque registered configuration and exact runtime bindings (#301 / PR #302).

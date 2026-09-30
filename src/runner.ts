@@ -1,3 +1,4 @@
+import { executionContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
 import { applyWorkCorrection } from "./work-repair.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
@@ -570,6 +571,7 @@ async function cancelRecordedSubprocesses(
 async function cancelKnownWork(
   state: ContinuationState,
   driver: ExecutionDriver,
+  save: () => void,
 ): Promise<void> {
   const errors: string[] = [];
   const tasks: Promise<void>[] = [];
@@ -606,7 +608,12 @@ async function cancelKnownWork(
         );
         continue;
       }
-      tasks.push(driver.cancel(work.execution));
+      tasks.push(
+        driver.cancel(
+          structuredClone(work.execution),
+          executionContext(work, save),
+        ),
+      );
     }
   tasks.push(cancelRecordedSubprocesses(state));
   for (const result of await Promise.allSettled(tasks))
@@ -716,7 +723,7 @@ export async function runObjective(
     owner.cancellation = (async () => {
       const state = owner.snapshot!;
       try {
-        await cancelKnownWork(state, services.driver);
+        await cancelKnownWork(state, services.driver, persist);
         // The run settles its in-flight effect before recording terminal cancellation.
         state.coordinator!.waitReason =
           "Owned cancellation acknowledged; waiting for in-flight phase to settle";
@@ -994,8 +1001,11 @@ async function runObjectivePass(
   owner: LocalOwner,
 ): Promise<FactoryState> {
   validateTarget(config.repository, config.checkout);
-  if (config.execution.kind !== "local")
-    throw new Error("Current trunk supports local execution only");
+  if (
+    config.execution.kind !== "local" &&
+    config.execution.kind !== "managed-agent"
+  )
+    throw new Error("Execution mode is not implemented");
   const root = stateRoot(config.repository);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const path = statePath(config.repository, objective);
@@ -1970,7 +1980,10 @@ async function runObjectivePass(
       for (const work of Object.values(current.work)) {
         if (!work.execution || work.status !== "running") continue;
         try {
-          await driver.cancel(work.execution);
+          await driver.cancel(
+            structuredClone(work.execution),
+            executionContext(work, () => saveState(path, current)),
+          );
         } catch (cancelError) {
           current.coordinator!.cancelError = String(cancelError);
         }
@@ -1986,8 +1999,18 @@ async function runObjectivePass(
         )
           continue;
         try {
-          if ((await driver.observe(work.execution)).state === "running")
-            await driver.cancel(work.execution);
+          if (
+            (
+              await driver.observe(
+                structuredClone(work.execution),
+                executionContext(work, () => saveState(path, current)),
+              )
+            ).state === "running"
+          )
+            await driver.cancel(
+              structuredClone(work.execution),
+              executionContext(work, () => saveState(path, current)),
+            );
         } catch (cessationError) {
           current.coordinator!.cancelError = `Owned worker cessation unresolved: ${String(cessationError)}`;
           current.coordinator!.waitReason =
@@ -2065,7 +2088,9 @@ export async function cancelObjective(
     continuation.cancelRequested = true;
     saveState(statePath(config.repository, objective), continuation);
     try {
-      await cancelKnownWork(continuation, driver);
+      await cancelKnownWork(continuation, driver, () =>
+        saveState(statePath(config.repository, objective), continuation),
+      );
     } catch (error) {
       continuation.coordinator ??= {
         mode: "running",
@@ -2081,7 +2106,20 @@ export async function cancelObjective(
     if (continuation.schemaVersion === 4)
       for (const work of Object.values(continuation.work)) {
         if (work.execution && work.step === "execute")
-          await driver.collect(work.execution).catch(() => undefined);
+          await driver
+            .collect(
+              structuredClone(work.execution),
+              executionContext(
+                work,
+                () =>
+                  saveState(
+                    statePath(config.repository, objective),
+                    continuation,
+                  ),
+                () => true,
+              ),
+            )
+            .catch(() => undefined);
         if (work.status !== "done" && work.status !== "published") {
           work.status = "cancelled";
           work.completedAt = new Date().toISOString();
@@ -2125,6 +2163,9 @@ export function retryWorkItem(
       throw new Error("Only a failed or cancelled Work Item can be retried");
     if (
       work.pendingEffect ||
+      (work.step === "execute" &&
+        work.execution !== undefined &&
+        work.recovery?.failure?.classification === "uncertain") ||
       state.coordinator?.phase === "objective-review-submitted"
     )
       throw new Error(

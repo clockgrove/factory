@@ -1,4 +1,8 @@
 import {
+  OpenAIManagedExecutionDriver,
+  validateOpenAIManagedConfig,
+} from "./execution/openai-managed.js";
+import {
   enqueueIntake,
   runIntake,
   type IntakeAuthorization,
@@ -501,6 +505,32 @@ function builtInHarness(
 /** The single production composition point for the installed application. */
 export function compose(input: FactoryConfig): FactoryApplication {
   const config = cloneAndValidateConfig(input);
+  if (config.execution.kind === "managed-agent") {
+    const root = stateRoot(config.repository);
+    const contentStore = new LocalContentStore(join(root, "content"));
+    const github = new RealGitHubGateway(
+      config.repository,
+      new NativeStackDelivery(config.repository),
+    );
+    const driver = new OpenAIManagedExecutionDriver({
+      checkout: config.checkout,
+      workRoot: join(root, "managed"),
+      contentStore,
+      config: validateOpenAIManagedConfig(config.execution.config),
+    });
+    return createApplication(config, {
+      planningModel: new CodexPlanningModel(
+        config.checkout,
+        config.planning.planner,
+        config.planning.reviewer,
+      ),
+      driver,
+      github,
+      delivery: new RegularDelivery(config.checkout, github),
+      contentStore,
+      reportRunStatus: (message) => console.error(message),
+    });
+  }
   if (config.execution.kind !== "local")
     throw new Error(
       `Execution mode ${config.execution.kind} is not implemented`,

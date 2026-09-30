@@ -338,13 +338,29 @@ export interface ExecutionResult {
   assets?: CapturedAssetSet[];
   evidence?: unknown;
 }
+/** Persist before each external mutation; callbacks are controller-owned, never serialized. */
+export interface ExecutionContext {
+  observeUsage?(observation: WorkerUsageObservation): void;
+  cancelled(): boolean;
+  checkpoint(handle: ExecutionHandle): void;
+}
+
 export interface ExecutionDriver {
   preflight?(graph: WorkGraph): Promise<void>;
   availableSlots(): Promise<number | "unknown">;
-  start(request: ExecutionRequest): Promise<ExecutionHandle>;
-  observe(handle: ExecutionHandle): Promise<ExecutionObservation>;
-  cancel(handle: ExecutionHandle): Promise<void>;
-  collect(handle: ExecutionHandle): Promise<ExecutionResult>;
+  start(
+    request: ExecutionRequest,
+    context?: ExecutionContext,
+  ): Promise<ExecutionHandle>;
+  observe(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionObservation>;
+  cancel(handle: ExecutionHandle, context?: ExecutionContext): Promise<void>;
+  collect(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionResult>;
 }
 
 export interface HarnessRequest {

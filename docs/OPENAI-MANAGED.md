@@ -1,0 +1,111 @@
+# OpenAI managed execution
+
+This adapter runs a Work Item in an OpenAI-hosted environment through the Agents
+API. Factory still owns planning, independent review, scheduling, media selection,
+validation and GitHub delivery. It does not use the Agents SDK or replace the local
+Codex harness.
+
+**Qualification status:** development candidate for [#258](https://github.com/clockgrove/factory/issues/258).
+Credential-free tests exercise the real Git and controller paths. Actual hosted
+execution, publication isolation and cancellation cessation still require the
+issue's public qualification; this document does not claim that proof exists.
+
+## Using the adapter
+
+Installing Factory does not authorize this provider, source disclosure or API
+spending. First approve the target, source and asset scope, OpenAI project/model,
+resource limits and spending authority. The controller uses an OpenAI Platform
+API credential; local Codex login is not its substitute. Keep the key outside the
+target checkout and outside worker input.
+
+The existing `factory install` command retains local execution defaults. For an
+explicitly authorized managed run, edit the printed installation configuration's
+`execution` object and worker policy. For example, replace the model and resource
+choices with the actual approved values:
+
+```json
+{
+  "execution": {
+    "kind": "managed-agent",
+    "provider": "openai-agents",
+    "concurrency": 1,
+    "config": {
+      "model": "APPROVED_MODEL",
+      "reasoningEffort": "low",
+      "containerSize": "small",
+      "apiKeyEnv": "FACTORY_OPENAI_API_KEY",
+      "timeoutSeconds": 600
+    }
+  },
+  "policy": {
+    "network": "off",
+    "allowedSecretNames": [],
+    "deployments": "denied"
+  }
+}
+```
+
+This is a partial configuration example, not a complete installation file. Do not
+put a secret value in it. The worker has disabled network access, no GitHub
+credentials, no additional tools, plugins or vaults, and no provider subagents.
+The controller requires network access to the API and GitHub. Models, container
+sizes and the attempt deadline are explicit installation choices. Reported
+provider capacity remains unknown; Factory still enforces configured concurrency.
+
+Use the ordinary installed `plan`, `run`, `status` and `cancel` commands with the
+matching configuration. Review the source before authorizing upload: the complete
+pinned baseline and declared source/selected assets leave the controller. OpenAI
+API data handling and account access must be acceptable for that target.
+
+## Supported inputs and results
+
+The initial transfer supports regular Git files and executable modes. It sends
+only exact shallow baseline objects, without unrelated history or local Git
+configuration. A setup command checks the archive digest and exact commit before
+Factory submits the Work Item. Symlink and submodule baselines are rejected before
+creating a session. The inline archive must fit the provider's 5 MiB per-file
+limit; larger inputs currently require another execution mode.
+
+The worker exports ordinary file bytes, including untracked files and declared
+media staging, into a tar artifact. Factory checks session, environment, turn,
+path, length and binding, rejects unsafe entries, and verifies every file against
+the exported inventory of paths, modes, byte lengths and SHA-256 digests.
+Deleted files and executable modes survive import. The normal media capture,
+whole-AssetSet selection, target-owned LFS rules, secret scan and independent
+acceptance then apply. An artifact, successful turn or final response is not
+product acceptance. An output archive must fit the provider's 200 MiB file limit.
+
+## Restart, cancellation and accounting
+
+Factory saves provider identity and submission disposition in its existing
+continuation snapshot. It never resends an ambiguous create or Work Item input.
+A stopped stream and an idle session do not establish success. Restart reads
+current session and paginated turn/artifact history. Unresolved identity or
+unexpected additional turns stop for operator direction.
+
+The configured `timeoutSeconds` bounds the whole attempt, including setup and
+artifact retrieval; each request uses only the remaining time. Cancellation and
+resource deletion receive a separate window of the same duration, recorded in the
+continuation snapshot so restart cannot reset it. Thus attempt and cleanup can
+together take up to twice the configured duration.
+
+Cancellation requests a stop and then confirms owned environment disposition.
+Successful collection retains its result, artifact identities and best-effort
+usage before requesting session deletion. Failed cleanup remains visible and
+prevents claiming resource cessation. Local failed transfers remain available for
+diagnosis. Null usage is unknown, never zero; token counts do not establish the
+complete model, tool and container bill.
+
+## Building this adapter
+
+The wire contract is pinned to `OpenAI-Beta: agents=v1` and the documented REST
+resources. It uses Node's existing fetch rather than adding a second OpenAI SDK.
+The pinned `tar` dependency parses provider-controlled archives; it avoids a
+custom archive decoder. The shared execution checkpoint writes the existing
+atomic snapshot before effects and rejects stale lifecycle writers. No new queue,
+journal or provider control plane is introduced.
+
+Official references: [hosted environments](https://developers.openai.com/api/docs/guides/agents-api/environments/openai-hosted),
+[session lifecycle](https://developers.openai.com/api/docs/guides/agents-api/sessions),
+[artifacts and limits](https://developers.openai.com/api/docs/guides/agents-api/environments/files),
+[usage](https://developers.openai.com/api/docs/guides/agents-api/observability).

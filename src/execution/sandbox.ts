@@ -261,13 +261,14 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<void> {
     const a = this.active(handle);
-    a.phase = "destroying";
-    a.terminal = terminal;
-    this.save(handle, context);
-    await this.options.provider.destroy(a.sandbox!);
-    a.phase = "destroyed";
-    a.terminal = terminal;
-    this.save(handle, context);
+    if (a.phase !== "destroyed") {
+      a.phase = "destroying";
+      a.terminal = terminal;
+      this.save(handle, context);
+      await this.options.provider.destroy(a.sandbox!);
+      a.phase = "destroyed";
+      this.save(handle, context);
+    }
     rmSync(join(this.options.workRoot, handle.identity), {
       recursive: true,
       force: true,
@@ -278,7 +279,10 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<void> {
     const a = this.active(handle);
-    if (a.phase === "destroyed") return;
+    if (a.phase === "destroyed") {
+      await this.destroy(handle, a.terminal!, context);
+      return;
+    }
     if (!a.sandbox)
       throw new Error(
         "Sandbox create outcome unknown; operator direction required",
@@ -314,8 +318,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
   ): Promise<ExecutionResult> {
     const a = this.active(handle);
     if (a.result) {
-      if (a.phase !== "destroyed")
-        await this.destroy(handle, "complete", context);
+      await this.destroy(handle, "complete", context);
       return a.result;
     }
     if (a.operation !== "collect") {

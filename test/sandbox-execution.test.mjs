@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -306,6 +307,10 @@ test("completed result survives restart after destruction and a recoverable clea
     const next = new SandboxExecutionDriver(f.options);
     const result = await next.collect(restored);
     assert.deepEqual(result, latest.data.result);
+    assert.equal(
+      existsSync(join(f.options.workRoot, restored.identity)),
+      false,
+    );
     assert.equal(f.git("show", result.changeRef + ":keep.txt"), "changed");
     assert.equal(f.provider.starts, starts);
     assert.equal(f.provider.resources.size, 0);

@@ -817,7 +817,15 @@ for (const delivery of ["regular", "native"])
         assert.equal(state.work.qa.status, "failed");
         await assert.rejects(application.runObjective(1, plan));
         assert.equal(submissions, 1);
+        if (outcome === "unknown") {
+          assert.throws(
+            () => application.retryWorkItem(1, "qa"),
+            /outcome is unknown/,
+          );
+          assert.equal(submissions, 1);
+        }
         if (outcome === "refused") {
+          assert.equal(state.work.qa.execution, undefined);
           application.retryWorkItem(1, "qa");
           const completed = await application.runObjective(1, plan);
           assert.equal(completed.finalValidation.passed, true);

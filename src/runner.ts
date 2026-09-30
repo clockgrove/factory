@@ -2163,7 +2163,9 @@ export function retryWorkItem(
       throw new Error("Only a failed or cancelled Work Item can be retried");
     if (
       work.pendingEffect ||
-      work.recovery?.failure?.classification === "uncertain" ||
+      (work.step === "execute" &&
+        work.execution !== undefined &&
+        work.recovery?.failure?.classification === "uncertain") ||
       state.coordinator?.phase === "objective-review-submitted"
     )
       throw new Error(

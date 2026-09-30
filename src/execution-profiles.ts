@@ -49,6 +49,29 @@ export function executionProfileChoices(
         ...profileBinding(id, profile, config.policy),
         description: profile.description,
         selectionHints: profile.selectionHints ?? [],
+        ...(profile.harness.kind !== "registered"
+          ? {
+              environment: {
+                instructions:
+                  profile.environment?.instructions !== undefined
+                    ? {
+                        present: true as const,
+                        identity: createHash("sha256")
+                          .update(profile.environment.instructions)
+                          .digest("hex"),
+                      }
+                    : { present: false as const },
+                ...(profile.environment?.mcp
+                  ? {
+                      mcp: {
+                        kind: profile.environment.mcp.kind,
+                        version: profile.environment.mcp.version,
+                      },
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         constraints: {
           network: config.policy.network,
           ...(profile.harness.kind === "claude-agent-sdk"

@@ -1,3 +1,5 @@
+import { CodexPlanningModel } from "../dist/compiler.js";
+import { compilerRequest, compilerResponse } from "./support/compiler-wire.mjs";
 import { Codex } from "@openai/codex-sdk";
 import { runCodexWorker } from "../dist/execution/worker.js";
 import assert from "node:assert/strict";
@@ -19,6 +21,7 @@ import {
   validateConfig,
   factoryConfigDigest,
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
+  GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
 } from "../dist/config.js";
 import {
   executionProfileChoices,
@@ -99,10 +102,7 @@ test("environment config is strict, private and covered by accepted profile/conf
     const config = configFor(target);
     assert.doesNotThrow(() => validateConfig(config));
     const choices = executionProfileChoices(config);
-    assert.doesNotMatch(
-      JSON.stringify(choices),
-      /PRIVATE-INSTRUCTIONS|factory-worktree-read/,
-    );
+    assert.doesNotMatch(JSON.stringify(choices), /PRIVATE-INSTRUCTIONS/);
     const graph = {
       objective: 1,
       baseSha: target.baseSha,
@@ -162,6 +162,202 @@ test("environment config is strict, private and covered by accepted profile/conf
     assert.match(prompt, /PRIVATE-INSTRUCTIONS-first/);
     assert.doesNotMatch(JSON.stringify(graph), /PRIVATE-INSTRUCTIONS/);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("profile environment summaries disclose only built-in capability and exact instruction equality", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-profile-summary-"));
+  try {
+    const config = configFor(createTarget(root));
+    const profiles = config.execution.profiles;
+    profiles.sameText = structuredClone(profiles.first);
+    profiles.sameText.description = "Different metadata";
+    profiles.sameText.harness.model = "other-model";
+    profiles.sameText.selectionHints = ["Different preference"];
+    const builtins = {
+      claude: harnessConfig(),
+      codex: { kind: "codex-sdk", model: "fixture", reasoningEffort: "low" },
+      copilot: {
+        kind: "github-copilot-sdk",
+        adapter: GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
+        model: "fixture",
+        reasoningEffort: "low",
+        session: "new-per-attempt",
+        availableTools: ["view"],
+        permissionKinds: ["read"],
+        timeoutSeconds: 30,
+        authentication: "local",
+      },
+    };
+    for (const [id, harness] of Object.entries(builtins)) {
+      profiles[id] = { description: id, harness };
+      profiles[`${id}Instructions`] = {
+        description: id,
+        harness,
+        environment: { instructions: environment("first").instructions },
+      };
+    }
+    profiles.registered = {
+      description: "Opaque adapter",
+      harness: {
+        kind: "registered",
+        adapter: "fixture@1",
+        config: {
+          instructions: "PRIVATE-REGISTERED",
+          privatePath: "/private/adapter/file",
+          secretAllowlist: ["PRIVATE_TOKEN"],
+          mcp: { kind: "private-server" },
+        },
+      },
+    };
+    validateConfig(config);
+    const choices = executionProfileChoices(config);
+    const byId = Object.fromEntries(choices.profiles.map((p) => [p.id, p]));
+    assert.deepEqual(byId.first.environment.mcp, {
+      kind: "factory-worktree-read",
+      version: 1,
+    });
+    assert.equal(byId.first.environment.instructions.present, true);
+    assert.match(
+      byId.first.environment.instructions.identity,
+      /^[0-9a-f]{64}$/,
+    );
+    assert.equal(
+      byId.first.environment.instructions.identity,
+      byId.sameText.environment.instructions.identity,
+    );
+    assert.notEqual(byId.first.digest, byId.sameText.digest);
+    assert.notEqual(
+      byId.first.environment.instructions.identity,
+      byId.second.environment.instructions.identity,
+    );
+    for (const id of Object.keys(builtins)) {
+      assert.deepEqual(byId[id].environment, {
+        instructions: { present: false },
+      });
+      assert.deepEqual(byId[`${id}Instructions`].environment, {
+        instructions: byId.first.environment.instructions,
+      });
+    }
+    assert.equal(byId.registered.environment, undefined);
+    assert.deepEqual(
+      byId.first.constraints.tools,
+      profiles.first.harness.tools,
+    );
+    assert.deepEqual(
+      byId.first.constraints.permissions,
+      profiles.first.harness.allowedTools,
+    );
+    assert.deepEqual(
+      byId.copilot.constraints.tools,
+      profiles.copilot.harness.availableTools,
+    );
+    assert.deepEqual(
+      byId.copilot.constraints.permissions,
+      profiles.copilot.harness.permissionKinds,
+    );
+    for (const summary of choices.profiles) {
+      const binding = profileBinding(
+        summary.id,
+        profiles[summary.id],
+        config.policy,
+      );
+      for (const [key, value] of Object.entries(binding))
+        assert.deepEqual(summary[key], value);
+    }
+    assert.doesNotMatch(
+      JSON.stringify(choices),
+      /PRIVATE-|privatePath|secretAllowlist|private-server|\/private\/adapter/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rendered planner, revision and amendment review inputs retain safe configured profile evidence", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-profile-prompts-"));
+  const original = Codex.prototype.startThread;
+  const captured = [];
+  Codex.prototype.startThread = function () {
+    return {
+      id: "profile-summary",
+      async runStreamed(prompt, options) {
+        captured.push(prompt);
+        const response = options.outputSchema.properties.contextId
+          ? compilerResponse(prompt, [
+              { executionProfile: { id: "first", reason: "Configured MCP" } },
+            ])
+          : {
+              packetId: options.outputSchema.properties.packetId.enum[0],
+              findings: [],
+            };
+        return {
+          events: (async function* () {
+            yield {
+              type: "item.completed",
+              item: { type: "agent_message", text: JSON.stringify(response) },
+            };
+            yield {
+              type: "turn.completed",
+              usage: { input_tokens: 1, output_tokens: 1 },
+            };
+          })(),
+        };
+      },
+    };
+  };
+  try {
+    const target = createTarget(root);
+    const config = configFor(target);
+    const choices = executionProfileChoices(config);
+    const objective =
+      "## Acceptance\n- result exists\n\n## Commands\n- test -s result.txt\n";
+    const model = new CodexPlanningModel(
+      root,
+      { model: "planner", reasoningEffort: "low" },
+      { model: "reviewer", reasoningEffort: "low" },
+    );
+    const request = compilerRequest({
+      objective,
+      baseSha: target.baseSha,
+      sources: [{ path: "OBJECTIVE", content: objective }],
+      executionProfiles: choices,
+      controllerCapabilities: {},
+      controllerCapabilitiesDigest: "c".repeat(64),
+    });
+    for (const phase of ["initial", "revision", "amendment"]) {
+      const graph = await model.generateStructured({
+        ...request,
+        compileContext: {
+          ...request.compileContext,
+          instructions: `${phase}: retain required configured MCP work`,
+        },
+      });
+      await model.reviewGraph({
+        ...request,
+        graph,
+        commands: [],
+        finalCommands: [],
+        ...(phase === "amendment"
+          ? { amendment: { reason: "Preserve configured capability" } }
+          : {}),
+      });
+    }
+    assert.equal(captured.length, 6);
+    for (const prompt of captured) {
+      assert.ok(prompt.includes(JSON.stringify(choices)));
+      assert.match(prompt, /factory-worktree-read/);
+      assert.match(prompt, /not successful readiness or runtime invocation/);
+      assert.match(
+        prompt,
+        /only exact text equality or distinctness, not instruction semantics/,
+      );
+      assert.match(prompt, /opaque, not evidence of absence/);
+      assert.doesNotMatch(prompt, /PRIVATE-INSTRUCTIONS/);
+    }
+  } finally {
+    Codex.prototype.startThread = original;
     rmSync(root, { recursive: true, force: true });
   }
 });

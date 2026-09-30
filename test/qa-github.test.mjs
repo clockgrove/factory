@@ -103,3 +103,59 @@ test("named CI reads later result pages and preserves transport failures", async
   );
   assert.equal(calls, 1);
 });
+
+test("PR observation exposes only successful unambiguous checks on its exact head", async () => {
+  for (const [candidates, expected] of [
+    [[run()], [71]],
+    [[], []],
+    [[run({ head_sha: "b".repeat(40) })], []],
+    [[run({ status: "in_progress", conclusion: null })], []],
+    [[run({ conclusion: "failure" })], []],
+    [[run({ conclusion: "neutral" })], []],
+    [[run({ conclusion: "skipped" })], []],
+    [[run(), run({ id: 72 })], []],
+  ]) {
+    const github = gateway(async (url) => {
+      const request = new URL(url);
+      if (request.pathname.endsWith("/pulls/1"))
+        return new Response(
+          JSON.stringify({
+            state: "open",
+            merged: false,
+            head: { sha: head, ref: "factory/item" },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      if (request.pathname.endsWith("/check-runs")) {
+        assert.equal(request.searchParams.get("filter"), "latest");
+        return response(candidates);
+      }
+      assert.equal(
+        request.pathname,
+        `/repos/example/target/commits/${head}/status`,
+      );
+      return new Response(
+        JSON.stringify({ state: "success", total_count: 0 }),
+        {
+          headers: { "content-type": "application/json" },
+        },
+      );
+    });
+    const actual = await github.observe({
+      number: 1,
+      branch: "factory/item",
+      headSha: head,
+    });
+    assert.deepEqual(
+      actual.namedChecks.map((check) => check.id),
+      expected,
+    );
+    for (const check of actual.namedChecks) {
+      assert.equal(check.headSha, head);
+      assert.equal(check.name, name);
+      assert.equal(check.conclusion, "success");
+    }
+    if (candidates.some((check) => check.conclusion === "failure"))
+      assert.equal(actual.checks, "failing");
+  }
+});

@@ -2051,8 +2051,10 @@ test("final review shares one text budget across ordinary and materialization pa
           [
             "Work Item Git delta: media-one",
             "Work Item Git delta: media-one controller materialization",
+            "Delivery lifecycle proof: media-one",
             "Work Item Git delta: media-two",
             "Work Item Git delta: media-two controller materialization",
+            "Delivery lifecycle proof: media-two",
           ],
         );
         assert.ok(

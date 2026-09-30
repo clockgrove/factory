@@ -75,6 +75,8 @@ export interface WorkState {
   discoveryDisposition?: "proposed" | "accepted";
   pendingEffect?: "review" | "publication" | "merge";
   qaChecks?: NamedCheckEvidence[];
+  /** Exact-head successful named checks observed before submitting integration. */
+  preIntegrationChecks?: NamedCheckEvidence[];
   status: WorkStatus;
   step?: WorkStep;
   attempt?: string;
@@ -605,21 +607,26 @@ export function parseFactoryState(
       (!Number.isSafeInteger(item.pullRequest) || !item.changeRef)
     )
       throw new Error(`Published Work Item ${id} lacks PR or change identity`);
-    if (item.qaChecks !== undefined) {
-      if (!Array.isArray(item.qaChecks))
-        throw new Error(`${id}.qaChecks is invalid`);
-      for (const raw of item.qaChecks) {
-        const check = record(raw, `${id}.qaChecks`);
+    for (const field of ["qaChecks", "preIntegrationChecks"] as const) {
+      if (item[field] === undefined) continue;
+      if (!Array.isArray(item[field]))
+        throw new Error(`${id}.${field} is invalid`);
+      const names = new Set<string>();
+      for (const raw of item[field] as unknown[]) {
+        const check = record(raw, `${id}.${field}`);
         if (
           !Number.isSafeInteger(check.id) ||
           Number(check.id) <= 0 ||
           check.status !== "completed" ||
-          check.conclusion !== "success"
+          check.conclusion !== "success" ||
+          (field === "preIntegrationChecks" &&
+            (check.headSha !== item.changeRef || names.has(String(check.name))))
         )
-          throw new Error(`${id}.qaChecks lacks successful result identity`);
-        sha(check.headSha, `${id}.qaChecks.headSha`);
-        string(check.name, `${id}.qaChecks.name`);
-        string(check.detailsUrl, `${id}.qaChecks.detailsUrl`);
+          throw new Error(`${id}.${field} lacks successful result identity`);
+        sha(check.headSha, `${id}.${field}.headSha`);
+        string(check.name, `${id}.${field}.name`);
+        string(check.detailsUrl, `${id}.${field}.detailsUrl`);
+        names.add(check.name as string);
       }
     }
     const accepted = (graph.items as WorkGraph["items"]).find(

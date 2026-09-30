@@ -14,6 +14,21 @@ const manifest: ControllerCapabilitiesManifest = {
   manifestId: "factory-controller-capabilities/v1",
   guarantees: [
     {
+      id: "independent-result-review",
+      statement:
+        "For ordinary regular and native-stack Work Items, Factory validates the exact result tree and requires a separate configured acceptance review before publishing that result. Human acceptance is recorded separately and never counts as an automatic passing independent review. Final Objective review receives controller-derived review completion facts for each exact delivered result, without treating prior reviewer prose as product proof.",
+    },
+    {
+      id: "reviewed-head-publication",
+      statement:
+        "Only the controller publishes Work Item branches and pull requests. It verifies that each published PR head is the exact result commit whose tree passed validation and acceptance review; workers receive no publication authority.",
+    },
+    {
+      id: "protected-exact-head-integration",
+      statement:
+        "Factory observes authenticated exact PR identities and check readiness before submitting regular or native-stack integration, supplies expected heads, and honors the target's existing GitHub protection and required checks without bypass. Final Objective review receives compact successful uniquely named check identities actually observed on each published head before integration. Missing, ambiguous, stale, pending, neutral, skipped or failing check results do not become successful named-check evidence; configured guarantees never claim that future checks have already passed.",
+    },
+    {
       id: "selected-set-materialization",
       statement:
         "Factory captures complete candidate AssetSets in private staging and stops for explicit human whole-set selection. It then materializes only selected bytes to Work Item-owned destinations, enforces the target Git attributes for every required LFS role, scans the staged result, and verifies each committed LFS pointer against the captured SHA-256 digest and byte count.",

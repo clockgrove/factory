@@ -1,3 +1,4 @@
+import { installedControllerCapabilities } from "./controller-capabilities.js";
 import { ownsPath } from "./ownership.js";
 import {
   CandidateValidationFailure,
@@ -1142,6 +1143,24 @@ function workItemResultEvidence(args: {
     throw new Error(
       `Work Item ${item.id} validation commands differ from the accepted item`,
     );
+  const checks = current.preIntegrationChecks ?? [];
+  const checkNames = new Set<string>();
+  for (const check of checks) {
+    if (
+      check.headSha !== current.changeRef ||
+      !Number.isSafeInteger(check.id) ||
+      check.id <= 0 ||
+      !check.name ||
+      !check.detailsUrl ||
+      check.status !== "completed" ||
+      check.conclusion !== "success" ||
+      checkNames.has(check.name)
+    )
+      throw new Error(
+        `Work Item ${item.id} pre-integration check lacks successful exact-result identity`,
+      );
+    checkNames.add(check.name);
+  }
   const itemIntegratedTreeSha = current.integratedSha
     ? pinnedGit(checkout, "rev-parse", `${current.integratedSha}^{tree}`)
     : null;
@@ -1176,6 +1195,20 @@ function workItemResultEvidence(args: {
     resultTreeSha: current.treeSha,
     validationTreeSha: current.validation.treeSha,
     validationCommands: current.validation.commands,
+    independentReview: {
+      resultCommitSha: current.changeRef,
+      resultTreeSha: current.treeSha,
+      automaticPass:
+        Boolean(current.pullRequest) &&
+        item.acceptance.length > 0 &&
+        current.validation.criteria?.length === item.acceptance.length &&
+        current.validation.criteria.every(
+          (criterion, index) =>
+            criterion.criterion === item.acceptance[index] &&
+            criterion.verdict === "pass",
+        ),
+    },
+    preIntegrationChecks: current.preIntegrationChecks ?? [],
     pullRequest: current.pullRequest,
     integratedCommitSha: current.integratedSha ?? null,
     integratedTreeSha: itemIntegratedTreeSha,
@@ -1186,6 +1219,17 @@ function workItemResultEvidence(args: {
     ),
     selection: current.selection,
   };
+  evidence.push({
+    path: `Delivery lifecycle proof: ${item.id}`,
+    complete: true,
+    content: JSON.stringify({
+      itemId: item.id,
+      pullRequest: current.pullRequest ?? null,
+      independentReview: record.independentReview,
+      preIntegrationChecks: record.preIntegrationChecks,
+      integratedCommitSha: current.integratedSha ?? null,
+    }),
+  });
   return { record, evidence };
 }
 
@@ -1454,6 +1498,10 @@ export async function reviewAcceptance(args: {
       },
     }),
     commandPassEvidence(evidence.commands),
+    {
+      path: "Factory controller capabilities",
+      content: JSON.stringify(installedControllerCapabilities()),
+    },
     {
       path: "Delivery observations",
       content: args.observations ?? "",

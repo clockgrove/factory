@@ -911,6 +911,10 @@ export async function runNativeGraph(args: {
           throw new Error(
             `Native PR #${layers[index]!.pullRequest} is not ready to merge`,
           );
+      for (const [index, observation] of observations.entries())
+        state.work[unit.items[index]!.id]!.preIntegrationChecks =
+          observation.namedChecks ?? [];
+      save();
     }
     let integratedSha: string;
     const mergeOperation = {

@@ -16,6 +16,7 @@ function fixture(run) {
       const item = {
         id,
         title: id,
+        acceptance: [`${path} exists`],
         dependencies,
         ownedPaths: [path],
         validation: [{ command: `test -f ${path}` }],

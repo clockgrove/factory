@@ -130,6 +130,14 @@ test("compile and independent graph review expose the pre-delivery boundary for 
     ).findings,
     [],
   );
+  for (const prompt of prompts) {
+    for (const id of [
+      "independent-result-review",
+      "reviewed-head-publication",
+      "protected-exact-head-integration",
+    ])
+      assert.ok(prompt.includes(id), `Missing rendered capability: ${id}`);
+  }
   assert.match(prompts[0], /Work-item result proof precedes its own delivery/);
   assert.match(
     prompts[0],

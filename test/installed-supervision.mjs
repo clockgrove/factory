@@ -7,15 +7,18 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const [installation, evidence] = process.argv
-  .slice(2)
-  .map((path) => resolve(path));
+const [installationPath, evidencePath, mode] = process.argv.slice(2);
+const installation = installationPath && resolve(installationPath);
+const evidence = evidencePath && resolve(evidencePath);
+if (mode && mode !== "--isolated-config")
+  throw new Error("Unknown installed-supervision mode");
 if (!installation || !evidence)
   throw new Error(
     "installed-supervision requires installed package root and new evidence directory",
@@ -51,6 +54,8 @@ const baseSha = execFileSync("git", ["-C", checkout, "rev-parse", "HEAD"], {
   encoding: "utf8",
 }).trim();
 process.env.XDG_STATE_HOME = join(evidence, "state");
+if (mode === "--isolated-config")
+  process.env.XDG_CONFIG_HOME = join(evidence, "config");
 const cli = join(installation, "dist/cli.js"),
   configPath = join(evidence, "factory.json");
 const run = (...args) =>
@@ -138,7 +143,8 @@ writeFileSync(
   JSON.stringify(
     {
       ...report,
-      owner: "Factory contributor #246",
+      owner: "Factory contributor installed supervision proof",
+      configMode: mode ?? "existing user configuration",
       attemptLimit: 1,
       providerCalls: 0,
       concurrency: 1,
@@ -165,6 +171,38 @@ try {
   run("supervisor", "install", "--objective", "1");
   const status = JSON.parse(run("supervisor", "status"));
   assert.equal(status.registered, true);
+  assert.equal(status.enabled, "enabled");
+  const fragment = execFileSync(
+    "systemctl",
+    ["--user", "show", status.unit, "--property=FragmentPath", "--value"],
+    { encoding: "utf8" },
+  ).trim();
+  const unitPath = join(
+    process.env.XDG_CONFIG_HOME ?? join(process.env.HOME, ".config"),
+    "systemd/user",
+    status.unit,
+  );
+  assert.equal(realpathSync(fragment), realpathSync(unitPath));
+  assert.equal(status.binding.cli, realpathSync(cli));
+  assert.equal(status.binding.config, realpathSync(configPath));
+  assert.equal(status.binding.stateHome, process.env.XDG_STATE_HOME);
+  if (mode === "--isolated-config") {
+    const managerPaths = execFileSync(
+      "systemctl",
+      ["--user", "show", "--property=UnitPath", "--value"],
+      { encoding: "utf8" },
+    )
+      .trim()
+      .split(" ");
+    assert.equal(
+      managerPaths.includes(join(process.env.XDG_CONFIG_HOME, "systemd/user")),
+      false,
+    );
+    assert.equal(
+      status.binding.environment.XDG_CONFIG_HOME,
+      process.env.XDG_CONFIG_HOME,
+    );
+  }
   assert.notEqual(status.active, "active");
   report.host = status;
   report.checks.push("idempotent registration without start");
@@ -205,6 +243,13 @@ try {
   run("supervisor", "upgrade", "--cli", cli);
   assert.equal(snapshot().runId, state.runId);
   report.checks.push("compatible exact-artifact handoff and restart");
+  run("supervisor", "disable");
+  const disabled = JSON.parse(run("supervisor", "status"));
+  assert.equal(disabled.registered, true);
+  assert.notEqual(disabled.enabled, "enabled");
+  assert.notEqual(disabled.enabled, "not-found");
+  run("supervisor", "upgrade", "--cli", cli);
+  assert.notEqual(JSON.parse(run("supervisor", "status")).enabled, "enabled");
   run("supervisor", "disable");
   assert.equal(
     existsSync(join(stateRoot(config.repository), "controller.lock")),

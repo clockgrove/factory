@@ -413,7 +413,9 @@ export async function supervise(
         );
     } else saveUnit(path, value);
     systemctl("daemon-reload");
-    systemctl("enable", name);
+    // The running manager may use a different XDG root. Let systemd link
+    // this exact private unit into its own search path.
+    systemctl("enable", realpathSync(path));
     return { registered: name, started: false, ...supervisorHost() };
   }
   if (!existsSync(path) && ["disable", "uninstall", "stop"].includes(action))
@@ -457,6 +459,9 @@ export async function supervise(
       return { artifact: candidate.cli, restarted: wasActive };
     }
     if (action !== "stop") systemctl("disable", name);
+    // Disable removes external-unit links too. Keep the owned unit discoverable
+    // for explicit start, upgrade and uninstall, without enabling future starts.
+    if (action === "disable") systemctl("link", realpathSync(path));
     if (action === "uninstall") {
       rmSync(path);
       systemctl("daemon-reload");

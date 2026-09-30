@@ -793,3 +793,17 @@ Credential-free fixture evidence does not qualify a live sandbox provider.
 ## Daytona public repository adapter (#9)
 
 Written from the current SandboxProvider contract and official `@daytonaio/sdk@0.220.0` APIs. No archived runtime or fixtures copied. Reuses shared sandbox transport/checkpoints, native Git/LFS, registered harnesses and controller delivery. Private repository authentication and live provider evidence remain outside this implemented source slice.
+
+## Explicit stopped read-only review abandonment (#363)
+
+The approved public lifecycle contract and existing `src/runner.ts`,
+`src/state.ts`, atomic state store, local worker handles and CLI supplied this
+narrow cancellation extension. No archived code, private adopter content or
+historical transcripts were consulted or copied. Exact raw snapshot/config/run
+binding and trusted operator cessation evidence precede the existing atomic
+terminal write. Original uncertainty, results, errors, accounting and allowances
+are retained; no cancellation/collection/provider cleanup is inferred. Permanent
+run/control/mutation fences and newly authored temporary-Git tests cover the
+supported source surface. Installed artifact proof and actual disposition remain
+separate release/operator evidence; no new journal, store or recovery framework
+was introduced.

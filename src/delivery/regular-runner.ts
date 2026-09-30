@@ -1,3 +1,4 @@
+import { executionContext } from "../execution/checkpoint.js";
 import {
   recordWorkFailure,
   diagnoseWorkRepair,
@@ -164,29 +165,65 @@ export async function runRegularGraph(args: {
         work.treeSha = applied.treeSha;
       } else if (work.step !== "validate") {
         const handle =
-          existingHandle ??
-          (await driver.start({
-            captureContext: { objective, runId: state.runId },
-            item: work.recovery?.correction
-              ? {
-                  ...item,
-                  brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
-                }
-              : item,
-            baseSha: itemBase,
-            attemptId: work.attempt,
-            objectiveBody: args.objectiveBody,
-            selectedAssets: selectedInputsForItem(state, item),
-          }));
+          (existingHandle ? structuredClone(existingHandle) : undefined) ??
+          (await driver.start(
+            {
+              captureContext: { objective, runId: state.runId },
+              item: work.recovery?.correction
+                ? {
+                    ...item,
+                    brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
+                  }
+                : item,
+              baseSha: itemBase,
+              attemptId: work.attempt,
+              objectiveBody: args.objectiveBody,
+              selectedAssets: selectedInputsForItem(state, item),
+            },
+            executionContext(work, save, args.cancelled, (workerUsage) =>
+              args.diagnostics?.emit({
+                runId: state.runId,
+                itemId: item.id,
+                attemptId: work.attempt,
+                operation: "worker-usage",
+                outcome: "observed",
+                workerUsage,
+              }),
+            ),
+          ));
         if (!existingHandle) {
-          work.execution = handle;
+          work.execution = structuredClone(handle);
           save();
         }
         if (args.cancelled()) {
-          await driver.cancel(handle);
+          await driver.cancel(
+            handle,
+            executionContext(work, save, args.cancelled, (workerUsage) =>
+              args.diagnostics?.emit({
+                runId: state.runId,
+                itemId: item.id,
+                attemptId: work.attempt,
+                operation: "worker-usage",
+                outcome: "observed",
+                workerUsage,
+              }),
+            ),
+          );
           throw new Error("Objective cancelled");
         }
-        const result = await driver.collect(handle);
+        const result = await driver.collect(
+          handle,
+          executionContext(work, save, args.cancelled, (workerUsage) =>
+            args.diagnostics?.emit({
+              runId: state.runId,
+              itemId: item.id,
+              attemptId: work.attempt,
+              operation: "worker-usage",
+              outcome: "observed",
+              workerUsage,
+            }),
+          ),
+        );
         phases.release(item.id);
         recordWorkerDiscovery(state, item.id, result.discovery);
         save();

@@ -811,3 +811,15 @@ run/control/mutation fences and newly authored temporary-Git tests cover the
 supported source surface. Installed artifact proof and actual disposition remain
 separate release/operator evidence; no new journal, store or recovery framework
 was introduced.
+
+## Auditor-owned release completion (#386)
+
+The existing sequential contributor script, immutable acceptance/public audit
+records and v0.1.57 timing evidence in #384 supplied this newly written correction.
+The independent public auditor now uses one deterministic completion operation to
+render verified release facts and update only the bound release issue and Project
+item. Existing command logs and observational timing preserve partial tracking
+failures; no runtime state, journal, automatic retry or release-stage parallelism
+was added. Real temporary Git/archive fixtures exercise evidence and target
+binding, mutation acknowledgements and partial failures without provider calls or
+live Objective/adopter qualification. Published artifacts remain unchanged.

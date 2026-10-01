@@ -4,7 +4,7 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Candidate v0.1.65 preserves the original native predecessor acceptance binding in successor amendments while reobserving current executable availability ([#376](https://github.com/clockgrove/factory/issues/376)). It also includes corrected contributor Gantt event metadata ([#396](https://github.com/clockgrove/factory/issues/396)) and the measured eight-worker installed release-test default ([#422](https://github.com/clockgrove/factory/issues/422)). Package/lock/plugin versions, marketplace ref and installation commands select the same candidate. Installed distribution and public verification are tracked in [#425](https://github.com/clockgrove/factory/issues/425). No new provider, target, retry or execution authority is introduced.
+Published [v0.1.65](https://github.com/clockgrove/factory/releases/tag/v0.1.65) preserves the original native predecessor acceptance binding in successor amendments while reobserving current executable availability ([#376](https://github.com/clockgrove/factory/issues/376)). It also includes corrected contributor Gantt event metadata ([#396](https://github.com/clockgrove/factory/issues/396)) and the measured eight-worker installed release-test default ([#422](https://github.com/clockgrove/factory/issues/422)). Package/lock/plugin versions, marketplace ref and installation commands select the same released version. All 145 installed tests and nine model-free preflights passed without skips, followed by [independent public archive and pinned-plugin verification and release completion](https://github.com/clockgrove/factory/issues/425#issuecomment-5939722740). These distribution checks do not accept live Objectives or adopter pilots. No new provider, target, retry or execution authority is introduced.
 
 Published [v0.1.64](https://github.com/clockgrove/factory/releases/tag/v0.1.64) passed [independent public verification](https://github.com/clockgrove/factory/issues/417) and the autonomous local Objective qualification in [#243](https://github.com/clockgrove/factory/issues/243). Its evidence retains that exact artifact and scenario scope.
 
@@ -104,7 +104,7 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select prepared v0.1.65 and are for use only after that matching release is published and its actual public bytes and enabled pinned plugin pass independent verification. Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/425), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
+The commands below select published v0.1.65, whose actual public bytes and enabled pinned plugin passed [independent verification](https://github.com/clockgrove/factory/issues/425#issuecomment-5939722740). Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/425), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.65

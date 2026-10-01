@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.57 — 2026-09-30 (candidate)
+
+- Retain the v0.1.56 runtime. The contributor public-audit command now creates its private Codex home before the first CLI invocation (#382 / PR #383).
+- Measure a clean complete sequential release after candidate review and CI under #384, with detailed timing attribution. This does not establish live autonomous Objective or adopter acceptance.
+
+Publication and independent public verification are pending. Earlier releases and their evidence remain bound to their original source and bytes.
+
 ## 0.1.56 — 2026-09-30 (candidate)
 
 - Retain the v0.1.55 sequential-planning runtime correction. This candidate aligns the next public artifact with the single-owner contributor release workflow introduced by #378 / PR #379.

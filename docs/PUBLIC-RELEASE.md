@@ -4,7 +4,7 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Candidate v0.1.56 retains the v0.1.55 runtime and measures the complete single-owner contributor release flow in [#380](https://github.com/clockgrove/factory/issues/380). Its package/lock/plugin versions, matching marketplace ref and install commands select the same candidate. Protected publication and independent public verification are pending. Published [v0.1.55](https://github.com/clockgrove/factory/releases/tag/v0.1.55) passed [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/pull/377#issuecomment-5924168842); that evidence remains bound to its original source and bytes. This comparison does not activate live qualification or transfer earlier Objective acceptance.
+Candidate v0.1.57 retains the published v0.1.56 runtime and measures a clean complete contributor release flow in [#384](https://github.com/clockgrove/factory/issues/384). The contributor public-audit command includes the isolated Codex-home correction from #382 / PR #383 before measurement starts. Package/lock/plugin versions, marketplace ref and installation commands select this same candidate. Publication and independent public verification are pending. Published [v0.1.56](https://github.com/clockgrove/factory/releases/tag/v0.1.56) passed [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/380#issuecomment-5924983809); its original measurement included a repair PR and is not a clean baseline. This comparison does not resume live qualification or transfer earlier Objective acceptance.
 
 Published [v0.1.54](https://github.com/clockgrove/factory/releases/tag/v0.1.54) aligns existing compiler, graph-review and planning-diagnosis guidance with one owner and complete proof for each whole source obligation ([#370](https://github.com/clockgrove/factory/issues/370)). Compound final criteria can use the existing final-review proof when one controller guarantee does not cover every clause. Unique obligation indices, duplicate rejection and independent final criterion acceptance remain required. Source gates, fresh-cache offline installation and all 40 installed compiler/QA checks passed without skips. [Independent public byte and pinned-plugin verification](https://github.com/clockgrove/factory/pull/372#issuecomment-5922896684) passed. See the [exact artifact record](BUILD-STATUS.md#immutable-v0154-artifact-record). These distribution and installed contract checks do not establish full autonomous Objective or adopter acceptance; #253, #331 and #254 retain their required acceptance under #243. Clockgrove retesting remains on hold until those gates pass.
 
@@ -78,16 +78,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select prepared v0.1.56 and are for use only after that matching release is published and its actual public bytes and enabled pinned plugin pass independent verification. Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/380), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
+The commands below select prepared v0.1.57 and are for use only after that matching release is published and its actual public bytes and enabled pinned plugin pass independent verification. Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/384), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.56
+codex plugin marketplace add clockgrove/factory --ref v0.1.57
 codex plugin add factory@clockgrove
-gh release download v0.1.56 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.56.tgz --pattern SHA256SUMS
+gh release download v0.1.57 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.57.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the independently recorded prepublication digest in the owning issue/PR or artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.56.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.57.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

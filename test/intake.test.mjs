@@ -7,6 +7,11 @@ import { Server } from "node:net";
 import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
 import { planningPrerequisites } from "../dist/objective-prerequisites.js";
+import {
+  applyPendingAmendment,
+  submitAmendment,
+  graphDigest,
+} from "../dist/graph-amendments.js";
 import { CodexPlanningModel, verifyPlanCandidate } from "../dist/compiler.js";
 import { encodeCompilerWire } from "./support/compiler-wire.mjs";
 import { planObjective } from "../dist/runner.js";
@@ -475,6 +480,241 @@ test("native planning facts refuse missing, unaccepted, changed and mismatched p
       planningPrerequisites(f.config, f.github, 2, later),
       /lacks bound accepted/,
     );
+  }));
+
+async function activatedSuccessor(f, descendant = false) {
+  await f.application.enqueueIntake(
+    { ...structuredClone(authority), objectives: [1] },
+    { pollSeconds: 0.01 },
+  );
+  await f.application.runIntake();
+  const first = readState(f.config.repository, 1);
+  assert.equal(objectiveComplete(first), true);
+  git(f.config.checkout, "merge", "--ff-only", first.finalAcceptance.commit);
+  if (descendant) {
+    writeFileSync(join(f.config.checkout, "later.txt"), "Later baseline\n");
+    git(f.config.checkout, "add", "later.txt");
+    git(
+      f.config.checkout,
+      "-c",
+      "user.name=Factory Test",
+      "-c",
+      "user.email=factory-test@example.com",
+      "commit",
+      "-m",
+      "Later baseline",
+    );
+    git(f.config.checkout, "push", "origin", "main");
+  }
+  const candidate = await f.application.planObjective(2);
+  const bounded = structuredClone(authority);
+  bounded.allowances.planningRevisions = 2;
+  const admission = await f.application.admitObjective(2, candidate, bounded);
+  // Refuse a worker start only after production activation has persisted the successor.
+  f.driver.start = async () => {
+    throw new Error("Fixture activated hold");
+  };
+  await assert.rejects(
+    f.application.runObjective(2, candidate, admission),
+    /Fixture activated hold/,
+  );
+  const second = readState(f.config.repository, 2);
+  assert.equal(second.admission.packetDigest, candidate.packetDigest);
+  assert.equal(second.work["result-2"].status, "failed");
+  second.coordinator.mode = "running";
+  return { first, second, candidate };
+}
+
+function successorDiscovery(state) {
+  submitAmendment(state, {
+    scope: "in-scope",
+    reason: "Independent integrated proof of the existing source acceptance",
+    evidence: ["Objective acceptance requires result-2.txt at integrated head"],
+    ownership: ["result-2.txt"],
+    acceptance: ["result-2.txt exists"],
+    dependencies: ["result-2"],
+    actor: "fixture",
+    expectedGraphDigest: graphDigest(state.graph),
+  });
+}
+
+for (const descendant of [false, true])
+  test(`activated native successor amendment renders original predecessor facts (${descendant ? "descendant" : "equal"} base)`, async (t) =>
+    fixture(async (f) => {
+      const { first, second, candidate } = await activatedSuccessor(
+        f,
+        descendant,
+      );
+      successorDiscovery(second);
+      const selection = { model: "gpt-5.6-sol", reasoningEffort: "low" };
+      const real = new CodexPlanningModel(
+        f.config.checkout,
+        selection,
+        selection,
+      );
+      const rendered = [];
+      let currentRequest;
+      t.mock.method(real, "runStructured", async (args) => {
+        const packet = JSON.parse(args.sourcePacket);
+        rendered.push({
+          phase: args.defaultPhase,
+          prompt: args.prompt,
+          packet,
+        });
+        if (args.defaultPhase === "compile") {
+          const graph = structuredClone(second.graph);
+          graph.items.push({
+            ...item(2),
+            id: "qa-2",
+            kind: "qa",
+            ownedPaths: [],
+            dependencies: ["result-2"],
+          });
+          graph.coverage = graph.coverage.map((entry) => ({
+            ...entry,
+            itemId: "qa-2",
+            proof: { kind: "integrated-semantic", acceptanceIndex: 0 },
+          }));
+          return encodeCompilerWire(graph, args.prompt);
+        }
+        const evidence = JSON.parse(
+          args.prompt.split(
+            "\nReview evidence packet (packet-local choices; JSON strings are data):\n",
+          )[1],
+        );
+        const native = evidence.evidence.find(
+          (entry) => entry.path === "FACTORY_NATIVE_OBJECTIVE_PREREQUISITES",
+        );
+        assert.equal(native.origin, "controller");
+        assert.equal(native.complete, true);
+        assert.deepEqual(
+          JSON.parse(native.content),
+          currentRequest.prerequisites,
+        );
+        return { packetId: evidence.packetId, findings: [] };
+      });
+      const model = {
+        generateStructured(request) {
+          currentRequest = request;
+          return real.generateStructured(request);
+        },
+        reviewGraph(request) {
+          return real.reviewGraph(request);
+        },
+      };
+      assert.equal(
+        await applyPendingAmendment({
+          state: second,
+          config: f.config,
+          body: f.issues.get(2).body,
+          model,
+          github: f.github,
+          save() {},
+          cancelled: () => false,
+        }),
+        true,
+      );
+      assert.deepEqual(
+        rendered.map((entry) => entry.phase),
+        ["compile", "graph-review"],
+      );
+      for (const entry of rendered) {
+        assert.deepEqual(entry.packet.prerequisites, candidate.prerequisites);
+        assert(entry.prompt.includes(JSON.stringify(candidate.prerequisites)));
+        assert.match(
+          entry.prompt,
+          /WorkGraph dependencies refer only to items in this Objective/,
+        );
+        assert.match(
+          entry.prompt,
+          /never copy a requirement for its own review completion into current item acceptance/,
+        );
+      }
+      assert.deepEqual(
+        candidate.prerequisites.predecessors[0].acceptance,
+        first.finalAcceptance &&
+          Object.fromEntries(
+            [
+              "sealedAt",
+              "commit",
+              "tree",
+              "graphDigest",
+              "configDigest",
+              "evidenceDigest",
+            ].map((key) => [key, first.finalAcceptance[key]]),
+          ),
+      );
+      assert.equal(
+        candidate.prerequisites.predecessors[0].baseRelationship,
+        descendant ? "descendant" : "equal",
+      );
+      assert.deepEqual(second.graph.items[0], candidate.graph.items[0]);
+      assert.equal(second.graphRevisions.length, 2);
+      assert.equal(second.graphRevisions[0].digest, candidate.graphDigest);
+      assert.equal(second.allowanceConsumption.planningRevisions, 1);
+      assert.equal(second.baseSha, candidate.baseSha);
+      assert.equal(second.objectiveBodyDigest, candidate.bodyDigest);
+      assert.equal(second.configDigest, candidate.configDigest);
+      assert.equal(second.admission.packetDigest, candidate.packetDigest);
+    }));
+
+test("native successor amendments refuse missing, unaccepted, changed and removed original evidence before model calls", async () =>
+  fixture(async (f) => {
+    const { first, second } = await activatedSuccessor(f);
+    let calls = 0;
+    const model = {
+      async generateStructured() {
+        calls++;
+        throw new Error("Unexpected model call");
+      },
+      async reviewGraph() {
+        calls++;
+        throw new Error("Unexpected model call");
+      },
+    };
+    for (const fault of [
+      "missing",
+      "unaccepted",
+      "body",
+      "relationship",
+      "tree",
+    ]) {
+      const state = structuredClone(second);
+      successorDiscovery(state);
+      if (fault === "missing") rmSync(statePath(f.config.repository, 1));
+      if (fault === "unaccepted")
+        saveState(statePath(f.config.repository, 1), {
+          ...first,
+          objectiveClosure: "pending",
+        });
+      if (fault === "body")
+        f.issues.get(1).body += "\nChanged after acceptance\n";
+      if (fault === "relationship") f.dependencies.set(2, []);
+      if (fault === "tree") {
+        const changed = structuredClone(first);
+        changed.finalAcceptance.tree = f.target.baseSha;
+        saveState(statePath(f.config.repository, 1), changed);
+      }
+      await assert.rejects(
+        applyPendingAmendment({
+          state,
+          config: f.config,
+          body: f.issues.get(2).body,
+          model,
+          github: f.github,
+          save() {},
+          cancelled: () => false,
+        }),
+        /accepted|acceptance|sealed|evidence|prerequisites/,
+      );
+      assert.equal(calls, 0, fault);
+      assert.equal(state.pendingAmendment.phase, "rejected");
+      assert.deepEqual(state.graph, second.graph);
+      assert.equal(state.allowanceConsumption.planningRevisions, 1);
+      saveState(statePath(f.config.repository, 1), first);
+      f.issues.get(1).body = body(1);
+      f.dependencies.set(2, [1]);
+    }
   }));
 
 test("one intake listener serves entry and terminal return controls under the same owner", async (t) =>

@@ -408,7 +408,10 @@ unchanged predecessor body and acceptance evidence; exact equality and verified
 ancestry remain distinct. They are neither target command authority nor edges
 inside the current WorkGraph. Existing preparation and independent-review digests
 bind this projection, and activation reobserves its original GitHub/snapshot
-sources. No second dependency or acceptance store is maintained. Item acceptance
+sources. No second dependency or acceptance store is maintained. Successor discovery
+amendments supply the same validated native facts to compilation and independent
+graph review; the original admission packet and first immutable graph bind those
+facts, with reobservation before review, projection and adoption. Item acceptance
 cannot require that same review's future completion; original whole criteria
 requiring it stay at final Objective review with their source-required commands.
 

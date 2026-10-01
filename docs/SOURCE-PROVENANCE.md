@@ -6,6 +6,20 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Native successor amendment prerequisites (#376)
+
+The existing native-dependency gateway, validated predecessor continuations and
+original admission packet supply amendment planning evidence. Compilation and
+independent graph review receive the same sealed predecessor facts. Rebuilding
+the original packet from the first immutable graph checks its admission digest;
+reobservation fences changed or removed authority before review, projection and
+adoption. Existing snapshots, graph revisions and planning consumption remain
+canonical. New temporary-Git tests complete a predecessor and activate a real
+successor, exercise both complete model renderers at exact and descendant bases,
+and refuse missing, unaccepted, changed or removed evidence without model calls.
+No archived source, new evidence store, provider call or installed qualification
+supplied this leaf correction.
+
 ## QA phase and retained correction evidence (#397)
 
 The current atomic WorkState, review observations, immutable Git objects and admitted repair consumption supplied this correction after independent architecture/contract reconciliation. Read-only QA identifies its selected integrated candidate and completed validation phase. Existing result/dependency/final projections expose compact retained failure and correction facts, keeping original failed and later replayed identities separate. Declared diagnosis remains distinct from controller-verified identities and consumption. New public synthetic temporary-Git regressions exercise both delivery routes, real validation failure and authorized correction, QA/aggregate/final packets, and missing or stale evidence. No archived source, private prompts or responses, duplicate lifecycle state, additional model call or new provider authority was introduced. Source checks do not establish installed or live autonomous qualification.

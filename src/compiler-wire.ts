@@ -81,6 +81,7 @@ export function compilerWire(
       JSON.stringify([
         context,
         request.baseSha,
+        ...(request.prerequisites ? [request.prerequisites] : []),
         request.sources,
         request.executionProfiles,
         request.controllerCapabilitiesDigest,

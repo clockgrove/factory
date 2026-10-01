@@ -2,6 +2,7 @@ import { hasReadinessWait, isReadinessWait } from "./delivery/readiness.js";
 import { executionContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
 import { applyWorkCorrection } from "./work-repair.js";
+import { planningPrerequisites } from "./objective-prerequisites.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
 import {
   amendmentBlocksDispatch,
@@ -169,16 +170,21 @@ export async function planObjective(
   try {
     const issue = await services.github.objective(objective);
     const baseSha = git(config.checkout, "rev-parse", "HEAD");
+    const prerequisites = await planningPrerequisites(
+      config,
+      services.github,
+      objective,
+      baseSha,
+    );
+    const sources = planningSources(
+      issue.body,
+      baseSha,
+      config.checkout,
+      additionalSources,
+    );
     const sourcePacketDigest = createHash("sha256")
       .update(
-        JSON.stringify(
-          planningSources(
-            issue.body,
-            baseSha,
-            config.checkout,
-            additionalSources,
-          ),
-        ),
+        JSON.stringify(prerequisites ? { sources, prerequisites } : sources),
       )
       .digest("hex");
     preflightObjective(config, issue.body, baseSha);
@@ -274,6 +280,7 @@ export async function planObjective(
               Boolean(options?.stopped?.()),
           }
         : undefined,
+      prerequisites,
     );
     if (preparation) {
       preparation.plan = result;
@@ -1393,6 +1400,22 @@ async function runObjectivePass(
         );
       reportRunStatus?.("Factory: resuming the existing run from atomic state");
     } else {
+      const baseline = git(config.checkout, "rev-parse", "HEAD");
+      const prerequisites = await planningPrerequisites(
+        config,
+        github,
+        objective,
+        baseline,
+      );
+      for (const candidate of [acceptedPlan, preparation?.plan])
+        if (
+          candidate &&
+          JSON.stringify(candidate.prerequisites) !==
+            JSON.stringify(prerequisites)
+        )
+          throw new Error(
+            "Planning native prerequisites changed before activation",
+          );
       const objectivesRoot = join(root, "objectives");
       if (existsSync(objectivesRoot)) {
         for (const name of readdirSync(objectivesRoot)) {
@@ -1502,6 +1525,7 @@ async function runObjectivePass(
                         preparation!.coordinator.mode !== "running",
                     }
                   : undefined,
+                prerequisites,
               );
             }
             verifyPlanCandidate(
@@ -1516,6 +1540,19 @@ async function runObjectivePass(
           },
           (candidate) => ({ itemCount: candidate.graph.items.length }),
         ));
+      const currentPrerequisites = await planningPrerequisites(
+        config,
+        github,
+        objective,
+        baseSha,
+      );
+      if (
+        JSON.stringify(plan.prerequisites) !==
+        JSON.stringify(currentPrerequisites)
+      )
+        throw new Error(
+          "Planning native prerequisites changed before activation",
+        );
       preparation.plan = plan;
       preparation.planning = "complete";
       preparation.coordinator.phase = "projection";

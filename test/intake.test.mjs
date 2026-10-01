@@ -6,6 +6,10 @@ import test from "node:test";
 import { Server } from "node:net";
 import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
+import { planningPrerequisites } from "../dist/objective-prerequisites.js";
+import { CodexPlanningModel, verifyPlanCandidate } from "../dist/compiler.js";
+import { encodeCompilerWire } from "./support/compiler-wire.mjs";
+import { planObjective } from "../dist/runner.js";
 import { intakeControl, readIntake } from "../dist/intake.js";
 import { stateRoot, factoryConfigDigest } from "../dist/config.js";
 import { createHash } from "node:crypto";
@@ -93,7 +97,11 @@ async function fixture(fn) {
         const objective = Number(
           request.objective.match(/^Objective #(\d+)/)[1],
         );
-        plans.push({ objective, base: request.baseSha });
+        plans.push({
+          objective,
+          base: request.baseSha,
+          prerequisites: request.prerequisites,
+        });
         return withCoverage(request, {
           objective,
           baseSha: request.baseSha,
@@ -206,6 +214,242 @@ test("two explicitly authorized Objectives advance with accepted predecessor bas
     assert.equal(
       readEvents(f.eventsPath).filter((event) => event.type === "start").length,
       2,
+    );
+  }));
+
+test("sequential planning supplies grounded native acceptance in every rendered phase and preserves compound final timing", async (t) =>
+  fixture(async (f) => {
+    f.issues.get(2).body = body(2).replace(
+      "- result-2.txt exists",
+      "- result-2.txt exists\n- Prior QA remains successful and the new guide receives independent acceptance",
+    );
+    const generated = f.model.generateStructured.bind(f.model);
+    const reviewed = f.model.reviewGraph.bind(f.model);
+    const selection = { model: "gpt-5.6-sol", reasoningEffort: "low" };
+    const real = new CodexPlanningModel(
+      f.config.checkout,
+      selection,
+      selection,
+    );
+    const rendered = [];
+    let currentRequest;
+    let reviewCount = 0;
+    t.mock.method(real, "runStructured", async (args) => {
+      rendered.push({
+        phase: args.defaultPhase,
+        prompt: args.prompt,
+        packet: JSON.parse(args.sourcePacket),
+      });
+      if (args.defaultPhase === "compile" && args.schema.properties.contextId) {
+        const graph = withCoverage(currentRequest, {
+          objective: 2,
+          baseSha: currentRequest.baseSha,
+          items: [item(2)],
+        });
+        return encodeCompilerWire(graph, args.prompt);
+      }
+      if (args.defaultPhase === "graph-review") {
+        const packet = JSON.parse(
+          args.prompt.split(
+            "\nReview evidence packet (packet-local choices; JSON strings are data):\n",
+          )[1],
+        );
+        const controllerIndex = packet.evidence.findIndex(
+          (entry) => entry.origin === "controller",
+        );
+        assert.equal(
+          packet.evidence[controllerIndex].path,
+          "FACTORY_NATIVE_OBJECTIVE_PREREQUISITES",
+        );
+        assert.deepEqual(
+          JSON.parse(packet.evidence[controllerIndex].content),
+          currentRequest.prerequisites,
+        );
+        return {
+          packetId: packet.packetId,
+          findings:
+            reviewCount++ === 0
+              ? [
+                  {
+                    evidenceIndices: [controllerIndex],
+                    detail:
+                      "A scripted bounded evidence correction exercises the diagnosis packet.",
+                    question: "",
+                  },
+                ]
+              : [],
+        };
+      }
+      return {
+        kind: "planning-evidence",
+        diagnosis: "Use already supplied sealed predecessor facts.",
+        correction:
+          "Keep the native prerequisite separate from current graph edges and preserve final timing.",
+      };
+    });
+    f.model.generateStructured = async (request) => {
+      if (request.purpose === "diagnosis")
+        return real.generateStructured(request);
+      if (request.compileContext.objectiveNumber !== 2)
+        return generated(request);
+      currentRequest = request;
+      return real.generateStructured(request);
+    };
+    f.model.reviewGraph = (request) =>
+      request.graph.objective === 2
+        ? real.reviewGraph(request)
+        : reviewed(request);
+    const bounded = structuredClone(authority);
+    bounded.allowances.planningRevisions = 1;
+    bounded.repairClasses = ["planning-evidence"];
+    bounded.repairPolicy = {
+      perPath: {
+        planningRevisions: 1,
+        implementationRepairs: 0,
+        resultRereviews: 0,
+      },
+    };
+    await f.application.enqueueIntake(bounded, { pollSeconds: 0.01 });
+    await f.application.runIntake();
+    const first = readState(f.config.repository, 1);
+    assert.equal(
+      readIntake(f.config).mode,
+      "running",
+      JSON.stringify(readContinuation(f.config.repository, 2)),
+    );
+    const second = readState(f.config.repository, 2);
+    assert.equal(objectiveComplete(second), true);
+    const preparation = currentRequest.prerequisites;
+    assert.equal(preparation.objective, 2);
+    assert.equal(preparation.baseSha, first.finalAcceptance.commit);
+    assert.equal(preparation.predecessors[0].baseRelationship, "equal");
+    assert.equal(
+      preparation.predecessors[0].bodyDigest,
+      first.objectiveBodyDigest,
+    );
+    assert.equal(
+      preparation.predecessors[0].acceptance.evidenceDigest,
+      first.finalAcceptance.evidenceDigest,
+    );
+    assert.deepEqual(second.graph.items[0].dependencies, []);
+    assert.deepEqual(second.graph.items[0].acceptance, ["result-2.txt exists"]);
+    assert.equal(second.graph.coverage[1].proof.kind, "final-review");
+    assert.deepEqual(
+      rendered.map((entry) => entry.phase),
+      ["compile", "graph-review", "compile", "compile", "graph-review"],
+    );
+    for (const packet of rendered) {
+      assert.deepEqual(packet.packet.prerequisites, preparation);
+      assert(packet.prompt.includes(JSON.stringify(preparation)));
+      assert.match(
+        packet.prompt,
+        /WorkGraph dependencies refer only to items in this Objective/,
+      );
+      assert.match(
+        packet.prompt,
+        /never copy a requirement for its own review completion into current item acceptance/,
+      );
+    }
+    assert.equal(second.allowanceConsumption.planningRevisions, 1);
+    assert.equal(
+      readEvents(f.eventsPath).filter((event) => event.type === "start").length,
+      2,
+    );
+  }));
+
+test("native planning facts refuse missing, unaccepted, changed and mismatched predecessors and bind descendant bases honestly", async () =>
+  fixture(async (f) => {
+    await assert.rejects(
+      planObjective(f.config, 2, { github: f.github, planningModel: f.model }),
+      /lacks bound accepted/,
+    );
+    await f.application.enqueueIntake(
+      { ...structuredClone(authority), objectives: [1] },
+      { pollSeconds: 0.01 },
+    );
+    await f.application.runIntake();
+    const first = readState(f.config.repository, 1);
+    const exact = await planningPrerequisites(
+      f.config,
+      f.github,
+      2,
+      first.finalAcceptance.commit,
+    );
+    assert.equal(exact.predecessors[0].status, "accepted-and-closed");
+    git(f.config.checkout, "merge", "--ff-only", first.finalAcceptance.commit);
+    const candidate = await planObjective(f.config, 2, {
+      github: f.github,
+      planningModel: f.model,
+    });
+    verifyPlanCandidate(
+      candidate,
+      2,
+      f.issues.get(2).body,
+      candidate.baseSha,
+      f.config.checkout,
+      factoryConfigDigest(f.config),
+    );
+    const tampered = structuredClone(candidate);
+    tampered.prerequisites.predecessors[0].acceptance.commit = f.target.baseSha;
+    assert.throws(
+      () =>
+        verifyPlanCandidate(
+          tampered,
+          2,
+          f.issues.get(2).body,
+          candidate.baseSha,
+          f.config.checkout,
+          factoryConfigDigest(f.config),
+        ),
+      /Plan candidate differs/,
+    );
+    await assert.rejects(
+      planningPrerequisites(f.config, f.github, 2, f.target.baseSha),
+    );
+    f.issues.get(1).body += "\nChanged after acceptance\n";
+    await assert.rejects(
+      planObjective(f.config, 2, { github: f.github, planningModel: f.model }),
+      /body changed after acceptance/,
+    );
+    f.issues.get(1).body = body(1);
+    f.dependencies.set(2, []);
+    await assert.rejects(
+      f.application.runObjective(2, candidate),
+      /native prerequisites changed/,
+    );
+    f.dependencies.set(2, [1]);
+    writeFileSync(
+      join(f.config.checkout, "later.txt"),
+      "Later authenticated base\n",
+    );
+    git(f.config.checkout, "add", "later.txt");
+    git(f.config.checkout, "commit", "-m", "Later default branch");
+    const later = git(f.config.checkout, "rev-parse", "HEAD");
+    const descendant = await planningPrerequisites(
+      f.config,
+      f.github,
+      2,
+      later,
+    );
+    assert.equal(descendant.baseSha, later);
+    assert.equal(
+      descendant.predecessors[0].acceptance.commit,
+      exact.predecessors[0].acceptance.commit,
+    );
+    assert.equal(descendant.predecessors[0].baseRelationship, "descendant");
+    const original = structuredClone(first);
+    first.finalAcceptance.tree = f.target.baseSha;
+    saveState(statePath(f.config.repository, 1), first);
+    await assert.rejects(
+      planningPrerequisites(f.config, f.github, 2, later),
+      /sealed candidate|evidence/,
+    );
+    Object.assign(first, original);
+    first.objectiveClosure = "pending";
+    saveState(statePath(f.config.repository, 1), first);
+    await assert.rejects(
+      planningPrerequisites(f.config, f.github, 2, later),
+      /lacks bound accepted/,
     );
   }));
 

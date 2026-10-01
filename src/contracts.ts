@@ -201,6 +201,29 @@ export interface ModelInvocationContext {
   observe?: (observation: ModelInvocationObservation) => void;
 }
 
+/** Controller-observed native admission, not target source or WorkGraph edges. */
+export interface PlanningPrerequisites {
+  provenance: "authenticated-native-dependencies-and-sealed-continuations";
+  repository: string;
+  objective: number;
+  baseSha: string;
+  predecessors: {
+    objective: number;
+    bodyDigest: string;
+    acceptance: Pick<
+      import("./completion.js").FinalAcceptance,
+      | "sealedAt"
+      | "commit"
+      | "tree"
+      | "graphDigest"
+      | "configDigest"
+      | "evidenceDigest"
+    >;
+    status: "accepted-and-closed";
+    baseRelationship: "equal" | "descendant";
+  }[];
+}
+
 export interface PlanningRequest<T> {
   /** Trusted transient compile input; not part of canonical or persisted graphs. */
   compileContext?: {
@@ -209,6 +232,7 @@ export interface PlanningRequest<T> {
     previousGraph?: WorkGraph;
     immutableItemIds?: string[];
   };
+  prerequisites?: PlanningPrerequisites;
   purpose?: "diagnosis";
   coverageObligations?: CoverageObligation[];
   objective: string;
@@ -232,6 +256,7 @@ export interface PlanCommandAuthorization {
 }
 
 export interface PlanReviewRequest {
+  prerequisites?: PlanningPrerequisites;
   amendment?: unknown;
   reviewPacket?: ReviewPacket;
   objective: string;

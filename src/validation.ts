@@ -1,5 +1,6 @@
 import { installedControllerCapabilities } from "./controller-capabilities.js";
 import { assertAdmissionBinding } from "./admission.js";
+import { assertGraphRevisions } from "./graph-amendments.js";
 import {
   allowanceKey,
   assertRepairLedger,
@@ -36,6 +37,7 @@ import type {
   ValidationCommandReceipt,
   ValidationLfsMember,
   WorkItem,
+  WorkDiscovery,
 } from "./contracts.js";
 import { CompletedModelInvocationError } from "./contracts.js";
 import { assetSelectionDigest, type HydrationReceipt } from "./media.js";
@@ -201,6 +203,73 @@ export type ReviewDeliveryObservation =
       predecessorItemId: string | null;
     };
 
+/** Project the existing attempt-bound proposal and its matching accepted revision. */
+function retainedHarnessDiscovery(state: FactoryState, item: WorkItem) {
+  const current = state.work[item.id];
+  if (
+    !current?.discovery ||
+    !current.attempt ||
+    current.discovery.attempt !== current.attempt ||
+    !current.changeRef ||
+    !current.treeSha
+  )
+    return null;
+  const proposalFields = (proposal: WorkDiscovery) => ({
+    scope: proposal.scope,
+    reason: proposal.reason,
+    evidence: proposal.evidence,
+    ownership: proposal.ownership,
+    acceptance: proposal.acceptance,
+    dependencies: proposal.dependencies,
+  });
+  const proposal = proposalFields(current.discovery);
+  assertGraphRevisions(state);
+  const revisions = state.graphRevisions ?? [];
+  const index = revisions.findIndex(
+    (revision, index) =>
+      index > 0 &&
+      current.discoveryDisposition === "accepted" &&
+      revision.proposal?.worker?.itemId === item.id &&
+      revision.proposal.worker.attempt === current.attempt &&
+      revision.proposal.scope === "in-scope" &&
+      isDeepStrictEqual(proposalFields(revision.proposal), proposal),
+  );
+  const revision = index > 0 ? revisions[index]! : undefined;
+  const previous = index > 0 ? revisions[index - 1]!.graph : undefined;
+  return {
+    itemId: item.id,
+    attemptId: current.attempt,
+    resultCommitSha: current.changeRef,
+    resultTreeSha: current.treeSha,
+    contentOrigin: "harness-declared-proposal",
+    proposal,
+    acceptedAmendment:
+      revision && previous
+        ? {
+            parentGraphDigest: revision.parentDigest,
+            graphDigest: revision.digest,
+            reviewDigest: revision.reviewDigest,
+            acceptedAt: revision.acceptedAt,
+            worker: revision.proposal!.worker,
+            addedItems: revision.graph.items
+              .filter(
+                (added) =>
+                  !previous.items.some((entry) => entry.id === added.id),
+              )
+              .map((added) => ({
+                id: added.id,
+                kind: added.kind ?? "work",
+                children: added.children ?? [],
+                dependencies: added.dependencies,
+                ownedPaths: added.ownedPaths,
+                acceptance: added.acceptance,
+                validation: added.validation,
+              })),
+          }
+        : null,
+  };
+}
+
 /**
  * Give result review the minimum authoritative run facts needed to evaluate
  * source-declared scheduling and predecessor criteria. The atomic snapshot and
@@ -362,28 +431,7 @@ export function workItemReviewObservations(
           },
         }
       : {}),
-    harnessDiscovery:
-      current.discovery &&
-      current.attempt &&
-      current.discovery.attempt === current.attempt &&
-      current.changeRef &&
-      current.treeSha
-        ? {
-            itemId: item.id,
-            attemptId: current.attempt,
-            resultCommitSha: current.changeRef,
-            resultTreeSha: current.treeSha,
-            contentOrigin: "harness-declared-proposal",
-            proposal: {
-              scope: current.discovery.scope,
-              reason: current.discovery.reason,
-              evidence: current.discovery.evidence,
-              ownership: current.discovery.ownership,
-              acceptance: current.discovery.acceptance,
-              dependencies: current.discovery.dependencies,
-            },
-          }
-        : null,
+    harnessDiscovery: retainedHarnessDiscovery(state, item),
     attempts: relevant.map((candidate) => {
       const work = state.work[candidate.id]!;
       return {
@@ -1115,6 +1163,7 @@ function workItemResultEvidence(args: {
       validationTreeSha: current.validation.treeSha,
       validationCommands: current.validation.commands,
       namedChecks: current.qaChecks ?? [],
+      harnessDiscovery: retainedHarnessDiscovery(state, item),
       integratedCommitSha: current.integratedSha ?? null,
       ...(repair && { repair }),
     };
@@ -1263,6 +1312,7 @@ function workItemResultEvidence(args: {
     integratedCommitSha: current.integratedSha ?? null,
     integratedTreeSha: itemIntegratedTreeSha,
     evidenceSource: evidencePath,
+    harnessDiscovery: retainedHarnessDiscovery(state, item),
     selectedAssetSet: current.selectedAssetSet,
     selectedAsset: current.assets?.find(
       (set) => set.id === current.selectedAssetSet,

@@ -600,6 +600,18 @@ test("actual planning packets carry presence without executing acceptance, and b
     );
     assert.equal(rendered.length, 3);
     for (const packet of rendered) {
+      assert.match(
+        packet.prompt,
+        /Reviewer findings and declared diagnoses are claims to check against the pinned source/,
+      );
+      assert.match(
+        packet.prompt,
+        /Do not infer exclusive validation phases from required phases unless the source explicitly states exclusivity/,
+      );
+      assert.match(
+        packet.prompt,
+        /removing redundant generated validation still requires complete source coverage and fresh independent review/,
+      );
       assert.deepEqual(packet.sourcePacket.localExecutables, facts);
       assert(packet.prompt.includes(JSON.stringify(facts)));
       assert.match(

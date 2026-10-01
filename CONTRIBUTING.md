@@ -32,7 +32,7 @@ npm pack --dry-run
 npm run notices:check
 ```
 
-`npm test` builds the project and runs deterministic tests, including temporary Git and LFS repositories. These checks do not require provider credentials or a live GitHub target. The [Quality workflow](.github/workflows/quality.yml) runs the same checks on pull requests and `main`. Use `npm run format` to apply formatting; [quality tooling](docs/QUALITY-TOOLING.md) explains the tooling configuration.
+`npm test` builds the project and runs deterministic tests, including temporary Git and LFS repositories. These checks do not require provider credentials or a live GitHub target. The [Quality workflow](.github/workflows/quality.yml) runs these checks on `main`. Pull requests use `npm run test:pr -- --base <base-commit>`: all ordinary deterministic tests still run; the two costly packed-install test files also run when packaging, installed entrypoints/workers, or test fixtures/support change. Missing diff information and unfamiliar paths select the complete suite. See [PR test selection](docs/QUALITY-TOOLING.md#pr-test-selection) for the boundary. Use `npm run format` to apply formatting; [quality tooling](docs/QUALITY-TOOLING.md) explains the tooling configuration.
 
 During development, run an affected test directly after building:
 

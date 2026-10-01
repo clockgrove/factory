@@ -153,3 +153,32 @@ then would silently drop formatting enforcement for those files.
 `npm run format:check` runs both formatters over their strictly non-overlapping
 sets. Biome's Git integration honors `.gitignore`; neither command checks
 `dist/` or `node_modules/`.
+
+## PR test selection
+
+`npm test` always builds and runs every deterministic test file. Main's Quality
+job retains that complete workload. `npm run test:pr -- --base <base-commit>`
+uses the actual changed paths to omit only `package-smoke.test.mjs` and
+`sandbox-installed.test.mjs` when their declared packaging surfaces are unchanged.
+Every other test file runs on every PR, including directly changed tests.
+
+Both installed files run for package manifests/lockfiles, build/package scripts
+and configurations, packaged assets/guidance, package-root and CLI entrypoints,
+application composition, execution/content sources, process/configuration and
+harness preparation, or test fixture/support changes. Direct changes to either
+installed file also retain both. The manifest's `files` list supplies packaged
+paths. Unknown paths, empty diffs and unavailable base commits choose the complete
+suite; renames include old and new paths so deleting a packaged file cannot evade
+selection. The selector lives in `scripts/test-pr.mjs` and has focused regressions.
+
+This PR optimization postpones the complete installed-source seam for other
+source edits until main. A new computed import, dependency or asset lookup can
+still fail only after packaging even when development-tree tests pass. Main's
+complete gate must pass before release acceptance; repair a failing integrated
+main promptly. Test selection is not release qualification.
+
+The baseline PR #387 Quality run executed 710 tests in 274.28 seconds of runner
+wall time; its npm-test step took 4m40s. The packed-install cases took 69.05s and
+56.68s individually. Those durations overlap and cannot be added to predict saved
+wall time. Report selected file/test counts and measured elapsed time for each
+workload; a smaller PR workload is not an apples-to-apples full-suite benchmark.

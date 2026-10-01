@@ -62,7 +62,8 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "package": "npm pack --dry-run",
     "notices": "node scripts/generate-notices.mjs",
-    "notices:check": "node scripts/generate-notices.mjs --check"
+    "notices:check": "node scripts/generate-notices.mjs --check",
+    "test:pr": "npm run build && node scripts/test-pr.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",

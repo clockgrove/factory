@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.55 — 2026-09-30 (candidate)
+
+- Supply authenticated native Objective dependencies, sealed accepted predecessor identity and the actual selected-base relationship to compilation, graph review and planning diagnosis. Bind these phase-available facts to their original body and acceptance evidence, and refuse unavailable, changed or mismatched prerequisites (#374).
+- Keep a Work Item's own independent-review completion in final Objective acceptance under the original whole criterion. Preserve source-required commands, independent review, unique obligations and existing admission limits (#374).
+
+Candidate preparation only. Matching archive, offline installation, focused installed proof, protected publication and independent public archive/pinned-plugin verification are pending. Earlier evidence retains its original bytes and scenarios; complete autonomous Objective qualification remains [#253](https://github.com/clockgrove/factory/issues/253).
+
 ## 0.1.54 — 2026-09-30
 
 - Align compilation, graph review and planning diagnosis around one owner and complete proof for each whole source obligation. Use the existing final-review proof for compound final criteria that no single controller guarantee covers; preserve unique obligation indices, duplicate rejection and independent final acceptance (#370).

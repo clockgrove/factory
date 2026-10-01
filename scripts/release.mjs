@@ -118,12 +118,19 @@ export async function main(argv = process.argv.slice(2)) {
       record: { type: "string" },
       codex: { type: "string", default: "codex" },
       fingerprint: { type: "string" },
+      "audit-output": { type: "string" },
+      "project-item": { type: "string" },
     },
   });
   const mode = positionals[0];
   assert(
-    ["release", "audit"].includes(mode) && positionals.length === 1,
-    "Usage: node scripts/release.mjs release|audit --output /absolute/fresh-directory [options]",
+    ["release", "audit", "complete"].includes(mode) && positionals.length === 1,
+    "Usage: node scripts/release.mjs release|audit|complete --output /absolute/fresh-directory [options]",
+  );
+  assert(
+    mode === "complete" ||
+      (!options["audit-output"] && !options["project-item"]),
+    "Completion inputs are only valid for complete",
   );
   assert(
     options.output && isAbsolute(options.output),
@@ -192,6 +199,8 @@ export async function main(argv = process.argv.slice(2)) {
     };
   };
   let status = "FAILED";
+  let workflowStartedUtc;
+  let publicVerifiedUtc;
   try {
     let record;
     if (mode === "release") {
@@ -568,7 +577,7 @@ export async function main(argv = process.argv.slice(2)) {
       status = options.publish
         ? "PUBLISHED; independent public audit required"
         : "LOCAL BASELINE PASS; no publication";
-    } else {
+    } else if (mode === "audit") {
       assert(
         options.record &&
           options.fingerprint &&
@@ -761,17 +770,168 @@ export async function main(argv = process.argv.slice(2)) {
         rulesetId: record.rulesetId,
       });
       status = "INDEPENDENT PUBLIC AUDIT PASS";
+    } else {
+      assert(
+        options.record &&
+          options["audit-output"] &&
+          /^[1-9]\d*$/.test(options.issue ?? "") &&
+          options["project-item"] &&
+          !options.publish &&
+          !options.ci &&
+          !options.review &&
+          !options.test &&
+          !options["test-tool"] &&
+          !options.preflight &&
+          !options.fingerprint,
+        "Complete needs existing acceptance, audit output, release issue and Project item",
+      );
+      const acceptanceBytes = readFileSync(options.record);
+      record = JSON.parse(acceptanceBytes);
+      const verificationBytes = readFileSync(
+        join(options["audit-output"], "public-verification.json"),
+      );
+      const verified = JSON.parse(verificationBytes);
+      const auditTiming = json(join(options["audit-output"], "timing.json"));
+      assert.equal(record.repository, repository);
+      assert.equal(record.status, "LOCAL CHECKS PASS");
+      verifyProtection(record.tagProtection, tagProtection(record.version));
+      assert.equal(verified.status, "PASS");
+      assert.equal(auditTiming.status, "INDEPENDENT PUBLIC AUDIT PASS");
+      assert.equal(verified.acceptanceSha256, digest(acceptanceBytes));
+      for (const key of ["source", "tree", "archiveSha256", "rulesetId"])
+        assert.equal(
+          verified[key],
+          record[key],
+          `Public audit differs: ${key}`,
+        );
+      assert.equal(
+        verified.release,
+        `https://github.com/${repository}/releases/tag/v${record.version}`,
+      );
+      const issueUrl = `https://github.com/${repository}/issues/${options.issue}`;
+      assert(
+        verified.fingerprint.startsWith(`${issueUrl}#issuecomment-`) &&
+          /^\d+$/.test(verified.fingerprint.split("#issuecomment-")[1]),
+        "Release issue differs from the verified prepublication fingerprint",
+      );
+      workflowStartedUtc = json(
+        join(dirname(options.record), "timing.json"),
+      ).startedUtc;
+      publicVerifiedUtc = auditTiming.endedUtc;
+      assert(Number.isFinite(Date.parse(workflowStartedUtc)));
+      assert(Number.isFinite(Date.parse(publicVerifiedUtc)));
+      status = "PUBLIC AUDIT PASS; completion target validation pending";
+      const issue = api(`repos/${repository}/issues/${options.issue}`);
+      assert.equal(issue.html_url, issueUrl);
+      assert(
+        !issue.pull_request,
+        "Completion requires a release issue, not a PR",
+      );
+      assert.equal(
+        issue.state,
+        "open",
+        "Inspect closed tracking before another completion",
+      );
+      assert(
+        issue.labels.some((label) => label.name === "release-gate"),
+        "Completion is only for release-gate issues, never live Objective or adopter gates",
+      );
+      const item = api(
+        "graphql",
+        "-f",
+        'query=query($item:ID!){node(id:$item){... on ProjectV2Item{id isArchived content{... on Issue{url}} project{id number owner{... on Organization{login}} field(name:"Status"){... on ProjectV2SingleSelectField{id options{id name}}}}}}}',
+        "-f",
+        `item=${options["project-item"]}`,
+      ).data.node;
+      assert.equal(item?.id, options["project-item"]);
+      assert.equal(item.isArchived, false);
+      assert.equal(
+        item.content?.url,
+        issueUrl,
+        "Project item differs from release issue",
+      );
+      assert.equal(item.project.number, 2);
+      assert.equal(item.project.owner.login, "clockgrove");
+      const field = item.project.field;
+      const done = field.options.filter((option) => option.name === "Done");
+      assert.equal(done.length, 1, "Project needs one Done status option");
+      const body = [
+        `Verified public release [Factory v${record.version}](${verified.release}).`,
+        `Source ${record.source}, tree ${record.tree}; archive SHA256 ${record.archiveSha256}. Exact tag protection: ruleset ${record.rulesetId}.`,
+        `All ${record.counts.tests} installed tests and ${record.preflights.length} model-free preflights passed. Independent public verification matched anonymous archive/checksum bytes, sealed acceptance, annotated source/tree, exact protection and the enabled pinned plugin.`,
+        `[Prepublication fingerprint](${verified.fingerprint}). Acceptance SHA256 ${verified.acceptanceSha256}; independent public receipt SHA256 ${digest(verificationBytes)}.`,
+        "These artifact checks do not accept live Objectives or adopter pilots. Existing scenario and accounting evidence retains its own scope. Timing observations are separate from sealed acceptance.",
+      ].join("\n\n");
+      const commentFile = join(output, "completion-comment.json");
+      save(commentFile, { body });
+      status = "PUBLIC AUDIT PASS; completion comment pending";
+      const comment = api(
+        "--method",
+        "POST",
+        `repos/${repository}/issues/${options.issue}/comments`,
+        "--input",
+        commentFile,
+      );
+      assert.equal(
+        comment.issue_url,
+        `https://api.github.com/repos/${repository}/issues/${options.issue}`,
+      );
+      assert(comment.html_url.startsWith(`${issueUrl}#issuecomment-`));
+      status =
+        "PUBLIC AUDIT PASS; issue closure pending (completion comment posted)";
+      const closed = api(
+        "--method",
+        "PATCH",
+        `repos/${repository}/issues/${options.issue}`,
+        "-f",
+        "state=closed",
+        "-f",
+        "state_reason=completed",
+      );
+      assert.equal(closed.html_url, issueUrl);
+      assert.equal(closed.state, "closed");
+      assert.equal(closed.state_reason, "completed");
+      status =
+        "PUBLIC AUDIT PASS; Project Done update pending (comment posted, issue closed)";
+      const updated = api(
+        "graphql",
+        "-f",
+        'query=mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{singleSelectOptionId:$option}}){projectV2Item{id fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{optionId}}}}}',
+        "-f",
+        `project=${item.project.id}`,
+        "-f",
+        `item=${item.id}`,
+        "-f",
+        `field=${field.id}`,
+        "-f",
+        `option=${done[0].id}`,
+      ).data.updateProjectV2ItemFieldValue.projectV2Item;
+      assert.equal(updated.id, item.id);
+      assert.equal(updated.fieldValueByName.optionId, done[0].id);
+      status = "RELEASE COMPLETE";
+      console.log(comment.html_url);
     }
     console.log(`${status}: ${output}`);
+  } catch (error) {
+    if (mode === "complete" && status.startsWith("PUBLIC AUDIT PASS"))
+      error.message = `${status}: ${error.message}`;
+    throw error;
   } finally {
     const elapsedSeconds = (performance.now() - clock) / 1000;
+    const endedUtc = new Date().toISOString();
     save(join(output, "timing.json"), {
       status,
       startedUtc: started,
-      endedUtc: new Date().toISOString(),
+      endedUtc,
       elapsedSeconds,
       commandSeconds,
       outsideCommandSeconds: elapsedSeconds - commandSeconds,
+      ...(workflowStartedUtc && {
+        workflowStartedUtc,
+        publicVerifiedUtc,
+        workflowElapsedSeconds:
+          (Date.parse(endedUtc) - Date.parse(workflowStartedUtc)) / 1000,
+      }),
       phases,
     });
   }

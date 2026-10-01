@@ -58,7 +58,7 @@ test("archive gate rejects absolute paths and parent traversal", () => {
     assert.throws(() => archivePaths(bad));
 });
 
-function publicFixture(t, corrupt, mutate) {
+function publicFixture(t, corrupt, mutate, complete = false) {
   const root = mkdtempSync("/tmp/factory-release-test-");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const pkg = join(root, "package");
@@ -120,6 +120,10 @@ function publicFixture(t, corrupt, mutate) {
   if (mutate === "counts") record.counts.skipped = 1;
   const acceptance = join(root, "acceptance.json");
   writeFileSync(acceptance, JSON.stringify(record));
+  writeFileSync(
+    join(root, "timing.json"),
+    JSON.stringify({ startedUtc: new Date().toISOString() }),
+  );
   const fingerprint =
     "https://github.com/clockgrove/factory/issues/1#issuecomment-2";
   const prefix = "repos/clockgrove/factory/";
@@ -158,6 +162,32 @@ function publicFixture(t, corrupt, mutate) {
   };
   const bin = join(root, "bin");
   mkdirSync(bin);
+  const callsFile = join(root, "gh-calls.jsonl");
+  writeFileSync(callsFile, "");
+  const issueUrl = "https://github.com/clockgrove/factory/issues/1";
+  const projectItem = {
+    id: "fixture-item",
+    isArchived: false,
+    content: {
+      url: mutate === "completion-project" ? `${issueUrl}00` : issueUrl,
+    },
+    project: {
+      id: "fixture-project",
+      number: 2,
+      owner: { login: "clockgrove" },
+      field: {
+        id: "fixture-status",
+        options: [{ id: "fixture-done", name: "Done" }],
+      },
+    },
+  };
+  replies[`${prefix}issues/1`] = {
+    html_url: issueUrl,
+    state: "open",
+    labels: [
+      { name: mutate === "completion-target" ? "trunk" : "release-gate" },
+    ],
+  };
   const shim = (name, text) => {
     const path = join(bin, name);
     writeFileSync(path, `#!${process.execPath}\n${text}\n`);
@@ -165,7 +195,24 @@ function publicFixture(t, corrupt, mutate) {
   };
   shim(
     "gh",
-    `const replies=${JSON.stringify(replies)}; const args=process.argv.slice(2); if(args[0]!=='api'||!replies[args[1]])process.exit(3); console.log(JSON.stringify(replies[args[1]]));`,
+    `const fs=require('node:fs'); const replies=${JSON.stringify(replies)}; const args=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(callsFile)},JSON.stringify(args)+'\\n'); if(args[0]!=='api')process.exit(3);
+    const route=args.find(a=>a.startsWith('repos/'));
+    const method=args.includes('--method')?args[args.indexOf('--method')+1]:'GET';
+    let result;
+    if(args[1]==='graphql') {
+      const query=args.find(a=>a.startsWith('query='));
+      if(query.includes('mutation(')) {
+        if(${JSON.stringify(mutate)}==='completion-update')process.exit(9);
+        result={data:{updateProjectV2ItemFieldValue:{projectV2Item:{id:'fixture-item',fieldValueByName:{optionId:'fixture-done'}}}}};
+      } else result={data:{node:${JSON.stringify(projectItem)}}};
+    } else if(method==='POST'&&route===${JSON.stringify(`${prefix}issues/1/comments`)}) {
+      const body=JSON.parse(fs.readFileSync(args[args.indexOf('--input')+1])).body;
+      result={html_url:${JSON.stringify(`${issueUrl}#issuecomment-3`)},issue_url:'https://api.github.com/repos/clockgrove/factory/issues/1',body};
+    } else if(method==='PATCH'&&route===${JSON.stringify(`${prefix}issues/1`)}) {
+      if(${JSON.stringify(mutate)}==='completion-close')process.exit(9);
+      result={html_url:${JSON.stringify(issueUrl)},state:${JSON.stringify(mutate === "completion-close-ack" ? "open" : "closed")},state_reason:'completed'};
+    } else result=replies[route];
+    if(!result)process.exit(3); console.log(JSON.stringify(result));`,
   );
   shim(
     "curl",
@@ -187,7 +234,7 @@ function publicFixture(t, corrupt, mutate) {
     writeFileSync(acceptance, JSON.stringify(record));
   }
   const output = join(root, "audit");
-  const result = spawnSync(
+  const auditResult = spawnSync(
     process.execPath,
     [
       resolve("scripts/release.mjs"),
@@ -206,7 +253,68 @@ function publicFixture(t, corrupt, mutate) {
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
     },
   );
-  return { result, output, acceptance };
+  const verification = join(output, "public-verification.json");
+  const verificationBefore =
+    auditResult.status === 0 ? readFileSync(verification) : undefined;
+  const acceptanceBefore = readFileSync(acceptance);
+  let result = auditResult;
+  const completionOutput = join(root, "completion");
+  if (complete) {
+    if (mutate === "completion-acceptance") {
+      const changed = JSON.parse(acceptanceBefore);
+      changed.counts.tests = 0;
+      writeFileSync(acceptance, JSON.stringify(changed));
+    }
+    if (mutate === "completion-receipt") {
+      const receipt = JSON.parse(readFileSync(verification));
+      receipt.source = "0".repeat(40);
+      writeFileSync(verification, JSON.stringify(receipt));
+    }
+    if (mutate === "completion-audit") {
+      const timing = JSON.parse(readFileSync(join(output, "timing.json")));
+      timing.status = "FAILED";
+      writeFileSync(join(output, "timing.json"), JSON.stringify(timing));
+    }
+    result = spawnSync(
+      process.execPath,
+      [
+        resolve("scripts/release.mjs"),
+        "complete",
+        "--source",
+        checkout,
+        "--output",
+        completionOutput,
+        "--record",
+        acceptance,
+        "--audit-output",
+        output,
+        "--issue",
+        mutate === "completion-issue" ? "2" : "1",
+        "--project-item",
+        "fixture-item",
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      },
+    );
+  }
+  const calls = readFileSync(callsFile, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  return {
+    result,
+    auditResult,
+    output,
+    completionOutput,
+    acceptance,
+    acceptanceBefore,
+    verification,
+    verificationBefore,
+    calls,
+  };
 }
 
 test("independent audit verifies actual archive/plugin bytes and excludes timing from acceptance", (t) => {
@@ -243,5 +351,116 @@ test("sealed broader protection and skipped local checks cannot pass public audi
       JSON.parse(readFileSync(join(output, "timing.json"))).status,
       "FAILED",
     );
+  }
+});
+
+const mutations = (calls) =>
+  calls.filter(
+    (args) =>
+      args.includes("--method") ||
+      args.some((arg) => arg.startsWith("query=mutation(")),
+  );
+
+test("auditor completion reports verified facts and completes only the bound release tracking", (t) => {
+  const {
+    result,
+    output,
+    completionOutput,
+    acceptance,
+    acceptanceBefore,
+    verification,
+    verificationBefore,
+    calls,
+  } = publicFixture(t, false, undefined, true);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(mutations(calls).length, 3);
+  const body = JSON.parse(
+    readFileSync(join(completionOutput, "completion-comment.json")),
+  ).body;
+  const record = JSON.parse(acceptanceBefore);
+  for (const value of [
+    record.source,
+    record.tree,
+    record.archiveSha256,
+    "1 installed tests",
+    "1 model-free preflights",
+    "do not accept live Objectives or adopter pilots",
+  ])
+    assert(body.includes(value), value);
+  const timing = JSON.parse(
+    readFileSync(join(completionOutput, "timing.json")),
+  );
+  assert.equal(timing.status, "RELEASE COMPLETE");
+  t.diagnostic(
+    `Fixed completion: ${timing.elapsedSeconds.toFixed(3)}s in the local GitHub subprocess fixture; excludes real GitHub latency and agent delivery.`,
+  );
+  assert(timing.workflowElapsedSeconds >= timing.elapsedSeconds);
+  assert.equal(
+    timing.publicVerifiedUtc,
+    JSON.parse(readFileSync(join(output, "timing.json"))).endedUtc,
+  );
+  assert(readFileSync(acceptance).equals(acceptanceBefore));
+  assert(readFileSync(verification).equals(verificationBefore));
+  assert(mutations(calls)[2].includes("option=fixture-done"));
+});
+
+test("completion refuses failed/mismatched evidence and wrong tracking targets before mutations", (t) => {
+  for (const mutate of [
+    "completion-acceptance",
+    "completion-receipt",
+    "completion-audit",
+    "completion-issue",
+    "completion-project",
+    "completion-target",
+  ]) {
+    const { result, calls } = publicFixture(t, false, mutate, true);
+    assert.equal(result.status, 1, mutate);
+    assert.equal(mutations(calls).length, 0, mutate);
+  }
+  const { result, calls, output } = publicFixture(t, true, undefined, true);
+  assert.equal(result.status, 1);
+  assert.equal(mutations(calls).length, 0);
+  assert.equal(
+    JSON.parse(readFileSync(join(output, "timing.json"))).status,
+    "FAILED",
+  );
+});
+
+test("partial tracking failure preserves public PASS and names the outstanding operation", (t) => {
+  for (const mutate of [
+    "completion-close",
+    "completion-close-ack",
+    "completion-update",
+  ]) {
+    const {
+      result,
+      completionOutput,
+      output,
+      acceptance,
+      acceptanceBefore,
+      verification,
+      verificationBefore,
+      calls,
+    } = publicFixture(t, false, mutate, true);
+    assert.equal(result.status, 1, mutate);
+    const expected =
+      mutate === "completion-update"
+        ? "Project Done update pending"
+        : "issue closure pending";
+    assert(result.stderr.includes(expected), result.stderr);
+    const timing = JSON.parse(
+      readFileSync(join(completionOutput, "timing.json")),
+    );
+    assert(timing.status.includes(`PUBLIC AUDIT PASS; ${expected}`));
+    assert.equal(
+      mutations(calls).length,
+      mutate === "completion-update" ? 3 : 2,
+    );
+    assert.equal(
+      JSON.parse(readFileSync(join(output, "timing.json"))).status,
+      "INDEPENDENT PUBLIC AUDIT PASS",
+    );
+    assert(readFileSync(acceptance).equals(acceptanceBefore));
+    assert(readFileSync(verification).equals(verificationBefore));
   }
 });

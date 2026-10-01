@@ -49,7 +49,7 @@ The output contains one immutable `acceptance.json`, the archive and `SHA256SUMS
 
 ### One independent audit afterward
 
-Hand the acceptance record and the prepublication issue-comment URL to one independent auditor. That auditor runs:
+Hand the acceptance record, prepublication issue-comment URL, release acceptance issue and its existing Factory Project item to one independent auditor. That auditor owns public verification through completion tracking and returns one concise result. The coordinator does not generate another reporting program. The auditor runs:
 
 ```sh
 npm run release -- audit \
@@ -60,7 +60,22 @@ npm run release -- audit \
 
 Use `--codex /absolute/codex` when the CLI is not on PATH. The audit verifies the fingerprint predates publication; downloads the archive and checksum anonymously; verifies the annotated tag, source/tree and exact protection; and installs an enabled plugin pinned to the same tag in an isolated Codex home. Manifest and both skills must match the public archive. Identical public bytes reuse the local offline/installed evidence; do not repeat those stages. A new qualification host still needs its actual installation and readiness checks.
 
-Report completion once, with the immutable record, independent public result and total elapsed time from the frozen candidate through audit completion. Report command durations and time outside commands separately. Include the final audit handoff in elapsed time; identify later reporting time separately. Report a concrete blocker when it occurs instead of routine coordination messages. Measure this sequential baseline before considering parallelism; do not claim an unmeasured speedup.
+After evaluating the passing audit against the declared release scope, that same auditor completes tracking with the fixed command:
+
+```sh
+npm run release -- complete \
+  --record /absolute/release-directory/acceptance.json \
+  --audit-output /absolute/public-audit-directory \
+  --issue EXISTING_RELEASE_ACCEPTANCE_ISSUE \
+  --project-item EXISTING_FACTORY_PROJECT_ITEM_ID \
+  --output /absolute/fresh-completion-directory
+```
+
+The command binds the passing public receipt and terminal audit timing to the sealed acceptance, verifies that the fingerprint belongs to the explicitly selected release issue, and checks the Project item belongs to that issue in Factory Project 2. Only an open `release-gate` issue can complete; this is not a general issue-closing operation. It derives the Done status from the actual Project, renders a concise comment from verified facts, posts it, closes the issue and marks the item Done. Mutation responses must confirm the intended targets and results. Source/guidance meaning, scenario sufficiency and unexpected observations remain independent reviewer decisions; the command does not replace them.
+
+Completion logs and timing identify the pending operation after a partial failure while preserving public PASS and successful earlier operations. Inspect actual GitHub state, then repair only the outstanding tracking operation with ordinary GitHub tools. Do not repeat a comment, rerun publication/audit, automatically retry or invent a resumable completion workflow. Sealed acceptance and the public receipt stay unchanged.
+
+Report completion once with the immutable record, independent public result and completion result. Keep technical public PASS, tracking completion and final auditor delivery distinct. Completion timing measures its own commands and elapsed time, and separately records elapsed from the original release command's start through tracking completion. For a full agent benchmark, retain the external frozen-candidate start and final auditor handoff as well; do not claim script timings include unobserved delivery. Detailed traces and charts are post-hoc diagnostics, not required completion work. Report a concrete blocker instead of routine coordination messages; do not claim an unmeasured full-workflow speedup.
 
 Public verification precedes separately authorized live qualification and private adopter acceptance. Later publication-ledger maintenance is not a pilot-start gate. This workflow does not resume held Objectives, authorize new targets/providers/spending, or waive independent review, acceptance, ownership or security controls.
 

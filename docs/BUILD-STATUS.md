@@ -4,6 +4,43 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.66 artifact record
+
+[Release v0.1.66](https://github.com/clockgrove/factory/releases/tag/v0.1.66)
+was published on 2026-10-01 at 21:37:51 UTC from frozen independently reviewed
+and integrated source `851171481f1d044058676570f039c98bec6a9170`, tree
+`1f68d3aa6569ccc0b08559081e3221e7130f3401`.
+[PR #433](https://github.com/clockgrove/factory/pull/433) records release preparation;
+[PR #435](https://github.com/clockgrove/factory/pull/435) records the reviewed
+installed test-fixture correction. [Exact integrated-main CI](https://github.com/clockgrove/factory/actions/runs/36928929323) passed.
+
+The `clockgrove-factory-0.1.66.tgz` archive is 153598608 bytes, SHA-256
+`33968ed54e824cb2fb0a95948a21dd3389f09203aca667ba8e4ce1e9fcc421ab`,
+recorded in the [prepublication fingerprint](https://github.com/clockgrove/factory/issues/431#issuecomment-5941157336).
+The 96-byte `SHA256SUMS` asset has SHA-256
+`a890e13a2358febb6d492e7223d3913e438cac7526327dcfa0aa3c7340414368`.
+Annotated tag `8f143b60265735354000d0f56c95632796eb6872` resolves to the source above.
+Exact-tag ruleset `24335246` prohibits updates and deletion with no bypass actors.
+
+All 205 installed tests and nine model-free preflights passed without skips.
+[Independent public verification and canonical release completion](https://github.com/clockgrove/factory/issues/431#issuecomment-5941198440)
+matched anonymous archive/checksum bytes, sealed acceptance, annotated source/tree,
+exact protection and the enabled pinned plugin. Acceptance SHA-256 is
+`9be03ce0ab84ed444e9055990f0a53867582b4b508dc933cc85be51ae9bf3522`;
+independent public receipt SHA-256 is
+`5d92eec4d8722f3dd44f0dcff617893a704bddc18e6f91a4f0bf8815b9ef3a71`.
+The release acceptance issue completed; archived candidate guidance remains unchanged.
+
+This release clarifies private Objective Gantt views (#428 / PR #430) and preserves
+an explicitly configured Codex SQLite directory through local harness and installed
+service environments (#429 / PR #432). The failed first distribution attempt and
+its fixture-only correction remain recorded in [#434](https://github.com/clockgrove/factory/issues/434).
+Distribution verification made no provider calls or target writes and does not
+accept live Objectives or adopter pilots. The autonomous local Objective acceptance
+in [#243](https://github.com/clockgrove/factory/issues/243) remains bound to public
+v0.1.64 and its original scenario; it does not transfer to v0.1.66. No published
+archive, tag or asset was changed by this later record.
+
 ## Immutable v0.1.65 artifact record
 
 [Release v0.1.65](https://github.com/clockgrove/factory/releases/tag/v0.1.65)

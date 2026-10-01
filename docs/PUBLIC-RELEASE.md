@@ -4,7 +4,9 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Published [v0.1.66](https://github.com/clockgrove/factory/releases/tag/v0.1.66) includes clearer private Objective Gantt timing/identity guidance ([#428](https://github.com/clockgrove/factory/issues/428)) and forwarding of the explicitly configured Codex SQLite directory through local harness and installed-service environments ([#429](https://github.com/clockgrove/factory/issues/429)). Package/lock/plugin versions, marketplace ref and installation commands select this released version. All 205 installed tests and nine model-free preflights passed without skips, followed by [independent public archive and pinned-plugin verification and release completion](https://github.com/clockgrove/factory/issues/431#issuecomment-5941198440). See the [exact artifact record](BUILD-STATUS.md#immutable-v0166-artifact-record). These distribution checks do not accept live Objectives or adopter pilots, introduce a provider or widen worker authority.
+Prepared v0.1.67 supplies supported cancellation after an owned local worker ceases without a durable result ([#437](https://github.com/clockgrove/factory/issues/437)). Package/lock/plugin versions, marketplace ref and installation commands select this candidate. Publication, whole installed cancellation regressions, a model-free public CLI cancellation preflight and independent public archive/pinned-plugin verification are pending in [#439](https://github.com/clockgrove/factory/issues/439). Original failed attempts, missing results and unknown accounting remain preserved; cancellation does not accept implementation or authorize retry. Earlier published artifacts retain their exact evidence.
+
+Published [v0.1.66](https://github.com/clockgrove/factory/releases/tag/v0.1.66) includes clearer private Objective Gantt timing/identity guidance ([#428](https://github.com/clockgrove/factory/issues/428)) and forwarding of the explicitly configured Codex SQLite directory through local harness and installed-service environments ([#429](https://github.com/clockgrove/factory/issues/429)). All 205 installed tests and nine model-free preflights passed without skips, followed by [independent public archive and pinned-plugin verification and release completion](https://github.com/clockgrove/factory/issues/431#issuecomment-5941198440). See the [exact artifact record](BUILD-STATUS.md#immutable-v0166-artifact-record). These distribution checks do not accept live Objectives or adopter pilots, introduce a provider or widen worker authority.
 
 Published [v0.1.65](https://github.com/clockgrove/factory/releases/tag/v0.1.65) preserves the original native predecessor acceptance binding in successor amendments while reobserving current executable availability ([#376](https://github.com/clockgrove/factory/issues/376)). It also includes corrected contributor Gantt event metadata ([#396](https://github.com/clockgrove/factory/issues/396)) and the measured eight-worker installed release-test default ([#422](https://github.com/clockgrove/factory/issues/422)). All 145 installed tests and nine model-free preflights passed without skips, followed by [independent public archive and pinned-plugin verification and release completion](https://github.com/clockgrove/factory/issues/425#issuecomment-5939722740). These distribution checks do not accept live Objectives or adopter pilots. No new provider, target, retry or execution authority is introduced.
 
@@ -106,16 +108,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select v0.1.66 after publication and independent public verification in [#431](https://github.com/clockgrove/factory/issues/431). Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/431), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
+The commands below select v0.1.67 after publication and independent public verification in [#439](https://github.com/clockgrove/factory/issues/439). Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/439), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.66
+codex plugin marketplace add clockgrove/factory --ref v0.1.67
 codex plugin add factory@clockgrove
-gh release download v0.1.66 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.66.tgz --pattern SHA256SUMS
+gh release download v0.1.67 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.67.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the independently recorded prepublication digest in the owning issue/PR or artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.66.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.67.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

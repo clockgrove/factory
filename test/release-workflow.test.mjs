@@ -179,7 +179,7 @@ function publicFixture(t, corrupt, mutate) {
   };
   shim(
     "codex",
-    `const args=process.argv.slice(2); let result; if(args[1]==='marketplace') result={installedRoot:${JSON.stringify(checkout)}}; else if(args[1]==='add')result={installedPath:${JSON.stringify(pkg)}}; else if(args[1]==='list')result={installed:[${JSON.stringify(plugin)}]}; else process.exit(4); console.log(JSON.stringify(result));`,
+    `const fs=require('node:fs'); const home=process.env.CODEX_HOME; if(!home||!fs.statSync(home).isDirectory()||(fs.statSync(home).mode&0o777)!==0o700)process.exit(5); const args=process.argv.slice(2); let result; if(args[1]==='marketplace') result={installedRoot:${JSON.stringify(checkout)}}; else if(args[1]==='add')result={installedPath:${JSON.stringify(pkg)}}; else if(args[1]==='list')result={installed:[${JSON.stringify(plugin)}]}; else process.exit(4); console.log(JSON.stringify(result));`,
   );
   if (corrupt) writeFileSync(archive, "Changed public bytes");
   if (mutate === "acceptance") {

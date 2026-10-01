@@ -691,6 +691,7 @@ export async function main(argv = process.argv.slice(2)) {
         ...environment,
         CODEX_HOME: join(output, "plugin-home"),
       };
+      mkdirSync(pluginEnvironment.CODEX_HOME, { mode: 0o700 });
       const marketplace = JSON.parse(
         run(
           [

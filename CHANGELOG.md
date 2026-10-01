@@ -2,13 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.65 — 2026-10-01 (candidate)
+## 0.1.65 — 2026-10-01
 
 - Retain the native predecessor acceptance binding when amending successor Objectives, while reobserving current executable availability (#376 / PR #424). Existing admissions remain readable; native amendments without the required original binding refuse without discarding evidence or accounting.
 - Recognize actual Codex final-answer and agent-message events in contributor Gantt metadata without exporting message content (#396 / PR #421).
 - Use eight isolated test-file workers for installed contributor release checks, based on the same-artifact concurrency benchmark (#422 / PR #423). Release stages and tests within each file remain sequential; Factory runtime scheduling is unchanged.
 
-Matching installed-artifact and public distribution verification are tracked in [#425](https://github.com/clockgrove/factory/issues/425). Earlier releases and Objective acceptance retain their exact artifact and scenario scope.
+Published with [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/425#issuecomment-5939722740). All 145 installed tests and nine model-free preflights passed without skips. These distribution checks do not accept live Objectives or adopter pilots; earlier releases and Objective acceptance retain their exact artifact and scenario scope.
 
 ## 0.1.64 — 2026-10-01
 

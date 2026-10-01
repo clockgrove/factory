@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.66 — 2026-10-01 (candidate)
+
+- Clarify private Objective Gantt views with elapsed-time ticks, adapter/provider/model identities, recorded command indexes and honest unavailable labels. Keep SDK invocation intervals distinct from individual model calls and shell commands; unknown CPU/network time remains unknown (#428 / PR #430).
+- Preserve explicitly configured `CODEX_SQLITE_HOME` through local Codex planning, review, readiness, worker execution and installed service environments, retaining the existing Codex home and credential filtering. Factory does not choose a directory or alter shared Codex databases (#429 / PR #432).
+
+Publication and independent public verification are tracked in [#431](https://github.com/clockgrove/factory/issues/431). These distribution checks do not accept live Objectives or adopter pilots; earlier releases and Objective acceptance retain their exact artifact and scenario scope.
+
 ## 0.1.65 — 2026-10-01
 
 - Retain the native predecessor acceptance binding when amending successor Objectives, while reobserving current executable availability (#376 / PR #424). Existing admissions remain readable; native amendments without the required original binding refuse without discarding evidence or accounting.

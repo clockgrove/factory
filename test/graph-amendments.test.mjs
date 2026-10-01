@@ -32,6 +32,7 @@ import {
 } from "./support/integration-fixture.mjs";
 import { withCoverage } from "./support/coverage.mjs";
 import { compilerWire } from "../dist/compiler-wire.js";
+import { CompletedModelInvocationError } from "../dist/contracts.js";
 import { encodeCompilerWire } from "./support/compiler-wire.mjs";
 
 const discovery = {
@@ -1311,22 +1312,45 @@ test("owner handoff after known amendment review resumes without repeating model
   });
 });
 
-for (const transport of ["stopped CLI", "live owner"])
-  test(`${transport}: diagnosed QA amendment replacement retains accepted work and charges one remaining revision`, async () => {
+for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
+  (transport) =>
+    ["compilation", "review", "review-unresolved"].map((rejection) => ({
+      transport,
+      rejection,
+    })),
+))
+  test(`${transport}: diagnosed ${rejection} amendment replacement retains accepted work and charges one remaining revision`, async () => {
     await fixture("rejected-correction", async ({ root, config, initial }) => {
       config.policy.allowedSecretNames = ["FACTORY_TEST_AMENDMENT_SECRET"];
       let first;
       let compilations = 0;
       let graphReviews = 0;
+      let fullRejectedResponse;
+      const amended = (redundant = false) => {
+        const graph = qaGraph(first);
+        if (rejection !== "compilation")
+          graph.items.push({
+            ...item("acceptance", ["result", "qa"]),
+            kind: "aggregate",
+            children: ["result", "qa"],
+            ownedPaths: [],
+            acceptance: aggregateAcceptance(["result", "qa"]),
+            validation: redundant
+              ? structuredClone(first.items[0].validation)
+              : [],
+          });
+        return graph;
+      };
       const planningModel = {
         async generateStructured(request) {
           compilations++;
           if (!first) return (first = withCoverage(request, initial));
           if (compilations === 2) {
-            const invalid = qaGraph(first);
-            // All source obligations still belong to work; QA is uncovered.
-            invalid.coverage = first.coverage;
-            return invalid;
+            const candidate = amended(true);
+            if (rejection === "compilation")
+              // All source obligations still belong to work; QA is uncovered.
+              candidate.coverage = first.coverage;
+            return candidate;
           }
           assert.equal(
             JSON.parse(
@@ -1334,12 +1358,47 @@ for (const transport of ["stopped CLI", "live owner"])
             ).discovery.replacement.correction.kind,
             "planning-output",
           );
-          return qaGraph(first);
+          return amended();
         },
         async reviewGraph(request) {
           graphReviews++;
-          if (request.amendment)
+          if (request.amendment) {
             assert.equal(request.amendment.work.result.status, "done");
+            assert.deepEqual(request.amendment.previousGraph, first);
+            assert.deepEqual(request.finalCommands, ["test -s result.txt"]);
+            assert.equal(
+              request.localExecutables.finalCommands[0],
+              "test -s result.txt",
+            );
+            if (
+              rejection !== "compilation" &&
+              (compilations === 2 || rejection === "review-unresolved")
+            ) {
+              const response = {
+                packetId: request.reviewPacket.id,
+                findings: [
+                  {
+                    evidenceIndices: [
+                      request.reviewPacket.evidence.findIndex(
+                        (entry) => entry.path === "OBJECTIVE",
+                      ),
+                    ],
+                    detail:
+                      compilations === 2
+                        ? "The aggregate repeats source coverage already retained on work and final validation. Remove the unnecessary aggregate command."
+                        : "A source-owned acceptance question remains unresolved; diagnosis does not grant acceptance.",
+                    question:
+                      compilations === 2
+                        ? "Can the corrected structural parent retain its children without the redundant check?"
+                        : "What source evidence resolves this acceptance question?",
+                  },
+                ],
+              };
+              if (compilations === 2)
+                fullRejectedResponse = structuredClone(response);
+              return JSON.parse(JSON.stringify(response));
+            }
+          }
           return { packetId: request.reviewPacket.id, findings: [] };
         },
         async reviewResult(request) {
@@ -1391,7 +1450,9 @@ for (const transport of ["stopped CLI", "live owner"])
       });
       await assert.rejects(
         setup.application.runObjective(1, candidate, admission),
-        /QA node has no acceptance coverage/,
+        rejection === "compilation"
+          ? /QA node has no acceptance coverage/
+          : /Independent amendment review rejected/,
       );
       const configPath = join(root, "factory.json");
       writeFileSync(configPath, JSON.stringify(config));
@@ -1434,7 +1495,18 @@ for (const transport of ["stopped CLI", "live owner"])
       );
       assert.equal(stopped.work.result.status, "done");
       assert.equal(stopped.pendingAmendment.phase, "rejected");
-      assert.equal(stopped.pendingAmendment.rejectionStage, "compilation");
+      assert.equal(
+        stopped.pendingAmendment.rejectionStage,
+        rejection === "compilation" ? "compilation" : "review-findings",
+      );
+      if (rejection !== "compilation") {
+        assert.equal(fullRejectedResponse.findings.length, 1);
+        assert.equal(
+          stopped.pendingAmendment.graph.items.at(-1).validation.length,
+          1,
+        );
+        assert.equal(stopped.graph.items.length, 1);
+      }
       assert.equal(stopped.allowanceConsumption.planningRevisions, 1);
       const proposal = {
         ...stopped.pendingAmendment.proposal,
@@ -1444,9 +1516,14 @@ for (const transport of ["stopped CLI", "live owner"])
           correction: {
             failureDigest: rejectedStatus.failureDigest,
             kind: "planning-output",
-            diagnosis: "Emitted choice contract allowed uncovered QA",
+            diagnosis:
+              rejection === "compilation"
+                ? "Emitted choice contract allowed uncovered QA"
+                : "Generated aggregate repeats an already retained source check",
             correction:
-              "QA choices now require a feasible existing source obligation",
+              rejection === "compilation"
+                ? "QA choices now require a feasible existing source obligation"
+                : "Keep required QA, work and final checks while omitting redundant aggregate validation",
             actor: "operator",
           },
         },
@@ -1476,8 +1553,32 @@ for (const transport of ["stopped CLI", "live owner"])
         (s) => {
           s.pendingAmendment.projectionPending = "qa";
         },
+        ...["reviewing", "projecting", "reviewed", "projected"].map(
+          (phase) => (s) => {
+            s.pendingAmendment.phase = phase;
+          },
+        ),
+        (s, p) => {
+          p.worker.attempt = "stale";
+        },
+        (s, p) => {
+          p.graph = structuredClone(s.graph);
+        },
+        (s) => {
+          s.pendingAmendment.proposal.graph = structuredClone(s.graph);
+        },
+        (s) => {
+          s.work.result.status = "running";
+        },
+        (s) => {
+          s.work.result.status = "published";
+        },
         (s) => {
           s.pendingAmendment.rejectionStage = "review";
+        },
+        (s) => {
+          s.pendingAmendment.rejectionStage = "review-findings";
+          delete s.pendingAmendment.graph;
         },
         (s) => {
           s.pendingAmendment.rejectionStage = "projection";
@@ -1598,7 +1699,7 @@ for (const transport of ["stopped CLI", "live owner"])
       assert.equal(replaced.coordinator.mode, "paused");
       assert.equal(replaced.allowanceConsumption.planningRevisions, 1);
       assert.equal(compilations, 2);
-      assert.equal(graphReviews, 1);
+      assert.equal(graphReviews, rejection === "compilation" ? 1 : 2);
       const beforeDuplicate = readFileSync(
         statePath(config.repository, 1),
         "utf8",
@@ -1612,6 +1713,45 @@ for (const transport of ["stopped CLI", "live owner"])
         beforeDuplicate,
       );
       await controlObjective(config, { objective: 1, action: "resume" });
+      if (rejection === "review-unresolved") {
+        await assert.rejects(
+          running ?? setup.application.runObjective(1),
+          /Independent amendment review rejected/,
+        );
+        const refused = readState(config.repository, 1);
+        assert.deepEqual(refused.graph, stopped.graph);
+        assert.deepEqual(refused.work, stopped.work);
+        assert.equal(refused.issueByItemId.qa, undefined);
+        assert.equal(
+          refused.pendingAmendment.graph.items.at(-1).validation.length,
+          0,
+        );
+        assert.equal(refused.pendingAmendment.phase, "rejected");
+        assert.equal(refused.allowanceConsumption.planningRevisions, 2);
+        assert.equal(refused.repairConsumption.$planning.planningRevisions, 2);
+        assert.equal(compilations, 3);
+        assert.equal(graphReviews, 3);
+        const next = {
+          ...proposal,
+          replacement: {
+            amendmentId: refused.pendingAmendment.id,
+            correction: {
+              ...proposal.replacement.correction,
+              failureDigest: failureDigest(refused.pendingAmendment.error),
+              correction:
+                "New correction requires unavailable further planning allowance",
+            },
+          },
+        };
+        const before = JSON.stringify(refused);
+        assert.throws(
+          () => submitAmendment(refused, next),
+          /allowance exhausted/,
+        );
+        assert.equal(JSON.stringify(refused), before);
+        assertGraphRevisions(refused);
+        return;
+      }
       const completed = await (running ?? setup.application.runObjective(1));
       assert.equal(completed.finalValidation.passed, true);
       assert.equal(completed.objectiveClosure, "complete");
@@ -1619,7 +1759,7 @@ for (const transport of ["stopped CLI", "live owner"])
       assert.equal(completed.allowanceConsumption.planningRevisions, 2);
       assert.equal(completed.repairConsumption.$planning.planningRevisions, 2);
       assert.equal(compilations, 3);
-      assert.equal(graphReviews, 2);
+      assert.equal(graphReviews, rejection === "compilation" ? 2 : 3);
       assert.equal(completed.work.result.attempt, stopped.work.result.attempt);
       assert.equal(
         completed.work.result.integratedSha,
@@ -1637,3 +1777,129 @@ for (const transport of ["stopped CLI", "live owner"])
       assertGraphRevisions(readState(config.repository, 1));
     });
   });
+
+test("actual review provider/protocol failures cannot authorize amendment replacement", async () => {
+  for (const failure of [
+    "unknown",
+    "completed-provider",
+    "wrong-packet",
+    "incomplete-response",
+  ])
+    await fixture(`review-${failure}`, async ({ config, initial }) => {
+      const graph = withCoverage(
+        {
+          coverageObligations: coverageObligations(
+            body,
+            objectiveCriteria(body),
+          ),
+        },
+        initial,
+      );
+      graph.coverage[0].source = coverageObligations(
+        body,
+        objectiveCriteria(body),
+      )[0].source;
+      const state = {
+        objective: 1,
+        baseSha: initial.baseSha,
+        graph,
+        issueByItemId: { result: 2 },
+        work: { result: { status: "done", attempt: "retained" } },
+        admission: {
+          graphDigest: graphDigest(graph),
+          authority: {
+            ...authority,
+            allowances: { ...authority.allowances, planningRevisions: 2 },
+            repairClasses: ["planning-output"],
+            repairPolicy: {
+              perPath: { ...authority.allowances, planningRevisions: 2 },
+            },
+          },
+        },
+        coordinator: { mode: "running" },
+      };
+      submitAmendment(state, {
+        ...discovery,
+        actor: "operator",
+        expectedGraphDigest: graphDigest(graph),
+      });
+      let reviewed = 0;
+      let projected = 0;
+      await assert.rejects(
+        applyPendingAmendment({
+          state,
+          config,
+          body,
+          model: {
+            async generateStructured(request) {
+              const wire = compilerWire(
+                request,
+                compilerCitationChoices(request.sources),
+              );
+              return wire.decode(encodeCompilerWire(qaGraph(graph), wire.data));
+            },
+            async reviewGraph(request) {
+              reviewed++;
+              if (failure === "unknown")
+                throw new Error("Unknown review submission outcome");
+              if (failure === "completed-provider")
+                throw new CompletedModelInvocationError(
+                  "Provider refused the request",
+                );
+              if (failure === "wrong-packet")
+                return { packetId: "stale", findings: [] };
+              return {
+                packetId: request.reviewPacket.id,
+                findings: [
+                  {
+                    evidenceIndices: [0],
+                    detail: "Partial finding with missing question",
+                  },
+                ],
+              };
+            },
+          },
+          github: {
+            async projectGraph() {
+              projected++;
+              throw new Error("Unexpected projection");
+            },
+          },
+          save() {},
+          cancelled: () => false,
+        }),
+      );
+      assert.equal(reviewed, 1, state.pendingAmendment.error);
+      assert.equal(projected, 0);
+      assert.equal(
+        state.pendingAmendment.phase,
+        failure === "unknown" ? "reviewing" : "rejected",
+      );
+      assert.equal(
+        state.pendingAmendment.rejectionStage,
+        failure === "unknown" ? undefined : "review",
+      );
+      assert.equal(state.allowanceConsumption.planningRevisions, 1);
+      const correction = {
+        ...state.pendingAmendment.proposal,
+        replacement: {
+          amendmentId: state.pendingAmendment.id,
+          correction: {
+            failureDigest: failureDigest(state.pendingAmendment.error),
+            kind: "planning-output",
+            actor: "operator",
+            diagnosis:
+              "Incomplete or unavailable review is not a decoded finding",
+            correction:
+              "Do not treat a provider or protocol failure as acceptance evidence",
+          },
+        },
+      };
+      const before = JSON.stringify(state);
+      assert.throws(
+        () => submitAmendment(state, correction),
+        /known unprojected/,
+      );
+      assert.equal(JSON.stringify(state), before);
+    });
+});

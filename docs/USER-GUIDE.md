@@ -398,8 +398,8 @@ projection outcomes pause affected work without repeating possibly completed cal
 Inspect the preserved pending proposal and original evidence before choosing a
 supported continuation; editing state or running a fresh root cannot bypass a fence.
 
-A known compiler-generated amendment rejection can be replaced after diagnosing and
-correcting its cause. Keep the original discovery fields and current graph digest,
+A known compiler-generated amendment rejection, including a completed independent
+review finding, can be replaced after diagnosing and correcting its cause. Keep the original discovery fields and current graph digest,
 set `actor` to the correcting operator, and add `replacement`:
 
 ```json
@@ -421,10 +421,12 @@ remaining total/per-path planning allowance. The operation also works while the
 owner is stopped, under the existing controller lock. It retains the rejected
 proposal and leaves the Objective paused; resume and start the existing owner to
 compile a fresh candidate through normal validation, independent review and
-projection. The new compilation consumes one remaining revision. Unknown calls,
-projection outcomes, independent-review refusals and unchanged failed corrections
-cannot use this operation. It does not accept or edit the rejected response, alter
-the accepted graph or restart completed Work Items.
+projection. The new compilation consumes one remaining revision. The diagnosis grants no
+missing source authority and cannot resolve a human-owned product decision; the
+fresh review still stops on an unresolved finding. Unknown calls/projection,
+provider failures, invalid or incomplete review responses and unchanged failed
+corrections cannot use this operation. It does not accept or edit the rejected
+response, alter the accepted graph or restart completed Work Items.
 
 ## Local background supervision
 

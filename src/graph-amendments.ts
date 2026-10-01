@@ -44,7 +44,7 @@ export interface AmendmentProposal extends WorkDiscovery {
   /** Operator supplied candidate; worker discoveries are compiled by the controller. */
   graph?: WorkGraph;
   worker?: { itemId: string; attempt: string };
-  /** Explicit disposition of a known compiler rejection, never an effect replay. */
+  /** Explicit disposition of a known generated amendment rejection, never an effect replay. */
   replacement?: { amendmentId: string; correction: RepairCorrection };
 }
 export interface PendingAmendment {
@@ -65,7 +65,12 @@ export interface PendingAmendment {
   issueByItemId: Record<string, number>;
   projectionPending?: string;
   error?: string;
-  rejectionStage?: "compilation" | "validation" | "review" | "projection";
+  rejectionStage?:
+    | "compilation"
+    | "validation"
+    | "review"
+    | "review-findings"
+    | "projection";
 }
 export interface GraphRevision {
   graph: WorkGraph;
@@ -375,12 +380,15 @@ function validateAmendmentReplacement(
     rejected.projectionPending ||
     rejected.reviewDigest ||
     (rejected.rejectionStage !== undefined
-      ? !["compilation", "validation"].includes(rejected.rejectionStage)
+      ? !["compilation", "validation", "review-findings"].includes(
+          rejected.rejectionStage,
+        )
       : !!rejected.graph) ||
+    (rejected.rejectionStage === "review-findings" && !rejected.graph) ||
     !isDeepStrictEqual(rejected.issueByItemId, state.issueByItemId)
   )
     throw new Error(
-      "Replacement requires a known unprojected compiler rejection",
+      "Replacement requires a known unprojected generated amendment rejection",
     );
   if (
     state.coordinator?.mode !== "paused" ||
@@ -752,10 +760,13 @@ export async function applyPendingAmendment(args: {
       });
       pending.phase = "compiled";
       const findings = decodeGraphReview(response, evidence);
-      if (findings.length)
+      if (findings.length) {
+        // Only a complete packet-bound decoded finding permits diagnosed correction.
+        stage = "review-findings";
         throw new Error(
           `Independent amendment review rejected: ${JSON.stringify(findings)}`,
         );
+      }
       pending.reviewDigest = createHash("sha256")
         .update(JSON.stringify({ packet, findings }))
         .digest("hex");

@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** Preparing v0.1.60 with controller-observed local executable facts in planning ([#403](https://github.com/clockgrove/factory/issues/403)). Matching publication, installed checks and independent public verification remain pending in [#399](https://github.com/clockgrove/factory/issues/404). Published [v0.1.58](https://github.com/clockgrove/factory/releases/tag/v0.1.58) passed [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/394#issuecomment-5926979213). Release checks do not establish full autonomous Objective or adopter acceptance.
+**Status:** Preparing v0.1.60 with controller-observed local executable facts in planning ([#403](https://github.com/clockgrove/factory/issues/403)). Matching publication, installed checks and independent public verification remain pending in [#404](https://github.com/clockgrove/factory/issues/404). Published [v0.1.58](https://github.com/clockgrove/factory/releases/tag/v0.1.58) passed [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/394#issuecomment-5926979213). Release checks do not establish full autonomous Objective or adopter acceptance.
 
 Published [v0.1.54](https://github.com/clockgrove/factory/releases/tag/v0.1.54) passed [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/pull/372#issuecomment-5922896684), fresh-cache offline installation and all 40 installed compiler/QA regression checks. It aligns compilation, graph review and planning diagnosis around one owner and complete proof for each whole source obligation ([#370](https://github.com/clockgrove/factory/issues/370)); compound final criteria can use the existing final-review proof. It retains the earlier delivery, review and recovery capabilities with their original evidence. Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Clockgrove retesting remains on hold until [#243](https://github.com/clockgrove/factory/issues/243) and its required dependencies pass acceptance. Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) for exact artifact and scenario records, and [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) for operator intervention.
 
@@ -33,7 +33,7 @@ codex plugin marketplace add clockgrove/factory --ref v0.1.60
 codex plugin add factory@clockgrove
 
 gh release download v0.1.60 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.59.tgz --pattern SHA256SUMS
+  --pattern clockgrove-factory-0.1.60.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
@@ -43,7 +43,7 @@ Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.59.tgz
+  ./clockgrove-factory-0.1.60.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

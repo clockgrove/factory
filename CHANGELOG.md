@@ -2,6 +2,14 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.60 — 2026-10-01 (candidate)
+
+- Supply existing controller-local executable observations for exact final commands to compilation, independent graph review and bounded diagnosis (#403). Keep presence separate from acceptance success, script-body behavior and remote worker readiness.
+- Bind the facts through the existing compiler context, preparation and review packets; repeat the existing check at admission and activation. Graph amendments observe their own scoped facts, and missing tools still fail before model calls.
+- Preserve stopped preparation, rejected responses, consumed allowances and unknown accounting without adding automatic continuation or resetting limits.
+
+Matching publication, installed packet checks and independent public verification remain pending under [#404](https://github.com/clockgrove/factory/issues/404). Complete autonomous Objective acceptance remains #253, #331, #254 and #243. Earlier releases retain their original artifact and scenario evidence.
+
 ## 0.1.59 — 2026-10-01 (candidate)
 
 - Supply the selected integrated commit/tree and actual validation phase to independent read-only QA review, without a worker or PR identity (#397).

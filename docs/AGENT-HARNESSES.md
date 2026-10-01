@@ -215,6 +215,15 @@ The native pinned runtime accumulates `ModelUsage.inputTokens` from
 `AssistantUsageData` describes its optional per-call API token fields; its
 conversation size is a separate metric.
 
+For local Codex, Factory preserves the caller's `CODEX_HOME` and optional
+`CODEX_SQLITE_HOME`. The latter selects Codex's SQLite directory without changing
+its credentials, configuration or security policy. This storage remains owned by
+Codex; Factory does not move, repair or reset it. Readiness and workers use the
+same setting. A newly installed supervisor service captures it from the installing
+environment; use supported service reinstall to change that captured setting.
+An environment override alone does not prove readiness: check the configured
+installed harness on the actual host.
+
 All three built-in harnesses reuse the developer's local authentication. Factory
 does not add tokens to its configuration file. For example, an existing `codex`
 CLI login is visible to the Codex SDK worker, an existing Claude profile is

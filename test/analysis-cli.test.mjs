@@ -176,4 +176,19 @@ test("local analysis reads metadata and recorded validation without opening a ca
   );
   assert.equal(json.includes("PRIVATE"), false);
   assert.equal(report.invocations[0].observations[0].content.truncated, true);
+  const svgPath = join(root, "timeline.svg");
+  assert.match(
+    runAnalysisCommand({ repository, checkout }, objective, [
+      "--objective",
+      "12",
+      "--gantt",
+      "--output",
+      svgPath,
+    ]),
+    /Saved private analysis report/,
+  );
+  const svg = readFileSync(svgPath, "utf8");
+  assert.match(svg, /Incomplete provider interval/);
+  assert.match(svg, /Controller validation-command/);
+  assert.doesNotMatch(svg, /PRIVATE/);
 });

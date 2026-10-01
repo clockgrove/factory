@@ -31,3 +31,20 @@ Choose an absolute, unused filename in an existing directory outside the target 
 The exported `analyzeInteractions` function accepts metadata arrays for explicitly selected repositories or Objectives when a local tool needs a broader comparison. The CLI stays within one configured Objective. Neither surface starts work, changes a plan, retries a call or sends telemetry to another service.
 
 A [bounded synthetic pattern-analysis exercise](OFFLINE-PATTERN-DISCOVERY.md) demonstrates when metadata and ordinary text search suffice, including false matches, incomplete captures and retry bias. It is contributor evidence, not a production frequency or model-quality report.
+
+## View an Objective Gantt timeline
+
+For a third-party developer using Factory on their own configured target, save a portable SVG:
+
+```sh
+factory analyze --objective 123 --gantt \
+  --output /home/alex/factory-reports/objective-123.svg
+factory analyze --objective 123 --filter runId=EXACT_RUN --gantt \
+  --output /home/alex/factory-reports/objective-123-run.svg
+```
+
+Open the SVG in a local browser or image viewer. `--gantt` requires `--output` and cannot combine with `--json`; the same private, new-file output guards apply. No provider credentials, calls or remote export are needed. This view reads Factory metadata for your Objective; it does not inspect contributor Codex sessions or run an Objective against Factory source.
+
+Each row names its recorded repository, Objective, run, item and attempt. Provider rows identify phase, invocation and provider attempt. Blue bars join a retained request observation to a retained provider terminal outcome; they represent that recorded invocation boundary, which may contain multiple model/tool interactions. An incomplete provider interval shows only observed dots and names any available request or terminal endpoint. Amber controller bars use the terminal observation time and its reported duration, with the start explicitly labeled as duration-derived. Other controller observations are dots, not invented intervals. Exact timestamps appear in row labels or point tooltips; a missing or invalid timestamp cannot produce a positioned mark.
+
+Rows overlap and must not be summed. These are wall-clock observations, not CPU or network attribution, full request traces, scheduling dependency proofs or evidence of current activity. Controller operations keep their explicit scope and use only repository/Objective/run/item/attempt filters, just as in JSON analysis. Missing capture, validation or delivery detail stays unavailable. The view does not load prompts, responses, command output or tool content; accounting stays in the ordinary text/JSON report with its original completeness. Keep repository and execution identities private when sharing the image.

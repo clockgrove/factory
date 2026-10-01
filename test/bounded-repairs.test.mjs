@@ -27,7 +27,11 @@ import {
   prepareEvidenceRecovery,
 } from "../dist/work-repair.js";
 import { validateAuthority } from "../dist/admission.js";
-import { compilePlan, objectiveCriteria } from "../dist/compiler.js";
+import {
+  compilePlan,
+  objectiveCriteria,
+  CodexPlanningModel,
+} from "../dist/compiler.js";
 import { coverageObligations, aggregateAcceptance } from "../dist/qa.js";
 import {
   validateTree,
@@ -43,7 +47,10 @@ import {
   waitForFile,
 } from "./support/integration-fixture.mjs";
 import { withCoverage } from "./support/coverage.mjs";
-import { resultFindings } from "./support/review-protocol.mjs";
+import {
+  packetFromPrompt,
+  resultFindings,
+} from "./support/review-protocol.mjs";
 
 const authority = () => ({
   schemaVersion: 1,
@@ -930,6 +937,26 @@ for (const delivery of ["regular", "native-stack"])
       );
       assert.equal(repair.controllerFacts.failedAttempt.phase, "validate");
       assert.equal(repair.controllerFacts.currentAttemptId, work.attempt);
+      assert.deepEqual(repair.controllerFacts.admittedAuthority, {
+        admissionDigest: done.admission.digest,
+        objective: 1,
+        actor: policy.actor,
+        reason: policy.reason,
+        executionConsent: true,
+        repairClass: "validation-environment",
+      });
+      const preservation = repair.controllerFacts.candidatePreservation;
+      assert.equal(preservation.preserved, true);
+      assert.equal(preservation.sameAttempt, true);
+      assert.equal(preservation.sameExecutionBase, true);
+      assert.equal(preservation.unchangedOwnedPaths, true);
+      assert.deepEqual(preservation.acceptedOwnedPaths, ["result.txt"]);
+      assert.deepEqual(preservation.ownedPathChanges, []);
+      assert.equal(preservation.failedCandidateChanges[0].path, "result.txt");
+      assert.equal(
+        preservation.failedCandidateChanges[0].newObject,
+        git(config.checkout, "rev-parse", `${work.changeRef}:result.txt`),
+      );
       assert.equal(
         repair.declaredCorrection.contentOrigin,
         "declared-diagnosis-and-correction",
@@ -959,13 +986,26 @@ for (const delivery of ["regular", "native-stack"])
         ).repair,
         repair,
       );
-      for (const corruption of ["history", "candidate", "consumption"]) {
+      for (const corruption of [
+        "history",
+        "candidate",
+        "candidate-base",
+        "consumption",
+        "admission",
+        "source-binding",
+      ]) {
         const broken = structuredClone(done);
         if (corruption === "history") broken.work.result.recovery.history = [];
         if (corruption === "candidate")
           broken.work.result.recovery.history[0].work.treeSha = "0".repeat(40);
+        if (corruption === "candidate-base")
+          delete broken.work.result.recovery.history[0].work.executionBaseSha;
         if (corruption === "consumption")
           broken.repairConsumption.result.resultRereviews = 0;
+        if (corruption === "admission")
+          broken.admission.authority.reason = "Unbound authority";
+        if (corruption === "source-binding")
+          broken.objectiveBodyDigest = "0".repeat(64);
         assert.throws(
           () =>
             workItemReviewEvidence({
@@ -974,7 +1014,7 @@ for (const delivery of ["regular", "native-stack"])
               checkout: config.checkout,
               delivery,
             }),
-          /retained failure|tree|admitted consumption/,
+          /retained failure|tree|admitted consumption|preservation bindings|Admission binding|admission differs/,
         );
         assert.throws(
           () =>
@@ -988,7 +1028,70 @@ for (const delivery of ["regular", "native-stack"])
                 `${broken.integratedSha}^{tree}`,
               ),
             }),
-          /retained failure|tree|admitted consumption/,
+          /retained failure|tree|admitted consumption|preservation bindings|Admission binding|admission differs/,
+        );
+      }
+      for (const corruption of ["attempt", "execution-base"]) {
+        const broken = structuredClone(done);
+        const prior = broken.work.result.recovery.history[0].work;
+        if (corruption === "attempt") prior.attempt = "stale-attempt";
+        else prior.executionBaseSha = done.work.result.changeRef;
+        const evidence = () =>
+          workItemReviewEvidence({
+            state: broken,
+            item: done.graph.items.find((entry) => entry.id === "result"),
+            checkout: config.checkout,
+            delivery,
+          });
+        if (corruption === "execution-base") {
+          assert.throws(evidence, /unexpected controller commit identity/);
+          continue;
+        }
+        const proof = JSON.parse(
+          evidence().find(
+            (source) => source.path === "Retained repair proof: result",
+          ).content,
+        );
+        assert.equal(
+          proof.controllerFacts.candidatePreservation.preserved,
+          false,
+        );
+      }
+      git(config.checkout, "checkout", "--detach", done.work.result.changeRef);
+      for (const corruption of ["blob", "mode"]) {
+        if (corruption === "blob")
+          writeFileSync(join(config.checkout, "result.txt"), "changed\n");
+        else chmodSync(join(config.checkout, "result.txt"), 0o755);
+        git(config.checkout, "add", "result.txt");
+        const changedTree = git(config.checkout, "write-tree");
+        const changedCommit = git(
+          config.checkout,
+          "commit-tree",
+          changedTree,
+          "-p",
+          done.work.result.baseSha,
+          "-m",
+          "Factory: result",
+        );
+        const broken = structuredClone(done);
+        broken.work.result.changeRef = changedCommit;
+        broken.work.result.treeSha = changedTree;
+        const proof = JSON.parse(
+          workItemReviewEvidence({
+            state: broken,
+            item: done.graph.items.find((entry) => entry.id === "result"),
+            checkout: config.checkout,
+            delivery,
+          }).find((source) => source.path === "Retained repair proof: result")
+            .content,
+        );
+        assert.equal(
+          proof.controllerFacts.candidatePreservation.preserved,
+          false,
+        );
+        assert.equal(
+          proof.controllerFacts.candidatePreservation.ownedPathChanges[0].path,
+          "result.txt",
         );
       }
     } finally {
@@ -1395,6 +1498,8 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
 - test -s beta.txt
 `;
     const betaReviewTrees = [];
+    const betaPackets = [];
+    let finalPacket;
     const planner = model(graph, () => {
       throw Error("Implementation diagnosis is not authorized");
     });
@@ -1402,8 +1507,11 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
       if (
         request.reviewPhase === "result-review" &&
         request.criteria.includes("beta.txt exists")
-      )
+      ) {
         betaReviewTrees.push(request.treeSha);
+        betaPackets.push(request);
+      }
+      if (request.reviewPhase === "objective-review") finalPacket = request;
       return reviewer(request);
     };
     const descriptor = {
@@ -1532,6 +1640,71 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
       correction.failureDigest,
     );
     assert.equal(done.allowanceConsumption.resultRereviews, 1);
+    assert.notEqual(done.work.beta.changeRef, original.changeRef);
+    assert.notEqual(done.work.beta.treeSha, original.treeSha);
+    const repair = JSON.parse(
+      betaPackets[0].reviewPacket.evidence.find(
+        (source) => source.path === "Retained repair proof: beta",
+      ).content,
+    );
+    const preservation = repair.controllerFacts.candidatePreservation;
+    assert.equal(preservation.preserved, true);
+    assert.equal(preservation.sameAttempt, true);
+    assert.equal(preservation.sameExecutionBase, true);
+    assert.equal(preservation.failedResultBaseCommitSha, original.baseSha);
+    assert.equal(
+      preservation.currentResultBaseCommitSha,
+      done.work.beta.baseSha,
+    );
+    assert.notEqual(
+      preservation.failedResultBaseCommitSha,
+      preservation.currentResultBaseCommitSha,
+    );
+    assert.deepEqual(preservation.acceptedOwnedPaths, ["beta.txt"]);
+    assert.deepEqual(preservation.ownedPathChanges, []);
+    const failedBlob = preservation.failedCandidateChanges[0];
+    assert.equal(failedBlob.path, "beta.txt");
+    assert.equal(failedBlob.newMode, "100644");
+    assert.equal(
+      failedBlob.newObject,
+      git(config.checkout, "rev-parse", `${done.work.beta.changeRef}:beta.txt`),
+    );
+    assert.equal(
+      repair.controllerFacts.admittedAuthority.repairClass,
+      "validation-environment",
+    );
+    assert.equal(
+      repair.controllerFacts.admittedAuthority.admissionDigest,
+      done.admission.digest,
+    );
+    assert.deepEqual(
+      JSON.parse(finalPacket.observations).work.find(
+        (entry) => entry.id === "beta",
+      ).repair,
+      repair,
+    );
+    const wireModel = new CodexPlanningModel(config.checkout);
+    let renderedFinal;
+    wireModel.runStructured = async ({ prompt, schema, defaultPhase }) => {
+      assert.equal(defaultPhase, "objective-review");
+      renderedFinal = packetFromPrompt(prompt);
+      assert.equal(renderedFinal.packetId, finalPacket.reviewPacket.id);
+      assert.equal(schema.properties.packetId.enum[0], renderedFinal.packetId);
+      assert.ok(prompt.includes("do not require whole-tree equality"));
+      assert.ok(
+        prompt.includes(
+          "without inventing a requirement to independently witness every declared host action",
+        ),
+      );
+      return reviewer(finalPacket);
+    };
+    await wireModel.reviewResult(finalPacket);
+    const renderedRepair = JSON.parse(
+      renderedFinal.evidence.find(
+        (entry) => entry.path === "Delivery observations",
+      ).content,
+    ).work.find((entry) => entry.id === "beta").repair;
+    assert.deepEqual(renderedRepair, repair);
     assert.deepEqual(
       readEvents(fixture.eventsPath)
         .filter((event) => event.type === "start")

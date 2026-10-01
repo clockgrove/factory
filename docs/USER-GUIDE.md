@@ -398,6 +398,11 @@ is a complete proposed replacement graph; Factory regenerates its worker source 
 from the selected pinned citations before the same deterministic and independent checks.
 Callers do not copy source contents into `inputSources`. The owner rejects stale proposals. A started/completed node's
 identity cannot be repurposed; propose successor or revalidation work instead.
+Never-started ordinary work may revise generated acceptance wording while retaining
+every substantive requirement. Independent review compares the complete old and new
+graphs; a paraphrase alone is not deletion, and weakened obligations still block
+the amendment. Source criterion identities/text and existing aggregate acceptance
+remain exact.
 
 A decomposed parent waits for every explicit child dependency and proves its own
 acceptance without another implementation worker or synthetic PR. Unknown model or

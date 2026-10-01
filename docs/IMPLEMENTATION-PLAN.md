@@ -55,10 +55,14 @@ The existing atomic snapshot retains the admitted initial graph, immutable revie
 successors, one pending amendment and Objective-level allowance consumption. Each
 new attempt binds its accepted graph digest. A revision consumes one recorded
 planning allowance before model submission; decomposition, children and restart do
-not reset it. Every required source criterion and existing Work Item acceptance
-remains covered. Changed started or completed nodes require explicit successor or
-revalidation work. Independent graph review includes the previous graph, proposal
-and compact attempt/result identities; it cannot expand source or command authority.
+not reset it. Every required source criterion retains its exact identity and text.
+Never-started ordinary Work Items may revise generated acceptance wording while
+preserving every substantive obligation. Independent graph review compares the
+complete previous and proposed graphs; equivalent wording alone is not deletion,
+and weakened or omitted requirements still stop acceptance. Changed started or
+completed nodes require explicit successor or revalidation work. Independent graph
+review includes the proposal and compact attempt/result identities; it cannot
+expand source or command authority.
 
 New dispatch stops while a proposal settles. Existing native delivery units finish
 without repartitioning published identities; other owned effects settle before

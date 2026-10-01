@@ -2,13 +2,20 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.63 — 2026-10-01 (candidate)
+## 0.1.64 — 2026-10-01 (candidate)
+
+- Permit equivalent acceptance wording for never-started ordinary Work Items during graph amendments (#415). Preserve every substantive obligation through the existing independent review of complete previous/proposed graphs.
+- Retain exact started/completed definitions, controller-derived aggregate acceptance, source criteria, coverage, command authority and native delivery guards. No new state, model call, retry or permission is introduced.
+
+Matching installed-artifact and public verification remain pending. Full autonomous Objective acceptance remains #253, #331, #254 and #243; historical failed runs and consumed allowances stay preserved.
+
+## 0.1.63 — 2026-10-01
 
 - Reuse the retained worker discovery capture in current, completed dependency and final review, with its actual attempt/result binding (#412).
 - Supply the matching accepted graph-revision receipt, independent-review digest, parent/successor bindings and exact added QA/parent definitions. Keep submitted proposals, reviewed amendments and completed acceptance distinct.
 - Clarify that absent or stale supplied discovery is missing proof, not a negative submission observation. Missing or mismatched facts still cannot pass a required source obligation; no new state, API, call or permission is introduced.
 
-Matching publication, installed final-packet checks and independent public verification remain pending under [#413](https://github.com/clockgrove/factory/issues/413). Full same-artifact autonomous Objective acceptance remains #253, #331, #254 and #243; historical failures, consumed allowances and unavailable accounting remain preserved.
+Published with [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/413). All 139 whole installed tests and nine model-free preflights passed without skips. One bounded final-packet diagnostic passed all four criteria, granting no Objective acceptance. Full same-artifact autonomous Objective acceptance remains #253, #331, #254 and #243; historical failures, consumed allowances and unavailable accounting remain preserved.
 
 ## 0.1.62 — 2026-10-01
 

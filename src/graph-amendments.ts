@@ -547,12 +547,6 @@ export function validateAmendment(
       throw new Error(
         `Started/completed Work Item ${old.id} is immutable; add explicit successor or revalidation work`,
       );
-    if (
-      old.acceptance.some((criterion) => !next.acceptance.includes(criterion))
-    )
-      throw new Error(
-        "Amendments cannot delete accepted Work Item obligations",
-      );
   }
   for (const entry of state.graph.coverage ?? []) {
     const next = graph.coverage.find(

@@ -10,13 +10,13 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 
 Matching publication, installed packet checks and independent public verification remain pending under [#404](https://github.com/clockgrove/factory/issues/404). Complete autonomous Objective acceptance remains #253, #331, #254 and #243. Earlier releases retain their original artifact and scenario evidence.
 
-## 0.1.59 — 2026-10-01 (candidate)
+## 0.1.59 — 2026-10-01
 
 - Supply the selected integrated commit/tree and actual validation phase to independent read-only QA review, without a worker or PR identity (#397).
 - Supply compact retained failure, correction, original candidate and admitted consumption facts to current, dependency and final review. Original failed candidates remain distinct from later native replay results; declared diagnosis does not prove external effects.
 - Preserve source phase ownership and conditional failure semantics: a passing conditional check does not require an invented failed execution. Missing evidence and exhausted repair authority retain their existing stop boundaries.
 
-Matching publication, installed packet checks and independent public verification remain pending under [#399](https://github.com/clockgrove/factory/issues/399). The stopped v0.1.58 qualification and its consumed allowances remain unchanged. Complete autonomous Objective acceptance remains #253, #331, #254 and #243.
+Published with [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/399). All 92 installed tests and six model-free preflights passed. These distribution checks do not accept live Objectives or adopter pilots. Stopped qualification evidence and consumed allowances retain their original identities; complete autonomous Objective acceptance remains #253, #331, #254 and #243.
 
 ## 0.1.58 — 2026-10-01
 

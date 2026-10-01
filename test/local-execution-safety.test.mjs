@@ -945,7 +945,7 @@ test("real offline pnpm TypeScript installation is observed in original collecti
       execFileSync(
         process.execPath,
         [
-          resolve("node_modules/pnpm/bin/pnpm.cjs"),
+          join(dirname(require.resolve("pnpm")), "bin/pnpm.cjs"),
           "install",
           "--offline",
           "--ignore-scripts",

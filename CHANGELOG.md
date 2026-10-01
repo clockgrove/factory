@@ -2,12 +2,19 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.57 — 2026-09-30 (candidate)
+## 0.1.58 — 2026-10-01 (candidate)
+
+- Add a private SVG Gantt view for target-repository Objectives with `factory analyze --gantt --output ABSOLUTE_NEW_FILE`. It reads retained local metadata, distinguishes provider invocations from controller observations, and preserves incomplete intervals without loading captured content or making provider calls (#389 / PR #391).
+- Add a separate repository-local contributor Gantt skill for developers building Factory, streamline completion of independently verified releases, and select proportionate PR checks while retaining the complete main gate (#388, #386, #390). Contributor tooling is outside the installed plugin skills.
+
+Publication, installed checks and independent public verification are pending under [#394](https://github.com/clockgrove/factory/issues/394). They do not establish complete autonomous Objective or adopter acceptance; #243 and its required dependencies retain that scope. Earlier releases and their evidence keep their original identities.
+
+## 0.1.57 — 2026-09-30
 
 - Retain the v0.1.56 runtime. The contributor public-audit command now creates its private Codex home before the first CLI invocation (#382 / PR #383).
 - Measure a clean complete sequential release after candidate review and CI under #384, with detailed timing attribution. This does not establish live autonomous Objective or adopter acceptance.
 
-Publication and independent public verification are pending. Earlier releases and their evidence remain bound to their original source and bytes.
+Published with all 27 installed checks and five model-free preflights. [Independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/384#issuecomment-5925566535) passed. The clean contributor release measurement and its original source, archive and accounting evidence remain bound to #384; they do not establish autonomous Objective or adopter acceptance.
 
 ## 0.1.56 — 2026-09-30 (candidate)
 

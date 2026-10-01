@@ -340,6 +340,17 @@ and carries the concrete rejected transport field into a fresh review packet.
 Missing/truncated evidence and semantic decisions require their actual correction;
 a repeated unchanged failure is not silently accepted.
 
+Sequential planning projects authenticated native Objective dependencies and the
+original sealed, fully accepted predecessor commit/tree into compilation, graph
+review and diagnosis. The compact controller facts bind the actual selected base,
+unchanged predecessor body and acceptance evidence; exact equality and verified
+ancestry remain distinct. They are neither target command authority nor edges
+inside the current WorkGraph. Existing preparation and independent-review digests
+bind this projection, and activation reobserves its original GitHub/snapshot
+sources. No second dependency or acceptance store is maintained. Item acceptance
+cannot require that same review's future completion; original whole criteria
+requiring it stay at final Objective review with their source-required commands.
+
 Planning with a repair policy, or within authorized intake, first persists its
 body/base/configuration/authority binding. Initial compilation, diagnosis,
 corrective compilation and independent review have explicit invocation identities.

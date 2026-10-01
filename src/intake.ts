@@ -20,6 +20,7 @@ import {
 } from "./config.js";
 import type { GitHubGateway, IntakeIssuePage } from "./contracts.js";
 import { objectiveComplete } from "./completion.js";
+import { planningPrerequisites } from "./objective-prerequisites.js";
 import {
   type ControlRequest,
   requestControl,
@@ -296,6 +297,7 @@ async function resolveBase(
   config: FactoryConfig,
   github: GitHubGateway,
   predecessors: number[],
+  objective: number,
 ): Promise<string> {
   await gitAsync(
     config.checkout,
@@ -304,29 +306,7 @@ async function resolveBase(
     await github.defaultBranch(),
   );
   const head = git(config.checkout, "rev-parse", "FETCH_HEAD");
-  for (const objective of predecessors) {
-    const previous = readContinuation(config.repository, objective);
-    if (
-      previous?.schemaVersion !== 4 ||
-      !objectiveComplete(previous) ||
-      !previous.finalAcceptance
-    )
-      throw new Error(
-        `Predecessor #${objective} lacks bound accepted integration evidence`,
-      );
-    const remote = await github.objective(objective);
-    if (digest(remote.body) !== previous.objectiveBodyDigest)
-      throw new Error(
-        `Predecessor #${objective} body changed after acceptance`,
-      );
-    await gitAsync(
-      config.checkout,
-      "merge-base",
-      "--is-ancestor",
-      previous.finalAcceptance.commit,
-      head,
-    );
-  }
+  await planningPrerequisites(config, github, objective, head, predecessors);
   if (git(config.checkout, "status", "--porcelain"))
     throw new Error(
       "Compilation checkout has local changes; preserve them before intake",
@@ -511,7 +491,7 @@ export async function runIntake(
                   `Predecessor #${missing} has no accepted evidence`;
                 continue;
               }
-              await resolveBase(config, services.github, predecessors);
+              await resolveBase(config, services.github, predecessors, id);
               selected = id;
               break;
             } catch (error) {

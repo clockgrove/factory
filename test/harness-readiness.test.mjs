@@ -20,7 +20,7 @@ async function fixture(mode, run) {
   const record = join(root, "requests.jsonl");
   writeFileSync(
     server,
-    `import {createInterface} from 'node:readline';import fs from 'node:fs';const mode=${JSON.stringify(mode)};const record=${JSON.stringify(record)};if(mode==='startup-failure'){console.error('state runtime unavailable');process.exit(1)}const lines=createInterface({input:process.stdin});lines.on('line',line=>{const m=JSON.parse(line);fs.appendFileSync(record,JSON.stringify({method:m.method,args:process.argv.slice(2),params:m.params,githubToken:process.env.GITHUB_TOKEN??null})+'\\n');if(!m.id)return;if(m.method==='initialize'){console.log(JSON.stringify({id:m.id,result:{}}));return}if(m.method!=='command/exec')throw Error('Unexpected method');const [, , ,inside,outside,token]=m.params.command;if(mode!=='forged')fs.writeFileSync(inside,token);if(mode==='outside-allowed')fs.writeFileSync(outside,token);console.log(JSON.stringify({id:m.id,result:{exitCode:0,stdout:JSON.stringify({writable:true,refused:mode!=='outside-allowed'}),stderr:''}}))});`,
+    `import {createInterface} from 'node:readline';import fs from 'node:fs';const mode=${JSON.stringify(mode)};const record=${JSON.stringify(record)};if(mode==='startup-failure'){console.error('state runtime unavailable');process.exit(1)}const lines=createInterface({input:process.stdin});lines.on('line',line=>{const m=JSON.parse(line);fs.appendFileSync(record,JSON.stringify({method:m.method,args:process.argv.slice(2),params:m.params,githubToken:process.env.GITHUB_TOKEN??null,sqliteHome:process.env.CODEX_SQLITE_HOME??null,codexHome:process.env.CODEX_HOME??null})+'\\n');if(!m.id)return;if(m.method==='initialize'){console.log(JSON.stringify({id:m.id,result:{}}));return}if(m.method!=='command/exec')throw Error('Unexpected method');const [, , ,inside,outside,token]=m.params.command;if(mode!=='forged')fs.writeFileSync(inside,token);if(mode==='outside-allowed')fs.writeFileSync(outside,token);console.log(JSON.stringify({id:m.id,result:{exitCode:0,stdout:JSON.stringify({writable:true,refused:mode!=='outside-allowed'}),stderr:''}}))});`,
   );
   try {
     await run({
@@ -97,4 +97,25 @@ test("refusal probe inside workspace is rejected before harness startup", async 
       /outside the workspace/,
     );
   });
+});
+
+test("readiness inherits the host SQLite directory while retaining the same Codex home", async () => {
+  const original = { ...process.env };
+  try {
+    process.env.CODEX_HOME = "/tmp/existing-codex-home";
+    process.env.CODEX_SQLITE_HOME = "/tmp/host-local-sqlite";
+    process.env.GITHUB_TOKEN = "excluded-publication-token";
+    await fixture("ready", async ({ server, record, input }) => {
+      assert.equal(
+        (await probeCodexReadiness(input, [process.execPath, server])).status,
+        "ready",
+      );
+      const observed = JSON.parse(readFileSync(record, "utf8").split("\n")[0]);
+      assert.equal(observed.codexHome, process.env.CODEX_HOME);
+      assert.equal(observed.sqliteHome, process.env.CODEX_SQLITE_HOME);
+      assert.equal(observed.githubToken, null);
+    });
+  } finally {
+    process.env = original;
+  }
 });

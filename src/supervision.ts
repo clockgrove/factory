@@ -364,6 +364,7 @@ export async function supervise(
       "XDG_CONFIG_HOME",
       "XDG_DATA_HOME",
       "CODEX_HOME",
+      "CODEX_SQLITE_HOME",
       "GH_CONFIG_DIR",
     ])
       if (process.env[key]) environment[key] = process.env[key]!;

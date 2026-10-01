@@ -13,6 +13,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { Codex } from "@openai/codex-sdk";
 import { LocalContentStore } from "../dist/content/local.js";
 import { LocalExecutionDriver } from "../dist/execution/local.js";
 import { checkStagedCandidate } from "../dist/execution/staged-candidate.js";
@@ -834,6 +835,8 @@ test("worker receives only declared ambient values and an empty GitHub credentia
       SSH_AUTH_SOCK: "/tmp/host-agent",
       GIT_ASKPASS: "/tmp/host-askpass",
       PATH: "/usr/bin",
+      CODEX_HOME: "/tmp/existing-codex-home",
+      CODEX_SQLITE_HOME: "/tmp/host-local-sqlite",
     });
     const env = sanitizedWorkerEnvironment("/tmp/factory-empty-gh-config");
     const effective = JSON.parse(
@@ -858,6 +861,14 @@ test("worker receives only declared ambient values and an empty GitHub credentia
     ])
       assert.equal(effective[key], undefined, key);
     assert.equal(effective.PATH, "/usr/bin");
+    assert.equal(effective.CODEX_HOME, "/tmp/existing-codex-home");
+    assert.equal(effective.CODEX_SQLITE_HOME, "/tmp/host-local-sqlite");
+    delete process.env.CODEX_SQLITE_HOME;
+    assert.equal(
+      sanitizedWorkerEnvironment("/tmp/factory-empty-gh-config")
+        .CODEX_SQLITE_HOME,
+      undefined,
+    );
     assert.equal(effective.GH_CONFIG_DIR, "/tmp/factory-empty-gh-config");
     assert.equal(effective.GIT_CONFIG_KEY_0, "credential.helper");
     assert.equal(effective.GIT_CONFIG_VALUE_0, "");
@@ -869,6 +880,41 @@ test("worker receives only declared ambient values and an empty GitHub credentia
     assert.equal(declared.GH_TOKEN, undefined);
   } finally {
     process.env = original;
+  }
+});
+
+test("Codex SDK forwards the worker's filtered SQLite directory to its executable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-codex-environment-"));
+  const original = { ...process.env };
+  try {
+    process.env.CODEX_HOME = join(root, "codex-home");
+    process.env.CODEX_SQLITE_HOME = join(root, "sqlite-home");
+    process.env.GITHUB_TOKEN = "excluded-publication-token";
+    const executable = join(root, "codex.mjs");
+    writeFileSync(
+      executable,
+      `#!${process.execPath}
+const text = JSON.stringify({home:process.env.CODEX_HOME,sqlite:process.env.CODEX_SQLITE_HOME,github:process.env.GITHUB_TOKEN??null});
+console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",id:"env",text}}));
+console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:0,output_tokens:0}}));
+`,
+      { mode: 0o700 },
+    );
+    const codex = new Codex({
+      codexPathOverride: executable,
+      env: sanitizedWorkerEnvironment(join(root, "credentials")),
+    });
+    const result = await codex
+      .startThread({ workingDirectory: root })
+      .run("Scripted environment observation");
+    assert.deepEqual(JSON.parse(result.finalResponse), {
+      home: process.env.CODEX_HOME,
+      sqlite: process.env.CODEX_SQLITE_HOME,
+      github: null,
+    });
+  } finally {
+    process.env = original;
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

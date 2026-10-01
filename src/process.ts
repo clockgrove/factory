@@ -88,6 +88,7 @@ export function sanitizedWorkerEnvironment(
     "XDG_DATA_HOME",
     "XDG_RUNTIME_DIR",
     "CODEX_HOME",
+    "CODEX_SQLITE_HOME",
   ]);
   for (const [key, value] of Object.entries(process.env)) {
     const declared =

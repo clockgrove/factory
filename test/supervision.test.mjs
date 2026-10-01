@@ -386,3 +386,40 @@ test("managed CLI readiness and fresh supervised starts use loaded private crede
       assert.doesNotMatch(started.stdout + started.stderr, /dummy-/);
     }
   }));
+
+test("supervised install and upgrade retain the caller's nonsecret SQLite path", () =>
+  fixture(async ({ root, config, configPath }) => {
+    process.env.CODEX_HOME = join(root, "codex-home");
+    process.env.CODEX_SQLITE_HOME = join(root, "sqlite-home");
+    process.env.GITHUB_TOKEN = "excluded-publication-token";
+    await supervise("install", configPath, { objective: 1 });
+    const installed = (await supervise("status", configPath)).binding;
+    assert.equal(installed.environment.CODEX_HOME, process.env.CODEX_HOME);
+    assert.equal(
+      installed.environment.CODEX_SQLITE_HOME,
+      process.env.CODEX_SQLITE_HOME,
+    );
+    assert.equal(installed.environment.GITHUB_TOKEN, undefined);
+    const path = join(
+      process.env.XDG_CONFIG_HOME,
+      "systemd/user",
+      serviceName(config.repository),
+    );
+    assert.ok(
+      readFileSync(path, "utf8").includes(
+        `Environment="CODEX_SQLITE_HOME=${process.env.CODEX_SQLITE_HOME}"`,
+      ),
+    );
+    const candidate = join(root, "compatible-cli.mjs");
+    writeFileSync(
+      candidate,
+      'console.log("factory-supervision-compatible-v1")',
+    );
+    process.env.CODEX_SQLITE_HOME = join(root, "different-host-value");
+    await supervise("upgrade", configPath, { cli: candidate });
+    assert.equal(
+      (await supervise("status", configPath)).binding.environment
+        .CODEX_SQLITE_HOME,
+      installed.environment.CODEX_SQLITE_HOME,
+    );
+  }));

@@ -45,6 +45,8 @@ export interface AutonomousAdmission {
   baseSha: string;
   bodyDigest: string;
   packetDigest: string;
+  /** Bind native facts separately from phase-specific executable observations. */
+  prerequisitesDigest?: string;
   graphDigest: string;
   sourceDigests: PlanCandidate["sourceDigests"];
   additionalSources?: PlanCandidate["additionalSources"];
@@ -199,6 +201,12 @@ export function assertAdmissionBinding(admission: AutonomousAdmission): void {
   if (!admission || admission.schemaVersion !== 1)
     throw new Error("Invalid admission schema");
   validateAuthority(admission.authority);
+  if (
+    admission.prerequisitesDigest !== undefined &&
+    (typeof admission.prerequisitesDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(admission.prerequisitesDigest))
+  )
+    throw new Error("Invalid admission native prerequisites digest");
   const { digest, ...bound } = admission;
   if (digest !== admissionDigest(bound))
     throw new Error(
@@ -282,6 +290,9 @@ export function bindAdmission(
     baseSha,
     bodyDigest: candidate.bodyDigest,
     packetDigest: candidate.packetDigest,
+    prerequisitesDigest: createHash("sha256")
+      .update(JSON.stringify(candidate.prerequisites ?? null))
+      .digest("hex"),
     graphDigest: candidate.graphDigest,
     sourceDigests: candidate.sourceDigests,
     ...(candidate.additionalSources?.length

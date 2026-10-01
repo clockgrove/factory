@@ -482,7 +482,7 @@ test("native planning facts refuse missing, unaccepted, changed and mismatched p
     );
   }));
 
-async function activatedSuccessor(f, descendant = false) {
+async function activatedSuccessor(f, descendant = false, dependent = true) {
   await f.application.enqueueIntake(
     { ...structuredClone(authority), objectives: [1] },
     { pollSeconds: 0.01 },
@@ -506,6 +506,7 @@ async function activatedSuccessor(f, descendant = false) {
     );
     git(f.config.checkout, "push", "origin", "main");
   }
+  if (!dependent) f.dependencies.set(2, []);
   const candidate = await f.application.planObjective(2);
   const bounded = structuredClone(authority);
   bounded.allowances.planningRevisions = 2;
@@ -538,13 +539,23 @@ function successorDiscovery(state) {
   });
 }
 
-for (const descendant of [false, true])
-  test(`activated native successor amendment renders original predecessor facts (${descendant ? "descendant" : "equal"} base)`, async (t) =>
+for (const [descendant, dependent] of [
+  [false, true],
+  [true, true],
+  [false, false],
+])
+  test(`activated ${dependent ? "native successor" : "first Objective"} amendment renders original facts (${descendant ? "descendant" : "equal"} base)`, async (t) =>
     fixture(async (f) => {
       const { first, second, candidate } = await activatedSuccessor(
         f,
         descendant,
+        dependent,
       );
+      const previousPath = process.env.PATH;
+      t.after(() => {
+        process.env.PATH = previousPath;
+      });
+      process.env.PATH += `:${join(f.root, "unrelated-path-entry")}`;
       successorDiscovery(second);
       const selection = { model: "gpt-5.6-sol", reasoningEffort: "low" };
       const real = new CodexPlanningModel(
@@ -585,12 +596,14 @@ for (const descendant of [false, true])
         const native = evidence.evidence.find(
           (entry) => entry.path === "FACTORY_NATIVE_OBJECTIVE_PREREQUISITES",
         );
-        assert.equal(native.origin, "controller");
-        assert.equal(native.complete, true);
-        assert.deepEqual(
-          JSON.parse(native.content),
-          currentRequest.prerequisites,
-        );
+        if (dependent) {
+          assert.equal(native.origin, "controller");
+          assert.equal(native.complete, true);
+          assert.deepEqual(
+            JSON.parse(native.content),
+            currentRequest.prerequisites,
+          );
+        } else assert.equal(native, undefined);
         return { packetId: evidence.packetId, findings: [] };
       });
       const model = {
@@ -620,7 +633,11 @@ for (const descendant of [false, true])
       );
       for (const entry of rendered) {
         assert.deepEqual(entry.packet.prerequisites, candidate.prerequisites);
-        assert(entry.prompt.includes(JSON.stringify(candidate.prerequisites)));
+        assert(
+          entry.prompt.includes(
+            JSON.stringify(candidate.prerequisites ?? null),
+          ),
+        );
         assert.match(
           entry.prompt,
           /WorkGraph dependencies refer only to items in this Objective/,
@@ -630,9 +647,9 @@ for (const descendant of [false, true])
           /never copy a requirement for its own review completion into current item acceptance/,
         );
       }
-      assert.deepEqual(
-        candidate.prerequisites.predecessors[0].acceptance,
-        first.finalAcceptance &&
+      if (dependent) {
+        assert.deepEqual(
+          candidate.prerequisites.predecessors[0].acceptance,
           Object.fromEntries(
             [
               "sealedAt",
@@ -643,10 +660,26 @@ for (const descendant of [false, true])
               "evidenceDigest",
             ].map((key) => [key, first.finalAcceptance[key]]),
           ),
-      );
+        );
+        assert.equal(
+          candidate.prerequisites.predecessors[0].baseRelationship,
+          descendant ? "descendant" : "equal",
+        );
+      }
       assert.equal(
-        candidate.prerequisites.predecessors[0].baseRelationship,
-        descendant ? "descendant" : "equal",
+        second.admission.prerequisitesDigest,
+        createHash("sha256")
+          .update(JSON.stringify(candidate.prerequisites ?? null))
+          .digest("hex"),
+      );
+      assert.notDeepEqual(
+        currentRequest.localExecutables,
+        candidate.localExecutables,
+      );
+      assert(
+        currentRequest.localExecutables.observations.every(
+          (entry) => entry.status === "ready",
+        ),
       );
       assert.deepEqual(second.graph.items[0], candidate.graph.items[0]);
       assert.equal(second.graphRevisions.length, 2);
@@ -678,9 +711,23 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
       "body",
       "relationship",
       "tree",
+      "historical",
     ]) {
       const state = structuredClone(second);
       successorDiscovery(state);
+      if (fault === "historical") {
+        delete state.admission.prerequisitesDigest;
+        const { digest, ...bound } = state.admission;
+        state.admission.digest = createHash("sha256")
+          .update(JSON.stringify(bound))
+          .digest("hex");
+        saveState(statePath(f.config.repository, 2), state);
+        assert.equal(
+          readState(f.config.repository, 2).admission.prerequisitesDigest,
+          undefined,
+        );
+        f.dependencies.set(2, []);
+      }
       if (fault === "missing") rmSync(statePath(f.config.repository, 1));
       if (fault === "unaccepted")
         saveState(statePath(f.config.repository, 1), {
@@ -705,7 +752,7 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
           save() {},
           cancelled: () => false,
         }),
-        /accepted|acceptance|sealed|evidence|prerequisites/,
+        /accepted|acceptance|sealed|evidence|prerequisite/,
       );
       assert.equal(calls, 0, fault);
       assert.equal(state.pendingAmendment.phase, "rejected");

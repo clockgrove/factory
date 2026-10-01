@@ -410,9 +410,11 @@ inside the current WorkGraph. Existing preparation and independent-review digest
 bind this projection, and activation reobserves its original GitHub/snapshot
 sources. No second dependency or acceptance store is maintained. Successor discovery
 amendments supply the same validated native facts to compilation and independent
-graph review; the original admission packet and first immutable graph bind those
-facts, with reobservation before review, projection and adoption. Item acceptance
-cannot require that same review's future completion; original whole criteria
+graph review. A digest of native facts in the existing admission binds that original
+projection separately from current executable observations; reobservation precedes
+review, projection and adoption. Historical snapshots remain readable without
+fabricated native bindings. Gateway-backed amendments lacking that original binding
+refuse before model calls. Item acceptance cannot require that same review's future completion; original whole criteria
 requiring it stay at final Objective review with their source-required commands.
 
 Planning separately receives the existing controller-local executable preflight

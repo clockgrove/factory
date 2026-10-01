@@ -652,29 +652,29 @@ export async function applyPendingAmendment(args: {
       state.baseSha,
     );
     const verifyPrerequisites = async () => {
-      // The original admission packet already binds these facts. Rebuild it
-      // from the immutable first graph instead of retaining another projection.
-      if (!args.github.objectiveDependencies) return;
+      // Reobserve the original sources; retain only a binding in admission,
+      // never a duplicate predecessor projection or historical host observation.
       const current = await planningPrerequisites(
         config,
         args.github,
         state.objective,
         state.baseSha,
       );
-      const originalPacket = planReviewPacket(
-        args.body,
-        state.baseSha,
-        sources,
-        state.graphRevisions![0]!.graph,
-        config.checkout,
-        choices,
-        current,
-        localExecutables,
-      );
       if (
-        createHash("sha256")
-          .update(JSON.stringify(originalPacket))
-          .digest("hex") !== state.admission!.packetDigest ||
+        !args.github.objectiveDependencies &&
+        !current &&
+        state.admission!.prerequisitesDigest === undefined
+      )
+        return;
+      if (state.admission!.prerequisitesDigest === undefined)
+        throw new Error(
+          "Amendment native prerequisite binding is unavailable in historical admission",
+        );
+      const nativeDigest = createHash("sha256")
+        .update(JSON.stringify(current ?? null))
+        .digest("hex");
+      if (
+        nativeDigest !== state.admission!.prerequisitesDigest ||
         !isDeepStrictEqual(current, prerequisites)
       )
         throw new Error(

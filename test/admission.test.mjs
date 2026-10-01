@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { objectiveComplete } from "../dist/completion.js";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -5,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  assertAdmissionBinding,
   checkAuthority,
   validateAuthority,
   preflightObjective,
@@ -171,6 +173,27 @@ test("admit and check are read-only and bind exact authority, plan, source, body
       );
       const policy = authority();
       const admission = await application.admitObjective(1, candidate, policy);
+      assert.equal(
+        admission.prerequisitesDigest,
+        createHash("sha256").update("null").digest("hex"),
+      );
+      for (const malformed of ["invalid", ["0".repeat(64)]])
+        assert.throws(
+          () =>
+            assertAdmissionBinding({
+              ...admission,
+              prerequisitesDigest: malformed,
+            }),
+          /native prerequisites digest/,
+        );
+      assert.throws(
+        () =>
+          assertAdmissionBinding({
+            ...admission,
+            prerequisitesDigest: "0".repeat(64),
+          }),
+        /binding changed/,
+      );
       policy.reason = "Changed externally";
       assert.equal(admission.authority.reason, "Bounded fixture execution");
       await application.checkAdmission(1, candidate, admission);

@@ -423,7 +423,16 @@ test("native planning facts refuse missing, unaccepted, changed and mismatched p
       "Later authenticated base\n",
     );
     git(f.config.checkout, "add", "later.txt");
-    git(f.config.checkout, "commit", "-m", "Later default branch");
+    git(
+      f.config.checkout,
+      "-c",
+      "user.name=Factory Test",
+      "-c",
+      "user.email=factory-test@example.com",
+      "commit",
+      "-m",
+      "Later default branch",
+    );
     const later = git(f.config.checkout, "rev-parse", "HEAD");
     const descendant = await planningPrerequisites(
       f.config,

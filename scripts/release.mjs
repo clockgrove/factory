@@ -112,6 +112,7 @@ export async function main(argv = process.argv.slice(2)) {
       review: { type: "string" },
       issue: { type: "string" },
       test: { type: "string", multiple: true },
+      "test-tool": { type: "string", multiple: true },
       preflight: { type: "string", multiple: true },
       publish: { type: "boolean", default: false },
       record: { type: "string" },
@@ -405,9 +406,31 @@ export async function main(argv = process.argv.slice(2)) {
       );
       // Keep Unix socket test paths short and host compile cache outside fixture roots.
       const testTmp = mkdtempSync("/tmp/fr-");
+      const testToolRoot = join(output, "test-tools");
+      mkdirSync(testToolRoot);
+      const testTools = [];
+      for (const name of options["test-tool"] ?? []) {
+        assert.match(name, /^(?:@[\w.-]+\/)?[\w.-]+$/);
+        const key = `node_modules/${name}`;
+        assert(
+          lock[key]?.dev === true,
+          `Test tool must be locked dev-only: ${name}`,
+        );
+        const path = join(source, key);
+        const bytes = readFileSync(join(path, "package.json"));
+        assert.equal(JSON.parse(bytes).version, lock[key].version);
+        mkdirSync(dirname(join(testToolRoot, name)), { recursive: true });
+        symlinkSync(path, join(testToolRoot, name));
+        testTools.push({
+          name,
+          version: lock[key].version,
+          packageSha256: digest(bytes),
+        });
+      }
       const testEnvironment = {
         ...environment,
         TMPDIR: testTmp,
+        NODE_PATH: testToolRoot,
         NODE_OPTIONS:
           `${process.env.NODE_OPTIONS ?? ""} --import=${preload}`.trim(),
       };
@@ -461,6 +484,7 @@ export async function main(argv = process.argv.slice(2)) {
         bundled,
         tests: options.test,
         testSources,
+        testTools,
         counts,
         preflights,
         tagProtection: protection,

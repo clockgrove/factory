@@ -41,7 +41,7 @@ npm run release -- release \
   --preflight /absolute/reviewed-model-free-preflight.mjs
 ```
 
-Repeat `--test` and `--preflight` for the actual accepted capability set. An external preflight script is an explicitly reviewed contributor input, not a plugin or alternate release workflow. Its bytes are hashed before execution and verified unchanged afterward. Keep target-specific private evidence in its authorized local destination.
+Repeat `--test` and `--preflight` for the actual accepted capability set. When a committed test needs a dev-only CommonJS tool, add `--test-tool NAME` (for example `ajv` for compiler schema tests). The tool must be dev-only in the frozen lockfile; its version and package hash are recorded, and it is supplied separately without modifying the installed package or replacing its production dependencies. An external preflight script is an explicitly reviewed contributor input, not a plugin or alternate release workflow. Its bytes are hashed before execution and verified unchanged afterward. Keep target-specific private evidence in its authorized local destination.
 
 To publish an already authorized new candidate, use the same command with `--publish --issue EXISTING_ACCEPTANCE_ISSUE`. The command runs the local stages once, verifies or creates only the exact new tag's active update/deletion protection with no bypass actors, records the expected fingerprint in that issue before publication, then creates the annotated tag and Release with its archive and checksum. Preserve normal controls and existing authority; this option grants no publication or security authority. Existing tags are refused. Never use it merely to measure elapsed time, replace published assets or retag a version.
 

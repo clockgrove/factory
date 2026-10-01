@@ -3,10 +3,13 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -15,8 +18,83 @@ import {
   archivePaths,
   tagProtection,
   testCounts,
+  retireTestScratch,
   verifyProtection,
 } from "../scripts/release.mjs";
+
+test("release retains the real Node child compile cache and removes only the test scratch", (t) => {
+  const root = mkdtempSync("/tmp/factory-release-cache-test-");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, "scratch");
+  const output = join(root, "evidence");
+  mkdirSync(scratch);
+  mkdirSync(output);
+  const module = join(root, "fixture.mjs");
+  writeFileSync(module, "export const value = 42;\n");
+  const child = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import { enableCompileCache } from "node:module"; enableCompileCache(); await import(${JSON.stringify(module)});`,
+    ],
+    {
+      // These are the relevant unchanged sanitized child variables; cache controls are absent.
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch },
+      encoding: "utf8",
+    },
+  );
+  assert.equal(child.status, 0, child.stderr);
+  const cache = join(scratch, "node-compile-cache");
+  const cacheFiles = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+      entry.isDirectory()
+        ? cacheFiles(join(dir, entry.name))
+        : [join(dir, entry.name)],
+    );
+  const before = cacheFiles(cache).map((path) => [
+    path.slice(cache.length + 1),
+    readFileSync(path),
+  ]);
+  assert.ok(before.length > 0, "Real imported module must create cache bytes");
+  retireTestScratch(scratch, output);
+  assert.equal(existsSync(scratch), false);
+  for (const [path, bytes] of before)
+    assert.deepEqual(
+      readFileSync(join(output, "test-node-cache", path)),
+      bytes,
+    );
+});
+
+test("release refuses unexplained scratch and a cache symlink without modifying evidence", (t) => {
+  const root = mkdtempSync("/tmp/factory-release-cache-refusal-");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const kind of ["unexplained", "symlink"]) {
+    const scratch = join(root, kind);
+    const output = join(root, `${kind}-evidence`);
+    mkdirSync(scratch);
+    mkdirSync(output);
+    const external = join(root, "external-cache");
+    if (kind === "unexplained")
+      writeFileSync(join(scratch, "unfinished-fixture"), "preserve me");
+    else {
+      mkdirSync(external);
+      writeFileSync(join(external, "external.txt"), "external bytes");
+      symlinkSync(external, join(scratch, "node-compile-cache"));
+    }
+    assert.throws(
+      () => retireTestScratch(scratch, output),
+      /retained scratch|not a symlink/,
+    );
+    assert.ok(existsSync(scratch));
+    assert.deepEqual(readdirSync(output), []);
+    if (kind === "symlink")
+      assert.equal(
+        readFileSync(join(external, "external.txt"), "utf8"),
+        "external bytes",
+      );
+  }
+});
 
 test("release guard refuses broader scopes, bypass actors and missing deletion protection", () => {
   const expected = tagProtection("1.2.3");

@@ -3,12 +3,15 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   rmdirSync,
   statSync,
   symlinkSync,
@@ -99,6 +102,31 @@ function files(root) {
     const path = join(root, entry.name);
     return entry.isDirectory() ? files(path) : entry.isFile() ? [path] : [];
   });
+}
+
+/** Node child caches are release evidence; every other test remainder is a failure. */
+export function retireTestScratch(scratch, output) {
+  const entries = readdirSync(scratch);
+  assert.deepEqual(
+    entries.filter((name) => name !== "node-compile-cache"),
+    [],
+    `Tests retained scratch; preserve ${scratch} for diagnosis`,
+  );
+  if (entries.length) {
+    const cache = join(scratch, "node-compile-cache");
+    assert(
+      lstatSync(cache).isDirectory(),
+      "Node test cache must be a directory, not a symlink",
+    );
+    cpSync(cache, join(output, "test-node-cache"), {
+      recursive: true,
+      dereference: false,
+      errorOnExist: true,
+      force: false,
+    });
+    rmSync(cache, { recursive: true });
+  }
+  rmdirSync(scratch);
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -454,12 +482,7 @@ export async function main(argv = process.argv.slice(2)) {
         { cwd: stage, env: testEnvironment },
       );
       const counts = testCounts(tested);
-      assert.deepEqual(
-        readdirSync(testTmp),
-        [],
-        `Tests retained scratch; preserve ${testTmp} for diagnosis`,
-      );
-      rmdirSync(testTmp);
+      retireTestScratch(testTmp, output);
       const preflights = [];
       for (const path of options.preflight) {
         const absolute = resolve(source, path);

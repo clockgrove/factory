@@ -22,6 +22,16 @@ Follow the [single-owner release sequence](docs/PUBLIC-RELEASE.md#contributor-re
 
 Start from the current issue's outcome and the relevant section of the public plan. A finding is a blocker only when it prevents that path; record useful follow-ups without making them blockers. Stop when accepted behavior and focused validation pass. The target repository owns product requirements, documentation authority, commands, branch protection, and Objective exit conditions. Work Item completion does not imply Objective completion.
 
+When a provider or workflow cannot satisfy a chosen mechanism, distinguish the
+required product outcome from that mechanism before declaring the work blocked.
+Check the simplest bounded alternative against the current contracts, explain
+its tradeoffs and retained guarantees, and bring a concrete proposal to the
+operator when a contract or authority change is needed. Do not wait for the
+operator to invent the alternative. Keep factual provider gaps visible and never
+silently weaken validation, permissions, ownership, spending or acceptance.
+An approved alternative must update the affected public contract and issue
+acceptance coherently before implementation; it does not prove provider support.
+
 ## GitHub issue hygiene
 
 Treat issue metadata as part of issue creation, not as optional cleanup. Before opening a Factory contributor issue, search both open and closed issues for the behavior and exact error. Prefer updating an existing issue when its accepted scope covers the finding. When a closed predecessor or active parent only partially covers it, file a focused follow-up and link the predecessor, parent tracking issue, relevant pull request, and durable public reproduction. Do not publish private adopter content, credentials, raw model prompts or responses, or local-only evidence.

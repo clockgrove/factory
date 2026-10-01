@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** [v0.1.65 is released](https://github.com/clockgrove/factory/releases/tag/v0.1.65), with retained native predecessor evidence for successor Objective amendments.
+**Status:** v0.1.66 is the next candidate, with clearer Objective Gantt views and support for an explicitly configured Codex SQLite directory. Publication and independent public verification are tracked in [#431](https://github.com/clockgrove/factory/issues/431).
 
 Factory is early software. Supervise initial Objectives and follow the [recovery guidance](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) when work stops. [Release artifact records](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) retain the evidence and limits of earlier versions.
 
@@ -26,24 +26,24 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select independently verified v0.1.65.
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select v0.1.66 after its publication and independent verification in [#431](https://github.com/clockgrove/factory/issues/431).
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.65
+codex plugin marketplace add clockgrove/factory --ref v0.1.66
 codex plugin add factory@clockgrove
 
-gh release download v0.1.65 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.65.tgz --pattern SHA256SUMS
+gh release download v0.1.66 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.66.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/425), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. [Independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/425#issuecomment-5939722740) passed for v0.1.65.
+Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/431), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. Public archive and pinned-plugin verification for v0.1.66 must pass in [#431](https://github.com/clockgrove/factory/issues/431) before use.
 
 Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.65.tgz
+  ./clockgrove-factory-0.1.66.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

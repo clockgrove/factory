@@ -1,4 +1,10 @@
 import { installedControllerCapabilities } from "./controller-capabilities.js";
+import {
+  allowanceKey,
+  assertRepairLedger,
+  failureDigest,
+  repairScopes,
+} from "./repair-policy.js";
 import { ownsPath } from "./ownership.js";
 import {
   CandidateValidationFailure,
@@ -185,6 +191,7 @@ function selectedLfsReviewEvidence(
 
 export type ReviewDeliveryObservation =
   | { kind: "regular" }
+  | { kind: "read-only-proof" }
   | {
       kind: "native-stack";
       unitId: string;
@@ -340,6 +347,20 @@ export function workItemReviewObservations(
     currentIntegratedCommitSha: state.integratedSha ?? null,
     reviewedItemId: item.id,
     delivery,
+    ...(item.kind === "qa" || item.kind === "aggregate"
+      ? {
+          validationPhase: {
+            kind: "post-integration-read-only",
+            attemptId: current.attempt,
+            selectedIntegratedCommitSha: current.changeRef,
+            selectedIntegratedTreeSha: current.treeSha,
+            validationTreeSha: current.validation?.treeSha,
+            commands: current.validation?.commands,
+            worker: false,
+            pullRequest: false,
+          },
+        }
+      : {}),
     harnessDiscovery:
       current.discovery &&
       current.attempt &&
@@ -1051,6 +1072,7 @@ function workItemResultEvidence(args: {
       `Work Item ${item.id} lacks complete result-review identity`,
     );
   const evidence: ResultReviewEvidenceSource[] = [];
+  const repair = retainedRepairProof(state, item, checkout);
   assertCommitTree(
     checkout,
     current.changeRef,
@@ -1082,6 +1104,10 @@ function workItemResultEvidence(args: {
     const record = {
       id: item.id,
       kind: item.kind,
+      attemptId: current.attempt,
+      validationPhase: "post-integration-read-only",
+      selectedIntegratedCommitSha: current.changeRef,
+      selectedIntegratedTreeSha: current.treeSha,
       status: current.status,
       resultCommitSha: current.changeRef,
       resultTreeSha: current.treeSha,
@@ -1089,6 +1115,7 @@ function workItemResultEvidence(args: {
       validationCommands: current.validation.commands,
       namedChecks: current.qaChecks ?? [],
       integratedCommitSha: current.integratedSha ?? null,
+      ...(repair && { repair }),
     };
     return {
       record,
@@ -1240,6 +1267,7 @@ function workItemResultEvidence(args: {
       (set) => set.id === current.selectedAssetSet,
     ),
     selection: current.selection,
+    ...(repair && { repair }),
   };
   evidence.push({
     path: `Delivery lifecycle proof: ${item.id}`,
@@ -1253,6 +1281,89 @@ function workItemResultEvidence(args: {
     }),
   });
   return { record, evidence };
+}
+
+/** Retained controller facts and declared correction, never a copy of worker or review prose. */
+function retainedRepairProof(
+  state: FactoryState,
+  item: WorkItem,
+  checkout: string,
+) {
+  const current = state.work[item.id]!;
+  const correction = current.recovery?.correction;
+  if (!correction) return undefined;
+  assertRepairLedger(state);
+  const prior = [...(current.recovery?.history ?? [])]
+    .reverse()
+    .find((entry) => entry.failure?.digest === correction.failureDigest);
+  if (
+    !prior?.failure ||
+    prior.failure.digest !== failureDigest(prior.failure.detail) ||
+    !prior.work.attempt
+  )
+    throw new Error(
+      `Work Item ${item.id} correction lacks its retained failure`,
+    );
+  const candidate = prior.work;
+  if (candidate.changeRef || candidate.treeSha) {
+    if (!candidate.changeRef || !candidate.treeSha)
+      throw new Error(`Work Item ${item.id} retained candidate is incomplete`);
+    assertCommitTree(
+      checkout,
+      candidate.changeRef,
+      candidate.treeSha,
+      `Work Item ${item.id} retained failure candidate`,
+    );
+  }
+  const key = allowanceKey(correction.kind);
+  const authority = state.admission?.authority;
+  const consumed = state.allowanceConsumption?.[key];
+  const scopes = repairScopes(state, item.id);
+  if (
+    !authority?.repairPolicy ||
+    !authority.repairClasses.includes(correction.kind) ||
+    !consumed ||
+    scopes.some((scope) => !state.repairConsumption?.[scope]?.[key])
+  )
+    throw new Error(
+      `Work Item ${item.id} correction lacks admitted consumption`,
+    );
+  return {
+    controllerFacts: {
+      failedAttempt: {
+        attemptId: candidate.attempt,
+        status: candidate.status,
+        phase: candidate.step ?? null,
+        resultCommitSha: candidate.changeRef ?? null,
+        resultTreeSha: candidate.treeSha ?? null,
+        failure: {
+          digest: prior.failure.digest,
+          classification: prior.failure.classification,
+          at: prior.failure.at,
+          continuation: prior.failure.continuation,
+          ...(correction.kind === "validation-environment" && {
+            recordedError: prior.failure.detail,
+          }),
+        },
+      },
+      currentAttemptId: current.attempt ?? null,
+      currentResultCommitSha: current.changeRef ?? null,
+      currentResultTreeSha: current.treeSha ?? null,
+      snapshotConsumption: {
+        allowance: key,
+        objective: { consumed, limit: authority.allowances[key] },
+        paths: scopes.map((scope) => ({
+          scope,
+          consumed: state.repairConsumption![scope]![key],
+          limit: authority.repairPolicy!.perPath[key],
+        })),
+      },
+    },
+    declaredCorrection: {
+      contentOrigin: "declared-diagnosis-and-correction",
+      ...correction,
+    },
+  };
 }
 
 /** Current materialization and declared dependency ancestry, never unrelated work. */
@@ -1298,6 +1409,19 @@ export function workItemReviewEvidence(args: {
     checkout,
     textBudget,
   });
+  if (item.kind === "qa" || item.kind === "aggregate") {
+    if (current.changeRef !== state.integratedSha)
+      throw new Error(`QA ${item.id} selected integration is stale`);
+    evidence.push(
+      ...workItemResultEvidence({ state, item, checkout, textBudget }).evidence,
+    );
+  }
+  const repair = retainedRepairProof(state, item, checkout);
+  if (repair)
+    evidence.push({
+      path: `Retained repair proof: ${item.id}`,
+      content: JSON.stringify(repair),
+    });
   const records = dependencies.map((dependency) => {
     const work = state.work[dependency.id];
     if (

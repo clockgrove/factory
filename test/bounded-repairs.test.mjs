@@ -27,8 +27,13 @@ import {
   prepareEvidenceRecovery,
 } from "../dist/work-repair.js";
 import { validateAuthority } from "../dist/admission.js";
-import { compilePlan } from "../dist/compiler.js";
-import { validateTree } from "../dist/validation.js";
+import { compilePlan, objectiveCriteria } from "../dist/compiler.js";
+import { coverageObligations, aggregateAcceptance } from "../dist/qa.js";
+import {
+  validateTree,
+  workItemReviewEvidence,
+  objectiveReviewEvidence,
+} from "../dist/validation.js";
 import {
   createTarget,
   factoryConfig,
@@ -750,7 +755,8 @@ for (const delivery of ["regular", "native-stack"])
       );
       const gate = join(root, "readiness");
       const command = `test -f '${gate}'`;
-      const source = `${body}\n## Environment\nThe controller requires this already-provisioned environment prerequisite.\n- ${command}\n`;
+      const aggregateCriterion = aggregateAcceptance({ id: "aggregate" })[0];
+      const source = `${body.replace("## Commands", `- The integrated conditional check passes; an actual failure requires diagnosed authorized correction\n- ${aggregateCriterion}\n## Commands`)}\n## Environment\nThe controller requires this already-provisioned environment prerequisite.\n- ${command}\n`;
       const graph = {
         objective: 1,
         baseSha: target.baseSha,
@@ -762,12 +768,50 @@ for (const delivery of ["regular", "native-stack"])
               { command, provenance: "source-declared", source: "OBJECTIVE" },
             ],
           },
+          {
+            ...item("qa", ["result"]),
+            kind: "qa",
+            ownedPaths: [],
+            acceptance: [
+              "The integrated conditional check passes; an actual failure requires diagnosed authorized correction",
+            ],
+            validation: [
+              { command, provenance: "source-declared", source: "OBJECTIVE" },
+            ],
+          },
+          {
+            ...item("aggregate", ["qa"]),
+            kind: "aggregate",
+            children: ["qa"],
+            ownedPaths: [],
+            acceptance: [aggregateCriterion],
+            validation: [],
+          },
         ],
       };
+      graph.coverage = coverageObligations(
+        source,
+        objectiveCriteria(source),
+      ).map((obligation, index) => ({
+        criterionId: obligation.criterionId,
+        itemId: ["result", "qa", "aggregate"][index],
+        proof:
+          index === 0
+            ? { kind: "final-review" }
+            : { kind: "integrated-semantic", acceptanceIndex: 0 },
+        environment: {
+          kind: "local",
+          readiness: "available",
+          probe: "",
+          preparedBy: "",
+        },
+      }));
       let reviews = 0;
+      const packets = [];
       const planner = model(graph);
       planner.reviewResult = async (request) => {
         reviews++;
+        packets.push(request);
         return reviewer(request);
       };
       const descriptor = {
@@ -851,6 +895,102 @@ for (const delivery of ["regular", "native-stack"])
       assert.equal(done.allowanceConsumption.resultRereviews, 1);
       assert.ok(reviews >= 2);
       assert.equal(done.work.result.recovery.history[0].work.error, work.error);
+      assert.equal(done.work.qa.status, "done");
+      assert.equal(done.work.aggregate.status, "done");
+      const resultPacket = packets.find((packet) =>
+        packet.evidence.some(
+          (source) => source.path === "Retained repair proof: result",
+        ),
+      );
+      const qaPacket = packets.find((packet) =>
+        packet.criteria.includes(graph.items[1].acceptance[0]),
+      );
+      const aggregatePacket = packets.find((packet) =>
+        packet.criteria.includes(graph.items[2].acceptance[0]),
+      );
+      const finalPacket = packets.find(
+        (packet) => packet.reviewPhase === "objective-review",
+      );
+      const repair = JSON.parse(
+        resultPacket.evidence.find(
+          (source) => source.path === "Retained repair proof: result",
+        ).content,
+      );
+      assert.equal(
+        repair.controllerFacts.failedAttempt.resultCommitSha,
+        work.changeRef,
+      );
+      assert.equal(
+        repair.controllerFacts.failedAttempt.resultTreeSha,
+        work.treeSha,
+      );
+      assert.equal(
+        repair.controllerFacts.failedAttempt.attemptId,
+        work.attempt,
+      );
+      assert.equal(repair.controllerFacts.failedAttempt.phase, "validate");
+      assert.equal(repair.controllerFacts.currentAttemptId, work.attempt);
+      assert.equal(
+        repair.declaredCorrection.contentOrigin,
+        "declared-diagnosis-and-correction",
+      );
+      assert.equal(
+        repair.declaredCorrection.failureDigest,
+        work.recovery.failure.digest,
+      );
+      assert.deepEqual(repair.controllerFacts.snapshotConsumption.objective, {
+        consumed: 1,
+        limit: policy.allowances.resultRereviews,
+      });
+      assert.deepEqual(repair.controllerFacts.snapshotConsumption.paths, [
+        { scope: "result", consumed: 1, limit: 1 },
+      ]);
+      for (const packet of [qaPacket, aggregatePacket]) {
+        const dependency = JSON.parse(
+          packet.evidence.find(
+            (source) => source.path === "Completed dependency results",
+          ).content,
+        ).work.find((entry) => entry.id === "result");
+        assert.deepEqual(dependency.repair, repair);
+      }
+      assert.deepEqual(
+        JSON.parse(finalPacket.observations).work.find(
+          (entry) => entry.id === "result",
+        ).repair,
+        repair,
+      );
+      for (const corruption of ["history", "candidate", "consumption"]) {
+        const broken = structuredClone(done);
+        if (corruption === "history") broken.work.result.recovery.history = [];
+        if (corruption === "candidate")
+          broken.work.result.recovery.history[0].work.treeSha = "0".repeat(40);
+        if (corruption === "consumption")
+          broken.repairConsumption.result.resultRereviews = 0;
+        assert.throws(
+          () =>
+            workItemReviewEvidence({
+              state: broken,
+              item: graph.items[1],
+              checkout: config.checkout,
+              delivery,
+            }),
+          /retained failure|tree|admitted consumption/,
+        );
+        assert.throws(
+          () =>
+            objectiveReviewEvidence({
+              state: broken,
+              checkout: config.checkout,
+              integratedCommitSha: broken.integratedSha,
+              integratedTreeSha: git(
+                config.checkout,
+                "rev-parse",
+                `${broken.integratedSha}^{tree}`,
+              ),
+            }),
+          /retained failure|tree|admitted consumption/,
+        );
+      }
     } finally {
       if (previous === undefined) delete process.env.XDG_STATE_HOME;
       else process.env.XDG_STATE_HOME = previous;

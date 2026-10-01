@@ -2,12 +2,20 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.58 — 2026-10-01 (candidate)
+## 0.1.59 — 2026-10-01 (candidate)
+
+- Supply the selected integrated commit/tree and actual validation phase to independent read-only QA review, without a worker or PR identity (#397).
+- Supply compact retained failure, correction, original candidate and admitted consumption facts to current, dependency and final review. Original failed candidates remain distinct from later native replay results; declared diagnosis does not prove external effects.
+- Preserve source phase ownership and conditional failure semantics: a passing conditional check does not require an invented failed execution. Missing evidence and exhausted repair authority retain their existing stop boundaries.
+
+Matching publication, installed packet checks and independent public verification remain pending under [#399](https://github.com/clockgrove/factory/issues/399). The stopped v0.1.58 qualification and its consumed allowances remain unchanged. Complete autonomous Objective acceptance remains #253, #331, #254 and #243.
+
+## 0.1.58 — 2026-10-01
 
 - Add a private SVG Gantt view for target-repository Objectives with `factory analyze --gantt --output ABSOLUTE_NEW_FILE`. It reads retained local metadata, distinguishes provider invocations from controller observations, and preserves incomplete intervals without loading captured content or making provider calls (#389 / PR #391).
 - Add a separate repository-local contributor Gantt skill for developers building Factory, streamline completion of independently verified releases, and select proportionate PR checks while retaining the complete main gate (#388, #386, #390). Contributor tooling is outside the installed plugin skills.
 
-Publication, installed checks and independent public verification are pending under [#394](https://github.com/clockgrove/factory/issues/394). They do not establish complete autonomous Objective or adopter acceptance; #243 and its required dependencies retain that scope. Earlier releases and their evidence keep their original identities.
+Published with all 35 installed checks and five model-free preflights. [Independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/394#issuecomment-5926979213) passed. These artifact checks do not establish complete autonomous Objective or adopter acceptance; #243 and its required dependencies retain that scope. Earlier releases and their evidence keep their original identities.
 
 ## 0.1.57 — 2026-09-30
 

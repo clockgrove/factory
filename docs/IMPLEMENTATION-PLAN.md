@@ -18,7 +18,7 @@ The shippable trunk covers installation, compilation, GitHub projection, one act
 4. Do not create hidden Factory limits beneath GitHub, providers, the OS, target rules, or explicit operator policy. One repository, one execution mode, and one active Objective per installation are explicit trunk boundaries.
 5. Existing explicit runs stop on failed work or ambiguous external state and require explicit operator retry for a new Work Item attempt. The autonomous contract below permits only diagnosed repairs within an explicitly admitted policy once that capability is implemented. Upgrading never grants existing runs new retry authority. The explicit compiler gate may make one evidenced planning revision after independent review; this is not an implementation retry. Ordinary controller restart reattaches to an identifiable active attempt. An explicitly bound operator disposition may permanently abandon a stopped failed run whose only unresolved effects are read-only result reviews, after full verified local execution cessation. Exclusive stopped ownership, exact run/configuration/snapshot binding and trusted operator cessation evidence are required; sealed final acceptance, uncertain planning/projection/mutations and unknown live resources remain fenced. The existing atomic snapshot retains original review markers, accepted/failed work, errors, evidence, accounting and consumed allowances. Abandonment records terminal cancellation as an unaccepted failure, permanently forbids revival and grants a successor no admission or allowance reset (#363).
 6. Work Items name owned paths, dependencies, resources, acceptance, non-goals, source citations, and command provenance. Ownership is a literal repository-relative file or a directory prefix ending in `/`; `*` and `?` are unsupported, brackets and braces remain literal, and path components cannot be empty, `.` or `..`. Factory rejects unsupported declarations before accepting a runnable graph without rewriting them. Parallel items cannot write overlapping paths or claim the same exclusive resource. Validation commands must be observed on the base or literally declared by a supplied source.
-7. A worker has no GitHub credentials or publication authority. The controller checks exact bases, PR heads, merge results, and the final default-branch head. Target branch protection and required checks remain authoritative. Pending checks and GitHub's documented `BLOCKED`/`UNKNOWN` protection readiness retain the known published result for read-only observation; they do not imply a submitted merge or implementation failure. The fixed PR readiness query shares authenticated GitHub rate and cancellation controls. Explicit runs return while waiting; admitted owners continue observations without another worker or model call. Merge intent is recorded only at submission; uncertain submitted effects remain fenced. Planning receives the installed controller's delivery guarantees, not receipts for future events. Final acceptance receives exact-result automatic independent-review completion derived from existing validation state, plus compact successful check identities observed on the exact published head before integration, one receipt per name. Repeated current runs of the same name are equivalent delivery evidence only when all are completed and successful on that head and identify the same authenticated GitHub app; the receipt retains one actual run ID. Singular QA named-check selection remains separate and rejects ambiguity. Human acceptance remains distinct; absent, ambiguous or unsuccessful checks never become successful named-check evidence. These compact historical facts do not replace current semantic review or duplicate GitHub's source data.
+7. Factory controller credentials and integration authority never pass to a worker. Local and sandbox harnesses have no GitHub publication authority. An explicitly authorized managed provider may publish isolated candidate branches or draft PRs under the [managed candidate publication contract](#managed-candidate-publication); those artifacts are unaccepted inputs to Factory. The controller checks exact bases, PR heads, merge results, and the final default-branch head. Target branch protection and required checks remain authoritative. Pending checks and GitHub's documented `BLOCKED`/`UNKNOWN` protection readiness retain the known published result for read-only observation; they do not imply a submitted merge or implementation failure. The fixed PR readiness query shares authenticated GitHub rate and cancellation controls. Explicit runs return while waiting; admitted owners continue observations without another worker or model call. Merge intent is recorded only at submission; uncertain submitted effects remain fenced. Planning receives the installed controller's delivery guarantees, not receipts for future events. Final acceptance receives exact-result automatic independent-review completion derived from existing validation state, plus compact successful check identities observed on the exact published head before integration, one receipt per name. Repeated current runs of the same name are equivalent delivery evidence only when all are completed and successful on that head and identify the same authenticated GitHub app; the receipt retains one actual run ID. Singular QA named-check selection remains separate and rejects ambiguity. Human acceptance remains distinct; absent, ambiguous or unsuccessful checks never become successful named-check evidence. These compact historical facts do not replace current semantic review or duplicate GitHub's source data.
 
 ### Explicit autonomous execution contract
 
@@ -26,7 +26,7 @@ The shippable trunk covers installation, compilation, GitHub projection, one act
 
 An installation may admit only explicitly authorized Objectives or a finite batch. Bind the target, exact Objective body, pinned base and source packet, installation configuration, delivery and acceptance policy before dispatch. The configuration remains the authority for providers, permissions and worker ceilings; admission cannot expand it. Record numeric planning, implementation and review allowances, permitted repair classes, resource limits and required environments from the operator, without inventing defaults. Initial explicitly requested planning remains separately authorized preparation. Installation, a discovery label and service consent alone authorize no Objective execution or provider spending.
 
-Use one concrete local coordinator and one authoritative continuation store. Reconcile known work before dispatch, serialize lifecycle changes and run long I/O outside state mutation. The coordinator owns projection and admissions; workers propose discoveries without GitHub publication credentials. An accepted graph revision is immutable. Review amendments at safe boundaries, preserve running/completed identities, distinguish executable leaves from aggregate parents, and retain every required criterion's owner, phase and evidence. A paused active Objective prevents admission of another.
+Use one concrete local coordinator and one authoritative continuation store. Reconcile known work before dispatch, serialize lifecycle changes and run long I/O outside state mutation. The coordinator owns projection and admissions; workers propose discoveries without Factory controller credentials or issue/graph mutation authority. A managed provider's candidate publication exception grants no projection or admission authority. An accepted graph revision is immutable. Review amendments at safe boundaries, preserve running/completed identities, distinguish executable leaves from aggregate parents, and retain every required criterion's owner, phase and evidence. A paused active Objective prevents admission of another.
 
 Automatic repair requires a concrete diagnosis, a permitted class and remaining recorded allowance. Children, recompilation and restart cannot reset consumption. Ambiguous external effects, ownership loss, missing authority or exhausted allowances stop affected work. Unknown usage remains unknown; it blocks spending when the information is needed to enforce an actual binding limit. Human-owned acceptance, deployment and target protections remain outside delegated engineering authority. Final acceptance binds the current graph to the exact integrated tree with required evidence and settled owned resources.
 
@@ -177,6 +177,55 @@ Accepted pending priority uses larger integer values first (zero when unspecifie
 Optional installation `scheduling` declares total `cpu` and `memoryMiB`, `reviewConcurrency` and `validationConcurrency`, and per-phase `phases.coding`, `phases.validation`, `phases.review`, `phases.delivery` CPU/memory reservations. A binding total requires a fitting declaration for every phase; an absent reservation is unknown, not zero. These are operator admission reservations, not OS quotas or adaptive measurements. The execution concurrency and admitted maximum bound coding; the driver's `availableSlots` is already remaining capacity and is never reduced a second time. Unknown driver capacity stays unknown in diagnostics while the operator ceiling remains enforced. Existing absolute Objective deadlines also govern waiting phase admission.
 
 Native preparation retains actual overlap but does not wait for every independent worker before reviewing a completed result. Publication and integration retain their established safety boundaries. Final Objective validation/review occurs after item work has settled. No separate queue, resource inventory or operational journal is introduced. Source acceptance does not qualify managed/sandbox execution; installed public overlap evidence remains #253.
+
+### Managed candidate publication
+
+The operator-approved exception in [#257](https://github.com/clockgrove/factory/issues/257)
+permits a managed provider to commit and publish an attempt's candidate branch or
+draft PR. Authorization binds the actual provider actor, target repository,
+attempt-owned candidate refs and source/asset visibility. The supported provider
+configuration must confine publication to those candidates: it grants no writes
+to Factory delivery refs, default/protected branches or another attempt's refs,
+and no merge, approval, deployment or protection-bypass authority. Repository
+association, a unique branch name and prompt instructions alone do not establish
+that confinement. Factory's controller credentials and GitHub gateway remain
+private to the controller.
+
+Provider publication is result transport, not delivery or acceptance. The managed
+`ExecutionDriver` binds the actual task, requested base, authenticated candidate
+commit/tree and any complete additional bytes in its existing execution handle.
+Factory imports that immutable result into a controller-owned exact-base
+worktree and applies ordinary ownership, filesystem, secret, AssetSet and LFS
+checks through the existing collector. A provider may have committed its result;
+the controller normalizes its verified files at the requested base and retains
+the original provider head as provenance. Provider PR metadata does not define
+native stack topology or substitute for dirty/untracked files, asset bytes or LFS
+bodies that have not been exported.
+
+After independent validation and review, Factory uses its existing regular or
+native delivery strategy and exact-head merge guards. The provider's draft PR is
+not adopted as an accepted Factory delivery. Unexpected candidate mutation,
+incomplete output, unresolved submissions and active owned work remain fenced;
+provider completion alone does not establish Work Item or Objective acceptance.
+Restart, cancellation, accounting and resource-disposition requirements remain
+unchanged. This exception changes neither the local `AgentHarness` capabilities
+nor sandbox credential removal and unchanged-HEAD requirements.
+
+Candidate content may reach GitHub before Factory's ownership and secret checks.
+Those checks still gate Factory delivery, but cannot prevent or undo earlier
+provider disclosure. Authorize candidate destinations and visibility before
+starting the provider; a rejected candidate remains unaccepted even if already
+published. The exception grants no new private-source disclosure authority.
+Provider candidate refs, PRs and resources retain explicit disposition under the
+existing owned-resource rules; never delete adopter resources automatically.
+
+[#368](https://github.com/clockgrove/factory/issues/368) owns Copilot's bounded
+hosted fit proof and installed qualification. The permitted publication path
+must be established on the exact SDK route, together with exact initial input,
+complete collection, same-task reconnect and ordinary-child cessation. Published
+SDK interfaces and credential-free tests establish only their respective source
+contracts; they do not qualify hosted behavior. Shared scheduling, continuation,
+validation and delivery need no provider-specific state store or alternate path.
 
 ## Trunk slices and done criteria
 

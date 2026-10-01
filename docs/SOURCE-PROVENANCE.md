@@ -20,6 +20,16 @@ and refuse missing, unaccepted, changed or removed evidence without model calls.
 No archived source, new evidence store, provider call or installed qualification
 supplied this leaf correction.
 
+## Contributor Gantt event metadata (#396)
+
+The existing repository-local Gantt collector now recognizes the observed Codex
+`final_answer` assistant-message phase and `event_msg` agent deliveries alongside
+its existing event shapes. New public synthetic traces cover metadata privacy,
+selected sources and clock windows, output-item intervals and explicit marker and
+routing authority. No native transcript, message body, private path, archived
+implementation or new dependency supplied this correction. This leaf contributor
+tooling stays outside the distributed plugin and makes no installed acceptance claim.
+
 ## QA phase and retained correction evidence (#397)
 
 The current atomic WorkState, review observations, immutable Git objects and admitted repair consumption supplied this correction after independent architecture/contract reconciliation. Read-only QA identifies its selected integrated candidate and completed validation phase. Existing result/dependency/final projections expose compact retained failure and correction facts, keeping original failed and later replayed identities separate. Declared diagnosis remains distinct from controller-verified identities and consumption. New public synthetic temporary-Git regressions exercise both delivery routes, real validation failure and authorized correction, QA/aggregate/final packets, and missing or stale evidence. No archived source, private prompts or responses, duplicate lifecycle state, additional model call or new provider authority was introduced. Source checks do not establish installed or live autonomous qualification.

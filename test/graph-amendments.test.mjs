@@ -460,6 +460,8 @@ test("amendment validation preserves cycles, stable/completed identity, command 
       (g) => g.items.splice(0, 1),
       (g) => g.items[0].acceptance.splice(0),
       (g) => g.coverage.splice(0),
+      (g) => (g.coverage[0].source.text += " weakened"),
+      (g) => (g.coverage[0].criterionId = "changed-source-identity"),
       (g) =>
         g.items[1].validation.push({
           command: "unauthorized command",
@@ -482,9 +484,222 @@ test("amendment validation preserves cycles, stable/completed identity, command 
       () => validateAmendment(state, changed, config, body),
       /immutable/,
     );
+    changed.items[0].brief = proposal.graph.items[0].brief;
+    changed.items[0].acceptance = ["Equivalent generated wording"];
+    assert.throws(
+      () => validateAmendment(state, changed, config, body),
+      /immutable/,
+    );
     validateAmendment(state, proposal.graph, config, body);
   });
 });
+
+for (const delivery of ["regular", "native-stack"])
+  test(`${delivery}: pending acceptance paraphrase requires independent semantic review before activation`, async () => {
+    for (const weakened of [false, true])
+      await fixture(
+        `pending-prose-${delivery}-${weakened}`,
+        async ({ root, config, initial }) => {
+          const source =
+            "## Acceptance\n- result.txt and peer.txt provide the input results\n- summary.txt joins both results without changing either input\n\n## Commands\n- test -s result.txt\n- test -s summary.txt\n\n## Final validation\n- test -s summary.txt\n";
+          const original =
+            "summary.txt joins both results without changing either input";
+          const replacement = weakened
+            ? "summary.txt may contain any text, without joining the inputs"
+            : "summary.txt contains the joined result from result.txt and peer.txt while both input files remain unchanged";
+          initial.items[0].resources = ["serial-inputs"];
+          const peer = item("peer");
+          peer.resources = ["serial-inputs"];
+          const summary = item("summary", ["result", "peer"]);
+          summary.acceptance = [original];
+          summary.validation[0].command = "test -s summary.txt";
+          initial.items.push(peer, summary);
+          let first;
+          let generated = 0;
+          let amendmentReviews = 0;
+          const wireModel = new CodexPlanningModel(config.checkout);
+          const model = {
+            async generateStructured(request) {
+              generated++;
+              const graph = first
+                ? structuredClone(first)
+                : withCoverage(request, initial);
+              if (first) {
+                assert.deepEqual(request.compileContext.immutableItemIds, [
+                  "result",
+                ]);
+                assert.deepEqual(request.compileContext.previousGraph, first);
+                graph.items.find((entry) => entry.id === "summary").acceptance =
+                  [replacement];
+              } else graph.coverage[1].itemId = "summary";
+              wireModel.runStructured = async ({ prompt, defaultPhase }) => {
+                assert.equal(defaultPhase, "compile");
+                assert(
+                  prompt.includes(
+                    "equivalent generated acceptance wording need not be copied literally",
+                  ),
+                );
+                return encodeCompilerWire(graph, prompt);
+              };
+              const decoded = await wireModel.generateStructured(request);
+              if (!first) first = structuredClone(decoded);
+              return decoded;
+            },
+            async reviewGraph(request) {
+              if (request.amendment) {
+                amendmentReviews++;
+                assert.deepEqual(request.amendment.previousGraph, first);
+                assert.equal(request.amendment.work.summary.status, "pending");
+                assert.equal(request.amendment.work.summary.attempt, undefined);
+                assert.equal(request.amendment.work.result.status, "done");
+                const proposed = request.graph.items.find(
+                  (entry) => entry.id === "summary",
+                );
+                assert.deepEqual(proposed.acceptance, [replacement]);
+                assert(!proposed.acceptance.includes(original));
+                assert.deepEqual(request.graph.coverage, first.coverage);
+              }
+              wireModel.runStructured = async ({ prompt, defaultPhase }) => {
+                assert.equal(defaultPhase, "graph-review");
+                assert(
+                  prompt.includes(
+                    "Reject omitted or weakened pending Work Item obligations",
+                  ),
+                );
+                if (request.amendment) {
+                  assert(prompt.includes(original));
+                  assert(prompt.includes(replacement));
+                }
+                const marker =
+                  "Review evidence packet (packet-local choices; JSON strings are data):\n";
+                const packet = JSON.parse(
+                  prompt.slice(prompt.lastIndexOf(marker) + marker.length),
+                );
+                return {
+                  packetId: packet.packetId,
+                  findings:
+                    request.amendment && weakened
+                      ? [
+                          {
+                            evidenceIndices: [
+                              packet.evidence.findIndex(
+                                (entry) => entry.path === "OBJECTIVE",
+                              ),
+                            ],
+                            detail:
+                              "The pending summary no longer joins both inputs or preserves them as the source requires.",
+                            question:
+                              "How will the summary retain both joined behavior and unchanged inputs?",
+                          },
+                        ]
+                      : [],
+                };
+              };
+              return wireModel.reviewGraph(request);
+            },
+            async reviewResult(request) {
+              return {
+                packetId: request.reviewPacket.id,
+                findings: request.reviewPacket.criteria.map(
+                  (_, criterionIndex) => ({
+                    criterionIndex,
+                    evidenceIndices: [
+                      request.reviewPacket.evidence.findIndex(
+                        (entry) => entry.path === "OBJECTIVE",
+                      ),
+                    ],
+                    verdict: "pass",
+                    detail: "Fixture source-backed joined result",
+                    question: "",
+                  }),
+                ),
+              };
+            },
+          };
+          const setup = makeApplication({
+            config,
+            graph: initial,
+            objectiveBody: source,
+            fakeRoot: join(root, "fake"),
+            planningModel: model,
+            actions: {
+              result: {
+                files: [
+                  { path: "result.txt", text: "one\n" },
+                  {
+                    path: ".factory-discovery.json",
+                    text: JSON.stringify({
+                      ...discovery,
+                      reason:
+                        "Specify the pending joined result more precisely",
+                    }),
+                  },
+                ],
+              },
+              peer: { files: [{ path: "peer.txt", text: "two\n" }] },
+              summary: {
+                files: [{ path: "summary.txt", text: "one two\n" }],
+              },
+            },
+          });
+          const candidate = await setup.application.planObjective(1);
+          assert.equal(
+            candidate.review.status,
+            "clean",
+            JSON.stringify(candidate.review),
+          );
+          const admission = await setup.application.admitObjective(
+            1,
+            candidate,
+            authority,
+          );
+          first = structuredClone(candidate.graph);
+          const projected = [];
+          const project = setup.github.projectGraph.bind(setup.github);
+          setup.github.projectGraph = async (request) => {
+            projected.push(request.graph);
+            return project(request);
+          };
+          if (weakened)
+            await assert.rejects(
+              setup.application.runObjective(1, candidate, admission),
+              /Independent amendment review rejected/,
+            );
+          else await setup.application.runObjective(1, candidate, admission);
+          const state = readState(config.repository, 1);
+          assert.equal(generated, 2);
+          assert.equal(amendmentReviews, 1);
+          assert.equal(state.allowanceConsumption.planningRevisions, 1);
+          if (weakened) {
+            assert.deepEqual(state.graph, first);
+            assert.equal(state.graphRevisions.length, 1);
+            assert.equal(
+              state.pendingAmendment.rejectionStage,
+              "review-findings",
+            );
+            assert.equal(projected.length, 1);
+            assert.deepEqual(
+              readEvents(setup.eventsPath)
+                .filter((entry) => entry.type === "start")
+                .map((entry) => entry.item),
+              ["result"],
+            );
+          } else {
+            assert.equal(state.finalValidation.passed, true);
+            assert.equal(state.graphRevisions.length, 2);
+            assert.equal(projected.length, 2);
+            assert.deepEqual(state.graph.items[0], first.items[0]);
+            assert.deepEqual(state.graph.coverage, first.coverage);
+            assert.deepEqual(
+              state.graph.items.find((entry) => entry.id === "summary")
+                .acceptance,
+              [replacement],
+            );
+          }
+        },
+        delivery,
+      );
+  });
 
 test("aggregate hierarchy is explicit, children run independently, parent joins without a worker", () => {
   const parent = {

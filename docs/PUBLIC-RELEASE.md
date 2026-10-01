@@ -4,7 +4,9 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Candidate v0.1.63 supplies existing attempt/result-bound worker discovery and the matching accepted graph-revision review receipt to current, dependency and final review ([#412](https://github.com/clockgrove/factory/issues/412)). Proposal declarations, reviewed graph additions and completed QA/aggregate results remain separate evidence. Missing or stale supplied capture does not prove that no submission occurred, and missing proof cannot pass a required discovery criterion. Package/lock/plugin versions, marketplace ref and installation commands select this same candidate. Publication, installed checks and independent public verification remain pending under [#413](https://github.com/clockgrove/factory/issues/413). This grants no new authority or acceptance and does not rescue historical runs or qualify the complete autonomous Objective pair.
+Candidate v0.1.64 removes exact generated-prose matching for never-started ordinary Work Items while preserving every substantive obligation through complete previous/proposed graph independent review ([#415](https://github.com/clockgrove/factory/issues/415)). Started definitions, existing aggregate acceptance, exact source criteria, coverage and command authority keep their existing guards. Package/lock/plugin versions, marketplace ref and installation commands select the same candidate. Installed checks and public verification remain pending. No new state, permission, model call or retry is introduced.
+
+Published [v0.1.63](https://github.com/clockgrove/factory/releases/tag/v0.1.63) supplies retained worker discovery and accepted amendment evidence ([#412](https://github.com/clockgrove/factory/issues/412)). All 139 whole installed tests and nine model-free preflights passed without skips, followed by [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/413). One bounded final-packet diagnostic passed all four criteria. It granted no Objective acceptance; the complete autonomous pair remains in #253.
 
 Published [v0.1.62](https://github.com/clockgrove/factory/releases/tag/v0.1.62) supplied owned-path implementation-preservation and admitted repair proof ([#409](https://github.com/clockgrove/factory/issues/409)). All 139 whole installed tests and nine model-free preflights passed with zero skips, and [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/410) passed. The bounded final-packet review passed the repaired-candidate criterion and separately refused the missing discovery evidence now tracked by #412; it granted no Objective acceptance.
 
@@ -108,11 +110,11 @@ The commands below select prepared v0.1.63 and are for use only after that match
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.63
 codex plugin add factory@clockgrove
-gh release download v0.1.63 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.63.tgz --pattern SHA256SUMS
+gh release download v0.1.64 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.64.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the independently recorded prepublication digest in the owning issue/PR or artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.63.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.64.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

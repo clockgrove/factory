@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** Preparing v0.1.63 with retained worker discovery and matching independently reviewed amendment evidence in dependency and final review ([#412](https://github.com/clockgrove/factory/issues/412)). Matching publication, installed checks and independent public verification remain pending in [#413](https://github.com/clockgrove/factory/issues/413). Published [v0.1.62](https://github.com/clockgrove/factory/releases/tag/v0.1.62) passed [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/410). Its repaired-candidate contract passed the bounded review, which separately exposed the missing discovery evidence in #412. Release checks do not establish full autonomous Objective or adopter acceptance.
+**Status:** Preparing v0.1.64 so never-started Work Items can preserve accepted obligations through equivalent generated wording under complete independent amendment review ([#415](https://github.com/clockgrove/factory/issues/415)). Matching installed and public checks remain pending. Published [v0.1.63](https://github.com/clockgrove/factory/releases/tag/v0.1.63) passed [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/413), all 139 whole installed tests and nine model-free preflights. Its bounded final-packet diagnostic passed all four criteria; that diagnostic grants no Objective acceptance. Full autonomous Objective and adopter acceptance remain separate.
 
 Published [v0.1.54](https://github.com/clockgrove/factory/releases/tag/v0.1.54) passed [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/pull/372#issuecomment-5922896684), fresh-cache offline installation and all 40 installed compiler/QA regression checks. It aligns compilation, graph review and planning diagnosis around one owner and complete proof for each whole source obligation ([#370](https://github.com/clockgrove/factory/issues/370)); compound final criteria can use the existing final-review proof. It retains the earlier delivery, review and recovery capabilities with their original evidence. Public workspace qualification in [#263](https://github.com/clockgrove/factory/issues/263) remains bound to v0.1.47; full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Clockgrove retesting remains on hold until [#243](https://github.com/clockgrove/factory/issues/243) and its required dependencies pass acceptance. Factory is early software. Start with a disposable repository and supervise initial runs. See [release evidence and limitations](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) for exact artifact and scenario records, and [recovery limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) for operator intervention.
 
@@ -32,8 +32,8 @@ The Codex plugin supplies the setup and director skills. The matching GitHub Rel
 codex plugin marketplace add clockgrove/factory --ref v0.1.63
 codex plugin add factory@clockgrove
 
-gh release download v0.1.63 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.63.tgz --pattern SHA256SUMS
+gh release download v0.1.64 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.64.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
@@ -43,7 +43,7 @@ Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.63.tgz
+  ./clockgrove-factory-0.1.64.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

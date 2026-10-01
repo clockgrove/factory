@@ -6,6 +6,23 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Native successor amendment prerequisites (#376)
+
+The existing native-dependency gateway, validated predecessor continuations and
+original admission binding supply amendment planning evidence. Compilation and
+independent graph review receive the same sealed predecessor facts. Reobserving
+the native projection checks a compact digest in the existing admission;
+reobservation fences changed or removed authority before review, projection and
+adoption. Existing snapshots, graph revisions and planning consumption remain
+canonical. New temporary-Git tests complete a predecessor and activate a real
+successor, exercise both complete model renderers at exact and descendant bases,
+and refuse missing, unaccepted, changed or removed evidence without model calls.
+Changed-ready PATH observations and ordinary first-Objective amendments pass;
+historical snapshots retain their accounting but missing original native bindings
+cannot qualify amendments.
+No archived source, new evidence store, provider call or installed qualification
+supplied this leaf correction.
+
 ## Contributor Gantt event metadata (#396)
 
 The existing repository-local Gantt collector now recognizes the observed Codex

@@ -5,6 +5,7 @@ import {
   type RepairCorrection,
 } from "./repair-policy.js";
 import { preflightObjective } from "./admission.js";
+import { planningPrerequisites } from "./objective-prerequisites.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -638,6 +639,49 @@ export async function applyPendingAmendment(args: {
       args.body,
       state.baseSha,
     );
+    const sources = planningSources(
+      args.body,
+      state.baseSha,
+      config.checkout,
+      state.additionalSources,
+    );
+    const prerequisites = await planningPrerequisites(
+      config,
+      args.github,
+      state.objective,
+      state.baseSha,
+    );
+    const verifyPrerequisites = async () => {
+      // Reobserve the original sources; retain only a binding in admission,
+      // never a duplicate predecessor projection or historical host observation.
+      const current = await planningPrerequisites(
+        config,
+        args.github,
+        state.objective,
+        state.baseSha,
+      );
+      if (
+        !args.github.objectiveDependencies &&
+        !current &&
+        state.admission!.prerequisitesDigest === undefined
+      )
+        return;
+      if (state.admission!.prerequisitesDigest === undefined)
+        throw new Error(
+          "Amendment native prerequisite binding is unavailable in historical admission",
+        );
+      const nativeDigest = createHash("sha256")
+        .update(JSON.stringify(current ?? null))
+        .digest("hex");
+      if (
+        nativeDigest !== state.admission!.prerequisitesDigest ||
+        !isDeepStrictEqual(current, prerequisites)
+      )
+        throw new Error(
+          "Amendment native prerequisites differ from original admission",
+        );
+    };
+    await verifyPrerequisites();
     if (pending.phase === "ready") {
       if (pending.proposal.graph) {
         pending.graph = structuredClone(pending.proposal.graph);
@@ -689,7 +733,7 @@ export async function applyPendingAmendment(args: {
                 state.work[id]!.status !== "pending" || state.work[id]!.attempt,
             ),
           },
-          undefined,
+          prerequisites,
           localExecutables,
         );
       }
@@ -703,12 +747,7 @@ export async function applyPendingAmendment(args: {
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (pending.phase === "compiled") {
       stage = "review";
-      const sources = planningSources(
-        args.body,
-        state.baseSha,
-        config.checkout,
-        state.additionalSources,
-      );
+      await verifyPrerequisites();
       const packet = planReviewPacket(
         args.body,
         state.baseSha,
@@ -716,7 +755,7 @@ export async function applyPendingAmendment(args: {
         pending.graph!,
         config.checkout,
         choices,
-        undefined,
+        prerequisites,
         localExecutables,
       );
       packet.amendment = {
@@ -772,6 +811,7 @@ export async function applyPendingAmendment(args: {
     validateAmendment(state, pending.graph!, config, args.body);
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (pending.phase === "reviewed") {
+      await verifyPrerequisites();
       stage = "projection";
       pending.phase = "projecting";
       save();
@@ -802,6 +842,7 @@ export async function applyPendingAmendment(args: {
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (stopped()) return false;
     validateAmendment(state, pending.graph!, config, args.body);
+    await verifyPrerequisites();
     const proposalReceipt = structuredClone(pending.proposal);
     delete proposalReceipt.graph;
     state.graphRevisions.push({

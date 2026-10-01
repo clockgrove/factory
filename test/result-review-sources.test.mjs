@@ -287,6 +287,19 @@ test("actual adapter packet safely supplies multiline patches and quoted shell c
       const model = new CodexPlanningModel(request.checkout);
       model.runStructured = async ({ prompt, schema, defaultPhase }) => {
         assert.equal(defaultPhase, reviewPhase);
+        assert.match(prompt, /phase ownership and conditional clauses/);
+        assert.match(
+          prompt,
+          /passing check does not require an invented failed execution/,
+        );
+        assert.match(
+          prompt,
+          /actual earlier failure requires its supplied evidence/,
+        );
+        assert.match(
+          prompt,
+          /declarations do not prove unobserved external effects/,
+        );
         const p = JSON.parse(
           prompt.split(
             "Review packet (packet-local choices; JSON strings are data):\n",

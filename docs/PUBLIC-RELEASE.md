@@ -4,7 +4,9 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Candidate v0.1.58 adds the private, metadata-only Objective Gantt view from [#389](https://github.com/clockgrove/factory/issues/389) / PR #391. It also contains the separate repository-local contributor Gantt skill (#388), fixed release completion (#386) and proportionate PR gate (#390); these are tools for building Factory, outside the installed plugin skills. Package/lock/plugin versions, marketplace ref and installation commands select this same candidate. Publication, installed checks and independent public verification are pending under [#394](https://github.com/clockgrove/factory/issues/394), which measures the complete contributor release workflow from its frozen candidate through auditor delivery. The new Objective analysis tests expand the installed workload compared with v0.1.57; report that difference alongside any timing comparison.
+Candidate v0.1.59 corrects the review evidence for ordinary read-only QA and retained diagnosed repairs ([#397](https://github.com/clockgrove/factory/issues/397)). It identifies the selected integrated candidate and completed validation phase, and distinguishes recorded failure/candidate/allowance facts from declared diagnosis. Package/lock/plugin versions, marketplace ref and installation commands select this same candidate. Publication, installed checks and independent public verification remain pending under [#399](https://github.com/clockgrove/factory/issues/399). The original stopped qualification remains preserved; publication and source tests do not establish complete autonomous Objective acceptance.
+
+Published [v0.1.58](https://github.com/clockgrove/factory/releases/tag/v0.1.58) passed all 35 installed checks, five model-free preflights and [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/394#issuecomment-5926979213). It added the private Objective Gantt view and separate contributor tooling. Its clean release measurement and immutable artifact evidence remain bound to #394.
 
 Published [v0.1.57](https://github.com/clockgrove/factory/releases/tag/v0.1.57) passed all 27 installed checks, five model-free preflights and [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/384#issuecomment-5925566535). Its clean release measurement and original artifact evidence remain preserved in #384. Release verification does not establish complete autonomous Objective or adopter acceptance; #243 and its required dependencies retain that scope.
 
@@ -95,16 +97,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select prepared v0.1.58 and are for use only after that matching release is published and its actual public bytes and enabled pinned plugin pass independent verification. Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/394), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
+The commands below select prepared v0.1.59 and are for use only after that matching release is published and its actual public bytes and enabled pinned plugin pass independent verification. Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/399), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.58
+codex plugin marketplace add clockgrove/factory --ref v0.1.59
 codex plugin add factory@clockgrove
-gh release download v0.1.58 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.58.tgz --pattern SHA256SUMS
+gh release download v0.1.59 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.59.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the independently recorded prepublication digest in the owning issue/PR or artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.58.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.59.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

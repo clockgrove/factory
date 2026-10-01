@@ -4,6 +4,25 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.58 artifact record
+
+[Release v0.1.58](https://github.com/clockgrove/factory/releases/tag/v0.1.58)
+was built from frozen independently reviewed and integrated source
+`4f0df26f38abb85078942b9e4efac6b5411e73dd`, tree
+`94b4be3915c8fcfddf950ff9fe86c7091f5643ae`. The archive is 153594018 bytes,
+SHA-256 `87e350f4ea236786ef687b0fbfa855b567968c7014189339c9149cd44f1c1513`,
+recorded in the [prepublication checkpoint](https://github.com/clockgrove/factory/issues/394#issuecomment-5926953118).
+All 35 installed tests and five model-free preflights passed. Exact-tag ruleset
+`24294830` prohibits updates and deletion without bypass actors.
+[Independent public verification](https://github.com/clockgrove/factory/issues/394#issuecomment-5926979213)
+matched anonymous archive/checksum bytes, sealed acceptance, annotated source/tree,
+exact protection and the enabled pinned plugin. Acceptance SHA-256 is
+`474c9b0e4ec4fff4b574d68e89b69bd2c32a551c8b14be6c9ba25769c0a09e4a`;
+independent public receipt SHA-256 is
+`6e51641af106e0ae1c966c4740da4f3306d62867369e22b778364e00993849a0`.
+This distribution proof does not accept complete autonomous Objectives or adopter pilots.
+The later stopped qualification remains preserved under its original identity and scope.
+
 ## Immutable v0.1.54 artifact record
 
 [Release v0.1.54](https://github.com/clockgrove/factory/releases/tag/v0.1.54)

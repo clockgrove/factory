@@ -23,6 +23,7 @@ import {
   reviewAcceptance,
   validateWorkItem,
   workItemReviewEvidence,
+  workItemReviewObservations,
 } from "./validation.js";
 
 /** Run only source-authorized readiness probes before spending a worker call. */
@@ -234,6 +235,9 @@ export async function runQaItem(args: {
         state.additionalSources,
       ),
       decisions: work.acceptanceDecisions,
+      observations: workItemReviewObservations(state, item, {
+        kind: "read-only-proof",
+      }),
       evidenceSources: [
         ...workItemReviewEvidence({
           state,

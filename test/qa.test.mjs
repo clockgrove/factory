@@ -22,6 +22,7 @@ import { runQaItem } from "../dist/qa-execution.js";
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
 import { readState } from "../dist/state-store.js";
 import { controlObjective } from "../dist/runner.js";
+import { workItemReviewEvidence } from "../dist/validation.js";
 import {
   createTarget,
   factoryConfig,
@@ -317,13 +318,17 @@ for (const delivery of ["regular", "native"])
       const target = createTarget(root, {
         "real-environment.txt": "actual local fixture resource",
       });
+      let qaPacket;
+      const value = graph(target.baseSha);
+      value.items[2].acceptance[0] +=
+        "; if the check fails, retain the failure for authorized correction";
       const { application, github, eventsPath } = makeApplication({
         config: factoryConfig(
           target.checkout,
           `example/qa-${delivery}`,
           delivery,
         ),
-        graph: graph(target.baseSha),
+        graph: value,
         objectiveBody: body,
         fakeRoot: join(root, "fake"),
         actions: {
@@ -331,6 +336,66 @@ for (const delivery of ["regular", "native"])
           integration: {
             files: [{ path: "integration.txt", text: "integration" }],
           },
+        },
+        resultReviewer(request) {
+          if (request.criteria.includes(value.items[2].acceptance[0])) {
+            qaPacket = request;
+            const observation = JSON.parse(request.observations);
+            assert.equal(observation.delivery.kind, "read-only-proof");
+            assert.equal(observation.reviewedItemId, "qa");
+            assert.equal(
+              observation.validationPhase.kind,
+              "post-integration-read-only",
+            );
+            assert.equal(observation.validationPhase.worker, false);
+            assert.equal(observation.validationPhase.pullRequest, false);
+            assert.equal(
+              observation.validationPhase.selectedIntegratedCommitSha,
+              observation.currentIntegratedCommitSha,
+            );
+            assert.equal(
+              observation.validationPhase.selectedIntegratedTreeSha,
+              request.treeSha,
+            );
+            assert.deepEqual(
+              observation.validationPhase.commands,
+              request.commands,
+            );
+            assert.ok(request.commands.every((command) => command.passed));
+            assert.ok(
+              !request.reviewPacket.evidence.some((source) =>
+                source.path.startsWith("Retained repair proof:"),
+              ),
+            );
+            const proof = JSON.parse(
+              request.evidence.find(
+                (source) => source.path === "Read-only QA proof: qa",
+              ).content,
+            );
+            assert.equal(
+              proof.attemptId,
+              observation.validationPhase.attemptId,
+            );
+            assert.equal(
+              proof.selectedIntegratedCommitSha,
+              observation.currentIntegratedCommitSha,
+            );
+          }
+          return {
+            packetId: request.reviewPacket.id,
+            findings: resultFindings(
+              request,
+              request.criteria.map((criterion) => ({
+                criterion,
+                source:
+                  request === qaPacket ? "Read-only QA proof: qa" : "OBJECTIVE",
+                verdict: "pass",
+                detail:
+                  "Actual passing conditional check and exact phase proof; no failed execution is required by this condition.",
+                question: "",
+              })),
+            ),
+          };
         },
       });
       const observed = [];
@@ -353,6 +418,31 @@ for (const delivery of ["regular", "native"])
       assert.equal(state.work.qa.pullRequest, undefined);
       assert.equal(state.work.qa.execution, undefined);
       assert.equal(state.work.qa.changeRef, state.integratedSha);
+      assert.ok(qaPacket);
+      const stale = structuredClone(state);
+      stale.integratedSha = target.baseSha;
+      assert.throws(
+        () =>
+          workItemReviewEvidence({
+            state: stale,
+            item: value.items[2],
+            checkout: target.checkout,
+            delivery: delivery === "regular" ? "regular" : "native-stack",
+          }),
+        /selected integration is stale/,
+      );
+      const missing = structuredClone(state);
+      delete missing.work.integration.integratedSha;
+      assert.throws(
+        () =>
+          workItemReviewEvidence({
+            state: missing,
+            item: value.items[2],
+            checkout: target.checkout,
+            delivery: delivery === "regular" ? "regular" : "native-stack",
+          }),
+        /lacks a completed delivery result/,
+      );
       assert.deepEqual(
         readEvents(eventsPath)
           .filter((event) => event.type === "start")
@@ -363,9 +453,9 @@ for (const delivery of ["regular", "native"])
         { headSha: state.integratedSha, name: "dependency-version-test" },
       ]);
       assertCompletedCoverage(state);
-      const stale = structuredClone(state);
-      stale.integratedSha = "a".repeat(40);
-      assert.throws(() => assertCompletedCoverage(stale), /stale/);
+      const staleCoverage = structuredClone(state);
+      staleCoverage.integratedSha = "a".repeat(40);
+      assert.throws(() => assertCompletedCoverage(staleCoverage), /stale/);
     }));
 
 for (const failure of ["missing", "pending", "failure", "stale", "unrelated"])

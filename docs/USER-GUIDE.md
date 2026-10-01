@@ -361,7 +361,7 @@ For a collected result blocked by an external prerequisite, restore only the alr
 factory repair --objective ISSUE_NUMBER --proposal /private/repair.json
 ```
 
-The admitted policy must permit that class and have a result rereview remaining. Factory revalidates and independently reviews the same candidate; this command does not accept it or rerun implementation. An admitted repair policy uses diagnosed proposals rather than unrestricted `retry` or `rereview` commands. Unknown accounting stays unknown, and no recovery operation raises a provider or spending limit.
+The admitted policy must permit that class and have a result rereview remaining. Factory revalidates and independently reviews the retained implementation; this command does not accept it or rerun implementation. Native delivery may replay that implementation onto the integrated base, changing commit/tree identities. Review receives the failed and current Git identities, ownership-scoped committed-byte comparison and admitted repair policy with finite consumption. Operator diagnosis and host-action declarations remain distinct from verified Git facts and actual successful probe receipts. An admitted repair policy uses diagnosed proposals rather than unrestricted `retry` or `rereview` commands. Unknown accounting stays unknown, and no recovery operation raises a provider or spending limit.
 
 ## Publication and local safety
 

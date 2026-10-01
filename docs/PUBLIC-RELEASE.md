@@ -4,7 +4,9 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Candidate v0.1.61 permits diagnosed correction of known, completed, unprojected amendment review findings through the existing bounded replacement operation ([#406](https://github.com/clockgrove/factory/issues/406)). Replacement retains original evidence, source/discovery scope, started work, finite consumed allowances and ownership/effect fences. Fresh compilation, canonical validation and complete independent review remain required before projection. Package/lock/plugin versions, marketplace ref and installation commands select this same candidate. Publication, installed checks and independent public verification remain pending under [#407](https://github.com/clockgrove/factory/issues/407). This does not accept an unresolved source decision, recover every historical run or qualify the complete autonomous Objective pair.
+Candidate v0.1.62 supplies retained failed-candidate and corrected-result Git preservation proof within accepted ownership, plus validated admitted repair authority, to current, dependency and final review ([#409](https://github.com/clockgrove/factory/issues/409)). Native replay may change the result base and whole tree while preserving owned implementation. Operator diagnosis remains separate from controller facts; existing source, review, effect and finite allowance fences remain. Package/lock/plugin versions, marketplace ref and installation commands select this same candidate. Publication, installed checks and independent public verification remain pending under [#410](https://github.com/clockgrove/factory/issues/410). This does not grant acceptance, rescue historical runs or qualify the complete autonomous Objective pair.
+
+Published [v0.1.61](https://github.com/clockgrove/factory/releases/tag/v0.1.61) permitted bounded correction of known amendment review findings ([#406](https://github.com/clockgrove/factory/issues/406)). All 138 whole installed tests and eight model-free preflights passed with zero skips, and [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/407) passed. That exact distribution evidence does not establish full autonomous Objective or adopter acceptance.
 
 Published [v0.1.60](https://github.com/clockgrove/factory/releases/tag/v0.1.60) supplied controller-local executable observations to compilation, graph review and diagnosis ([#403](https://github.com/clockgrove/factory/issues/403)). All 133 whole installed tests and seven model-free preflights passed with zero skips, and [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/404) passed. That evidence proves the exact distribution and phase contracts; full autonomous Objective and adopter acceptance remain separate.
 
@@ -99,16 +101,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select prepared v0.1.61 and are for use only after that matching release is published and its actual public bytes and enabled pinned plugin pass independent verification. Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/407), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
+The commands below select prepared v0.1.62 and are for use only after that matching release is published and its actual public bytes and enabled pinned plugin pass independent verification. Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/410), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.61
+codex plugin marketplace add clockgrove/factory --ref v0.1.62
 codex plugin add factory@clockgrove
-gh release download v0.1.61 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.61.tgz --pattern SHA256SUMS
+gh release download v0.1.62 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.62.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the independently recorded prepublication digest in the owning issue/PR or artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.61.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.62.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

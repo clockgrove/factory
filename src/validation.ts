@@ -1,4 +1,5 @@
 import { installedControllerCapabilities } from "./controller-capabilities.js";
+import { assertAdmissionBinding } from "./admission.js";
 import {
   allowanceKey,
   assertRepairLedger,
@@ -1316,10 +1317,12 @@ function retainedRepairProof(
     );
   }
   const key = allowanceKey(correction.kind);
-  const authority = state.admission?.authority;
+  const admission = state.admission;
+  const authority = admission?.authority;
   const consumed = state.allowanceConsumption?.[key];
   const scopes = repairScopes(state, item.id);
   if (
+    !admission ||
     !authority?.repairPolicy ||
     !authority.repairClasses.includes(correction.kind) ||
     !consumed ||
@@ -1328,6 +1331,102 @@ function retainedRepairProof(
     throw new Error(
       `Work Item ${item.id} correction lacks admitted consumption`,
     );
+  assertAdmissionBinding(admission);
+  if (
+    admission.repository !== state.repository ||
+    admission.objective !== state.objective ||
+    admission.baseSha !== state.baseSha ||
+    admission.bodyDigest !== state.objectiveBodyDigest ||
+    admission.configDigest !== state.configDigest ||
+    !authority.objectives.includes(state.objective)
+  )
+    throw new Error(
+      `Work Item ${item.id} correction admission differs from its Objective`,
+    );
+  let candidatePreservation;
+  if (correction.kind === "validation-environment") {
+    if (
+      !candidate.baseSha ||
+      !candidate.executionBaseSha ||
+      !candidate.changeRef ||
+      !candidate.treeSha ||
+      !current.baseSha ||
+      !current.executionBaseSha ||
+      !current.changeRef ||
+      !current.treeSha ||
+      !isDeepStrictEqual(
+        item,
+        state.graph.items.find((entry) => entry.id === item.id),
+      )
+    )
+      throw new Error(
+        `Work Item ${item.id} retained candidate lacks preservation bindings`,
+      );
+    assertCommitTree(
+      checkout,
+      current.changeRef,
+      current.treeSha,
+      `Work Item ${item.id} corrected candidate`,
+    );
+    if (item.kind === "qa" || item.kind === "aggregate") {
+      if (
+        candidate.baseSha !== candidate.changeRef ||
+        candidate.executionBaseSha !== candidate.changeRef ||
+        candidate.execution ||
+        candidate.pullRequest ||
+        current.baseSha !== current.changeRef ||
+        current.executionBaseSha !== current.changeRef ||
+        current.execution ||
+        current.pullRequest ||
+        item.ownedPaths.length
+      )
+        throw new Error(
+          `QA ${item.id} retained candidate contains a worker or delivery identity`,
+        );
+    } else {
+      assertResultCommitShape(checkout, item, {
+        ...candidate,
+        executionBaseSha: candidate.executionBaseSha,
+        baseSha: candidate.baseSha,
+        changeRef: candidate.changeRef,
+      });
+      const failedCandidateChanges = parseResultChangePacket(
+        resultChangePacket(checkout, candidate.baseSha, candidate.changeRef, 0)
+          .change,
+      ).changes;
+      if (
+        failedCandidateChanges.some(
+          (change) => !itemOwnsPath(item, change.path),
+        )
+      )
+        throw new Error(
+          `Work Item ${item.id} retained candidate differs from accepted ownership`,
+        );
+      const ownedPathChanges = parseResultChangePacket(
+        resultChangePacket(checkout, candidate.changeRef, current.changeRef, 0)
+          .change,
+      ).changes.filter((change) => itemOwnsPath(item, change.path));
+      const sameAttempt = candidate.attempt === current.attempt;
+      const sameExecutionBase =
+        candidate.executionBaseSha === current.executionBaseSha;
+      candidatePreservation = {
+        evidenceScope:
+          "Committed paths within accepted ownership only; not whole-tree equality, transient conduct or LFS hydration",
+        acceptedOwnedPaths: item.ownedPaths,
+        failedExecutionBaseCommitSha: candidate.executionBaseSha,
+        failedResultBaseCommitSha: candidate.baseSha,
+        currentExecutionBaseCommitSha: current.executionBaseSha,
+        currentResultBaseCommitSha: current.baseSha,
+        failedCandidateChanges,
+        ownedPathChanges,
+        sameAttempt,
+        sameExecutionBase,
+        unchangedOwnedPaths: ownedPathChanges.length === 0,
+        preserved:
+          sameAttempt && sameExecutionBase && ownedPathChanges.length === 0,
+      };
+    }
+  }
   return {
     controllerFacts: {
       failedAttempt: {
@@ -1349,6 +1448,15 @@ function retainedRepairProof(
       currentAttemptId: current.attempt ?? null,
       currentResultCommitSha: current.changeRef ?? null,
       currentResultTreeSha: current.treeSha ?? null,
+      ...(candidatePreservation && { candidatePreservation }),
+      admittedAuthority: {
+        admissionDigest: admission.digest,
+        objective: admission.objective,
+        actor: authority.actor,
+        reason: authority.reason,
+        executionConsent: authority.executionConsent,
+        repairClass: correction.kind,
+      },
       snapshotConsumption: {
         allowance: key,
         objective: { consumed, limit: authority.allowances[key] },

@@ -2,13 +2,21 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.61 — 2026-10-01 (candidate)
+## 0.1.62 — 2026-10-01 (candidate)
+
+- Supply exact retained failed-candidate Git descriptors and an ownership-scoped comparison with the corrected result to current, dependency and final review (#409). Preserve attempt and execution-base bindings while allowing legitimate native result-base and whole-tree changes.
+- Supply the validated admission binding, permitted repair class and finite objective/path limits with actual consumption. Keep operator diagnosis and host-action declarations separate from controller facts and source-required successful probe receipts.
+- Preserve all existing acceptance, ownership, uncertainty and allowance fences without a new recovery operation, persistent record or model call.
+
+Matching publication, installed final-packet checks and independent public verification remain pending under [#410](https://github.com/clockgrove/factory/issues/410). Full same-artifact autonomous Objective acceptance remains #253, #331, #254 and #243; historical evidence and accounting retain their original scope.
+
+## 0.1.61 — 2026-10-01
 
 - Permit a diagnosed correction of a known, completed, unprojected amendment review finding through the existing bounded replacement operation (#406). Keep unknown calls, invalid responses, projected work and terminal states fenced.
 - Retain the rejected candidate, original evidence, started definitions, immutable discovery and consumed allowance. Fresh compilation charges one remaining revision and still requires canonical validation and complete independent review before projection.
 - Preserve initial executable observations and later QA/repair evidence without granting acceptance or expanding source, provider or spending authority.
 
-Matching publication, installed correction checks and independent public verification remain pending under [#407](https://github.com/clockgrove/factory/issues/407). Full same-artifact autonomous Objective acceptance remains #253, #331, #254 and #243. Historical releases and rejected runs retain their exact evidence and accounting.
+Published with [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/407). All 138 whole installed tests and eight model-free preflights passed with zero skips. Full same-artifact autonomous Objective acceptance remains #253, #331, #254 and #243. Historical releases and rejected runs retain their exact evidence and accounting.
 
 ## 0.1.60 — 2026-10-01
 

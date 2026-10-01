@@ -357,6 +357,12 @@ for (const delivery of ["regular", "native-stack"])
             ),
           );
           assert(
+            prompt.includes(
+              "receipt facts supply no proof of amendment acceptance",
+            ),
+          );
+          assert(!prompt.includes("receipt facts prove no accepted amendment"));
+          assert(
             !prompt.includes(
               "An absent or stale discovery proves no submission",
             ),

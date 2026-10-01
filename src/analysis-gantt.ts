@@ -18,6 +18,26 @@ const timestamp = (at: string | null) => {
   return Number.isFinite(time) ? time : null;
 };
 
+// Only these existing producers report duration of the named operation.
+// Snapshot events can carry whole Work Item duration, even after completion.
+const timedOperations = new Set([
+  "planning-preview",
+  "planning-decision",
+  "planning",
+  "github-projection",
+  "media-materialization",
+  "acceptance-review",
+  "github-publication",
+  "github-merge",
+  "github-stack-merge",
+  "github-stack",
+  "media-hydration-verification",
+  "objective-acceptance-review",
+  "objective-validation",
+  "validation-command",
+  "objective-validation-command",
+]);
+
 /** Presentation of retained metadata only; no pairing of unrelated events. */
 export function renderAnalysisGantt(report: Report): string {
   const rows: {
@@ -59,6 +79,7 @@ export function renderAnalysisGantt(report: Report): string {
   for (const event of report.controllerObservations) {
     const end = timestamp(event.at);
     const timed =
+      timedOperations.has(event.operation) &&
       end !== null &&
       event.durationMs !== null &&
       Number.isFinite(event.durationMs) &&
@@ -77,7 +98,7 @@ export function renderAnalysisGantt(report: Report): string {
       points: validStart === null && end !== null ? [end] : [],
       detail:
         validStart === null
-          ? `Observation ${event.at}; interval unavailable`
+          ? `Observation ${event.at}; operation interval unavailable; reported duration ${event.durationMs ?? "unavailable"}${event.durationMs === null ? "" : " ms (scope unavailable)"}`
           : `duration-derived start ${new Date(validStart).toISOString()}; terminal observation ${event.at}; reported ${event.durationMs} ms`,
       kind: "controller",
     });

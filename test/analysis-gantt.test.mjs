@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { StateDiagnostics } from "../dist/diagnostics.js";
 import { analyzeInteractions } from "../dist/analysis.js";
 import { renderAnalysisGantt } from "../dist/analysis-gantt.js";
 import {
@@ -191,4 +192,56 @@ test("SVG uses existing exclusive owner-only report output guards", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("StateDiagnostics whole item duration never becomes a delayed closure operation interval", () => {
+  const observations = [];
+  const state = {
+    repository: "example/target",
+    objective: 12,
+    runId: "run-one",
+    graph: {
+      items: [{ id: "one", dependencies: [], ownedPaths: [], resources: [] }],
+    },
+    issueByItemId: {},
+    work: {
+      one: {
+        status: "done",
+        attempt: "attempt-one",
+        startedAt: at(0),
+        completedAt: at(10),
+        githubClosure: "pending",
+      },
+    },
+  };
+  const diagnostics = new StateDiagnostics(
+    {
+      emit: (entry) =>
+        observations.push({
+          repository: state.repository,
+          objective: 12,
+          eventId: `event-${observations.length}`,
+          at: at(60),
+          ...entry,
+        }),
+    },
+    state,
+    "regular",
+    1,
+  );
+  diagnostics.observe();
+  state.work.one.githubClosure = "complete";
+  diagnostics.observe();
+  const closure = observations.find(
+    (entry) => entry.operation === "github-closure",
+  );
+  assert.equal(closure.durationMs, 10000);
+  const svg = renderAnalysisGantt(analyzeInteractions([], [closure]));
+  assert.match(
+    svg,
+    /operation interval unavailable; reported duration 10000 ms \(scope unavailable\)/,
+  );
+  assert.match(svg, /2026-01-01T00:01:00.000Z/);
+  assert.doesNotMatch(svg, /duration-derived start|2026-01-01T00:00:50.000Z/);
+  assert.equal((svg.match(/<circle /g) ?? []).length, 1);
 });

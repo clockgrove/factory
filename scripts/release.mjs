@@ -476,7 +476,7 @@ export async function main(argv = process.argv.slice(2)) {
           process.execPath,
           "--test",
           "--test-reporter=tap",
-          "--test-concurrency=1",
+          "--test-concurrency=2",
           ...options.test,
         ],
         { cwd: stage, env: testEnvironment },

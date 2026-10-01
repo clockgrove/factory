@@ -1061,11 +1061,18 @@ for (const delivery of ["regular", "native-stack"])
       for (const corruption of ["blob", "mode"]) {
         if (corruption === "blob")
           writeFileSync(join(config.checkout, "result.txt"), "changed\n");
-        else chmodSync(join(config.checkout, "result.txt"), 0o755);
+        else {
+          writeFileSync(join(config.checkout, "result.txt"), "accepted\n");
+          chmodSync(join(config.checkout, "result.txt"), 0o755);
+        }
         git(config.checkout, "add", "result.txt");
         const changedTree = git(config.checkout, "write-tree");
         const changedCommit = git(
           config.checkout,
+          "-c",
+          "user.name=Factory Test",
+          "-c",
+          "user.email=factory-test@example.com",
           "commit-tree",
           changedTree,
           "-p",
@@ -1093,6 +1100,12 @@ for (const delivery of ["regular", "native-stack"])
           proof.controllerFacts.candidatePreservation.ownedPathChanges[0].path,
           "result.txt",
         );
+        const changed =
+          proof.controllerFacts.candidatePreservation.ownedPathChanges[0];
+        if (corruption === "mode") {
+          assert.equal(changed.oldObject, changed.newObject);
+          assert.notEqual(changed.oldMode, changed.newMode);
+        } else assert.notEqual(changed.oldObject, changed.newObject);
       }
     } finally {
       if (previous === undefined) delete process.env.XDG_STATE_HOME;
@@ -1100,6 +1113,208 @@ for (const delivery of ["regular", "native-stack"])
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+test("regular: diagnosed read-only QA repair retains its selected commit through review and final evidence", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-qa-env-control-"));
+  const previous = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  try {
+    const target = createTarget(root);
+    const config = factoryConfig(target.checkout, "example/qa-env-control");
+    const gate = join(root, "readiness");
+    const command = `test -f '${gate}'`;
+    const qaCriterion =
+      "The integrated conditional check passes; an actual failure requires diagnosed authorized correction";
+    const aggregateCriterion = aggregateAcceptance({ id: "aggregate" })[0];
+    const source = `${body.replace("## Commands", `- ${qaCriterion}\n- ${aggregateCriterion}\n## Commands`)}\n## Environment\nThe controller requires this already-provisioned environment prerequisite.\n- ${command}\n`;
+    const graph = {
+      objective: 1,
+      baseSha: target.baseSha,
+      items: [
+        item(),
+        {
+          ...item("qa", ["result"]),
+          kind: "qa",
+          ownedPaths: [],
+          acceptance: [qaCriterion],
+          validation: [
+            { command, provenance: "source-declared", source: "OBJECTIVE" },
+          ],
+        },
+        {
+          ...item("aggregate", ["qa"]),
+          kind: "aggregate",
+          children: ["qa"],
+          ownedPaths: [],
+          acceptance: [aggregateCriterion],
+          validation: [],
+        },
+      ],
+    };
+    graph.coverage = coverageObligations(source, objectiveCriteria(source)).map(
+      (obligation, index) => ({
+        criterionId: obligation.criterionId,
+        itemId: ["result", "qa", "aggregate"][index],
+        proof:
+          index === 0
+            ? { kind: "final-review" }
+            : { kind: "integrated-semantic", acceptanceIndex: 0 },
+        environment: {
+          kind: "local",
+          readiness: "available",
+          probe: "",
+          preparedBy: "",
+        },
+      }),
+    );
+    const packets = [];
+    const planner = model(graph);
+    planner.reviewResult = async (request) => {
+      packets.push(request);
+      return reviewer(request);
+    };
+    const descriptor = {
+      config,
+      graph,
+      objectiveBody: source,
+      fakeRoot: join(root, "fake"),
+      actions: {
+        result: { files: [{ path: "result.txt", text: "accepted\n" }] },
+      },
+      planningModel: planner,
+    };
+    const fixture = makeApplication(descriptor);
+    const policy = authority();
+    policy.repairClasses = ["validation-environment"];
+    policy.allowances.implementationRepairs = 0;
+    const plan = await fixture.application.planObjective(1);
+    const admitted = await fixture.application.admitObjective(1, plan, policy);
+    const { readState, statePath } = await import("../dist/state-store.js");
+    const { requestControl } = await import("../dist/coordinator-control.js");
+    const running = fixture.application.runObjective(1, plan, admitted);
+    const failed = await waitForFile(
+      () => {
+        const state = readState(config.repository, 1);
+        return state?.work.qa.status === "failed" ? state : undefined;
+      },
+      statePath(config.repository, 1),
+      "preserved read-only QA candidate",
+    );
+    const work = failed.work.qa;
+    assert.equal(failed.work.result.status, "done");
+    assert.equal(work.baseSha, work.changeRef);
+    assert.equal(work.executionBaseSha, work.changeRef);
+    assert.equal(work.execution, undefined);
+    assert.equal(work.pullRequest, undefined);
+    const drained = assert.rejects(running, /drained and released ownership/);
+    await requestControl(config.repository, {
+      objective: 1,
+      action: "handoff",
+    });
+    await drained;
+    writeFileSync(gate, "ready\n");
+    fixture.application.repairWorkItem(1, {
+      item: "qa",
+      treeSha: work.treeSha,
+      correction: {
+        kind: "validation-environment",
+        failureDigest: work.recovery.failure.digest,
+        actor: "fixture",
+        diagnosis: "Declared integrated QA prerequisite was unavailable",
+        correction:
+          "The same prerequisite is provisioned; revalidate the selected integrated commit",
+      },
+    });
+    const { controlObjective } = await import("../dist/runner.js");
+    await controlObjective(config, { objective: 1, action: "resume" });
+    const done = await makeApplication(descriptor).application.runObjective(1);
+    assert.equal(done.finalValidation.passed, true);
+    assert.equal(done.work.qa.status, "done");
+    assert.equal(done.work.qa.attempt, work.attempt);
+    assert.equal(done.work.qa.changeRef, work.changeRef);
+    assert.equal(done.work.qa.treeSha, work.treeSha);
+    assert.equal(done.work.qa.execution, undefined);
+    assert.equal(done.work.qa.pullRequest, undefined);
+    assert.equal(done.allowanceConsumption.resultRereviews, 1);
+    assert.equal(done.allowanceConsumption.implementationRepairs, 0);
+    assert.deepEqual(
+      readEvents(fixture.eventsPath)
+        .filter((event) => event.type === "start")
+        .map((event) => event.item),
+      ["result"],
+    );
+    const qaPacket = packets.find((packet) =>
+      packet.evidence.some(
+        (entry) => entry.path === "Retained repair proof: qa",
+      ),
+    );
+    const repair = JSON.parse(
+      qaPacket.evidence.find(
+        (entry) => entry.path === "Retained repair proof: qa",
+      ).content,
+    );
+    assert.equal(
+      repair.controllerFacts.failedAttempt.resultCommitSha,
+      work.changeRef,
+    );
+    assert.equal(
+      repair.controllerFacts.failedAttempt.resultTreeSha,
+      work.treeSha,
+    );
+    assert.equal(repair.controllerFacts.failedAttempt.attemptId, work.attempt);
+    assert.equal(repair.controllerFacts.currentAttemptId, work.attempt);
+    assert.equal(repair.controllerFacts.currentResultCommitSha, work.changeRef);
+    assert.equal(repair.controllerFacts.candidatePreservation, undefined);
+    assert.equal(
+      repair.controllerFacts.admittedAuthority.admissionDigest,
+      done.admission.digest,
+    );
+    assert.equal(
+      repair.controllerFacts.admittedAuthority.repairClass,
+      "validation-environment",
+    );
+    assert.deepEqual(repair.controllerFacts.snapshotConsumption.paths, [
+      { scope: "aggregate", consumed: 1, limit: 1 },
+      { scope: "qa", consumed: 1, limit: 1 },
+    ]);
+    const aggregatePacket = packets.find((packet) =>
+      packet.criteria.includes(aggregateCriterion),
+    );
+    const dependency = JSON.parse(
+      aggregatePacket.evidence.find(
+        (entry) => entry.path === "Completed dependency results",
+      ).content,
+    ).work.find((entry) => entry.id === "qa");
+    assert.equal(dependency.validationPhase, "post-integration-read-only");
+    assert.equal(dependency.selectedIntegratedCommitSha, work.changeRef);
+    assert.deepEqual(dependency.repair, repair);
+    const finalPacket = packets.find(
+      (packet) => packet.reviewPhase === "objective-review",
+    );
+    assert.deepEqual(
+      JSON.parse(finalPacket.observations).work.find(
+        (entry) => entry.id === "qa",
+      ).repair,
+      repair,
+    );
+    const broken = structuredClone(done);
+    broken.work.qa.recovery.history[0].work.executionBaseSha = target.baseSha;
+    assert.throws(
+      () =>
+        workItemReviewEvidence({
+          state: broken,
+          item: done.graph.items.find((entry) => entry.id === "qa"),
+          checkout: config.checkout,
+          delivery: "regular",
+        }),
+      /retained candidate contains a worker or delivery identity/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 for (const delivery of ["regular", "native-stack"])
   test(`${delivery}: evidence-only recovery retains original rejection and exact worker result`, async () => {
@@ -1691,6 +1906,17 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
       assert.equal(renderedFinal.packetId, finalPacket.reviewPacket.id);
       assert.equal(schema.properties.packetId.enum[0], renderedFinal.packetId);
       assert.ok(prompt.includes("do not require whole-tree equality"));
+      assert.ok(
+        prompt.includes(
+          "Controller-origin Work Item Git deltas and retained repair comparisons provide supervisor-generated exact Git evidence",
+        ),
+      );
+      assert.equal(
+        prompt.includes(
+          "Only evidence with origin controller and a Work Item Git delta label",
+        ),
+        false,
+      );
       assert.ok(
         prompt.includes(
           "without inventing a requirement to independently witness every declared host action",

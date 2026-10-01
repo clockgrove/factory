@@ -25,7 +25,7 @@ matched all 6357 regular archive files, 95 bundled lock-addressed dependency roo
 and 94 bundled license files. CLI help, manifests, both skills, notices and
 archived matching-version guidance passed. Both mandatory complete committed
 test files ran against actual installed production imports: compiler-wire (14)
-and qa-github (26). All 40 tests passed with zero failures, cancellations, skips
+and qa (26). All 40 tests passed with zero failures, cancellations, skips
 or todos, covering actual emitted guidance and whole-obligation proof/refusal
 behavior. The distribution receipt SHA-256 is
 `1766e704540c9e1b74e056005ff4bb3732208179574a9272739d401532a530b0`;

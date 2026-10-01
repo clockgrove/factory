@@ -1,5 +1,6 @@
 import { realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { renderAnalysisGantt } from "./analysis-gantt.js";
 import { readInteractionMetadata } from "./capture.js";
 import { readDiagnosticMetadata } from "./diagnostics.js";
 import {
@@ -12,11 +13,12 @@ import {
 
 export function parseAnalysisOptions(
   args: string[],
-): AnalysisOptions & { json: boolean; output?: string } {
+): AnalysisOptions & { json: boolean; gantt?: boolean; output?: string } {
   const filters: NonNullable<AnalysisOptions["filters"]> = {};
   const groupBy: AnalysisField[] = [];
   let output: string | undefined;
   let json = false;
+  let gantt = false;
   const field = (value: string): AnalysisField => {
     if (!analysisFields.includes(value as AnalysisField))
       throw new Error(
@@ -26,6 +28,11 @@ export function parseAnalysisOptions(
   };
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
+    if (flag === "--gantt") {
+      if (gantt) throw new Error("Duplicate --gantt option");
+      gantt = true;
+      continue;
+    }
     if (flag === "--json") {
       json = true;
       continue;
@@ -57,7 +64,11 @@ export function parseAnalysisOptions(
       filters[name] = value.slice(equals + 1);
     }
   }
+  if (gantt && json) throw new Error("Use only one of --gantt or --json");
+  if (gantt && !output)
+    throw new Error("--gantt requires --output ABSOLUTE_NEW_FILE");
   return {
+    ...(gantt ? { gantt } : {}),
     filters,
     ...(groupBy.length ? { groupBy } : {}),
     json,
@@ -97,9 +108,11 @@ export function runAnalysisCommand(
     ),
     options,
   );
-  const result = options.json
-    ? `${JSON.stringify(report, null, 2)}\n`
-    : renderAnalysis(report);
+  const result = options.gantt
+    ? renderAnalysisGantt(report)
+    : options.json
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : renderAnalysis(report);
   if (options.output) {
     writeAnalysisReport(options.output, config.checkout, result);
     return `Saved private analysis report to ${options.output}\n`;

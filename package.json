@@ -37,7 +37,8 @@
     "docs/OPENAI-MANAGED.md",
     "docs/CLAUDE-MANAGED.md",
     "docs/SANDBOX-EXECUTION.md",
-    "docs/CAPTURE-EXPORT.md"
+    "docs/CAPTURE-EXPORT.md",
+    "docs/LOCAL-ANALYSIS.md"
   ],
   "publishConfig": {
     "access": "public"

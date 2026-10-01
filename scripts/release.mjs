@@ -556,6 +556,29 @@ export async function main(argv = process.argv.slice(2)) {
       );
       record = json(options.record);
       assert.equal(record.repository, repository);
+      assert.equal(
+        record.status,
+        "LOCAL CHECKS PASS",
+        "Sealed local acceptance is required",
+      );
+      assert(
+        record.counts?.tests > 0 && record.counts.tests === record.counts.pass,
+      );
+      for (const name of ["fail", "cancelled", "skipped", "todo"])
+        assert.equal(record.counts[name], 0, name);
+      assert(record.tests?.length > 0 && record.preflights?.length > 0);
+      for (const path of record.tests)
+        assert(
+          record.testSources.some(
+            (entry) =>
+              entry.path === path && /^[a-f0-9]{64}$/.test(entry.sha256),
+          ),
+        );
+      for (const preflight of record.preflights)
+        assert(preflight.name && /^[a-f0-9]{64}$/.test(preflight.sha256));
+      assert(record.installedFilesCompared > 0 && record.bundled?.length > 0);
+      const expectedProtection = tagProtection(record.version);
+      verifyProtection(record.tagProtection, expectedProtection);
       assert(
         record.rulesetId,
         "Acceptance must include actual publication tag protection",
@@ -572,6 +595,12 @@ export async function main(argv = process.argv.slice(2)) {
         `repos/${repository}/issues/comments/${options.fingerprint.split("issuecomment-")[1]}`,
       );
       assert.equal(comment.html_url, options.fingerprint);
+      const acceptanceDigest = digest(readFileSync(options.record));
+      assert.equal(
+        comment.body.match(/\bAcceptance SHA256 ([a-f0-9]{64})\./)?.[1],
+        acceptanceDigest,
+        "Acceptance identity differs from the prepublication fingerprint",
+      );
       assert(
         comment.created_at < release.published_at,
         "Fingerprint was not recorded before publication",
@@ -632,7 +661,7 @@ export async function main(argv = process.argv.slice(2)) {
       );
       verifyProtection(
         api(`repos/${repository}/rulesets/${record.rulesetId}`),
-        record.tagProtection,
+        expectedProtection,
       );
       const pluginEnvironment = {
         ...environment,

@@ -58,7 +58,7 @@ test("archive gate rejects absolute paths and parent traversal", () => {
     assert.throws(() => archivePaths(bad));
 });
 
-function publicFixture(t, corrupt) {
+function publicFixture(t, corrupt, mutate) {
   const root = mkdtempSync("/tmp/factory-release-test-");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const pkg = join(root, "package");
@@ -97,6 +97,13 @@ function publicFixture(t, corrupt) {
   const source = git("rev-parse", "HEAD");
   const tree = git("rev-parse", "HEAD^{tree}");
   const record = {
+    status: "LOCAL CHECKS PASS",
+    counts: { tests: 1, pass: 1, fail: 0, cancelled: 0, skipped: 0, todo: 0 },
+    tests: ["test/example.test.mjs"],
+    testSources: [{ path: "test/example.test.mjs", sha256: "a".repeat(64) }],
+    preflights: [{ name: "preflight.mjs", sha256: "b".repeat(64) }],
+    installedFilesCompared: 3,
+    bundled: [{ path: "node_modules/example", version: "1.0.0" }],
     repository: "clockgrove/factory",
     version: "1.2.3",
     archive: "clockgrove-factory-1.2.3.tgz",
@@ -108,6 +115,9 @@ function publicFixture(t, corrupt) {
     rulesetId: 12,
     tagProtection: tagProtection("1.2.3"),
   };
+  if (mutate === "guard")
+    record.tagProtection.conditions.ref_name.include = ["refs/tags/*"];
+  if (mutate === "counts") record.counts.skipped = 1;
   const acceptance = join(root, "acceptance.json");
   writeFileSync(acceptance, JSON.stringify(record));
   const fingerprint =
@@ -134,6 +144,7 @@ function publicFixture(t, corrupt) {
         archiveSha256,
         record.checksumSha256,
         String(record.archiveBytes),
+        `Acceptance SHA256 ${sha(readFileSync(acceptance))}.`,
       ].join(" "),
     },
     [`${prefix}git/ref/tags/v1.2.3`]: {
@@ -171,6 +182,10 @@ function publicFixture(t, corrupt) {
     `const args=process.argv.slice(2); let result; if(args[1]==='marketplace') result={installedRoot:${JSON.stringify(checkout)}}; else if(args[1]==='add')result={installedPath:${JSON.stringify(pkg)}}; else if(args[1]==='list')result={installed:[${JSON.stringify(plugin)}]}; else process.exit(4); console.log(JSON.stringify(result));`,
   );
   if (corrupt) writeFileSync(archive, "Changed public bytes");
+  if (mutate === "acceptance") {
+    record.preflights[0].sha256 = "c".repeat(64);
+    writeFileSync(acceptance, JSON.stringify(record));
+  }
   const output = join(root, "audit");
   const result = spawnSync(
     process.execPath,
@@ -212,4 +227,21 @@ test("changed public bytes fail before plugin installation and retain failure ti
   const timing = JSON.parse(readFileSync(join(output, "timing.json")));
   assert.equal(timing.status, "FAILED");
   assert(!timing.phases.some((phase) => phase.command[0] === "codex"));
+});
+
+test("changed acceptance is rejected even when all public artifact identities match", (t) => {
+  const { result } = publicFixture(t, false, "acceptance");
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Acceptance identity differs/);
+});
+
+test("sealed broader protection and skipped local checks cannot pass public audit", (t) => {
+  for (const mutate of ["guard", "counts"]) {
+    const { result, output } = publicFixture(t, false, mutate);
+    assert.equal(result.status, 1);
+    assert.equal(
+      JSON.parse(readFileSync(join(output, "timing.json"))).status,
+      "FAILED",
+    );
+  }
 });

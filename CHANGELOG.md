@@ -2,12 +2,20 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.64 — 2026-10-01 (candidate)
+## 0.1.65 — 2026-10-01 (candidate)
+
+- Retain the native predecessor acceptance binding when amending successor Objectives, while reobserving current executable availability (#376 / PR #424). Existing admissions remain readable; native amendments without the required original binding refuse without discarding evidence or accounting.
+- Recognize actual Codex final-answer and agent-message events in contributor Gantt metadata without exporting message content (#396 / PR #421).
+- Use eight isolated test-file workers for installed contributor release checks, based on the same-artifact concurrency benchmark (#422 / PR #423). Release stages and tests within each file remain sequential; Factory runtime scheduling is unchanged.
+
+Matching installed-artifact and public distribution verification are tracked in [#425](https://github.com/clockgrove/factory/issues/425). Earlier releases and Objective acceptance retain their exact artifact and scenario scope.
+
+## 0.1.64 — 2026-10-01
 
 - Permit equivalent acceptance wording for never-started ordinary Work Items during graph amendments (#415). Preserve every substantive obligation through the existing independent review of complete previous/proposed graphs.
 - Retain exact started/completed definitions, controller-derived aggregate acceptance, source criteria, coverage, command authority and native delivery guards. No new state, model call, retry or permission is introduced.
 
-Matching installed-artifact and public verification remain pending. Full autonomous Objective acceptance remains #253, #331, #254 and #243; historical failed runs and consumed allowances stay preserved.
+Published with [independent public verification](https://github.com/clockgrove/factory/issues/417). The autonomous local Objective qualification completed under [#243](https://github.com/clockgrove/factory/issues/243); all earlier failed runs, consumed allowances and unknown accounting remain preserved.
 
 ## 0.1.63 — 2026-10-01
 

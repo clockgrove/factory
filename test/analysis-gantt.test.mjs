@@ -1,22 +1,23 @@
 import assert from "node:assert/strict";
 import {
-  mkdtempSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
-  statSync,
   rmSync,
+  statSync,
   symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { StateDiagnostics } from "../dist/diagnostics.js";
 import { analyzeInteractions } from "../dist/analysis.js";
-import { renderAnalysisGantt } from "../dist/analysis-gantt.js";
 import {
   parseAnalysisOptions,
   writeAnalysisReport,
 } from "../dist/analysis-cli.js";
+import { renderAnalysisGantt } from "../dist/analysis-gantt.js";
+import { StateDiagnostics } from "../dist/diagnostics.js";
+
 const at = (seconds) =>
   new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString();
 const capture = (id, sequence, seconds, extra = {}) => ({
@@ -244,4 +245,43 @@ test("StateDiagnostics whole item duration never becomes a delayed closure opera
   assert.match(svg, /2026-01-01T00:01:00.000Z/);
   assert.doesNotMatch(svg, /duration-derived start|2026-01-01T00:00:50.000Z/);
   assert.equal((svg.match(/<circle /g) ?? []).length, 1);
+});
+
+test("elapsed axis and recorded invocation/command identities remain metadata-only", () => {
+  const svg = renderAnalysisGantt(
+    analyzeInteractions(
+      [
+        capture("one", 1, 0, {
+          configured: { provider: "synthetic", model: "model<&" },
+          reportedModel: "reported",
+        }),
+        capture("one", 2, 10, {
+          kind: "outcome",
+          outcome: { stage: "provider", status: "completed" },
+          configured: { provider: "synthetic", model: "model<&" },
+          reportedModel: "reported",
+        }),
+      ],
+      [
+        event({
+          metadata: { commandIndex: 2, command: "PRIVATE COMMAND" },
+          detail: "PRIVATE OUTPUT",
+        }),
+      ],
+    ),
+  );
+  assert.match(
+    svg,
+    /adapter synthetic \/ configured model model&lt;&amp; \/ reported model reported/,
+  );
+  assert.match(svg, /command index 2 \(executable unavailable\)/);
+  assert.match(svg, /Elapsed wall-clock seconds/);
+  assert.match(svg, />0 s<.*\n/s);
+  assert.match(svg, />2.5 s</);
+  assert.match(svg, />10 s</);
+  assert.doesNotMatch(svg, /PRIVATE COMMAND|PRIVATE OUTPUT/);
+  const point = renderAnalysisGantt(
+    analyzeInteractions([], [event({ durationMs: null })]),
+  );
+  assert.equal((point.match(/>0 s</g) ?? []).length, 1);
 });

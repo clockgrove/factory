@@ -61,7 +61,7 @@ export function renderAnalysisGantt(report: Report): string {
     const interval = invocation.interval;
     rows.push({
       scope: scope(invocation.identity),
-      label: `Provider ${invocation.identity.phase}: ${invocation.identity.invocationId} / provider attempt ${invocation.identity.providerAttempt}`,
+      label: `Provider ${invocation.identity.phase}: ${invocation.identity.invocationId} / provider attempt ${invocation.identity.providerAttempt} / ${invocation.identity.provider ?? "unavailable"} / adapter ${invocation.identity.adapter ?? "unavailable"} / configured model ${invocation.identity.model ?? "unavailable"} / reported model ${invocation.identity.reportedModel ?? "unavailable"}`,
       start: interval.complete ? timestamp(interval.startedAt) : null,
       end: interval.complete ? timestamp(interval.endedAt) : null,
       points: interval.complete
@@ -92,7 +92,7 @@ export function renderAnalysisGantt(report: Report): string {
         : null;
     rows.push({
       scope: scope(event),
-      label: `Controller ${event.operation}: ${event.outcome} / ${event.eventId}`,
+      label: `Controller ${event.operation}: ${event.outcome} / ${event.eventId}${["validation-command", "objective-validation-command"].includes(event.operation) ? ` / command index ${event.metadata.commandIndex ?? "unavailable"} (executable unavailable)` : ""}`,
       start: validStart,
       end: validStart === null ? null : end,
       points: validStart === null && end !== null ? [end] : [],
@@ -127,7 +127,7 @@ export function renderAnalysisGantt(report: Report): string {
   );
   const x = (at: number) =>
     30 + ((at - first) / Math.max(1, last - first)) * (width - 60);
-  const footer = 170 + Math.max(1, rows.length) * 104;
+  const footer = 205 + Math.max(1, rows.length) * 104;
   const text = (y: number, value: unknown, size = 12) =>
     `<text x="30" y="${y}" font-size="${size}">${xmlEscape(value)}</text>`;
   const svg = [
@@ -158,8 +158,26 @@ export function renderAnalysisGantt(report: Report): string {
       `Usage and cost: inspect analyze text/JSON; missing accounting stays unavailable. ${report.observedWindow.incompleteIntervals} incomplete provider intervals.`,
     ),
   ];
+  if (times.length) {
+    svg.push(
+      text(
+        148,
+        "Elapsed wall-clock seconds from first plotted observation (0 s); lanes overlap.",
+      ),
+    );
+    const ticks = last === first ? [0] : [0, 1, 2, 3, 4];
+    for (const tick of ticks) {
+      const at = first + ((last - first) * tick) / 4;
+      const position = x(at);
+      const seconds = Number(((at - first) / 1000).toFixed(3));
+      svg.push(
+        `<path d="M${position} 173V${footer - 35}" stroke="#cbd5e1" stroke-dasharray="3 5"/>`,
+        `<text x="${position}" y="169" text-anchor="${tick === 0 ? "start" : tick === 4 ? "end" : "middle"}" font-size="11">${seconds} s</text>`,
+      );
+    }
+  }
   rows.forEach((row, index) => {
-    const y = 155 + index * 104;
+    const y = 190 + index * 104;
     svg.push(
       text(y, row.scope),
       text(y + 18, row.label),

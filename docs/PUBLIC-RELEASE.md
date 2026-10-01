@@ -18,52 +18,51 @@ The pinned Git marketplace supplies the plugin manifest and use skills. The matc
 
 Keep tag, package version, plugin version, marketplace ref and artifact identity aligned. Never rebuild a published version from later main, replace its assets or transfer qualification from different bytes.
 
-## Contributor sequencing
+## Contributor release workflow
 
-Assign complete outcomes to the release owner and independent reviewers/auditors within existing delegated authority. Source and metadata preparation, review preparation, and audit/preflight preparation may proceed in parallel where they do not overlap. Once source review and candidate gates pass, build one frozen artifact; independent offline installation and ready model-free installed preflights may run in parallel against those exact bytes with separate owned workspaces. Record the source/tree, archive digest and host/scenario for each result. A source change invalidates candidate evidence; do not combine results from different artifacts.
+One contributor owns the release from the frozen candidate through publication. Run the stages sequentially with `scripts/release.mjs`: package, inspect, offline install, installed tests, model-free preflights, exact tag protection and publication. Do not delegate individual stages or run them in parallel. Independent source review precedes this command; one independent public audit follows it. This is a contributor procedure, not Factory's runtime scheduler or an adopter permission policy.
 
-The release owner reconciles those results before publication. Public byte and pinned-plugin verification remain required before approved public qualification, and public acceptance plus independent audit remain required before private adopter acceptance. Later publication-ledger maintenance is not an additional pilot-start gate. This sequencing grants no new provider, spending, target, security or activation authority, does not supply unrecorded limits, and does not resume deferred work.
+Prepare the package, lockfile, plugin and marketplace versions, changelog, notices and version-matched installation guidance before reviewing and freezing the candidate. Read the actual README, both skills and packaged use guides during that review; automate identity and version checks, not judgments about their meaning. Preserve earlier publication and qualification evidence. A later documentation edit cannot repair an already published archive.
 
-## Build one candidate
+Use a clean Linux x64 checkout with Node.js 22.12 or later, npm, Git, Git LFS, GitHub CLI and the Codex CLI needed for the public audit. The exact candidate must have passing Quality CI and an independent source/guidance review. The command reuses CI rather than repeating broad source checks. It installs locked source dependencies and builds once for packaging.
 
-Prepare the complete candidate before independent review and freezing, including the guidance people will receive from its tag and tarball:
+### One owner, one command
 
-1. Set the new version in the existing package, lockfile, plugin and marketplace metadata, update the changelog, and regenerate third-party notices with `npm run notices` after installing the locked dependencies. Check the notices header and matching marketplace ref along with package, lockfile and plugin versions before CI and freezing; do not defer these existing metadata edits until a gate fails.
-2. Use `package.json` as the version reference when updating the README's matching marketplace tag, Release download and archive installation commands. Check capability descriptions against the source included in this candidate, including optional-provider requirements and unqualified boundaries. Inspect the packaged `director` and `setup` skills and the use guides listed in `package.json` for the same consistency. Keep source-development and release procedures separate from plugin-use instructions.
-3. Distinguish instructions for the prepared version from publication and qualification facts. Before publication, label the new version as a candidate and make its public installation instructions conditional on publication and independent artifact verification. Retain earlier published evidence with its original version; do not claim that the candidate is published, installed or qualified. Append immutable artifact evidence and update current publication status only after those checks actually pass.
+Select whole committed test files that exercise the changed installed behavior. There is no test-name filter or fixed case/package count. Select the reviewed model-free preflight scripts required by the intended scenario. Each script receives the actual installed package path and a fresh evidence directory as its two arguments, and must return nonzero on failure. Preflights must inspect actual phase inputs and validators, intercept before SDK/provider construction, preserve failed evidence and stay inside their approved scratch/source scope. They establish readiness, not live Objective acceptance. Their requirements remain candidate- and scenario-specific; do not replace them with a smaller generic smoke.
 
-Freeze the independently reviewed candidate, including these documentation changes and its version, before running the coordinated gates. Do not postpone version-matched installation or capability guidance to a post-publication documentation PR: that cannot repair the frozen tag or packed README. Preserve all published releases and their evidence; never rebuild them to include later source changes.
-
-From a clean Linux x64 source checkout at the accepted commit, with Node.js 22.12 or later, Git, Git LFS, and public npm access, with optional dependencies enabled for source checks and notice generation, confirm `git status --porcelain` is empty. Choose an empty absolute release directory outside the checkout, then run:
+Run a local baseline without publication first:
 
 ```sh
-FACTORY_RELEASE_VERSION=$(node -p "require('./package.json').version")
-npm ci
-npm run build
-npm run typecheck
-npm run lint
-npm run format:check
-npm run notices:check
-npm test
-mkdir -p /absolute/empty/release-directory
-npm pack --pack-destination /absolute/empty/release-directory
-cd /absolute/empty/release-directory
-sha256sum "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" > SHA256SUMS
+npm run release -- release \
+  --ci EXACT_CANDIDATE_QUALITY_RUN \
+  --review https://github.com/clockgrove/factory/pull/REVIEWED_PR \
+  --output /absolute/fresh-release-directory \
+  --test test/affected-behavior.test.mjs \
+  --preflight /absolute/reviewed-model-free-preflight.mjs
 ```
 
-Inspect the tarball file list for the manifest, installed skills, CLI, license, logo, notices, and bundled production dependency tree. Read the actual archived README, plugin manifest, both skills and packaged use guides, not just their paths in the file list. For example, from the release directory:
+Repeat `--test` and `--preflight` for the actual accepted capability set. An external preflight script is an explicitly reviewed contributor input, not a plugin or alternate release workflow. Its bytes are hashed before execution and verified unchanged afterward. Keep target-specific private evidence in its authorized local destination.
+
+To publish an already authorized new candidate, use the same command with `--publish --issue EXISTING_ACCEPTANCE_ISSUE`. The command runs the local stages once, verifies or creates only the exact new tag's active update/deletion protection with no bypass actors, records the expected fingerprint in that issue before publication, then creates the annotated tag and Release with its archive and checksum. Preserve normal controls and existing authority; this option grants no publication or security authority. Existing tags are refused. Never use it merely to measure elapsed time, replace published assets or retag a version.
+
+The output contains one immutable `acceptance.json`, the archive and `SHA256SUMS`, command logs, and a separate `timing.json`. Timing is observational and excluded from acceptance hashes. Do not add per-stage handoff records, reconciliation reports, configurable stage graphs or a resumable release state machine. Stop on any failed command and preserve the output; diagnose before an explicitly bounded corrected attempt. Publication can have partial external effects, so inspect GitHub before retrying; the command does not automatically retry, roll back or resume.
+
+### One independent audit afterward
+
+Hand the acceptance record and the prepublication issue-comment URL to one independent auditor. That auditor runs:
 
 ```sh
-tar -xOf "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" package/package.json
-tar -xOf "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" package/README.md
-tar -xOf "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" package/.codex-plugin/plugin.json
-tar -xOf "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" package/skills/director/SKILL.md
-tar -xOf "clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz" package/skills/setup/SKILL.md
+npm run release -- audit \
+  --record /absolute/release-directory/acceptance.json \
+  --fingerprint https://github.com/clockgrove/factory/issues/ISSUE#issuecomment-COMMENT \
+  --output /absolute/fresh-public-audit-directory
 ```
 
-Check that every installation command selects the archived package/plugin version and matching marketplace ref, and that capability and optional-provider descriptions agree with the frozen source. Follow the packaged use-guide entries in `package.json` for the remaining inspection. Record this guidance check with the existing package inspection evidence. If it fails, correct the source and freeze a new candidate; do not patch the archive or rely on later main documentation. Post-publication status and ledger changes cannot change these bytes.
+Use `--codex /absolute/codex` when the CLI is not on PATH. The audit verifies the fingerprint predates publication; downloads the archive and checksum anonymously; verifies the annotated tag, source/tree and exact protection; and installs an enabled plugin pinned to the same tag in an isolated Codex home. Manifest and both skills must match the public archive. Identical public bytes reuse the local offline/installed evidence; do not repeat those stages. A new qualification host still needs its actual installation and readiness checks.
 
-In a separate empty prefix, install the tarball with `npm install --offline --prefix /absolute/private/check-prefix "./clockgrove-factory-${FACTORY_RELEASE_VERSION}.tgz"` using an empty npm cache; verify `factory help`, compare every installed bundled package version with `package-lock.json`, and check that notices cover the same tree. Record `git rev-parse HEAD`, package version, tarball SHA-256, and the passing CI run. Preserve all existing protected release tags and assets. Publication uses the operator-delegated release authority, normal controls and a protected tag at the exact accepted commit. Before publication, record the expected SHA-256 and source/tree outside mutable Release assets in the existing release acceptance issue/PR or [artifact ledger](BUILD-STATUS.md). After public verification, append immutable evidence and update current publication facts through the existing README, PUBLIC-RELEASE, RELEASE-CHECKLIST and BUILD-STATUS maintenance; that later documentation does not gate an otherwise authorized qualification start. This procedure does not itself publish or tag anything.
+Report completion once, with the immutable record, independent public result and total elapsed time from the frozen candidate through audit completion. Report command durations and time outside commands separately. Include the final audit handoff in elapsed time; identify later reporting time separately. Report a concrete blocker when it occurs instead of routine coordination messages. Measure this sequential baseline before considering parallelism; do not claim an unmeasured speedup.
+
+Public verification precedes separately authorized live qualification and private adopter acceptance. Later publication-ledger maintenance is not a pilot-start gate. This workflow does not resume held Objectives, authorize new targets/providers/spending, or waive independent review, acceptance, ownership or security controls.
 
 ## Install from public artifacts
 

@@ -52,6 +52,7 @@
     "x64"
   ],
   "scripts": {
+    "release": "node scripts/release.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint . && eslint src",

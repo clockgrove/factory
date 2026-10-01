@@ -14,6 +14,10 @@ Additional cloud-session SDKs and sandbox providers are separate adapter capabil
 
 The approved adopter pilot is Codex-only. #55 and PR #62 are accepted and closed with their own installed harness evidence; that evidence does not qualify a later artifact or optional provider for this pilot. Current execution gates belong to [#206](https://github.com/clockgrove/factory/issues/206), with independent final acceptance in [#207](https://github.com/clockgrove/factory/issues/207). Historical #26 is closed as superseded tracking. Do not infer new target or source-egress authority from contributor instructions.
 
+## Release ownership
+
+Follow the [single-owner release sequence](docs/PUBLIC-RELEASE.md#contributor-release-workflow). One owner completes packaging, offline installation, installed checks, required model-free preflights and publication sequentially. Do not delegate these release stages or run them in parallel. Retain independent source review and one subsequent independent public verification. Measure the next authorized release before considering parallelism; this contributor workflow does not change Factory's runtime scheduling or resume held qualification.
+
 ## Scope
 
 Start from the current issue's outcome and the relevant section of the public plan. A finding is a blocker only when it prevents that path; record useful follow-ups without making them blockers. Stop when accepted behavior and focused validation pass. The target repository owns product requirements, documentation authority, commands, branch protection, and Objective exit conditions. Work Item completion does not imply Objective completion.

@@ -6,8 +6,8 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -16,9 +16,9 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   archivePaths,
+  retireTestScratch,
   tagProtection,
   testCounts,
-  retireTestScratch,
   verifyProtection,
 } from "../scripts/release.mjs";
 
@@ -312,32 +312,49 @@ function publicFixture(t, corrupt, mutate, complete = false) {
     writeFileSync(acceptance, JSON.stringify(record));
   }
   const output = join(root, "audit");
+  const completionOutput = join(root, "completion");
+  const acceptanceBefore = readFileSync(acceptance);
+  const combined = complete === "combined";
   const auditResult = spawnSync(
-    process.execPath,
-    [
-      resolve("scripts/release.mjs"),
-      "audit",
-      "--source",
-      checkout,
-      "--output",
-      output,
-      "--record",
-      acceptance,
-      "--fingerprint",
-      fingerprint,
-    ],
+    combined ? "/bin/sh" : process.execPath,
+    combined
+      ? [
+          "-c",
+          '"$1" "$2" audit --source "$3" --output "$4" --record "$5" --fingerprint "$6" && "$1" "$2" complete --source "$3" --output "$7" --record "$5" --audit-output "$4" --issue "$8" --project-item "$9"',
+          "factory-release-audit-complete",
+          process.execPath,
+          resolve("scripts/release.mjs"),
+          checkout,
+          output,
+          acceptance,
+          fingerprint,
+          completionOutput,
+          mutate === "completion-issue" ? "2" : "1",
+          "fixture-item",
+        ]
+      : [
+          resolve("scripts/release.mjs"),
+          "audit",
+          "--source",
+          checkout,
+          "--output",
+          output,
+          "--record",
+          acceptance,
+          "--fingerprint",
+          fingerprint,
+        ],
     {
       encoding: "utf8",
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
     },
   );
   const verification = join(output, "public-verification.json");
-  const verificationBefore =
-    auditResult.status === 0 ? readFileSync(verification) : undefined;
-  const acceptanceBefore = readFileSync(acceptance);
+  const verificationBefore = existsSync(verification)
+    ? readFileSync(verification)
+    : undefined;
   let result = auditResult;
-  const completionOutput = join(root, "completion");
-  if (complete) {
+  if (complete === true) {
     if (mutate === "completion-acceptance") {
       const changed = JSON.parse(acceptanceBefore);
       changed.counts.tests = 0;
@@ -541,4 +558,71 @@ test("partial tracking failure preserves public PASS and names the outstanding o
     assert(readFileSync(acceptance).equals(acceptanceBefore));
     assert(readFileSync(verification).equals(verificationBefore));
   }
+});
+
+test("one conditional auditor invocation verifies and completes without an intermediate process handoff", (t) => {
+  const {
+    result,
+    output,
+    completionOutput,
+    acceptance,
+    acceptanceBefore,
+    calls,
+  } = publicFixture(t, false, undefined, "combined");
+  assert.equal(result.status, 0, result.stderr);
+  const audit = JSON.parse(readFileSync(join(output, "timing.json")));
+  const completion = JSON.parse(
+    readFileSync(join(completionOutput, "timing.json")),
+  );
+  assert.equal(audit.status, "INDEPENDENT PUBLIC AUDIT PASS");
+  assert.equal(completion.status, "RELEASE COMPLETE");
+  assert.equal(completion.publicVerifiedUtc, audit.endedUtc);
+  assert(Date.parse(completion.startedUtc) >= Date.parse(audit.endedUtc));
+  assert.equal(mutations(calls).length, 3);
+  assert(readFileSync(acceptance).equals(acceptanceBefore));
+  t.diagnostic(
+    `Combined fixture: audit ${audit.elapsedSeconds.toFixed(3)}s; completion ${completion.elapsedSeconds.toFixed(3)}s; gap ${((Date.parse(completion.startedUtc) - Date.parse(audit.endedUtc)) / 1000).toFixed(3)}s. Local subprocess fixture only, not real GitHub latency.`,
+  );
+});
+
+test("conditional auditor invocation stops on failed public audit before any completion", (t) => {
+  const { result, output, completionOutput, calls } = publicFixture(
+    t,
+    true,
+    undefined,
+    "combined",
+  );
+  assert.equal(result.status, 1);
+  assert.equal(
+    JSON.parse(readFileSync(join(output, "timing.json"))).status,
+    "FAILED",
+  );
+  assert(!existsSync(completionOutput));
+  assert.equal(mutations(calls).length, 0);
+});
+
+test("conditional auditor invocation preserves public PASS and completed effects on tracking failure", (t) => {
+  const {
+    result,
+    output,
+    completionOutput,
+    acceptance,
+    acceptanceBefore,
+    calls,
+  } = publicFixture(t, false, "completion-update", "combined");
+  assert.equal(result.status, 1);
+  assert.equal(
+    JSON.parse(readFileSync(join(output, "timing.json"))).status,
+    "INDEPENDENT PUBLIC AUDIT PASS",
+  );
+  assert.equal(
+    JSON.parse(readFileSync(join(output, "public-verification.json"))).status,
+    "PASS",
+  );
+  assert.match(
+    JSON.parse(readFileSync(join(completionOutput, "timing.json"))).status,
+    /Project Done update pending/,
+  );
+  assert.equal(mutations(calls).length, 3);
+  assert(readFileSync(acceptance).equals(acceptanceBefore));
 });

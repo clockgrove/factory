@@ -40,7 +40,7 @@ Use a clean Linux x64 checkout with Node.js 22.12 or later, npm, Git, Git LFS, G
 
 ### One owner, one command
 
-Select whole committed test files that exercise the changed installed behavior. There is no test-name filter or fixed case/package count. After passing test accounting, the release command retains standard Node child compile-cache bytes under its private evidence output; unexplained scratch and a cache symlink still stop the release. Select the reviewed model-free preflight scripts required by the intended scenario. Each script receives the actual installed package path and a fresh evidence directory as its two arguments, and must return nonzero on failure. Preflights must inspect actual phase inputs and validators, intercept before SDK/provider construction, preserve failed evidence and stay inside their approved scratch/source scope. They establish readiness, not live Objective acceptance. Their requirements remain candidate- and scenario-specific; do not replace them with a smaller generic smoke.
+Select whole committed test files that exercise the changed installed behavior. There is no test-name filter or fixed case/package count. The installed-test stage uses two isolated Node test-file workers; tests within each file remain serial. Packaging, installation, preflights and publication remain sequential. After passing test accounting, the release command retains standard Node child compile-cache bytes under its private evidence output; unexplained scratch and a cache symlink still stop the release. Select the reviewed model-free preflight scripts required by the intended scenario. Each script receives the actual installed package path and a fresh evidence directory as its two arguments, and must return nonzero on failure. Preflights must inspect actual phase inputs and validators, intercept before SDK/provider construction, preserve failed evidence and stay inside their approved scratch/source scope. They establish readiness, not live Objective acceptance. Their requirements remain candidate- and scenario-specific; do not replace them with a smaller generic smoke.
 
 Run a local baseline without publication first:
 
@@ -61,27 +61,24 @@ The output contains one immutable `acceptance.json`, the archive and `SHA256SUMS
 
 ### One independent audit afterward
 
-Hand the acceptance record, prepublication issue-comment URL, release acceptance issue and its existing Factory Project item to one independent auditor. That auditor owns public verification through completion tracking and returns one concise result. The coordinator does not generate another reporting program. The auditor runs:
+Prepare the independent auditor and the exact acceptance-record path, prepublication issue-comment URL, release acceptance issue, existing Factory Project item and fresh output directories before publication. After receiving the sealed record, that auditor evaluates the exact candidate's source/guidance and installed-test/preflight scope. When its semantic acceptance is conditional only on the declared public checks passing, it runs both existing commands in one invocation:
 
 ```sh
 npm run release -- audit \
   --record /absolute/release-directory/acceptance.json \
   --fingerprint https://github.com/clockgrove/factory/issues/ISSUE#issuecomment-COMMENT \
-  --output /absolute/fresh-public-audit-directory
-```
-
-Use `--codex /absolute/codex` when the CLI is not on PATH. The audit verifies the fingerprint predates publication; downloads the archive and checksum anonymously; verifies the annotated tag, source/tree and exact protection; and installs an enabled plugin pinned to the same tag in an isolated Codex home. Manifest and both skills must match the public archive. Identical public bytes reuse the local offline/installed evidence; do not repeat those stages. A new qualification host still needs its actual installation and readiness checks.
-
-After evaluating the passing audit against the declared release scope, that same auditor completes tracking with the fixed command:
-
-```sh
+  --output /absolute/fresh-public-audit-directory &&
 npm run release -- complete \
   --record /absolute/release-directory/acceptance.json \
-  --audit-output /absolute/public-audit-directory \
+  --audit-output /absolute/fresh-public-audit-directory \
   --issue EXISTING_RELEASE_ACCEPTANCE_ISSUE \
   --project-item EXISTING_FACTORY_PROJECT_ITEM_ID \
   --output /absolute/fresh-completion-directory
 ```
+
+The independent auditor owns this conditional acceptance and completion; the release producer does not. Do not insert another agent turn, coordinator acknowledgment or report between successful commands. If the auditor has an unresolved semantic question or needs to evaluate an unexpected observation, it must run the audit alone and resolve that question before completion. A failed audit stops the chain, preserves its output and performs no completion operation.
+
+Use `--codex /absolute/codex` on the audit command when the CLI is not on PATH. The audit verifies the fingerprint predates publication; downloads the archive and checksum anonymously; verifies the annotated tag, source/tree and exact protection; and installs an enabled plugin pinned to the same tag in an isolated Codex home. Manifest and both skills must match the public archive. Identical public bytes reuse the local offline/installed evidence; do not repeat those stages. A new qualification host still needs its actual installation and readiness checks.
 
 The command binds the passing public receipt and terminal audit timing to the sealed acceptance, verifies that the fingerprint belongs to the explicitly selected release issue, and checks the Project item belongs to that issue in Factory Project 2. Only an open `release-gate` issue can complete; this is not a general issue-closing operation. It derives the Done status from the actual Project, renders a concise comment from verified facts, posts it, closes the issue and marks the item Done. Mutation responses must confirm the intended targets and results. Source/guidance meaning, scenario sufficiency and unexpected observations remain independent reviewer decisions; the command does not replace them.
 

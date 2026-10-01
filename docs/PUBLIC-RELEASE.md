@@ -4,7 +4,7 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Candidate v0.1.64 removes exact generated-prose matching for never-started ordinary Work Items while preserving every substantive obligation through complete previous/proposed graph independent review ([#415](https://github.com/clockgrove/factory/issues/415)). Started definitions, existing aggregate acceptance, exact source criteria, coverage and command authority keep their existing guards. Package/lock/plugin versions, marketplace ref and installation commands select the same candidate. Installed checks and public verification remain pending. No new state, permission, model call or retry is introduced.
+Candidate v0.1.64 removes exact generated-prose matching for never-started ordinary Work Items while preserving every substantive obligation through complete previous/proposed graph independent review ([#415](https://github.com/clockgrove/factory/issues/415)). Started definitions, existing aggregate acceptance, exact source criteria, coverage and command authority keep their existing guards. Package/lock/plugin versions, marketplace ref and installation commands select the same candidate. Installed checks and public verification remain pending in [#417](https://github.com/clockgrove/factory/issues/417). No new state, permission, model call or retry is introduced.
 
 Published [v0.1.63](https://github.com/clockgrove/factory/releases/tag/v0.1.63) supplies retained worker discovery and accepted amendment evidence ([#412](https://github.com/clockgrove/factory/issues/412)). All 139 whole installed tests and nine model-free preflights passed without skips, followed by [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/413). One bounded final-packet diagnostic passed all four criteria. It granted no Objective acceptance; the complete autonomous pair remains in #253.
 
@@ -105,10 +105,10 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select prepared v0.1.63 and are for use only after that matching release is published and its actual public bytes and enabled pinned plugin pass independent verification. Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/413), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
+The commands below select prepared v0.1.64 and are for use only after that matching release is published and its actual public bytes and enabled pinned plugin pass independent verification. Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/417), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.63
+codex plugin marketplace add clockgrove/factory --ref v0.1.64
 codex plugin add factory@clockgrove
 gh release download v0.1.64 --repo clockgrove/factory \
   --pattern clockgrove-factory-0.1.64.tgz --pattern SHA256SUMS

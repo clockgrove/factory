@@ -98,13 +98,18 @@ rewriting admitted snapshots. Final-review/controller coverage retains the
 original Objective obligations separately from parent acceptance. Aggregate
 validation and independent review still run after actual child integration.
 
-Result review receives the harness discovery retained on the current Work Item
-attempt, with that attempt and the current reviewed result commit/tree. The
-controller proves capture binding; the proposal's facts, requested scope,
-ownership, acceptance and dependencies remain untrusted harness data. It proves
-proposal submission, not accepted amendment authority or completed QA. Missing,
-stale-attempt or incomplete-result records provide no discovery evidence, and the
-private staging file remains outside Git.
+Current, completed dependency and final review receive the harness discovery
+retained on the Work Item attempt, bound to that attempt and its current reviewed
+result commit/tree. The controller proves capture binding; proposal facts,
+requested scope, ownership, acceptance and dependencies remain harness declarations.
+A matching accepted graph-revision receipt separately proves the independently
+reviewed addition: worker attempt, parent/successor graph digests, review digest,
+acceptance time and exact added node definitions. Existing integrated QA/aggregate
+proofs establish later completion, not proposal submission. Missing, stale or
+incomplete capture supplies no submission proof and does not prove that no
+submission occurred; missing or mismatched amendment facts cannot prove acceptance.
+The private staging file remains outside Git. No history store or model call is
+added.
 
 ### Compiler plan review
 

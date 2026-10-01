@@ -378,6 +378,13 @@ ownership, acceptance and dependencies. Factory collects it with the ordinary re
 then independently reviews and projects an in-scope graph revision. Workers keep
 implementing only their already accepted scope. Out-of-scope proposals remain backlog.
 
+Current, dependency and final review receive the retained proposal with its
+attempt/result binding. The matching accepted graph-revision receipt separately
+identifies the independently reviewed addition and its actual QA/parent definitions;
+completed QA evidence remains distinct. Missing or stale capture is missing proof,
+not proof that no proposal was submitted. Missing or mismatched evidence cannot
+pass a required discovery or amendment criterion.
+
 An operator can submit the same structured discovery to a running owner:
 
 ```sh

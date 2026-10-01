@@ -2,13 +2,21 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.62 — 2026-10-01 (candidate)
+## 0.1.63 — 2026-10-01 (candidate)
+
+- Reuse the retained worker discovery capture in current, completed dependency and final review, with its actual attempt/result binding (#412).
+- Supply the matching accepted graph-revision receipt, independent-review digest, parent/successor bindings and exact added QA/parent definitions. Keep submitted proposals, reviewed amendments and completed acceptance distinct.
+- Clarify that absent or stale supplied discovery is missing proof, not a negative submission observation. Missing or mismatched facts still cannot pass a required source obligation; no new state, API, call or permission is introduced.
+
+Matching publication, installed final-packet checks and independent public verification remain pending under [#413](https://github.com/clockgrove/factory/issues/413). Full same-artifact autonomous Objective acceptance remains #253, #331, #254 and #243; historical failures, consumed allowances and unavailable accounting remain preserved.
+
+## 0.1.62 — 2026-10-01
 
 - Supply exact retained failed-candidate Git descriptors and an ownership-scoped comparison with the corrected result to current, dependency and final review (#409). Preserve attempt and execution-base bindings while allowing legitimate native result-base and whole-tree changes.
 - Supply the validated admission binding, permitted repair class and finite objective/path limits with actual consumption. Keep operator diagnosis and host-action declarations separate from controller facts and source-required successful probe receipts.
 - Preserve all existing acceptance, ownership, uncertainty and allowance fences without a new recovery operation, persistent record or model call.
 
-Matching publication, installed final-packet checks and independent public verification remain pending under [#410](https://github.com/clockgrove/factory/issues/410). Full same-artifact autonomous Objective acceptance remains #253, #331, #254 and #243; historical evidence and accounting retain their original scope.
+Published with [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/410). All 139 whole installed tests and nine model-free preflights passed with zero skips. The bounded final-packet review passed the repaired-candidate obligation and exposed missing discovery evidence in #412; it granted no Objective acceptance. Full same-artifact autonomous Objective acceptance remains #253, #331, #254 and #243; historical evidence and accounting retain their original scope.
 
 ## 0.1.61 — 2026-10-01
 

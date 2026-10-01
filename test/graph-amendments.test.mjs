@@ -11,11 +11,15 @@ import {
   submitAmendment,
   validateAmendment,
 } from "../dist/graph-amendments.js";
-import { workItemReviewEvidence } from "../dist/validation.js";
+import {
+  workItemReviewEvidence,
+  objectiveReviewEvidence,
+} from "../dist/validation.js";
 import { aggregateAcceptance, coverageObligations } from "../dist/qa.js";
 import {
   compilerCitationChoices,
   objectiveCriteria,
+  CodexPlanningModel,
 } from "../dist/compiler.js";
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
 import { readState, statePath } from "../dist/state-store.js";
@@ -34,6 +38,7 @@ import { withCoverage } from "./support/coverage.mjs";
 import { compilerWire } from "../dist/compiler-wire.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
 import { encodeCompilerWire } from "./support/compiler-wire.mjs";
+import { packetFromPrompt } from "./support/review-protocol.mjs";
 
 const discovery = {
   scope: "in-scope",
@@ -121,13 +126,14 @@ async function fixture(name, fn, delivery = "regular") {
   }
 }
 for (const delivery of ["regular", "native-stack"])
-  test(`${delivery}: worker discovery autonomously adds reviewed QA without rerunning implementation`, async () => {
+  test(`${delivery}: worker discovery adds reviewed QA and parent evidence through dependencies and final review without rerunning implementation`, async () => {
     await fixture(
       delivery,
       async ({ root, config, initial }) => {
         let generated = 0;
         let reviews = 0;
         let first;
+        const packets = [];
         const planningModel = {
           async generateStructured(request) {
             generated++;
@@ -149,7 +155,16 @@ for (const delivery of ["regular", "native-stack"])
               request,
               compilerCitationChoices(request.sources),
             );
-            const value = encodeCompilerWire(qaGraph(first), wire.data);
+            const amended = qaGraph(first);
+            amended.items.push({
+              ...item("aggregate", ["result", "qa"]),
+              kind: "aggregate",
+              children: ["result", "qa"],
+              ownedPaths: [],
+              acceptance: aggregateAcceptance({ id: "aggregate" }),
+              validation: [],
+            });
+            const value = encodeCompilerWire(amended, wire.data);
             assert.deepEqual(value.items[0], {
               kind: "retained",
               id: "result",
@@ -179,6 +194,7 @@ for (const delivery of ["regular", "native-stack"])
             };
           },
           async reviewResult(request) {
+            packets.push(request);
             if (
               request.observations &&
               JSON.parse(request.observations).reviewedItemId === "result"
@@ -193,6 +209,7 @@ for (const delivery of ["regular", "native-stack"])
               assert.equal(captured.resultTreeSha, request.treeSha);
               assert.equal(captured.contentOrigin, "harness-declared-proposal");
               assert.deepEqual(captured.proposal, discovery);
+              assert.equal(captured.acceptedAmendment, null);
               assert(captured.attemptId);
               assert.match(captured.resultCommitSha, /^[a-f0-9]{40}$/);
               assert(!request.change.includes(".factory-discovery.json"));
@@ -259,6 +276,154 @@ for (const delivery of ["regular", "native-stack"])
         );
         assertGraphRevisions(readState(config.repository, 1));
         assert.doesNotThrow(() => checkServiceState(config, 1));
+        assert.equal(state.work.aggregate.status, "done");
+        assert.equal(state.work.aggregate.pullRequest, undefined);
+        const finalPacket = packets.find(
+          (packet) => packet.reviewPhase === "objective-review",
+        );
+        const captured = JSON.parse(finalPacket.observations).work.find(
+          (entry) => entry.id === "result",
+        ).harnessDiscovery;
+        assert.equal(captured.itemId, "result");
+        assert.equal(captured.attemptId, state.work.result.attempt);
+        assert.equal(captured.resultCommitSha, state.work.result.changeRef);
+        assert.equal(captured.resultTreeSha, state.work.result.treeSha);
+        assert.deepEqual(captured.proposal, discovery);
+        const receipt = captured.acceptedAmendment;
+        const revision = state.graphRevisions[1];
+        assert.equal(receipt.parentGraphDigest, state.graphRevisions[0].digest);
+        assert.equal(receipt.graphDigest, revision.digest);
+        assert.equal(receipt.reviewDigest, revision.reviewDigest);
+        assert.equal(receipt.acceptedAt, revision.acceptedAt);
+        assert.deepEqual(receipt.worker, {
+          itemId: "result",
+          attempt: state.work.result.attempt,
+        });
+        assert.deepEqual(
+          receipt.addedItems.map((entry) => [entry.id, entry.kind]),
+          [
+            ["qa", "qa"],
+            ["aggregate", "aggregate"],
+          ],
+        );
+        assert.deepEqual(receipt.addedItems[0].dependencies, ["result"]);
+        assert.deepEqual(receipt.addedItems[1].children, ["result", "qa"]);
+        assert.deepEqual(receipt.addedItems[1].dependencies, ["result", "qa"]);
+        assert(
+          receipt.addedItems.every((entry) => entry.ownedPaths.length === 0),
+        );
+        assert(
+          state.graphRevisions[0].graph.items.every(
+            (entry) => !["qa", "aggregate"].includes(entry.id),
+          ),
+        );
+        for (const id of ["qa", "aggregate"]) {
+          const packet = packets.find(
+            (packet) =>
+              packet.observations &&
+              JSON.parse(packet.observations).reviewedItemId === id,
+          );
+          const dependencies = JSON.parse(
+            packet.evidence.find(
+              (entry) => entry.path === "Completed dependency results",
+            ).content,
+          );
+          assert.deepEqual(
+            dependencies.work.find((entry) => entry.id === "result")
+              .harnessDiscovery,
+            captured,
+          );
+        }
+        const wireModel = new CodexPlanningModel(config.checkout);
+        wireModel.runStructured = async ({ prompt, schema, defaultPhase }) => {
+          assert.equal(defaultPhase, "objective-review");
+          const packet = packetFromPrompt(prompt);
+          assert.equal(packet.packetId, finalPacket.reviewPacket.id);
+          assert.equal(schema.properties.packetId.enum[0], packet.packetId);
+          assert.deepEqual(
+            JSON.parse(
+              packet.evidence.find(
+                (entry) => entry.path === "Delivery observations",
+              ).content,
+            ).work.find((entry) => entry.id === "result").harnessDiscovery,
+            captured,
+          );
+          assert(
+            prompt.includes("it is not proof that no submission occurred"),
+          );
+          assert(
+            prompt.includes(
+              "Required discovery remains unproved unless supplied evidence establishes it",
+            ),
+          );
+          assert(
+            prompt.includes(
+              "receipt facts supply no proof of amendment acceptance",
+            ),
+          );
+          assert(!prompt.includes("receipt facts prove no accepted amendment"));
+          assert(
+            !prompt.includes(
+              "An absent or stale discovery proves no submission",
+            ),
+          );
+          return planningModel.reviewResult(finalPacket);
+        };
+        await wireModel.reviewResult(finalPacket);
+        const projection = (snapshot) =>
+          objectiveReviewEvidence({
+            state: snapshot,
+            checkout: config.checkout,
+            integratedCommitSha: snapshot.integratedSha,
+            integratedTreeSha: finalPacket.treeSha,
+          });
+        for (const corruption of [
+          "missing",
+          "stale",
+          "worker",
+          "proposal",
+          "unaccepted",
+          "backlog",
+        ]) {
+          const broken = structuredClone(state);
+          if (corruption === "missing") delete broken.work.result.discovery;
+          if (corruption === "stale")
+            broken.work.result.discovery.attempt = "stale-attempt";
+          if (corruption === "worker")
+            broken.graphRevisions[1].proposal.worker.attempt =
+              "unrelated-attempt";
+          if (corruption === "proposal")
+            broken.graphRevisions[1].proposal.reason = "Different discovery";
+          if (corruption === "unaccepted")
+            broken.work.result.discoveryDisposition = "proposed";
+          if (corruption === "backlog")
+            broken.work.result.discovery.scope = "backlog";
+          const capture = JSON.parse(projection(broken).observations).work.find(
+            (entry) => entry.id === "result",
+          ).harnessDiscovery;
+          if (["missing", "stale"].includes(corruption))
+            assert.equal(capture, null);
+          else assert.equal(capture.acceptedAmendment, null);
+        }
+        for (const corruption of [
+          "missing-revision",
+          "review",
+          "parent",
+          "digest",
+        ]) {
+          const broken = structuredClone(state);
+          if (corruption === "missing-revision") broken.graphRevisions.pop();
+          if (corruption === "review")
+            delete broken.graphRevisions[1].reviewDigest;
+          if (corruption === "parent")
+            broken.graphRevisions[1].parentDigest = "0".repeat(64);
+          if (corruption === "digest")
+            broken.graphRevisions[1].digest = "0".repeat(64);
+          assert.throws(
+            () => projection(broken),
+            /Graph revision|Current graph/,
+          );
+        }
       },
       delivery,
     );

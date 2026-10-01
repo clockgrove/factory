@@ -81,9 +81,9 @@ def collect(manifest, base):
                         count += 1
                         if entry.get('type') == 'event_msg' and typ == 'task_started':
                             events.append(dict(agent=aid, kind='task-start', at=when-start))
-                        if entry.get('type') == 'response_item' and typ == 'agent_message':
+                        if entry.get('type') in ('response_item', 'event_msg') and typ == 'agent_message':
                             events.append(dict(agent=aid, kind='agent-delivery', at=when-start))
-                        if entry.get('type') == 'response_item' and typ == 'message' and payload.get('role') == 'assistant' and payload.get('phase') == 'final':
+                        if entry.get('type') == 'response_item' and typ == 'message' and payload.get('role') == 'assistant' and payload.get('phase') in ('final', 'final_answer'):
                             events.append(dict(agent=aid, kind='final-message', at=when-start))
             coverage.append(dict(agent=aid, source=f'trace-{index}', entriesInWindow=count,
                                  unmatchedToolRequests=sum(start <= v[0] <= end for v in calls.values()),

@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.56 — 2026-09-30 (candidate)
+
+- Retain the v0.1.55 sequential-planning runtime correction. This candidate aligns the next public artifact with the single-owner contributor release workflow introduced by #378 / PR #379.
+- Measure packaging, installed/model-free checks, protected publication and independent public verification sequentially under #380. This does not establish live autonomous Objective or adopter acceptance.
+
+Publication and public verification are pending. Earlier releases and evidence keep their original identities.
+
 ## 0.1.55 — 2026-09-30 (candidate)
 
 - Supply authenticated native Objective dependencies, sealed accepted predecessor identity and the actual selected-base relationship to compilation, graph review and planning diagnosis. Bind these phase-available facts to their original body and acceptance evidence, and refuse unavailable, changed or mismatched prerequisites (#374).

@@ -2,11 +2,11 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
-## 0.1.54 — candidate
+## 0.1.54 — 2026-09-30
 
 - Align compilation, graph review and planning diagnosis around one owner and complete proof for each whole source obligation. Use the existing final-review proof for compound final criteria that no single controller guarantee covers; preserve unique obligation indices, duplicate rejection and independent final acceptance (#370).
 
-Source integration, release gates, publication and independent public archive/pinned-plugin verification are pending. Earlier release evidence remains bound to its original bytes and scenarios; full autonomous Objective qualification remains #253.
+Published with fresh-cache offline installation and all 40 installed compiler/QA checks, without skips. [Independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/pull/372#issuecomment-5922896684) passed. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0154-artifact-record). Earlier release evidence retains its original bytes and scenarios; full autonomous Objective qualification remains [#253](https://github.com/clockgrove/factory/issues/253), with #331 final-evidence acceptance and #254 interruption reconciliation still required by #243.
 
 ## 0.1.53 — 2026-09-30
 

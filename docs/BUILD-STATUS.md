@@ -4,6 +4,75 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.54 artifact record
+
+[Release v0.1.54](https://github.com/clockgrove/factory/releases/tag/v0.1.54)
+was built once from frozen independently reviewed and integrated source
+`0e096620a592a3162dfea567b77c394b059c18cb`, tree
+`6ed0961ad5889ac49366b8733758d35c4293f40d`. The archive is 153587311 bytes,
+SHA-256 `c56768393c4d2c0782fb528aae54939d5cbfd1f209954f709a1e3f2b2e0d35ae`,
+recorded in the [prepublication checkpoint](https://github.com/clockgrove/factory/issues/370#issuecomment-5921101391).
+[PR #371](https://github.com/clockgrove/factory/pull/371) records independent
+source review and guarded integration of the whole-obligation guidance correction.
+[Release PR #372](https://github.com/clockgrove/factory/pull/372) records independent
+metadata/guidance review. [Required PR CI](https://github.com/clockgrove/factory/actions/runs/36786890706)
+and [integrated main CI](https://github.com/clockgrove/factory/actions/runs/36787485085)
+passed. The exact coordinated source gate passed all 698 deterministic tests
+without skips, plus build, typecheck, lint, formatting, notices and packaging.
+
+[Independent empty-cache offline installation and complete installed proof](https://github.com/clockgrove/factory/pull/372#issuecomment-5921281409)
+matched all 6357 regular archive files, 95 bundled lock-addressed dependency roots
+and 94 bundled license files. CLI help, manifests, both skills, notices and
+archived matching-version guidance passed. Both mandatory complete committed
+test files ran against actual installed production imports: compiler-wire (14)
+and qa (26). All 40 tests passed with zero failures, cancellations, skips
+or todos, covering actual emitted guidance and whole-obligation proof/refusal
+behavior. The distribution receipt SHA-256 is
+`1766e704540c9e1b74e056005ff4bb3732208179574a9272739d401532a530b0`;
+the accepted installed receipt SHA-256 is
+`93e8a0dca7eddc4411b0b027bbbeece3e65501d1b26b142ee26da816820a9401`.
+The original wrapper rejection after these same 40 passing cases remains
+preserved: runtime-created Node compile-cache files kept its temporary scratch
+nonempty. After verified quiescence, the owned cache was relocated into retained
+audit evidence with every file hash preserved, and the original empty-scratch
+predicate passed. No installation or test execution was repeated, no validator
+was weakened and no source or archive changed.
+
+Publication completed on 2026-09-30 at 18:26:02 PDT (2026-10-01 01:26:02 UTC).
+Annotated tag `20d020f3fd96675a1ca9987097ecd1d2827e21b1` resolves to the
+frozen source above. Expressly approved exact-tag ruleset `24282215` prohibits
+updates and deletion with no bypass actors or exclusions. GitHub's published
+archive digest and size match the audited bytes. The public `SHA256SUMS` asset
+is 96 bytes, SHA-256
+`b5c5083d9054b054dad57018dd5f855f81439b7f0279b6178f4e47e2a7333f0d`.
+[Independent public verification](https://github.com/clockgrove/factory/pull/372#issuecomment-5922896684)
+matched the anonymous archive and checksum download against the fingerprint
+recorded before publication. One fresh isolated pinned v0.1.54 marketplace/plugin
+installation was enabled at the exact source; its manifest and both skills
+matched the public archive byte for byte. Public proof receipt SHA-256:
+`8856b07e85568fc093778fbbdc17d0e38911c1e64879d466b5c5d2bcb1593c7b`.
+The byte-identical public archive retains the single offline audit and 40-test
+proof without repeating either. The archived candidate wording remains unchanged;
+this later record supplies its verified publication facts.
+
+This release aligns compilation, graph review and planning diagnosis around
+one owner and complete proof for each whole source obligation. Compound final
+criteria can use the existing final-review proof when no single controller
+guarantee covers every clause; unique obligation indices, duplicate rejection
+and independent final acceptance remain intact
+([#370](https://github.com/clockgrove/factory/issues/370)).
+
+Full installed two-Objective public autonomy qualification remains
+[#253](https://github.com/clockgrove/factory/issues/253), with actual final-evidence
+acceptance in [#331](https://github.com/clockgrove/factory/issues/331), interruption
+reconciliation in [#254](https://github.com/clockgrove/factory/issues/254) and parent
+[#243](https://github.com/clockgrove/factory/issues/243) retaining their required
+acceptance. Clockgrove retesting remains on hold until those gates pass. Earlier
+releases and their public workspace and adopter scenarios retain their exact
+historical scope. No release was rebuilt, retagged or replaced. This publication
+ledger is parallel maintenance and does not gate an otherwise authorized pilot
+start or resume deferred cloud-provider work.
+
 ## Immutable v0.1.53 artifact record
 
 [Release v0.1.53](https://github.com/clockgrove/factory/releases/tag/v0.1.53)

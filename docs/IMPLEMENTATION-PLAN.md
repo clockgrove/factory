@@ -400,6 +400,18 @@ sources. No second dependency or acceptance store is maintained. Item acceptance
 cannot require that same review's future completion; original whole criteria
 requiring it stay at final Objective review with their source-required commands.
 
+Planning separately receives the existing controller-local executable preflight
+observations for the exact Objective final commands. Compilation, independent
+graph review and diagnosis share these source/base/configuration-bound facts;
+activation repeats the check. Ready means literal entrypoint presence and
+executable-file access on the controller's validation PATH at observation time,
+not command success, script-body behavior, future readiness or remote worker
+capability. Dynamic, relative or target-owned resolution remains unverified.
+Acceptance-only commands retain their required later phase. Graph amendments
+observe the same scoped facts at their own planning boundary. These observations
+use the existing preparation and review bindings, not a readiness ledger or
+native Objective predecessor receipt (#403).
+
 Planning with a repair policy, or within authorized intake, first persists its
 body/base/configuration/authority binding. Initial compilation, diagnosis,
 corrective compilation and independent review have explicit invocation identities.

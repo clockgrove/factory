@@ -82,6 +82,7 @@ export function compilerWire(
         context,
         request.baseSha,
         ...(request.prerequisites ? [request.prerequisites] : []),
+        ...(request.localExecutables ? [request.localExecutables] : []),
         request.sources,
         request.executionProfiles,
         request.controllerCapabilitiesDigest,

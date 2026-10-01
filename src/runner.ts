@@ -182,12 +182,22 @@ export async function planObjective(
       config.checkout,
       additionalSources,
     );
+    const localExecutables = preflightObjective(config, issue.body, baseSha);
     const sourcePacketDigest = createHash("sha256")
       .update(
-        JSON.stringify(prerequisites ? { sources, prerequisites } : sources),
+        JSON.stringify(
+          localExecutables
+            ? {
+                sources,
+                ...(prerequisites ? { prerequisites } : {}),
+                localExecutables,
+              }
+            : prerequisites
+              ? { sources, prerequisites }
+              : sources,
+        ),
       )
       .digest("hex");
-    preflightObjective(config, issue.body, baseSha);
     if (authority?.repairPolicy || options?.ownerLock) {
       if (!authority)
         throw new Error("Owned durable planning requires bound authority");
@@ -281,6 +291,7 @@ export async function planObjective(
           }
         : undefined,
       prerequisites,
+      localExecutables,
     );
     if (preparation) {
       preparation.plan = result;
@@ -1223,12 +1234,13 @@ async function runObjectivePass(
       );
     if (admission && !state && !acceptedPlan && !preparation?.plan)
       throw new Error("Admission dispatch requires its exact reviewed plan");
-    if (!state)
-      preflightObjective(
-        config,
-        issue.body,
-        git(config.checkout, "rev-parse", "HEAD"),
-      );
+    const localExecutables = !state
+      ? preflightObjective(
+          config,
+          issue.body,
+          git(config.checkout, "rev-parse", "HEAD"),
+        )
+      : undefined;
     if (state) {
       if (state.readOnlyReviewAbandonment)
         throw new Error(
@@ -1451,8 +1463,30 @@ async function runObjectivePass(
             admission,
           );
       }
+      const sources = planningSources(
+        issue.body,
+        baseSha,
+        config.checkout,
+        acceptedPlan?.additionalSources ?? preparation?.plan?.additionalSources,
+      );
+      const sourcePacketDigest = createHash("sha256")
+        .update(
+          JSON.stringify(
+            localExecutables
+              ? {
+                  sources,
+                  ...(prerequisites ? { prerequisites } : {}),
+                  localExecutables,
+                }
+              : prerequisites
+                ? { sources, prerequisites }
+                : sources,
+          ),
+        )
+        .digest("hex");
       if (!preparation) {
         preparation = {
+          sourcePacketDigest,
           schemaVersion: 5,
           kind: "preparing",
           repository: config.repository,
@@ -1477,6 +1511,8 @@ async function runObjectivePass(
         saveState(path, preparation);
       }
       if (
+        (preparation.sourcePacketDigest !== undefined &&
+          preparation.sourcePacketDigest !== sourcePacketDigest) ||
         preparation.configDigest !== installationConfigDigest ||
         preparation.baseSha !== baseSha ||
         preparation.objectiveBodyDigest !==
@@ -1526,6 +1562,7 @@ async function runObjectivePass(
                     }
                   : undefined,
                 prerequisites,
+                localExecutables,
               );
             }
             verifyPlanCandidate(
@@ -1552,6 +1589,18 @@ async function runObjectivePass(
       )
         throw new Error(
           "Planning native prerequisites changed before activation",
+        );
+      const currentLocalExecutables = preflightObjective(
+        config,
+        issue.body,
+        baseSha,
+      );
+      if (
+        JSON.stringify(plan.localExecutables) !==
+        JSON.stringify(currentLocalExecutables)
+      )
+        throw new Error(
+          "Planning local executable observations changed before activation",
         );
       preparation.plan = plan;
       preparation.planning = "complete";

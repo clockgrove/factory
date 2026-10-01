@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { PlanningLocalExecutables } from "./contracts.js";
 import type { FactoryConfig } from "./config.js";
 import { factoryConfigDigest } from "./config.js";
 import type { PlanCandidate } from "./compiler.js";
@@ -211,8 +212,10 @@ export function preflightObjective(
   body: string,
   baseSha: string,
   candidate?: PlanCandidate,
-): void {
+): PlanningLocalExecutables | undefined {
   planningSources(body, baseSha, config.checkout, candidate?.additionalSources);
+  const finalCommands = finalObjectiveCommands(body);
+  const observations: PlanningLocalExecutables["observations"] = [];
   const root = mkdtempSync(join(tmpdir(), "factory-preflight-"));
   try {
     preflightLocalExecutables({
@@ -224,19 +227,27 @@ export function preflightObjective(
         items: [],
         coverage: [],
       },
-      finalCommands: finalObjectiveCommands(body),
+      finalCommands,
       privateRoot: root,
       credentialDirectory: join(root, "empty-gh-config"),
       secrets: config.policy.allowedSecretNames.flatMap((name) =>
         process.env[name] ? [process.env[name]!] : [],
       ),
-      observe: () => {
-        /* Missing prerequisites throw; read-only callers do not write diagnostics. */
+      observe: (entry) => {
+        if (entry.origin === "final") observations.push(entry);
       },
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+  return finalCommands.length
+    ? {
+        provenance: "controller-local-validation-executable-preflight",
+        baseSha,
+        finalCommands,
+        observations,
+      }
+    : undefined;
 }
 
 export function bindAdmission(
@@ -256,7 +267,14 @@ export function bindAdmission(
     config.checkout,
     factoryConfigDigest(config),
   );
-  preflightObjective(config, body, baseSha, candidate);
+  const localExecutables = preflightObjective(config, body, baseSha, candidate);
+  if (
+    JSON.stringify(candidate.localExecutables) !==
+    JSON.stringify(localExecutables)
+  )
+    throw new Error(
+      "Planning local executable observations changed before admission",
+    );
   const bound: Omit<AutonomousAdmission, "digest"> = {
     schemaVersion: 1,
     repository: config.repository,

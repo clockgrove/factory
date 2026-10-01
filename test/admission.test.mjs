@@ -4,7 +4,11 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { checkAuthority, validateAuthority } from "../dist/admission.js";
+import {
+  checkAuthority,
+  validateAuthority,
+  preflightObjective,
+} from "../dist/admission.js";
 import { compilePlan } from "../dist/compiler.js";
 import { factoryConfigDigest } from "../dist/config.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
@@ -358,6 +362,12 @@ test("admission binds the exact human plan decision", async () => {
           },
         },
         factoryConfigDigest(config),
+        undefined,
+        undefined,
+        [],
+        undefined,
+        undefined,
+        preflightObjective(config, body, target.baseSha),
       );
       assert.equal(candidate.review.status, "needs-human");
       const accepted = await application.decidePlan(1, candidate, {

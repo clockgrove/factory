@@ -4,7 +4,7 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Candidate v0.1.59 corrects the review evidence for ordinary read-only QA and retained diagnosed repairs ([#397](https://github.com/clockgrove/factory/issues/397)). It identifies the selected integrated candidate and completed validation phase, and distinguishes recorded failure/candidate/allowance facts from declared diagnosis. Package/lock/plugin versions, marketplace ref and installation commands select this same candidate. Publication, installed checks and independent public verification remain pending under [#399](https://github.com/clockgrove/factory/issues/399). The original stopped qualification remains preserved; publication and source tests do not establish complete autonomous Objective acceptance.
+Candidate v0.1.60 supplies the existing controller-local final-command executable observations to compilation, independent graph review and bounded diagnosis ([#403](https://github.com/clockgrove/factory/issues/403)). Presence and executable access do not imply later acceptance success or remote worker readiness. Existing preparation and review bindings retain the facts; admission and activation repeat the check. Package/lock/plugin versions, marketplace ref and installation commands select this same candidate. Publication, installed checks and independent public verification remain pending under [#404](https://github.com/clockgrove/factory/issues/404). The original stopped qualification remains preserved; publication and source tests do not establish complete autonomous Objective acceptance.
 
 Published [v0.1.58](https://github.com/clockgrove/factory/releases/tag/v0.1.58) passed all 35 installed checks, five model-free preflights and [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/394#issuecomment-5926979213). It added the private Objective Gantt view and separate contributor tooling. Its clean release measurement and immutable artifact evidence remain bound to #394.
 
@@ -97,16 +97,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select prepared v0.1.59 and are for use only after that matching release is published and its actual public bytes and enabled pinned plugin pass independent verification. Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/399), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
+The commands below select prepared v0.1.60 and are for use only after that matching release is published and its actual public bytes and enabled pinned plugin pass independent verification. Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/404), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.59
+codex plugin marketplace add clockgrove/factory --ref v0.1.60
 codex plugin add factory@clockgrove
-gh release download v0.1.59 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.59.tgz --pattern SHA256SUMS
+gh release download v0.1.60 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.60.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the independently recorded prepublication digest in the owning issue/PR or artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.59.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.60.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

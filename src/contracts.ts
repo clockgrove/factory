@@ -224,6 +224,14 @@ export interface PlanningPrerequisites {
   }[];
 }
 
+/** Observed controller validation tools, never worker or acceptance readiness. */
+export interface PlanningLocalExecutables {
+  provenance: "controller-local-validation-executable-preflight";
+  baseSha: string;
+  finalCommands: string[];
+  observations: import("./local-preflight.js").ExecutablePreflightObservation[];
+}
+
 export interface PlanningRequest<T> {
   /** Trusted transient compile input; not part of canonical or persisted graphs. */
   compileContext?: {
@@ -233,6 +241,7 @@ export interface PlanningRequest<T> {
     immutableItemIds?: string[];
   };
   prerequisites?: PlanningPrerequisites;
+  localExecutables?: PlanningLocalExecutables;
   purpose?: "diagnosis";
   coverageObligations?: CoverageObligation[];
   objective: string;
@@ -257,6 +266,7 @@ export interface PlanCommandAuthorization {
 
 export interface PlanReviewRequest {
   prerequisites?: PlanningPrerequisites;
+  localExecutables?: PlanningLocalExecutables;
   amendment?: unknown;
   reviewPacket?: ReviewPacket;
   objective: string;

@@ -341,6 +341,21 @@ test("sequential planning supplies grounded native acceptance in every rendered 
     for (const packet of rendered) {
       assert.deepEqual(packet.packet.prerequisites, preparation);
       assert(packet.prompt.includes(JSON.stringify(preparation)));
+      assert.deepEqual(
+        packet.packet.localExecutables,
+        currentRequest.localExecutables,
+      );
+      assert.equal(
+        packet.packet.localExecutables.baseSha,
+        first.finalAcceptance.commit,
+      );
+      assert.equal(
+        packet.packet.localExecutables.provenance,
+        "controller-local-validation-executable-preflight",
+      );
+      assert(
+        packet.prompt.includes(JSON.stringify(currentRequest.localExecutables)),
+      );
       assert.match(
         packet.prompt,
         /WorkGraph dependencies refer only to items in this Objective/,

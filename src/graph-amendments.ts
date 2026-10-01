@@ -4,6 +4,7 @@ import {
   failureDigest,
   type RepairCorrection,
 } from "./repair-policy.js";
+import { preflightObjective } from "./admission.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -11,6 +12,7 @@ import {
   hydrateWorkerInputSources,
   objectiveCriteria,
   planningSources,
+  planningReviewEvidence,
   planReviewPacket,
   validateCommandProvenance,
   validateGraph,
@@ -629,6 +631,11 @@ export async function applyPendingAmendment(args: {
   try {
     if (args.cancelled()) throw new Error("Objective cancelled");
     const choices = executionProfileChoices(config);
+    const localExecutables = preflightObjective(
+      config,
+      args.body,
+      state.baseSha,
+    );
     if (pending.phase === "ready") {
       if (pending.proposal.graph) {
         pending.graph = structuredClone(pending.proposal.graph);
@@ -680,6 +687,8 @@ export async function applyPendingAmendment(args: {
                 state.work[id]!.status !== "pending" || state.work[id]!.attempt,
             ),
           },
+          undefined,
+          localExecutables,
         );
       }
       pending.phase = "compiled";
@@ -705,6 +714,8 @@ export async function applyPendingAmendment(args: {
         pending.graph!,
         config.checkout,
         choices,
+        undefined,
+        localExecutables,
       );
       packet.amendment = {
         previousGraph: state.graph,
@@ -723,10 +734,7 @@ export async function applyPendingAmendment(args: {
           ]),
         ),
       };
-      const evidence = reviewPacket(
-        [],
-        sources.map((source) => ({ ...source, origin: "source" as const })),
-      );
+      const evidence = reviewPacket([], planningReviewEvidence(packet));
       pending.phase = "reviewing";
       save();
       const response = await args.model.reviewGraph({

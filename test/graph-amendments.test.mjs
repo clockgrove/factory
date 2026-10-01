@@ -130,6 +130,13 @@ for (const delivery of ["regular", "native-stack"])
         const planningModel = {
           async generateStructured(request) {
             generated++;
+            assert.equal(
+              request.localExecutables.provenance,
+              "controller-local-validation-executable-preflight",
+            );
+            assert.deepEqual(request.localExecutables.finalCommands, [
+              "test -s result.txt",
+            ]);
             if (!first) {
               first = withCoverage(request, initial);
               return first;
@@ -151,6 +158,18 @@ for (const delivery of ["regular", "native-stack"])
           },
           async reviewGraph(request) {
             reviews++;
+            assert.equal(
+              request.localExecutables.provenance,
+              "controller-local-validation-executable-preflight",
+            );
+            const host = request.reviewPacket.evidence.find(
+              (entry) => entry.path === "FACTORY_LOCAL_EXECUTABLE_OBSERVATIONS",
+            );
+            assert.equal(host.origin, "controller");
+            assert.deepEqual(
+              JSON.parse(host.content),
+              request.localExecutables,
+            );
             if (request.amendment)
               assert.equal(request.amendment.work.result.status, "done");
             return {

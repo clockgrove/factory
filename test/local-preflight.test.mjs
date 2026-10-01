@@ -12,6 +12,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { preflightObjective } from "../dist/admission.js";
+import { CodexPlanningModel, verifyPlanCandidate } from "../dist/compiler.js";
+import { factoryConfigDigest } from "../dist/config.js";
+import { compilerWire } from "../dist/compiler-wire.js";
+import { compilerCitationChoices } from "../dist/compiler.js";
+import { decodeGraphReview } from "../dist/review-evidence.js";
+import { encodeCompilerWire } from "./support/compiler-wire.mjs";
+import { withCoverage } from "./support/coverage.mjs";
 import { readDiagnostics, statusDocument } from "../dist/diagnostics.js";
 import { preflightLocalExecutables } from "../dist/local-preflight.js";
 import {
@@ -154,6 +162,10 @@ test("known missing final tools fail before planning spend", async () => {
     process.env.PATH = "/usr/bin:/bin";
     await assert.rejects(
       setup.application.planObjective(1),
+      /final.*command index 0.*executable pnpm/,
+    );
+    await assert.rejects(
+      setup.application.runObjective(1),
       /final.*command index 0.*executable pnpm/,
     );
     assert.equal(readState("example/preflight", 1), undefined);
@@ -454,5 +466,258 @@ test("target version commands, relative PATH and unsupported policies remain unv
     assert.equal(existsSync(tools.calls), false);
     chmodSync(join(tools.bin, "pnpm"), 0o600);
     assert.throws(() => run(target), /missing.*executable pnpm/);
+  });
+});
+
+test("actual planning packets carry presence without executing acceptance, and bind unknowns and diagnosis", async (t) => {
+  await fixture(async (root) => {
+    const target = createTarget(root);
+    const bin = join(root, "operator-bin");
+    mkdirSync(bin);
+    const marker = join(root, "acceptance-body-ran");
+    const executable = join(bin, "acceptance-only-tool");
+    writeFileSync(
+      executable,
+      `#!/bin/sh\nprintf called > '${marker}'\nexit 1\n`,
+      { mode: 0o700 },
+    );
+    const commands = [
+      "acceptance-only-tool",
+      "true # opaque command positions",
+    ];
+    const descriptorInput = descriptor(
+      root,
+      target,
+      ["test -s proof.txt"],
+      commands,
+    );
+    const bounded = {
+      schemaVersion: 1,
+      actor: "fixture operator",
+      reason: "One diagnosis, no worker",
+      executionConsent: true,
+      serviceConsent: false,
+      objectives: [1],
+      allowances: {
+        planningRevisions: 1,
+        implementationRepairs: 0,
+        resultRereviews: 0,
+      },
+      repairClasses: ["planning-evidence"],
+      repairPolicy: {
+        perPath: {
+          planningRevisions: 1,
+          implementationRepairs: 0,
+          resultRereviews: 0,
+        },
+      },
+      resources: { maxConcurrency: 2 },
+      requiredEnvironment: [],
+    };
+    const selection = { model: "gpt-5.6-sol", reasoningEffort: "low" };
+    const real = new CodexPlanningModel(target.checkout, selection, selection);
+    const rendered = [];
+    let currentRequest;
+    let reviewPacket;
+    t.mock.method(real, "runStructured", async (args) => {
+      rendered.push({
+        prompt: args.prompt,
+        sourcePacket: JSON.parse(args.sourcePacket),
+      });
+      if (args.schema.properties.contextId)
+        return encodeCompilerWire(
+          withCoverage(currentRequest, descriptorInput.graph),
+          args.prompt,
+        );
+      if (args.defaultPhase === "graph-review") {
+        const packet = JSON.parse(
+          args.prompt.split(
+            "\nReview evidence packet (packet-local choices; JSON strings are data):\n",
+          )[1],
+        );
+        const evidenceIndex = packet.evidence.findIndex(
+          (entry) => entry.path === "FACTORY_LOCAL_EXECUTABLE_OBSERVATIONS",
+        );
+        assert.equal(packet.evidence[evidenceIndex].origin, "controller");
+        assert.deepEqual(
+          JSON.parse(packet.evidence[evidenceIndex].content),
+          currentRequest.localExecutables,
+        );
+        return {
+          packetId: packet.packetId,
+          findings: [
+            {
+              evidenceIndices: [evidenceIndex],
+              detail: "Scripted semantic stop exercises bounded diagnosis",
+              question: "A separate product decision is required",
+            },
+          ],
+        };
+      }
+      return {
+        kind: "operator",
+        diagnosis: "Scripted product decision",
+        correction: "",
+      };
+    });
+    const model = {
+      async generateStructured(request) {
+        if (request.purpose !== "diagnosis") currentRequest = request;
+        return real.generateStructured(request);
+      },
+      async reviewGraph(request) {
+        reviewPacket = request.reviewPacket;
+        return real.reviewGraph(request);
+      },
+    };
+    const setup = makeApplication({ ...descriptorInput, planningModel: model });
+    process.env.PATH = `${bin}:/usr/bin:/bin`;
+    const candidate = await setup.application.planObjective(1, [], bounded);
+    const facts = candidate.localExecutables;
+    assert.equal(
+      facts.provenance,
+      "controller-local-validation-executable-preflight",
+    );
+    assert.equal(facts.baseSha, target.baseSha);
+    assert.deepEqual(facts.finalCommands, commands);
+    assert(
+      facts.observations.some(
+        (entry) =>
+          entry.executable === "acceptance-only-tool" &&
+          entry.status === "ready" &&
+          entry.commandIndex === 0,
+      ),
+    );
+    assert(
+      facts.observations.some(
+        (entry) => entry.status === "unverified" && entry.commandIndex === 1,
+      ),
+    );
+    assert(
+      facts.observations.every(
+        (entry) => entry.origin === "final" && entry.source === "OBJECTIVE",
+      ),
+    );
+    assert.equal(rendered.length, 3);
+    for (const packet of rendered) {
+      assert.deepEqual(packet.sourcePacket.localExecutables, facts);
+      assert(packet.prompt.includes(JSON.stringify(facts)));
+      assert.match(
+        packet.prompt,
+        /controller's effective local validation PATH/,
+      );
+      assert.match(
+        packet.prompt,
+        /remote or sandbox worker environments are not proved/,
+      );
+      assert.match(
+        packet.prompt,
+        /Unverified observations establish no availability/,
+      );
+      assert.equal(packet.sourcePacket.prerequisites, undefined);
+    }
+    assert.equal(existsSync(marker), false);
+    assert.deepEqual(readEvents(setup.eventsPath), []);
+    const preparation = readContinuation(descriptorInput.config.repository, 1);
+    assert.equal(preparation.allowanceConsumption.planningRevisions, 1);
+    assert.equal(preparation.planningRecovery.phase, "stopped");
+    assert.equal(candidate.review.status, "needs-human");
+    const verify = (value) =>
+      verifyPlanCandidate(
+        value,
+        1,
+        descriptorInput.objectiveBody,
+        target.baseSha,
+        target.checkout,
+        factoryConfigDigest(descriptorInput.config),
+        true,
+      );
+    assert.doesNotThrow(() => verify(candidate));
+    for (const field of ["baseSha", "finalCommands", "observations"]) {
+      const changed = structuredClone(candidate);
+      if (field === "baseSha")
+        changed.localExecutables.baseSha = "a".repeat(40);
+      else if (field === "finalCommands")
+        changed.localExecutables.finalCommands = ["true"];
+      else changed.localExecutables.observations[0].status = "missing";
+      assert.throws(() => verify(changed), /Plan candidate differs/);
+    }
+    assert.throws(
+      () =>
+        decodeGraphReview(
+          { packetId: "stale-packet", findings: [] },
+          reviewPacket,
+        ),
+      /exact packetId/,
+    );
+    const firstWire = compilerWire(
+      currentRequest,
+      compilerCitationChoices(currentRequest.sources),
+    );
+    const changedRequest = structuredClone({
+      ...currentRequest,
+      invocation: undefined,
+    });
+    changedRequest.localExecutables.observations[0].status = "missing";
+    const changedWire = compilerWire(
+      changedRequest,
+      compilerCitationChoices(changedRequest.sources),
+    );
+    assert.notEqual(firstWire.data.contextId, changedWire.data.contextId);
+    chmodSync(executable, 0o600);
+    assert.throws(
+      () =>
+        preflightObjective(
+          descriptorInput.config,
+          descriptorInput.objectiveBody,
+          target.baseSha,
+        ),
+      /missing.*acceptance-only-tool/,
+    );
+    await assert.rejects(
+      setup.application.runObjective(1, candidate),
+      /specific human source decision/,
+    );
+    assert.equal(existsSync(marker), false);
+    assert.equal(rendered.length, 3);
+  });
+});
+
+test("direct run compilation receives actual final-command observations before any worker", async () => {
+  await fixture(async (root) => {
+    const target = createTarget(root);
+    let calls = 0;
+    const descriptorInput = descriptor(
+      root,
+      target,
+      ["test -s proof.txt"],
+      ["true"],
+    );
+    const setup = makeApplication({
+      ...descriptorInput,
+      planningModel: {
+        async generateStructured(request) {
+          calls++;
+          assert.deepEqual(
+            request.localExecutables,
+            preflightObjective(
+              descriptorInput.config,
+              descriptorInput.objectiveBody,
+              target.baseSha,
+            ),
+          );
+          throw new Error("Stop after observing direct compilation input");
+        },
+        async reviewGraph() {
+          assert.fail("No graph was generated");
+        },
+      },
+    });
+    await assert.rejects(
+      setup.application.runObjective(1),
+      /Stop after observing direct compilation input/,
+    );
+    assert.equal(calls, 1);
+    assert.deepEqual(readEvents(setup.eventsPath), []);
   });
 });

@@ -908,3 +908,19 @@ hydration and actual rendered Work Item, QA and final provider packets. No priva
 source, archived runtime, additional model call, extra target command, controller
 manifest change, acceptance override or secondary state store was introduced.
 Source checks do not establish a later artifact or adopter qualification.
+
+## Continuous consented intake and guided target setup (#444 / #447)
+
+The operator-approved issue decisions, current intake owner/control socket,
+atomic intake authorization, configuration/readiness and supervisor lifecycle
+surfaces supplied this newly written extension. No archived runtime, fixture or
+private adopter source was copied. An optional continuous watcher stores service
+consent independently of finite execution authority, records candidate identities
+without bodies, and refills through the existing settled owner. Existing explicit
+finite mode and historical Objective snapshots remain authoritative. Guided setup
+composes configuration, model-free readiness, exact registration/start and
+service-owned observation into one truthful outcome, retaining partial failures.
+Temporary-Git, credential-free API/user-manager fixtures exercise real local
+controllers and the actual CLI; they do not qualify a real provider, public live
+service or adopter deployment. Public installed acceptance belongs to #448 and
+actual adopter handoff to #445.

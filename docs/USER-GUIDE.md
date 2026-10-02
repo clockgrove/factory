@@ -23,7 +23,7 @@ In your target repository, use requests such as:
 | Review media | “Use Factory to export the candidate asset sets for my review.”                  |
 | Stop         | “Use Factory to cancel Objective #123 and report its final status.”              |
 
-Setup and planning do not authorize execution. The agent uses Factory's controller for scheduling and delivery and asks about specific unresolved decisions. Keep the CLI runtime on that agent's PATH. The command examples below describe what the skills operate; they are not a separate development workflow.
+Configuration-only setup and planning do not authorize execution. Background setup may bind an explicitly supplied execution authority; service consent alone permits model-free observation. The agent uses Factory's controller for scheduling and delivery and asks about specific unresolved decisions. Keep the CLI runtime on that agent's PATH. The command examples below describe what the skills operate; they are not a separate development workflow.
 
 ## Prepare your environment
 
@@ -46,6 +46,22 @@ If the harness reports a socket directory or permission error, inspect the host 
 ## Managed execution development candidate
 
 The [OpenAI managed execution guide](OPENAI-MANAGED.md) describes explicit provider configuration and current qualification limitations. It changes Work Item execution only; installing Factory retains local defaults and grants no additional provider, disclosure or spending authority.
+
+## Guided target setup
+
+Use one guided request to establish the intended outcome. On installed versions exposing `setup`, background setup reuses or creates the bound configuration, checks the host and authenticated GitHub access, records explicit service consent, registers the exact retained package, starts it and verifies its actual owner/control connection:
+
+```sh
+factory setup --background --service-consent --actor OPERATOR --reason REASON \
+  --retain-package --repository OWNER/REPO --checkout /absolute/path/to/target \
+  --concurrency 2 --config /private/factory.json
+```
+
+Retain the immutable installed package outside the target checkout until supported upgrade or uninstall. `--retain-package` acknowledges that retention, not new execution authority. Repeating setup with the same binding reuses existing choices and does not duplicate controllers. Installation options can be omitted for an existing matching configuration. Conflicting choices stop rather than silently changing an active binding. Add `--authority /private/authority.json` only when the operator has explicitly approved the finite Objective selection and its existing allowances and resource limits. Setup checks the configured execution readiness before starting that selection; an idle watcher without authority makes no model calls and reports execution readiness as unassessed. No issue label or discovery admits work.
+
+Use `factory setup --config-only` with the same installation options for a configuration-only request. That mode succeeds without a supported service host and does not register or start supervision. Low-level `install`, intake and supervisor commands remain available for lifecycle inspection and control.
+
+Background success returns `status: ready`, verified active/enabled service state, exact artifact and configuration, poll interval, approved IDs or idle reason, and host persistence limits. Configuration-only success returns `status: configured`. A failure returns `status: blocked`, the failed stage, completed stages and a supported continuation; it does not remove them or claim readiness. Inspect retained state, resolve the stated prerequisite and repeat. Paused/draining work requires a separate explicit safe resume. Sleep suspends execution, shutdown stops it, and logout persistence is reported without changing linger. A supported upgrade validates compatibility, drains the existing owner and switches the exact package without resetting history. Only an unchanged, settled idle continuous watcher automatically restores its prior running mode. Changed authorization, paused state or any retained nonterminal work requires an explicit safe resume; guided setup reports that retained boundary.
 
 ## Bind a checkout
 
@@ -463,6 +479,25 @@ To change installed artifacts, use `factory supervisor upgrade --cli /absolute/n
 
 `supervisor disable` drains and stops before disabling future automatic starts. The owned unit remains registered for explicit start, upgrade or uninstall. `supervisor uninstall` also removes the owned unit. Both retain target binding, snapshots, results, logs and accounting. Neither removes the target repository or provider authentication. Raw systemd stop sends a graceful drain request only to the owner and does not kill detached workers; unresolved work can therefore keep it waiting. Prefer the packaged stop command for bounded diagnostics.
 
+## Keep a consented watcher available
+
+Guided background setup selects a continuous watcher. To explicitly select watch on an already configured installation without admitting execution, use:
+
+```sh
+factory intake watch --service-consent --actor OPERATOR --reason REASON \
+  --config /private/factory.json
+```
+
+The existing private atomic intake record holds this consent and the optional finite execution authority. The watcher conditionally polls authenticated GitHub pages at the configured interval, default 30 seconds, including after its batch is exhausted. Idle observation makes no model calls. Status records the last observation time, unapproved candidate IDs, eligibility reasons and `awaiting-approved-work` or `waiting-for-eligible-work`; an unavailable scan reports its error rather than a healthy empty result. Candidate bodies are not stored in observations. Active Objective reconciliation retains the ordinary controller's cadence; it does not promise a separate discovery scan every 30 seconds during execution.
+
+Later work requires explicit refill:
+
+```sh
+factory intake enqueue --authority /private/next-authority.json --config /private/factory.json
+```
+
+At a settled idle boundary the running owner authenticates that request through its existing control socket, reads the selected bodies and atomically replaces the finite authority. No second controller or queue is created. Poll/watch settings persist unless explicitly changed. A scan in flight reports that the refill boundary has not settled; retry after status shows it has settled. Active, paused, failed or ambiguous nonterminal work blocks replacement. Refill preserves all Objective snapshots, prior accounting and allowances; selecting a completed issue never reruns it. The current watcher stays available after completion until supported drain/stop/disable/uninstall. An unapproved new issue is observed but never compiled or executed.
+
 ## Run a finite batch of Objectives
 
 Use the same explicit authority file described under autonomous admission, with the finite `objectives` list in the desired order. Enqueue records that selection and each issue's current body. It does not start planning or execution. Configure the target and prepare its Objective issues first:
@@ -475,7 +510,7 @@ factory intake status --config /private/factory.json
 
 Factory processes one Objective at a time. Once an Objective is accepted, closed and its owned work has stopped, Factory can plan the next eligible selection. A GitHub issue's native “blocked by” dependencies must have retained Factory acceptance evidence. Factory verifies that the current default branch contains that accepted result before compiling the successor. Keep the configured checkout clean and able to fast-forward; Factory preserves conflicting local edits and reports the blocked baseline.
 
-The authority list is the default order. Optional repeated `--priority-label EXISTING_LABEL` arguments to `enqueue` rank pending selections using those labels, in argument order. Label changes can reorder pending work but never authorize another issue or interrupt active work. Closed issues, changed bodies and unresolved prerequisites remain ineligible with a reason in status. API failures are reported as unavailable observations. A reopened completed issue does not rerun. The poll interval defaults to 30 seconds and can be set with `--poll-seconds`.
+The authority list is the default order. Optional repeated `--priority-label EXISTING_LABEL` arguments to `enqueue` rank pending selections using those labels, in argument order. Label changes can reorder pending work but never authorize another issue or interrupt active work. Closed issues, changed bodies and unresolved prerequisites remain ineligible with a reason in status. API failures are reported as unavailable observations. A reopened completed issue does not rerun. The poll interval defaults to 30 seconds and can be set with `--poll-seconds`. Explicit finite mode exits when its selection is exhausted; add `--watch` to enqueue only when continuous observation and service consent were explicitly approved.
 
 ```sh
 factory intake pause --config /private/factory.json

@@ -68,7 +68,7 @@ import type { FactoryState } from "./state.js";
 export interface FactoryApplication {
   enqueueIntake(
     authority: ExecutionAuthority,
-    options?: { priorityLabels?: string[]; pollSeconds?: number },
+    options?: import("./intake.js").IntakeOptions,
   ): Promise<IntakeAuthorization>;
   runIntake(): Promise<IntakeAuthorization>;
   proposeAmendment(
@@ -236,6 +236,21 @@ export function createApplication(
         output,
         services.contentStore,
       ),
+  };
+}
+
+/** Model-free intake binding does not construct a provider driver or require its credential. */
+export function composeIntake(
+  config: FactoryConfig,
+): Pick<FactoryApplication, "enqueueIntake"> {
+  validateTarget(config.repository, config.checkout);
+  const github = new RealGitHubGateway(
+    config.repository,
+    new NativeStackDelivery(config.repository),
+  );
+  return {
+    enqueueIntake: (authority, options) =>
+      enqueueIntake(config, github, authority, options),
   };
 }
 

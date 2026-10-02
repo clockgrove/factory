@@ -34,6 +34,14 @@ Factory in its own checkout. Keep CLI, configuration, capture and state outside 
 target. Read complete README, AGENTS.md and scripts/check.mjs into the pinned source
 packet. Do not substitute a filename inventory for their contents.
 
+[Source clarification #489](https://github.com/clockgrove/factory/issues/489)
+makes this fixture's probe phases and empty aggregate validation explicit in the
+README and first Objective. Use those complete sources when preparing a new
+qualification baseline. This clarification does not change an existing run's
+pinned sources, accept a rejected graph or restore exhausted allowances. Exact
+command declaration proves lexical authority; independent graph review must
+still enforce the source's permitted phases and this scenario's aggregate role.
+
 Before remote creation, run this local mechanical fixture check:
 
 ```sh
@@ -60,8 +68,9 @@ QA and independent semantic reviews supply the product acceptance.
 The source-authorized `factory-fixture-prerequisite` is a task-private host tool
 that reports a named disposable acceptance condition. The dependency-free local
 Node.js implementation environment is available independently of this condition;
-the command belongs to beta result validation and final validation, not pre-worker
-readiness. Prepare it
+the command may run only during beta result validation and Objective final
+validation in this scenario. It must not run in another Work Item, including
+the discovered QA child or aggregate parent, or as pre-worker readiness. Prepare it
 before planning so executable preflight succeeds. Its implementation must have
 only a local condition observation, no model calls, credential access or target
 writes. Record its exact bytes, path and readiness condition. Keep the condition
@@ -100,6 +109,12 @@ start/completion times and harness identities; a concurrency setting or two
 planned nodes is insufficient. The alpha result proposes required QA. Verify an
 independently reviewed successor graph, unchanged started identities, a newly
 projected QA child/aggregate hierarchy and explicit join dependencies.
+
+The discovered QA child runs exactly `node scripts/check.mjs qa` after summary
+integration and receives independent acceptance review. This scenario's aggregate
+parent has an empty validation array and only joins accepted child proof against
+the exact integrated candidate, without a coding worker or PR. These fixture
+requirements do not restrict aggregate validation in other Factory Objectives.
 
 After a known identifiable worker has started, request one supported supervisor
 restart. Preserve before/after run, attempt, model-session, issue and PR identities.

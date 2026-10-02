@@ -1,6 +1,6 @@
 # Third-party notices
 
-Generated from the production dependencies in `package-lock.json` and their installed license files for Factory 0.1.66. Re-run `npm run notices` after changing the dependency lock and review the result. Development-only tooling is excluded; optional platform packages are included.
+Generated from the production dependencies in `package-lock.json` and their installed license files for Factory 0.1.67. Re-run `npm run notices` after changing the dependency lock and review the result. Development-only tooling is excluded; optional platform packages are included.
 
 | Package | Version | Declared license | Notice source |
 | --- | --- | --- | --- |

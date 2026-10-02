@@ -1095,3 +1095,179 @@ test("closed selection stays ineligible until explicit dequeue without model cal
     await running;
     assert.equal(f.plans.length, 0);
   }));
+
+const watcherConsent = {
+  actor: "fixture",
+  reason: "Observe approved target without spending",
+  consent: true,
+};
+async function waitFor(check) {
+  for (let attempt = 0; attempt < 300; attempt++) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Intake fixture condition did not settle");
+}
+async function settledEnqueue(application, selection) {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    try {
+      return await application.enqueueIntake(selection);
+    } catch (error) {
+      if (!String(error).includes("settled refill boundary")) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error("Refill did not reach its settled boundary");
+}
+
+test("consented continuous intake stays model-free while idle and refills through its same owner without reviving completed work", async () =>
+  fixture(async (f) => {
+    const { watchIntake } = await import("../dist/intake.js");
+    await watchIntake(f.config, watcherConsent, { pollSeconds: 0.05 });
+    assert.equal(readIntake(f.config).authority, undefined);
+    const running = f.application.runIntake();
+    await waitFor(
+      () =>
+        readIntake(f.config).observation?.idleReason ===
+        "awaiting-approved-work",
+    );
+    assert.deepEqual(readIntake(f.config).observation.unapproved, [1, 2]);
+    assert.deepEqual(f.plans, []);
+    const owner = readControllerOwner(
+      join(stateRoot(f.config.repository), "controller.lock"),
+    );
+    await settledEnqueue(f.application, { ...authority, objectives: [1] });
+    await waitFor(() => {
+      const state = readContinuation(f.config.repository, 1);
+      return (
+        state?.schemaVersion === 4 &&
+        objectiveComplete(state) &&
+        readIntake(f.config).observation?.idleReason ===
+          "awaiting-approved-work"
+      );
+    });
+    const first = JSON.stringify(readContinuation(f.config.repository, 1));
+    assert.equal(
+      readControllerOwner(
+        join(stateRoot(f.config.repository), "controller.lock"),
+      ).token,
+      owner.token,
+    );
+    await settledEnqueue(f.application, { ...authority, objectives: [1, 2] });
+    await waitFor(() => {
+      const state = readContinuation(f.config.repository, 2);
+      return (
+        state?.schemaVersion === 4 &&
+        objectiveComplete(state) &&
+        readIntake(f.config).observation?.idleReason ===
+          "awaiting-approved-work"
+      );
+    });
+    assert.equal(
+      JSON.stringify(readContinuation(f.config.repository, 1)),
+      first,
+    );
+    assert.deepEqual(
+      f.plans.map((entry) => entry.objective),
+      [1, 2],
+    );
+    await intakeControl(f.config, "drain");
+    await running;
+    assert.equal(
+      readControllerOwner(
+        join(stateRoot(f.config.repository), "controller.lock"),
+      ),
+      undefined,
+    );
+    await intakeControl(f.config, "resume");
+    const restarted = f.application.runIntake();
+    await waitFor(
+      async () =>
+        (
+          await requestControl(f.config.repository, {
+            objective: 0,
+            action: "status",
+          })
+        ).handled,
+    );
+    assert.deepEqual(
+      f.plans.map((entry) => entry.objective),
+      [1, 2],
+    );
+    await intakeControl(f.config, "drain");
+    await restarted;
+  }));
+
+test("watch retains changed-body fences and reports unavailable observations without candidate body storage or model calls", async () =>
+  fixture(async (f) => {
+    await f.application.enqueueIntake(
+      { ...authority, objectives: [1] },
+      { watch: true, pollSeconds: 0.05 },
+    );
+    f.issues.get(1).body += "Changed after explicit authorization";
+    const running = f.application.runIntake();
+    await waitFor(() =>
+      readIntake(f.config).observation?.reasons[1]?.includes("body changed"),
+    );
+    assert.deepEqual(readIntake(f.config).observation.unapproved, [2]);
+    assert.deepEqual(f.plans, []);
+    f.github.intakePage = async () => {
+      throw new Error("Fixture observation unavailable");
+    };
+    await waitFor(() =>
+      readIntake(f.config).observation?.error?.includes(
+        "observation unavailable",
+      ),
+    );
+    const observation = JSON.stringify(readIntake(f.config).observation);
+    assert.doesNotMatch(observation, /result-1\.txt|Changed after explicit/);
+    assert.equal(readIntake(f.config).observation.idleReason, undefined);
+    await intakeControl(f.config, "drain");
+    await running;
+  }));
+
+test("watch and refill preserve failed nonterminal fences and require real service consent", async () =>
+  fixture(async (f) => {
+    const { watchIntake } = await import("../dist/intake.js");
+    await assert.rejects(
+      watchIntake(f.config, { ...watcherConsent, consent: false }),
+      /explicit service consent/,
+    );
+    await assert.rejects(
+      f.application.enqueueIntake(
+        { ...authority, serviceConsent: false },
+        { watch: true },
+      ),
+      /explicit service consent/,
+    );
+    await watchIntake(f.config, watcherConsent);
+    const failed = {
+      schemaVersion: 5,
+      kind: "preparing",
+      repository: f.config.repository,
+      objective: 1,
+      configDigest: factoryConfigDigest(f.config),
+      runId: "preserved-failure",
+      baseSha: "a".repeat(40),
+      objectiveBodyDigest: "b".repeat(64),
+      coordinator: {
+        mode: "paused",
+        phase: "idle",
+        phaseStartedAt: new Date().toISOString(),
+      },
+      error: "Fixture submitted outcome unknown",
+      planning: "submitted",
+      issueByItemId: {},
+    };
+    saveState(statePath(f.config.repository, 1), failed);
+    await assert.rejects(
+      f.application.enqueueIntake(authority),
+      /active Objective prevents/,
+    );
+    await assert.rejects(
+      watchIntake(f.config, watcherConsent),
+      /active Objective prevents/,
+    );
+    assert.deepEqual(readContinuation(f.config.repository, 1), failed);
+    assert.equal(readIntake(f.config).authority, undefined);
+  }));

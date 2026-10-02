@@ -1,0 +1,457 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import test from "node:test";
+import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
+
+const installedCli = new URL("../dist/cli.js", import.meta.url).pathname;
+const consent = [
+  "--background",
+  "--service-consent",
+  "--actor",
+  "fixture",
+  "--reason",
+  "Consented model-free target watcher",
+  "--retain-package",
+];
+async function fixture(fn) {
+  const root = mkdtempSync(join(tmpdir(), "factory-setup-entry-"));
+  const checkout = createTarget(root).checkout;
+  factoryConfig(checkout, "example/setup");
+  const configPath = join(root, "factory.json");
+  const bin = join(root, "bin");
+  mkdirSync(bin);
+  const preload = join(root, "github.mjs");
+  writeFileSync(
+    preload,
+    `import fs from 'node:fs';
+const root=process.env.FACTORY_SETUP_FIXTURE;
+globalThis.fetch=async (url, input={})=>{
+ const address=String(url); const method=input.method??'GET';
+ fs.appendFileSync(root+'/requests', JSON.stringify({address,method})+'\\n');
+ if(method!=='GET'||!address.startsWith('https://api.github.com/repos/example/setup/issues')) throw Error('Fixture forbids provider calls and remote mutations');
+ if(fs.existsSync(root+'/github-unavailable')||(process.argv.includes('serve')&&fs.existsSync(root+'/service-github-unavailable'))) return new Response(JSON.stringify({message:'Unavailable'}),{status:503,headers:{'content-type':'application/json'}});
+ const data=address.match(/\\/issues\\/1(?:$|\\?)/)?{number:1,title:'Closed approved issue',body:'fixture exact approved body',state:'closed',labels:[]}:[{number:1,state:'closed',labels:[]}];
+ return new Response(JSON.stringify(data),{status:200,headers:{'content-type':'application/json',etag:'fixture-1'}});
+};`,
+  );
+  writeFileSync(
+    join(bin, "gh"),
+    "#!/bin/sh\nif test \"$1 $2\" = 'auth token'; then echo fixture-no-live-credential; else exit 1; fi\n",
+    { mode: 0o700 },
+  );
+  writeFileSync(join(bin, "loginctl"), "#!/bin/sh\necho no\n", { mode: 0o700 });
+  writeFileSync(
+    join(bin, "systemctl"),
+    `#!${process.execPath}
+import fs from 'node:fs'; import {spawn,spawnSync} from 'node:child_process';
+const root=process.env.FACTORY_SETUP_FIXTURE; const action=process.argv[3];
+fs.appendFileSync(root+'/calls',process.argv.slice(2).join(' ')+'\\n');
+const file=name=>root+'/'+name;
+const alive=()=>{try{const text=fs.readFileSync('/proc/'+fs.readFileSync(file('pid'),'utf8')+'/stat','utf8');return !['Z','X'].includes(text.slice(text.lastIndexOf(')')+2).split(' ')[0]);}catch{return false;}};
+if(action==='is-system-running'){console.log(fs.existsSync(file('unsupported'))?'offline':'running');}
+else if(action==='is-active'){console.log(fs.existsSync(file('start-failure'))?'failed':alive()?'active':'inactive');}
+else if(action==='is-enabled'){console.log(fs.existsSync(file('enabled'))?'enabled':'not-found');}
+else if(action==='show'){console.log(alive()?fs.readFileSync(file('pid'),'utf8'):'0');}
+else if(action==='enable'){if(fs.existsSync(file('enable-failure')))process.exit(1);fs.writeFileSync(file('registered'),process.argv[4]);fs.writeFileSync(file('enabled'),'');}
+else if(action==='disable'){fs.rmSync(file('enabled'),{force:true});}
+else if(action==='stop'&&fs.existsSync(file('refill-at-stop'))){
+ fs.rmSync(file('refill-at-stop'));
+ const target=spawnSync(process.execPath,[${JSON.stringify(installedCli)},'intake','enqueue','--authority',file('next-authority.json'),'--config',file('factory.json')],{env:process.env,encoding:'utf8'});
+ if(target.status!==0){console.error(target.stderr);process.exit(1);}
+}
+else if(action==='stop'&&fs.existsSync(file('foreign-at-stop'))){
+ const input=JSON.parse(fs.readFileSync(file('foreign-at-stop'),'utf8'));
+ fs.mkdirSync(input.directory,{recursive:true});fs.writeFileSync(input.directory+'/state.json',JSON.stringify(input.snapshot));
+ fs.rmSync(file('foreign-at-stop'));
+}
+else if(action==='start'&&!alive()&&!fs.existsSync(file('start-failure'))){
+ const unit=fs.readFileSync(fs.readFileSync(file('registered'),'utf8'),'utf8');
+ const binding=JSON.parse(unit.split('\\n')[0].slice('# Factory local supervision v1 '.length));
+ const args=[binding.cli,'supervisor','serve','--intake','--config',binding.config];
+ const env={...process.env,...binding.environment,XDG_STATE_HOME:binding.stateHome};
+ if(binding.credential){const dir=file('loaded');fs.mkdirSync(dir,{recursive:true});fs.copyFileSync(binding.credential.file,dir+'/'+binding.credential.name);env.CREDENTIALS_DIRECTORY=dir;args.push('--service-credential',binding.credential.name);}
+ const child=spawn(binding.node,args,{env,detached:true,stdio:['ignore',fs.openSync(file('service-out'),'a'),fs.openSync(file('service-error'),'a')]});
+ fs.writeFileSync(file('pid'),String(child.pid));fs.appendFileSync(file('starts'),'start\\n');child.unref();
+}
+`,
+    { mode: 0o700 },
+  );
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    XDG_CONFIG_HOME: join(root, "config"),
+    XDG_STATE_HOME: join(root, "state"),
+    FACTORY_SETUP_FIXTURE: root,
+    NODE_OPTIONS: `--import=${preload}`,
+  };
+  function run(commandArgs) {
+    const command = spawnSync(
+      process.execPath,
+      [installedCli, ...commandArgs, "--config", configPath],
+      { env, encoding: "utf8", timeout: 25000 },
+    );
+    assert.equal(command.signal, null, command.stderr);
+    return {
+      ...command,
+      document: command.stdout.trim().startsWith("{")
+        ? JSON.parse(command.stdout)
+        : undefined,
+    };
+  }
+  function installArgs() {
+    return [
+      "--repository",
+      "example/setup",
+      "--checkout",
+      checkout,
+      "--concurrency",
+      "1",
+    ];
+  }
+  try {
+    await fn({ root, checkout, configPath, env, run, installArgs });
+  } finally {
+    rmSync(join(root, "unsupported"), { force: true });
+    if (existsSync(configPath)) {
+      const stop = run(["supervisor", "uninstall"]);
+      assert.equal(stop.status, 0, stop.stderr);
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("actual guided CLI creates a consented idle watcher, verifies its owner and reuses it without duplicate controllers", () =>
+  fixture(async ({ root, run, installArgs, configPath }) => {
+    const first = run([
+      "setup",
+      ...consent,
+      ...installArgs(),
+      "--poll-seconds",
+      "0.05",
+    ]);
+    assert.equal(first.status, 0, first.stderr + first.stdout);
+    assert.equal(first.document.status, "ready");
+    assert.equal(first.document.repository, "example/setup");
+    assert.equal(first.document.service.active, "active");
+    assert.equal(first.document.service.binding.cli, installedCli);
+    assert.equal(first.document.intake.pollSeconds, 0.05);
+    assert.deepEqual(first.document.intake.approvedObjectives, []);
+    assert.equal(first.document.readiness.status, "not-assessed");
+    assert.equal(first.document.host.logoutPersistence, "not-enabled");
+    const config = readFileSync(configPath);
+    const pid = readFileSync(join(root, "pid"), "utf8");
+    const again = run(["setup", ...consent]);
+    assert.equal(again.status, 0, again.stderr + again.stdout);
+    assert.equal(again.document.status, "ready");
+    assert.equal(readFileSync(join(root, "pid"), "utf8"), pid);
+    assert.equal(readFileSync(join(root, "starts"), "utf8"), "start\n");
+    assert.deepEqual(readFileSync(configPath), config);
+    const requests = readFileSync(join(root, "requests"), "utf8")
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.ok(requests.length >= 2);
+    assert.ok(requests.every((request) => request.method === "GET"));
+  }));
+
+test("actual guided configuration-only setup succeeds with unavailable manager and requires explicit service consent for background", () =>
+  fixture(async ({ root, run, installArgs, configPath }) => {
+    writeFileSync(join(root, "unsupported"), "");
+    const configured = run(["setup", "--config-only", ...installArgs()]);
+    assert.equal(configured.status, 0, configured.stdout + configured.stderr);
+    assert.equal(configured.document.status, "configured");
+    assert.equal(existsSync(join(root, "registered")), false);
+    const saved = readFileSync(configPath);
+    const absent = run(["setup", "--background", "--retain-package"]);
+    assert.equal(absent.status, 1);
+    assert.equal(absent.document.blocked.stage, "intent");
+    assert.match(absent.document.blocked.detail, /explicit --service-consent/);
+    const unsupported = run(["setup", ...consent]);
+    assert.equal(unsupported.status, 1);
+    assert.equal(unsupported.document.blocked.stage, "host-readiness");
+    assert.deepEqual(readFileSync(configPath), saved);
+    assert.equal(existsSync(join(root, "registered")), false);
+  }));
+
+test("actual guided setup reports partial registration/start failures and completes a corrected repeat without replacing state", () =>
+  fixture(async ({ root, run, installArgs, configPath }) => {
+    writeFileSync(join(root, "enable-failure"), "");
+    const failed = run(["setup", ...consent, ...installArgs()]);
+    assert.equal(failed.status, 1);
+    assert.equal(failed.document.blocked.stage, "service-registration");
+    assert.ok(failed.document.completed.includes("intake-bound"));
+    assert.equal(existsSync(join(root, "starts")), false);
+    const saved = readFileSync(configPath);
+    rmSync(join(root, "enable-failure"));
+    writeFileSync(join(root, "start-failure"), "");
+    const start = run(["setup", ...consent]);
+    assert.equal(start.status, 1);
+    assert.equal(start.document.blocked.stage, "service-start");
+    assert.match(start.document.blocked.detail, /exact coordinator owner/);
+    rmSync(join(root, "start-failure"));
+    const ready = run(["setup", ...consent]);
+    assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+    assert.equal(ready.document.status, "ready");
+    assert.deepEqual(readFileSync(configPath), saved);
+    assert.equal(readFileSync(join(root, "starts"), "utf8"), "start\n");
+  }));
+
+test("actual guided setup checks admitted execution readiness and retains a closed finite selection without dispatch", () =>
+  fixture(async ({ root, run, configPath, env, checkout }) => {
+    const config = factoryConfig(checkout, "example/setup");
+    config.execution = {
+      kind: "managed-agent",
+      provider: "openai-agents",
+      concurrency: 1,
+      config: {
+        model: "fixture",
+        reasoningEffort: "low",
+        containerSize: "small",
+        apiKeyEnv: "FACTORY_SERVICE_TEST_KEY",
+        timeoutSeconds: 10,
+      },
+    };
+    writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+    const authority = join(root, "authority.json");
+    writeFileSync(
+      authority,
+      JSON.stringify({
+        schemaVersion: 1,
+        actor: "fixture",
+        reason: "One explicitly approved closed fixture Objective",
+        executionConsent: true,
+        serviceConsent: false,
+        objectives: [1],
+        allowances: {
+          planningRevisions: 0,
+          implementationRepairs: 0,
+          resultRereviews: 0,
+        },
+        repairClasses: [],
+        resources: { maxConcurrency: 1 },
+        requiredEnvironment: [],
+      }),
+    );
+    const credential = join(root, "credential");
+    writeFileSync(credential, "fixture-no-provider-call", { mode: 0o600 });
+    const args = [
+      "setup",
+      ...consent,
+      "--authority",
+      authority,
+      "--credential-file",
+      credential,
+    ];
+    delete env.FACTORY_SERVICE_TEST_KEY;
+    const missing = run(["setup", ...consent, "--authority", authority]);
+    assert.equal(missing.status, 1);
+    assert.equal(missing.document.blocked.stage, "execution-readiness");
+    assert.equal(existsSync(join(root, "registered")), false);
+    const ready = run(args);
+    assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+    assert.deepEqual(ready.document.intake.approvedObjectives, [1]);
+    assert.equal(ready.document.readiness.status, "present");
+    assert.doesNotMatch(ready.stdout, /fixture-no-provider-call/);
+    const status = run(["intake", "status"]);
+    assert.equal(status.status, 0);
+    assert.equal(status.document.authority.serviceConsent, false);
+    assert.equal(status.document.serviceConsent.consent, true);
+    assert.equal(status.document.observation.reasons[1], "Issue is closed");
+  }));
+
+test("guided ready requires the service owner's own GitHub observation and retains a blocked live watcher for correction", () =>
+  fixture(async ({ root, run, installArgs }) => {
+    writeFileSync(join(root, "service-github-unavailable"), "");
+    const blocked = run([
+      "setup",
+      ...consent,
+      ...installArgs(),
+      "--poll-seconds",
+      "0.05",
+    ]);
+    assert.equal(blocked.status, 1);
+    assert.equal(blocked.document.blocked.stage, "service-observation");
+    assert.match(
+      blocked.document.blocked.detail,
+      /Service GitHub observation is unavailable/,
+    );
+    assert.ok(blocked.document.completed.includes("exact-owner-verified"));
+    assert.equal(blocked.document.service.active, "active");
+    const pid = readFileSync(join(root, "pid"), "utf8");
+    rmSync(join(root, "service-github-unavailable"));
+    const ready = run(["setup", ...consent]);
+    assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+    assert.equal(ready.document.status, "ready");
+    assert.equal(ready.document.observation.error, undefined);
+    assert.equal(readFileSync(join(root, "pid"), "utf8"), pid);
+    assert.equal(readFileSync(join(root, "starts"), "utf8"), "start\n");
+  }));
+
+test("guided setup upgrades a live settled watcher through compatibility and drain without losing its running mode", () =>
+  fixture(async ({ root, run, installArgs, configPath }) => {
+    const first = run([
+      "setup",
+      ...consent,
+      ...installArgs(),
+      "--poll-seconds",
+      "0.05",
+    ]);
+    assert.equal(first.status, 0, first.stdout + first.stderr);
+    const before = readFileSync(configPath);
+    const oldPackage = join(root, "retained-package");
+    mkdirSync(oldPackage);
+    cpSync(
+      join(dirname(dirname(installedCli)), "package.json"),
+      join(oldPackage, "package.json"),
+    );
+    cpSync(dirname(installedCli), join(oldPackage, "dist"), {
+      recursive: true,
+    });
+    symlinkSync(
+      realpathSync(new URL("../node_modules", import.meta.url).pathname),
+      join(oldPackage, "node_modules"),
+    );
+    const previousArtifact = join(oldPackage, "dist/cli.js");
+    const switchToPrevious = run([
+      "supervisor",
+      "upgrade",
+      "--cli",
+      previousArtifact,
+    ]);
+    assert.equal(
+      switchToPrevious.status,
+      0,
+      switchToPrevious.stdout + switchToPrevious.stderr,
+    );
+    const upgraded = run(["setup", ...consent]);
+    assert.equal(upgraded.status, 0, upgraded.stdout + upgraded.stderr);
+    assert.ok(upgraded.document.completed.includes("artifact-upgraded"));
+    assert.equal(upgraded.document.intake.mode, "running");
+    assert.equal(upgraded.document.service.binding.cli, installedCli);
+    assert.equal(upgraded.document.service.active, "active");
+    assert.deepEqual(readFileSync(configPath), before);
+    assert.equal(
+      readFileSync(join(root, "starts"), "utf8"),
+      "start\nstart\nstart\n",
+    );
+  }));
+
+for (const fault of ["refill", "foreign"]) {
+  test(`watcher artifact upgrade refuses automatic resume after ${fault} changes its settled boundary`, () =>
+    fixture(async ({ root, run, installArgs, configPath }) => {
+      const initial = run([
+        "setup",
+        ...consent,
+        ...installArgs(),
+        "--poll-seconds",
+        "0.05",
+      ]);
+      assert.equal(initial.status, 0, initial.stdout + initial.stderr);
+      const config = JSON.parse(readFileSync(configPath, "utf8"));
+      if (fault === "refill") {
+        writeFileSync(
+          join(root, "next-authority.json"),
+          JSON.stringify({
+            schemaVersion: 1,
+            actor: "fixture",
+            reason: "Concurrent explicit settled refill",
+            executionConsent: true,
+            serviceConsent: false,
+            objectives: [1],
+            allowances: {
+              planningRevisions: 0,
+              implementationRepairs: 0,
+              resultRereviews: 0,
+            },
+            repairClasses: [],
+            resources: { maxConcurrency: 1 },
+            requiredEnvironment: [],
+          }),
+        );
+        writeFileSync(join(root, "refill-at-stop"), "");
+      } else {
+        const { factoryConfigDigest } = await import("../dist/config.js");
+        const snapshot = {
+          schemaVersion: 5,
+          kind: "preparing",
+          repository: config.repository,
+          objective: 2,
+          configDigest: factoryConfigDigest(config),
+          runId: "retained-foreign-nonterminal",
+          baseSha: "a".repeat(40),
+          objectiveBodyDigest: "b".repeat(64),
+          coordinator: {
+            mode: "paused",
+            phase: "idle",
+            phaseStartedAt: new Date().toISOString(),
+          },
+          error: "Retained submitted outcome requires operator recovery",
+          planning: "submitted",
+          issueByItemId: {},
+        };
+        writeFileSync(
+          join(root, "foreign-at-stop"),
+          JSON.stringify({
+            directory: join(
+              root,
+              "state/clockgrove-factory/repositories",
+              ...config.repository.split("/"),
+              "objectives/2",
+            ),
+            snapshot,
+          }),
+        );
+      }
+      const upgraded = run(["supervisor", "upgrade", "--cli", installedCli]);
+      assert.equal(upgraded.status, 0, upgraded.stdout + upgraded.stderr);
+      assert.equal(upgraded.document.restarted, false);
+      assert.equal(upgraded.document.resumeRequired, true);
+      assert.equal(readFileSync(join(root, "starts"), "utf8"), "start\n");
+      const status = run(["intake", "status"]);
+      assert.equal(status.status, 0, status.stderr);
+      assert.equal(status.document.mode, "draining");
+      if (fault === "refill")
+        assert.deepEqual(status.document.authority.objectives, [1]);
+    }));
+}
+
+test("guided setup rejects configuration inside the target before writing it and preserves conflicting existing choices", () =>
+  fixture(async ({ checkout, run, installArgs, configPath }) => {
+    const inside = join(checkout, "factory.json");
+    const refused = run([
+      "setup",
+      "--config-only",
+      ...installArgs(),
+      "--config",
+      inside,
+    ]);
+    assert.equal(refused.status, 1);
+    assert.match(
+      refused.document.blocked.detail,
+      /outside the target checkout/,
+    );
+    assert.equal(existsSync(inside), false);
+    const configured = run(["setup", "--config-only", ...installArgs()]);
+    assert.equal(configured.status, 0, configured.stdout + configured.stderr);
+    const before = readFileSync(configPath);
+    const conflict = run(["setup", "--config-only", "--concurrency", "2"]);
+    assert.equal(conflict.status, 1);
+    assert.match(
+      conflict.document.blocked.detail,
+      /differs from --concurrency/,
+    );
+    assert.deepEqual(readFileSync(configPath), before);
+  }));

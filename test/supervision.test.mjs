@@ -630,3 +630,44 @@ test("CLI status preserves local health when the manager is unavailable and keep
     assert.equal(status.bindingHealth.diagnostics[0].code, "invalid-config");
     assert.doesNotMatch(JSON.stringify(status), /dummy-secret/);
   }));
+
+test("standalone intake service consent remains valid for exact admitted historical work without changing that admission", () =>
+  fixture(async ({ config, state, configPath }) => {
+    const { watchIntake } = await import("../dist/intake.js");
+    rmSync(statePath(config.repository, 1));
+    await watchIntake(config, {
+      actor: "fixture",
+      reason: "Observe and supervise separately consented work",
+      consent: true,
+    });
+    const authority = {
+      ...state.admission.authority,
+      serviceConsent: false,
+      resources: { maxConcurrency: config.execution.concurrency },
+    };
+    await enqueueIntake(
+      config,
+      {
+        objective: async () => ({
+          body: "Authorized Objective",
+          state: "open",
+        }),
+      },
+      authority,
+    );
+    const { digest: _oldDigest, ...raw } = state.admission;
+    raw.authority = authority;
+    state.admission = {
+      ...raw,
+      digest: createHash("sha256").update(JSON.stringify(raw)).digest("hex"),
+    };
+    saveState(statePath(config.repository, 1), state);
+    const before = readFileSync(statePath(config.repository, 1));
+    checkIntakeServiceState(config);
+    assert.equal(
+      await supervise("check", configPath, { intake: true }),
+      "factory-supervision-compatible-v1",
+    );
+    assert.throws(() => checkServiceState(config, 1), /Service consent/);
+    assert.deepEqual(readFileSync(statePath(config.repository, 1)), before);
+  }));

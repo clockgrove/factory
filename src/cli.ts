@@ -35,13 +35,14 @@ import {
   summarizeDiagnosticUsage,
 } from "./diagnostics.js";
 import { probeCodexReadiness } from "./harness-readiness.js";
-import { compose, composePlanning } from "./index.js";
+import { compose, composePlanning, composeIntake } from "./index.js";
 import {
   CoordinatorHandoff,
   controlObjective,
   selectAssetSetFromCli,
 } from "./runner.js";
-import { intakeControl } from "./intake.js";
+import { intakeControl, watchIntake } from "./intake.js";
+import { setupTarget } from "./setup.js";
 import { itemsConflict } from "./scheduler.js";
 import { readContinuation, readState } from "./state-store.js";
 import {
@@ -63,7 +64,7 @@ function options(args: string[], name: string): string[] {
 
 function help(): void {
   console.log(
-    `Factory CLI\n\nCommands:\n  intake enqueue --authority FILE [--priority-label LABEL ...] [--poll-seconds N] [--config PATH]\n  intake run|status|pause|resume|drain [--config PATH]\n  intake dequeue --objective N [--config PATH]\n  readiness [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--config PATH]\n  supervisor install|status|start|stop|disable|uninstall|upgrade [--intake | --objective N] [--plan PATH --admission PATH] [--cli ABSOLUTE_INSTALLED_CLI] [--credential-file ABSOLUTE_PRIVATE_FILE] [--config PATH]\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  export-captures --objective N --destination langfuse|langsmith --endpoint HTTPS_BASE_URL --content metadata|retained [--project-id UUID] [--workspace-id UUID] [--run ID ...] [--invocation ID ...] [--send --authorize PREVIEW_DIGEST] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  propose-amendment --objective N --proposal FILE [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--abandon-read-only-review FILE] [--config PATH]\n  repair --objective N --proposal FILE [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
+    `Factory CLI\n\nCommands:\n  setup --background --service-consent --actor NAME --reason TEXT --retain-package [--authority FILE] [INSTALL_OPTIONS] [--config PATH]\n  setup --config-only [INSTALL_OPTIONS] [--config PATH]\n  intake watch --service-consent --actor NAME --reason TEXT [--poll-seconds N] [--config PATH]\n  intake enqueue --authority FILE [--priority-label LABEL ...] [--poll-seconds N] [--watch] [--config PATH]\n  intake run|status|pause|resume|drain [--config PATH]\n  intake dequeue --objective N [--config PATH]\n  readiness [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--config PATH]\n  supervisor install|status|start|stop|disable|uninstall|upgrade [--intake | --objective N] [--plan PATH --admission PATH] [--cli ABSOLUTE_INSTALLED_CLI] [--credential-file ABSOLUTE_PRIVATE_FILE] [--config PATH]\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH --concurrency N [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  export-captures --objective N --destination langfuse|langsmith --endpoint HTTPS_BASE_URL --content metadata|retained [--project-id UUID] [--workspace-id UUID] [--run ID ...] [--invocation ID ...] [--send --authorize PREVIEW_DIGEST] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  propose-amendment --objective N --proposal FILE [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--abandon-read-only-review FILE] [--config PATH]\n  repair --objective N --proposal FILE [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
   );
 }
 
@@ -71,6 +72,12 @@ async function main(): Promise<void> {
   const [, , command, ...args] = process.argv;
   if (!command || command === "help" || command === "--help") return help();
   const path = option(args, "config") ?? configPath();
+  if (command === "setup") {
+    const result = await setupTarget(args, path);
+    console.log(JSON.stringify(result, null, 2));
+    if (result.status === "blocked") process.exitCode = 1;
+    return;
+  }
   if (command === "readiness") {
     const config = readConfig(path);
     const credentialName = requiredProviderCredential(config);
@@ -147,17 +154,40 @@ async function main(): Promise<void> {
   if (command === "intake") {
     const action = args[0] ?? "status";
     const config = readConfig(path);
-    if (action === "enqueue") {
+    if (action === "watch") {
+      if (!args.includes("--service-consent"))
+        throw new Error("intake watch requires explicit --service-consent");
+      console.log(
+        JSON.stringify(
+          await watchIntake(
+            config,
+            {
+              actor: option(args, "actor")!,
+              reason: option(args, "reason")!,
+              consent: true,
+            },
+            option(args, "poll-seconds")
+              ? { pollSeconds: Number(option(args, "poll-seconds")) }
+              : {},
+          ),
+          null,
+          2,
+        ),
+      );
+    } else if (action === "enqueue") {
       const authorityPath = option(args, "authority");
       if (!authorityPath)
         throw new Error("intake enqueue requires --authority FILE");
       console.log(
         JSON.stringify(
-          await compose(config).enqueueIntake(
+          await composeIntake(config).enqueueIntake(
             JSON.parse(readFileSync(authorityPath, "utf8")),
             {
               priorityLabels: options(args, "priority-label"),
-              pollSeconds: Number(option(args, "poll-seconds") ?? 30),
+              ...(option(args, "poll-seconds")
+                ? { pollSeconds: Number(option(args, "poll-seconds")) }
+                : {}),
+              ...(args.includes("--watch") ? { watch: true } : {}),
             },
           ),
           null,

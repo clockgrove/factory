@@ -12,7 +12,11 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { ExecutionAuthority } from "./admission.js";
-import { checkAuthority, bindAdmission } from "./admission.js";
+import {
+  checkAuthority,
+  bindAdmission,
+  validateAuthority,
+} from "./admission.js";
 import {
   factoryConfigDigest,
   stateRoot,
@@ -46,17 +50,35 @@ import {
 import type { PreparationState, ContinuationState } from "./state.js";
 
 /** Authorization and idle control only. Pending order is derived, never copied into a queue. */
+export interface IntakeServiceConsent {
+  actor: string;
+  reason: string;
+  consent: true;
+}
+export interface IntakeOptions {
+  priorityLabels?: string[];
+  pollSeconds?: number;
+  watch?: boolean;
+}
 export interface IntakeAuthorization {
   version: 1;
   repository: string;
   configDigest: string;
-  authority: ExecutionAuthority;
+  authority?: ExecutionAuthority;
+  watch?: true;
+  serviceConsent?: IntakeServiceConsent;
   bodyDigests: Record<string, string>;
   priorityLabels: string[];
   pollSeconds: number;
   dequeued: number[];
   mode: "running" | "paused" | "draining";
-  observation?: { at: string; reasons: Record<string, string>; error?: string };
+  observation?: {
+    at: string;
+    reasons: Record<string, string>;
+    error?: string;
+    idleReason?: "awaiting-approved-work" | "waiting-for-eligible-work";
+    unapproved?: number[];
+  };
 }
 const digest = (body: string) =>
   createHash("sha256").update(body).digest("hex");
@@ -111,6 +133,8 @@ export function readIntake(
         "repository",
         "configDigest",
         "authority",
+        "watch",
+        "serviceConsent",
         "bodyDigests",
         "priorityLabels",
         "pollSeconds",
@@ -122,12 +146,27 @@ export function readIntake(
       throw new Error(
         `Unsupported intake authorization field ${key}; compatibility refused`,
       );
-  for (const objective of value.authority.objectives) {
-    checkAuthority(config, objective, value.authority);
+  if (value.watch !== undefined && value.watch !== true)
+    throw new Error("Invalid continuous intake selection");
+  if (value.serviceConsent !== undefined)
+    validateServiceConsent(value.serviceConsent);
+  if (!value.authority && (!value.watch || !intakeServiceConsent(value)))
+    throw new Error(
+      "Observation-only intake requires explicit watch and service consent",
+    );
+  if (value.watch && !intakeServiceConsent(value))
+    throw new Error("Continuous watch requires explicit service consent");
+  if (value.authority) validateAuthority(value.authority);
+  for (const objective of value.authority?.objectives ?? []) {
+    checkAuthority(config, objective, value.authority!);
     if (!/^[a-f0-9]{64}$/.test(value.bodyDigests[objective] ?? ""))
       throw new Error("Intake issue body binding is missing");
   }
-  if (value.dequeued.some((id) => !value.authority.objectives.includes(id)))
+  if (
+    value.dequeued.some(
+      (id) => !(value.authority?.objectives ?? []).includes(id),
+    )
+  )
     throw new Error("Invalid revoked Objective authorization");
   return value;
 }
@@ -150,55 +189,166 @@ export function intakeComplete(
   config: FactoryConfig,
   record: IntakeAuthorization,
 ): boolean {
-  return record.authority.objectives.every((id) => {
+  return (record.authority?.objectives ?? []).every((id) => {
     if (record.dequeued.includes(id)) return true;
     const state = readContinuation(config.repository, id);
     return !!state && terminal(state);
   });
 }
+function validateServiceConsent(consent: IntakeServiceConsent): void {
+  if (
+    !consent ||
+    consent.consent !== true ||
+    typeof consent.actor !== "string" ||
+    !consent.actor.trim() ||
+    typeof consent.reason !== "string" ||
+    !consent.reason.trim() ||
+    Object.keys(consent).some(
+      (key) => !["actor", "reason", "consent"].includes(key),
+    )
+  )
+    throw new Error(
+      "Watcher requires explicit service consent, actor and reason",
+    );
+}
+export function intakeServiceConsent(record: IntakeAuthorization): boolean {
+  return (
+    record.authority?.serviceConsent === true ||
+    record.serviceConsent?.consent === true
+  );
+}
+export function intakeSettled(config: FactoryConfig): boolean {
+  return continuations(config).every(terminal);
+}
+function settledRefill(config: FactoryConfig): void {
+  if (!intakeSettled(config))
+    throw new Error("An active Objective prevents replacing intake authority");
+}
+async function bindIntake(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  authority: ExecutionAuthority,
+  options: IntakeOptions,
+  previous?: IntakeAuthorization,
+): Promise<IntakeAuthorization> {
+  settledRefill(config);
+  validateAuthority(authority);
+  if (
+    (options.watch ?? previous?.watch) &&
+    !authority.serviceConsent &&
+    !previous?.serviceConsent
+  )
+    throw new Error("Continuous watch requires explicit service consent");
+  const bodyDigests: Record<string, string> = {};
+  for (const objective of authority.objectives) {
+    checkAuthority(config, objective, authority);
+    bodyDigests[objective] = digest((await github.objective(objective)).body);
+  }
+  const value: IntakeAuthorization = {
+    version: 1,
+    repository: config.repository,
+    configDigest: factoryConfigDigest(config),
+    authority: structuredClone(authority),
+    bodyDigests,
+    priorityLabels: options.priorityLabels ?? previous?.priorityLabels ?? [],
+    pollSeconds: options.pollSeconds ?? previous?.pollSeconds ?? 30,
+    dequeued: [],
+    mode: previous?.mode ?? "running",
+    ...((options.watch ?? previous?.watch) ? { watch: true as const } : {}),
+    ...(previous?.serviceConsent
+      ? { serviceConsent: previous.serviceConsent }
+      : {}),
+  };
+  if (
+    !Number.isFinite(value.pollSeconds) ||
+    value.pollSeconds <= 0 ||
+    value.priorityLabels.some(
+      (label) => typeof label !== "string" || !label.trim(),
+    )
+  )
+    throw new Error(
+      "Intake polling interval and priority labels must be explicit valid values",
+    );
+  return value;
+}
+/** Refill is handled by the current owner, or by the ordinary lock when stopped. */
 export async function enqueueIntake(
   config: FactoryConfig,
   github: GitHubGateway,
   authority: ExecutionAuthority,
-  options: { priorityLabels?: string[]; pollSeconds?: number } = {},
+  options: IntakeOptions = {},
 ): Promise<IntakeAuthorization> {
+  const reply = await requestControl(config.repository, {
+    objective: 0,
+    action: "enqueue",
+    input: { authority, options },
+  });
+  if (reply.handled) return reply.result as IntakeAuthorization;
   mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
   const lockPath = join(stateRoot(config.repository), "controller.lock");
   const lock = acquireControllerLock(lockPath, 0);
   try {
-    if (continuations(config).some((state) => !terminal(state)))
-      throw new Error(
-        "An active Objective prevents replacing intake authority",
-      );
-    const bodyDigests: Record<string, string> = {};
-    for (const objective of authority.objectives) {
-      checkAuthority(config, objective, authority);
-      bodyDigests[objective] = digest((await github.objective(objective)).body);
-    }
-    const value: IntakeAuthorization = {
-      version: 1,
-      repository: config.repository,
-      configDigest: factoryConfigDigest(config),
-      authority: structuredClone(authority),
-      bodyDigests,
-      priorityLabels: options.priorityLabels ?? [],
-      pollSeconds: options.pollSeconds ?? 30,
-      dequeued: [],
-      mode: "running",
-    };
-    if (
-      !Number.isFinite(value.pollSeconds) ||
-      value.pollSeconds <= 0 ||
-      value.priorityLabels.some((label) => !label.trim())
-    )
-      throw new Error(
-        "Intake polling interval and priority labels must be explicit valid values",
-      );
+    const value = await bindIntake(
+      config,
+      github,
+      authority,
+      options,
+      readIntake(config),
+    );
     saveIntake(config, value);
     return value;
   } finally {
     releaseControllerLock(lockPath, lock);
   }
+}
+export async function watchIntake(
+  config: FactoryConfig,
+  consent: IntakeServiceConsent,
+  options: Pick<IntakeOptions, "pollSeconds"> = {},
+): Promise<IntakeAuthorization> {
+  validateServiceConsent(consent);
+  const reply = await requestControl(config.repository, {
+    objective: 0,
+    action: "watch",
+    input: { consent, options },
+  });
+  if (reply.handled) return reply.result as IntakeAuthorization;
+  mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
+  const path = join(stateRoot(config.repository), "controller.lock");
+  const lock = acquireControllerLock(path, 0);
+  try {
+    const previous = readIntake(config);
+    settledRefill(config);
+    const value = watchRecord(config, consent, options, previous);
+    saveIntake(config, value);
+    return value;
+  } finally {
+    releaseControllerLock(path, lock);
+  }
+}
+function watchRecord(
+  config: FactoryConfig,
+  consent: IntakeServiceConsent,
+  options: Pick<IntakeOptions, "pollSeconds">,
+  previous?: IntakeAuthorization,
+): IntakeAuthorization {
+  validateServiceConsent(consent);
+  const pollSeconds = options.pollSeconds ?? previous?.pollSeconds ?? 30;
+  if (!Number.isFinite(pollSeconds) || pollSeconds <= 0)
+    throw new Error("Intake polling interval must be a positive number");
+  return {
+    version: 1,
+    repository: config.repository,
+    configDigest: factoryConfigDigest(config),
+    bodyDigests: {},
+    priorityLabels: [],
+    dequeued: [],
+    mode: "running",
+    ...previous,
+    watch: true,
+    serviceConsent: structuredClone(consent),
+    pollSeconds,
+  };
 }
 
 /** Conditional page receipts are transient observations. A restart performs fresh authenticated reads. */
@@ -277,7 +427,7 @@ function applyControl(
   objective?: number,
 ): void {
   if (action === "dequeue") {
-    if (!objective || !record.authority.objectives.includes(objective))
+    if (!objective || !(record.authority?.objectives ?? []).includes(objective))
       throw new Error("Objective is outside intake authority");
     const state = readContinuation(config.repository, objective);
     if (state && !terminal(state))
@@ -291,6 +441,35 @@ function applyControl(
   else if (action !== "status")
     throw new Error("Unsupported intake control action");
   if (action !== "status") saveIntake(config, record);
+}
+
+/** Restore only the unchanged, settled idle watch after supported artifact handoff. */
+export function resumeWatcherAfterUpgrade(
+  config: FactoryConfig,
+  expected: IntakeAuthorization,
+): boolean {
+  const path = join(stateRoot(config.repository), "controller.lock");
+  const lock = acquireControllerLock(path, 0);
+  try {
+    const current = readIntake(config);
+    const binding = (record: IntakeAuthorization) => {
+      const { mode: _mode, observation: _observation, ...value } = record;
+      return JSON.stringify(value);
+    };
+    if (
+      !current?.watch ||
+      !expected.watch ||
+      expected.mode !== "running" ||
+      current.mode !== "draining" ||
+      binding(current) !== binding(expected) ||
+      !intakeSettled(config)
+    )
+      return false;
+    applyControl(config, current, "resume");
+    return true;
+  } finally {
+    releaseControllerLock(path, lock);
+  }
 }
 
 async function resolveBase(
@@ -324,8 +503,9 @@ export async function runIntake(
   config: FactoryConfig,
   services: ApplicationServices,
 ): Promise<IntakeAuthorization> {
-  const record = readIntake(config);
-  if (!record) throw new Error("No intake authority registered");
+  const initial = readIntake(config);
+  if (!initial) throw new Error("No intake authority registered");
+  let record: IntakeAuthorization = initial;
   const lockPath = join(stateRoot(config.repository), "controller.lock");
   const lock = acquireControllerLock(lockPath, 0);
   const observations = new IntakeObservation(services.github);
@@ -337,6 +517,8 @@ export async function runIntake(
   let preparation: PreparationState | undefined;
   let planningAbort: AbortController | undefined;
   let handingOff = false;
+  let observing = false;
+  let refilling = false;
   let wake: (() => void) | undefined;
   const onHandoff = () => {
     handingOff = true;
@@ -345,6 +527,42 @@ export async function runIntake(
     wake?.();
   };
   const handle = async (request: ControlRequest): Promise<unknown> => {
+    if (
+      request.objective === 0 &&
+      ["enqueue", "watch"].includes(request.action)
+    ) {
+      if (activeObjective || observing || refilling || handingOff)
+        throw new Error(
+          "Intake is not at a settled refill boundary; inspect status and retry after observation settles",
+        );
+      settledRefill(config);
+      refilling = true;
+      try {
+        const next =
+          request.action === "enqueue"
+            ? await bindIntake(
+                config,
+                services.github,
+                request.input?.authority as ExecutionAuthority,
+                (request.input?.options ?? {}) as IntakeOptions,
+                record,
+              )
+            : watchRecord(
+                config,
+                request.input?.consent as IntakeServiceConsent,
+                (request.input?.options ?? {}) as IntakeOptions,
+                record,
+              );
+        if (handingOff || record.mode === "draining")
+          throw new Error("Intake handoff prevents replacing authorization");
+        saveIntake(config, next);
+        record = next;
+      } finally {
+        refilling = false;
+        wake?.();
+      }
+      return record;
+    }
     if (request.objective !== 0) {
       if (request.objective === activeObjective && objectiveControl)
         return objectiveControl(request);
@@ -353,13 +571,13 @@ export async function runIntake(
       if (
         request.action === "status" &&
         preparing?.objective === request.objective &&
-        record.authority.objectives.includes(request.objective)
+        (record.authority?.objectives ?? []).includes(request.objective)
       )
         return preparing.coordinator;
       if (
         preparing?.schemaVersion !== 5 ||
         preparing.objective !== request.objective ||
-        !record.authority.objectives.includes(request.objective)
+        !(record.authority?.objectives ?? []).includes(request.objective)
       )
         throw new Error(
           "Use intake control while discovery owns this installation",
@@ -436,17 +654,21 @@ export async function runIntake(
           "Multiple nonterminal Objectives require ownership reconciliation",
         );
       const current = existing[0];
-      if (current && !record.authority.objectives.includes(current.objective))
+      if (
+        current &&
+        !(record.authority?.objectives ?? []).includes(current.objective)
+      )
         throw new Error("Active Objective is outside this intake authority");
       const reasons: Record<string, string> = {};
       let selected = current?.objective;
-      if (record.mode === "running" && !selected) {
-        const remaining = record.authority.objectives.filter(
+      if (record.mode === "running" && !selected && !refilling) {
+        const remaining = (record.authority?.objectives ?? []).filter(
           (id) =>
             !record.dequeued.includes(id) &&
             !readContinuation(config.repository, id),
         );
-        if (!remaining.length) return record;
+        if (!remaining.length && !record.watch) return record;
+        observing = true;
         try {
           const scanned = await observations.scan();
           const ranked = [...remaining].sort((left, right) => {
@@ -459,8 +681,8 @@ export async function runIntake(
             };
             return (
               rank(left) - rank(right) ||
-              record.authority.objectives.indexOf(left) -
-                record.authority.objectives.indexOf(right)
+              (record.authority?.objectives ?? []).indexOf(left) -
+                (record.authority?.objectives ?? []).indexOf(right)
             );
           });
           for (const id of ranked) {
@@ -499,17 +721,36 @@ export async function runIntake(
                 `Observation or baseline unavailable: ${String(error)}`;
             }
           }
-          record.observation = { at: new Date().toISOString(), reasons };
+          record.observation = {
+            at: new Date().toISOString(),
+            reasons,
+            ...(record.watch
+              ? {
+                  unapproved: [...scanned.keys()].filter(
+                    (id) => !(record.authority?.objectives ?? []).includes(id),
+                  ),
+                  ...(!selected
+                    ? {
+                        idleReason: remaining.length
+                          ? ("waiting-for-eligible-work" as const)
+                          : ("awaiting-approved-work" as const),
+                      }
+                    : {}),
+                }
+              : {}),
+          };
         } catch (error) {
           record.observation = {
             at: new Date().toISOString(),
             reasons,
             error: String(error),
           };
+        } finally {
+          observing = false;
         }
         saveIntake(config, record);
       }
-      if (selected && record.mode === "running") {
+      if (selected && record.mode === "running" && !refilling) {
         activeObjective = selected;
         retargetControllerLock(lockPath, lock, selected);
         try {
@@ -530,16 +771,23 @@ export async function runIntake(
             // #250 supplies the internal durable planning/borrowed-owner seam.
             planningAbort = new AbortController();
             plan = await withProcessCancellation(planningAbort.signal, () =>
-              planObjective(config, selected!, services, [], record.authority, {
-                ownerLock: lock,
-                observePreparation: (value: PreparationState) => {
-                  preparation = value;
+              planObjective(
+                config,
+                selected!,
+                services,
+                [],
+                record.authority!,
+                {
+                  ownerLock: lock,
+                  observePreparation: (value: PreparationState) => {
+                    preparation = value;
+                  },
+                  stopped: () =>
+                    record.mode !== "running" ||
+                    handingOff ||
+                    !!preparation?.cancelRequested,
                 },
-                stopped: () =>
-                  record.mode !== "running" ||
-                  handingOff ||
-                  !!preparation?.cancelRequested,
-              }),
+              ),
             );
             planningAbort = undefined;
             preparation = undefined;
@@ -553,7 +801,7 @@ export async function runIntake(
               issue.body,
               plan.baseSha,
               plan,
-              record.authority,
+              record.authority!,
             );
             state = readContinuation(config.repository, selected);
           }

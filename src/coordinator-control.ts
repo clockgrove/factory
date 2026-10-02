@@ -20,7 +20,9 @@ export interface ControlRequest {
     | "decide-result"
     | "select"
     | "propose-amendment"
-    | "dequeue";
+    | "dequeue"
+    | "enqueue"
+    | "watch";
   input?: Record<string, unknown>;
 }
 const socketPath = (repository: string) =>

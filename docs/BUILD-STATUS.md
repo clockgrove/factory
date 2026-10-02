@@ -4,6 +4,61 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.71 artifact record
+
+[Release v0.1.71](https://github.com/clockgrove/factory/releases/tag/v0.1.71)
+was published on 2026-10-02 at 10:46:07 UTC from
+independently reviewed and integrated source
+`f02ae64cae906fcc965f3f42a8db27272f5ffdb8`, tree
+`d6de0bb9783c6e8b1be4e3d0095b2a1c8ee4c9d6`.
+[PR #481](https://github.com/clockgrove/factory/pull/481) integrates validated
+execution-authority reuse (#479) and aligned release preparation.
+[Independent combined source/guidance review](https://github.com/clockgrove/factory/pull/481#issuecomment-5950312026),
+[required PR Quality CI](https://github.com/clockgrove/factory/actions/runs/36994832081)
+and [exact integrated-main Quality CI](https://github.com/clockgrove/factory/actions/runs/36996148730)
+passed before release execution.
+
+The `clockgrove-factory-0.1.71.tgz` archive is 153618049 bytes, SHA-256
+`8c94919049f813f2cdfa17adbcd7ae4bf0ff5996bf5913fdb37e1e25f9f66f1f`, recorded in the [prepublication fingerprint](https://github.com/clockgrove/factory/issues/480#issuecomment-5950675718).
+The 96-byte `SHA256SUMS` asset has SHA-256 `b601643b984b9a09f8eb0abe3579b643995f066b62294923a68cad083fa7a346`.
+Annotated tag `5f6ea15472fc05c4a68b9f53c9fb304d180684ac` resolves to the source above.
+Active exact-tag ruleset `24359492` prohibits updates and deletion, with no
+bypass actors or ref exclusions.
+
+Offline installation matched all 6364 regular archive files and
+95 bundled lock-addressed dependency roots. All 514 tests
+across 50 whole committed installed files passed, with zero failures,
+cancellations, skips or todos. 6 reviewed model-free preflights passed:
+four unchanged retained scopes, the actual bundled-harness readiness successor
+with its strict v0.1.71 version binding, and focused structural-authority reuse.
+All predecessor scripts, their failed controls and 22 historical planning-evidence
+files retain their original identities. The readiness successor changes only
+three version literals; its native RPC, command, policy, environment and cleanup
+checks remain unchanged. Authority-reuse checks use scripted readiness, manager
+and GitHub boundaries and do not supply confinement or live service proof.
+
+The focused authority preflight follows actual setup, retained preparation, a
+new valid reordered-authority admission, check-admission and first activation.
+It retains the legitimate closed-Objective safety stop before projection/workers,
+original plan/run/authority/accounting and exact already-bound receipt refusal.
+Object property order is irrelevant to validated authority values; field presence,
+values and ordered arrays remain significant. Existing receipt serialization and
+digest verification remain exact. No normalization, migration, allowance reset,
+new provider call or live service change is inferred.
+
+Acceptance SHA-256 is `19d87c28f51c1a6ce5727449b116867d54b8a132551c9622e25814674008f86d`.
+[Independent public verification and canonical release completion](https://github.com/clockgrove/factory/issues/480#issuecomment-5950722931)
+matched anonymous archive/checksum bytes, sealed acceptance, annotated source/tree,
+exact tag protection and the enabled public pinned plugin. Independent public
+receipt SHA-256 is `2fab38cb0c016f7fc5a866a760b88cbc9e63eb0104149b211841d71899dbf62d`.
+#480 and its Factory Project item are complete. Source and installed correction
+acceptance remain distinct from actual persistent-watch/guided-setup #444/#447
+qualification in [#448](https://github.com/clockgrove/factory/issues/448), followed
+by [private handoff #445](https://github.com/clockgrove/factory/issues/445).
+Earlier published artifacts, failed attempts, rejected evidence and accounting
+retain their original scope. This later source record changes no published tag,
+archive, asset, version or archived guidance.
+
 ## Immutable v0.1.70 artifact record
 
 [Release v0.1.70](https://github.com/clockgrove/factory/releases/tag/v0.1.70)

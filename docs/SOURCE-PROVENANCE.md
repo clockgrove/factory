@@ -6,6 +6,28 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Verified v0.1.71 authority-reuse handoff (#479 / #480)
+
+The validated-authority correction integrated in [PR #481](https://github.com/clockgrove/factory/pull/481)
+supplied independently reviewed source `f02ae64cae906fcc965f3f42a8db27272f5ffdb8`,
+tree `d6de0bb9783c6e8b1be4e3d0095b2a1c8ee4c9d6`. One release owner completed
+sequential packaging, offline installation, 514 tests across 50 whole files and
+six reviewed model-free preflights. Four scopes retain their script bytes; the
+actual-harness readiness successor changes only its three version literals; the
+sixth uses scripted transports to prove authority reuse through first exact
+admission binding and a legitimate closed-Objective stop before work. Exact
+already-bound receipt replacement and real policy changes remain refused.
+No stored digest normalization, migration, new state or provider call supplied
+this correction or handoff.
+
+[Independent public verification and completion](https://github.com/clockgrove/factory/issues/480#issuecomment-5950722931)
+matched public archive/checksum bytes, sealed acceptance, protected annotated tag
+and the pinned plugin. [BUILD-STATUS](BUILD-STATUS.md#immutable-v0171-artifact-record)
+records the exact artifact identities. Predecessor scripts, the failed v0.1.69
+attempt, historical preparations and unknown accounting remain preserved.
+Current-main prose changes no published bytes or archived guidance. Actual live
+#444/#447/#448 and private #445 acceptance remain separately owned.
+
 ## Guided setup refusal-probe default and verified v0.1.70 handoff (#474 / #475)
 
 The actual installed v0.1.69 temporary-checkout reproduction exposed a writable

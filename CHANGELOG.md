@@ -14,7 +14,9 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 - Retain the original initial-planning review packet with its complete context and response across continuation; changed or unbound evidence stops before calls or allowance consumption (#464).
 - Keep the private control socket bound to its own directory until the native listener closes, preventing file descriptor reuse from deleting another live socket (#468).
 
-Independent distribution acceptance belongs to [#466](https://github.com/clockgrove/factory/issues/466). Live public service acceptance remains [#448](https://github.com/clockgrove/factory/issues/448), followed by the separately authorized adopter handoff in [#445](https://github.com/clockgrove/factory/issues/445). Earlier artifacts, failed runs, original evidence and accounting remain unchanged.
+The first distribution attempt passed 501 of 502 installed tests, then stopped on the pilot test's production-only pnpm lookup. The test-only correction uses the existing separately supplied locked tool and retains the complete offline pnpm/LFS and final-evidence assertions (#471 / PR #472). The failed attempt is preserved.
+
+Published with [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/466#issuecomment-5948017279). All 502 tests across 49 whole installed files and four model-free preflights passed without skips. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0169-artifact-record). Live public service acceptance remains [#448](https://github.com/clockgrove/factory/issues/448), followed by the separately authorized adopter handoff in [#445](https://github.com/clockgrove/factory/issues/445). Earlier artifacts, failed runs, original evidence and accounting remain unchanged.
 
 ## 0.1.68 — 2026-10-01
 

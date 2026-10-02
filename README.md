@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** Candidate v0.1.69 corrects grounded planning, native field validation, read-only baseline qualification, dirty-result evidence, issue context and diagnosis metadata. [Independent distribution acceptance](https://github.com/clockgrove/factory/issues/466) is required before using this candidate. Published v0.1.68 retains its [original distribution evidence](https://github.com/clockgrove/factory/issues/451#issuecomment-5946087196). [Live public qualification](https://github.com/clockgrove/factory/issues/448) and [adopter rollout](https://github.com/clockgrove/factory/issues/445) retain separate acceptance gates.
+**Status:** Published v0.1.69 supplies nine planning, validation, metadata, evidence-retention and control corrections, with [independent public distribution verification](https://github.com/clockgrove/factory/issues/466#issuecomment-5948017279). All 502 tests across 49 whole installed files and four model-free preflights passed without skips. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0169-artifact-record). [Live public qualification](https://github.com/clockgrove/factory/issues/448) and [adopter handoff](https://github.com/clockgrove/factory/issues/445) retain separate acceptance gates.
 
 Factory is early software. Supervise initial Objectives and follow the [recovery guidance](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) when work stops. [Release artifact records](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) retain the evidence and limits of earlier versions.
 
@@ -26,7 +26,7 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select v0.1.69 once its [independent public verification](https://github.com/clockgrove/factory/issues/466) has completed. Compare the exact archive fingerprint recorded there before installation.
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select the independently verified [published v0.1.69](https://github.com/clockgrove/factory/issues/466#issuecomment-5948017279). Compare the exact archive fingerprint recorded there before installation.
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.69

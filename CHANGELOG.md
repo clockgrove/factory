@@ -2,6 +2,15 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.68 — 2026-10-01
+
+- Establish background observation through guided target setup, including explicit service consent, retained package binding and verified service-owned GitHub observation (#447). A separately approved persistent watcher waits after finite work and accepts supported explicit refill while idle (#444).
+- Report unusable or stale service package/configuration bindings without hiding the actual manager state (#442).
+- Bind source-required named CI into the reviewed graph and require authenticated successful exact-head receipts before regular or native integration (#446).
+- Supply the actual post-validation worktree observation to independent Work Item, QA and final review, while preserving absent historical evidence and dirty-tree refusal (#452).
+
+Release preparation is tracked in [#451](https://github.com/clockgrove/factory/issues/451). Public live installed qualification remains [#448](https://github.com/clockgrove/factory/issues/448), followed by the separately scoped adopter rollout in [#445](https://github.com/clockgrove/factory/issues/445). Preparation grants no Objective acceptance or execution authority; earlier releases retain their exact evidence.
+
 ## 0.1.67 — 2026-10-01
 
 - Allow supported local cancellation when the recorded worker has ceased without a durable result and its owned process group is absent (#437). Preserve live-descendant and reused/foreign identity fences across the local Codex, Claude and Copilot harnesses.

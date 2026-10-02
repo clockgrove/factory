@@ -891,3 +891,40 @@ later success, failure, stale/ambiguous receipts and no-requirement compatibilit
 No archived source, private target content, provider calls, target protection
 changes, new evidence store or retry framework was introduced. Source tests do
 not establish a later installed release or adopter acceptance.
+
+## Positive exact-tree worktree observation (#452)
+
+The existing public `validateTree` guards, ValidationEvidence, atomic snapshot
+validation and result/QA/final review paths supply this correction. Successful
+validation now emits a compact exact-tree observation only after its existing
+initial-cleanliness, post-command status equality, selected-LFS byte checks and
+subprocess ownership checks pass. The observation records the post-hydration
+baseline digest and whether it is empty, so an allowed nonempty hydrated baseline
+is never described as empty. The current reviewer packet receives that literal
+controller evidence; canonical snapshot and review boundaries reject malformed or
+wrong-tree facts, while historical absence stays absent. New public temporary-Git
+regressions cover real successful and dirty validation, applicable selected-LFS
+hydration and actual rendered Work Item, QA and final provider packets. No private
+source, archived runtime, additional model call, extra target command, controller
+manifest change, acceptance override or secondary state store was introduced.
+Source checks do not establish a later artifact or adopter qualification.
+
+## Continuous consented intake and guided target setup (#444 / #447)
+
+The operator-approved issue decisions, current intake owner/control socket,
+atomic intake authorization, configuration/readiness and supervisor lifecycle
+surfaces supplied this newly written extension. No archived runtime, fixture or
+private adopter source was copied. An optional continuous watcher stores service
+consent independently of finite execution authority, records candidate identities
+without bodies, and refills through the existing settled owner. Existing explicit
+finite mode and historical Objective snapshots remain authoritative. Guided setup
+composes configuration, model-free readiness, exact registration/start and
+service-owned observation into one truthful outcome, retaining partial failures.
+Temporary-Git, credential-free API/user-manager fixtures exercise real local
+controllers and the actual CLI; they do not qualify a real provider, public live
+service or adopter deployment. Public installed acceptance belongs to #448 and
+actual adopter handoff to #445.
+
+## Host-independent release regressions (#452 / #456)
+
+Required contributor CI exposed a selected-LFS fixture that attempted to publish a manually seeded pointer through inherited host filters, and a cancellation assertion that treated changing Linux scheduling state as immutable identity. The corrected public fixture publishes ordinary baseline files first and seeds its local validation pointer through existing pinned Git; its intentional raw-staging negative control remains explicit. Cancellation checks stable group/start identity and a bounded live-child response. Actual inherited Git LFS filters and a pre-push hook reproduce the original failure and exercise both corrected whole files. No runtime ownership, upload guard, hook policy, provider usage or historical release evidence changed.

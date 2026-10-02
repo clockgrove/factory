@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** [v0.1.67 is published and independently verified](https://github.com/clockgrove/factory/issues/439#issuecomment-5944288283), with supported cancellation after an owned local worker ceases without a durable result.
+**Status:** v0.1.68 adds guided background setup, persistent consented observation, explicit later intake and source-required CI before integration. [Release verification](https://github.com/clockgrove/factory/issues/451) and [live public qualification](https://github.com/clockgrove/factory/issues/448) retain their separate acceptance records.
 
 Factory is early software. Supervise initial Objectives and follow the [recovery guidance](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) when work stops. [Release artifact records](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) retain the evidence and limits of earlier versions.
 
@@ -26,24 +26,24 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select published, independently verified v0.1.67.
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select v0.1.68. Confirm its completed [release verification](https://github.com/clockgrove/factory/issues/451) before installation.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.67
+codex plugin marketplace add clockgrove/factory --ref v0.1.68
 codex plugin add factory@clockgrove
 
-gh release download v0.1.67 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.67.tgz --pattern SHA256SUMS
+gh release download v0.1.68 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.68.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/439), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. [Public archive and pinned-plugin verification for v0.1.67 passed](https://github.com/clockgrove/factory/issues/439#issuecomment-5944288283).
+Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/451), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. The owning release issue records the independent public archive and pinned-plugin verification result.
 
 Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.67.tgz
+  ./clockgrove-factory-0.1.68.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```
@@ -56,7 +56,13 @@ Open your target repository in Codex after loading the matching plugin, and ask:
 
 > Use Factory to set up this repository with a concurrency limit of two. Do not start work.
 
-Factory's setup skill binds the checkout and reports the configuration. The target must be a trusted GitHub repository with committed requirements and available validation tools. Factory cannot run against its own source repository.
+Factory's setup skill binds the checkout and reports the configuration. For background operation, ask:
+
+> Use Factory to set up this repository and keep watching for explicitly approved Objectives, with a concurrency limit of two.
+
+On a supported Linux/WSL user-service host, the guided setup configures Factory, registers and starts its background service, and verifies the actual service-owned GitHub observation in one flow. An idle watcher makes no model calls. It checks every 30 seconds by default and starts only explicitly authorized Objective IDs; discovered issues and labels grant no execution authority. Later approved batches use the supported intake refill operation while idle. The service must be able to run on this machine; shutdown, sleep and user-manager lifetime still apply.
+
+The target must be a trusted GitHub repository with committed requirements and available validation tools. Factory cannot run against its own source repository.
 
 Create an Objective issue **in the target repository** describing the outcome, acceptance checks, allowed changes, and canonical sources. You can copy the [Objective issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml) into that repository. Then ask:
 

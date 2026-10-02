@@ -3,7 +3,13 @@ import {
   validateCredentialFile,
 } from "./provider-credentials.js";
 import type { ContinuationState } from "./state.js";
-import { readIntake, intakeComplete } from "./intake.js";
+import {
+  readIntake,
+  intakeComplete,
+  intakeServiceConsent,
+  intakeSettled,
+  resumeWatcherAfterUpgrade,
+} from "./intake.js";
 import { objectiveComplete } from "./completion.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -404,6 +410,7 @@ export function checkServiceState(
   config: FactoryConfig,
   objective: number,
   admissionPath?: string,
+  consentFromIntake = false,
 ): void {
   const state = readContinuation(config.repository, objective);
   if (state) checkServiceContinuationFields(state);
@@ -417,8 +424,13 @@ export function checkServiceState(
       "Background operation requires an existing exact admission",
     );
   assertAdmissionBinding(admission);
+  const intake = consentFromIntake ? readIntake(config) : undefined;
+  const explicitlyConsentedIntake =
+    !!intake &&
+    intakeServiceConsent(intake) &&
+    (intake.authority?.objectives ?? []).includes(objective);
   if (
-    !admission.authority.serviceConsent ||
+    (!admission.authority.serviceConsent && !explicitlyConsentedIntake) ||
     admission.repository !== config.repository ||
     admission.objective !== objective ||
     admission.configDigest !== factoryConfigDigest(config)
@@ -442,14 +454,14 @@ function hasOwner(config: FactoryConfig): boolean {
 }
 export function checkIntakeServiceState(config: FactoryConfig): void {
   const intake = readIntake(config);
-  if (!intake?.authority.serviceConsent)
+  if (!intake || !intakeServiceConsent(intake))
     throw new Error(
       "Intake background operation requires explicit service consent",
     );
-  for (const id of intake.authority.objectives) {
+  for (const id of intake.authority?.objectives ?? []) {
     const state = readContinuation(config.repository, id);
     if (state) checkServiceContinuationFields(state);
-    if (state?.admission) checkServiceState(config, id);
+    if (state?.admission) checkServiceState(config, id, undefined, true);
     else if (state && state.schemaVersion !== 5)
       throw new Error("Intake continuation has no admission");
   }
@@ -497,7 +509,7 @@ async function verifyServiceOwner(
       if (reply.handled) return;
     }
     const intake = objective === 0 ? readIntake(config) : undefined;
-    if (intake && intakeComplete(config, intake)) return;
+    if (intake && !intake.watch && intakeComplete(config, intake)) return;
     const current = readContinuation(config.repository, objective);
     if (
       current?.cancelledAt ||
@@ -663,17 +675,31 @@ export async function supervise(
       validateArtifact(candidate);
     }
     const wasActive = inspect("is-active", name) === "active";
+    const beforeIntake =
+      candidate && value.intake ? readIntake(config) : undefined;
+    const resumeIdleWatcher =
+      wasActive &&
+      beforeIntake?.watch &&
+      beforeIntake.mode === "running" &&
+      intakeSettled(config);
     await handoffService(config, value.objective);
     systemctl("stop", name);
     if (candidate) {
       validateArtifact(candidate);
       saveUnit(path, candidate);
       systemctl("daemon-reload");
-      if (wasActive) {
+      const restart = beforeIntake?.watch
+        ? !!resumeIdleWatcher && resumeWatcherAfterUpgrade(config, beforeIntake)
+        : wasActive;
+      if (restart) {
         systemctl("start", name);
         await verifyServiceOwner(config, value.objective, name);
       }
-      return { artifact: candidate.cli, restarted: wasActive };
+      return {
+        artifact: candidate.cli,
+        restarted: restart,
+        ...(wasActive && !restart ? { resumeRequired: true } : {}),
+      };
     }
     if (action !== "stop") systemctl("disable", name);
     // Disable removes external-unit links too. Keep the owned unit discoverable

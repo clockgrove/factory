@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { coverageObligations } from "../dist/qa.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -1216,3 +1217,91 @@ test("retained discovery review binds current attempt and result, omitting absen
     null,
   );
 });
+
+for (const scope of ["work", "final"])
+  test(`${scope} validation ingress rejects malformed or mismatched positive worktree observations`, () => {
+    const valid =
+      scope === "final"
+        ? withFinalValidation(selectedLfsState())
+        : selectedLfsState();
+    const receipt = (value) =>
+      scope === "final" ? value.finalValidation : value.work.asset.validation;
+    receipt(valid).worktreeObservation = {
+      treeSha: receipt(valid).treeSha,
+      initialStatus: "clean",
+      postHydrationStatus: {
+        porcelainSha256: createHash("sha256").update("").digest("hex"),
+        empty: true,
+      },
+      postCommandStatus: "unchanged",
+      selectedLfsMembers: 1,
+      subprocessOwnership: "settled",
+    };
+    assert.doesNotThrow(() => parseFactoryState(valid, repository, objective));
+    for (const mutate of [
+      (observation) => {
+        observation.treeSha = "0".repeat(40);
+      },
+      (observation) => {
+        observation.initialStatus = "dirty";
+      },
+      (observation) => {
+        observation.postCommandStatus = "changed";
+      },
+      (observation) => {
+        observation.subprocessOwnership = "unknown";
+      },
+      (observation) => {
+        observation.selectedLfsMembers = 0;
+      },
+      (observation) => {
+        observation.postHydrationStatus.empty = false;
+      },
+      (observation) => {
+        observation.extraClaim = true;
+      },
+      (observation) => {
+        observation.postHydrationStatus.extraClaim = true;
+      },
+    ]) {
+      const invalid = structuredClone(valid);
+      mutate(receipt(invalid).worktreeObservation);
+      assert.throws(
+        () => parseFactoryState(invalid, repository, objective),
+        /canonical exact-tree evidence/,
+      );
+    }
+    const hydrated = structuredClone(valid);
+    receipt(hydrated).worktreeObservation.postHydrationStatus = {
+      porcelainSha256: createHash("sha256")
+        .update(" M approved/image.png\n")
+        .digest("hex"),
+      empty: false,
+    };
+    assert.doesNotThrow(() =>
+      parseFactoryState(hydrated, repository, objective),
+    );
+    for (const digest of [
+      [
+        receipt(hydrated).worktreeObservation.postHydrationStatus
+          .porcelainSha256,
+      ],
+      1,
+      null,
+      {},
+    ]) {
+      const invalid = structuredClone(hydrated);
+      receipt(invalid).worktreeObservation.postHydrationStatus.porcelainSha256 =
+        digest;
+      assert.throws(
+        () => parseFactoryState(invalid, repository, objective),
+        /canonical exact-tree evidence/,
+      );
+    }
+    delete receipt(valid).worktreeObservation;
+    assert.equal(
+      receipt(parseFactoryState(valid, repository, objective))
+        .worktreeObservation,
+      undefined,
+    );
+  });

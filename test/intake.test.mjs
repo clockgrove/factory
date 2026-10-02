@@ -260,7 +260,9 @@ test("sequential planning supplies grounded native acceptance in every rendered 
           )[1],
         );
         const controllerIndex = packet.evidence.findIndex(
-          (entry) => entry.origin === "controller",
+          (entry) =>
+            entry.origin === "controller" &&
+            entry.path === "FACTORY_NATIVE_OBJECTIVE_PREREQUISITES",
         );
         assert.equal(
           packet.evidence[controllerIndex].path,
@@ -270,6 +272,15 @@ test("sequential planning supplies grounded native acceptance in every rendered 
           JSON.parse(packet.evidence[controllerIndex].content),
           currentRequest.prerequisites,
         );
+        const bounds = packet.evidence.find(
+          (entry) =>
+            entry.origin === "controller" &&
+            entry.path === "FACTORY_EXECUTION_BOUNDS",
+        );
+        assert.deepEqual(JSON.parse(bounds.content), {
+          configuredConcurrency: f.config.execution.concurrency,
+          authorizedMaxConcurrency: authority.resources.maxConcurrency,
+        });
         return {
           packetId: packet.packetId,
           findings:

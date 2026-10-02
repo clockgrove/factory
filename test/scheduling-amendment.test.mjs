@@ -76,6 +76,14 @@ test("accepted reprioritization changes pending order without resetting running 
       admission: {
         graphDigest: graphDigest(graph),
         authority: {
+          schemaVersion: 1,
+          actor: "fixture operator",
+          reason: "Bounded accepted reprioritization",
+          executionConsent: true,
+          serviceConsent: false,
+          objectives: [1],
+          repairClasses: [],
+          requiredEnvironment: [],
           allowances: {
             planningRevisions: 1,
             implementationRepairs: 0,
@@ -112,6 +120,11 @@ test("accepted reprioritization changes pending order without resetting running 
       model: {
         async reviewGraph(request) {
           reviews++;
+          assert.deepEqual(request.executionBounds, {
+            configuredConcurrency: config.execution.concurrency,
+            authorizedMaxConcurrency:
+              state.admission.authority.resources.maxConcurrency,
+          });
           return {
             packetId: request.reviewPacket.id,
             findings: [],

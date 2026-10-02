@@ -6,6 +6,30 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Guided setup refusal-probe default and verified v0.1.70 handoff (#474 / #475)
+
+The actual installed v0.1.69 temporary-checkout reproduction exposed a writable
+checkout-parent default. The existing shared Codex readiness helper now selects
+the operator-owned home directory or explicit override, verifies canonical
+outside-workspace relationships, and establishes controller write/read/removal
+before the unchanged sandbox probe. Setup, CLI help and packaged guidance agree.
+Real temporary-Git and no-model protocol tests preserve refusal and cleanup;
+there is no fallback chain, new state, policy expansion or inferred authority.
+No archived implementation, private source or provider call supplied the fix.
+
+[PR #477](https://github.com/clockgrove/factory/pull/477) integrates the independently
+reviewed source and guidance. One release owner completed sequential packaging,
+offline installation, 512 tests across 50 whole files and five model-free
+preflights from source `ef6d09478ce7109d4e00d0117f8397ab84f41b9e`, tree
+`1ca9c93c7b6325bc357cb1edc8507a3ab78c0a0a`.
+[Independent public verification and completion](https://github.com/clockgrove/factory/issues/475#issuecomment-5949114107)
+matched the public bytes, sealed acceptance, protected annotated tag and pinned
+plugin. [BUILD-STATUS](BUILD-STATUS.md#immutable-v0170-artifact-record) records the
+exact artifact identities and four retained plus one actual-harness preflight.
+The older 11 frozen script/fixture inputs and 22 historical evidence files remain
+unchanged. Current-main prose changes no published bytes or archived guidance;
+actual live #444/#447/#448 and private #445 acceptance remain separately owned.
+
 ## Verified v0.1.69 distribution handoff (#466)
 
 The integrated nine-fix source from PR #470 and the test-only #471 correction in

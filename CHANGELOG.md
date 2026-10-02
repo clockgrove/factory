@@ -7,7 +7,7 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 - Choose the operator-owned home directory as the single default outside-write probe for guided Codex setup, preserving explicit overrides and canonical outside-workspace checks (#474).
 - Verify controller writability before using a sandbox refusal as boundary evidence. Unsuitable paths remain blocked; no sandbox policy or execution authority changes.
 
-Distribution acceptance is pending [#475](https://github.com/clockgrove/factory/issues/475). Public service qualification remains [#448](https://github.com/clockgrove/factory/issues/448), followed by the separately authorized private handoff in [#445](https://github.com/clockgrove/factory/issues/445). Earlier published artifacts and failed evidence remain unchanged.
+Published with [independent public distribution verification](https://github.com/clockgrove/factory/issues/475#issuecomment-5949114107): all 512 tests across 50 whole installed files and five model-free preflights passed without skips. The fifth uses the actual bundled harness to prove the named workspace/outside boundary and reject sandbox-allowed or host-denied outside locations. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0170-artifact-record). Public service qualification remains [#448](https://github.com/clockgrove/factory/issues/448), followed by the separately authorized private handoff in [#445](https://github.com/clockgrove/factory/issues/445). Earlier published artifacts and failed evidence remain unchanged.
 
 ## 0.1.69 — 2026-10-02
 

@@ -256,6 +256,15 @@ test("selected LFS hydration records an honest nonempty baseline and unchanged p
         sources: [],
       });
       assert.deepEqual(observation, evidence.worktreeObservation);
+      // Raw porcelain preserves staged vs unstaged columns and trailing bytes.
+      assert.equal(
+        evidence.worktreeObservation.postHydrationStatus.porcelainSha256,
+        hash(" M asset.bin\n"),
+      );
+      await assert.rejects(
+        validate(["git add asset.bin"], selected, store),
+        /modified the result tree/,
+      );
       await assert.rejects(
         validate(["printf bad > asset.bin"], selected, store),
         /could not restore selected LFS bytes/,

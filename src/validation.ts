@@ -2266,14 +2266,14 @@ export async function validateTree(
       throw new Error(
         `Validation tree mismatch: expected ${expectedTree}, got ${treeSha}`,
       );
-    if (pinnedGit(worktree, "status", "--porcelain"))
+    if (pinnedGitRaw(worktree, "status", "--porcelain").length)
       throw new Error("Validation worktree is not initially clean");
     const selectedLfs = await hydrateSelectedLfsBytes(
       worktree,
       lfsMembers,
       contentStore,
     );
-    const hydratedStatus = pinnedGit(worktree, "status", "--porcelain");
+    const hydratedStatus = pinnedGitRaw(worktree, "status", "--porcelain");
     const evidence: ValidationEvidence = {
       treeSha,
       commands: [],
@@ -2333,7 +2333,7 @@ export async function validateTree(
       assertSelectedLfsPointer(worktree, member);
       assertSelectedLfsBytes(worktree, member);
     }
-    if (pinnedGit(worktree, "status", "--porcelain") !== hydratedStatus)
+    if (!pinnedGitRaw(worktree, "status", "--porcelain").equals(hydratedStatus))
       throw new Error("Validation command modified the result tree");
     if (hasUnresolvedSubprocesses())
       throw new Error(

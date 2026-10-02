@@ -128,7 +128,13 @@ commit/tree, then supply the restored prerequisite and the #250 supported repair
 proposal with concrete diagnosis, correction, actor, failure digest and tree.
 The bound policy must permit this class with one result rereview and zero
 implementation repairs. Check that Factory consumes that allowance, revalidates
-the preserved candidate and independently reviews it before delivery. No manual
+the actual selected candidate and independently reviews it before delivery. For native
+delivery, retain the original failed objects/history and preserve exact owned paths,
+modes and blobs, attempt and execution base. A replay must bind its parent and
+result base to the independently accepted integration commit; retain both identities
+and run all required commands and full independent review on the actual replayed
+tree before protected exact-head CI integration. This is ownership preservation,
+not equality of the original and replayed whole trees. No manual
 acceptance, implementation retry, state editing or allowance reset is permitted.
 This proves a diagnosed validation-environment repair with an externally supplied
 correction; it does not prove autonomous implementation repair.
@@ -139,17 +145,17 @@ PRs or a successful final review alone as terminal acceptance.
 
 ## Acceptance evidence
 
-| Required outcome                           | Sufficient observation                                                                                                           |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| Packaged setup and continuity              | Artifact identity, setup/config binding, real service context, owner alive after launcher exit                                   |
-| Independent leaves and join                | Overlapping active attempt intervals; join starts only after both dependencies are accepted                                      |
-| Worker discovery and native amendment      | Worker proposal, reviewed graph revision, unchanged started identities, authenticated child/parent issue relationships           |
-| Required QA/review admission               | Exact integrated QA tree, real command output and independent findings; QA has no coding worker or PR                            |
-| One diagnosed repair                       | Original failure and exact candidate, external correction, authorized consumed allowance, same candidate revalidation and review |
-| Restart without duplication                | Same run/attempt/session and projected/delivered identities before and after supported restart                                   |
-| Sequential authorized intake               | Bound two-body authority, native dependency, predecessor acceptance and second plan's actual baseline                            |
-| Protected integration and final acceptance | Effective protection, exact check/PR head, accepted current graph and final commit/tree, settled issue closure                   |
-| Accounting and retirement                  | Available usage with unknowns explicit, stopped owned resources, retained/deleted fixture disposition                            |
+| Required outcome                           | Sufficient observation                                                                                                                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Packaged setup and continuity              | Artifact identity, setup/config binding, real service context, owner alive after launcher exit                                                                                                         |
+| Independent leaves and join                | Overlapping active attempt intervals; join starts only after both dependencies are accepted                                                                                                            |
+| Worker discovery and native amendment      | Worker proposal, reviewed graph revision, unchanged started identities, authenticated child/parent issue relationships                                                                                 |
+| Required QA/review admission               | Exact integrated QA tree, real command output and independent findings; QA has no coding worker or PR                                                                                                  |
+| One diagnosed repair                       | Original failed objects/history and owned-path/mode/blob/attempt/execution-base preservation; external correction and sole allowance; exact replay parent/base and actual-tree command/review/CI proof |
+| Restart without duplication                | Same run/attempt/session and projected/delivered identities before and after supported restart                                                                                                         |
+| Sequential authorized intake               | Bound two-body authority, native dependency, predecessor acceptance and second plan's actual baseline                                                                                                  |
+| Protected integration and final acceptance | Effective protection, exact check/PR head, accepted current graph and final commit/tree, settled issue closure                                                                                         |
+| Accounting and retirement                  | Available usage with unknowns explicit, stopped owned resources, retained/deleted fixture disposition                                                                                                  |
 
 An independent reviewer checks the complete record against this map. Keep raw
 prompts, local run identifiers and logs in their authorized evidence destination;

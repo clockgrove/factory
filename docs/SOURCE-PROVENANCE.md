@@ -6,6 +6,37 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Native-replay qualification source and contract handoff (#448)
+
+The accepted current native runner, retained repair-proof packet and public #489
+fixture supply this clarification. The operator approved existing native replay
+with ownership-scoped implementation preservation for the corrected one-artifact
+v0.1.72 successor on 2026-10-02. The first Objective and fixture README now name
+original failed objects/history/receipts, unchanged owned path inventory/mode/blob,
+attempt/execution base, exact accepted-alpha replay parent/result base and actual
+replayed-tree command/full-review/CI bindings. Existing implementation-plan,
+user-guide and contributor-autonomy clauses describe that same mechanism. No
+runtime code, schemas, validators, source-command catalog, retry policy, installed
+artifact, version, release assets or historical acceptance changes.
+
+The complete exact-source installed producer/decoder/hydration/rendering proof and
+managed continuation rehearsal passed independent review at explicitly synthetic
+semantic SDK, GitHub/CI/protection, manager and worker transport seams. The native
+owned-process, Git, validator, repair proof and continuation facts are real local
+observations; they are not provider semantic acceptance, actual remote protection,
+live service qualification or #448/#445 acceptance. The restricted-host source
+launch and corrected completed command remain separate. The failed strict
+whole-candidate diagnostic, original mixed-phase attempts, source bytes, receipts,
+identities and all accounting remain intact. Unavailable monetary usage is unknown.
+
+The existing public fixture supplies all source. Only README and first-Objective
+prose change; complete check scripts, workflow, package, standing AGENTS, unfinished
+alpha/beta and guide obligations are retained. This release-gate handoff neither
+copies private material nor starts an Objective, provider, system manager or private
+target. Authenticated new-target binding, approved exact protection readback, live
+public execution and independent final acceptance remain the next gate. No archived
+runtime, test, fixture, local-only evidence or raw provider output is added here.
+
 ## Public qualification phase-source clarification (#489)
 
 [PR #490](https://github.com/clockgrove/factory/pull/490), merged source

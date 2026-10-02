@@ -4,6 +4,45 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Approved native-replay qualification preparation (#448)
+
+The operator approved the corrected one-artifact v0.1.72 successor mechanism on
+2026-10-02. Original failed beta commit/tree objects, failure history and command
+receipts remain separate from a native replay onto independently accepted alpha.
+The replay preserves the exact owned path inventory, modes and blobs, attempt and
+execution base; required commands and full independent review validate its actual
+tree, followed by successful authenticated exact-head CI before integration.
+The previous strict whole-candidate equality diagnostic remains failed and
+unaccepted. The earlier mixed-phase transition and spent allowances remain history.
+
+Exact-source installed input preparation and the complete managed continuation
+rehearsal passed independent review on the unchanged accepted v0.1.72 installation.
+The complete source/worker/schema/decoder/hydration and grounded negative-command
+controls, summary/discovery/QA/aggregate, sole environment correction, restart,
+accepted-baseline guide, idle sentinel, teardown and fresh clone are covered only
+at declared synthetic SDK/semantic, GitHub/CI/protection, system-manager and worker
+transport seams. Local owned PIDs, native lifecycle, Git and validators are real;
+these model-free results do not qualify live providers, real systemd/protection,
+#448 completion or private #445. The initial restricted-host source-proof launch
+remains preserved beside its corrected command and completed proof.
+
+The public source and contract handoff changes fixture README/first-Objective prose
+and existing native replay documentation only. Runtime v0.1.72, published archives,
+tags and assets remain unchanged; no new release is needed for this clarification.
+The target-specific standing AGENTS CI clause, immutable check/workflow/package and
+unfinished implementation bytes remain unchanged. One fresh scenario attempt,
+concurrency two/one active Objective, two planning revisions per Objective/path,
+zero implementation repairs, one whole-scenario environment recovery, two owner
+activations and one controlled restart remain the bounds. Unknown monetary usage
+stays unknown within existing account/provider/spending limits.
+
+Current work remains the release gate in [#448](https://github.com/clockgrove/factory/issues/448),
+which stays open. The next action is supported predecessor terminal disposition,
+authenticated new-target source/authority/native dependency binding and exact main
+protection readback under the approved named-target decision, followed by the live
+public installed scenario and independent acceptance. Public acceptance precedes
+separately owned private #445; source preparation grants no private activation.
+
 ## Qualification fixture source clarification (#489)
 
 [PR #490](https://github.com/clockgrove/factory/pull/490) integrated source

@@ -4,6 +4,65 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.69 artifact record
+
+[Release v0.1.69](https://github.com/clockgrove/factory/releases/tag/v0.1.69)
+was published on 2026-10-02 at 08:14:51 UTC from independently reviewed and
+integrated source `672bfbf29f47a084b53b278d61d9262d9018717b`, tree
+`4880bdcba77cdfc77ea7e16cec527422432c7b36`.
+[PR #470](https://github.com/clockgrove/factory/pull/470) integrates nine runtime
+corrections: grounded canonical planning (#458), native field types (#460),
+read-only pinned-baseline QA (#459), bounded dirty-result diagnostics (#438),
+issue metadata/context (#443), diagnosis identity (#461), retained discovery
+proposals (#465), original planning review bindings (#464), and private socket
+directory lifetime (#468).
+[PR #472](https://github.com/clockgrove/factory/pull/472) adds the test-only locked
+pnpm resolver correction (#471).
+[Exact integrated-main Quality CI](https://github.com/clockgrove/factory/actions/runs/36982072837)
+passed before release execution.
+
+The `clockgrove-factory-0.1.69.tgz` archive is 153617475 bytes, SHA-256
+`ed479c537b179a60370d49525e00e19c055849592f787569d2e48ee1c8030c40`,
+recorded in the [prepublication fingerprint](https://github.com/clockgrove/factory/issues/466#issuecomment-5947988377).
+The 96-byte `SHA256SUMS` asset has SHA-256
+`df655ef54fc8e3e37120fa74a170ddecf8b5104046ff0efd918ec0f0c7bcd2e6`.
+Annotated tag `3b3c902542ca277d87d96d91eaeceb36bee8e1e4` resolves to the source above.
+Active exact-tag ruleset `24353836` prohibits updates and deletion, with no bypass
+actors or ref exclusions.
+
+Offline installation matched all 6364 regular archive files and 95 bundled
+lock-addressed dependency roots. All 502 tests across 49 whole committed installed
+files passed, with zero failures, cancellations, skips or todos. Four reviewed
+model-free preflights passed against that installed package: complete source and
+phase inputs; guided setup with a synthetic service manager and an actual local
+owner; historical planning refusal and supported public synthetic continuation;
+and complete malformed planner-response controls. The continuation preflight
+verified all 22 frozen historical files before and after, refused the missing
+original review binding with no calls, saves or consumption change, and exercised
+supported cancellation and a distinct fresh synthetic Objective in one unchanged
+configuration/state root. Scripted responses prove mechanics, not semantic
+Objective acceptance. No provider calls or live target actions were made by these
+distribution checks.
+
+The first unpublished attempt passed 501 of 502 tests, then stopped before
+preflights or publication on the pilot regression's production-only pnpm lookup.
+#471 corrects only that test's use of the existing separately supplied locked
+pnpm tool; the offline pnpm/LFS, collection and final-evidence assertions remain.
+The failed attempt and all earlier runs, rejected responses and accounting remain
+preserved. No published tag, archive or asset was replaced.
+
+Acceptance SHA-256 is
+`8e1ebdee3f495568f4874b8cb75af67a420951f758e324ca33298f3966934b39`.
+[Independent public verification and canonical release completion](https://github.com/clockgrove/factory/issues/466#issuecomment-5948017279)
+matched anonymous archive/checksum bytes, sealed acceptance, annotated source/tree,
+exact tag protection and the enabled public pinned plugin. Independent public
+receipt SHA-256 is
+`79f2bfb635cbc8208687428bdacf5c72620d0a049b2549e560b0c2f7187ec781`.
+#466 and its Factory Project item are complete. Earlier artifact records retain
+their exact scope. [Live public service qualification](https://github.com/clockgrove/factory/issues/448)
+and [private adopter handoff](https://github.com/clockgrove/factory/issues/445)
+remain separate and unaccepted by this distribution record.
+
 ## Immutable v0.1.68 artifact record
 
 [Release v0.1.68](https://github.com/clockgrove/factory/releases/tag/v0.1.68)

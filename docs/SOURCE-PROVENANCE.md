@@ -6,6 +6,27 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Verified v0.1.69 distribution handoff (#466)
+
+The integrated nine-fix source from PR #470 and the test-only #471 correction in
+PR #472 supplied source `672bfbf29f47a084b53b278d61d9262d9018717b`, tree
+`4880bdcba77cdfc77ea7e16cec527422432c7b36`. One release owner completed sequential
+packaging, offline installation, all 502 tests across 49 whole files and four
+model-free preflights. The 153617475-byte archive has SHA-256
+`ed479c537b179a60370d49525e00e19c055849592f787569d2e48ee1c8030c40`.
+[Independent public verification and completion](https://github.com/clockgrove/factory/issues/466#issuecomment-5948017279)
+matched the exact public bytes, sealed acceptance, protected annotated tag and
+pinned plugin. [BUILD-STATUS](BUILD-STATUS.md#immutable-v0169-artifact-record)
+records their immutable identities and the preserved failed 501/502 attempt.
+
+Historical compiler/review responses are preserved as evidence, not migrated into
+acceptance. Missing original review binding refuses without calls, saves or
+consumption; a separate public synthetic cancellation/fresh-Objective path proves
+supported mechanics only. No private source, provider call, live target action or
+archived implementation supplied this handoff. Current-main prose records the
+accepted release; it does not change that published artifact's source or guidance.
+Actual live #448 and private #445 acceptance remain separate.
+
 ## Private control socket directory lifetime (#468)
 
 A deterministic public temporary-directory reproduction demonstrated that the
@@ -18,6 +39,20 @@ socket retirement and unrelated listener responsiveness. Setup fixture diagnosti
 retain both the original body error and cleanup error. This reproduction does not
 establish the cause of an earlier CI ENOENT. No retry loop, timeout increase,
 archived implementation, new state or private target supplied the correction.
+
+## Installed pilot test-tool resolution (#471)
+
+The first unpublished v0.1.69 distribution attempt passed 501 of 502 installed
+tests, then stopped because the pilot regression looked for pnpm beneath the
+production package instead of using the existing separately supplied locked
+test-tool input. The source checkout's development dependency concealed that
+assumption. [PR #472](https://github.com/clockgrove/factory/pull/472) changes only
+the test's native resolver: locate pnpm's exported package metadata and select
+its declared CLI. The complete source and production-installed pilot diagnostics
+passed with all offline pnpm, Git/LFS, collection and final-evidence assertions.
+No runtime source, production dependency, version, acceptance condition, provider
+call or archived implementation supplied this correction. The failed distribution
+attempt remains preserved; independent artifact acceptance belongs to #466.
 
 ## Settled dirty validation evidence and diagnosis identity (#438 / #461)
 

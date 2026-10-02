@@ -198,8 +198,9 @@ export async function setupTarget(
           : (JSON.parse(
               await invoke([
                 "readiness",
-                "--outside-directory",
-                option(args, "outside-directory") ?? dirname(config.checkout),
+                ...(option(args, "outside-directory")
+                  ? ["--outside-directory", option(args, "outside-directory")!]
+                  : []),
                 "--config",
                 configPath,
               ]),

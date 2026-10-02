@@ -1110,3 +1110,7 @@ retains a settled failed proposal worktree at its existing handle-owned path.
 Tracked or staged proposals are rejected rather than silently excluded. No
 archived source, private adopter content, new state store, ledger, recovery
 operation, automatic retry or accepted failed result is introduced.
+
+## Guided setup outside-write probe (#474)
+
+The current setup, CLI, sanitized Codex environment and fixed app-server diagnostic supplied this correction. The actual accepted installed v0.1.69 model-free probe demonstrated that a temporary checkout parent is writable under the configured workspace-write policy. Setup and readiness now share one home-directory default with explicit override, canonical outside-workspace validation and a real host sentinel prerequisite. Existing policy, evidence grounding, exclusive private sentinel creation and owned cleanup remain authoritative. Temporary Git/CLI and protocol regressions cover default/override transport, host denial, workspace aliases and sandbox-allowed outside writes without model calls. No archived runtime, private source, authority change, fallback chain or new state was introduced; source diagnostics do not qualify a later release or live service.

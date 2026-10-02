@@ -5,6 +5,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -43,6 +44,8 @@ test("model-free readiness uses worker policy, private environment, exact sentin
   await fixture("ready", async ({ root, server, record, input }) => {
     const result = await probeCodexReadiness(input, [process.execPath, server]);
     assert.equal(result.status, "ready");
+    assert.equal(result.outsideDirectory, input.outsideDirectory);
+    assert.equal(result.outsideHostWritable, true);
     const requests = readFileSync(record, "utf8")
       .trim()
       .split("\n")
@@ -59,6 +62,7 @@ test("model-free readiness uses worker policy, private environment, exact sentin
     assert.equal(requests[0].githubToken, null);
     assert.equal(requests[2].params.cwd, input.workspace);
     assert.equal(requests[2].params.sandboxPolicy, undefined);
+    assert.match(requests[2].params.command[2], /flag:'wx',mode:0o600/);
     assert.deepEqual(readdirSync(join(root, "workspace")), []);
     assert.deepEqual(readdirSync(join(root, "outside")), []);
   });
@@ -74,11 +78,16 @@ test("readiness does not accept a claimed write without actual owned sentinel by
 
 test("outside write success is an unproven boundary and only owned probe files are removed", async () => {
   await fixture("outside-allowed", async ({ root, server, input }) => {
-    writeFileSync(join(root, "outside", "keep"), "retained");
+    writeFileSync(
+      join(root, "outside", ".factory-readiness-unowned"),
+      "retained",
+    );
     const result = await probeCodexReadiness(input, [process.execPath, server]);
     assert.equal(result.status, "unavailable");
     assert.equal(result.outsideWriteRefused, false);
-    assert.deepEqual(readdirSync(join(root, "outside")), ["keep"]);
+    assert.deepEqual(readdirSync(join(root, "outside")), [
+      ".factory-readiness-unowned",
+    ]);
   });
 });
 
@@ -87,6 +96,8 @@ test("harness startup failure reports unavailable and terminates without a model
     const result = await probeCodexReadiness(input, [process.execPath, server]);
     assert.equal(result.status, "unavailable");
     assert.match(result.detail, /state runtime unavailable/);
+    assert.deepEqual(readdirSync(input.workspace), []);
+    assert.deepEqual(readdirSync(input.outsideDirectory), []);
   });
 });
 
@@ -96,6 +107,75 @@ test("refusal probe inside workspace is rejected before harness startup", async 
       probeCodexReadiness({ ...input, outsideDirectory: input.workspace }),
       /outside the workspace/,
     );
+  });
+});
+
+test("readiness uses home as one default and preserves explicit outside selection", async () => {
+  const originalHome = process.env.HOME;
+  try {
+    await fixture("ready", async ({ server, input, record }) => {
+      process.env.HOME = input.outsideDirectory;
+      const { outsideDirectory, ...defaultInput } = input;
+      const result = await probeCodexReadiness(defaultInput, [
+        process.execPath,
+        server,
+      ]);
+      assert.equal(result.status, "ready");
+      assert.equal(result.outsideDirectory, outsideDirectory);
+      const requests = readFileSync(record, "utf8")
+        .trim()
+        .split("\n")
+        .map(JSON.parse);
+      assert.equal(
+        requests[2].params.command[4].startsWith(
+          `${outsideDirectory}/.factory-readiness-`,
+        ),
+        true,
+      );
+      process.env.HOME = input.workspace;
+      await assert.rejects(
+        probeCodexReadiness(defaultInput, [process.execPath, server]),
+        /choose an owned existing directory with --outside-directory/,
+      );
+      assert.equal(
+        (await probeCodexReadiness(input, [process.execPath, server])).status,
+        "ready",
+      );
+    });
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+  }
+});
+
+test("canonical outside alias into workspace refuses before process startup", async () => {
+  await fixture("ready", async ({ root, server, record, input }) => {
+    const alias = join(root, "workspace-alias");
+    symlinkSync(input.workspace, alias);
+    await assert.rejects(
+      probeCodexReadiness({ ...input, outsideDirectory: alias }, [
+        process.execPath,
+        server,
+      ]),
+      /outside the workspace/,
+    );
+    assert.equal(readdirSync(root).includes("requests.jsonl"), false);
+  });
+});
+
+test("a host-denied outside write is unavailable before harness startup", async () => {
+  await fixture("ready", async ({ root, server, record, input }) => {
+    const result = await probeCodexReadiness(
+      { ...input, outsideDirectory: "/proc/sys" },
+      [process.execPath, server],
+    );
+    assert.equal(result.status, "unavailable");
+    assert.equal(result.outsideHostWritable, false);
+    assert.equal(result.outsideWriteRefused, false);
+    assert.equal(result.workspaceWritable, false);
+    assert.match(result.detail, /host-writable outside directory/);
+    assert.equal(readdirSync(root).includes("requests.jsonl"), false);
+    assert.deepEqual(readdirSync(input.workspace), []);
   });
 });
 

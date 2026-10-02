@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -1011,6 +1012,200 @@ test("late secret and commit failures never return completed collection observat
     );
     assert.equal(completed, false);
   }
+});
+
+const discoveryProposal = {
+  scope: "backlog",
+  reason: "Public test proposal",
+  evidence: ["Observed existing requirement"],
+  ownership: ["safe.txt"],
+  acceptance: ["Inspect existing requirement"],
+  dependencies: [],
+};
+const discoveryBytes = `${JSON.stringify(discoveryProposal, null, 2)}\n`;
+
+for (const failure of [
+  "head",
+  "ownership",
+  "secret",
+  "assets",
+  "commit",
+  "empty",
+])
+  test(`failed ${failure} collection retains exact private discovery in its settled owned attempt`, async () => {
+    let retained = false;
+    let completed = false;
+    const errors = {
+      head: /Worker changed HEAD/,
+      ownership: /outside ownership: other.txt/,
+      secret: /Secretlint/,
+      assets: /AssetSet/,
+      commit: /git.*commit|Command failed/s,
+      empty: /Worker produced no repository change/,
+    };
+    await assert.rejects(
+      runCandidate(
+        (worktree, root) => {
+          writeFileSync(
+            join(worktree, ".factory-discovery.json"),
+            discoveryBytes,
+          );
+          if (failure === "head")
+            git(
+              worktree,
+              "-c",
+              "user.name=Fixture",
+              "-c",
+              "user.email=fixture@example.test",
+              "commit",
+              "--allow-empty",
+              "-m",
+              "Unexpected worker commit",
+            );
+          else if (failure !== "empty")
+            writeFileSync(
+              join(
+                worktree,
+                failure === "ownership" ? "other.txt" : "safe.txt",
+              ),
+              failure === "secret"
+                ? "ghp_abcdefghijklmnopqrstuvwxyz0123456789\n"
+                : "safe\n",
+            );
+          if (failure === "commit") {
+            const hook = join(root, "hooks");
+            mkdirSync(hook);
+            writeFileSync(join(hook, "pre-commit"), "#!/bin/sh\nexit 1\n", {
+              mode: 0o755,
+            });
+            git(worktree, "config", "core.hooksPath", hook);
+          }
+        },
+        {
+          ...(failure === "assets"
+            ? {
+                collect: () => ({
+                  evidence: { harness: "scripted" },
+                  assets: [{}],
+                }),
+              }
+            : {}),
+          inspectFailure(worktree) {
+            retained = existsSync(worktree);
+            assert.equal(
+              readFileSync(join(worktree, ".factory-discovery.json"), "utf8"),
+              discoveryBytes,
+            );
+            assert.equal(
+              git(worktree, "diff", "--cached", "--name-only")
+                .split("\n")
+                .includes(".factory-discovery.json"),
+              false,
+            );
+            const blob = git(
+              worktree,
+              "hash-object",
+              "--no-filters",
+              "--",
+              ".factory-discovery.json",
+            );
+            assert.throws(
+              () => git(worktree, "cat-file", "-e", blob),
+              /Command failed/,
+            );
+          },
+          inspectResult() {
+            completed = true;
+          },
+        },
+      ),
+      errors[failure],
+    );
+    assert.equal(retained, true);
+    assert.equal(completed, false);
+  });
+
+test("successful discovery collection returns the proposal without delivering its private staging bytes", async () => {
+  let originalWorktree;
+  await runCandidate(
+    (worktree) => {
+      originalWorktree = worktree;
+      writeFileSync(join(worktree, ".factory-discovery.json"), discoveryBytes);
+      writeFileSync(join(worktree, "safe.txt"), "safe\n");
+    },
+    {
+      inspectResult(result, checkout) {
+        assert.deepEqual(result.discovery, discoveryProposal);
+        assert.equal(
+          git(
+            checkout,
+            "ls-tree",
+            result.changeRef,
+            "--",
+            ".factory-discovery.json",
+          ),
+          "",
+        );
+        assert.equal(existsSync(originalWorktree), false);
+      },
+    },
+  );
+});
+
+test("tracked discovery cannot use the private staging exclusion", async () => {
+  let retained = false;
+  await assert.rejects(
+    runCandidate(
+      (worktree) => {
+        writeFileSync(join(worktree, "safe.txt"), "safe\n");
+      },
+      {
+        prepareBase(checkout) {
+          writeFileSync(
+            join(checkout, ".factory-discovery.json"),
+            discoveryBytes,
+          );
+        },
+        inspectFailure(worktree) {
+          retained = existsSync(worktree);
+          assert.equal(
+            readFileSync(join(worktree, ".factory-discovery.json"), "utf8"),
+            discoveryBytes,
+          );
+        },
+      },
+    ),
+    /Discovery manifest must be untracked private staging/,
+  );
+  assert.equal(retained, true);
+});
+
+test("already staged discovery cannot use the private staging exclusion", async () => {
+  await assert.rejects(
+    runCandidate(
+      (worktree) => {
+        writeFileSync(
+          join(worktree, ".factory-discovery.json"),
+          discoveryBytes,
+        );
+        git(worktree, "add", ".factory-discovery.json");
+        writeFileSync(join(worktree, "safe.txt"), "safe\n");
+      },
+      {
+        inspectFailure(worktree) {
+          assert.equal(
+            readFileSync(join(worktree, ".factory-discovery.json"), "utf8"),
+            discoveryBytes,
+          );
+          assert.equal(
+            git(worktree, "diff", "--cached", "--name-only"),
+            ".factory-discovery.json",
+          );
+        },
+      },
+    ),
+    /Discovery manifest must be untracked private staging/,
+  );
 });
 
 test("failed collection retains owned checkout when worker cessation is unknown", async () => {

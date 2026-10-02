@@ -20,20 +20,9 @@ export function encodeCompilerWire(input, promptOrChoices) {
       const lines = choices.sources[sourceIndex]?.lines.map(
         (line) => line.text,
       );
-      const sourceLines = gate.source.text.split("\n");
-      const firstLine = lines?.findIndex(
-        (_, index) =>
-          lines.slice(index, index + sourceLines.length).join("\n") ===
-          gate.source.text,
-      );
-      if (sourceIndex < 0 || firstLine < 0)
+      if (sourceIndex < 0 || !lines.join("\n").includes(gate.source.text))
         throw new Error("Fixture check authority is not supplied");
-      return {
-        checkName: gate.checkName,
-        sourceIndex,
-        firstLine,
-        lastLine: firstLine + sourceLines.length - 1,
-      };
+      return { checkName: gate.checkName, sourceIndex };
     }),
     items: graph.items
       .map(compilerItem)

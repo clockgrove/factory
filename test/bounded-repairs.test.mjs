@@ -1021,8 +1021,8 @@ for (const delivery of ["regular", "native-stack"])
             objectiveReviewEvidence({
               state: broken,
               checkout: config.checkout,
-              integratedCommitSha: broken.integratedSha,
-              integratedTreeSha: git(
+              candidateCommitSha: broken.integratedSha,
+              candidateTreeSha: git(
                 config.checkout,
                 "rev-parse",
                 `${broken.integratedSha}^{tree}`,

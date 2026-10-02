@@ -55,6 +55,13 @@ new authority. Evidence describes the gap, scope, ownership, acceptance and
 prerequisites; the compiler still uses the original pinned source packet. Backlog
 discoveries remain proposed data and never enter current execution.
 
+Private discovery staging remains outside Git collection. A rejected collection
+retains its exact proposal bytes in the existing owned attempt worktree after
+worker cessation is verified; it supplies no accepted result or retry authority.
+Successful collection returns the proposal and removes the private staging file
+before ordinary worktree cleanup. A tracked or staged proposal cannot use this
+private-file exclusion. This bounded evidence-retention correction is #465.
+
 The existing atomic snapshot retains the admitted initial graph, immutable reviewed
 successors, one pending amendment and Objective-level allowance consumption. Each
 new attempt binds its accepted graph digest. A revision consumes one recorded
@@ -105,6 +112,22 @@ trusted previous graph. Candidate validation enforces that derivation without
 rewriting admitted snapshots. Final-review/controller coverage retains the
 original Objective obligations separately from parent acceptance. Aggregate
 validation and independent review still run after actual child integration.
+
+An explicitly authorized unchanged-baseline qualification may compile a nonempty
+all-QA graph with no coding worker, owned change, implementation dependency or
+PR. Its controller-derived candidate basis is `pinned-baseline`, bound to the
+accepted base and current authenticated default-branch head; an implementation
+graph instead uses `current-graph-integration` from actual delivery. Baseline
+qualification never writes an integration identity or fabricates native or
+WorkGraph dependencies. Original final-review/controller criteria owned by QA
+remain at final Objective acceptance; current QA acceptance uses its actual
+phase-available commands and semantic evidence. Source-required implementation
+cannot be omitted by selecting read-only nodes. QA and final evidence, sealing,
+closure, status and native predecessor acceptance retain the honest candidate
+basis. Exact default-head checks precede baseline QA and final validation and
+follow final independent review. Existing mixed implementation graphs retain
+actual integration dependencies and candidate freshness. [#459](https://github.com/clockgrove/factory/issues/459)
+owns this bounded correction and its exact installed qualification.
 
 Current, completed dependency and final review receive the harness discovery
 retained on the Work Item attempt, bound to that attempt and its current reviewed
@@ -433,6 +456,32 @@ observe the same scoped facts at their own planning boundary. These observations
 use the existing preparation and review bindings, not a readiness ledger or
 native Objective predecessor receipt (#403).
 
+Planning compilation selects a source-required named CI check by semantic check
+name and an existing pinned source index. The controller supplies that complete
+source's canonical path, digest and literal text; models do not copy line bounds.
+Independent graph and amendment review assess the resulting canonical entry and
+its full pre-integration scope, rather than asking for discarded compiler choices.
+Complete transport is not semantic acceptance. Planning diagnosis receives the
+actual rejected canonical graph when one exists; failed wire decoding supplies
+null, never a reconstructed graph. Findings and diagnosis remain claims evaluated
+against supplied sources and controller facts (#458).
+
+Compilation, graph review, diagnosis and amendment review also receive typed
+configured concurrency and the checked finite authority maximum when supplied.
+Explicit previews record no authorized maximum. These controller ceilings prove
+neither available driver capacity, completed admission nor measured worker overlap;
+authored worker prose cannot establish them. Review packets supply the facts as
+controller evidence, candidates bind exactly what review saw, and activation and
+admission check current configuration and authority. Existing immutable source,
+configuration, authority and consumed-planning bindings remain intact (#458).
+
+Native compilation validates copied Work Item primitives and collections before
+proof, path, review or projection consumers. Identifiers, task text, string arrays
+and asset declarations retain actual types across ordinary, read-only and retained
+nodes. Malformed complete provider output is rejected without string coercion or
+an independent review submission; the emitted schema does not substitute for
+native validation (#460).
+
 Planning with a repair policy, or within authorized intake, first persists its
 body/base/configuration/authority binding. Initial compilation, diagnosis,
 corrective compilation and independent review have explicit invocation identities.
@@ -444,3 +493,19 @@ activation. Graph amendments share the same planning counter and path limit.
 Original admitted item IDs anchor work repair scopes; aggregate children inherit
 those scopes, and otherwise new work shares the Objective discovery scope. Neither
 new children, explicit retry commands, recompilation nor restart resets limits.
+
+A retained planning review pairs its original packet and complete canonical
+review-context/configuration digest with its completed response in that same
+preparation snapshot. The request is retained before provider submission. An
+unchanged known review uses the original packet and resolved evidence identities;
+pause/restart cannot create an identity-only protocol failure or correction charge.
+Completed clean reviews and prior rejected review envelopes remain retained.
+Actual rejected findings can still consume an evidenced, admitted correction and
+require a fresh independent review of the corrected graph (#464).
+
+Changed or damaged review context, a response lacking its original request binding,
+and unknown submitted outcomes never inherit acceptance or get rebound to new
+packet identities. They stop without a diagnostic call or allowance reset. A
+historical unbound preparation requires supported owned cessation/cancellation
+before a separately bounded corrected successor; preserve its rejected evidence
+and accounting rather than reconstruct a binding or migrate the record (#464).

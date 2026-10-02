@@ -44,6 +44,7 @@ import {
   git,
   StatefulGitHubFake,
 } from "./support/integration-fixture.mjs";
+import { projectionClient } from "./support/projection-client.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
 
 const capabilities = {
@@ -650,27 +651,83 @@ test("GitHub issue projection renders the accepted assignment and resolved bindi
       items: [item("one")],
     };
     normalizeExecutionProfiles(graph, executionProfileChoices(config));
-    let body;
+    const projection = projectionClient(config.repository);
+    projection.issues.set(
+      1,
+      projection.issue(1, { body, labels: ["existing-objective-label"] }),
+    );
     const client = new GitHubClient(
       new Octokit({
         request: {
           fetch: async (url, options) => {
-            assert.equal(
-              new URL(url).pathname,
-              "/repos/example/profiles/issues",
+            const path = new URL(url).pathname.slice(1);
+            assert.match(
+              path,
+              /^repos\/example\/profiles\/(?:labels|issues(?:\/[12](?:\/(?:labels|dependencies\/blocked_by|sub_issues))?)?)$/,
             );
-            if (options.method === "GET") return Response.json([]);
-            assert.equal(options.method, "POST");
-            body = JSON.parse(options.body).body;
-            return Response.json({ id: 1010, number: 101 });
+            assert.equal(options.headers["x-github-api-version"], "2026-03-10");
+            const method = options.method ?? "GET";
+            if (
+              method === "GET" &&
+              (path.endsWith("/labels") ||
+                path.endsWith("/issues") ||
+                path.endsWith("/blocked_by") ||
+                path.endsWith("/sub_issues"))
+            )
+              return Response.json(await projection.client.paginate(path));
+            return Response.json(
+              await projection.client.request(
+                method,
+                path,
+                options.body ? JSON.parse(options.body) : undefined,
+              ),
+            );
           },
         },
       }),
     );
     const gateway = new RealGitHubGateway(config.repository, {}, client);
-    await gateway.projectGraph({ graph, objectiveIssue: 1 });
-    assert.match(body, /## Assigned execution profile/);
-    assert.ok(body.includes(JSON.stringify(graph.items[0].executionProfile)));
-    assert.ok(body.includes(JSON.stringify(graph.items[0].executionBinding)));
-    assert.doesNotMatch(body, /DO-NOT-SEND|privatePath/);
+    const projected = await gateway.projectGraph({ graph, objectiveIssue: 1 });
+    const creation = projection.calls.find(
+      (call) => call.method === "POST" && call.route.endsWith("/issues"),
+    );
+    const projectedBody = creation.body.body;
+    const workIssue = projection.issues.get(projected.issueByItemId.one);
+    assert.equal(workIssue.body, projectedBody);
+    assert.equal(
+      workIssue.repository_url,
+      "https://api.github.com/repos/example/profiles",
+    );
+    assert.deepEqual(creation.body.labels, ["factory:work-item"]);
+    assert.deepEqual(projection.issues.get(1).labels, [
+      "existing-objective-label",
+      "factory:objective",
+    ]);
+    assert.deepEqual(projection.hierarchy.get(1), [workIssue.number]);
+    assert.deepEqual(
+      projection.calls.find(
+        (call) => call.method === "POST" && call.route.endsWith("/sub_issues"),
+      ).body,
+      { sub_issue_id: workIssue.id, replace_parent: false },
+    );
+    const mutations = projection.calls.filter(
+      (call) => call.method !== "GET",
+    ).length;
+    await gateway.projectGraph({
+      graph,
+      objectiveIssue: 1,
+      knownIssues: projected.issueByItemId,
+    });
+    assert.equal(
+      projection.calls.filter((call) => call.method !== "GET").length,
+      mutations,
+    );
+    assert.match(projectedBody, /## Assigned execution profile/);
+    assert.ok(
+      projectedBody.includes(JSON.stringify(graph.items[0].executionProfile)),
+    );
+    assert.ok(
+      projectedBody.includes(JSON.stringify(graph.items[0].executionBinding)),
+    );
+    assert.doesNotMatch(projectedBody, /DO-NOT-SEND|privatePath/);
   }));

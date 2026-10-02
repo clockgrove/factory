@@ -137,6 +137,11 @@ for (const delivery of ["regular", "native-stack"])
         const planningModel = {
           async generateStructured(request) {
             generated++;
+            assert.deepEqual(request.executionBounds, {
+              configuredConcurrency: config.execution.concurrency,
+              authorizedMaxConcurrency:
+                generated === 1 ? null : authority.resources.maxConcurrency,
+            });
             assert.equal(
               request.localExecutables.provenance,
               "controller-local-validation-executable-preflight",
@@ -174,6 +179,18 @@ for (const delivery of ["regular", "native-stack"])
           },
           async reviewGraph(request) {
             reviews++;
+            const bounds = request.reviewPacket.evidence.find(
+              (entry) => entry.path === "FACTORY_EXECUTION_BOUNDS",
+            );
+            assert.equal(bounds.origin, "controller");
+            assert.deepEqual(
+              JSON.parse(bounds.content),
+              request.executionBounds,
+            );
+            assert.equal(
+              request.executionBounds.authorizedMaxConcurrency,
+              request.amendment ? authority.resources.maxConcurrency : null,
+            );
             assert.equal(
               request.localExecutables.provenance,
               "controller-local-validation-executable-preflight",
@@ -374,8 +391,8 @@ for (const delivery of ["regular", "native-stack"])
           objectiveReviewEvidence({
             state: snapshot,
             checkout: config.checkout,
-            integratedCommitSha: snapshot.integratedSha,
-            integratedTreeSha: finalPacket.treeSha,
+            candidateCommitSha: snapshot.integratedSha,
+            candidateTreeSha: finalPacket.treeSha,
           });
         for (const corruption of [
           "missing",
@@ -1282,10 +1299,24 @@ test("real gateway reconciles reviewed issue bodies, native hierarchy and depend
   let next = 3;
   const issues = new Map([
     [
+      1,
+      {
+        id: 101,
+        number: 1,
+        title: "Objective",
+        body: "Public objective",
+        state: "open",
+        labels: ["factory:objective"],
+        repository_url: "https://api.github.com/repos/example/projection",
+      },
+    ],
+    [
       2,
       {
         id: 102,
         number: 2,
+        labels: ["factory:work-item"],
+        repository_url: "https://api.github.com/repos/example/projection",
         state: "open",
         title: original.items[0].title,
         body: projectedIssueBody(original.items[0], 1),
@@ -1297,6 +1328,11 @@ test("real gateway reconciles reviewed issue bodies, native hierarchy and depend
   const calls = [];
   const client = {
     async paginate(route) {
+      if (route.endsWith("/labels"))
+        return ["factory:objective", "factory:work-item"].map((name) => ({
+          name,
+          archived_at: null,
+        }));
       const n = Number(route.match(/issues\/(\d+)/)?.[1]);
       if (route.includes("blocked_by"))
         return (deps.get(n) ?? []).map((id) => issues.get(id));
@@ -1329,7 +1365,13 @@ test("real gateway reconciles reviewed issue bodies, native hierarchy and depend
       }
       if (method === "POST" && route.endsWith("issues")) {
         const number = next++;
-        const issue = { id: 100 + number, number, state: "open", ...value };
+        const issue = {
+          id: 100 + number,
+          number,
+          state: "open",
+          repository_url: "https://api.github.com/repos/example/projection",
+          ...value,
+        };
         issues.set(number, issue);
         return structuredClone(issue);
       }

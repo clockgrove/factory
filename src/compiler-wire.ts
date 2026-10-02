@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import type { CoverageProof, PlanningRequest, WorkGraph } from "./contracts.js";
+import {
+  assertPlanningExecutionBounds,
+  type CoverageProof,
+  type PlanningRequest,
+  type WorkGraph,
+} from "./contracts.js";
+import { assertWorkItemFields } from "./scheduler.js";
 import { aggregateAcceptance } from "./qa.js";
 
 type Schema = {
@@ -50,6 +56,8 @@ export function compilerWire(
   request: PlanningRequest<unknown>,
   citations: CompilerCitationChoice[],
 ) {
+  if (request.executionBounds)
+    assertPlanningExecutionBounds(request.executionBounds);
   const context = request.compileContext;
   if (
     !context ||
@@ -83,6 +91,7 @@ export function compilerWire(
         request.baseSha,
         ...(request.prerequisites ? [request.prerequisites] : []),
         ...(request.localExecutables ? [request.localExecutables] : []),
+        ...(request.executionBounds ? [request.executionBounds] : []),
         request.sources,
         request.executionProfiles,
         request.controllerCapabilitiesDigest,
@@ -196,6 +205,8 @@ export function compilerWire(
       "integrated-semantic",
       "integrated-ci",
       "published-ci",
+      "final-review",
+      "final-controller",
     ],
     aggregate: [
       "result-command",
@@ -240,8 +251,6 @@ export function compilerWire(
       items: strict({
         checkName: { ...text, minLength: 1 },
         sourceIndex: integer(request.sources.length),
-        firstLine: integer(),
-        lastLine: integer(),
       }),
     },
     items: {
@@ -323,6 +332,7 @@ export function compilerWire(
       ...entry,
     })),
     executionProfiles: request.executionProfiles ?? null,
+    executionBounds: request.executionBounds ?? null,
   };
   return {
     schema,
@@ -343,32 +353,19 @@ export function compilerWire(
       const requiredPreIntegrationChecks =
         wire.requiredPreIntegrationChecks.map((raw) => {
           const gate = object(raw, "pre-integration check");
-          keys(
-            gate,
-            ["checkName", "sourceIndex", "firstLine", "lastLine"],
-            "pre-integration check",
-          );
+          keys(gate, ["checkName", "sourceIndex"], "pre-integration check");
           const source =
             request.sources[
               index(gate.sourceIndex, request.sources.length, "sourceIndex")
             ]!;
-          const lines = source.content.split("\n");
-          const first = index(gate.firstLine, lines.length, "firstLine");
-          const last = index(gate.lastLine, lines.length, "lastLine");
-          if (
-            last < first ||
-            typeof gate.checkName !== "string" ||
-            !gate.checkName.trim()
-          )
-            throw new Error(
-              "Planner pre-integration check name or source span is invalid",
-            );
+          if (typeof gate.checkName !== "string" || !gate.checkName.trim())
+            throw new Error("Planner pre-integration check name is invalid");
           return {
             checkName: gate.checkName,
             source: {
               path: source.path,
               digest: createHash("sha256").update(source.content).digest("hex"),
-              text: lines.slice(first, last + 1).join("\n"),
+              text: source.content,
             },
           };
         });
@@ -415,6 +412,16 @@ export function compilerWire(
             );
           if (item.kind !== "work")
             Object.assign(item, structuredClone(readonlyConstants));
+          if (!Array.isArray(item.sourceAssets))
+            throw new Error("Planner sourceAssets must be an array");
+          for (const rawAsset of item.sourceAssets) {
+            const asset = object(rawAsset, "source asset");
+            keys(
+              asset,
+              ["kind", "path", "role", "mediaType", "visibility"],
+              "source asset",
+            );
+          }
           if (!Array.isArray(item.citations) || !item.citations.length)
             throw new Error("Planner item needs citations");
           const chosen = item.citations.map((value) => {
@@ -488,6 +495,7 @@ export function compilerWire(
             };
           });
         }
+        assertWorkItemFields(item);
         if (!Array.isArray(item.coverage))
           throw new Error("Planner item coverage must be an array");
         if (item.kind === "qa" && item.coverage.length === 0)

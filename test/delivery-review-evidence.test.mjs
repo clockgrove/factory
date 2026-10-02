@@ -268,8 +268,8 @@ for (const delivery of ["regular", "native-stack"]) {
         objectiveReviewEvidence({
           state,
           checkout: target.checkout,
-          integratedCommitSha: state.integratedSha,
-          integratedTreeSha: git(
+          candidateCommitSha: state.integratedSha,
+          candidateTreeSha: git(
             target.checkout,
             "rev-parse",
             `${state.integratedSha}^{tree}`,

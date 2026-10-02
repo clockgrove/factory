@@ -1,13 +1,23 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { CodexPlanningModel, objectiveCriteria } from "../dist/compiler.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { coverageObligations } from "../dist/qa.js";
-import { pinnedGit } from "../dist/process.js";
+import { pinnedGit, withProcessCancellation } from "../dist/process.js";
+import {
+  CandidateValidationFailure,
+  recordWorkFailure,
+} from "../dist/work-repair.js";
 import { validateTree, reviewAcceptance } from "../dist/validation.js";
 import {
   createTarget,
@@ -124,6 +134,205 @@ test("tracked and untracked command mutations and failed commands emit no succes
         evidence = await validate([command]);
       }, /modified the result tree|Validation command failed/);
       assert.equal(evidence, undefined);
+    }
+  }));
+
+function mutationDetail(error) {
+  assert.ok(error instanceof CandidateValidationFailure);
+  return JSON.parse(error.message.slice(error.message.indexOf(": ") + 2));
+}
+
+test("settled dirty refusals retain structured relative tracked, generated, special and rename paths after cleanup", async () =>
+  fixture(async ({ root, target, validate }) => {
+    const special = 'space \" quote\n雪.txt';
+    for (const [command, expected] of [
+      [
+        "printf secret-content >> base.txt",
+        [{ phase: "after", status: " M", path: "base.txt" }],
+      ],
+      [
+        "mkdir -p generated/cache; printf secret-content > generated/cache/result.txt",
+        [{ phase: "after", status: "??", path: "generated/cache/result.txt" }],
+      ],
+      [
+        `node -e 'require("fs").writeFileSync(${JSON.stringify(special)}, "secret-content")'`,
+        [{ phase: "after", status: "??", path: special }],
+      ],
+      [
+        "git mv base.txt renamed.txt",
+        [
+          {
+            phase: "after",
+            status: "R ",
+            path: "renamed.txt",
+            from: { path: "base.txt" },
+          },
+        ],
+      ],
+      [
+        `node -e 'require("fs").writeFileSync(Buffer.from("ff2e747874","hex"), "secret-content")'`,
+        [
+          {
+            phase: "after",
+            status: "??",
+            path: "ff2e747874",
+            pathEncoding: "hex",
+          },
+        ],
+      ],
+    ]) {
+      let failure;
+      const observations = [];
+      await assert.rejects(
+        validateTree(
+          target.checkout,
+          join(root, "validation"),
+          target.baseSha,
+          target.treeSha,
+          [command],
+          (entry) => observations.push(entry),
+        ),
+        (error) => {
+          failure = error;
+          assert.deepEqual(mutationDetail(error), {
+            paths: expected,
+            omittedRecords: 0,
+          });
+          assert.doesNotMatch(
+            error.message,
+            /secret-content|factory-worktree-observation-/,
+          );
+          return true;
+        },
+      );
+      assert.equal(observations.length, 1);
+      assert.equal(observations[0].passed, true);
+      assert.equal(
+        readdirSync(join(root, "validation")).filter(
+          (name) => name !== "empty-gh-config",
+        ).length,
+        0,
+      );
+      assert.equal(
+        git(target.checkout, "worktree", "list", "--porcelain").split(
+          "worktree ",
+        ).length - 1,
+        1,
+      );
+      const state = {
+        graph: { items: [{ id: "result", dependencies: [] }] },
+        work: {
+          result: {
+            status: "failed",
+            step: "validate",
+            changeRef: target.baseSha,
+            treeSha: target.treeSha,
+            usage: { availability: "unavailable" },
+          },
+        },
+      };
+      assert.equal(recordWorkFailure(state, "result", failure), true);
+      assert.equal(
+        state.work.result.recovery.failure.classification,
+        "implementation",
+      );
+      assert.equal(state.work.result.recovery.failure.detail, failure.message);
+      assert.deepEqual(state.work.result.usage, {
+        availability: "unavailable",
+      });
+      state.work.result.pendingEffect = "publication";
+      assert.equal(recordWorkFailure(state, "result", failure), false);
+      assert.equal(
+        state.work.result.recovery.failure.classification,
+        "uncertain",
+      );
+    }
+    const evidence = await validate();
+    assert.equal(evidence.worktreeObservation.postCommandStatus, "unchanged");
+  }));
+
+test("dirty diagnostics bound record count and path display while retaining explicit omission facts", async () =>
+  fixture(async ({ validate }) => {
+    const command = `node -e 'const fs=require("fs"); for(let i=0;i<50;i++) { const dir="generated/"+String(i).padStart(2,"0")+"/"+"x".repeat(180); fs.mkdirSync(dir,{recursive:true}); fs.writeFileSync(dir+"/"+"y".repeat(180),"private file contents") }'`;
+    await assert.rejects(validate([command]), (error) => {
+      const detail = mutationDetail(error);
+      assert.equal(detail.paths.length, 20);
+      assert.equal(detail.omittedRecords, 30);
+      assert.ok(JSON.stringify(detail.paths).length <= 8192);
+      assert.ok(
+        detail.paths.every(
+          (entry) => entry.path.length === 256 && entry.pathTruncated,
+        ),
+      );
+      assert.doesNotMatch(error.message, /private file contents/);
+      return true;
+    });
+  }));
+
+test("escaped control-character paths bound the complete diagnostic envelope independently of record count", async () =>
+  fixture(async ({ validate }) => {
+    const command = `node -e 'const fs=require("fs"); for(let i=0;i<16;i++) fs.writeFileSync(String(i).padStart(2,"0")+String.fromCharCode(1).repeat(220), "private contents")'`;
+    await assert.rejects(validate([command]), (error) => {
+      const detail = mutationDetail(error);
+      assert.ok(JSON.stringify(detail).length <= 8192);
+      assert.ok(detail.paths.length > 0 && detail.paths.length < 20);
+      assert.equal(detail.paths.length + detail.omittedRecords, 16);
+      assert.ok(detail.paths.every((entry) => !entry.pathTruncated));
+      assert.doesNotMatch(error.message, /private contents/);
+      return true;
+    });
+  }));
+
+test("unresolved validation descendants remain uncertain and retain the dirty owned checkout", async () =>
+  fixture(async ({ root, validate }) => {
+    let owned;
+    try {
+      await withProcessCancellation(
+        undefined,
+        async () => {
+          await assert.rejects(
+            validate(["printf dirty >> base.txt; sleep 30 >/dev/null 2>&1 &"]),
+            (error) => {
+              assert.equal(error instanceof CandidateValidationFailure, false);
+              assert.match(
+                error.message,
+                /Owned subprocess group remains active; outcome unknown/,
+              );
+              const directories = readdirSync(join(root, "validation")).filter(
+                (name) => name !== "empty-gh-config",
+              );
+              assert.equal(directories.length, 1);
+              assert.equal(
+                existsSync(
+                  join(root, "validation", directories[0], "base.txt"),
+                ),
+                true,
+              );
+              const state = {
+                graph: { items: [{ id: "result", dependencies: [] }] },
+                work: { result: { status: "failed" } },
+              };
+              assert.equal(recordWorkFailure(state, "result", error), false);
+              assert.equal(
+                state.work.result.recovery.failure.classification,
+                "uncertain",
+              );
+              return true;
+            },
+          );
+        },
+        (process, settled) => {
+          if (!settled) owned = process;
+        },
+      );
+    } finally {
+      if (owned) {
+        try {
+          process.kill(-owned.pid, "SIGKILL");
+        } catch (error) {
+          if (error.code !== "ESRCH") throw error;
+        }
+      }
     }
   }));
 
@@ -325,7 +534,26 @@ test("selected LFS hydration records an honest nonempty baseline and unchanged p
           selected,
           store,
         ),
-        /modified the result tree/,
+        (error) => {
+          assert.deepEqual(mutationDetail(error), {
+            paths: [
+              { phase: "before", status: " M", path: "asset.bin" },
+              { phase: "after", status: "M ", path: "asset.bin" },
+            ],
+            omittedRecords: 0,
+          });
+          return true;
+        },
+      );
+      await assert.rejects(
+        validate(["printf generated > generated.txt"], selected, store),
+        (error) => {
+          assert.deepEqual(mutationDetail(error), {
+            paths: [{ phase: "after", status: "??", path: "generated.txt" }],
+            omittedRecords: 0,
+          });
+          return true;
+        },
       );
       await assert.rejects(
         validate(["printf bad > asset.bin"], selected, store),

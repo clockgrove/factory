@@ -247,6 +247,95 @@ export class RealGitHubGateway implements GitHubGateway {
   }
 
   async projectGraph(request: GraphProjection): Promise<ProjectedGraph> {
+    const authenticated = (issue: Issue, number?: number): Issue => {
+      if (
+        !issue ||
+        issue.pull_request ||
+        !Number.isSafeInteger(issue.id) ||
+        issue.id <= 0 ||
+        !Number.isSafeInteger(issue.number) ||
+        issue.number <= 0 ||
+        (number !== undefined && issue.number !== number) ||
+        typeof issue.repository_url !== "string" ||
+        !issue.repository_url.startsWith("https://api.github.com/repos/") ||
+        issue.repository_url
+          .slice("https://api.github.com/repos/".length)
+          .toLowerCase() !== this.repository.toLowerCase() ||
+        !["open", "closed"].includes(issue.state)
+      )
+        throw new Error(
+          "Work Item projection lacks authenticated issue identity",
+        );
+      return issue;
+    };
+    const roles = ["factory:objective", "factory:work-item"];
+    const labels = await this.client.paginate<{
+      name: string;
+      archived_at?: string | null;
+    }>(this.route("labels"));
+    for (const role of roles) {
+      const matches = labels.filter((label) => label.name === role);
+      if (matches.length > 1 || matches[0]?.archived_at)
+        throw new Error(
+          `Required Factory role label is archived or ambiguous: ${role}`,
+        );
+      if (!matches.length) {
+        await this.client.request("POST", this.route("labels"), {
+          name: role,
+          color: "ededed",
+        });
+        const observed = await this.client.paginate<{
+          name: string;
+          archived_at?: string | null;
+        }>(this.route("labels"));
+        const created = observed.filter((label) => label.name === role);
+        if (created.length !== 1 || created[0]!.archived_at)
+          throw new Error(
+            `Factory role label creation did not reconcile exactly: ${role}`,
+          );
+      }
+    }
+    const ensureRole = async (issue: Issue, role: string): Promise<Issue> => {
+      const names = (issue.labels ?? []).map((label) =>
+        typeof label === "string" ? label : label.name,
+      );
+      if (names.includes(role)) return issue;
+      await this.client.request(
+        "POST",
+        this.route(`issues/${issue.number}/labels`),
+        { labels: [role] },
+      );
+      const observed = authenticated(
+        await this.client.request<Issue>(
+          "GET",
+          this.route(`issues/${issue.number}`),
+        ),
+        issue.number,
+      );
+      const observedNames = (observed.labels ?? []).map((label) =>
+        typeof label === "string" ? label : label.name,
+      );
+      if (
+        observed.id !== issue.id ||
+        observed.body !== issue.body ||
+        observed.title !== issue.title ||
+        observed.state !== issue.state ||
+        !observedNames.includes(role) ||
+        names.some((name) => !observedNames.includes(name))
+      )
+        throw new Error(
+          "Factory role label did not reconcile exactly; issue changed",
+        );
+      return observed;
+    };
+    const objective = authenticated(
+      await this.client.request<Issue>(
+        "GET",
+        this.route(`issues/${request.objectiveIssue}`),
+      ),
+      request.objectiveIssue,
+    );
+    await ensureRole(objective, roles[0]!);
     const issueByItemId: Record<string, number> = {};
     const issues = new Map<number, Issue>();
     let existing: Issue[] | undefined;
@@ -285,6 +374,7 @@ export class RealGitHubGateway implements GitHubGateway {
           );
       }
       if (found) {
+        authenticated(found, known);
         if (request.previousGraph) {
           if (
             found.state === "closed" &&
@@ -314,13 +404,28 @@ export class RealGitHubGateway implements GitHubGateway {
               "GET",
               this.route(`issues/${found.number}`),
             );
-            if (observed.body !== expectedBody || observed.title !== item.title)
+            authenticated(observed, found.number);
+            if (
+              observed.id !== found.id ||
+              observed.body !== expectedBody ||
+              observed.title !== item.title
+            )
               throw new Error(
                 "Amendment issue projection did not reconcile exactly",
               );
             found = observed;
           }
         }
+        if (
+          !request.previousGraph &&
+          (found.body !== projectedIssueBody(item, request.objectiveIssue) ||
+            found.title !== item.title ||
+            found.state !== "open")
+        )
+          throw new Error(
+            `Work Item ${item.id} projection changed; edits are proposals, not graph authority`,
+          );
+        found = await ensureRole(found, roles[1]!);
         issueByItemId[item.id] = found.number;
         issues.set(found.number, found);
         request.projected?.(item.id, found.number);
@@ -331,35 +436,64 @@ export class RealGitHubGateway implements GitHubGateway {
       const created = await this.client.request<Issue>(
         "POST",
         this.route("issues"),
-        { title: item.title, body },
+        { title: item.title, body, labels: [roles[1]!] },
       );
-      if (!Number.isSafeInteger(created.number) || created.number <= 0)
+      if (
+        !created ||
+        !Number.isSafeInteger(created.number) ||
+        created.number <= 0
+      )
         throw new Error(
           "Cannot parse created Work Item issue identity; outcome unknown",
         );
+      authenticated(created);
       request.projected?.(item.id, created.number);
       issueByItemId[item.id] = created.number;
+      if (
+        !(created.labels ?? []).some(
+          (label) =>
+            (typeof label === "string" ? label : label.name) === roles[1],
+        )
+      )
+        throw new Error("Created Work Item lacks its Factory role label");
+      if (
+        created.title !== item.title ||
+        created.body !== body ||
+        created.state !== "open"
+      )
+        throw new Error(
+          "Created Work Item projection did not reconcile exactly",
+        );
       issues.set(created.number, created);
       existing?.push(created);
     }
     for (const item of request.graph.items) {
-      if (!item.dependencies.length && !request.previousGraph) continue;
       const number = issueByItemId[item.id]!;
       const observations = await this.client.paginate<Issue>(
         this.route(`issues/${number}/dependencies/blocked_by`),
       );
-      const existing = new Set(observations.map((issue) => issue.number));
-      if (request.previousGraph) {
-        const old = request.previousGraph.items.find(
-          (previous) => previous.id === item.id,
-        );
-        const allowed = new Set(
-          [...(old?.dependencies ?? []), ...item.dependencies].map(
-            (id) => issueByItemId[id],
-          ),
-        );
-        if (observations.some((issue) => !allowed.has(issue.number)))
+      for (const issue of observations) {
+        authenticated(issue);
+        if (issues.get(issue.number)?.id !== issue.id)
           throw new Error("Unreviewed remote dependency edit");
+      }
+      if (
+        new Set(observations.map((issue) => issue.number)).size !==
+        observations.length
+      )
+        throw new Error("Ambiguous remote dependency identity");
+      const existing = new Set(observations.map((issue) => issue.number));
+      const allowed = new Set(
+        [
+          ...item.dependencies,
+          ...(request.previousGraph?.items.find(
+            (previous) => previous.id === item.id,
+          )?.dependencies ?? []),
+        ].map((id) => issueByItemId[id]),
+      );
+      if (observations.some((issue) => !allowed.has(issue.number)))
+        throw new Error("Unreviewed remote dependency edit");
+      if (request.previousGraph) {
         for (const issue of observations) {
           if (
             item.dependencies.some((id) => issueByItemId[id] === issue.number)
@@ -386,22 +520,27 @@ export class RealGitHubGateway implements GitHubGateway {
           );
         }
       }
-      if (request.previousGraph) {
+      {
         const observed = await this.client.paginate<Issue>(
           this.route(`issues/${number}/dependencies/blocked_by`),
         );
         const expected = item.dependencies.map((id) => issueByItemId[id]);
         if (
           observed.length !== expected.length ||
-          observed.some((issue) => !expected.includes(issue.number))
+          new Set(observed.map((issue) => issue.number)).size !==
+            observed.length ||
+          observed.some((issue) => {
+            authenticated(issue);
+            return (
+              !expected.includes(issue.number) ||
+              issues.get(issue.number)?.id !== issue.id
+            );
+          })
         )
-          throw new Error("Amendment dependencies did not reconcile exactly");
+          throw new Error("Work Item dependencies did not reconcile exactly");
       }
     }
-    if (
-      request.previousGraph ||
-      request.graph.items.some((item) => item.kind === "aggregate")
-    ) {
+    {
       const parentByChild = new Map(
         request.graph.items.flatMap((parent) =>
           (parent.children ?? []).map((id) => [id, parent.id] as const),
@@ -422,7 +561,16 @@ export class RealGitHubGateway implements GitHubGateway {
         const existing = await this.client.paginate<Issue>(
           this.route(`issues/${parent}/sub_issues`),
         );
-        if (existing.some((issue) => !children.includes(issue.number)))
+        for (const issue of existing) {
+          authenticated(issue);
+          if (issues.get(issue.number)?.id !== issue.id)
+            throw new Error("Ambiguous remote hierarchy identity");
+        }
+        if (
+          new Set(existing.map((issue) => issue.number)).size !==
+            existing.length ||
+          existing.some((issue) => !children.includes(issue.number))
+        )
           throw new Error("Unreviewed remote hierarchy edit");
         for (const child of children) {
           if (existing.some((issue) => issue.number === child)) continue;
@@ -440,9 +588,17 @@ export class RealGitHubGateway implements GitHubGateway {
         );
         if (
           observed.length !== children.length ||
-          observed.some((issue) => !children.includes(issue.number))
+          new Set(observed.map((issue) => issue.number)).size !==
+            observed.length ||
+          observed.some((issue) => {
+            authenticated(issue);
+            return (
+              !children.includes(issue.number) ||
+              issues.get(issue.number)?.id !== issue.id
+            );
+          })
         )
-          throw new Error("Amendment hierarchy did not reconcile exactly");
+          throw new Error("Work Item hierarchy did not reconcile exactly");
       }
     }
     return { issueByItemId };

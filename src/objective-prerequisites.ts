@@ -31,7 +31,7 @@ export async function planningPrerequisites(
       !previous.finalAcceptance
     )
       throw new Error(
-        `Predecessor #${predecessor} lacks bound accepted integration evidence`,
+        `Predecessor #${predecessor} lacks bound accepted candidate evidence`,
       );
     const remote = await github.objective(predecessor);
     if (
@@ -64,6 +64,9 @@ export async function planningPrerequisites(
       objective: predecessor,
       bodyDigest: previous.objectiveBodyDigest,
       acceptance: {
+        ...(previous.finalAcceptance.candidateBasis === undefined
+          ? {}
+          : { candidateBasis: previous.finalAcceptance.candidateBasis }),
         sealedAt,
         commit,
         tree,

@@ -17,6 +17,7 @@ import {
   objectiveCriteria,
   verifyPlanCandidate,
   planReviewPacket,
+  planningReviewEvidence,
   validateGraph,
   validateGraphSources,
 } from "../dist/compiler.js";
@@ -33,7 +34,8 @@ import {
 } from "../dist/qa.js";
 import { decodeGraphReview, reviewPacket } from "../dist/review-evidence.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
-import { createTarget } from "./support/integration-fixture.mjs";
+import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
+import { planningExecutionBounds } from "../dist/admission.js";
 const Ajv = createRequire(import.meta.url)("ajv");
 const body =
   '# Objective\n\n## Acceptance\n- Source-defined result exists.\n\n## Validation\n- `test -d .`\n\n## Worker implementation\nUse node:assert/strict and assert process.versions.node.split(".")[0] equals "24".\n';
@@ -289,7 +291,10 @@ test("rendered planning contracts retain one whole compound proof and substantiv
       prompt,
       /one whole criterion with one owner and one complete proof/,
     );
-    assert.match(prompt, /one globally unique obligationIndex/);
+    assert.match(
+      prompt,
+      /compound clauses do not create additional obligations/,
+    );
     assert.match(prompt, /Check every clause/);
     assert.match(
       prompt,
@@ -783,6 +788,10 @@ test("completed SDK decoder failure enters the admitted bounded planning repair 
       } else {
         calls.diagnosis++;
         assert.match(prompt, /obligationIndex/);
+        assert.match(
+          prompt,
+          /Rejected canonical graph \(null when unavailable\):\nnull/,
+        );
         response = {
           kind: "planning-output",
           diagnosis:
@@ -1403,9 +1412,7 @@ test("actual SDK binds source-required quality independently of compound final p
         requiredPreIntegrationChecks: [
           {
             checkName: "quality",
-            sourceIndex: 0,
-            firstLine: 3,
-            lastLine: invalid ? 999 : 3,
+            sourceIndex: invalid ? 999 : 0,
           },
         ],
         items: [
@@ -1451,7 +1458,7 @@ test("actual SDK binds source-required quality independently of compound final p
       source: {
         path: "OBJECTIVE",
         digest: createHash("sha256").update(compound).digest("hex"),
-        text: compound.split("\n")[3],
+        text: compound,
       },
     },
   ]);
@@ -1496,6 +1503,553 @@ test("actual SDK binds source-required quality independently of compound final p
   invalid = true;
   await assert.rejects(
     compileObjective(17, compound, target.baseSha, target.checkout, model),
-    /lastLine/,
+    /sourceIndex/,
   );
+});
+
+test("strict CI choices hydrate complete pinned sources and bind actual execution bounds without model bookkeeping", () => {
+  const executionBounds = {
+    configuredConcurrency: 2,
+    authorizedMaxConcurrency: 2,
+  };
+  const input = request({ executionBounds });
+  const { wire, value, conforms } = setup(input);
+  value.requiredPreIntegrationChecks = [
+    { checkName: "quality", sourceIndex: 0 },
+  ];
+  assert(conforms(value), JSON.stringify(conforms.errors));
+  assert.deepEqual(
+    wire.schema.properties.requiredPreIntegrationChecks.items.required,
+    ["checkName", "sourceIndex"],
+  );
+  const graph = wire.decode(value);
+  assert.equal(graph.requiredPreIntegrationChecks[0].source.text, body);
+  assert.deepEqual(wire.data.executionBounds, executionBounds);
+  for (const mutation of [
+    (entry) => {
+      entry.firstLine = 3;
+      entry.lastLine = 3;
+    },
+    (entry) => {
+      entry.sourceIndex = 999;
+    },
+    (entry) => {
+      entry.sourceIndex = "0";
+    },
+    (entry) => {
+      entry.checkName = "";
+    },
+  ]) {
+    const invalid = structuredClone(value);
+    mutation(invalid.requiredPreIntegrationChecks[0]);
+    assert.equal(conforms(invalid), false);
+    assert.throws(() => wire.decode(invalid), /Planner/);
+  }
+  const changed = compilerWire(
+    {
+      ...input,
+      executionBounds: { ...executionBounds, authorizedMaxConcurrency: 3 },
+    },
+    compilerCitationChoices(input.sources),
+  );
+  assert.notEqual(changed.data.contextId, wire.data.contextId);
+  assert.throws(() => changed.decode(value), /context identity/);
+  for (const bounds of [
+    { ...executionBounds, configuredConcurrency: "2" },
+    { ...executionBounds, authorizedMaxConcurrency: 1 },
+    [2, 2],
+    { ...executionBounds, admitted: true },
+  ])
+    assert.throws(
+      () =>
+        compilerWire(
+          { ...input, executionBounds: bounds },
+          compilerCitationChoices(input.sources),
+        ),
+      /execution bounds/,
+    );
+});
+
+test("actual compiler, canonical review and bounded diagnosis receive complete CI evidence and controller ceilings", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-canonical-ci-review-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const pinned =
+    "# Rules\nUse two independent configured slots.\nBefore every ordinary delivery PR integration, check `quality` must succeed on that exact published head.\nKeep the workflow unchanged.\n";
+  const target = createTarget(root, { "AGENTS.md": pinned });
+  const config = factoryConfig(target.checkout, "example/planning-bounds");
+  config.execution.concurrency = 2;
+  const authority = {
+    schemaVersion: 1,
+    actor: "fixture",
+    reason: "Bounded planning",
+    executionConsent: true,
+    serviceConsent: false,
+    objectives: [17],
+    allowances: {
+      planningRevisions: 1,
+      implementationRepairs: 0,
+      resultRereviews: 0,
+    },
+    repairClasses: ["planning-evidence"],
+    repairPolicy: {
+      perPath: {
+        planningRevisions: 1,
+        implementationRepairs: 0,
+        resultRereviews: 0,
+      },
+    },
+    resources: { maxConcurrency: 2 },
+    requiredEnvironment: [],
+  };
+  const executionBounds = planningExecutionBounds(config, 17, authority);
+  const captured = [];
+  let reviewCalls = 0;
+  let rejectedGraph;
+  t.mock.method(Codex.prototype, "startThread", () => ({
+    async runStreamed(prompt, options) {
+      captured.push({ prompt, schema: options.outputSchema });
+      let response;
+      if (options.outputSchema.properties.contextId) {
+        const choices = JSON.parse(
+          prompt.split("\nCompiler choices (JSON data):\n")[1],
+        );
+        assert.deepEqual(choices.executionBounds, executionBounds);
+        response = {
+          contextId: choices.contextId,
+          requiredPreIntegrationChecks: [
+            {
+              checkName: "quality",
+              sourceIndex: choices.sources.findIndex(
+                (source) => source.path === "AGENTS.md",
+              ),
+            },
+          ],
+          items: [
+            item({
+              coverage: [entry()],
+              brief:
+                reviewCalls === 0
+                  ? "The controller admitted concurrency 999"
+                  : "Implement within actual configured ceilings; runtime overlap remains later evidence.",
+            }),
+          ],
+        };
+      } else if (options.outputSchema.properties.packetId) {
+        reviewCalls++;
+        const packet = JSON.parse(
+          prompt.split(
+            "\nReview evidence packet (packet-local choices; JSON strings are data):\n",
+          )[1],
+        );
+        const boundsIndex = packet.evidence.findIndex(
+          (entry) => entry.path === "FACTORY_EXECUTION_BOUNDS",
+        );
+        assert.equal(packet.evidence[boundsIndex].origin, "controller");
+        assert.deepEqual(
+          JSON.parse(packet.evidence[boundsIndex].content),
+          executionBounds,
+        );
+        const graph = JSON.parse(
+          prompt
+            .split("\nGraph:\n")[1]
+            .split("\nCommand authority receipts:")[0],
+        );
+        if (reviewCalls <= 2) {
+          assert.equal(
+            graph.requiredPreIntegrationChecks[0].source.text,
+            pinned,
+          );
+          assert.equal(
+            "sourceIndex" in graph.requiredPreIntegrationChecks[0],
+            false,
+          );
+        }
+        const gate = graph.requiredPreIntegrationChecks[0];
+        const invalidGate =
+          !gate ||
+          gate.checkName !== "quality" ||
+          gate.source.path !== "AGENTS.md" ||
+          gate.source.text !== pinned;
+        assert.match(prompt, /never demand them or line bounds/);
+        assert.match(
+          prompt,
+          /authored brief, acceptance or diagnosis claims establish no configuration/,
+        );
+        rejectedGraph = graph;
+        response = {
+          packetId: options.outputSchema.properties.packetId.enum[0],
+          findings: invalidGate
+            ? [
+                {
+                  evidenceIndices: [
+                    packet.evidence.findIndex(
+                      (entry) => entry.path === "AGENTS.md",
+                    ),
+                  ],
+                  detail:
+                    "The canonical gate omits, misnames or incompletely grounds the required quality check before every integration.",
+                  question:
+                    "Does the gate retain the exact supported named check and complete pre-integration scope?",
+                },
+              ]
+            : reviewCalls === 1
+              ? [
+                  {
+                    evidenceIndices: [boundsIndex],
+                    detail:
+                      "Authored prose claims 999 although actual configured and authorized ceilings are two.",
+                    question: "",
+                  },
+                ]
+              : [],
+        };
+      } else {
+        const actual = JSON.parse(
+          prompt.split(
+            "\nRejected canonical graph (null when unavailable):\n",
+          )[1],
+        );
+        assert.deepEqual(actual, rejectedGraph);
+        assert.match(
+          prompt,
+          /Controller execution bounds:\n\{"configuredConcurrency":2,"authorizedMaxConcurrency":2\}/,
+        );
+        assert.match(prompt, /Compiler-only sourceIndex choices are absent/);
+        response = {
+          kind: "planning-evidence",
+          diagnosis: "Worker prose cannot override actual controller ceilings.",
+          correction:
+            "Retain full pinned CI evidence and plan within two configured and authorized slots.",
+        };
+      }
+      return {
+        events: (async function* () {
+          yield {
+            type: "item.completed",
+            item: {
+              id: "fixture",
+              type: "agent_message",
+              text: JSON.stringify(response),
+            },
+          };
+          yield { type: "turn.completed", usage: null };
+        })(),
+      };
+    },
+  }));
+  const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
+  const model = new CodexPlanningModel(target.checkout, selection, selection);
+  const state = { authority };
+  const candidate = await compilePlan(
+    17,
+    body,
+    target.baseSha,
+    target.checkout,
+    model,
+    undefined,
+    undefined,
+    undefined,
+    [],
+    { state, save() {} },
+    undefined,
+    undefined,
+    executionBounds,
+  );
+  assert.equal(candidate.review.status, "clean");
+  assert.equal(candidate.review.revisions, 1);
+  assert.deepEqual(candidate.executionBounds, executionBounds);
+  assert.equal(state.allowanceConsumption.planningRevisions, 1);
+  assert.deepEqual(
+    captured.map(({ schema }) =>
+      schema.properties.contextId
+        ? "compile"
+        : schema.properties.packetId
+          ? "review"
+          : "diagnosis",
+    ),
+    ["compile", "review", "diagnosis", "compile", "review"],
+  );
+  verifyPlanCandidate(candidate, 17, body, target.baseSha, target.checkout);
+  for (const mutate of [
+    (graph) => {
+      graph.requiredPreIntegrationChecks = [];
+    },
+    (graph) => {
+      graph.requiredPreIntegrationChecks[0].checkName = "invented-check";
+    },
+    (graph) => {
+      graph.requiredPreIntegrationChecks[0].source = {
+        path: "OBJECTIVE",
+        digest: createHash("sha256").update(body).digest("hex"),
+        text: body,
+      };
+    },
+    (graph) => {
+      graph.requiredPreIntegrationChecks[0].source.text =
+        "Keep the workflow unchanged.\n";
+    },
+  ]) {
+    const graph = structuredClone(candidate.graph);
+    mutate(graph);
+    const request = planReviewPacket(
+      body,
+      target.baseSha,
+      candidate.sources,
+      graph,
+      target.checkout,
+      undefined,
+      undefined,
+      undefined,
+      executionBounds,
+    );
+    request.reviewPacket = reviewPacket([], planningReviewEvidence(request));
+    const refusal = await model.reviewGraph(request);
+    assert.equal(
+      decodeGraphReview(refusal, request.reviewPacket).length,
+      1,
+      "Substantive grounded refusals stay refusals through the actual SDK contract",
+    );
+  }
+});
+
+test("complete SDK responses reject malformed native item primitives and collections before review", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-native-planner-types-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const target = createTarget(root);
+  let mutation;
+  let captured;
+  let reviews = 0;
+  t.mock.method(Codex.prototype, "startThread", () => ({
+    async runStreamed(prompt, options) {
+      let response;
+      if (options.outputSchema.properties.contextId) {
+        const choices = JSON.parse(
+          prompt.split("\nCompiler choices (JSON data):\n")[1],
+        );
+        response = {
+          contextId: choices.contextId,
+          requiredPreIntegrationChecks: [],
+          items: [item({ coverage: [entry()] })],
+        };
+        if (mutation)
+          response.items[0][mutation[0]] = structuredClone(mutation[1]);
+        const conforms = new Ajv({ strict: false, allErrors: true }).compile(
+          options.outputSchema,
+        );
+        captured = {
+          response,
+          conforms: conforms(response),
+          schema: options.outputSchema,
+        };
+      } else {
+        reviews++;
+        response = {
+          packetId: options.outputSchema.properties.packetId.enum[0],
+          findings: [],
+        };
+      }
+      return {
+        events: (async function* () {
+          yield {
+            type: "item.completed",
+            item: {
+              id: "fixture",
+              type: "agent_message",
+              text: JSON.stringify(response),
+            },
+          };
+          yield { type: "turn.completed", usage: null };
+        })(),
+      };
+    },
+  }));
+  const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
+  const model = new CodexPlanningModel(target.checkout, selection, selection);
+  const valid = await compilePlan(
+    17,
+    body,
+    target.baseSha,
+    target.checkout,
+    model,
+  );
+  assert.equal(captured.conforms, true);
+  assert.equal(valid.review.status, "clean");
+  assert.equal(reviews, 1);
+  for (mutation of [
+    ...["id", "title", "goal", "brief"].map((field) => [field, 42]),
+    ...[
+      "acceptance",
+      "nonGoals",
+      "dependencies",
+      "children",
+      "ownedPaths",
+      "resources",
+      "expectedOutputRoles",
+      "requiredLfsRoles",
+    ].map((field) => [field, [42]]),
+    ["acceptance", null],
+    ["resources", "resource"],
+    ["priority", "1"],
+    ["minimumAssetSets", "0"],
+    ["sourceAssets", [42]],
+    [
+      "sourceAssets",
+      [
+        {
+          kind: ["repository"],
+          path: "README.md",
+          role: "fixture",
+          mediaType: "text/plain",
+          visibility: "repository",
+        },
+      ],
+    ],
+  ]) {
+    await assert.rejects(
+      compilePlan(17, body, target.baseSha, target.checkout, model),
+      (error) =>
+        error instanceof MalformedPlannerOutput &&
+        /Work Item|Planner source asset/.test(error.message),
+      mutation[0],
+    );
+    assert.equal(captured.conforms, false, mutation[0]);
+    assert.equal(
+      reviews,
+      1,
+      "No independent review call after malformed response",
+    );
+    const invalidCanonical = structuredClone(valid.graph);
+    invalidCanonical.items[0][mutation[0]] = structuredClone(mutation[1]);
+    assert.throws(
+      () =>
+        validateGraph(
+          invalidCanonical,
+          17,
+          target.baseSha,
+          new Set(["OBJECTIVE", "AGENTS.md"]),
+        ),
+      /Work Item/,
+      mutation[0],
+    );
+  }
+});
+
+test("semantic validation rejection retains the actual decoded graph for bounded diagnosis", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-decoded-rejection-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const target = createTarget(root);
+  let compiles = 0;
+  let diagnoses = 0;
+  t.mock.method(Codex.prototype, "startThread", () => ({
+    async runStreamed(prompt, options) {
+      let response;
+      if (options.outputSchema.properties.contextId) {
+        compiles++;
+        const choices = JSON.parse(
+          prompt.split("\nCompiler choices (JSON data):\n")[1],
+        );
+        response = {
+          contextId: choices.contextId,
+          requiredPreIntegrationChecks: [],
+          items: [item({ coverage: [entry()] })],
+        };
+        if (compiles === 1)
+          response.items[0].sourceAssets = [
+            {
+              kind: "repository",
+              path: "missing.png",
+              role: "fixture",
+              mediaType: "image/png",
+              visibility: "repository",
+            },
+          ];
+      } else if (options.outputSchema.properties.packetId) {
+        response = {
+          packetId: options.outputSchema.properties.packetId.enum[0],
+          findings: [],
+        };
+      } else {
+        diagnoses++;
+        const graph = JSON.parse(
+          prompt.split(
+            "\nRejected canonical graph (null when unavailable):\n",
+          )[1],
+        );
+        assert.equal(graph.baseSha, target.baseSha);
+        assert.deepEqual(graph.items[0].sourceAssets, [
+          {
+            kind: "repository",
+            path: "missing.png",
+            role: "fixture",
+            mediaType: "image/png",
+            visibility: "repository",
+          },
+        ]);
+        assert.equal(graph.items[0].inputSources[0].content, body);
+        response = {
+          kind: "planning-output",
+          diagnosis:
+            "The decoded graph invented an unavailable repository source asset.",
+          correction:
+            "Retain the supplied ordinary-work contract without inventing unavailable source assets.",
+        };
+      }
+      return {
+        events: (async function* () {
+          yield {
+            type: "item.completed",
+            item: {
+              id: "fixture",
+              type: "agent_message",
+              text: JSON.stringify(response),
+            },
+          };
+          yield { type: "turn.completed", usage: null };
+        })(),
+      };
+    },
+  }));
+  const state = {
+    authority: {
+      schemaVersion: 1,
+      actor: "fixture",
+      reason: "One planning correction",
+      executionConsent: true,
+      serviceConsent: false,
+      objectives: [17],
+      allowances: {
+        planningRevisions: 1,
+        implementationRepairs: 0,
+        resultRereviews: 0,
+      },
+      repairClasses: ["planning-output"],
+      repairPolicy: {
+        perPath: {
+          planningRevisions: 1,
+          implementationRepairs: 0,
+          resultRereviews: 0,
+        },
+      },
+      resources: { maxConcurrency: 1 },
+      requiredEnvironment: [],
+    },
+  };
+  const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
+  const model = new CodexPlanningModel(target.checkout, selection, selection);
+  const candidate = await compilePlan(
+    17,
+    body,
+    target.baseSha,
+    target.checkout,
+    model,
+    undefined,
+    undefined,
+    undefined,
+    [],
+    { state, save() {} },
+  );
+  assert.equal(candidate.review.status, "clean");
+  assert.equal(diagnoses, 1);
+  assert.equal(compiles, 2);
+  assert.equal(state.allowanceConsumption.planningRevisions, 1);
 });

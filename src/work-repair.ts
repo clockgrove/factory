@@ -26,7 +26,7 @@ export class SettledAttemptFailure extends Error {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
   }
 }
-/** The exact collected candidate exists, but a required command failed. */
+/** The exact collected candidate exists, but settled local validation failed. */
 export class CandidateValidationFailure extends Error {}
 export class CandidateEnvironmentFailure extends Error {}
 
@@ -220,7 +220,7 @@ export async function diagnoseWorkRepair(args: {
       schema: diagnosisSchema,
       invocation: {
         invocationId: randomUUID(),
-        phase: "compile",
+        phase: "diagnosis",
         ordinal: state.allowanceConsumption!.implementationRepairs,
         observe: args.diagnostics?.modelObserver({
           scopeId: work.attempt!,

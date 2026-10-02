@@ -4,6 +4,101 @@ import type { WorkGraph, WorkItem } from "./contracts.js";
 import { assertCoverageShape } from "./qa.js";
 import type { WorkState } from "./state.js";
 
+/** Native item types must hold before proof, path, scheduler or review consumers. */
+export function assertWorkItemFields(
+  value: unknown,
+): asserts value is WorkItem {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Work Item must be an object");
+  const item = value as Record<string, unknown>;
+  for (const field of ["id", "title", "goal", "brief"])
+    if (typeof item[field] !== "string" || !(item[field] as string).length)
+      throw new Error(`Work Item ${field} must be a nonempty string`);
+  for (const field of [
+    "acceptance",
+    "nonGoals",
+    "dependencies",
+    "ownedPaths",
+    "resources",
+    "children",
+    "expectedOutputRoles",
+    "requiredLfsRoles",
+  ]) {
+    if (
+      [
+        "resources",
+        "children",
+        "expectedOutputRoles",
+        "requiredLfsRoles",
+      ].includes(field) &&
+      item[field] === undefined
+    )
+      continue;
+    if (
+      !Array.isArray(item[field]) ||
+      !(item[field] as unknown[]).every((entry) => typeof entry === "string")
+    )
+      throw new Error(`Work Item ${field} must be a string array`);
+  }
+  if (
+    !Array.isArray(item.citations) ||
+    !item.citations.every(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        typeof entry.path === "string" &&
+        !!entry.path &&
+        (entry.heading === undefined || typeof entry.heading === "string"),
+    )
+  )
+    throw new Error("Work Item citations must contain typed source references");
+  if (
+    !Array.isArray(item.validation) ||
+    !item.validation.every(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        typeof entry.command === "string" &&
+        !!entry.command &&
+        typeof entry.provenance === "string" &&
+        (entry.source === undefined || typeof entry.source === "string"),
+    )
+  )
+    throw new Error("Work Item validation must contain typed commands");
+  if (
+    item.minimumAssetSets !== undefined &&
+    (!Number.isSafeInteger(item.minimumAssetSets) ||
+      (item.minimumAssetSets as number) < 0)
+  )
+    throw new Error("Work Item minimumAssetSets must be a nonnegative integer");
+  if (item.priority !== undefined && !Number.isSafeInteger(item.priority))
+    throw new Error("Work Item priority must be an integer");
+  if (
+    item.sourceAssets !== undefined &&
+    (!Array.isArray(item.sourceAssets) ||
+      !item.sourceAssets.every((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry))
+          return false;
+        const asset = entry as Record<string, unknown>;
+        return (
+          ["path", "role", "mediaType"].every(
+            (field) => typeof asset[field] === "string" && !!asset[field],
+          ) &&
+          (asset.kind === undefined ||
+            ["repository", "local", "github-attachment"].includes(
+              asset.kind as string,
+            )) &&
+          ["private", "repository"].includes(asset.visibility as string)
+        );
+      }))
+  )
+    throw new Error(
+      "Work Item sourceAssets must contain typed asset declarations",
+    );
+}
+
 export function itemsConflict(left: WorkItem, right: WorkItem): boolean {
   return (
     left.ownedPaths.some((a) =>
@@ -25,12 +120,14 @@ export function validateAndOrderGraph(
   if (
     graph.objective !== objective ||
     graph.baseSha !== baseSha ||
+    !Array.isArray(graph.items) ||
     !graph.items.length
   ) {
     throw new Error(
       "Compiled graph must target the exact Objective and base with at least one Work Item",
     );
   }
+  for (const item of graph.items) assertWorkItemFields(item);
   assertCoverageShape(graph);
   const byId = new Map<string, WorkItem>();
   for (const item of graph.items) {

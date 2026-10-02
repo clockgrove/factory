@@ -6,6 +6,112 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Private control socket directory lifetime (#468)
+
+A deterministic public temporary-directory reproduction demonstrated that the
+native listener retains its procfs pathname through close. Closing its bound
+directory descriptor early let another directory reuse that identity and receive
+the former listener's unlink. The existing private control transport now retains
+the descriptor through native close and cleans both resources after startup
+permission failure. Real long-path and failure regressions exercise original
+socket retirement and unrelated listener responsiveness. Setup fixture diagnostics
+retain both the original body error and cleanup error. This reproduction does not
+establish the cause of an earlier CI ENOENT. No retry loop, timeout increase,
+archived implementation, new state or private target supplied the correction.
+
+## Settled dirty validation evidence and diagnosis identity (#438 / #461)
+
+The current exact-tree validation, candidate failure classification and existing
+model invocation contracts supply these corrections. A settled post-command
+mutation retains bounded relative path/status diagnostics with explicit omitted
+and truncated observations, without file contents or another state store.
+Unknown subprocess ownership still takes precedence. Typed diagnosis metadata
+now follows actual planning and repair calls through capture, diagnostics and
+analysis without changing phase accounting or retry authority. Whole temporary
+Git, full diagnostic-envelope and actual SDK regressions preserve the relevant
+positive, ownership, malformed-byte and allowance controls. No archived source,
+private adopter material or provider call supplied these implementations.
+
+## Canonical planning evidence and native field types (#458 / #460)
+
+The public v0.1.68 service qualification and complete preserved model responses
+exposed a compiler-choice versus canonical-review mismatch and absent controller
+concurrency facts. Existing pinned source selection, configuration, checked finite
+authority, preparation, review and candidate bindings supply the correction.
+Compilation selects a semantic check name and one existing source; deterministic
+hydration supplies complete canonical evidence. Review and diagnosis use actual
+canonical graphs and controller ceilings, retaining the distinction between those
+ceilings, eventual admission and runtime overlap. Existing preparation identities
+and consumed history are unchanged. Complete local historical-response replay checks the actual schemas, canonical
+context and full rejected responses without provider calls or target writes.
+A cloned legacy preparation exposed missing original review binding (#464);
+scripted review does not establish semantic acceptance or supported recovery.
+Corrected qualification uses a settled terminal predecessor and fresh authorized
+Objective identities within the same installation.
+
+The related actual SDK replay demonstrated schema-invalid primitive and collection
+types reaching review. Narrow native Work Item field guards now precede proof,
+path, review and projection consumers. Whole-response regressions cover ordinary,
+read-only and retained contracts and refuse malformed types without coercion.
+No archived implementation, private adopter source, new dependency, model call,
+duplicate state or acceptance override supplied these changes. Independent source
+review and exact-head CI precede integration; installed/live qualification remains
+owned separately by #448.
+
+## Ordinary Work Item metadata and native context (#443)
+
+The public recording-gateway reproduction in #443 and the current ordinary and
+amendment projection contracts supplied this trunk correction. Approved graph
+projection establishes only the existing `factory:objective` and
+`factory:work-item` role convention, creates missing repository labels with
+neutral presentation, and preserves existing presentation and unrelated issue
+labels. Initial work and QA nodes receive native Objective parents; aggregate
+children retain their aggregate parent. Authenticated issue identities, canonical
+bodies, additive metadata observations and exact hierarchy/dependency rereads
+fence changed or ambiguous remote context without parent replacement. New
+recording transport and temporary-Git coverage exercises initial, interrupted,
+reused and amended projections; packaged setup/director guidance carries the
+same convention. No archived implementation, private target material, model call,
+new taxonomy, authority policy or state store supplied this correction.
+
+## Read-only pinned-baseline qualification (#459)
+
+The public source reproduction in #459 and the existing typed compiler, QA,
+atomic snapshot, exact Git validation and final-acceptance boundaries supply
+this correction. The accepted all-QA graph selects its pinned base through a
+controller-derived candidate basis; implementation graphs continue to require
+actual integration. No baseline is written into an integration field. Actual
+provider choices, canonical validation, admission, QA/final packets, sealing,
+closure, native predecessor acceptance and status share that selection.
+New public temporary-Git tests exercise the complete emitted schema and decoder
+through admitted execution and closure with real exact command and worktree
+receipts, zero coding workers or delivery, and source, stale-head and foreign
+identity refusals. Historical seals and failed runs are retained. No archived
+implementation, private source or prompts, extra lifecycle ledger, provider
+call or retry allowance supplied this implementation. Source tests do not
+establish published-artifact or live qualification acceptance.
+
+## Retained initial-planning review binding (#464)
+
+The complete public v0.1.68 planning rejection correctly decoded against its
+original review packet, but unchanged continuation generated another packet UUID
+and misclassified the retained response as a protocol failure. The existing atomic
+preparation snapshot now retains the submitted packet and full deterministic
+canonical review-context/configuration binding beside its completed response.
+Reuse validates that original request; it never assigns an old response identity
+to a new packet. Clean completion preserves the envelope, and normal admitted
+correction retains rejected envelopes in the existing planning history.
+
+Complete synthetic SDK responses exercise actual schemas, decoding, snapshot
+serialization, unchanged clean/rejected continuation, changed/damaged context,
+pre-submission pause, unknown submission, malformed findings and finite limits.
+The complete historical response/record independently exercises explicit missing
+binding refusal without calls, mutation or consumption. Older records are not
+migrated or reconstructed; owned cessation and supported cancellation precede a
+separately bounded corrected successor. No archived runtime or tests, private
+adopter material, new ledger, acceptance override or provider call supplied this
+correction. Source gates do not accept the separately owned live #448 outcome.
+
 ## Cancellation after a vanished local worker (#437)
 
 The public reproduction in #437, existing adapter-owned durable handles and
@@ -942,3 +1048,30 @@ assertion correction; no product bytes changed. This later documentation records
 completed distribution acceptance without copying private source or altering
 published artifacts. Live public service qualification (#448) and adopter rollout
 (#445) remain separate gates.
+
+## Diagnosis invocation classification (#461)
+
+The current typed model observation contract, diagnosis producers, SDK adapter,
+local diagnostic aggregation and metadata-only analysis supplied this correction.
+Diagnosis now emits its explicit phase through planning and Work Item repair,
+without changing repair charging, allowances or provider retry policy. Compilation
+and independent graph/result/final review retain their existing phases. Actual
+scripted SDK turns exercise request/progress/terminal correlation, disabled-content
+capture, available and unavailable usage, phase aggregation, exact filtering and
+Gantt labels; a capacity refusal verifies diagnosis gains no reviewer retries.
+Previously emitted compile records remain unchanged and cannot be retrospectively
+classified by prompt parsing. No archived runtime, private source, provider call,
+new lifecycle store or historical-accounting rewrite was introduced.
+
+## Rejected discovery collection retention (#465)
+
+The public v0.1.68 local collector, existing private discovery/result contracts,
+staged candidate guard and owned local execution lifecycle supplied this bounded
+correction. Actual temporary-Git driver regressions reproduce loss at HEAD,
+asset, ownership, secret-scan and commit rejection without provider calls. The
+collector excludes the validated untracked proposal from Git before staging,
+retains its original bytes until successful collection, and the existing driver
+retains a settled failed proposal worktree at its existing handle-owned path.
+Tracked or staged proposals are rejected rather than silently excluded. No
+archived source, private adopter content, new state store, ledger, recovery
+operation, automatic retry or accepted failed result is introduced.

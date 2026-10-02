@@ -9,8 +9,9 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel } from "../dist/compiler.js";
@@ -53,7 +54,10 @@ test("ordinary pilot combines real pnpm collection, LFS selection and complete f
     );
     const pnpm =
       process.env.FACTORY_TEST_PNPM ??
-      resolve("node_modules/pnpm/bin/pnpm.cjs");
+      join(
+        dirname(createRequire(import.meta.url).resolve("pnpm")),
+        "bin/pnpm.cjs",
+      );
     const bin = join(root, "bin");
     mkdirSync(bin);
     symlinkSync(pnpm, join(bin, "pnpm"));

@@ -924,3 +924,7 @@ Temporary-Git, credential-free API/user-manager fixtures exercise real local
 controllers and the actual CLI; they do not qualify a real provider, public live
 service or adopter deployment. Public installed acceptance belongs to #448 and
 actual adopter handoff to #445.
+
+## Host-independent release regressions (#452 / #456)
+
+Required contributor CI exposed a selected-LFS fixture that attempted to publish a manually seeded pointer through inherited host filters, and a cancellation assertion that treated changing Linux scheduling state as immutable identity. The corrected public fixture publishes ordinary baseline files first and seeds its local validation pointer through existing pinned Git; its intentional raw-staging negative control remains explicit. Cancellation checks stable group/start identity and a bounded live-child response. Actual inherited Git LFS filters and a pre-push hook reproduce the original failure and exercise both corrected whole files. No runtime ownership, upload guard, hook policy, provider usage or historical release evidence changed.

@@ -17,10 +17,44 @@ A deterministic temporary-Git regression with deferred GitHub observation and
 a 60-second poll interval reproduced the extra scan on unchanged source. It now
 proves unchanged repeated status, immediate same-owner admission, mutation-triggered
 observation and refusal of enqueue/watch during that outstanding scan, with no
-model calls or timing retries. This candidate remains pending independent source
-review and exact-head Quality CI. Integration and release are held while the
-separately owned installed v0.1.72 qualification continues in #448; published
-bytes and live acceptance remain unchanged. #444 stays open for its live outcome.
+model calls or timing retries. [PR #494](https://github.com/clockgrove/factory/pull/494) passed independent source
+review and [exact-head Quality CI](https://github.com/clockgrove/factory/actions/runs/37070644649),
+then integrated as `ab38f0ea8aa626c6ecc22a5c2337d5e7be3fdbb2` after the installed
+qualification owner ceased. #444 stays open for its live outcome; publication and
+Objective acceptance remain separate.
+
+## Reviewed native hierarchy correction and stopped public gate (#495 / #448)
+
+The real v0.1.72 successor reached two concurrent workers, independently accepted
+alpha integration and beta's preserved environment-condition failure. Its approved
+controlled restart retained the same run and produced a canonically valid,
+independently accepted QA/aggregate amendment. Projection then failed with
+`GitHub request failed (HTTP 422)`: existing alpha/beta/summary issues already
+belonged to the Objective, but the new aggregate attachment refused replacement.
+The independently reviewed successor graph remains pending and unapplied. The
+[public failure checkpoint](https://github.com/clockgrove/factory/issues/448#issuecomment-5962273873)
+records the stopped owner, consumed two activations/one restart and retained history;
+this whole public gate is failed and unaccepted. No environment recovery or manual
+hierarchy edit accepts it, and no further activation is authorized for that attempt.
+
+[Implementation issue #495](https://github.com/clockgrove/factory/issues/495) corrects
+the demonstrated composition gap. The gateway derives old and new parents from
+reviewed graphs, authenticates every affected hierarchy before mutation, replaces
+only an exact verified old-parent to new-parent relation, and reads back all old
+and new parents before accepting projection. Interrupted moves reuse existing
+identities and completed effects. Unrelated children, foreign parents, duplicate
+relations and changed issue identities remain refused. A complete preserved
+public graph/body replay exercises the actual versioned Octokit gateway against
+faithful native single-parent semantics; focused real-Git, transport and amendment
+regressions accompany the correction. Source review and guarded integration of
+this correction still precede release.
+
+The next action is one independently reviewed corrected release combining #444's
+status correction with #495, followed by a fresh complete one-artifact public
+qualification with original substantive acceptance and bounded resources. Preserve
+all failed predecessor runs, accounting and published v0.1.72 bytes. #444/#447/#448
+remain open for actual public acceptance; private #445 remains gated on that full
+public proof and the same corrected artifact.
 
 ## Approved native-replay qualification preparation (#448)
 
@@ -55,10 +89,8 @@ activations and one controlled restart remain the bounds. Unknown monetary usage
 stays unknown within existing account/provider/spending limits.
 
 Current work remains the release gate in [#448](https://github.com/clockgrove/factory/issues/448),
-which stays open. The next action is supported predecessor terminal disposition,
-authenticated new-target source/authority/native dependency binding and exact main
-protection readback under the approved named-target decision, followed by the live
-public installed scenario and independent acceptance. Public acceptance precedes
+which stays open. The prepared v0.1.72 scenario subsequently ran and stopped unaccepted as recorded
+above; the earlier preparation does not qualify its later projection failure. Public acceptance precedes
 separately owned private #445; source preparation grants no private activation.
 
 ## Qualification fixture source clarification (#489)

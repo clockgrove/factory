@@ -21,9 +21,47 @@ at a 60-second polling interval. It fails unchanged source on a second scan star
 by status, then proves pure repeated status and one immediate same-owner refill,
 the enqueue wakeup, observing enqueue/watch refusals and drain cleanup without a
 provider call, sleep or retry loop. No archived runtime, private content, new state,
-transport workaround or relaxed guard supplies the fix. This is source preparation
-under #444, pending independent review and exact-head CI; the active installed
-v0.1.72 #448 scenario and all published artifact bytes remain unchanged.
+transport workaround or relaxed guard supplies the fix. [PR #494](https://github.com/clockgrove/factory/pull/494) passed independent source
+review and [exact-head CI](https://github.com/clockgrove/factory/actions/runs/37070644649),
+then merged as `ab38f0ea8aa626c6ecc22a5c2337d5e7be3fdbb2` after the v0.1.72
+qualification owner ceased. Published bytes and historical acceptance remain
+unchanged; source acceptance does not close #444's live requirement.
+
+## Reviewed single-parent hierarchy reconciliation (#495)
+
+The current gateway from #443 / [PR #470](https://github.com/clockgrove/factory/pull/470),
+the reviewed-amendment contract from #247 / [PR #265](https://github.com/clockgrove/factory/pull/265),
+and the [actual public v0.1.72 projection failure](https://github.com/clockgrove/factory/issues/448#issuecomment-5962273873)
+supply this correction. Initial ordinary Work Items already have native Objective
+parents. The new reviewed aggregate attempted to attach those same authenticated
+issues with `replace_parent: false`, receiving HTTP 422. The pending reviewed
+revision remains unapplied; the predecessor owner has ceased after its two allowed
+activations and sole controlled restart. Failed beta objects, accepted alpha,
+planning consumption, provider captures and unavailable monetary accounting remain
+historical evidence, without whole-gate acceptance.
+
+The existing gateway now derives previous and desired parent relations from those
+verified graph inputs, reads every affected hierarchy before mutation, and uses
+GitHub's documented replacement only for a fresh authenticated exact old-parent
+transition. All affected parent lists, including emptied parents, receive exact
+final readback. Current desired relations reconcile without repeated known
+mutations; foreign parents and unreviewed/ambiguous children remain refused.
+Dependencies, role labels and completed issue identities retain their contracts.
+
+The new public fixture preserves the complete original and pending reviewed graphs
+and relevant public issue bodies from the actual failed target. It supplies the
+real Octokit/GitHubClient `2026-03-10` projection regression with narrow single-parent
+HTTP semantics. Additional cases cover partial moves, unchanged replay, closed
+completed work, changed parent URLs, foreign parents, duplicate relationships and
+wrong database identities. These are current public source and collaboration
+facts; no archived code, private adopter source, secrets or raw provider responses
+are copied. No snapshot repair, compatibility fallback, extra model call, journal,
+manual live hierarchy mutation or protection change supplies the correction.
+
+The source correction requires independent review and guarded exact-head integration
+before one corrected immutable artifact and a fresh complete public qualification.
+Published v0.1.72 bytes and failed history remain unchanged. Actual #444/#447/#448
+and subsequent private #445 acceptance retain their full separate gates.
 
 ## Native-replay qualification source and contract handoff (#448)
 

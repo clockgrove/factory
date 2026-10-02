@@ -41,8 +41,9 @@ hierarchy edit accepts it, and no further activation is authorized for that atte
 the demonstrated composition gap. The gateway derives old and new parents from
 reviewed graphs, authenticates every affected hierarchy before mutation, replaces
 only an exact verified old-parent to new-parent relation, and reads back all old
-and new parents before accepting projection. Interrupted moves reuse existing
-identities and completed effects. Unrelated children, foreign parents, duplicate
+and new parents before accepting projection. Adapter fixtures demonstrate reuse of acknowledged existing
+identities and completed effects; they do not authorize controller replay of an
+unresolved submitted call. Unrelated children, foreign parents, duplicate
 relations and changed issue identities remain refused. A complete preserved
 public graph/body replay exercises the actual versioned Octokit gateway against
 faithful native single-parent semantics; focused real-Git, transport and amendment
@@ -64,20 +65,30 @@ transport. The separate retirement candidate's 181-case overlapping source suite
 observations; they neither terminalize the real predecessor nor prove the missing
 submitted-mutation fence. Counts from overlapping suites are not added together.
 
-The next action is one coherent projection effect/outcome contract correction and
-adversarial real-producer/persistence/cancellation proof under #498, alongside
-review of shared remote-graph facts and query/command boundaries. A current readback,
-phase label or missing historical field must not become proof of settled submission.
-The prior source acceptance was withdrawn rather than weakening that fence. Exact
-final source/guidance review and head CI precede the sequential corrected release
-gate in [#497](https://github.com/clockgrove/factory/issues/497).
-Integration, release and live execution remain held during that review. After
-installed verification, supported actual predecessor retirement and a fresh
-complete one-artifact public qualification retain original substantive acceptance
-and bounded resources. Preserve
-all failed predecessor runs, accounting and published v0.1.72 bytes. #444/#447/#448
-remain open for actual public acceptance; private #445 remains gated on that full
-public proof and the same corrected artifact.
+The replacement #498 source contract persists initial and amended whole gateway
+calls before dispatch and distinguishes actual completed HTTP rejection from
+unresolved submission. Shared decoders and lifecycle consumers refuse unresolved
+calls before cancellation intent or replay. Settled rejection readback authenticates
+recorded issue subsets, preserves all previous mappings and reviewed common edges,
+and permits reachable partial creation/dependency/parent facts without acceptance.
+Actual versioned producer/persistence tests pair completed rejection with response
+loss for initial and amendment calls, including early role failures and intermediate
+multiple-dependency additions. The complete original stopped snapshot refuses native
+CLI cancellation with no API/provider call and unchanged bytes. These source checks
+remain subject to independent exact-source review and head CI.
+
+The original v0.1.72 snapshot retains generic projecting history; no authentic
+completed-response receipt was found in retained transport/scenario evidence.
+It remains unresolved and unaccepted. Installing the new typed producer cannot
+retrospectively manufacture that fact. Any exact-run terminal disposition needs a
+separate explicit operator decision and supported implementation, preserving all
+old evidence and uncertainty. The next action is final source/guidance review,
+exact-head CI and the sequential release gate in
+[#497](https://github.com/clockgrove/factory/issues/497). Integration, release and live
+execution remain held during review. A subsequent full public qualification retains
+original substantive acceptance and bounded resources; predecessor histories and
+published v0.1.72 bytes remain intact. #444/#447/#448 stay open for actual public
+acceptance; private #445 remains gated on that full proof and the corrected artifact.
 
 ## Approved native-replay qualification preparation (#448)
 

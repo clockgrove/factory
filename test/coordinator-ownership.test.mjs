@@ -243,6 +243,7 @@ for (const planning of ["ready", "submitted"]) {
       saveState(statePath(config.repository, 1), {
         schemaVersion: 5,
         kind: "preparing",
+        projection: "ready",
         repository: config.repository,
         objective: 1,
         runId: "preserved-preparation-run",
@@ -264,13 +265,13 @@ for (const planning of ["ready", "submitted"]) {
         first.application.runObjective(1),
         planning === "ready"
           ? /fixture planning reply lost/
-          : /unknown outcome/,
+          : /Interrupted projection or planning cannot be replayed/,
       );
       assert.equal(calls, planning === "ready" ? 1 : 0);
       const second = makeApplication(descriptor);
       await assert.rejects(
         second.application.runObjective(1),
-        /preparation stopped|unknown outcome/,
+        /Interrupted projection or planning cannot be replayed/,
       );
       assert.equal(calls, planning === "ready" ? 1 : 0);
       assert.equal(
@@ -313,6 +314,7 @@ test("offline cancellation verifies recorded subprocess cessation and refuses a 
       saveState(statePath(config.repository, 1), {
         schemaVersion: 5,
         kind: "preparing",
+        projection: "ready",
         repository: config.repository,
         objective: 1,
         runId: "cancel-owned",

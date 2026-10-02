@@ -557,6 +557,7 @@ for (const fault of ["refill", "foreign"]) {
         const snapshot = {
           schemaVersion: 5,
           kind: "preparing",
+          projection: "ready",
           repository: config.repository,
           objective: 2,
           configDigest: factoryConfigDigest(config),

@@ -165,22 +165,35 @@ A concrete finding permits at most one evidenced compiler revision, followed by 
 
 An operator may explicitly request exact-tree Work Item re-review through `rereview`, then `run`, after inspecting a pending result. This schedules existing validation and automatic review without restarting implementation or recording acceptance. The existing final-result continuation remains `run`, which repeats final validation and review. These explicit actions do not expand automatic provider retries or revive terminal results. [Issue #202](https://github.com/clockgrove/factory/issues/202) records this continuation boundary.
 
+Initial preparation and graph amendments persist the outcome of the whole sequential
+GitHub projection call in the existing atomic snapshot (#498). Planning completion
+is not projection completion. The call is submitted before its first read or
+mutation; successful completion records projected, and an actual typed completed
+HTTP 4xx rejection records rejected. A submitted call may have stopped before any
+mutation, but its unresolved outcome remains fenced across restart, handoff and
+stopped cancellation. Lost responses, crashes and generic exceptions cannot be
+replayed or settled by reading current GitHub facts. Retained error prose and
+missing fields never establish a completed rejection.
+
 Stopped cancellation is distinct from uncertain read-only review abandonment (#363).
-For a partially projected independently reviewed amendment, ordinary `cancel` may
-retire the failed run only with exclusive stopped mutation ownership, the original
-configuration and source, complete unique known issue identities, settled local
-work and no unresolved creation or other submission. The gateway authenticates
-all existing issue bodies, titles, roles, states, dependencies and native parents
-using GETs against the accepted previous and reviewed candidate graphs. Partial
-old/new relationships remain diagnostic evidence, never accepted projection.
-Unknown creates, foreign or incomplete facts, live resources and unresolved
-publication, merge, planning or review submissions refuse before cancellation
-intent is saved. The original pending phase, error, graph, review, mappings,
-accepted/failed attempt evidence and consumed allowances remain in the terminal
-unaccepted snapshot. This performs no remote mutation, replay, provider call, service
-activation or allowance reset (#498). At the actual HTTP boundary, a completed
-projection rejection becomes the existing typed rejected phase; a lost mutation
-response remains uncertain. Retained error prose never supplies that distinction.
+For a known rejected initial or amended projection, ordinary `cancel` may retire
+an unaccepted failed run with exclusive stopped mutation ownership, bound original
+configuration/source and independently reviewed graph, settled local work, and no
+other unresolved submission. GET-only readback authenticates the unique recorded
+subset of candidate issues and every accepted previous mapping. Uncreated new nodes
+need no fabricated identities or role labels; an early initial rejection may precede
+the Objective role assignment. Recorded Work Items retain their exact reviewed old
+or new bodies, titles, roles and state. Intermediate dependency sets must stay within
+reviewed old/new intent and preserve common edges. Native parent GETs and lists must
+agree with reviewed old/new parents; old children cannot lose their parent, while a
+new child may remain unattached. Foreign, duplicate, changed or ambiguous facts and
+live resources refuse before cancellation intent is saved. The original rejection,
+graph, review, maps, errors, accepted/failed evidence and consumption remain in the
+terminal unaccepted snapshot. This performs no remote mutation, projection replay,
+provider call, service activation or allowance reset. Historical submitted projections
+without a genuine completed-response fact remain unresolved and require a separate
+explicit operator disposition; this contract does not reinterpret the stopped
+v0.1.72 run or authorize its cancellation.
 
 ### Existing workspace membership authority
 

@@ -779,6 +779,7 @@ for (const planning of ["ready", "submitted"])
       const preparation = {
         schemaVersion: 5,
         kind: "preparing",
+        projection: "ready",
         repository: context.config.repository,
         objective: 1,
         runId: context.state.runId,

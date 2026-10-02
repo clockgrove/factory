@@ -4,7 +4,7 @@ import {
   failureDigest,
   type RepairCorrection,
 } from "./repair-policy.js";
-import { GitHubRequestError } from "./github-client.js";
+import { isCompletedProjectionRejection } from "./github-client.js";
 import { preflightObjective, planningExecutionBounds } from "./admission.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -912,10 +912,7 @@ export async function applyPendingAmendment(args: {
     // The actual transport distinguishes completed HTTP rejection from a lost mutation.
     // Do not infer this fact from retained error prose.
     const projectionRejected =
-      pending.phase === "projecting" &&
-      error instanceof GitHubRequestError &&
-      error.status >= 400 &&
-      error.status < 500;
+      pending.phase === "projecting" && isCompletedProjectionRejection(error);
     if (projectionRejected) delete pending.projectionPending;
     if (
       projectionRejected ||

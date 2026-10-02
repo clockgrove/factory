@@ -18,6 +18,15 @@ export class GitHubRequestError extends Error {
   }
 }
 
+/** Classify only an actual acknowledged rejection; retained prose is never evidence. */
+export function isCompletedProjectionRejection(error: unknown): boolean {
+  return (
+    error instanceof GitHubRequestError &&
+    error.status >= 400 &&
+    error.status < 500
+  );
+}
+
 /** One account/host gate shared by ordinary and native-stack delivery. No retries. */
 export class GitHubClient {
   private client?: Promise<Octokit>;

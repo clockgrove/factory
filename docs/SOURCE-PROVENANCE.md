@@ -6,34 +6,41 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
-## Stopped known partial-projection cancellation (#498)
+## Typed whole-call projection lifecycle (#498)
 
-The existing amendment and cancellation boundaries and the stopped public
-v0.1.72 HTTP 422 scenario supply this correction. All five issue identities were
-retained after independently reviewed graph projection failed, but the projecting
-phase alone prevented cancellation. Ordinary cancellation also saved intent
-before testing its uncertain-effect fence.
+The current initial preparation, amendment, GitHub transport and lifecycle boundaries
+supply this correction. The stopped public v0.1.72 HTTP 422 scenario exposed a
+projecting snapshot with known issue IDs and no create marker. An initial readback
+proposal was withdrawn after an adversarial real boundary counterexample showed
+that a lost known-ID mutation response produces those same fields; current remote
+facts cannot establish that an earlier submitted operation completed.
 
-The actual HTTP producer now uses typed completed rejection to retain a rejected
-projection, while genuinely unknown transport and creation outcomes stay fenced.
-The stopped cancellation path uses the existing mutation lock and GET-only
-GitHub gateway observation to bind original source/configuration, complete known
-mapping and exact reviewed old/new issue bodies, roles, dependency sets and native
-parent facts. It refuses before intent persistence if any known fact is incomplete,
-foreign or changed, a create/submission remains unknown, or local owned work is
-unsettled. A successful retirement preserves the original unaccepted amendment
-phase/error/review/mapping, graph and attempt evidence, and all finite consumption.
-It neither applies a graph nor mutates GitHub, reruns work or grants new authority.
+Initial and amendment producers now persist the whole sequential gateway call as
+unresolved before dispatch and use actual typed HTTP completion for known rejection.
+Decoders, status, supervision, restart, handoff and cancellation consume that same
+contract. Genuine lost responses, crashes, unknown creates and generic failures stay
+fenced. No historical error string or missing field supplies certainty.
 
-Committed regressions combine real temporary Git with synthetic runtime bindings
-and the complete public graph/body fixture. The complete actual stopped snapshot
-and authenticated API captures are separately retained locally for full replay
-through native decoding, validation, locking and the versioned HTTP transport;
-raw runtime state and provider responses are not published. No legacy error
-parser, state migration, manual snapshot repair, operational journal, new root to
-evade ownership or uncertain read-only review abandonment supplies the fix.
-Independent source and installed verification remain required before any actual
-old-run disposition. This evidence does not accept #448 or authorize private #445.
+Known rejected projection cancellation uses the existing mutation lock and GET-only
+gateway observation to authenticate the recorded candidate subset, all original
+accepted mappings, source/configuration, reviewed bodies/roles, bounded intermediate
+dependencies and consistent documented native parent facts. Early rejection does
+not invent uncreated issues or an unassigned initial Objective role. Refusal precedes
+intent persistence; terminal cancellation preserves the original unaccepted graph,
+review, map, failure, evidence and finite consumption.
+
+Committed synthetic temporary-Git regressions exercise the actual Octokit/GitHubClient
+producer-to-persistence path for initial and amended projection, paired completed
+rejections and lost responses, partial issue creation and intermediate dependencies,
+then cancellation/restart/resume. The complete public graph/body fixture is retained.
+The complete original stopped snapshot and authenticated read-only API captures stay
+local; its unchanged submitted history must refuse through the native CLI. Earlier
+positive readback rehearsals remain preserved as withdrawn evidence, not acceptance.
+No archived runtime, private prompt publication, compatibility migration, manual
+snapshot repair, operational journal or new state root supplies this correction.
+An authentic completed-response search or separately approved exact-run disposition
+is still required for the historical run. Source evidence does not accept #448 or
+private #445; independent source and installed verification remain required.
 
 ## Read-only continuous-intake status (#444)
 

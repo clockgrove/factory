@@ -670,20 +670,22 @@ export class RealGitHubGateway implements GitHubGateway {
   ): Promise<void> {
     const known = request.knownIssues ?? {};
     const items = request.graph.items;
+    const knownItems = items.filter((item) => known[item.id] !== undefined);
     if (
-      !request.previousGraph ||
-      Object.keys(known).length !== items.length ||
-      items.some(
-        (item) => !Number.isSafeInteger(known[item.id]) || known[item.id]! <= 0,
+      Object.keys(known).length !== knownItems.length ||
+      Object.values(known).some(
+        (number) => !Number.isSafeInteger(number) || number <= 0,
       ) ||
-      new Set(Object.values(known)).size !== items.length ||
+      new Set(Object.values(known)).size !== knownItems.length ||
       Object.values(known).includes(request.objectiveIssue) ||
-      request.previousGraph.items.some(
-        (item) => !items.some((next) => next.id === item.id),
+      request.previousGraph?.items.some(
+        (item) =>
+          !items.some((next) => next.id === item.id) ||
+          known[item.id] === undefined,
       )
     )
       throw new Error(
-        "Partial projection lacks complete unique known issue identities",
+        "Partial projection lacks unique reviewed known issue identities",
       );
     const get = async (number: number) =>
       this.authenticatedIssue(
@@ -696,19 +698,20 @@ export class RealGitHubGateway implements GitHubGateway {
         .update(objective.body ?? "")
         .digest("hex") !== request.objectiveBodyDigest ||
       objective.state !== "open" ||
-      !(objective.labels ?? []).some(
-        (label) =>
-          (typeof label === "string" ? label : label.name) ===
-          "factory:objective",
-      )
+      (request.previousGraph !== undefined &&
+        !(objective.labels ?? []).some(
+          (label) =>
+            (typeof label === "string" ? label : label.name) ===
+            "factory:objective",
+        ))
     )
       throw new Error(
         "Partial projection Objective changed identity or source",
       );
     const issues = new Map<number, Issue>();
-    for (const item of items) {
+    for (const item of knownItems) {
       const issue = await get(known[item.id]!);
-      const old = request.previousGraph.items.find(
+      const old = request.previousGraph?.items.find(
         (entry) => entry.id === item.id,
       );
       const matches = (entry: WorkItem) =>
@@ -729,15 +732,13 @@ export class RealGitHubGateway implements GitHubGateway {
         );
       issues.set(issue.number, issue);
     }
-    const numbers = (ids: string[]) => ids.map((id) => known[id]!);
-    const equal = (left: number[], right: number[]) =>
-      left.length === right.length &&
-      left.every((number) => right.includes(number));
-    for (const item of items) {
+    const numbers = (ids: string[]) =>
+      ids.flatMap((id) => (known[id] === undefined ? [] : [known[id]!]));
+    for (const item of knownItems) {
       const observed = await this.client.paginate<Issue>(
         this.route(`issues/${known[item.id]}/dependencies/blocked_by`),
       );
-      const old = request.previousGraph.items.find(
+      const old = request.previousGraph?.items.find(
         (entry) => entry.id === item.id,
       );
       if (
@@ -747,17 +748,18 @@ export class RealGitHubGateway implements GitHubGateway {
           (issue) =>
             this.authenticatedIssue(issue).id !== issues.get(issue.number)?.id,
         ) ||
-        !(
-          equal(
-            observed.map((issue) => issue.number),
-            numbers(item.dependencies),
-          ) ||
-          (old &&
-            equal(
-              observed.map((issue) => issue.number),
-              numbers(old.dependencies),
-            ))
-        )
+        observed.some(
+          (issue) =>
+            !numbers([
+              ...item.dependencies,
+              ...(old?.dependencies ?? []),
+            ]).includes(issue.number),
+        ) ||
+        numbers(
+          (old?.dependencies ?? []).filter((id) =>
+            item.dependencies.includes(id),
+          ),
+        ).some((number) => !observed.some((issue) => issue.number === number))
       )
         throw new Error(
           "Partial projection dependency facts are incomplete or unreviewed",
@@ -770,18 +772,25 @@ export class RealGitHubGateway implements GitHubGateway {
         ),
       );
       return new Map(
-        graph.items.map((item) => [
-          known[item.id]!,
-          aggregates.has(item.id)
-            ? known[aggregates.get(item.id)!]!
-            : request.objectiveIssue,
-        ]),
+        graph.items
+          .filter((item) => known[item.id] !== undefined)
+          .flatMap((item) => {
+            const parent = aggregates.has(item.id)
+              ? known[aggregates.get(item.id)!]
+              : request.objectiveIssue;
+            return parent === undefined
+              ? []
+              : [[known[item.id]!, parent] as const];
+          }),
       );
     };
-    const oldParents = parentsFor(request.previousGraph);
+    const oldParents = request.previousGraph
+      ? parentsFor(request.previousGraph)
+      : new Map<number, number>();
     const newParents = parentsFor(request.graph);
     const observedParents = new Map<number, number>();
     for (const parent of new Set([
+      request.objectiveIssue,
       ...oldParents.values(),
       ...newParents.values(),
     ])) {

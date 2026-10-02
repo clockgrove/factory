@@ -69,6 +69,17 @@ export function readContinuation(
     !/^[a-f0-9]{40}$/.test(value.baseSha) ||
     !/^[a-f0-9]{64}$/.test(value.objectiveBodyDigest) ||
     !["ready", "submitted", "complete"].includes(value.planning) ||
+    !["ready", "submitted", "projected", "rejected"].includes(
+      value.projection,
+    ) ||
+    (value.planning !== "complete" && value.projection !== "ready") ||
+    (value.projectionPending !== undefined &&
+      (value.projection !== "submitted" ||
+        typeof value.projectionPending !== "string" ||
+        !value.plan?.graph?.items.some(
+          (item: { id: string }) => item.id === value.projectionPending,
+        ) ||
+        Object.hasOwn(value.issueByItemId ?? {}, value.projectionPending))) ||
     !value.coordinator ||
     !["running", "paused", "draining"].includes(value.coordinator.mode) ||
     typeof value.coordinator.phase !== "string" ||
@@ -79,6 +90,21 @@ export function readContinuation(
     Object.values(value.issueByItemId).some(
       (id) => !Number.isSafeInteger(id) || Number(id) <= 0,
     ) ||
+    new Set(Object.values(value.issueByItemId)).size !==
+      Object.keys(value.issueByItemId).length ||
+    Object.values(value.issueByItemId).includes(objective) ||
+    (value.projection === "ready" &&
+      Object.keys(value.issueByItemId).length !== 0) ||
+    (value.plan &&
+      Object.keys(value.issueByItemId).some(
+        (id) =>
+          !value.plan.graph?.items?.some(
+            (item: { id: string }) => item.id === id,
+          ),
+      )) ||
+    (value.projection === "projected" &&
+      Object.keys(value.issueByItemId).length !==
+        value.plan?.graph?.items?.length) ||
     (value.planning === "complete" && !value.plan)
   )
     throw new Error(

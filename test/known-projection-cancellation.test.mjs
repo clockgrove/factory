@@ -3,12 +3,17 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { linuxProcessIdentity } from "../dist/process.js";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
-import { GitHubRequestError } from "../dist/github-client.js";
+import { Octokit } from "@octokit/core";
+import { createApplication } from "../dist/application.js";
+import { applyPendingAmendment } from "../dist/graph-amendments.js";
+import { runObjective, controlObjective } from "../dist/runner.js";
+import { readContinuation } from "../dist/state-store.js";
+import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { RealGitHubGateway, projectedIssueBody } from "../dist/github.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import {
@@ -24,7 +29,11 @@ import {
   saveState,
   statePath,
 } from "../dist/state-store.js";
-import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
+import {
+  createTarget,
+  factoryConfig,
+  makeApplication,
+} from "./support/integration-fixture.mjs";
 import { withCoverage } from "./support/coverage.mjs";
 import { projectionClient } from "./support/projection-client.mjs";
 
@@ -127,6 +136,7 @@ async function fixture(callback) {
       objective: 1,
       configDigest: factoryConfigDigest(config),
       graphDigest: graphDigest(graph),
+      prerequisitesDigest: digest("null"),
       authority,
     };
     const state = {
@@ -150,7 +160,8 @@ async function fixture(callback) {
       },
       pendingAmendment: {
         id: "preserved-amendment",
-        phase: "projecting",
+        phase: "rejected",
+        rejectionStage: "projection",
         graph: candidate,
         reviewDigest: "b".repeat(64),
         issueByItemId: { result: 2, qa: 3, aggregate: 4 },
@@ -241,7 +252,7 @@ test("stopped known partial projection cancels without accepting, replaying or c
       { ...originalWork.result, completedAt: undefined },
     );
     assert.equal(actual.finalAcceptance, undefined);
-    assert.equal(actual.pendingAmendment.phase, "projecting");
+    assert.equal(actual.pendingAmendment.phase, "rejected");
     assert.ok(remote.calls.every((call) => call.method === "GET"));
     const frozen = readFileSync(path);
     assert.equal(
@@ -253,6 +264,7 @@ test("stopped known partial projection cancels without accepting, replaying or c
 });
 
 for (const mode of [
+  "legacy-projecting",
   "unknown-create",
   "compiling",
   "reviewing",
@@ -295,7 +307,13 @@ for (const mode of [
     await fixture(
       async ({ root, config, state, path, remote, gateway, driver }) => {
         const p = state.pendingAmendment;
+        if (mode === "legacy-projecting") {
+          p.phase = "projecting";
+          delete p.rejectionStage;
+        }
         if (mode === "unknown-create") {
+          p.phase = "projecting";
+          delete p.rejectionStage;
           p.projectionPending = "qa";
           delete p.issueByItemId.qa;
         }
@@ -355,7 +373,7 @@ for (const mode of [
         if (mode === "title") remote.issues.get(2).title = "Unreviewed";
         if (mode === "role") remote.issues.get(2).labels = [];
         if (mode === "closure") remote.issues.get(2).state = "closed";
-        if (mode === "dependencies") remote.deps.set(4, [2]);
+        if (mode === "dependencies") remote.deps.set(2, [3]);
         if (mode === "parent") {
           remote.issues.set(99, remote.issue(99));
           remote.hierarchy.set(1, [4]);
@@ -464,3 +482,362 @@ test("complete public partial projection reconciles all five identities using GE
   });
   assert.ok(remote.calls.every((call) => call.method === "GET"));
 });
+
+// Real transport classification drives durable lifecycle; retained message text never supplies certainty.
+for (const producer of ["initial", "amendment"])
+  for (const effect of producer === "initial"
+    ? [
+        "labels",
+        "body",
+        "dependency",
+        "dependency-mid",
+        "parent",
+        "create",
+        "partial-create",
+      ]
+    : ["body", "dependency", "dependency-mid", "parent", "create"])
+    for (const outcome of ["rejected", "lost"])
+      test(`${producer}: ${effect} ${outcome} response crosses producer/persist/restart/cancel coherently`, async () => {
+        await fixture(async ({ root, config, state, path, remote }) => {
+          const pending = state.pendingAmendment;
+          pending.phase = "reviewed";
+          delete pending.rejectionStage;
+          delete pending.error;
+          state.coordinator.mode = "running";
+          if (effect === "body" && producer === "amendment") {
+            state.work.result = { status: "pending" };
+            pending.graph.items[0].brief =
+              "Reviewed updated public result brief";
+          }
+          if (producer === "initial") {
+            for (const number of [2, 3, 4]) remote.issues.delete(number);
+            remote.deps.clear();
+            remote.hierarchy.clear();
+            if (["body", "labels"].includes(effect))
+              remote.issues.get(1).labels = [];
+            if (effect === "labels") remote.labels.length = 0;
+          } else {
+            if (["dependency", "dependency-mid"].includes(effect))
+              remote.deps.set(4, []);
+            if (effect === "create") {
+              remote.issues.delete(3);
+              delete pending.issueByItemId.qa;
+              remote.deps.clear();
+            }
+          }
+          let submitted = false;
+          let targetCount = 0;
+          const client = new GitHubClient(
+            new Octokit({
+              request: {
+                fetch: async (url, options) => {
+                  assert.equal(
+                    options.headers["x-github-api-version"],
+                    "2026-03-10",
+                  );
+                  const u = new URL(url);
+                  const route = u.pathname.slice(1);
+                  if (route === `repos/${config.repository}`)
+                    return new Response(
+                      JSON.stringify({ default_branch: "main" }),
+                      {
+                        status: 200,
+                        headers: { "content-type": "application/json" },
+                      },
+                    );
+                  const targeted =
+                    options.method !== "GET" &&
+                    (effect === "labels"
+                      ? route.endsWith("/labels") && !route.includes("/issues/")
+                      : effect === "body"
+                        ? producer === "initial"
+                          ? route.endsWith("/issues/1/labels")
+                          : options.method === "PATCH" &&
+                            route.endsWith("/issues/2")
+                        : ["dependency", "dependency-mid"].includes(effect)
+                          ? route.endsWith("/issues/4/dependencies/blocked_by")
+                          : effect === "parent"
+                            ? route.endsWith("/sub_issues")
+                            : route.endsWith("/issues"));
+                  if (targeted) targetCount++;
+                  if (
+                    targeted &&
+                    !submitted &&
+                    (!["dependency-mid", "partial-create"].includes(effect) ||
+                      targetCount === 2)
+                  ) {
+                    submitted = true;
+                    const observed = readContinuation(config.repository, 1);
+                    assert.equal(
+                      producer === "initial"
+                        ? observed.projection
+                        : observed.pendingAmendment.phase,
+                      producer === "initial" ? "submitted" : "projecting",
+                    );
+                    if (outcome === "lost")
+                      throw Error(
+                        "Simulated response loss after known mutation submission",
+                      );
+                    return new Response(
+                      JSON.stringify({
+                        message: "Acknowledged public fixture rejection",
+                      }),
+                      {
+                        status: 422,
+                        headers: { "content-type": "application/json" },
+                      },
+                    );
+                  }
+                  try {
+                    const data =
+                      options.method === "GET" &&
+                      (/\/(labels|sub_issues|blocked_by)$/.test(route) ||
+                        route.endsWith("/issues"))
+                        ? await remote.client.paginate(route)
+                        : await remote.client.request(
+                            options.method,
+                            route,
+                            options.body ? JSON.parse(options.body) : undefined,
+                          );
+                    return new Response(JSON.stringify(data), {
+                      status: 200,
+                      headers: { "content-type": "application/json" },
+                    });
+                  } catch (error) {
+                    if (!(error instanceof GitHubRequestError)) throw error;
+                    return new Response(
+                      JSON.stringify({ message: "Documented parent absence" }),
+                      {
+                        status: error.status,
+                        headers: { "content-type": "application/json" },
+                      },
+                    );
+                  }
+                },
+              },
+            }),
+          );
+          const github = new RealGitHubGateway(
+            config.repository,
+            undefined,
+            client,
+          );
+          const driver = {
+            async preflight() {},
+            async availableSlots() {
+              throw Error("No dispatch permitted");
+            },
+            async start() {
+              throw Error("No dispatch permitted");
+            },
+          };
+          const graph = structuredClone(pending.graph);
+          if (producer === "initial") {
+            rmSync(path);
+            const planningModel = {
+              async generateStructured(request) {
+                return withCoverage(request, graph);
+              },
+              async reviewGraph(request) {
+                return { packetId: request.reviewPacket.id, findings: [] };
+              },
+            };
+            const prepared = makeApplication({
+              config,
+              fakeRoot: join(root, "planning"),
+              objectiveBody: body,
+              planningModel,
+              graph,
+              actions: {},
+            });
+            const application = createApplication(config, {
+              planningModel,
+              driver,
+              github,
+              contentStore: prepared.contentStore,
+              delivery: {},
+            });
+            const plan = await application.planObjective(1);
+            // This is a fresh supported run, not a hand-built completed-rejection snapshot.
+            await assert.rejects(application.runObjective(1, plan), /GitHub/);
+          } else {
+            saveState(path, state);
+            await assert.rejects(
+              applyPendingAmendment({
+                state,
+                config,
+                body,
+                github,
+                model: {},
+                save() {
+                  saveState(path, state);
+                },
+                cancelled: () => false,
+              }),
+              /GitHub/,
+            );
+          }
+          assert.equal(submitted, true);
+          const observed = readContinuation(config.repository, 1);
+          assert.equal(
+            producer === "initial"
+              ? observed.projection
+              : observed.pendingAmendment.phase,
+            outcome === "rejected"
+              ? "rejected"
+              : producer === "initial"
+                ? "submitted"
+                : "projecting",
+          );
+          const frozen = readFileSync(path);
+          const requests = remote.calls.length;
+          if (outcome === "lost") {
+            await assert.rejects(
+              cancelObjective(config, 1, driver, undefined, github),
+              /Submitted|unknown/,
+            );
+            assert.deepEqual(readFileSync(path), frozen);
+            assert.equal(remote.calls.length, requests);
+            await assert.rejects(
+              runObjective(config, 1, { driver, github }),
+              /cannot be replayed|unknown/,
+            );
+            assert.deepEqual(readFileSync(path), frozen);
+            await assert.rejects(
+              controlObjective(config, { objective: 1, action: "resume" }),
+              /cannot be resumed/,
+            );
+            assert.deepEqual(readFileSync(path), frozen);
+          } else {
+            assert.equal(
+              await cancelObjective(config, 1, driver, undefined, github),
+              "cancelled",
+            );
+            const after = readContinuation(config.repository, 1);
+            assert.ok(after.cancelledAt);
+            assert.equal(after.finalAcceptance, undefined);
+            assert.deepEqual(
+              producer === "initial" ? after.plan : after.pendingAmendment,
+              producer === "initial"
+                ? observed.plan
+                : observed.pendingAmendment,
+            );
+            assert.ok(
+              remote.calls
+                .slice(requests)
+                .every((call) => call.method === "GET"),
+            );
+          }
+        });
+      });
+
+for (const producer of ["initial", "amendment"])
+  test(`${producer}: interrupted submitted projection refuses before intent and never-dispatched projection cancels`, async () => {
+    await fixture(async ({ config, state, path, gateway, driver }) => {
+      let snapshot;
+      if (producer === "initial")
+        snapshot = {
+          schemaVersion: 5,
+          kind: "preparing",
+          repository: config.repository,
+          objective: 1,
+          runId: "synthetic-interrupted",
+          configDigest: factoryConfigDigest(config),
+          baseSha: state.baseSha,
+          objectiveBodyDigest: digest(body),
+          planning: "ready",
+          projection: "ready",
+          issueByItemId: {},
+          coordinator: state.coordinator,
+        };
+      else {
+        snapshot = state;
+        snapshot.pendingAmendment.phase = "reviewed";
+        delete snapshot.pendingAmendment.rejectionStage;
+      }
+      saveState(path, snapshot);
+      const ready = readFileSync(path);
+      if (producer === "initial") {
+        snapshot.planning = "complete";
+        snapshot.projection = "submitted";
+        snapshot.plan = { graph: state.pendingAmendment.graph };
+      } else snapshot.pendingAmendment.phase = "projecting";
+      saveState(path, snapshot);
+      const submitted = readFileSync(path);
+      await assert.rejects(
+        cancelObjective(config, 1, driver, undefined, gateway),
+        /Submitted|unknown/,
+      );
+      assert.deepEqual(readFileSync(path), submitted);
+      // Restore only this synthetic never-dispatched test fixture, not a historical/live snapshot.
+      writeFileSync(path, ready);
+      assert.equal(
+        await cancelObjective(config, 1, driver, undefined, gateway),
+        "cancelled",
+      );
+    });
+  });
+
+// A retained common edge cannot be mistaken for an intermediate new dependency.
+test("settled readback refuses a removed common dependency before any mutation", async () => {
+  await fixture(async ({ state, remote, gateway }) => {
+    const candidate = state.pendingAmendment.graph;
+    remote.deps.set(4, [2]);
+    await assert.rejects(
+      gateway.reconcileGraphProjection({
+        graph: candidate,
+        previousGraph: structuredClone(candidate),
+        objectiveIssue: 1,
+        objectiveBodyDigest: digest(body),
+        knownIssues: state.pendingAmendment.issueByItemId,
+      }),
+      /dependency/,
+    );
+    assert.ok(remote.calls.every((call) => call.method === "GET"));
+  });
+});
+
+for (const invalid of [
+  "missing-outcome",
+  "planning-projection-conflict",
+  "ready-map",
+  "unknown-item",
+  "duplicate",
+  "incomplete-projected",
+  "settled-create",
+]) {
+  test(`preparation decoder refuses ${invalid} without changing snapshot`, async () => {
+    await fixture(async ({ config, state, path }) => {
+      const snapshot = {
+        schemaVersion: 5,
+        kind: "preparing",
+        repository: config.repository,
+        objective: 1,
+        runId: "synthetic-decoder",
+        configDigest: factoryConfigDigest(config),
+        baseSha: state.baseSha,
+        objectiveBodyDigest: digest(body),
+        planning: "complete",
+        projection: "rejected",
+        issueByItemId: { result: 2 },
+        plan: { graph: state.pendingAmendment.graph },
+        coordinator: state.coordinator,
+      };
+      if (invalid === "missing-outcome") delete snapshot.projection;
+      if (invalid === "planning-projection-conflict")
+        snapshot.planning = "submitted";
+      if (invalid === "ready-map") snapshot.projection = "ready";
+      if (invalid === "unknown-item") snapshot.issueByItemId.foreign = 8;
+      if (invalid === "duplicate") snapshot.issueByItemId.qa = 2;
+      if (invalid === "incomplete-projected") snapshot.projection = "projected";
+      if (invalid === "settled-create") snapshot.projectionPending = "qa";
+      saveState(path, snapshot);
+      const frozen = readFileSync(path);
+      assert.throws(
+        () => readContinuation(config.repository, 1),
+        /Invalid preparation snapshot/,
+      );
+      assert.deepEqual(readFileSync(path), frozen);
+    });
+  });
+}

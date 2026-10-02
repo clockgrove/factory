@@ -1904,7 +1904,9 @@ test("complete SDK responses reject malformed native item primitives and collect
   assert.equal(valid.review.status, "clean");
   assert.equal(reviews, 1);
   for (mutation of [
-    ...["id", "title", "goal", "brief"].map((field) => [field, 42]),
+    ...["id", "title", "goal", "brief"].flatMap((field) =>
+      [42, null, [], {}].map((value) => [field, value]),
+    ),
     ...[
       "acceptance",
       "nonGoals",
@@ -1914,12 +1916,27 @@ test("complete SDK responses reject malformed native item primitives and collect
       "resources",
       "expectedOutputRoles",
       "requiredLfsRoles",
-    ].map((field) => [field, [42]]),
-    ["acceptance", null],
+    ].flatMap((field) => [42, null, {}, [42]].map((value) => [field, value])),
+    ...["priority", "minimumAssetSets"].flatMap((field) =>
+      ["0", null, [], 0.5].map((value) => [field, value]),
+    ),
     ["resources", "resource"],
     ["priority", "1"],
-    ["minimumAssetSets", "0"],
+    ["sourceAssets", 42],
     ["sourceAssets", [42]],
+    ...["role", "mediaType"].map((field) => [
+      "sourceAssets",
+      [
+        {
+          kind: "repository",
+          path: "README.md",
+          role: "source",
+          mediaType: "text/plain",
+          visibility: "repository",
+          [field]: 42,
+        },
+      ],
+    ]),
     [
       "sourceAssets",
       [
@@ -1935,9 +1952,15 @@ test("complete SDK responses reject malformed native item primitives and collect
   ]) {
     await assert.rejects(
       compilePlan(17, body, target.baseSha, target.checkout, model),
-      (error) =>
-        error instanceof MalformedPlannerOutput &&
-        /Work Item|Planner source asset/.test(error.message),
+      (error) => {
+        assert(error instanceof MalformedPlannerOutput);
+        assert.match(error.message, /Work Item|Planner source.?asset/i);
+        assert.doesNotMatch(
+          error.message,
+          /is not a function|Cannot read properties|Cannot convert undefined/,
+        );
+        return true;
+      },
       mutation[0],
     );
     assert.equal(captured.conforms, false, mutation[0]);

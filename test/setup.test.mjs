@@ -48,8 +48,13 @@ async function fixture(fn) {
     preload,
     `import fs from 'node:fs';
 import childProcess from 'node:child_process';
-import {syncBuiltinESMExports} from 'node:module';
+import {registerHooks,syncBuiltinESMExports} from 'node:module';
 const root=process.env.FACTORY_SETUP_FIXTURE;
+globalThis.__setupDenySdk=()=>{fs.appendFileSync(root+'/forbidden-sdk-construction','attempt\\n');throw Error('Fixture forbids SDK construction')};
+registerHooks({resolve(specifier,context,next){
+ if(specifier==='@openai/codex-sdk')return{shortCircuit:true,url:'data:text/javascript,'+encodeURIComponent("export class Codex {constructor(){globalThis.__setupDenySdk()}}")};
+ return next(specifier,context);
+}});
 if(fs.existsSync(root+'/readiness-mode')){
  const spawn=childProcess.spawn;
  childProcess.spawn=(file,args,options)=>args.includes('app-server')?spawn(process.execPath,[root+'/readiness-server.mjs',...args],options):spawn(file,args,options);
@@ -59,6 +64,10 @@ globalThis.fetch=async (url, input={})=>{
  const address=String(url); const method=input.method??'GET';
  fs.appendFileSync(root+'/requests', JSON.stringify({address,method})+'\\n');
  if(method!=='GET'||!address.startsWith('https://api.github.com/repos/example/setup/issues')) throw Error('Fixture forbids provider calls and remote mutations');
+ if(fs.existsSync(root+'/open-unapproved')){
+  if(new URL(address).pathname.endsWith('/issues/99')){fs.appendFileSync(root+'/forbidden-dispatch','attempt\\n');throw Error('Fixture forbids unapproved Objective reads')};
+  return new Response(JSON.stringify([{number:99,state:'open',labels:[{name:'urgent'}]}]),{status:200,headers:{'content-type':'application/json',etag:'fixture-unapproved-99'}});
+ }
  if(fs.existsSync(root+'/github-unavailable')||(process.argv.includes('serve')&&fs.existsSync(root+'/service-github-unavailable'))) return new Response(JSON.stringify({message:'Unavailable'}),{status:503,headers:{'content-type':'application/json'}});
  const data=address.match(/\\/issues\\/1(?:$|\\?)/)?{number:1,title:'Closed approved issue',body:fs.existsSync(root+'/objective-body')?fs.readFileSync(root+'/objective-body','utf8'):'fixture exact approved body',state:'closed',labels:[]}:[{number:1,state:'closed',labels:[]}];
  return new Response(JSON.stringify(data),{status:200,headers:{'content-type':'application/json',etag:'fixture-1'}});
@@ -203,6 +212,7 @@ test("setup fixture preserves its original failure when owner cleanup also fails
 
 test("actual guided CLI creates a consented idle watcher, verifies its owner and reuses it without duplicate controllers", () =>
   fixture(async ({ root, run, installArgs, configPath }) => {
+    writeFileSync(join(root, "open-unapproved"), "");
     const first = run([
       "setup",
       ...consent,
@@ -233,6 +243,25 @@ test("actual guided CLI creates a consented idle watcher, verifies its owner and
       .map(JSON.parse);
     assert.ok(requests.length >= 2);
     assert.ok(requests.every((request) => request.method === "GET"));
+    assert.ok(
+      requests.every(
+        (request) => !new URL(request.address).pathname.endsWith("/issues/99"),
+      ),
+    );
+    const state = run(["intake", "status"]).document;
+    assert.deepEqual(state.observation.unapproved, [99]);
+    assert.equal(state.observation.idleReason, "awaiting-approved-work");
+    assert.equal(state.authority, undefined);
+    assert.deepEqual(state.bodyDigests, {});
+    const repositoryState = join(
+      root,
+      "state/clockgrove-factory/repositories/example/setup",
+    );
+    for (const path of ["objectives", "harness", "model-invocations"])
+      assert.equal(existsSync(join(repositoryState, path)), false, path);
+    for (const path of ["forbidden-sdk-construction", "forbidden-dispatch"])
+      assert.equal(existsSync(join(root, path)), false, path);
+    assert.equal(readFileSync(join(root, "service-error"), "utf8"), "");
   }));
 
 test("actual guided configuration-only setup succeeds with unavailable manager and requires explicit service consent for background", () =>

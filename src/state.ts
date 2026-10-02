@@ -24,7 +24,10 @@ import {
 import { assertGraphRevisions } from "./graph-amendments.js";
 import { assertCompletedCoverage, assertCoverageShape } from "./qa.js";
 import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
-import { assertSelectedLfsValidation } from "./validation.js";
+import {
+  assertSelectedLfsValidation,
+  assertValidationWorktreeObservation,
+} from "./validation.js";
 
 export type WorkStatus =
   | "pending"
@@ -407,6 +410,13 @@ function validationEvidence(value: unknown, label: string): string[] {
   const evidence = record(value, label);
   const treeSha = sha(evidence.treeSha, `${label}.treeSha`);
   assertSelectedLfsValidation(evidence.selectedLfs, treeSha);
+  assertValidationWorktreeObservation(
+    evidence.worktreeObservation,
+    treeSha,
+    evidence.selectedLfs as
+      | import("./validation.js").SelectedLfsValidation[]
+      | undefined,
+  );
   if (!Array.isArray(evidence.commands))
     throw new Error(`${label}.commands must be an array`);
   for (const [index, raw] of evidence.commands.entries()) {

@@ -126,7 +126,7 @@ export function releaseTree(root, installed = false) {
           path: local,
           type: "file",
           sha256: digest(readFileSync(path)),
-          mode: info.mode & 0o777,
+          mode: info.mode & 0o7777,
         });
       } else {
         assert(

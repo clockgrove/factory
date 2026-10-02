@@ -7,7 +7,7 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 - Allow supported local cancellation when the recorded worker has ceased without a durable result and its owned process group is absent (#437). Preserve live-descendant and reused/foreign identity fences across the local Codex, Claude and Copilot harnesses.
 - Retain the original failed attempt, missing result and unknown accounting. Cancellation grants no implementation acceptance, retry or migration authority.
 
-Publication, exact installed cancellation checks and independent public archive/pinned-plugin verification are pending in [#439](https://github.com/clockgrove/factory/issues/439). Earlier releases and their evidence retain their exact artifact and scenario scope.
+Published with [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/439#issuecomment-5944288283). All 63 installed tests and one model-free CLI preflight passed without skips. The fresh synthetic cancellation scenario also passed from the verified public bytes for #437. These checks do not accept live Objectives or adopter pilots; earlier releases and their evidence retain their exact artifact and scenario scope.
 
 ## 0.1.66 — 2026-10-01
 

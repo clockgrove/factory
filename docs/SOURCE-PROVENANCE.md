@@ -6,6 +6,26 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Cancellation after a vanished local worker (#437)
+
+The public reproduction in #437, existing adapter-owned durable handles and
+Linux process identity/group helpers supplied this trunk correction. The current
+Codex, Claude and Copilot adapters distinguish an absent leader with an empty
+group from a changed identity or surviving descendants. Missing durable output
+does not prevent established cessation, and result-file presence does not waive
+ownership checks. The runner, atomic snapshot, attempt allowances and accounting
+contracts remain unchanged. New real-process regressions preserve failed evidence,
+missing results and unknown usage through supported Objective cancellation.
+No archived source, historical state, private adopter content or provider call
+supplied the implementation. [PR #440](https://github.com/clockgrove/factory/pull/440)
+records independent source/guidance review and guarded integration; exact
+distribution and the fresh synthetic public CLI gate completed in
+[#439](https://github.com/clockgrove/factory/issues/439). All 63 whole installed
+tests and the model-free preflight passed. Independent public byte and pinned-plugin
+verification passed; the fresh synthetic CLI cancellation from those public bytes
+completed [#437 acceptance](https://github.com/clockgrove/factory/issues/437#issuecomment-5944300601).
+These observations do not qualify live Objectives or optional providers.
+
 ## Native successor amendment prerequisites (#376)
 
 The existing native-dependency gateway, validated predecessor continuations and

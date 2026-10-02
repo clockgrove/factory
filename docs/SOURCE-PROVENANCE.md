@@ -29,9 +29,12 @@ Compilation selects a semantic check name and one existing source; deterministic
 hydration supplies complete canonical evidence. Review and diagnosis use actual
 canonical graphs and controller ceilings, retaining the distinction between those
 ceilings, eventual admission and runtime overlap. Existing preparation identities
-and consumed history are unchanged. Complete local historical-response replay and
-an unmodified cloned preparation exercise the remaining supported correction
-without provider calls or target writes; scripted review is no qualification.
+and consumed history are unchanged. Complete local historical-response replay checks the actual schemas, canonical
+context and full rejected responses without provider calls or target writes.
+A cloned legacy preparation exposed missing original review binding (#464);
+scripted review does not establish semantic acceptance or supported recovery.
+Corrected qualification uses a settled terminal predecessor and fresh authorized
+Objective identities within the same installation.
 
 The related actual SDK replay demonstrated schema-invalid primitive and collection
 types reaching review. Narrow native Work Item field guards now precede proof,

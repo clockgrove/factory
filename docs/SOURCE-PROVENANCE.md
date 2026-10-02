@@ -6,6 +6,22 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Ordinary Work Item metadata and native context (#443)
+
+The public recording-gateway reproduction in #443 and the current ordinary and
+amendment projection contracts supplied this trunk correction. Approved graph
+projection establishes only the existing `factory:objective` and
+`factory:work-item` role convention, creates missing repository labels with
+neutral presentation, and preserves existing presentation and unrelated issue
+labels. Initial work and QA nodes receive native Objective parents; aggregate
+children retain their aggregate parent. Authenticated issue identities, canonical
+bodies, additive metadata observations and exact hierarchy/dependency rereads
+fence changed or ambiguous remote context without parent replacement. New
+recording transport and temporary-Git coverage exercises initial, interrupted,
+reused and amended projections; packaged setup/director guidance carries the
+same convention. No archived implementation, private target material, model call,
+new taxonomy, authority policy or state store supplied this correction.
+
 ## Cancellation after a vanished local worker (#437)
 
 The public reproduction in #437, existing adapter-owned durable handles and

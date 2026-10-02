@@ -197,11 +197,15 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
   async cancel(handle: HarnessHandle): Promise<void> {
     const data = this.require(handle);
     const current = linuxProcessIdentity(data.pid);
-    if (current?.startTime !== data.startTime || current.group !== data.pid) {
-      if (!existsSync(data.resultPath))
-        throw new Error("Claude worker identity changed before cancellation");
+    if (!current) {
+      if (processGroupExists(data.pid))
+        throw new Error(
+          "Worker cessation remains unresolved; checkout retained",
+        );
       return;
     }
+    if (current.startTime !== data.startTime || current.group !== data.pid)
+      throw new Error("Claude worker identity changed before cancellation");
     try {
       process.kill(-data.pid, "SIGTERM");
     } catch (error) {

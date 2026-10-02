@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.67 — 2026-10-01
+
+- Allow supported local cancellation when the recorded worker has ceased without a durable result and its owned process group is absent (#437). Preserve live-descendant and reused/foreign identity fences across the local Codex, Claude and Copilot harnesses.
+- Retain the original failed attempt, missing result and unknown accounting. Cancellation grants no implementation acceptance, retry or migration authority.
+
+Publication, exact installed cancellation checks and independent public archive/pinned-plugin verification are pending in [#439](https://github.com/clockgrove/factory/issues/439). Earlier releases and their evidence retain their exact artifact and scenario scope.
+
 ## 0.1.66 — 2026-10-01
 
 - Clarify private Objective Gantt views with elapsed-time ticks, adapter/provider/model identities, recorded command indexes and honest unavailable labels. Keep SDK invocation intervals distinct from individual model calls and shell commands; unknown CPU/network time remains unknown (#428 / PR #430).

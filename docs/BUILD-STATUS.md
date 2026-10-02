@@ -4,6 +4,49 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Approved #448 current-runtime qualification
+
+On 2026-10-02 the operator [approved a narrowly scoped #448 continuation](https://github.com/clockgrove/factory/issues/448#issuecomment-5957494560)
+on independently accepted v0.1.72. The same paused, settled, nonterminal first
+Objective may make one supported transition from v0.1.71; configuration, state
+root, run/admission/item identities, evidence and accounting remain intact.
+Actual initial planning/review, concurrent workers, accepted delivery and failed
+candidate retain their v0.1.71 attribution. The original one-artifact attempt
+remains failed and unaccepted. Remaining amendment, QA/aggregate proof, the
+permitted exact-result environment rereview, delivery/final acceptance, dependent
+guide, idle/refill, control/teardown and fresh-clone phases must actually run on
+v0.1.72 and pass their unchanged substantive requirements.
+
+The supported generated-amendment replacement binds the amendment ID and exact
+failure digest, archives the rejection, clears only its matching error, stays
+paused and consumes no allowance. Fresh compilation uses the one remaining
+planning revision once. The replacement corrects the controller criterion and
+omits the extra aggregate-phase prerequisite probe while preserving accepted
+read-only QA, implementation-child integration, all original source obligations
+and the original beta/final prerequisite executions.
+
+The approved event map permits exactly two v0.1.72 owner activations: one paused
+cold activation with zero model dispatch, then one deliberate supported
+quiescent stop/start as the sole planned restart. Inactive upgrade/offline
+replacement starts no owner. Full quiescence and supported offline intake/Objective
+resume precede the final start; provider work waits for all artifact/input gates.
+No further activation/restart cycle is allowed, and teardown has no subsequent
+start. One active Objective, concurrency at most two, one remaining planning
+revision, zero implementation repairs and one environment-only exact-result
+rereview remain bound. Fresh canonical validation, grounded semantic amendment
+review, native projection and independent complete mixed-phase acceptance remain
+required; another substantive rejection stops at the recorded limit.
+
+Only this named #448 gate has an exception to the one-artifact scenario rule.
+Original sources, accepted obligations, rejected responses and real phase
+identities remain exact; no state rewrite, compatibility fallback, fabricated
+receipt, allowance reset or repaired response is authorized. Public #448 remains
+unaccepted and must precede private #445 on the same v0.1.72 artifact and proven
+scope. #444/#447 remain open for that live gate. Other artifact gates, worker
+permissions, security, source, provider and spending boundaries are unchanged.
+The approved decision is authority to attempt the bounded continuation, not
+acceptance or private activation.
+
 ## Immutable v0.1.72 artifact record
 
 [Release v0.1.72](https://github.com/clockgrove/factory/releases/tag/v0.1.72)
@@ -61,10 +104,11 @@ SHA-256 is `06792e14d72ef94da044ca03810700f97b8b7d016022a920247a77e589ae7171`.
 #485 and its Factory Project item are complete. Actual #444/#447 live outcomes
 remain with [public service qualification #448](https://github.com/clockgrove/factory/issues/448),
 followed by [private handoff #445](https://github.com/clockgrove/factory/issues/445).
-The operator decision about a scoped same-run artifact transition in #448 remains
-pending; this distribution does not approve it or accept the retained rejected
-amendment. Earlier artifacts, failed attempts and accounting retain their own
-scope. This later source record changes no published bytes, version or guidance.
+At publication, the scoped #448 artifact-transition decision was pending.
+The later [approved continuation](https://github.com/clockgrove/factory/issues/448#issuecomment-5957494560) is recorded separately above; distribution
+acceptance does not accept the retained rejected amendment or live qualification.
+Earlier artifacts, failed attempts and accounting retain their own scope. This
+later source record changes no published bytes, version or guidance.
 
 ## Immutable v0.1.71 artifact record
 

@@ -4,6 +4,58 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.67 artifact record
+
+[Release v0.1.67](https://github.com/clockgrove/factory/releases/tag/v0.1.67)
+was published on 2026-10-02 at 02:07:35 UTC from frozen independently reviewed
+and integrated source `021a002f4cd9aee5610cac51d11cdb3a75d342f8`, tree
+`a749857a9d73dcb8fb59bd46c816025a9c60676a`.
+[PR #440](https://github.com/clockgrove/factory/pull/440) records the cancellation
+correction, version-aligned release preparation and independent source/guidance
+review. [Required PR CI](https://github.com/clockgrove/factory/actions/runs/36952739614)
+and [exact integrated-main CI](https://github.com/clockgrove/factory/actions/runs/36953166611) passed.
+
+The `clockgrove-factory-0.1.67.tgz` archive is 153598647 bytes, SHA-256
+`a417e238b6d90a9affcb181af08c9692f447bb05bc7234ef942adae2c8bad8db`,
+recorded in the [prepublication fingerprint](https://github.com/clockgrove/factory/issues/439#issuecomment-5944269747).
+The 96-byte `SHA256SUMS` asset has SHA-256
+`1b28a2d6dccdd659a3aa62aa9b584fb634d5c5da4d96c1105d1c44962daa7217`.
+Annotated tag `dc50b3747d1fc9b88b42117c7a5545e619e650a2` resolves to the source above.
+Exact-tag ruleset `24344102` prohibits updates and deletion with no bypass actors.
+
+Offline installation matched all 6362 regular archive files and 95 bundled
+lock-addressed dependency roots. Both whole committed installed test files,
+`local-cancellation` and `local-execution-safety`, passed all 63 tests with zero
+failures, cancellations, skips or todos. One independently reviewed model-free
+CLI preflight passed, retaining the original synthetic failed attempt, missing
+output, consumed allowances and canonical unavailable worker usage through
+terminal cancellation without result or implementation acceptance. The first
+release attempt's missing dev-only test tools and
+[reviewed command correction](https://github.com/clockgrove/factory/issues/439#issuecomment-5944251918)
+remain preserved; the corrected command supplied locked TypeScript 5.9.3 and
+pnpm 10.34.5 through the existing separate test-tool mechanism. No source change
+was needed for that correction.
+
+Acceptance SHA-256 is
+`d562c62087e66a0c23a39f5ff9ad988b09cf8182591077819f9353c116d261d9`.
+[Independent public verification and canonical release completion](https://github.com/clockgrove/factory/issues/439#issuecomment-5944288283)
+matched anonymous archive/checksum bytes, sealed acceptance, annotated source/tree,
+exact protection and the enabled pinned plugin. Independent public receipt SHA-256
+is `458ecdc2dee9e182a59959e1766596625d7636c120d5b6fdae3cb32a483a60ad`.
+The release issue and its Factory Project item completed. The same fresh synthetic
+CLI cancellation scenario subsequently passed from the verified public archive
+for [#437 acceptance](https://github.com/clockgrove/factory/issues/437#issuecomment-5944300601), with receipt SHA-256
+`840f4e19cef95af5457afdcedc9aedeb6e3ec8c8cc9f3bdef9634e4584b588b4`.
+Archived candidate guidance remains unchanged.
+
+This release supplies supported local cancellation after an owned worker ceases
+without a durable result (#437). Live descendants and changed or foreign identities
+remain fenced across the Codex, Claude and Copilot adapters. Distribution and the
+fresh synthetic cancellation scenario make no provider calls or historical target
+writes and do not accept live Objectives or adopter pilots. Autonomous Objective
+acceptance remains bound to its original artifact and scenario; it does not transfer
+to v0.1.67. No published archive, tag or asset was changed by this later record.
+
 ## Immutable v0.1.66 artifact record
 
 [Release v0.1.66](https://github.com/clockgrove/factory/releases/tag/v0.1.66)

@@ -20,11 +20,28 @@ baselines remain intact. Native aggregate-validation variants remain supported.
 
 Source preparation passed complete ordered compiler-source reconstruction,
 focused checks and the bounded model-free fixture preflight, preserving its
-initial restricted-host refusal. The full actual installed compiler/reviewer
-source-phase and refusal proof remains pending; #489 stays Open/In progress.
-Lexical command identity does not itself impose semantic phase eligibility.
-Source integration changes no runtime, package version, permission, published
-v0.1.72 byte or release acceptance and supplies no actual service acceptance.
+initial restricted-host refusal. At the first source handoff, the full installed
+input/refusal gate was pending. Its [narrow executed-source proof now has independent acceptance](https://github.com/clockgrove/factory/issues/489#issuecomment-5959143930)
+on the accepted v0.1.72 installation: 42 retained captures cover complete corrected
+source/worker transports, emitted schemas, native initial/guide/amendment hydration,
+retained leaves, exact final commands and required source CI. The positive candidate
+has empty aggregate validation and exact discovered QA. The deliberate wrong-phase
+candidate remains lexically authorized; a complete-source, explicitly synthetic
+grounded reviewer finding and refusal controls pass native decoding. This is not
+a generic phase guard or actual model semantic acceptance. Generic QA/final
+rendering supplies only local validator observations; the full managed-continuation
+proof and actual service/private acceptance remain separate.
+
+Independent executed-result receipt SHA-256 is
+`bac76cf09f5ee0fc5f05b47d93277288a1079388b705ee65b38273dec58f6029`,
+binding 42-file evidence map
+`ff01786e76c66cab0d4da0e37211bef53812d2dafb78cc99cce1ed4501627367`.
+Whole installation/input byte fences, old 22/49/57-file evidence sets and five
+internal links remain unchanged. Initial owner/reader diagnostic failures and
+external test corrections remain preserved. No provider call or real qualification
+lifecycle operation supplied this proof. Source integration changes no runtime,
+package version, permission, published v0.1.72 byte or release acceptance and
+supplies no actual service acceptance.
 
 The [approved #448 continuation](https://github.com/clockgrove/factory/issues/448#issuecomment-5957494560)
 remains recorded below as its bounded historical authority. The

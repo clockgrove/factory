@@ -16,7 +16,7 @@ import type { DiagnosticEmitter } from "./diagnostics.js";
 import { validationLfsMembersForItem } from "./media.js";
 import type { PhaseAdmission } from "./phase-admission.js";
 import { gitAsync } from "./process.js";
-import { itemCoverage } from "./qa.js";
+import { itemCoverage, objectiveCandidate } from "./qa.js";
 import type { FactoryState } from "./state.js";
 import {
   AcceptanceDecisionRequired,
@@ -97,6 +97,7 @@ export async function runQaItem(args: {
     return true;
   };
   try {
+    const candidate = objectiveCandidate(state);
     if (work.pendingEffect)
       throw new Error(
         `QA ${item.id} submitted ${work.pendingEffect} has unknown outcome; operator direction required`,
@@ -105,13 +106,29 @@ export async function runQaItem(args: {
       (item.kind !== "qa" && item.kind !== "aggregate") ||
       !item.dependencies.every(
         (id) =>
-          state.work[id]?.status === "done" && state.work[id]?.integratedSha,
+          state.work[id]?.status === "done" &&
+          (state.work[id]?.integratedSha ||
+            (candidate?.basis === "pinned-baseline" &&
+              state.work[id]?.changeRef === candidate.commitSha)),
       )
     )
       throw new Error("QA cannot run before actual dependency integration");
-    if (!state.integratedSha) throw new Error("QA has no integrated candidate");
+    if (!candidate) throw new Error("QA has no integrated candidate");
     if (args.cancelled()) throw new Error("Objective cancelled");
-    const commit = state.integratedSha;
+    const commit = candidate.commitSha;
+    if (candidate.basis === "pinned-baseline") {
+      await gitAsync(
+        args.config.checkout,
+        "fetch",
+        "origin",
+        await args.github.defaultBranch(),
+      );
+      if (
+        (await gitAsync(args.config.checkout, "rev-parse", "FETCH_HEAD")) !==
+        commit
+      )
+        throw new Error("Default branch changed before pinned-baseline QA");
+    }
     if (work.waitingReason && work.changeRef !== commit)
       throw new Error("QA candidate changed while awaiting exact named CI");
     work.status = "running";
@@ -254,7 +271,8 @@ export async function runQaItem(args: {
     delete work.pendingEffect;
     if (args.cancelled()) throw new Error("Objective cancelled");
     delete work.acceptancePending;
-    work.integratedSha = commit;
+    if (candidate.basis === "current-graph-integration")
+      work.integratedSha = commit;
     work.status = "done";
     work.completedAt = new Date().toISOString();
     delete work.step;

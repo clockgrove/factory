@@ -220,6 +220,7 @@ export interface PlanningPrerequisites {
     bodyDigest: string;
     acceptance: Pick<
       import("./completion.js").FinalAcceptance,
+      | "candidateBasis"
       | "sealedAt"
       | "commit"
       | "tree"

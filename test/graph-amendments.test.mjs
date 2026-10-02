@@ -374,8 +374,8 @@ for (const delivery of ["regular", "native-stack"])
           objectiveReviewEvidence({
             state: snapshot,
             checkout: config.checkout,
-            integratedCommitSha: snapshot.integratedSha,
-            integratedTreeSha: finalPacket.treeSha,
+            candidateCommitSha: snapshot.integratedSha,
+            candidateTreeSha: finalPacket.treeSha,
           });
         for (const corruption of [
           "missing",

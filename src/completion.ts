@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { graphDigest, amendmentBlocksDispatch } from "./graph-amendments.js";
-import { assertCompletedCoverage } from "./qa.js";
+import { assertCompletedCoverage, objectiveCandidate } from "./qa.js";
 import type { GitHubGateway } from "./contracts.js";
 import type { FactoryState } from "./state.js";
 
 /** Compact bindings into the existing snapshot, not a second copy of its evidence. */
 export interface FinalAcceptance {
+  /** Historical delivered seals predate this field; new seals always bind it. */
+  candidateBasis?: "pinned-baseline" | "current-graph-integration";
   sealedAt: string;
   graphDigest: string;
   configDigest: string;
@@ -34,9 +36,10 @@ function evidenceDigest(state: FactoryState): string {
 }
 
 export function assertTerminalEligibility(state: FactoryState): void {
+  const candidate = objectiveCandidate(state);
   if (
     !state.finalValidation?.passed ||
-    !state.integratedSha ||
+    !candidate ||
     state.cancelRequested ||
     state.cancelledAt ||
     state.error ||
@@ -111,11 +114,16 @@ export function assertFinalAcceptance(state: FactoryState): void {
   const seal = state.finalAcceptance;
   if (!seal) return; // Historical snapshots remain readable without invented evidence.
   assertTerminalEligibility(state);
+  const candidate = objectiveCandidate(state)!;
   if (
     !Number.isFinite(Date.parse(seal.sealedAt)) ||
     seal.graphDigest !== graphDigest(state.graph) ||
     seal.configDigest !== state.configDigest ||
-    seal.commit !== state.integratedSha ||
+    (seal.candidateBasis !== undefined &&
+      seal.candidateBasis !== candidate.basis) ||
+    (candidate.basis === "pinned-baseline" &&
+      seal.candidateBasis !== candidate.basis) ||
+    seal.commit !== candidate.commitSha ||
     seal.tree !== state.finalValidation?.treeSha ||
     seal.evidenceDigest !== evidenceDigest(state) ||
     seal.usage?.availability !== "unavailable" ||
@@ -136,10 +144,11 @@ export function sealFinalAcceptance(state: FactoryState): void {
     return;
   }
   state.finalAcceptance = {
+    candidateBasis: objectiveCandidate(state)!.basis,
     sealedAt: new Date().toISOString(),
     graphDigest: graphDigest(state.graph),
     configDigest: state.configDigest,
-    commit: state.integratedSha!,
+    commit: objectiveCandidate(state)!.commitSha,
     tree: state.finalValidation!.treeSha,
     evidenceDigest: evidenceDigest(state),
     // Diagnostic accounting is observational; no complete total is invented here.
@@ -260,7 +269,7 @@ export async function closeObjectiveIssue(
     save();
     await github.closeIssue(
       state.objective,
-      `Factory completed ${state.graph.items.length} Work Items; final validation passed at ${state.integratedSha}.`,
+      `Factory completed ${state.graph.items.length} Work Items; final validation passed at ${objectiveCandidate(state)!.commitSha} (${objectiveCandidate(state)!.basis}).`,
       { body },
     );
     state.objectiveClosure = "complete";

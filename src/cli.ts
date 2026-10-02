@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { objectiveCandidate } from "./qa.js";
 import {
   requiredProviderCredential,
   resolveProviderCredential,
@@ -955,7 +956,7 @@ async function main(): Promise<void> {
     );
     console.log(
       objectiveComplete(state)
-        ? `Objective #${objective} completed at ${state.integratedSha}; final validation passed`
+        ? `Objective #${objective} completed at ${objectiveCandidate(state)!.commitSha} (${objectiveCandidate(state)!.basis}); final validation passed`
         : `Objective #${objective} awaits a decision; use status for the specific pending criterion or AssetSet`,
     );
   }

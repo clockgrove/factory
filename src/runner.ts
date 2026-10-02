@@ -87,7 +87,7 @@ import {
   processGroupExists,
   withProcessCancellation,
 } from "./process.js";
-import { assertCompletedCoverage } from "./qa.js";
+import { assertCompletedCoverage, objectiveCandidate } from "./qa.js";
 import type {
   ContinuationState,
   FactoryState,
@@ -1397,7 +1397,7 @@ async function runObjectivePass(
           );
           if (
             git(config.checkout, "rev-parse", "FETCH_HEAD") !==
-            state.integratedSha
+            objectiveCandidate(state)?.commitSha
           )
             throw new Error(
               "Default branch changed before historical final acceptance could be sealed",
@@ -1889,16 +1889,16 @@ async function runObjectivePass(
       await github.defaultBranch(),
     );
     const finalGraphDigest = graphDigest(state.graph);
-    const integratedSha = state.integratedSha!;
+    const candidateCommitSha = objectiveCandidate(state)!.commitSha;
     const observedHead = git(config.checkout, "rev-parse", "FETCH_HEAD");
-    if (observedHead !== integratedSha)
+    if (observedHead !== candidateCommitSha)
       throw new Error(
-        `Default branch changed before final validation: expected ${integratedSha}, observed ${observedHead}`,
+        `Default branch changed before final validation: expected ${candidateCommitSha}, observed ${observedHead}`,
       );
     const finalTree = git(
       config.checkout,
       "rev-parse",
-      `${integratedSha}^{tree}`,
+      `${candidateCommitSha}^{tree}`,
     );
     assertCompletedCoverage(state);
     const finalValidationStarted = Date.now();
@@ -1906,12 +1906,17 @@ async function runObjectivePass(
       runId: state.runId,
       operation: "objective-validation",
       outcome: "started",
-      metadata: { integratedSha, treeSha: finalTree },
+      metadata: {
+        candidateCommitSha,
+        candidateBasis: objectiveCandidate(state)!.basis,
+        ...(state.integratedSha ? { integratedSha: state.integratedSha } : {}),
+        treeSha: finalTree,
+      },
     });
     assertPinnedNpmScripts(
       config.checkout,
       state.baseSha,
-      integratedSha,
+      candidateCommitSha,
       state.objectiveCommands ?? finalObjectiveCommands(issue.body),
       {
         sourceDeclared:
@@ -1922,7 +1927,7 @@ async function runObjectivePass(
     const commandEvidence = await validateTree(
       config.checkout,
       join(root, "final-validation"),
-      integratedSha,
+      candidateCommitSha,
       finalTree,
       state.objectiveCommands ?? finalObjectiveCommands(issue.body),
       (entry) =>
@@ -1960,13 +1965,16 @@ async function runObjectivePass(
           {
             runId: state.runId,
             operation: "media-hydration-verification",
-            metadata: { integratedSha, treeSha: finalTree },
+            metadata: {
+              integratedSha: state.integratedSha!,
+              treeSha: finalTree,
+            },
           },
           async () =>
             verifyHydratedAssets({
               checkout: config.checkout,
               workRoot: join(root, "hydration"),
-              integratedSha,
+              integratedSha: candidateCommitSha,
               selections: selectedAssets,
             }),
           (receipt) => ({ members: receipt?.members.length ?? 0 }),
@@ -1980,8 +1988,8 @@ async function runObjectivePass(
       const objectiveEvidence = objectiveReviewEvidence({
         state,
         checkout: config.checkout,
-        integratedCommitSha: integratedSha,
-        integratedTreeSha: finalTree,
+        candidateCommitSha,
+        candidateTreeSha: finalTree,
       });
       const reviewFinal = () =>
         reviewAcceptance({
@@ -2002,7 +2010,7 @@ async function runObjectivePass(
           reviewPhase: "objective-review",
           checkout: config.checkout,
           baseSha: state.baseSha,
-          commit: integratedSha,
+          commit: candidateCommitSha,
           evidence: acceptanceEvidence,
           criteria: objectiveCriteria(issue.body),
           sources: planningSources(
@@ -2038,7 +2046,14 @@ async function runObjectivePass(
         {
           runId: state.runId,
           operation: "objective-acceptance-review",
-          metadata: { treeSha: finalTree, integratedSha },
+          metadata: {
+            treeSha: finalTree,
+            candidateCommitSha,
+            candidateBasis: objectiveCandidate(state)!.basis,
+            ...(state.integratedSha
+              ? { integratedSha: state.integratedSha }
+              : {}),
+          },
         },
         reviewFinal,
         (result) => ({ criteria: result.criteria?.length ?? 0 }),
@@ -2077,7 +2092,7 @@ async function runObjectivePass(
       state.coordinator.mode !== "running" ||
       amendmentBlocksDispatch(state) ||
       graphDigest(state.graph) !== finalGraphDigest ||
-      state.integratedSha !== integratedSha
+      objectiveCandidate(state)?.commitSha !== candidateCommitSha
     ) {
       save(state);
       return state;
@@ -2089,9 +2104,9 @@ async function runObjectivePass(
       await github.defaultBranch(),
     );
     const reviewedHead = git(config.checkout, "rev-parse", "FETCH_HEAD");
-    if (reviewedHead !== integratedSha)
+    if (reviewedHead !== candidateCommitSha)
       throw new Error(
-        `Default branch changed during final review: expected ${integratedSha}, observed ${reviewedHead}`,
+        `Default branch changed during final review: expected ${candidateCommitSha}, observed ${reviewedHead}`,
       );
     // No await between this CAS, the immutable seal and pending closure persistence.
     if (
@@ -2099,7 +2114,7 @@ async function runObjectivePass(
       state.coordinator.mode !== "running" ||
       amendmentBlocksDispatch(state) ||
       graphDigest(state.graph) !== finalGraphDigest ||
-      state.integratedSha !== integratedSha
+      objectiveCandidate(state)?.commitSha !== candidateCommitSha
     ) {
       save(state);
       return state;
@@ -2111,7 +2126,12 @@ async function runObjectivePass(
       operation: "objective-validation",
       outcome: "completed",
       durationMs: Date.now() - finalValidationStarted,
-      metadata: { treeSha: finalTree, integratedSha },
+      metadata: {
+        treeSha: finalTree,
+        candidateCommitSha,
+        candidateBasis: objectiveCandidate(state)!.basis,
+        ...(state.integratedSha ? { integratedSha: state.integratedSha } : {}),
+      },
     });
     save(state);
     await closeObjectiveIssue(state, issue.body, github, () => save(state));
@@ -2667,7 +2687,9 @@ export function decideResult(
     const pending = input.item
       ? work?.acceptancePending
       : state.finalAcceptancePending;
-    const commit = input.item ? work?.changeRef : state.integratedSha;
+    const commit = input.item
+      ? work?.changeRef
+      : objectiveCandidate(state)?.commitSha;
     if (
       !pending ||
       !commit ||

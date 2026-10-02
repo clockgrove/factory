@@ -8,6 +8,53 @@ import type {
 import { installedControllerCapabilities } from "./controller-capabilities.js";
 import type { FactoryState } from "./state.js";
 
+/** The accepted graph determines whether this run qualifies existing bytes or delivers changes. */
+export function baselineQaGraph(graph: WorkGraph): boolean {
+  return (
+    graph.items.length > 0 && graph.items.every((item) => item.kind === "qa")
+  );
+}
+
+export function objectiveCandidate(
+  state: Pick<
+    FactoryState,
+    | "graph"
+    | "baseSha"
+    | "integratedSha"
+    | "work"
+    | "stackNumbers"
+    | "stackMerges"
+  >,
+):
+  | {
+      basis: "pinned-baseline" | "current-graph-integration";
+      commitSha: string;
+    }
+  | undefined {
+  if (baselineQaGraph(state.graph)) {
+    if (
+      state.integratedSha !== undefined ||
+      Object.values(state.work).some(
+        (work) =>
+          work.execution ||
+          work.pullRequest ||
+          work.integratedSha ||
+          work.preIntegrationChecks?.length ||
+          (work.pendingEffect && work.pendingEffect !== "review"),
+      ) ||
+      Object.keys(state.stackNumbers ?? {}).length ||
+      Object.keys(state.stackMerges ?? {}).length
+    )
+      throw new Error(
+        "Baseline-only QA cannot claim current-graph integration",
+      );
+    return { basis: "pinned-baseline", commitSha: state.baseSha };
+  }
+  return state.integratedSha
+    ? { basis: "current-graph-integration", commitSha: state.integratedSha }
+    : undefined;
+}
+
 /** New parents join accepted child results; semantic assertions belong to QA. */
 const aggregateJoinCriterion =
   "Every explicit child Work Item has completed acceptance and its result is integrated into this aggregate's exact candidate.";
@@ -179,8 +226,8 @@ export function assertCoverageShape(graph: WorkGraph): void {
       throw new Error("Late proof requires a read-only QA node");
     if (
       item.kind === "qa" &&
-      (!item.dependencies.length ||
-        (!integrated && proof.kind !== "published-ci"))
+      ((!item.dependencies.length && !baselineQaGraph(graph)) ||
+        (!integrated && proof.kind !== "published-ci" && !final))
     )
       throw new Error(
         "QA proof needs integrated dependencies and a feasible late phase",
@@ -326,7 +373,7 @@ export function assertCompletedCoverage(state: FactoryState): void {
       throw new Error("Acceptance coverage lacks completed exact-tree proof");
     if (
       proof.kind.startsWith("integrated-") &&
-      work.changeRef !== state.integratedSha
+      work.changeRef !== objectiveCandidate(state)?.commitSha
     )
       throw new Error("Integrated QA proof is stale at the final candidate");
     if (
@@ -352,7 +399,7 @@ export function assertCompletedCoverage(state: FactoryState): void {
       const head =
         proof.kind === "published-ci"
           ? state.work[proof.targetItem]?.changeRef
-          : state.integratedSha;
+          : objectiveCandidate(state)?.commitSha;
       if (
         !head ||
         !work.qaChecks?.some(

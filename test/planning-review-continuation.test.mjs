@@ -407,7 +407,8 @@ test("retained clean review binds actual execution ceilings across unchanged and
     authorizedMaxConcurrency: 1,
   };
   const f = await fixture(t, { limit: 0, executionBounds });
-  const state = structuredClone(f.retained);
+  const state = structuredClone(f.state);
+  assert.equal(state.planningRecovery.phase, "complete");
   const original = JSON.stringify(state);
   const evidence = state.planningRecovery.review.packet.evidence.find(
     (entry) => entry.path === "FACTORY_EXECUTION_BOUNDS",

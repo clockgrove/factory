@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.71 — 2026-10-02
+
+- Reuse valid execution authority after JSON object properties are reordered, so guided setup preserves its finite selection and durable planning preserves its prepared work (#479).
+- Keep ordered arrays, real policy values, optional-field presence and invalid authority fenced. Exact serialized admission receipt verification remains unchanged; reuse makes no new planning call or allowance reset.
+
+Candidate release; [#480](https://github.com/clockgrove/factory/issues/480) owns exact-source review, installed verification, immutable publication and independent public completion. Live service acceptance remains [#448](https://github.com/clockgrove/factory/issues/448), followed by the separately authorized adopter handoff in [#445](https://github.com/clockgrove/factory/issues/445). All earlier release and failed-run evidence remains preserved.
+
 ## 0.1.70 — 2026-10-02
 
 - Choose the operator-owned home directory as the single default outside-write probe for guided Codex setup, preserving explicit overrides and canonical outside-workspace checks (#474).

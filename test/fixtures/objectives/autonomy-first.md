@@ -15,8 +15,10 @@ Use the baseline README and complete scripts/check.mjs as pinned planning source
   number, with null for an empty array. No dependencies. Validate with
   `node scripts/check.mjs beta` and `factory-fixture-prerequisite` after
   implementation. The local Node.js environment is available. The latter command
-  checks an acceptance-only disposable condition; it is not required for coding
-  and must not be used as a pre-worker readiness probe.
+  checks an acceptance-only disposable condition. It may run only during beta
+  result validation and Objective final validation in this scenario; no other
+  Work Item may run it. It is not required for coding and must not be used as a
+  pre-worker readiness probe.
 - `summary` owns only `src/summary.mjs`: depend explicitly on both leaves and
   export `summarize(values)` returning `{ total, maximum }` using their exports.
   Validate with `node scripts/check.mjs join`.
@@ -39,7 +41,11 @@ The initial graph represents this required inspection and its controller-mediate
 amendment. It must not pre-create the discovered QA node and then call that a graph
 revision. After accepting the worker's proposal, independently review a graph
 revision adding a read-only QA child and an aggregate acceptance parent. The parent
-has explicit child dependencies; neither parent nor QA has a coding worker or PR.
+has explicit child dependencies and only joins accepted child proof against the
+exact integrated candidate. Its validation array must be empty. The read-only QA
+child runs exactly `node scripts/check.mjs qa` after summary integration and
+receives independent acceptance review. Neither parent nor QA has a coding worker
+or PR; neither may run `factory-fixture-prerequisite`.
 Every initial obligation stays covered. The controller, not the worker, assigns
 new node identities and projects native issue hierarchy.
 

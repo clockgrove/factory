@@ -475,6 +475,7 @@ export function summarizeModelInvocations(
       typeof invocationId !== "string" ||
       ![
         "compile",
+        "diagnosis",
         "graph-review",
         "result-review",
         "objective-review",
@@ -579,6 +580,7 @@ export function summarizeModelInvocations(
   };
   const phases: ModelInvocationPhase[] = [
     "compile",
+    "diagnosis",
     "graph-review",
     "result-review",
     "objective-review",

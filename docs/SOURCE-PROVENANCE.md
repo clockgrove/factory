@@ -965,3 +965,17 @@ assertion correction; no product bytes changed. This later documentation records
 completed distribution acceptance without copying private source or altering
 published artifacts. Live public service qualification (#448) and adopter rollout
 (#445) remain separate gates.
+
+## Diagnosis invocation classification (#461)
+
+The current typed model observation contract, diagnosis producers, SDK adapter,
+local diagnostic aggregation and metadata-only analysis supplied this correction.
+Diagnosis now emits its explicit phase through planning and Work Item repair,
+without changing repair charging, allowances or provider retry policy. Compilation
+and independent graph/result/final review retain their existing phases. Actual
+scripted SDK turns exercise request/progress/terminal correlation, disabled-content
+capture, available and unavailable usage, phase aggregation, exact filtering and
+Gantt labels; a capacity refusal verifies diagnosis gains no reviewer retries.
+Previously emitted compile records remain unchanged and cannot be retrospectively
+classified by prompt parsing. No archived runtime, private source, provider call,
+new lifecycle store or historical-accounting rewrite was introduced.

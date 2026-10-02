@@ -341,7 +341,7 @@ test("sequential planning supplies grounded native acceptance in every rendered 
     assert.equal(second.graph.coverage[1].proof.kind, "final-review");
     assert.deepEqual(
       rendered.map((entry) => entry.phase),
-      ["compile", "graph-review", "compile", "compile", "graph-review"],
+      ["compile", "graph-review", "diagnosis", "compile", "graph-review"],
     );
     for (const packet of rendered) {
       assert.deepEqual(packet.packet.prerequisites, preparation);

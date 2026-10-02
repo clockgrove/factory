@@ -121,6 +121,7 @@ export interface WorkGraph {
 
 export type ModelInvocationPhase =
   | "compile"
+  | "diagnosis"
   | "graph-review"
   | "result-review"
   | "objective-review";

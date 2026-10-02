@@ -220,7 +220,7 @@ export async function diagnoseWorkRepair(args: {
       schema: diagnosisSchema,
       invocation: {
         invocationId: randomUUID(),
-        phase: "compile",
+        phase: "diagnosis",
         ordinal: state.allowanceConsumption!.implementationRepairs,
         observe: args.diagnostics?.modelObserver({
           scopeId: work.attempt!,

@@ -9,6 +9,8 @@ factory analyze --objective 123 --filter phase=implementation --group-by model
 factory analyze --objective 123 --filter promptDigest=EXACT_DIGEST --json
 ```
 
+Planning and Work Item repair diagnosis use phase `diagnosis`; initial and corrective graph compilation use `compile`. Recorded older `compile` entries retain their original phase, even if a historical call performed diagnosis.
+
 The default grouping is `phase`. Repeat `--group-by` to combine dimensions. Filters match exact field values; `--filter reportedModel=null` selects invocations without a reported model. Configured `model` and provider-reported `reportedModel` are separate fields. A changed prompt digest identifies different text, not its quality or meaning.
 
 Supported grouping and filtering fields are `repository`, `objective`, `runId`, `itemId`, `attemptId`, `scopeId`, `invocationId`, `providerAttempt`, `phase`, `provider`, `model`, `reportedModel`, `reasoningEffort`, `adapter`, `factoryVersion`, `promptDigest`, `schemaDigest`, `sourceDigest` and `configDigest`.

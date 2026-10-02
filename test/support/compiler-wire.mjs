@@ -11,6 +11,30 @@ export function encodeCompilerWire(input, promptOrChoices) {
   const graph = structuredClone(input);
   return {
     contextId: choices.contextId,
+    requiredPreIntegrationChecks: (
+      graph.requiredPreIntegrationChecks ?? []
+    ).map((gate) => {
+      const sourceIndex = choices.sources.findIndex(
+        (source) => source.path === gate.source.path,
+      );
+      const lines = choices.sources[sourceIndex]?.lines.map(
+        (line) => line.text,
+      );
+      const sourceLines = gate.source.text.split("\n");
+      const firstLine = lines?.findIndex(
+        (_, index) =>
+          lines.slice(index, index + sourceLines.length).join("\n") ===
+          gate.source.text,
+      );
+      if (sourceIndex < 0 || firstLine < 0)
+        throw new Error("Fixture check authority is not supplied");
+      return {
+        checkName: gate.checkName,
+        sourceIndex,
+        firstLine,
+        lastLine: firstLine + sourceLines.length - 1,
+      };
+    }),
     items: graph.items
       .map(compilerItem)
       .map((item) => ({
@@ -142,6 +166,7 @@ export function compilerResponse(prompt, items = [compilerItem()]) {
   const choices = compilerChoices(prompt);
   return {
     contextId: choices.contextId,
+    requiredPreIntegrationChecks: [],
     items: items.map((item, index) => ({
       ...compilerItem(item),
       coverage:

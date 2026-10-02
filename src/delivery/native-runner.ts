@@ -932,8 +932,14 @@ export async function runNativeGraph(args: {
             observation.mergeReadiness === "blocked"
           )
             assertDeliveryReady(observation);
-        for (const observation of observations)
-          assertDeliveryReady(observation);
+        for (const [index, observation] of observations.entries())
+          assertDeliveryReady(
+            observation,
+            (state.graph.requiredPreIntegrationChecks ?? []).map(
+              (check) => check.checkName,
+            ),
+            layers[index]!.headSha,
+          );
       } catch (error) {
         if (!(error instanceof DeliveryReadinessPending)) throw error;
         state.work[unit.items.at(-1)!.id]!.waitingReason = error.message;

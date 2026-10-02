@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -75,7 +76,7 @@ async function until(check) {
   }
   throw new Error("Fixture condition not reached");
 }
-async function fixture(route, name, run, chain = false) {
+async function fixture(route, name, run, chain = false, namedGate = false) {
   const root = mkdtempSync(join(tmpdir(), "factory-ci-wait-"));
   const previous = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = join(root, "state");
@@ -88,10 +89,31 @@ async function fixture(route, name, run, chain = false) {
       route,
       1,
     );
+    const objectiveBody =
+      (chain ? body + "- test -s next.txt\n" : body) +
+      (namedGate
+        ? "\n## Delivery\nThe Quality workflow job `quality` must succeed on each exact PR head before integration; preserve workflow/job files and final acceptance.\n"
+        : "");
     const setup = makeApplication({
       config,
       graph: {
         objective: 1,
+        ...(namedGate
+          ? {
+              requiredPreIntegrationChecks: [
+                {
+                  checkName: "quality",
+                  source: {
+                    path: "OBJECTIVE",
+                    text: objectiveBody.split("\n").at(-2),
+                    digest: createHash("sha256")
+                      .update(objectiveBody)
+                      .digest("hex"),
+                  },
+                },
+              ],
+            }
+          : {}),
         baseSha: target.baseSha,
         items: chain
           ? [
@@ -116,7 +138,7 @@ async function fixture(route, name, run, chain = false) {
             ]
           : [item],
       },
-      objectiveBody: chain ? body + "- test -s next.txt\n" : body,
+      objectiveBody,
       fakeRoot: join(root, "fake"),
       actions: {
         result: { files: [{ path: "result.txt", text: "done\n" }] },
@@ -134,12 +156,33 @@ async function fixture(route, name, run, chain = false) {
       });
       return result;
     };
+    let namedMode = "missing";
     let observations = 0,
       merges = 0;
     const observe = github.observe.bind(github);
     github.observe = async (identity) => {
       observations++;
-      return observe(identity);
+      const observation = await observe(identity);
+      if (!namedGate || namedMode === "missing") return observation;
+      const receipt = {
+        id: 1,
+        name: "quality",
+        headSha: identity.headSha,
+        status: "completed",
+        conclusion: "success",
+        detailsUrl: "https://example.test/check/1",
+      };
+      if (namedMode === "stale") receipt.headSha = "f".repeat(40);
+      if (namedMode === "failed")
+        return { ...observation, checks: "failing", namedChecks: [] };
+      if (namedMode === "pending") receipt.status = "in_progress";
+      return {
+        ...observation,
+        namedChecks:
+          namedMode === "ambiguous"
+            ? [receipt, { ...receipt, id: 2 }]
+            : [receipt],
+      };
     };
     const merge = github.merge.bind(github);
     github.merge = async (...args) => {
@@ -163,6 +206,9 @@ async function fixture(route, name, run, chain = false) {
       config,
       root,
       ready,
+      setNamedMode: (mode) => {
+        namedMode = mode;
+      },
       counts: () => ({ observations, merges }),
       track: (promise) => {
         active = promise;
@@ -369,6 +415,70 @@ for (const route of ["regular", "native-stack"]) {
         1,
       );
     }));
+}
+
+for (const route of ["regular", "native-stack"]) {
+  test(`${route}: source-required quality waits for exact named evidence despite clean no-check readiness`, async () =>
+    fixture(
+      route,
+      "named",
+      async (f) => {
+        const plan = await f.application.planObjective(1);
+        assert.equal(
+          plan.graph.requiredPreIntegrationChecks[0].checkName,
+          "quality",
+        );
+        const first = await f.application.runObjective(1, plan);
+        assertWait(first);
+        const identity = identityOf(first);
+        f.ready();
+        for (const mode of ["missing", "pending", "stale", "ambiguous"]) {
+          f.setNamedMode(mode);
+          const waiting = await f.application.runObjective(1, plan);
+          assertWait(waiting);
+          assert.deepEqual(identityOf(waiting), identity);
+          assert.equal(f.counts().merges, 0);
+        }
+        f.setNamedMode("success");
+        const completed = await f.application.runObjective(1, plan);
+        assert.equal(completed.finalValidation.passed, true);
+        assert.equal(f.counts().merges, 1);
+        assert.deepEqual(identityOf(completed), identity);
+        assert.equal(
+          completed.work.result.preIntegrationChecks[0].headSha,
+          identity.head,
+        );
+        assert.equal(
+          readEvents(f.eventsPath).filter((event) => event.type === "start")
+            .length,
+          1,
+        );
+      },
+      false,
+      true,
+    ));
+  test(`${route}: failed source-required check stops before merge intent`, async () =>
+    fixture(
+      route,
+      "named-fail",
+      async (f) => {
+        const plan = await f.application.planObjective(1);
+        await f.application.runObjective(1, plan);
+        f.ready();
+        f.setNamedMode("failed");
+        await assert.rejects(
+          f.application.runObjective(1, plan),
+          /not mergeable/,
+        );
+        assert.equal(f.counts().merges, 0);
+        assert.equal(
+          readState(f.config.repository, 1).work.result.pendingEffect,
+          undefined,
+        );
+      },
+      false,
+      true,
+    ));
 }
 
 test("intake keeps its ordinary pending-CI Objective owned and finishes it when checks pass", async () =>
@@ -679,4 +789,92 @@ test("regular discovery and pending CI settle before amendment without starving 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// Full preserved public #446 reproduction: empty check runs, zero commit statuses,
+// authenticated CLEAN readiness. Source-required gates must close this exact gap.
+test("public no-registered-check reproduction refuses gated integration while preserving no-CI targets", async () => {
+  const identity = {
+    number: 1,
+    branch: "work",
+    headSha: head,
+    baseBranch: "main",
+  };
+  let runs = [];
+  const client = {
+    async request(method, path) {
+      if (path.endsWith("/pulls/1"))
+        return {
+          head: { sha: head, ref: "work" },
+          base: { ref: "main" },
+          state: "open",
+          merged: false,
+        };
+      if (path.includes("/check-runs?")) return { check_runs: runs };
+      if (path.endsWith("/status")) return { state: "pending", total_count: 0 };
+      throw new Error(`Unexpected request ${method} ${path}`);
+    },
+    async pullRequestReadiness() {
+      return {
+        headRefOid: head,
+        headRefName: "work",
+        baseRefName: "main",
+        mergeStateStatus: "CLEAN",
+      };
+    },
+  };
+  const gateway = new RealGitHubGateway("example/fixture", false, client);
+  let submitted = 0;
+  gateway.defaultBranch = async () => "main";
+  gateway.merge = async () => {
+    submitted++;
+    return { integratedSha: "b".repeat(40) };
+  };
+  assert.deepEqual(await gateway.observe(identity), {
+    namedChecks: [],
+    mergeReadiness: "ready",
+    state: "open",
+    checks: "passing",
+  });
+  const result = { branch: "work", pullRequest: 1, headSha: head };
+  await new RegularDelivery("/unused", gateway).merge(result);
+  assert.equal(submitted, 1);
+  submitted = 0;
+  const gated = new RegularDelivery("/unused", gateway, ["quality"]);
+  await assert.rejects(gated.merge(result), /Awaiting.*quality/);
+  assert.equal(submitted, 0);
+  const success = {
+    id: 1,
+    name: "quality",
+    head_sha: head,
+    status: "completed",
+    conclusion: "success",
+    html_url: "https://example.test/check/1",
+    app: { id: 100 },
+  };
+  for (const variant of [
+    { ...success, status: "in_progress", conclusion: null },
+    { ...success, head_sha: "f".repeat(40) },
+    { ...success, conclusion: "neutral" },
+    { ...success, conclusion: "skipped" },
+  ]) {
+    runs = [variant];
+    await assert.rejects(gated.merge(result), /Awaiting/);
+    assert.equal(submitted, 0);
+  }
+  runs = [success, { ...success, id: 2, app: { id: 200 } }];
+  await assert.rejects(gated.merge(result), /Awaiting/);
+  assert.equal(submitted, 0);
+  runs = [{ ...success, conclusion: "failure" }];
+  await assert.rejects(gated.merge(result), /not mergeable/);
+  assert.equal(submitted, 0);
+  runs = [success];
+  let before;
+  await gated.merge(result, (observation) => {
+    before = observation;
+    assert.equal(submitted, 0);
+  });
+  assert.equal(submitted, 1);
+  assert.equal(before.namedChecks[0].name, "quality");
+  assert.equal(before.namedChecks[0].headSha, head);
 });

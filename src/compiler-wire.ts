@@ -235,6 +235,15 @@ export function compilerWire(
   ];
   const schema = strict({
     contextId: { type: "string", enum: [contextId] },
+    requiredPreIntegrationChecks: {
+      type: "array",
+      items: strict({
+        checkName: { ...text, minLength: 1 },
+        sourceIndex: integer(request.sources.length),
+        firstLine: integer(),
+        lastLine: integer(),
+      }),
+    },
     items: {
       type: "array",
       minItems: 1,
@@ -320,16 +329,55 @@ export function compilerWire(
     data,
     decode(value: unknown): WorkGraph {
       const wire = object(value, "response");
-      keys(wire, ["contextId", "items"], "response");
+      keys(
+        wire,
+        ["contextId", "items", "requiredPreIntegrationChecks"],
+        "response",
+      );
       if (wire.contextId !== contextId)
         throw new Error("Planner context identity differs from this request");
       if (!Array.isArray(wire.items) || !wire.items.length)
         throw new Error("Planner requires at least one Work Item");
+      if (!Array.isArray(wire.requiredPreIntegrationChecks))
+        throw new Error("Planner pre-integration checks must be an array");
+      const requiredPreIntegrationChecks =
+        wire.requiredPreIntegrationChecks.map((raw) => {
+          const gate = object(raw, "pre-integration check");
+          keys(
+            gate,
+            ["checkName", "sourceIndex", "firstLine", "lastLine"],
+            "pre-integration check",
+          );
+          const source =
+            request.sources[
+              index(gate.sourceIndex, request.sources.length, "sourceIndex")
+            ]!;
+          const lines = source.content.split("\n");
+          const first = index(gate.firstLine, lines.length, "firstLine");
+          const last = index(gate.lastLine, lines.length, "lastLine");
+          if (
+            last < first ||
+            typeof gate.checkName !== "string" ||
+            !gate.checkName.trim()
+          )
+            throw new Error(
+              "Planner pre-integration check name or source span is invalid",
+            );
+          return {
+            checkName: gate.checkName,
+            source: {
+              path: source.path,
+              digest: createHash("sha256").update(source.content).digest("hex"),
+              text: lines.slice(first, last + 1).join("\n"),
+            },
+          };
+        });
       const graph: WorkGraph = {
         objective: context.objectiveNumber,
         baseSha: request.baseSha,
         items: [],
         coverage: [],
+        requiredPreIntegrationChecks,
       };
       const seen = new Set<number>();
       const referenced = new Set<string>();

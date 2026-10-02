@@ -26,7 +26,7 @@ const manifest: ControllerCapabilitiesManifest = {
     {
       id: "protected-exact-head-integration",
       statement:
-        "Factory observes authenticated exact PR identities and check readiness before submitting regular or native-stack integration, supplies expected heads, and honors the target's existing GitHub protection and required checks without bypass. Final Objective review receives compact successful uniquely named check identities actually observed on each published head before integration. Missing, ambiguous, stale, pending, neutral, skipped or failing check results do not become successful named-check evidence; configured guarantees never claim that future checks have already passed.",
+        "Factory observes authenticated exact PR identities and check readiness before submitting regular or native-stack integration, requires every source-required named check admitted in the graph to have successful exact-head evidence (including waiting when it has not registered), supplies expected heads, and honors the target's existing GitHub protection and required checks without bypass. Final Objective review receives compact successful uniquely named check identities actually observed on each published head before integration. Missing, ambiguous, stale, pending, neutral, skipped or failing check results do not become successful named-check evidence; configured guarantees never claim that future checks have already passed.",
     },
     {
       id: "selected-set-materialization",

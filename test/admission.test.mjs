@@ -11,7 +11,7 @@ import {
   validateAuthority,
   preflightObjective,
 } from "../dist/admission.js";
-import { compilePlan } from "../dist/compiler.js";
+import { compilePlan, planReviewPacket } from "../dist/compiler.js";
 import { factoryConfigDigest } from "../dist/config.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
 import { withCoverage } from "./support/coverage.mjs";
@@ -84,11 +84,26 @@ async function fixture(name, callback, options = {}) {
         },
       ],
     };
+    const objectiveBody = options.namedCi
+      ? body +
+        "\n## Delivery\nThe named check `quality` must pass on every exact published PR head before integration.\n"
+      : body;
+    if (options.namedCi)
+      graph.requiredPreIntegrationChecks = [
+        {
+          checkName: "quality",
+          source: {
+            path: "OBJECTIVE",
+            text: objectiveBody.split("\n").at(-2),
+            digest: createHash("sha256").update(objectiveBody).digest("hex"),
+          },
+        },
+      ];
     const descriptor = {
       config,
       graph,
       resultReviewer: options.resultReviewer,
-      objectiveBody: body,
+      objectiveBody,
       fakeRoot: join(root, "fake"),
       actions: { result: { files: [{ path: "result.txt", text: "done\n" }] } },
     };
@@ -98,6 +113,7 @@ async function fixture(name, callback, options = {}) {
       target,
       root,
       graph,
+      objectiveBody,
     });
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
@@ -481,3 +497,110 @@ for (const delivery of ["regular", "native-stack"]) {
     );
   });
 }
+
+test("admit and check validate required CI shape and pinned authority even with consistent recomputed plan hashes", async () => {
+  await fixture(
+    "named-ci-source",
+    async ({ application, github, target, planningPath, objectiveBody }) => {
+      const candidate = await application.planObjective(1);
+      const admission = await application.admitObjective(
+        1,
+        candidate,
+        authority(),
+      );
+      await application.checkAdmission(1, candidate, admission);
+      assert.equal(
+        candidate.graph.requiredPreIntegrationChecks[0].checkName,
+        "quality",
+      );
+      const before = github.state();
+      const calls = readEvents(planningPath);
+      const hash = (value) => createHash("sha256").update(value).digest("hex");
+      for (const [mutate, message] of [
+        [
+          (plan) => {
+            plan.graph.requiredPreIntegrationChecks = "quality";
+          },
+          /must be an array/,
+        ],
+        [
+          (plan) => {
+            plan.graph.requiredPreIntegrationChecks = [null];
+          },
+          /unique name or pinned authority/,
+        ],
+        [
+          (plan) => {
+            plan.graph.requiredPreIntegrationChecks[0].checkName = " ";
+          },
+          /unique name or pinned authority/,
+        ],
+        [
+          (plan) => {
+            plan.graph.requiredPreIntegrationChecks.push(
+              structuredClone(plan.graph.requiredPreIntegrationChecks[0]),
+            );
+          },
+          /unique name or pinned authority/,
+        ],
+        [
+          (plan) => {
+            plan.graph.requiredPreIntegrationChecks[0].source.digest =
+              "0".repeat(64);
+          },
+          /exact pinned source authority/,
+        ],
+        [
+          (plan) => {
+            plan.graph.requiredPreIntegrationChecks[0].source.path =
+              "UNSUPPLIED";
+          },
+          /exact pinned source authority/,
+        ],
+        [
+          (plan) => {
+            plan.graph.requiredPreIntegrationChecks[0].source.text =
+              "Unsupported reconstructed pre-integration authority";
+          },
+          /exact pinned source authority/,
+        ],
+      ]) {
+        const invalid = structuredClone(candidate);
+        mutate(invalid);
+        invalid.graphDigest = hash(JSON.stringify(invalid.graph));
+        const packet = planReviewPacket(
+          objectiveBody,
+          target.baseSha,
+          invalid.sources,
+          invalid.graph,
+          target.checkout,
+          invalid.executionProfiles,
+          invalid.prerequisites,
+          invalid.localExecutables,
+        );
+        invalid.packetDigest = hash(JSON.stringify(packet));
+        invalid.reviewDigest = hash(
+          JSON.stringify({
+            packetDigest: invalid.packetDigest,
+            revisions: invalid.review.revisions,
+            findings: invalid.review.findings,
+            ...(invalid.review.failure
+              ? { failure: invalid.review.failure }
+              : {}),
+          }),
+        );
+        await assert.rejects(
+          application.admitObjective(1, invalid, authority()),
+          message,
+        );
+        await assert.rejects(
+          application.checkAdmission(1, invalid, admission),
+          message,
+        );
+      }
+      assert.deepEqual(github.state(), before);
+      assert.deepEqual(readEvents(planningPath), calls);
+    },
+    { namedCi: true },
+  );
+});

@@ -1,3 +1,4 @@
+import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
 import { assertFinalAcceptance } from "./completion.js";
 import { assertRepairLedger } from "./repair-policy.js";
 import {
@@ -491,6 +492,7 @@ export function parseFactoryState(
     !graph.items.length
   )
     throw new Error("graph identity or items are invalid");
+  assertPreIntegrationCheckShape(graph as unknown as WorkGraph);
   assertCoverageShape(graph as unknown as WorkGraph);
   assertGraphRevisions(state as unknown as FactoryState);
   assertRepairLedger(state as unknown as FactoryState);

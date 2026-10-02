@@ -49,25 +49,28 @@ faithful native single-parent semantics; focused real-Git, transport and amendme
 regressions accompany the correction. Source review and guarded integration of
 this correction still precede release.
 
-The source batch now also includes [#498](https://github.com/clockgrove/factory/issues/498):
-GET-only reconciliation of stopped, completely identified partial projection before
-unaccepted terminal cancellation under the existing mutation lock. It validates
-the source/configuration and reviewed old/new graph against authenticated issue
-bodies, role labels, dependency sets and native parents; refusal occurs before
-cancellation intent is persisted. Original pending phase/error/review/mapping,
-accepted and failed work, graph and consumed limits remain intact. No graph replay,
-GitHub mutation, worker, provider call or service activation supplies retirement.
+A separate stopped-projection retirement candidate was prepared for
+[#498](https://github.com/clockgrove/factory/issues/498), but its source acceptance
+was withdrawn before integration or actual cancellation. Its GET-only current
+old/new relationship checks cannot prove that an earlier submitted known-identity
+GitHub mutation has finished. The hierarchy correction does not resolve that
+uncertainty. The held candidate and all model-free proofs remain evidence of their
+original scope; they do not qualify cancellation of an unknown mutation.
 
-The combined batch has 97 passing hierarchy/transport/execution-profile/amendment
-tests and 181 passing cancellation/amendment/ownership/abandonment/ingress tests;
-these overlapping source suites are separate evidence, not a summed test count.
-The final whole new cancellation file passes 40 cases, and a complete preserved
-actual stopped-state replay passes at declared model-free transport seams. These
-source checks do not terminalize the real predecessor or accept the live gate.
+The hierarchy/API source batch has 97 passing tests across its four affected whole
+files, with complete preserved public graph/body replay and realistic single-parent
+transport. The separate retirement candidate's 181-case overlapping source suites,
+40-case new file and actual stopped-state/CLI replays remain limited model-free
+observations; they neither terminalize the real predecessor nor prove the missing
+submitted-mutation fence. Counts from overlapping suites are not added together.
 
-The next action is independent review of the full status/projection/cancellation
-batch and its structural boundary/composition contracts, followed by exact-head CI
-and the sequential corrected release gate in [#497](https://github.com/clockgrove/factory/issues/497).
+The next action is one coherent projection effect/outcome contract correction and
+adversarial real-producer/persistence/cancellation proof under #498, alongside
+review of shared remote-graph facts and query/command boundaries. A current readback,
+phase label or missing historical field must not become proof of settled submission.
+The prior source acceptance was withdrawn rather than weakening that fence. Exact
+final source/guidance review and head CI precede the sequential corrected release
+gate in [#497](https://github.com/clockgrove/factory/issues/497).
 Integration, release and live execution remain held during that review. After
 installed verification, supported actual predecessor retirement and a fresh
 complete one-artifact public qualification retain original substantive acceptance

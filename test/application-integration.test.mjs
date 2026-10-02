@@ -2961,7 +2961,7 @@ function dirnameFor(path) {
   return path.slice(0, path.lastIndexOf("/"));
 }
 
-test("partial projection reuses issues and dependency relationships", async () => {
+test("partial projection retains evidence and refuses unresolved replay without effects", async () => {
   await fixture("projection-replay", async (root) => {
     const target = createTarget(root);
     const command = "test -s first.txt && test -s second.txt";
@@ -2987,14 +2987,35 @@ test("partial projection reuses issues and dependency relationships", async () =
         second: { files: [{ path: "second.txt", text: "second\n" }] },
       },
     };
-    const { application, github } = makeApplication(descriptor);
+    const { application, github, eventsPath, planningPath } =
+      makeApplication(descriptor);
+    let projectionCalls = 0;
+    let mutations = 0;
+    const project = github.projectGraph.bind(github);
+    const update = github.update.bind(github);
+    github.projectGraph = async (request) => {
+      projectionCalls++;
+      assert.equal(
+        readContinuation(descriptor.config.repository, objective).projection,
+        "submitted",
+      );
+      return project(request);
+    };
+    github.update = (change) => {
+      mutations++;
+      return update(change);
+    };
     github.failProjectionAfter = 1;
     await assert.rejects(
       application.runObjective(objective),
       /partial projection/,
     );
+    const diagnosticEvidence = readDiagnostics(
+      descriptor.config.repository,
+      objective,
+    );
     assert.ok(
-      readDiagnostics(descriptor.config.repository, objective).some(
+      diagnosticEvidence.some(
         (event) =>
           event.operation === "github-projection" &&
           event.outcome === "failed" &&
@@ -3002,14 +3023,45 @@ test("partial projection reuses issues and dependency relationships", async () =
           /partial projection/.test(event.detail),
       ),
     );
-    const firstIssue = github.state().issues.first;
-    assert.equal(github.state().issues.second, undefined);
-    const completed = await application.runObjective(objective);
-    assert.equal(completed.finalValidation.passed, true);
-    assert.equal(github.state().issues.first, firstIssue);
-    assert.equal(Object.keys(github.state().issues).length, 2);
-    assert.deepEqual(github.state().dependencies.second, ["first"]);
-    assert.equal(github.state().closedIssues[firstIssue], true);
+    const partialRemote = github.state();
+    const firstIssue = partialRemote.issues.first;
+    assert.ok(Number.isSafeInteger(firstIssue));
+    assert.equal(partialRemote.issues.second, undefined);
+    assert.deepEqual(partialRemote.dependencies, {});
+    const path = statePath(descriptor.config.repository, objective);
+    const frozen = readFileSync(path);
+    const retained = readContinuation(descriptor.config.repository, objective);
+    assert.equal(retained.planning, "complete");
+    assert.equal(retained.projection, "submitted");
+    assert.equal(retained.projectionPending, undefined);
+    assert.deepEqual(
+      partialRemote.projections.first,
+      retained.plan.graph.items[0],
+    );
+    assert.match(retained.error, /partial projection/);
+    // This fixture observes a remote partial create, but supplies no acknowledged
+    // per-item callback. The whole-call fence must retain that uncertainty.
+    assert.deepEqual(retained.issueByItemId, {});
+    const planningEvidence = readEvents(planningPath);
+    assert.ok(planningEvidence.length > 0);
+    assert.deepEqual(readEvents(eventsPath), []);
+    assert.equal(projectionCalls, 1);
+    assert.equal(mutations, 1);
+    await assert.rejects(
+      application.runObjective(objective),
+      /Interrupted projection or planning cannot be replayed; operator direction required/,
+    );
+    assert.deepEqual(readFileSync(path), frozen);
+    assert.deepEqual(github.state(), partialRemote);
+    assert.deepEqual(
+      readDiagnostics(descriptor.config.repository, objective),
+      diagnosticEvidence,
+    );
+    assert.deepEqual(readEvents(planningPath), planningEvidence);
+    assert.deepEqual(readEvents(eventsPath), []);
+    assert.equal(projectionCalls, 1);
+    assert.equal(mutations, 1);
+    assert.equal(retained.finalAcceptance, undefined);
   });
 });
 

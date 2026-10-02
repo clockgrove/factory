@@ -112,16 +112,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select independently accepted [published v0.1.69](https://github.com/clockgrove/factory/issues/466#issuecomment-5948017279). Compare the tarball digest with the independently recorded prepublication value for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/466), or its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). Earlier evidence retains its historical artifact scope.
+The commands below select candidate v0.1.70 after [its release gate](https://github.com/clockgrove/factory/issues/475) records publication and independent public verification. Compare the tarball digest with the independently recorded prepublication value for that same version in that issue. Published v0.1.69 and its [exact artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md#immutable-v0169-artifact-record) retain their historical scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.69
+codex plugin marketplace add clockgrove/factory --ref v0.1.70
 codex plugin add factory@clockgrove
-gh release download v0.1.69 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.69.tgz --pattern SHA256SUMS
+gh release download v0.1.70 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.70.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the independently recorded prepublication digest in the owning issue/PR or artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.69.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.70.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

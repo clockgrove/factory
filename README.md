@@ -26,24 +26,24 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select the independently verified [published v0.1.69](https://github.com/clockgrove/factory/issues/466#issuecomment-5948017279). Compare the exact archive fingerprint recorded there before installation.
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select candidate v0.1.70. Use them after [its release gate](https://github.com/clockgrove/factory/issues/475) records publication and independent public verification; compare the exact archive fingerprint recorded there before installation. Published v0.1.69 retains its [independent verification](https://github.com/clockgrove/factory/issues/466#issuecomment-5948017279).
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.69
+codex plugin marketplace add clockgrove/factory --ref v0.1.70
 codex plugin add factory@clockgrove
 
-gh release download v0.1.69 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.69.tgz --pattern SHA256SUMS
+gh release download v0.1.70 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.70.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release issue](https://github.com/clockgrove/factory/issues/466), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. The owning release issue records the independent public archive and pinned-plugin verification result.
+Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release issue](https://github.com/clockgrove/factory/issues/475), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. The owning release issue records the independent public archive and pinned-plugin verification result.
 
 Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.69.tgz
+  ./clockgrove-factory-0.1.70.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

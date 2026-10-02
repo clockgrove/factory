@@ -6,6 +6,7 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 
 - Derive aggregate acceptance according to child roles: implementation results are integrated, while read-only QA and aggregate children provide accepted proof against the selected candidate without a worker or delivery (#483).
 - Align compiler and independent-review guidance while preserving prior accepted obligations, exact candidate evidence, command authority and semantic rejection.
+- Bind the original archive/checksum and complete extracted/installed file and link inventories through tests and every preflight, refusing later mutation or topology changes before publication (#486).
 
 Prepared distribution candidate for [#485](https://github.com/clockgrove/factory/issues/485). The installed gate selects 50 whole test files and seven reviewed model-free preflights, including strict replay of the complete preserved aggregate failure. Its unrelated unsupported aggregate command remains unchanged and rejected. Counts and immutable artifact identities are recorded only after execution and independent public verification. Live service qualification [#448](https://github.com/clockgrove/factory/issues/448) and adopter handoff [#445](https://github.com/clockgrove/factory/issues/445) retain separate acceptance. Historical releases and failures remain preserved.
 

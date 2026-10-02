@@ -6,6 +6,36 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Verified v0.1.72 aggregate and release-integrity handoff (#483 / #486 / #485)
+
+[PR #484](https://github.com/clockgrove/factory/pull/484) supplies independently
+reviewed source `f1f68b7aa99a9a360699cfc456e0e0fc312cf7ff`, tree
+`81eb67fbe641322c2df557b5da05a73598588190`. One release owner completed sequential
+packaging, offline installation, 514 tests across 50 whole files and seven
+reviewed model-free preflights, retaining original archive/checksum and complete
+byte, mode, topology and internal-link identities through the producer gate.
+The whole-response replay verified corrected controller hydration and canonical
+validation while retaining all 49 original evidence files and prior canonical
+items. The unsupported aggregate command and substantive review rejection remain
+unchanged and unaccepted. No raw model response was copied into public source;
+no new model call, lifecycle operation or state write supplied that replay.
+
+The first producer passed tests and six preflights, then stopped on an external
+helper's incorrect assumption that known producer preload/tool variables were
+absent. The reviewed correction preserves the exact network-denial preload and
+locked tool context while refusing arbitrary loaders. A restricted-host diagnostic
+failure and the passing normal authorized diagnostic remain retained. The second
+producer used the same source and identical archive bytes; no product correction
+or version change supplied this recovery.
+
+[Independent public verification and completion](https://github.com/clockgrove/factory/issues/485#issuecomment-5953125869)
+matched public bytes, sealed acceptance, protected annotated tag and pinned plugin.
+[BUILD-STATUS](BUILD-STATUS.md#immutable-v0172-artifact-record) records their exact
+identities and failure provenance. Earlier artifacts, scripts and accounting
+remain preserved. Current-main prose changes no published bytes or archived
+guidance. Actual #444/#447/#448 and private #445 are unaccepted; the operator's
+scoped same-run artifact-transition decision for #448 is pending.
+
 ## Verified v0.1.71 authority-reuse handoff (#479 / #480)
 
 The validated-authority correction integrated in [PR #481](https://github.com/clockgrove/factory/pull/481)

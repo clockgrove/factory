@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -16,10 +17,12 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   archivePaths,
+  releaseTree,
   retireTestScratch,
   tagProtection,
   testCounts,
   verifyProtection,
+  verifyReleaseIntegrity,
 } from "../scripts/release.mjs";
 
 test("release retains the real Node child compile cache and removes only the test scratch", (t) => {
@@ -134,6 +137,187 @@ test("archive gate rejects absolute paths and parent traversal", () => {
   );
   for (const bad of ["/tmp/file", "package/../file", "other/file", ""])
     assert.throws(() => archivePaths(bad));
+});
+
+function integrityFixture(t, beforeInstall = () => {}) {
+  const root = mkdtempSync("/tmp/factory-release-integrity-");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const packageRoot = join(root, "unpacked/package");
+  mkdirSync(join(packageRoot, "node_modules/transitive"), { recursive: true });
+  writeFileSync(
+    join(packageRoot, "package.json"),
+    '{"name":"public-fixture"}\n',
+  );
+  writeFileSync(
+    join(packageRoot, "node_modules/transitive/cli.js"),
+    "original dependency\n",
+  );
+  writeFileSync(
+    join(packageRoot, "node_modules/transitive/other.js"),
+    "second dependency\n",
+  );
+  const archive = join(root, "fixture.tgz");
+  execFileSync("tar", [
+    "-czf",
+    archive,
+    "-C",
+    join(root, "unpacked"),
+    "package",
+  ]);
+  const archiveSha256 = createHash("sha256")
+    .update(readFileSync(archive))
+    .digest("hex");
+  const sums = `${archiveSha256}  fixture.tgz\n`;
+  const checksum = join(root, "SHA256SUMS");
+  writeFileSync(checksum, sums);
+  const unpacked = releaseTree(packageRoot);
+  const installed = join(root, "installed");
+  cpSync(packageRoot, installed, { recursive: true });
+  mkdirSync(join(installed, "node_modules/.bin"));
+  symlinkSync(
+    "../transitive/cli.js",
+    join(installed, "node_modules/.bin/public-cli"),
+  );
+  // Actual npm bin permission normalization does not change file-byte equality.
+  chmodSync(join(installed, "node_modules/transitive/cli.js"), 0o755);
+  beforeInstall(installed);
+  const installation = releaseTree(installed, true);
+  return {
+    root,
+    archive,
+    archiveSha256,
+    checksum,
+    sums,
+    packageRoot,
+    unpacked,
+    installed,
+    installation,
+  };
+}
+
+test("release integrity retains original archive and complete trees with internal npm bin links", (t) => {
+  const baseline = integrityFixture(t);
+  assert.equal(verifyReleaseIntegrity(baseline), 3);
+  assert.equal(verifyReleaseIntegrity(baseline), 3);
+});
+
+for (const [name, change] of [
+  ["added", (root) => writeFileSync(join(root, "added.js"), "extra")],
+  ["removed", (root) => rmSync(join(root, "package.json"))],
+  [
+    "mutated transitive dependency",
+    (root) =>
+      writeFileSync(join(root, "node_modules/transitive/other.js"), "changed"),
+  ],
+]) {
+  test(`initial installed inventory refuses ${name} regular files`, (t) => {
+    const baseline = integrityFixture(t, change);
+    assert.throws(
+      () => verifyReleaseIntegrity(baseline),
+      /regular-file inventory differs/,
+    );
+  });
+  test(`post-check installed inventory refuses ${name} regular files`, (t) => {
+    const baseline = integrityFixture(t);
+    verifyReleaseIntegrity(baseline);
+    change(baseline.installed);
+    assert.throws(
+      () => verifyReleaseIntegrity(baseline),
+      /Installed release tree changed/,
+    );
+    assert(existsSync(baseline.archive));
+  });
+}
+
+for (const [name, change] of [
+  [
+    "both trees identically mutated",
+    (b) => {
+      for (const root of [b.installed, b.packageRoot])
+        writeFileSync(join(root, "package.json"), "same changed bytes");
+    },
+  ],
+  [
+    "unpacked added file",
+    (b) => writeFileSync(join(b.packageRoot, "added.js"), "extra"),
+  ],
+  ["archive changed", (b) => writeFileSync(b.archive, "new archive")],
+  ["checksum changed", (b) => writeFileSync(b.checksum, "new checksum")],
+  [
+    "installed permissions changed",
+    (b) => chmodSync(join(b.installed, "package.json"), 0o777),
+  ],
+  [
+    "installed empty directory added",
+    (b) => mkdirSync(join(b.installed, "extra")),
+  ],
+  [
+    "bin link removed",
+    (b) => rmSync(join(b.installed, "node_modules/.bin/public-cli")),
+  ],
+  [
+    "bin link added",
+    (b) =>
+      symlinkSync(
+        "../transitive/cli.js",
+        join(b.installed, "node_modules/.bin/extra"),
+      ),
+  ],
+  [
+    "bin link retargeted",
+    (b) => {
+      const link = join(b.installed, "node_modules/.bin/public-cli");
+      rmSync(link);
+      symlinkSync("../transitive/other.js", link);
+    },
+  ],
+  [
+    "bin link broken",
+    (b) => rmSync(join(b.installed, "node_modules/transitive/cli.js")),
+  ],
+  [
+    "bin link escaping",
+    (b) => {
+      writeFileSync(join(b.root, "outside.js"), "outside");
+      const link = join(b.installed, "node_modules/.bin/public-cli");
+      rmSync(link);
+      symlinkSync("../../../outside.js", link);
+    },
+  ],
+  [
+    "directory replaced by link",
+    (b) => {
+      const directory = join(b.installed, "node_modules/transitive");
+      cpSync(directory, join(b.root, "outside"), { recursive: true });
+      rmSync(directory, { recursive: true });
+      symlinkSync(join(b.root, "outside"), directory);
+    },
+  ],
+  [
+    "archive replaced by link to same bytes",
+    (b) => {
+      cpSync(b.archive, join(b.root, "other.tgz"));
+      rmSync(b.archive);
+      symlinkSync("other.tgz", b.archive);
+    },
+  ],
+]) {
+  test(`release integrity refuses ${name} after a passing baseline`, (t) => {
+    const baseline = integrityFixture(t);
+    verifyReleaseIntegrity(baseline);
+    change(baseline);
+    assert.throws(() => verifyReleaseIntegrity(baseline));
+    assert(existsSync(baseline.checksum));
+  });
+}
+
+test("release archive tree refuses links before installed checks", (t) => {
+  const baseline = integrityFixture(t);
+  symlinkSync("package.json", join(baseline.packageRoot, "alias"));
+  assert.throws(
+    () => releaseTree(baseline.packageRoot),
+    /Unexpected release entry/,
+  );
 });
 
 function publicFixture(t, corrupt, mutate, complete = false) {

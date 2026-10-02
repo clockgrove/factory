@@ -1,4 +1,3 @@
-import { objectiveCandidate } from "./qa.js";
 import { createHash } from "node:crypto";
 import type { FactoryConfig } from "./config.js";
 import type { GitHubGateway, PlanningPrerequisites } from "./contracts.js";
@@ -65,7 +64,9 @@ export async function planningPrerequisites(
       objective: predecessor,
       bodyDigest: previous.objectiveBodyDigest,
       acceptance: {
-        candidateBasis: objectiveCandidate(previous)!.basis,
+        ...(previous.finalAcceptance.candidateBasis === undefined
+          ? {}
+          : { candidateBasis: previous.finalAcceptance.candidateBasis }),
         sealedAt,
         commit,
         tree,

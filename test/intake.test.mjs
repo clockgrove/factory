@@ -482,7 +482,12 @@ test("native planning facts refuse missing, unaccepted, changed and mismatched p
     );
   }));
 
-async function activatedSuccessor(f, descendant = false, dependent = true) {
+async function activatedSuccessor(
+  f,
+  descendant = false,
+  dependent = true,
+  historical = false,
+) {
   await f.application.enqueueIntake(
     { ...structuredClone(authority), objectives: [1] },
     { pollSeconds: 0.01 },
@@ -490,6 +495,10 @@ async function activatedSuccessor(f, descendant = false, dependent = true) {
   await f.application.runIntake();
   const first = readState(f.config.repository, 1);
   assert.equal(objectiveComplete(first), true);
+  if (historical) {
+    delete first.finalAcceptance.candidateBasis;
+    saveState(statePath(f.config.repository, 1), first);
+  }
   git(f.config.checkout, "merge", "--ff-only", first.finalAcceptance.commit);
   if (descendant) {
     writeFileSync(join(f.config.checkout, "later.txt"), "Later baseline\n");
@@ -539,17 +548,19 @@ function successorDiscovery(state) {
   });
 }
 
-for (const [descendant, dependent] of [
+for (const [descendant, dependent, historical] of [
   [false, true],
   [true, true],
   [false, false],
+  [false, true, true],
 ])
-  test(`activated ${dependent ? "native successor" : "first Objective"} amendment renders original facts (${descendant ? "descendant" : "equal"} base)`, async (t) =>
+  test(`activated ${dependent ? "native successor" : "first Objective"} amendment renders original facts (${descendant ? "descendant" : "equal"} base${historical ? ", historical sealed shape" : ""})`, async (t) =>
     fixture(async (f) => {
       const { first, second, candidate } = await activatedSuccessor(
         f,
         descendant,
         dependent,
+        historical,
       );
       const previousPath = process.env.PATH;
       t.after(() => {
@@ -652,7 +663,7 @@ for (const [descendant, dependent] of [
           candidate.prerequisites.predecessors[0].acceptance,
           Object.fromEntries(
             [
-              "candidateBasis",
+              ...(historical ? [] : ["candidateBasis"]),
               "sealedAt",
               "commit",
               "tree",
@@ -690,6 +701,25 @@ for (const [descendant, dependent] of [
       assert.equal(second.objectiveBodyDigest, candidate.bodyDigest);
       assert.equal(second.configDigest, candidate.configDigest);
       assert.equal(second.admission.packetDigest, candidate.packetDigest);
+      if (historical) {
+        assert.equal(
+          Object.hasOwn(
+            candidate.prerequisites.predecessors[0].acceptance,
+            "candidateBasis",
+          ),
+          false,
+        );
+        assert.equal(
+          second.admission.prerequisitesDigest,
+          createHash("sha256")
+            .update(JSON.stringify(candidate.prerequisites))
+            .digest("hex"),
+        );
+        assert.deepEqual(
+          readState(f.config.repository, 1).finalAcceptance,
+          first.finalAcceptance,
+        );
+      }
     }));
 
 test("native successor amendments refuse missing, unaccepted, changed and removed original evidence before model calls", async () =>

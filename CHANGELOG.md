@@ -2,6 +2,17 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.69 — 2026-10-02
+
+- Hydrate source-required CI evidence from one pinned source choice and supply actual controller execution bounds and rejected canonical graphs to review and diagnosis (#458).
+- Reject malformed native planner fields before review or projection (#460).
+- Qualify an unchanged pinned baseline with read-only QA and final acceptance, using an explicit candidate basis without fabricating integration (#459).
+- Retain bounded structured dirty-path evidence from settled post-validation mutations (#438).
+- Project ordinary Work Item role labels and native Objective parent context without replacing existing issue metadata (#443).
+- Distinguish diagnosis from compilation in invocation and diagnostic metadata (#461).
+
+Independent distribution acceptance belongs to [#466](https://github.com/clockgrove/factory/issues/466). Live public service acceptance remains [#448](https://github.com/clockgrove/factory/issues/448), followed by the separately authorized adopter handoff in [#445](https://github.com/clockgrove/factory/issues/445). Earlier artifacts, failed runs, original evidence and accounting remain unchanged.
+
 ## 0.1.68 — 2026-10-01
 
 - Establish background observation through guided target setup, including explicit service consent, retained package binding and verified service-owned GitHub observation (#447). A separately approved persistent watcher waits after finite work and accepts supported explicit refill while idle (#444).

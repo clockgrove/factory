@@ -6,6 +6,19 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Settled dirty validation evidence and diagnosis identity (#438 / #461)
+
+The current exact-tree validation, candidate failure classification and existing
+model invocation contracts supply these corrections. A settled post-command
+mutation retains bounded relative path/status diagnostics with explicit omitted
+and truncated observations, without file contents or another state store.
+Unknown subprocess ownership still takes precedence. Typed diagnosis metadata
+now follows actual planning and repair calls through capture, diagnostics and
+analysis without changing phase accounting or retry authority. Whole temporary
+Git, full diagnostic-envelope and actual SDK regressions preserve the relevant
+positive, ownership, malformed-byte and allowance controls. No archived source,
+private adopter material or provider call supplied these implementations.
+
 ## Canonical planning evidence and native field types (#458 / #460)
 
 The public v0.1.68 service qualification and complete preserved model responses

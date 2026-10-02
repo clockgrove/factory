@@ -49,9 +49,29 @@ faithful native single-parent semantics; focused real-Git, transport and amendme
 regressions accompany the correction. Source review and guarded integration of
 this correction still precede release.
 
-The next action is one independently reviewed corrected release combining #444's
-status correction with #495, followed by a fresh complete one-artifact public
-qualification with original substantive acceptance and bounded resources. Preserve
+The source batch now also includes [#498](https://github.com/clockgrove/factory/issues/498):
+GET-only reconciliation of stopped, completely identified partial projection before
+unaccepted terminal cancellation under the existing mutation lock. It validates
+the source/configuration and reviewed old/new graph against authenticated issue
+bodies, role labels, dependency sets and native parents; refusal occurs before
+cancellation intent is persisted. Original pending phase/error/review/mapping,
+accepted and failed work, graph and consumed limits remain intact. No graph replay,
+GitHub mutation, worker, provider call or service activation supplies retirement.
+
+The combined batch has 97 passing hierarchy/transport/execution-profile/amendment
+tests and 181 passing cancellation/amendment/ownership/abandonment/ingress tests;
+these overlapping source suites are separate evidence, not a summed test count.
+The final whole new cancellation file passes 40 cases, and a complete preserved
+actual stopped-state replay passes at declared model-free transport seams. These
+source checks do not terminalize the real predecessor or accept the live gate.
+
+The next action is independent review of the full status/projection/cancellation
+batch and its structural boundary/composition contracts, followed by exact-head CI
+and the sequential corrected release gate in [#497](https://github.com/clockgrove/factory/issues/497).
+Integration, release and live execution remain held during that review. After
+installed verification, supported actual predecessor retirement and a fresh
+complete one-artifact public qualification retain original substantive acceptance
+and bounded resources. Preserve
 all failed predecessor runs, accounting and published v0.1.72 bytes. #444/#447/#448
 remain open for actual public acceptance; private #445 remains gated on that full
 public proof and the same corrected artifact.

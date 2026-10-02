@@ -423,3 +423,210 @@ test("supervised install and upgrade retain the caller's nonsecret SQLite path",
       installed.environment.CODEX_SQLITE_HOME,
     );
   }));
+
+function unitFile(config) {
+  return join(
+    process.env.XDG_CONFIG_HOME,
+    "systemd/user",
+    serviceName(config.repository),
+  );
+}
+function editBinding(config, change) {
+  const path = unitFile(config);
+  const text = readFileSync(path, "utf8");
+  const prefix = "# Factory local supervision v1 ";
+  const value = JSON.parse(text.split("\n")[0].slice(prefix.length));
+  change(value);
+  writeFileSync(path, renderService(value));
+}
+async function cliStatus(configPath) {
+  const { spawnSync } = await import("node:child_process");
+  const result = spawnSync(
+    process.execPath,
+    [
+      new URL("../dist/cli.js", import.meta.url).pathname,
+      "supervisor",
+      "status",
+      "--config",
+      configPath,
+    ],
+    { encoding: "utf8", timeout: 10000, env: process.env },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  return JSON.parse(result.stdout);
+}
+
+test("CLI status separates usable stopped and disabled bindings from registration and manager observations", () =>
+  fixture(async ({ root, config, configPath }) => {
+    const stateFile = statePath(config.repository, 1);
+    const before = readFileSync(stateFile);
+    let status = await cliStatus(configPath);
+    assert.equal(status.bindingHealth.status, "unregistered");
+    await supervise("install", configPath, { objective: 1 });
+    status = await cliStatus(configPath);
+    assert.equal(status.registered, true);
+    assert.equal(status.active, "inactive");
+    assert.equal(status.enabled, "enabled");
+    assert.equal(status.bindingHealth.status, "usable");
+    assert.deepEqual(status.bindingHealth.checks, {
+      node: true,
+      cli: true,
+      config: true,
+    });
+    assert.match(status.bindingHealth.limitation, /ownership are not verified/);
+    await supervise("disable", configPath);
+    status = await cliStatus(configPath);
+    assert.equal(status.enabled, "linked");
+    assert.equal(status.bindingHealth.status, "usable");
+    const calls = readFileSync(join(root, "calls"), "utf8");
+    const unit = readFileSync(unitFile(config));
+    await cliStatus(configPath);
+    assert.deepEqual(readFileSync(unitFile(config)), unit);
+    assert.deepEqual(readFileSync(stateFile), before);
+    assert.doesNotMatch(
+      readFileSync(join(root, "calls"), "utf8").slice(calls.length),
+      /--user (?:enable|start|stop|daemon-reload)(?: |\n)/,
+    );
+  }));
+
+test("CLI status diagnoses missing CLI, unavailable Node and missing configuration without executing bindings", () =>
+  fixture(async ({ root, config, configPath }) => {
+    await supervise("install", configPath, { objective: 1 });
+    const poisoned = join(root, "poisoned-node");
+    writeFileSync(poisoned, `#!/bin/sh\ntouch '${root}/executed'\n`, {
+      mode: 0o600,
+    });
+    editBinding(config, (value) => {
+      value.node = poisoned;
+      value.cli = join(root, "absent-cli.js");
+      value.config = join(root, "absent-config.json");
+    });
+    const before = readFileSync(unitFile(config));
+    const status = await cliStatus(configPath);
+    assert.equal(status.registered, true);
+    assert.equal(status.active, "inactive");
+    assert.equal(status.enabled, "enabled");
+    assert.equal(status.bindingHealth.status, "unusable");
+    assert.deepEqual(status.bindingHealth.checks, {
+      node: false,
+      cli: false,
+      config: false,
+    });
+    assert.deepEqual(
+      status.bindingHealth.diagnostics.map((d) => d.code),
+      ["unavailable-node", "missing-cli", "missing-config"],
+    );
+    assert.match(
+      status.bindingHealth.diagnostics[1].action,
+      /supervisor upgrade/,
+    );
+    assert.equal(existsSync(join(root, "executed")), false);
+    assert.deepEqual(readFileSync(unitFile(config)), before);
+    await assert.rejects(supervise("start", configPath));
+    assert.doesNotMatch(
+      readFileSync(join(root, "calls"), "utf8"),
+      /--user start/,
+    );
+  }));
+
+test("CLI status retains observations for malformed and mismatched bindings and redacts arbitrary marker fields", () =>
+  fixture(async ({ root, config, configPath }) => {
+    await supervise("install", configPath, { objective: 1 });
+    const original = readFileSync(unitFile(config), "utf8");
+    for (const marker of [
+      '# Factory local supervision v1 {"secret":"dummy-secret",',
+      "# Factory local supervision v1 null",
+      "[Service]\nExecStart=foreign",
+    ]) {
+      writeFileSync(unitFile(config), marker);
+      const status = await cliStatus(configPath);
+      assert.equal(status.registered, true);
+      assert.equal(status.active, "inactive");
+      assert.equal(status.bindingHealth.status, "unusable");
+      assert.equal(
+        status.bindingHealth.diagnostics[0].code,
+        "malformed-binding",
+      );
+      assert.equal(status.binding, undefined);
+      assert.doesNotMatch(JSON.stringify(status), /dummy-secret/);
+      await assert.rejects(supervise("start", configPath));
+    }
+    writeFileSync(unitFile(config), original);
+    editBinding(config, (value) => {
+      value.stateHome = join(root, "different-state");
+    });
+    let status = await cliStatus(configPath);
+    assert.equal(
+      status.bindingHealth.diagnostics[0].code,
+      "installation-mismatch",
+    );
+    assert.equal(status.binding, undefined);
+    await assert.rejects(supervise("start", configPath), /differs/);
+    writeFileSync(unitFile(config), original);
+    const other = join(root, "other-config.json");
+    writeFileSync(
+      other,
+      JSON.stringify(
+        factoryConfig(
+          createTarget(join(root, "other")).checkout,
+          "example/other",
+        ),
+      ),
+    );
+    editBinding(config, (value) => {
+      value.config = other;
+    });
+    status = await cliStatus(configPath);
+    assert.equal(
+      status.bindingHealth.diagnostics[0].code,
+      "installation-mismatch",
+    );
+    assert.equal(status.binding, undefined);
+    writeFileSync(unitFile(config), original);
+    const prefix = "# Factory local supervision v1 ";
+    const value = JSON.parse(original.split("\n")[0].slice(prefix.length));
+    value.environment.PRIVATE_TOKEN = "dummy-secret";
+    value.privateSecret = "dummy-secret";
+    value.credential = {
+      name: "KEY",
+      file: "/private/credential",
+      extra: "dummy-secret",
+    };
+    writeFileSync(unitFile(config), renderService(value));
+    status = await cliStatus(configPath);
+    assert.equal(status.bindingHealth.status, "usable");
+    assert.doesNotMatch(
+      JSON.stringify(status),
+      /dummy-secret|PRIVATE_TOKEN|privateSecret/,
+    );
+    assert.deepEqual(status.binding.credential, {
+      name: "KEY",
+      file: "/private/credential",
+    });
+  }));
+
+test("CLI status preserves local health when the manager is unavailable and keeps invalid config details private", () =>
+  fixture(async ({ root, config, configPath }) => {
+    await supervise("install", configPath, { objective: 1 });
+    writeFileSync(
+      join(root, "bin/systemctl"),
+      '#!/bin/sh\necho "Failed: dummy-secret" >&2\nexit 1\n',
+      { mode: 0o700 },
+    );
+    let status = await cliStatus(configPath);
+    assert.equal(status.manager, "unavailable");
+    assert.equal(status.supported, false);
+    assert.equal(status.active, "unavailable");
+    assert.equal(status.enabled, "unavailable");
+    assert.equal(status.bindingHealth.status, "usable");
+    const bad = join(root, "invalid-config.json");
+    writeFileSync(bad, '{"secret":"dummy-secret",');
+    editBinding(config, (value) => {
+      value.config = bad;
+    });
+    status = await cliStatus(configPath);
+    assert.equal(status.bindingHealth.status, "unusable");
+    assert.equal(status.bindingHealth.diagnostics[0].code, "invalid-config");
+    assert.doesNotMatch(JSON.stringify(status), /dummy-secret/);
+  }));

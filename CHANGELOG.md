@@ -10,6 +10,7 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 - Retain bounded structured dirty-path evidence from settled post-validation mutations (#438).
 - Project ordinary Work Item role labels and native Objective parent context without replacing existing issue metadata (#443).
 - Distinguish diagnosis from compilation in invocation and diagnostic metadata (#461).
+- Preserve exact private discovery staging evidence in the settled owned worktree when collection rejects a result; successful collection still excludes private proposals from Git and cleans up (#465).
 
 Independent distribution acceptance belongs to [#466](https://github.com/clockgrove/factory/issues/466). Live public service acceptance remains [#448](https://github.com/clockgrove/factory/issues/448), followed by the separately authorized adopter handoff in [#445](https://github.com/clockgrove/factory/issues/445). Earlier artifacts, failed runs, original evidence and accounting remain unchanged.
 

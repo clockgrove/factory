@@ -37,7 +37,7 @@ gh release download v0.1.69 --repo clockgrove/factory \
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [prepublication fingerprint](https://github.com/clockgrove/factory/issues/451#issuecomment-5946059666), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. The owning release issue records the independent public archive and pinned-plugin verification result.
+Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release issue](https://github.com/clockgrove/factory/issues/466), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. The owning release issue records the independent public archive and pinned-plugin verification result.
 
 Choose an absolute installation directory outside your target repository:
 

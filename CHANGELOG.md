@@ -2,6 +2,13 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.73 — 2026-10-02
+
+- Keep intake status read-only so an idle status check does not wake observation and race the next authorized refill (#444 / PR #494).
+- Reconcile reviewed native hierarchy changes using authenticated previous and desired parent relationships. Move a child only from its verified previous parent, retain unrelated-parent conflicts, and verify all final parent memberships before graph activation (#495 / PR #496).
+
+Exact distribution verification is tracked in [#497](https://github.com/clockgrove/factory/issues/497). The failed v0.1.72 public scenario preserves its original results, partial projection identities, accounting and consumed limits. A corrected one-artifact public successor remains [#448](https://github.com/clockgrove/factory/issues/448), followed by separately owned private [#445](https://github.com/clockgrove/factory/issues/445). This correction grants no acceptance or new worker, provider, security or spending authority; earlier releases and failures remain unchanged.
+
 ## 0.1.72 — 2026-10-02
 
 - Derive aggregate acceptance according to child roles: implementation results are integrated, while read-only QA and aggregate children provide accepted proof against the selected candidate without a worker or delivery (#483).

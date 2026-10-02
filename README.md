@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** Published v0.1.72 corrects aggregate child acceptance and complete release integrity (#483/#486), with [independent public distribution verification](https://github.com/clockgrove/factory/issues/485#issuecomment-5953125869). All 514 tests across 50 whole installed files and seven model-free preflights passed without skips. See the [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0172-artifact-record). [Live public qualification](https://github.com/clockgrove/factory/issues/448) and [adopter handoff](https://github.com/clockgrove/factory/issues/445) remain unaccepted. The operator [approved the narrow #448 continuation](https://github.com/clockgrove/factory/issues/448#issuecomment-5957494560); its [recorded bounds](docs/BUILD-STATUS.md#approved-448-current-runtime-qualification) preserve the failed one-artifact attempt and require fresh independent live acceptance.
+**Status:** v0.1.73 keeps intake status read-only (#444) and reconciles reviewed native hierarchy moves (#495). Its [release gate](https://github.com/clockgrove/factory/issues/497) tracks exact distribution verification. [Live public qualification](https://github.com/clockgrove/factory/issues/448) and [adopter handoff](https://github.com/clockgrove/factory/issues/445) remain separate and unaccepted. The stopped v0.1.72 public scenario retains its failed projection, original results and consumed limits; a corrected one-artifact successor must pass the full public gate before private work. Earlier versions retain their [immutable artifact records](docs/BUILD-STATUS.md).
 
 Factory is early software. Supervise initial Objectives and follow the [recovery guidance](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) when work stops. [Release artifact records](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) retain the evidence and limits of earlier versions.
 
@@ -26,24 +26,24 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select published v0.1.72, which has [independent public verification](https://github.com/clockgrove/factory/issues/485#issuecomment-5953125869). Compare the selected version's exact archive fingerprint before installation. Earlier versions retain their own [artifact records](docs/BUILD-STATUS.md).
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select v0.1.73. Run them after the [owning release gate](https://github.com/clockgrove/factory/issues/497) records independent public verification. Compare the selected version's exact archive fingerprint before installation. Earlier versions retain their own [artifact records](docs/BUILD-STATUS.md).
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.72
+codex plugin marketplace add clockgrove/factory --ref v0.1.73
 codex plugin add factory@clockgrove
 
-gh release download v0.1.72 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.72.tgz --pattern SHA256SUMS
+gh release download v0.1.73 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.73.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release issue](https://github.com/clockgrove/factory/issues/485), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. The owning release issue records the independent public archive and pinned-plugin verification result.
+Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release issue](https://github.com/clockgrove/factory/issues/497), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. The owning release issue records the independent public archive and pinned-plugin verification result.
 
 Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.72.tgz
+  ./clockgrove-factory-0.1.73.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

@@ -2190,6 +2190,7 @@ export function verifyPlanCandidate(
     throw new Error(
       "Plan contains a command without established host execution authority",
     );
+  assertPreIntegrationCheckSources(candidate.graph, candidate.sources);
   // Verify already reviewed bytes, including historical aggregate acceptance.
   // New compilation and amendments enforce controller derivation before review.
   validateAndOrderGraph(

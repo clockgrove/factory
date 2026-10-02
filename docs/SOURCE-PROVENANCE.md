@@ -928,3 +928,17 @@ actual adopter handoff to #445.
 ## Host-independent release regressions (#452 / #456)
 
 Required contributor CI exposed a selected-LFS fixture that attempted to publish a manually seeded pointer through inherited host filters, and a cancellation assertion that treated changing Linux scheduling state as immutable identity. The corrected public fixture publishes ordinary baseline files first and seeds its local validation pointer through existing pinned Git; its intentional raw-staging negative control remains explicit. Cancellation checks stable group/start identity and a bounded live-child response. Actual inherited Git LFS filters and a pre-push hook reproduce the original failure and exercise both corrected whole files. No runtime ownership, upload guard, hook policy, provider usage or historical release evidence changed.
+
+## Verified v0.1.68 distribution handoff (#451)
+
+The existing public source and committed regression files supplied the frozen
+v0.1.68 distribution. All 317 installed tests across 30 whole files and two
+model-free source/setup preflights passed, followed by
+[independent anonymous archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/451#issuecomment-5946087196).
+The [immutable artifact record](BUILD-STATUS.md#immutable-v0168-artifact-record)
+binds the exact source/tree, bytes, acceptance, public receipt and tag protection.
+The preserved first preflight failure required one independently reviewed external
+assertion correction; no product bytes changed. This later documentation records
+completed distribution acceptance without copying private source or altering
+published artifacts. Live public service qualification (#448) and adopter rollout
+(#445) remain separate gates.

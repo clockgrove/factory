@@ -4,6 +4,60 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.68 artifact record
+
+[Release v0.1.68](https://github.com/clockgrove/factory/releases/tag/v0.1.68)
+was published on 2026-10-02 at 05:19:38 UTC from frozen independently reviewed
+and integrated source `0cdef95faba7821d27c16f2728efbb7c564de90b`, tree
+`471093ff1e9b8e6a8ad4de143f5dd86d7979d336`.
+[PR #455](https://github.com/clockgrove/factory/pull/455) records the consolidated
+release preparation and independent source/guidance review.
+[Required PR CI](https://github.com/clockgrove/factory/actions/runs/36966394412)
+and [exact integrated-main CI](https://github.com/clockgrove/factory/actions/runs/36966988798) passed.
+
+The `clockgrove-factory-0.1.68.tgz` archive is 153608062 bytes, SHA-256
+`a1c2faa9c30f2d39a7f3a07d4adee70e5eb574a7aa0201a0f5629b173527ecdd`,
+recorded in the [prepublication fingerprint](https://github.com/clockgrove/factory/issues/451#issuecomment-5946059666).
+The 96-byte `SHA256SUMS` asset has SHA-256
+`94e071275554e5253c27c654c424f41a140c9c650718844f6d419e276f78ca4b`.
+Annotated tag `fc07f8dc3ba559764e6f934dcc116ae50f9bfccb` resolves to the source above.
+Exact-tag ruleset `24348504` prohibits updates and deletion with no bypass actors
+or ref exclusions.
+
+Offline installation matched all 6364 regular archive files and 95 bundled
+lock-addressed dependency roots. All 317 tests across 30 whole committed installed
+test files passed with zero failures, cancellations, skips or todos. Two
+independently reviewed model-free preflights passed: the actual source/provider
+review inputs and validation phases, and guided setup with a service-owned
+unapproved-candidate observation and no execution dispatch. The latter used a
+synthetic service manager and proves the installed CLI contract, not live service
+qualification. The first attempt passed the same 317 tests, then stopped on an
+external preflight assertion expecting `[undefined]` instead of the decoder's
+actual `[]`. That failed attempt and the independently reviewed one-line
+assertion correction remain preserved in [#451](https://github.com/clockgrove/factory/issues/451).
+The corrected successor used the same frozen source; no product bytes changed.
+
+Acceptance SHA-256 is
+`2f35fe02bcd83b1ef77f0459c06b455a60e309d142b21215aa9470a81e873c2d`.
+[Independent public verification and canonical release completion](https://github.com/clockgrove/factory/issues/451#issuecomment-5946087196)
+matched anonymous archive/checksum bytes, sealed acceptance, annotated source/tree,
+exact protection and the enabled pinned plugin. Independent public receipt SHA-256
+is `5875d1cbaacce5802bec478242f8e9f9e348c846a96c942b17ba1c6db3a112fb`.
+The release issue and its Factory Project item completed. Archived candidate
+guidance remains unchanged.
+
+This release supplies guided background setup (#447), an explicitly consented
+persistent watcher with bounded later intake (#444), actionable service binding
+health (#442), source-required named CI before integration (#446), and positive
+exact-tree validation observations (#452). It also corrects host-dependent
+selected-LFS and Linux cancellation test assertions (#452 / #456).
+Distribution checks made no provider calls and do not accept live Objectives or
+adopter pilots. [Live public service qualification](https://github.com/clockgrove/factory/issues/448)
+and [adopter rollout](https://github.com/clockgrove/factory/issues/445) retain their
+separate acceptance gates. Earlier autonomous Objective evidence remains bound
+to its original artifact and scenario. No published archive, tag or asset was
+changed by this later record.
+
 ## Immutable v0.1.67 artifact record
 
 [Release v0.1.67](https://github.com/clockgrove/factory/releases/tag/v0.1.67)

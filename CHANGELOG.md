@@ -9,7 +9,7 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 - Bind source-required named CI into the reviewed graph and require authenticated successful exact-head receipts before regular or native integration (#446).
 - Supply the actual post-validation worktree observation to independent Work Item, QA and final review, while preserving absent historical evidence and dirty-tree refusal (#452).
 
-Release preparation is tracked in [#451](https://github.com/clockgrove/factory/issues/451). Public live installed qualification remains [#448](https://github.com/clockgrove/factory/issues/448), followed by the separately scoped adopter rollout in [#445](https://github.com/clockgrove/factory/issues/445). Preparation grants no Objective acceptance or execution authority; earlier releases retain their exact evidence.
+Published with [independent public archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/451#issuecomment-5946087196). All 317 tests across 30 whole installed files and two model-free preflights passed without skips. The [immutable artifact record](docs/BUILD-STATUS.md#immutable-v0168-artifact-record) preserves the external preflight assertion failure and its reviewed correction without changed product bytes. Public live service qualification remains [#448](https://github.com/clockgrove/factory/issues/448), followed by the separately scoped adopter rollout in [#445](https://github.com/clockgrove/factory/issues/445). Distribution verification grants no Objective acceptance or execution authority; earlier releases retain their exact evidence.
 
 ## 0.1.67 — 2026-10-01
 

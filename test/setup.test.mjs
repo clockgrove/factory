@@ -16,7 +16,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 
-const installedCli = new URL("../dist/cli.js", import.meta.url).pathname;
+const installedCli = realpathSync(new URL("../dist/cli.js", import.meta.url));
 const consent = [
   "--background",
   "--service-consent",
@@ -321,7 +321,7 @@ test("guided setup upgrades a live settled watcher through compatibility and dra
       recursive: true,
     });
     symlinkSync(
-      realpathSync(new URL("../node_modules", import.meta.url).pathname),
+      realpathSync(join(dirname(dirname(installedCli)), "node_modules")),
       join(oldPackage, "node_modules"),
     );
     const previousArtifact = join(oldPackage, "dist/cli.js");

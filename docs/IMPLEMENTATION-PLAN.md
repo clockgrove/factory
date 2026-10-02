@@ -165,6 +165,23 @@ A concrete finding permits at most one evidenced compiler revision, followed by 
 
 An operator may explicitly request exact-tree Work Item re-review through `rereview`, then `run`, after inspecting a pending result. This schedules existing validation and automatic review without restarting implementation or recording acceptance. The existing final-result continuation remains `run`, which repeats final validation and review. These explicit actions do not expand automatic provider retries or revive terminal results. [Issue #202](https://github.com/clockgrove/factory/issues/202) records this continuation boundary.
 
+Stopped cancellation is distinct from uncertain read-only review abandonment (#363).
+For a partially projected independently reviewed amendment, ordinary `cancel` may
+retire the failed run only with exclusive stopped mutation ownership, the original
+configuration and source, complete unique known issue identities, settled local
+work and no unresolved creation or other submission. The gateway authenticates
+all existing issue bodies, titles, roles, states, dependencies and native parents
+using GETs against the accepted previous and reviewed candidate graphs. Partial
+old/new relationships remain diagnostic evidence, never accepted projection.
+Unknown creates, foreign or incomplete facts, live resources and unresolved
+publication, merge, planning or review submissions refuse before cancellation
+intent is saved. The original pending phase, error, graph, review, mappings,
+accepted/failed attempt evidence and consumed allowances remain in the terminal
+unaccepted snapshot. This performs no remote mutation, replay, provider call, service
+activation or allowance reset (#498). At the actual HTTP boundary, a completed
+projection rejection becomes the existing typed rejected phase; a lost mutation
+response remains uncertain. Retained error prose never supplies that distinction.
+
 ### Existing workspace membership authority
 
 The pinned Objective may declare exact relative directories under `## Workspace package additions`. Compilation requires one responsible Work Item to own the existing `pnpm-workspace.yaml` and each new package manifest and carry its directory in the worker-visible brief or pinned source inputs. Runtime validation compares parsed membership against the original accepted base and accepted predecessor, permits only those additions with regular JSON manifests, preserves original entry order and predecessor membership, and keeps every non-membership setting pinned. Ambiguous YAML, aliases, tags and merges fail closed. This uses the existing Objective digest and immutable Git evidence, not a new permission store. Ownership and validation commands alone never grant this authority. The same check runs before commands in Work Item, environment, QA and final validation, including command-less results. Greenfield workspace authority remains unchanged.

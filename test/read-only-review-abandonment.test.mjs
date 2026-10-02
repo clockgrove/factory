@@ -651,8 +651,9 @@ test("verified ceased known local worker identities and subprocess markers are r
     );
   }));
 
-test("ordinary cancellation retains its existing uncertain-review refusal", () =>
-  fixture(async ({ application, config, state }) => {
+test("ordinary cancellation refuses uncertain review before writing cancellation intent", () =>
+  fixture(async ({ application, config, state, path }) => {
+    const before = readFileSync(path);
     await assert.rejects(
       application.cancelObjective(1),
       /Submitted|unknown|uncertain/,
@@ -662,11 +663,9 @@ test("ordinary cancellation retains its existing uncertain-review refusal", () =
     assert.equal(after.error, state.error);
     assert.equal(after.cancelledAt, undefined);
     assert.equal(after.readOnlyReviewAbandonment, undefined);
-    assert.equal(after.cancelRequested, true);
-    assert.match(
-      after.coordinator.cancelError,
-      /Submitted review outcome is unknown/,
-    );
+    assert.equal(after.cancelRequested, undefined);
+    assert.equal(after.coordinator.cancelError, undefined);
+    assert.deepEqual(readFileSync(path), before);
   }));
 
 test("sealed final Objective acceptance cannot be abandoned", () =>

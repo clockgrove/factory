@@ -4,6 +4,7 @@ import {
   failureDigest,
   type RepairCorrection,
 } from "./repair-policy.js";
+import { GitHubRequestError } from "./github-client.js";
 import { preflightObjective, planningExecutionBounds } from "./admission.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -235,6 +236,39 @@ export function assertGraphRevisions(state: FactoryState): void {
       pending.proposal.expectedGraphDigest !== graphDigest(state.graph)
     )
       throw new Error("Pending amendment has stale graph identity");
+    const known = pending.issueByItemId;
+    if (
+      !known ||
+      typeof known !== "object" ||
+      Array.isArray(known) ||
+      Object.values(known).some((id) => !Number.isSafeInteger(id) || id <= 0) ||
+      new Set(Object.values(known)).size !== Object.values(known).length ||
+      (pending.graph &&
+        Object.keys(known).some(
+          (id) => !pending.graph!.items.some((item) => item.id === id),
+        )) ||
+      (pending.reviewDigest !== undefined &&
+        !/^[a-f0-9]{64}$/.test(pending.reviewDigest)) ||
+      (pending.projectionPending !== undefined &&
+        (typeof pending.projectionPending !== "string" ||
+          !pending.projectionPending ||
+          !pending.graph?.items.some(
+            (item) => item.id === pending.projectionPending,
+          ) ||
+          Object.hasOwn(known, pending.projectionPending))) ||
+      (pending.rejectionStage !== undefined &&
+        ![
+          "compilation",
+          "validation",
+          "review",
+          "review-findings",
+          "projection",
+        ].includes(pending.rejectionStage)) ||
+      (pending.phase === "rejected" && pending.projectionPending !== undefined)
+    )
+      throw new Error(
+        "Pending amendment has invalid projection or review identities",
+      );
     if (
       ["compiled", "reviewing", "reviewed", "projecting", "projected"].includes(
         pending.phase,
@@ -875,7 +909,16 @@ export async function applyPendingAmendment(args: {
     save();
     return true;
   } catch (error) {
+    // The actual transport distinguishes completed HTTP rejection from a lost mutation.
+    // Do not infer this fact from retained error prose.
+    const projectionRejected =
+      pending.phase === "projecting" &&
+      error instanceof GitHubRequestError &&
+      error.status >= 400 &&
+      error.status < 500;
+    if (projectionRejected) delete pending.projectionPending;
     if (
+      projectionRejected ||
       !["compiling", "reviewing", "projecting"].includes(pending.phase) ||
       error instanceof CompletedModelInvocationError ||
       (pending.phase === "compiling" && compilationResponseObserved)

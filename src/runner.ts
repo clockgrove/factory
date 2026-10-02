@@ -9,6 +9,7 @@ import {
   applyPendingAmendment,
   graphDigest,
   hasPendingAmendmentEffect,
+  validateAmendment,
   submitAmendment,
   type AmendmentProposal,
 } from "./graph-amendments.js";
@@ -633,9 +634,10 @@ async function cancelKnownWork(
   state: ContinuationState,
   driver: ExecutionDriver,
   save: () => void,
+  projectionReconciled = false,
 ): Promise<void> {
   const errors: string[] = [];
-  const tasks: Promise<void>[] = [];
+  const tasks: (() => Promise<void>)[] = [];
   if (
     state.schemaVersion === 5 &&
     (state.planning === "submitted" || state.projectionPending)
@@ -643,7 +645,11 @@ async function cancelKnownWork(
     errors.push(
       "Submitted preparation effect has unknown outcome; operator direction required",
     );
-  if (state.schemaVersion === 4 && hasPendingAmendmentEffect(state))
+  if (
+    state.schemaVersion === 4 &&
+    hasPendingAmendmentEffect(state) &&
+    !projectionReconciled
+  )
     errors.push(
       "Submitted amendment effect has unknown outcome; operator direction required",
     );
@@ -669,15 +675,16 @@ async function cancelKnownWork(
         );
         continue;
       }
-      tasks.push(
+      tasks.push(() =>
         driver.cancel(
-          structuredClone(work.execution),
+          structuredClone(work.execution!),
           executionContext(work, save),
         ),
       );
     }
-  tasks.push(cancelRecordedSubprocesses(state));
-  for (const result of await Promise.allSettled(tasks))
+  if (errors.length) throw new Error(errors.join("; "));
+  tasks.push(() => cancelRecordedSubprocesses(state));
+  for (const result of await Promise.allSettled(tasks.map((task) => task())))
     if (result.status === "rejected") errors.push(String(result.reason));
   if (errors.length) throw new Error(errors.join("; "));
 }
@@ -2399,11 +2406,82 @@ function abandonStoppedReadOnlyReview(
   }
 }
 
+/** Identified remote objects may be retired, never replayed or accepted, after stopped readback. */
+async function reconcileStoppedProjection(
+  config: FactoryConfig,
+  state: FactoryState,
+  github: GitHubGateway | undefined,
+): Promise<boolean> {
+  const pending = state.pendingAmendment;
+  if (
+    !pending ||
+    !(
+      pending.phase === "projecting" ||
+      (pending.phase === "rejected" && pending.rejectionStage === "projection")
+    )
+  )
+    return false;
+  if (
+    !github?.reconcileGraphProjection ||
+    config.execution.kind !== "local" ||
+    state.configDigest !== factoryConfigDigest(config) ||
+    owners.has(ownerKey(config, state.objective)) ||
+    pending.projectionPending ||
+    Object.entries(state.issueByItemId).some(
+      ([id, issue]) => pending.issueByItemId[id] !== issue,
+    ) ||
+    !pending.graph ||
+    !/^[a-f0-9]{64}$/.test(pending.reviewDigest ?? "") ||
+    pending.proposal.expectedGraphDigest !== graphDigest(state.graph) ||
+    state.planningRecovery?.phase === "submitted" ||
+    state.coordinator?.phase.includes("submitted") ||
+    Object.keys(state.stackMerges ?? {}).length ||
+    Object.values(state.work).some(
+      (work) =>
+        work.pendingEffect ||
+        work.execution ||
+        work.status === "running" ||
+        work.status === "published" ||
+        (work.step === "deliver" && work.status !== "done") ||
+        work.githubClosure === "pending",
+    )
+  )
+    throw new Error(
+      "Stopped projection cancellation has unresolved ownership or mutation",
+    );
+  for (const owned of state.coordinator?.processes ?? []) {
+    const identity = linuxProcessIdentity(owned.pid);
+    if (processGroupExists(owned.pid) || (identity && identity.state !== "Z"))
+      throw new Error(
+        "Stopped projection cancellation has live owned subprocesses",
+      );
+  }
+  const objective = await github.objective(state.objective);
+  if (
+    createHash("sha256").update(objective.body).digest("hex") !==
+    state.objectiveBodyDigest
+  )
+    throw new Error("Stopped projection cancellation Objective source changed");
+  validateAmendment(state, pending.graph, config, objective.body);
+  await github.reconcileGraphProjection({
+    graph: pending.graph,
+    previousGraph: state.graph,
+    objectiveIssue: state.objective,
+    objectiveBodyDigest: state.objectiveBodyDigest!,
+    knownIssues: pending.issueByItemId,
+    completedItems: Object.keys(state.work).filter(
+      (id) => state.work[id]!.status === "done",
+    ),
+  });
+  return true;
+}
+
 export async function cancelObjective(
   config: FactoryConfig,
   objective: number,
   driver: ExecutionDriver,
   abandonment?: ReadOnlyReviewAbandonmentRequest,
+  github?: GitHubGateway,
 ): Promise<"requested" | "cancelled"> {
   if (abandonment !== undefined)
     return abandonStoppedReadOnlyReview(config, objective, abandonment);
@@ -2437,11 +2515,32 @@ export async function cancelObjective(
       throw new Error(
         "Acceptance is sealed; resume to reconcile Objective closure",
       );
+    const projectionReconciled =
+      continuation.schemaVersion === 4 &&
+      (await reconcileStoppedProjection(config, continuation, github));
+    // Refuse unknown external effects before saving a cancellation request.
+    if (
+      (continuation.schemaVersion === 5 &&
+        (continuation.planning === "submitted" ||
+          continuation.projectionPending)) ||
+      (continuation.schemaVersion === 4 &&
+        ((hasPendingAmendmentEffect(continuation) && !projectionReconciled) ||
+          Object.values(continuation.work).some(
+            (work) => work.pendingEffect,
+          ))) ||
+      continuation.coordinator?.phase === "objective-review-submitted"
+    )
+      throw new Error(
+        "Submitted effect has unknown outcome; operator direction required",
+      );
     continuation.cancelRequested = true;
     saveState(statePath(config.repository, objective), continuation);
     try {
-      await cancelKnownWork(continuation, driver, () =>
-        saveState(statePath(config.repository, objective), continuation),
+      await cancelKnownWork(
+        continuation,
+        driver,
+        () => saveState(statePath(config.repository, objective), continuation),
+        projectionReconciled,
       );
     } catch (error) {
       continuation.coordinator ??= {

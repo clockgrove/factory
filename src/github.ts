@@ -12,6 +12,7 @@ import type {
   PullRequestPublication,
   WorkItem,
 } from "./contracts.js";
+import { createHash } from "node:crypto";
 import { NativeStackDelivery } from "./delivery/native-stack.js";
 import {
   GitHubClient,
@@ -250,28 +251,31 @@ export class RealGitHubGateway implements GitHubGateway {
       throw new Error(`Issue #${number} has unexpected state`);
   }
 
+  private authenticatedIssue(issue: Issue, number?: number): Issue {
+    if (
+      !issue ||
+      issue.pull_request ||
+      !Number.isSafeInteger(issue.id) ||
+      issue.id <= 0 ||
+      !Number.isSafeInteger(issue.number) ||
+      issue.number <= 0 ||
+      (number !== undefined && issue.number !== number) ||
+      typeof issue.repository_url !== "string" ||
+      !issue.repository_url.startsWith("https://api.github.com/repos/") ||
+      issue.repository_url
+        .slice("https://api.github.com/repos/".length)
+        .toLowerCase() !== this.repository.toLowerCase() ||
+      !["open", "closed"].includes(issue.state)
+    )
+      throw new Error(
+        "Work Item projection lacks authenticated issue identity",
+      );
+    return issue;
+  }
+
   async projectGraph(request: GraphProjection): Promise<ProjectedGraph> {
-    const authenticated = (issue: Issue, number?: number): Issue => {
-      if (
-        !issue ||
-        issue.pull_request ||
-        !Number.isSafeInteger(issue.id) ||
-        issue.id <= 0 ||
-        !Number.isSafeInteger(issue.number) ||
-        issue.number <= 0 ||
-        (number !== undefined && issue.number !== number) ||
-        typeof issue.repository_url !== "string" ||
-        !issue.repository_url.startsWith("https://api.github.com/repos/") ||
-        issue.repository_url
-          .slice("https://api.github.com/repos/".length)
-          .toLowerCase() !== this.repository.toLowerCase() ||
-        !["open", "closed"].includes(issue.state)
-      )
-        throw new Error(
-          "Work Item projection lacks authenticated issue identity",
-        );
-      return issue;
-    };
+    const authenticated = (issue: Issue, number?: number) =>
+      this.authenticatedIssue(issue, number);
     const roles = ["factory:objective", "factory:work-item"];
     const labels = await this.client.paginate<{
       name: string;
@@ -658,6 +662,175 @@ export class RealGitHubGateway implements GitHubGateway {
       }
     }
     return { issueByItemId };
+  }
+
+  /** Observe old/new facts only. This never completes or accepts a graph projection. */
+  async reconcileGraphProjection(
+    request: GraphProjection & { objectiveBodyDigest: string },
+  ): Promise<void> {
+    const known = request.knownIssues ?? {};
+    const items = request.graph.items;
+    if (
+      !request.previousGraph ||
+      Object.keys(known).length !== items.length ||
+      items.some(
+        (item) => !Number.isSafeInteger(known[item.id]) || known[item.id]! <= 0,
+      ) ||
+      new Set(Object.values(known)).size !== items.length ||
+      Object.values(known).includes(request.objectiveIssue) ||
+      request.previousGraph.items.some(
+        (item) => !items.some((next) => next.id === item.id),
+      )
+    )
+      throw new Error(
+        "Partial projection lacks complete unique known issue identities",
+      );
+    const get = async (number: number) =>
+      this.authenticatedIssue(
+        await this.client.request<Issue>("GET", this.route(`issues/${number}`)),
+        number,
+      );
+    const objective = await get(request.objectiveIssue);
+    if (
+      createHash("sha256")
+        .update(objective.body ?? "")
+        .digest("hex") !== request.objectiveBodyDigest ||
+      objective.state !== "open" ||
+      !(objective.labels ?? []).some(
+        (label) =>
+          (typeof label === "string" ? label : label.name) ===
+          "factory:objective",
+      )
+    )
+      throw new Error(
+        "Partial projection Objective changed identity or source",
+      );
+    const issues = new Map<number, Issue>();
+    for (const item of items) {
+      const issue = await get(known[item.id]!);
+      const old = request.previousGraph.items.find(
+        (entry) => entry.id === item.id,
+      );
+      const matches = (entry: WorkItem) =>
+        issue.title === entry.title &&
+        issue.body === projectedIssueBody(entry, request.objectiveIssue);
+      if (
+        !(matches(item) || (old && matches(old))) ||
+        (issue.state === "closed" &&
+          !request.completedItems?.includes(item.id)) ||
+        !(issue.labels ?? []).some(
+          (label) =>
+            (typeof label === "string" ? label : label.name) ===
+            "factory:work-item",
+        )
+      )
+        throw new Error(
+          "Partial projection Work Item changed identity, source or state",
+        );
+      issues.set(issue.number, issue);
+    }
+    const numbers = (ids: string[]) => ids.map((id) => known[id]!);
+    const equal = (left: number[], right: number[]) =>
+      left.length === right.length &&
+      left.every((number) => right.includes(number));
+    for (const item of items) {
+      const observed = await this.client.paginate<Issue>(
+        this.route(`issues/${known[item.id]}/dependencies/blocked_by`),
+      );
+      const old = request.previousGraph.items.find(
+        (entry) => entry.id === item.id,
+      );
+      if (
+        new Set(observed.map((issue) => issue.number)).size !==
+          observed.length ||
+        observed.some(
+          (issue) =>
+            this.authenticatedIssue(issue).id !== issues.get(issue.number)?.id,
+        ) ||
+        !(
+          equal(
+            observed.map((issue) => issue.number),
+            numbers(item.dependencies),
+          ) ||
+          (old &&
+            equal(
+              observed.map((issue) => issue.number),
+              numbers(old.dependencies),
+            ))
+        )
+      )
+        throw new Error(
+          "Partial projection dependency facts are incomplete or unreviewed",
+        );
+    }
+    const parentsFor = (graph: GraphProjection["graph"]) => {
+      const aggregates = new Map(
+        graph.items.flatMap((item) =>
+          (item.children ?? []).map((child) => [child, item.id] as const),
+        ),
+      );
+      return new Map(
+        graph.items.map((item) => [
+          known[item.id]!,
+          aggregates.has(item.id)
+            ? known[aggregates.get(item.id)!]!
+            : request.objectiveIssue,
+        ]),
+      );
+    };
+    const oldParents = parentsFor(request.previousGraph);
+    const newParents = parentsFor(request.graph);
+    const observedParents = new Map<number, number>();
+    for (const parent of new Set([
+      ...oldParents.values(),
+      ...newParents.values(),
+    ])) {
+      const observed = await this.client.paginate<Issue>(
+        this.route(`issues/${parent}/sub_issues`),
+      );
+      for (const issue of observed) {
+        this.authenticatedIssue(issue);
+        if (
+          issue.id !== issues.get(issue.number)?.id ||
+          observedParents.has(issue.number) ||
+          (oldParents.get(issue.number) !== parent &&
+            newParents.get(issue.number) !== parent)
+        )
+          throw new Error(
+            "Partial projection hierarchy is ambiguous or unreviewed",
+          );
+        observedParents.set(issue.number, parent);
+      }
+    }
+    for (const issue of issues.values()) {
+      let parent: Issue | undefined;
+      try {
+        parent = this.authenticatedIssue(
+          await this.client.request<Issue>(
+            "GET",
+            this.route(`issues/${issue.number}/parent`),
+          ),
+        );
+      } catch (error) {
+        if (!(error instanceof GitHubRequestError && error.status === 404))
+          throw error;
+      }
+      const expected = observedParents.get(issue.number);
+      const expectedIssue =
+        expected === request.objectiveIssue
+          ? objective
+          : expected === undefined
+            ? undefined
+            : issues.get(expected);
+      if (
+        (parent &&
+          (parent.number !== expected || parent.id !== expectedIssue?.id)) ||
+        (!parent && (expected !== undefined || oldParents.has(issue.number)))
+      )
+        throw new Error(
+          "Partial projection parent observation is incomplete or unreviewed",
+        );
+    }
   }
 
   async publish(request: PullRequestPublication): Promise<PullRequestIdentity> {

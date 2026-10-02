@@ -36,6 +36,10 @@ import {
 } from "./support/integration-fixture.mjs";
 import { withCoverage } from "./support/coverage.mjs";
 import { compilerWire } from "../dist/compiler-wire.js";
+import {
+  GitHubRequestError,
+  GitHubOutcomeUnknown,
+} from "../dist/github-client.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
 import { encodeCompilerWire } from "./support/compiler-wire.mjs";
 import { packetFromPrompt } from "./support/review-protocol.mjs";
@@ -2359,4 +2363,186 @@ test("actual review provider/protocol failures cannot authorize amendment replac
       );
       assert.equal(JSON.stringify(state), before);
     });
+});
+
+test("completed-rejection preserves projection history without replay", async () => {
+  await fixture(
+    "projection-completed-rejection",
+    async ({ config, initial }) => {
+      const obligations = coverageObligations(body, objectiveCriteria(body));
+      const graph = withCoverage({ coverageObligations: obligations }, initial);
+      graph.coverage[0].source = obligations[0].source;
+      const state = {
+        graph,
+        objective: 1,
+        baseSha: initial.baseSha,
+        runId: "fixture",
+        issueByItemId: { result: 2 },
+        work: { result: { status: "done", attempt: "preserved" } },
+        admission: { graphDigest: graphDigest(graph), authority },
+        coordinator: { mode: "running" },
+      };
+      submitAmendment(state, {
+        ...discovery,
+        actor: "operator",
+        expectedGraphDigest: graphDigest(graph),
+        graph: qaGraph(graph),
+      });
+      let creates = 0;
+      const args = {
+        state,
+        config,
+        body,
+        model: {
+          async reviewGraph(request) {
+            return {
+              packetId: request.reviewPacket.id,
+              findings: [],
+            };
+          },
+        },
+        github: {
+          async projectGraph(request) {
+            request.projected("result", 2);
+            await request.beforeCreate("qa");
+            creates++;
+            throw new GitHubRequestError(422);
+          },
+        },
+        save() {},
+        cancelled: () => false,
+      };
+      await assert.rejects(applyPendingAmendment(args), /GitHub/);
+      assert.equal(state.pendingAmendment.phase, "rejected");
+      assert.equal(state.pendingAmendment.projectionPending, undefined);
+      assert.equal(state.pendingAmendment.rejectionStage, "projection");
+      assert.ok(state.pendingAmendment.reviewDigest);
+      assert.deepEqual(state.pendingAmendment.issueByItemId, { result: 2 });
+      assert.equal(state.graph.items.length, 1);
+      assert.equal(state.work.result.attempt, "preserved");
+      await assert.rejects(applyPendingAmendment(args), /cannot be replayed/);
+      assert.equal(creates, 1);
+      assert.equal(state.allowanceConsumption.planningRevisions, 1);
+    },
+  );
+});
+
+test("mutation-unknown preserves projection history without replay", async () => {
+  await fixture("projection-mutation-unknown", async ({ config, initial }) => {
+    const obligations = coverageObligations(body, objectiveCriteria(body));
+    const graph = withCoverage({ coverageObligations: obligations }, initial);
+    graph.coverage[0].source = obligations[0].source;
+    const state = {
+      graph,
+      objective: 1,
+      baseSha: initial.baseSha,
+      runId: "fixture",
+      issueByItemId: { result: 2 },
+      work: { result: { status: "done", attempt: "preserved" } },
+      admission: { graphDigest: graphDigest(graph), authority },
+      coordinator: { mode: "running" },
+    };
+    submitAmendment(state, {
+      ...discovery,
+      actor: "operator",
+      expectedGraphDigest: graphDigest(graph),
+      graph: qaGraph(graph),
+    });
+    let creates = 0;
+    const args = {
+      state,
+      config,
+      body,
+      model: {
+        async reviewGraph(request) {
+          return {
+            packetId: request.reviewPacket.id,
+            findings: [],
+          };
+        },
+      },
+      github: {
+        async projectGraph(request) {
+          request.projected("result", 2);
+          await request.beforeCreate("qa");
+          creates++;
+          throw new GitHubOutcomeUnknown();
+        },
+      },
+      save() {},
+      cancelled: () => false,
+    };
+    await assert.rejects(applyPendingAmendment(args), /GitHub/);
+    assert.equal(state.pendingAmendment.phase, "projecting");
+    assert.equal(state.pendingAmendment.projectionPending, "qa");
+    assert.ok(state.pendingAmendment.reviewDigest);
+    assert.deepEqual(state.pendingAmendment.issueByItemId, { result: 2 });
+    assert.equal(state.graph.items.length, 1);
+    assert.equal(state.work.result.attempt, "preserved");
+    await assert.rejects(applyPendingAmendment(args), /cannot be replayed/);
+    assert.equal(creates, 1);
+    assert.equal(state.allowanceConsumption.planningRevisions, 1);
+  });
+});
+
+test("completed-auth-rejection preserves projection history without replay", async () => {
+  await fixture(
+    "projection-completed-auth-rejection",
+    async ({ config, initial }) => {
+      const obligations = coverageObligations(body, objectiveCriteria(body));
+      const graph = withCoverage({ coverageObligations: obligations }, initial);
+      graph.coverage[0].source = obligations[0].source;
+      const state = {
+        graph,
+        objective: 1,
+        baseSha: initial.baseSha,
+        runId: "fixture",
+        issueByItemId: { result: 2 },
+        work: { result: { status: "done", attempt: "preserved" } },
+        admission: { graphDigest: graphDigest(graph), authority },
+        coordinator: { mode: "running" },
+      };
+      submitAmendment(state, {
+        ...discovery,
+        actor: "operator",
+        expectedGraphDigest: graphDigest(graph),
+        graph: qaGraph(graph),
+      });
+      let creates = 0;
+      const args = {
+        state,
+        config,
+        body,
+        model: {
+          async reviewGraph(request) {
+            return {
+              packetId: request.reviewPacket.id,
+              findings: [],
+            };
+          },
+        },
+        github: {
+          async projectGraph(request) {
+            request.projected("result", 2);
+            await request.beforeCreate("qa");
+            creates++;
+            throw new GitHubRequestError(403);
+          },
+        },
+        save() {},
+        cancelled: () => false,
+      };
+      await assert.rejects(applyPendingAmendment(args), /GitHub/);
+      assert.equal(state.pendingAmendment.phase, "rejected");
+      assert.equal(state.pendingAmendment.projectionPending, undefined);
+      assert.equal(state.pendingAmendment.rejectionStage, "projection");
+      assert.ok(state.pendingAmendment.reviewDigest);
+      assert.deepEqual(state.pendingAmendment.issueByItemId, { result: 2 });
+      assert.equal(state.graph.items.length, 1);
+      assert.equal(state.work.result.attempt, "preserved");
+      await assert.rejects(applyPendingAmendment(args), /cannot be replayed/);
+      assert.equal(creates, 1);
+      assert.equal(state.allowanceConsumption.planningRevisions, 1);
+    },
+  );
 });

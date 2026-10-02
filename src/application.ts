@@ -210,7 +210,13 @@ export function createApplication(
         options,
       ),
     cancelObjective: (objective, abandonment) =>
-      cancelObjective(config, objective, services.driver, abandonment),
+      cancelObjective(
+        config,
+        objective,
+        services.driver,
+        abandonment,
+        services.github,
+      ),
     repairWorkItem: (objective, input) =>
       repairWorkItem(config, objective, input),
     retryWorkItem: (objective, itemId) =>

@@ -6,6 +6,35 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Stopped known partial-projection cancellation (#498)
+
+The existing amendment and cancellation boundaries and the stopped public
+v0.1.72 HTTP 422 scenario supply this correction. All five issue identities were
+retained after independently reviewed graph projection failed, but the projecting
+phase alone prevented cancellation. Ordinary cancellation also saved intent
+before testing its uncertain-effect fence.
+
+The actual HTTP producer now uses typed completed rejection to retain a rejected
+projection, while genuinely unknown transport and creation outcomes stay fenced.
+The stopped cancellation path uses the existing mutation lock and GET-only
+GitHub gateway observation to bind original source/configuration, complete known
+mapping and exact reviewed old/new issue bodies, roles, dependency sets and native
+parent facts. It refuses before intent persistence if any known fact is incomplete,
+foreign or changed, a create/submission remains unknown, or local owned work is
+unsettled. A successful retirement preserves the original unaccepted amendment
+phase/error/review/mapping, graph and attempt evidence, and all finite consumption.
+It neither applies a graph nor mutates GitHub, reruns work or grants new authority.
+
+Committed regressions combine real temporary Git with synthetic runtime bindings
+and the complete public graph/body fixture. The complete actual stopped snapshot
+and authenticated API captures are separately retained locally for full replay
+through native decoding, validation, locking and the versioned HTTP transport;
+raw runtime state and provider responses are not published. No legacy error
+parser, state migration, manual snapshot repair, operational journal, new root to
+evade ownership or uncertain read-only review abandonment supplies the fix.
+Independent source and installed verification remain required before any actual
+old-run disposition. This evidence does not accept #448 or authorize private #445.
+
 ## Read-only continuous-intake status (#444)
 
 The current continuous-intake implementation and the public v0.1.72 settled-refill

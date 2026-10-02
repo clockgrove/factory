@@ -121,17 +121,52 @@ else if(action==='start'&&!alive()&&!fs.existsSync(file('start-failure'))){
       "1",
     ];
   }
+  let bodyError;
   try {
     await fn({ root, checkout, configPath, env, run, installArgs });
+  } catch (error) {
+    bodyError = error;
   } finally {
-    rmSync(join(root, "unsupported"), { force: true });
-    if (existsSync(configPath)) {
-      const stop = run(["supervisor", "uninstall"]);
-      assert.equal(stop.status, 0, stop.stderr);
+    try {
+      rmSync(join(root, "unsupported"), { force: true });
+      if (existsSync(configPath)) {
+        const stop = run(["supervisor", "uninstall"]);
+        assert.equal(stop.status, 0, stop.stderr);
+      }
+    } catch (cleanupError) {
+      if (bodyError)
+        throw new AggregateError(
+          [bodyError, cleanupError],
+          "Setup fixture body and owner cleanup both failed; fixture retained",
+        );
+      throw cleanupError;
     }
     rmSync(root, { recursive: true, force: true });
   }
+  if (bodyError) throw bodyError;
 }
+
+test("setup fixture preserves its original failure when owner cleanup also fails", async () => {
+  let retainedRoot;
+  try {
+    await assert.rejects(
+      fixture(async ({ root, configPath }) => {
+        retainedRoot = root;
+        writeFileSync(configPath, "{}");
+        throw new Error("Original setup body failure");
+      }),
+      (error) => {
+        assert.ok(error instanceof AggregateError);
+        assert.equal(error.errors[0].message, "Original setup body failure");
+        assert.match(error.errors[1].message, /Factory:/);
+        assert.equal(existsSync(retainedRoot), true);
+        return true;
+      },
+    );
+  } finally {
+    if (retainedRoot) rmSync(retainedRoot, { recursive: true, force: true });
+  }
+});
 
 test("actual guided CLI creates a consented idle watcher, verifies its owner and reuses it without duplicate controllers", () =>
   fixture(async ({ root, run, installArgs, configPath }) => {

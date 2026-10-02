@@ -59,16 +59,34 @@ export async function serveControl(
     });
     socket.on("error", () => undefined);
   });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    const directory = openSync(stateRoot(repository), "r");
-    server.once("error", () => closeSync(directory));
-    server.listen(`/proc/self/fd/${directory}/control.sock`, () => {
+  const directory = openSync(stateRoot(repository), "r");
+  let directoryOpen = true;
+  const closeDirectory = () => {
+    if (directoryOpen) {
+      directoryOpen = false;
       closeSync(directory);
-      chmodSync(path, 0o600);
-      resolve();
+    }
+  };
+  // libuv retains this literal pathname and unlinks it when the native listener
+  // closes. Keep its directory descriptor bound until that unlink has finished.
+  server.once("close", closeDirectory);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(`/proc/self/fd/${directory}/control.sock`, () => {
+        try {
+          chmodSync(path, 0o600);
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      });
     });
-  });
+  } catch (error) {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    closeDirectory();
+    throw error;
+  }
   return server;
 }
 

@@ -11,7 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** v0.1.68 adds guided background setup, persistent consented observation, explicit later intake and source-required CI before integration. [Release verification](https://github.com/clockgrove/factory/issues/451) and [live public qualification](https://github.com/clockgrove/factory/issues/448) retain their separate acceptance records.
+**Status:** Published v0.1.68 adds guided background setup, persistent consented observation, explicit later intake and source-required CI before integration. [Independent release verification](https://github.com/clockgrove/factory/issues/451#issuecomment-5946087196) passed all 317 installed tests and two model-free preflights. [Live public qualification](https://github.com/clockgrove/factory/issues/448) and [adopter rollout](https://github.com/clockgrove/factory/issues/445) retain separate acceptance gates.
 
 Factory is early software. Supervise initial Objectives and follow the [recovery guidance](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) when work stops. [Release artifact records](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) retain the evidence and limits of earlier versions.
 
@@ -26,7 +26,7 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select v0.1.68. Confirm its completed [release verification](https://github.com/clockgrove/factory/issues/451) before installation.
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select v0.1.68. Its [independent public verification](https://github.com/clockgrove/factory/issues/451#issuecomment-5946087196) matched the archive and pinned plugin.
 
 ```sh
 codex plugin marketplace add clockgrove/factory --ref v0.1.68
@@ -37,7 +37,7 @@ gh release download v0.1.68 --repo clockgrove/factory \
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release acceptance issue or PR](https://github.com/clockgrove/factory/issues/451), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. The owning release issue records the independent public archive and pinned-plugin verification result.
+Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [prepublication fingerprint](https://github.com/clockgrove/factory/issues/451#issuecomment-5946059666), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. The owning release issue records the independent public archive and pinned-plugin verification result.
 
 Choose an absolute installation directory outside your target repository:
 

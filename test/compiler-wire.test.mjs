@@ -937,6 +937,15 @@ test("aggregate choices derive the child join while preserving real QA semantics
     aggregateAcceptance({ id: "parent" }),
   );
   assert.deepEqual(graph.items[1].acceptance, qa.acceptance);
+  assert.match(graph.items[2].acceptance[0], /Implementation child results/);
+  assert.match(
+    graph.items[2].acceptance[0],
+    /read-only QA and aggregate children have accepted proof/,
+  );
+  assert.doesNotMatch(
+    graph.items[2].acceptance[0],
+    /Every explicit child.*its result is integrated/,
+  );
   const finalCoverage = graph.coverage.find(
     (coverage) => coverage.itemId === "parent",
   );
@@ -965,6 +974,25 @@ test("aggregate choices derive the child join while preserving real QA semantics
     () => validateGraph(direct, 17, input.baseSha, new Set(["OBJECTIVE"])),
     /Aggregate acceptance/,
   );
+  // An aggregate may itself be a read-only child, with no new delivery identity.
+  const nested = structuredClone(value);
+  nested.items.push({
+    ...structuredClone(aggregate),
+    id: "outer-parent",
+    children: ["parent"],
+    dependencies: ["parent"],
+    coverage: [],
+  });
+  assert(conforms(nested), JSON.stringify(conforms.errors));
+  const nestedGraph = wire.decode(nested);
+  assert.doesNotThrow(() =>
+    validateGraph(nestedGraph, 17, input.baseSha, new Set(["OBJECTIVE"])),
+  );
+  assert.match(
+    nestedGraph.items[3].acceptance[0],
+    /read-only QA and aggregate children have accepted proof/,
+  );
+  assert.deepEqual(nestedGraph.items[3].ownedPaths, []);
 });
 
 test("trusted prior graph retains aggregate and decomposed work acceptance exactly", () => {

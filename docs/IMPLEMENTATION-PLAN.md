@@ -109,13 +109,16 @@ responses, projected work and terminal states remain fenced. No automatic retry
 loop or second state root is introduced.
 
 New aggregate compiler choices omit free-form acceptance. The controller supplies
-one structural child acceptance/integration criterion; new semantic assertions
-belong to read-only QA children. Existing parent acceptance, or the acceptance of
-unstarted work decomposed into a parent, remains exactly as accepted through the
+one structural child acceptance criterion: implementation results are integrated
+into the selected candidate, while read-only QA and aggregate children supply
+accepted proof against that candidate without a worker or delivery. New semantic
+assertions belong to read-only QA children. Existing parent acceptance, or the
+acceptance of unstarted work decomposed into a parent, remains exactly as accepted through the
 trusted previous graph. Candidate validation enforces that derivation without
 rewriting admitted snapshots. Final-review/controller coverage retains the
 original Objective obligations separately from parent acceptance. Aggregate
-validation and independent review still run after actual child integration.
+validation and independent review run after implementation-child integration and
+read-only-child acceptance; a read-only child is never required to deliver a PR.
 
 An explicitly authorized unchanged-baseline qualification may compile a nonempty
 all-QA graph with no coding worker, owned change, implementation dependency or

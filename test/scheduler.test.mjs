@@ -2,6 +2,7 @@ import { coverageObligations } from "../dist/qa.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  assertWorkItemFields,
   itemsConflict,
   readyItems,
   validateAndOrderGraph,
@@ -190,5 +191,53 @@ test("ownership is literal exact files and canonical directory prefixes", () => 
       itemsConflict(item("left", [], [right]), item("right", [], [left])),
       conflict,
     );
+  }
+});
+
+test("native item type checks cover ordinary and read-only fields before path or coverage consumers", () => {
+  for (const kind of ["work", "qa", "aggregate"]) {
+    const valid = {
+      ...item("result"),
+      kind,
+      children: kind === "aggregate" ? ["child"] : [],
+      ownedPaths: kind === "work" ? ["result.txt"] : [],
+      sourceAssets: [],
+      expectedOutputRoles: [],
+      requiredLfsRoles: [],
+      minimumAssetSets: 0,
+    };
+    assert.doesNotThrow(() => assertWorkItemFields(valid));
+    for (const [field, value] of [
+      ["id", 42],
+      ["title", 42],
+      ["goal", null],
+      ["brief", {}],
+      ["acceptance", [42]],
+      ["nonGoals", null],
+      ["dependencies", [42]],
+      ["children", [42]],
+      ["ownedPaths", [42]],
+      ["resources", [42]],
+      ["expectedOutputRoles", [42]],
+      ["requiredLfsRoles", [42]],
+      ["minimumAssetSets", "0"],
+      ["priority", "0"],
+      ["sourceAssets", [42]],
+      ["citations", [null]],
+      ["validation", [{ command: 42, provenance: "base-observed" }]],
+    ]) {
+      const invalid = { ...valid, [field]: value };
+      assert.throws(() => assertWorkItemFields(invalid), /Work Item/);
+      assert.throws(
+        () =>
+          validateAndOrderGraph(
+            { objective: 1, baseSha: "a".repeat(40), items: [invalid] },
+            1,
+            "a".repeat(40),
+            new Set(["OBJECTIVE"]),
+          ),
+        /Work Item/,
+      );
+    }
   }
 });

@@ -240,6 +240,30 @@ export interface PlanningLocalExecutables {
   observations: import("./local-preflight.js").ExecutablePreflightObservation[];
 }
 
+/** Controller configuration and checked finite authority, not capacity or runtime overlap. */
+export interface PlanningExecutionBounds {
+  configuredConcurrency: number;
+  authorizedMaxConcurrency: number | null;
+}
+
+export function assertPlanningExecutionBounds(
+  value: PlanningExecutionBounds,
+): void {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join() !==
+      "authorizedMaxConcurrency,configuredConcurrency" ||
+    !Number.isSafeInteger(value.configuredConcurrency) ||
+    value.configuredConcurrency < 1 ||
+    (value.authorizedMaxConcurrency !== null &&
+      (!Number.isSafeInteger(value.authorizedMaxConcurrency) ||
+        value.authorizedMaxConcurrency < value.configuredConcurrency))
+  )
+    throw new Error("Invalid controller planning execution bounds");
+}
+
 export interface PlanningRequest<T> {
   /** Trusted transient compile input; not part of canonical or persisted graphs. */
   compileContext?: {
@@ -250,7 +274,10 @@ export interface PlanningRequest<T> {
   };
   prerequisites?: PlanningPrerequisites;
   localExecutables?: PlanningLocalExecutables;
+  executionBounds?: PlanningExecutionBounds;
   purpose?: "diagnosis";
+  /** Actual decoded rejected graph; null when no canonical graph was produced. */
+  rejectedGraph?: WorkGraph | null;
   coverageObligations?: CoverageObligation[];
   objective: string;
   baseSha: string;
@@ -275,6 +302,7 @@ export interface PlanCommandAuthorization {
 export interface PlanReviewRequest {
   prerequisites?: PlanningPrerequisites;
   localExecutables?: PlanningLocalExecutables;
+  executionBounds?: PlanningExecutionBounds;
   amendment?: unknown;
   reviewPacket?: ReviewPacket;
   objective: string;

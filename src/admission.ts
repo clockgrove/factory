@@ -169,6 +169,19 @@ export function validateAuthority(value: ExecutionAuthority): void {
     throw new Error("Admission requires explicit requiredEnvironment names");
 }
 
+/** Planning observes ceilings after checking actual authority; it does not complete admission. */
+export function planningExecutionBounds(
+  config: FactoryConfig,
+  objective: number,
+  authority?: ExecutionAuthority,
+): import("./contracts.js").PlanningExecutionBounds {
+  if (authority) checkAuthority(config, objective, authority);
+  return {
+    configuredConcurrency: config.execution.concurrency,
+    authorizedMaxConcurrency: authority?.resources.maxConcurrency ?? null,
+  };
+}
+
 export function checkAuthority(
   config: FactoryConfig,
   objective: number,
@@ -274,7 +287,22 @@ export function bindAdmission(
     baseSha,
     config.checkout,
     factoryConfigDigest(config),
+    false,
+    config.execution.concurrency,
   );
+  if (candidate.executionBounds) {
+    const actual = planningExecutionBounds(config, objective, authority);
+    if (
+      candidate.executionBounds.configuredConcurrency !==
+        actual.configuredConcurrency ||
+      (candidate.executionBounds.authorizedMaxConcurrency !== null &&
+        candidate.executionBounds.authorizedMaxConcurrency !==
+          actual.authorizedMaxConcurrency)
+    )
+      throw new Error(
+        "Planning execution bounds differ from current configuration or checked authority",
+      );
+  }
   const localExecutables = preflightObjective(config, body, baseSha, candidate);
   if (
     JSON.stringify(candidate.localExecutables) !==

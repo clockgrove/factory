@@ -6,6 +6,25 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Read-only continuous-intake status (#444)
+
+The current continuous-intake implementation and the public v0.1.72 settled-refill
+failure supply this correction. The live objective-zero status branch previously
+fell through to the common mutation wakeup even though `applyControl` did not save
+status. It now returns the same record/active-Objective snapshot early. Existing
+Objective-specific status paths already return before mutation handling; offline
+status, refill authority, all ownership/lifecycle fences and mutation wakes retain
+their existing behavior.
+
+The new temporary-Git regression defers actual control-socket GitHub observations
+at a 60-second polling interval. It fails unchanged source on a second scan started
+by status, then proves pure repeated status and one immediate same-owner refill,
+the enqueue wakeup, observing enqueue/watch refusals and drain cleanup without a
+provider call, sleep or retry loop. No archived runtime, private content, new state,
+transport workaround or relaxed guard supplies the fix. This is source preparation
+under #444, pending independent review and exact-head CI; the active installed
+v0.1.72 #448 scenario and all published artifact bytes remain unchanged.
+
 ## Native-replay qualification source and contract handoff (#448)
 
 The accepted current native runner, retained repair-proof packet and public #489

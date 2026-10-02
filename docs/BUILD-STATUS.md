@@ -4,6 +4,24 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Read-only intake status correction (#444)
+
+The active v0.1.72 public qualification exposed a settled-refill race: reading
+idle intake status woke the watcher, starting another GitHub scan before the
+operator's immediate refill. The objective-zero status handler now returns its
+existing snapshot before mutation handling and wakeup. Objective-specific status,
+mutation wakeups, owner authentication and active/observing/refilling/handoff
+fences retain their existing behavior.
+
+A deterministic temporary-Git regression with deferred GitHub observation and
+a 60-second poll interval reproduced the extra scan on unchanged source. It now
+proves unchanged repeated status, immediate same-owner admission, mutation-triggered
+observation and refusal of enqueue/watch during that outstanding scan, with no
+model calls or timing retries. This candidate remains pending independent source
+review and exact-head Quality CI. Integration and release are held while the
+separately owned installed v0.1.72 qualification continues in #448; published
+bytes and live acceptance remain unchanged. #444 stays open for its live outcome.
+
 ## Approved native-replay qualification preparation (#448)
 
 The operator approved the corrected one-artifact v0.1.72 successor mechanism on

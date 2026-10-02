@@ -527,6 +527,8 @@ export async function runIntake(
     wake?.();
   };
   const handle = async (request: ControlRequest): Promise<unknown> => {
+    if (request.objective === 0 && request.action === "status")
+      return { ...record, activeObjective: activeObjective ?? null };
     if (
       request.objective === 0 &&
       ["enqueue", "watch"].includes(request.action)

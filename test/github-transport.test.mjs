@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Octokit } from "@octokit/core";
-import { RealGitHubGateway } from "../dist/github.js";
+import { projectionClient } from "./support/projection-client.mjs";
+import { RealGitHubGateway, projectedIssueBody } from "../dist/github.js";
 import { GitHubClient, GitHubOutcomeUnknown } from "../dist/github-client.js";
 import { withProcessCancellation } from "../dist/process.js";
 
@@ -15,6 +16,7 @@ const clientFor = (fetch) =>
 const integratedSha = "c".repeat(40);
 const headSha = "a".repeat(40);
 const item = {
+  kind: "work",
   id: "one",
   title: "One",
   goal: "goal",
@@ -74,17 +76,45 @@ test("lost mutation response is unknown and does not expose transport details", 
   assert.equal(calls, 1);
 });
 
+function projectionTransport() {
+  const fixture = projectionClient("a/b");
+  fixture.issues.set(3, fixture.issue(3, { labels: ["factory:objective"] }));
+  const urls = [];
+  const fetch = async (url, options) => {
+    urls.push(String(url));
+    const path = new URL(String(url)).pathname.slice(1);
+    const method = options.method ?? "GET";
+    if (
+      method === "GET" &&
+      (path.endsWith("/labels") ||
+        path.endsWith("/sub_issues") ||
+        path.endsWith("/blocked_by") ||
+        path.endsWith("/issues"))
+    )
+      return json(await fixture.client.paginate(path));
+    return json(
+      await fixture.client.request(
+        method,
+        path,
+        options.body ? JSON.parse(options.body) : undefined,
+      ),
+    );
+  };
+  return { ...fixture, urls, fetch };
+}
+
 test("projection direct reads known identity without listing or replacement", async () => {
-  const calls = [];
-  const client = clientFor(async (url) => {
-    calls.push(String(url));
-    return json({
-      number: 7,
-      id: 100,
-      body: "<!-- factory:objective=3;item=one -->",
-    });
-  });
-  const gateway = new RealGitHubGateway("a/b", {}, client);
+  const f = projectionTransport();
+  f.issues.set(
+    7,
+    f.issue(7, {
+      title: item.title,
+      body: projectedIssueBody(item, 3),
+      labels: ["factory:work-item"],
+    }),
+  );
+  f.hierarchy.set(3, [7]);
+  const gateway = new RealGitHubGateway("a/b", {}, clientFor(f.fetch));
   const saved = [];
   const result = await gateway.projectGraph({
     objectiveIssue: 3,
@@ -95,17 +125,22 @@ test("projection direct reads known identity without listing or replacement", as
   });
   assert.deepEqual(result.issueByItemId, { one: 7 });
   assert.deepEqual(saved, [["one", 7]]);
-  assert.equal(calls.length, 1);
-  assert.match(calls[0], /issues\/7$/);
+  assert.ok(f.urls.some((url) => /issues\/7$/.test(url)));
+  assert.ok(f.urls.every((url) => !/\/issues\?/.test(url)));
+  assert.ok(f.calls.every((call) => call.method === "GET"));
 });
 
 test("missing known issue fails without replacement", async () => {
-  let calls = 0;
-  const client = clientFor(async () => {
-    calls++;
-    return json({ message: "Not found" }, 404);
-  });
-  const gateway = new RealGitHubGateway("a/b", {}, client);
+  const f = projectionTransport();
+  const gateway = new RealGitHubGateway(
+    "a/b",
+    {},
+    clientFor((url, options) =>
+      String(url).endsWith("/issues/7")
+        ? json({ message: "Not found" }, 404)
+        : f.fetch(url, options),
+    ),
+  );
   await assert.rejects(
     gateway.projectGraph({
       objectiveIssue: 3,
@@ -115,24 +150,32 @@ test("missing known issue fails without replacement", async () => {
     }),
     /404/,
   );
-  assert.equal(calls, 1);
+  assert.ok(f.calls.every((call) => call.method === "GET"));
 });
 
 test("projection persists intent before creation and identity before next work", async () => {
+  const f = projectionTransport();
   const events = [];
-  const client = clientFor(async (_url, options) => {
-    if (options.method === "GET") return json([]);
-    events.push("create");
-    return json({ number: 8, id: 101 });
-  });
-  const gateway = new RealGitHubGateway("a/b", {}, client);
+  const gateway = new RealGitHubGateway(
+    "a/b",
+    {},
+    clientFor(async (url, options) => {
+      if (options.method === "POST" && String(url).endsWith("/issues"))
+        events.push("create");
+      return f.fetch(url, options);
+    }),
+  );
   await gateway.projectGraph({
     objectiveIssue: 3,
     graph: { items: [item] },
     beforeCreate: () => events.push("intent"),
     projected: (_id, number) => events.push(`saved:${number}`),
   });
-  assert.deepEqual(events, ["intent", "create", "saved:8"]);
+  assert.deepEqual(events, ["intent", "create", "saved:2"]);
+  const create = f.calls.find(
+    (call) => call.method === "POST" && call.route.endsWith("/issues"),
+  );
+  assert.deepEqual(create.body.labels, ["factory:work-item"]);
 });
 
 test("regular merge sends the exact expected head and verifies integrated identity", async () => {

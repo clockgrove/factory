@@ -6,6 +6,33 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Public qualification phase-source clarification (#489)
+
+[PR #490](https://github.com/clockgrove/factory/pull/490), merged source
+`3f8a3df5e424b4c414d0dba757d54178a4ad6184`, tree
+`23a37f2bf20e49a1bc1a3a847ab4f3592948e9b5`, passed
+[independent focused source review](https://github.com/clockgrove/factory/pull/490#issuecomment-5958260563)
+and [required exact-head CI](https://github.com/clockgrove/factory/actions/runs/37044151153).
+Only the public qualification fixture README, first Objective and contributor
+autonomy contract change. The scenario's disposable probe is now explicitly
+limited to beta result/final validation, and its structural aggregate has no own
+commands. The old sources required beta/final without making them exclusive;
+native aggregate validation remains a legitimate unchanged Factory capability.
+No runtime-wide phase ban, schema change or diagnosis-as-authority supplies this
+correction.
+
+Complete ordered source reconstruction and the bounded model-free fixture
+preflight passed; the first restricted-host refusal remains preserved. The full
+actual installed compiler/reviewer/source-phase and refusal proof is pending,
+and #489 remains Open/In progress. Original semantic criteria, final checks and
+implementation/check baseline bytes remain intact. No provider call, new live
+attempt or release stage supplied the source preparation. Existing rejected
+proposals, actual per-release phases and exhausted allowances remain untouched.
+[BUILD-STATUS](BUILD-STATUS.md#qualification-fixture-source-clarification-489)
+records source completion separately from actual unaccepted service #448 and
+private #445. No published archive, tag, asset, version, prior receipt or
+historical source packet was replaced.
+
 ## Verified v0.1.72 aggregate and release-integrity handoff (#483 / #486 / #485)
 
 [PR #484](https://github.com/clockgrove/factory/pull/484) supplies independently

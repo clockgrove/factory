@@ -4,6 +4,41 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Qualification fixture source clarification (#489)
+
+[PR #490](https://github.com/clockgrove/factory/pull/490) integrated source
+`3f8a3df5e424b4c414d0dba757d54178a4ad6184`, tree
+`23a37f2bf20e49a1bc1a3a847ab4f3592948e9b5`, on 2026-10-02 at 18:03:55 UTC,
+after [independent focused source review](https://github.com/clockgrove/factory/pull/490#issuecomment-5958260563)
+and [required exact-head Quality CI](https://github.com/clockgrove/factory/actions/runs/37044151153).
+Only the public fixture README, first Objective and contributor autonomy contract
+change. This scenario now explicitly runs its disposable probe only during beta
+result validation and Objective final validation, with no own commands on its
+structural aggregate parent. Discovered read-only QA, original semantic criteria,
+functional/final checks, concurrency, exact-head source CI and implementation
+baselines remain intact. Native aggregate-validation variants remain supported.
+
+Source preparation passed complete ordered compiler-source reconstruction,
+focused checks and the bounded model-free fixture preflight, preserving its
+initial restricted-host refusal. The full actual installed compiler/reviewer
+source-phase and refusal proof remains pending; #489 stays Open/In progress.
+Lexical command identity does not itself impose semantic phase eligibility.
+Source integration changes no runtime, package version, permission, published
+v0.1.72 byte or release acceptance and supplies no actual service acceptance.
+
+The [approved #448 continuation](https://github.com/clockgrove/factory/issues/448#issuecomment-5957494560)
+remains recorded below as its bounded historical authority. The
+[actual attempt stopped](https://github.com/clockgrove/factory/issues/448#issuecomment-5957995536)
+with planning 2/2, v0.1.72 owner activations 2/2 and restart 1/1 consumed.
+The [source-authority clarification](https://github.com/clockgrove/factory/issues/448#issuecomment-5958127858)
+distinguishes required beta/final phases from exclusivity missing in the old
+sources. Accepted work, failed candidates, both rejections, all 49 original
+evidence files, real artifact attribution and accounting remain intact. This
+fixture change does not rewrite that run's source or authorize another call,
+activation or allowance reset. Actual #444/#447/#448 and private #445 remain
+open and unaccepted; later qualification requires its separately established
+supported authority and finite bounds.
+
 ## Approved #448 current-runtime qualification
 
 On 2026-10-02 the operator [approved a narrowly scoped #448 continuation](https://github.com/clockgrove/factory/issues/448#issuecomment-5957494560)

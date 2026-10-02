@@ -66,6 +66,7 @@ import {
 } from "./qa.js";
 import {
   decodeGraphReview,
+  assertReviewPacketBinding,
   type ResolvedGraphFinding,
   type ReviewPacket,
   renderReviewPacket,
@@ -1559,13 +1560,13 @@ async function checkedPlanReview(
   model: PlanningModel,
   packet: PlanReviewRequest,
   invocation?: ModelInvocationContext,
+  evidencePacket = reviewPacket([], planningReviewEvidence(packet)),
 ): Promise<{
   findings: ResolvedGraphFinding[];
   failure?: { detail: string; question: string };
 }> {
   let responseReceived = false;
   try {
-    const evidencePacket = reviewPacket([], planningReviewEvidence(packet));
     const response = await model.reviewGraph({
       ...packet,
       reviewPacket: evidencePacket,
@@ -1619,13 +1620,19 @@ async function checkedPlanReview(
 }
 
 /** Compile and independently review a candidate without GitHub or run-state writes. */
+export interface PlanningReviewRecord {
+  contextDigest: string;
+  packet: ReviewPacket;
+  response?: Awaited<ReturnType<PlanningModel["reviewGraph"]>>;
+}
+
 export interface PlanningRecoveryRecord {
   phase: "ready" | "submitted" | "complete" | "stopped";
   invocation?: { id: string; phase: string };
   invocations?: { id: string; phase: string; resultDigest?: string }[];
   response?: unknown;
   responseFailure?: string;
-  reviewResponse?: Awaited<ReturnType<PlanningModel["reviewGraph"]>>;
+  review?: PlanningReviewRecord;
   history: {
     failure: string;
     detail: string;
@@ -1633,7 +1640,40 @@ export interface PlanningRecoveryRecord {
     kind: RepairClass;
     diagnosis: string;
     correction: string;
+    review?: PlanningReviewRecord;
   }[];
+}
+
+class PlanningReviewBindingError extends Error {}
+
+function retainedPlanningReview(
+  record: PlanningRecoveryRecord,
+  packet: PlanReviewRequest,
+  configDigest: string,
+): PlanningReviewRecord {
+  const contextDigest = digest(JSON.stringify([configDigest, packet]));
+  if (record.review) {
+    if (record.review.contextDigest !== contextDigest)
+      throw new PlanningReviewBindingError(
+        "Retained planning review context changed; preserve its evidence and use supported cancellation before a corrected successor",
+      );
+    try {
+      assertReviewPacketBinding(
+        record.review.packet,
+        [],
+        planningReviewEvidence(packet),
+      );
+    } catch {
+      throw new PlanningReviewBindingError(
+        "Retained planning review request binding is invalid; do not reconstruct or replay it",
+      );
+    }
+    return record.review;
+  }
+  return {
+    contextDigest,
+    packet: reviewPacket([], planningReviewEvidence(packet)),
+  };
 }
 export interface PlanningRecoveryContext {
   state: RepairLedger & {
@@ -1667,7 +1707,60 @@ async function compileRecoverablePlan(
     throw new Error(
       "Planning recovery stopped; inspect the preserved exact decision",
     );
+  if ("reviewResponse" in record)
+    throw new PlanningReviewBindingError(
+      "Retained planning review lacks its original request binding; stop owned work and use supported cancellation before a corrected successor",
+    );
   const sources = planningSources(body, baseSha, checkout, additionalSources);
+  if (record.review) {
+    try {
+      assertReviewPacketBinding(
+        record.review.packet,
+        [],
+        planningReviewEvidence({
+          sources,
+          prerequisites,
+          localExecutables,
+          executionBounds,
+        }),
+      );
+    } catch {
+      throw new PlanningReviewBindingError(
+        "Retained planning review evidence changed or its binding is invalid; preserve the original and use supported cancellation before a corrected successor",
+      );
+    }
+  }
+  if (record.phase === "complete") {
+    if (!state.plan || record.review?.response === undefined)
+      throw new PlanningReviewBindingError(
+        "Completed planning review lacks its original request binding; do not reconstruct or replay it",
+      );
+    const packet = planReviewPacket(
+      body,
+      baseSha,
+      sources,
+      state.plan.graph,
+      checkout,
+      executionProfiles,
+      prerequisites,
+      localExecutables,
+      executionBounds,
+    );
+    retainedPlanningReview(record, packet, configDigest);
+    if (decodeGraphReview(record.review.response, record.review.packet).length)
+      throw new PlanningReviewBindingError(
+        "Completed planning review retains unresolved findings",
+      );
+    verifyPlanCandidate(
+      state.plan,
+      objective,
+      body,
+      baseSha,
+      checkout,
+      configDigest,
+    );
+    return structuredClone(state.plan);
+  }
   let corrections: ResolvedGraphFinding[] = record.history.length
     ? [
         {
@@ -1683,7 +1776,7 @@ async function compileRecoverablePlan(
       (phase === "compile" &&
         (record.response !== undefined ||
           record.responseFailure !== undefined)) ||
-      (phase === "graph-review" && record.reviewResponse !== undefined)
+      (phase === "graph-review" && record.review?.response !== undefined)
     )
       return {
         invocationId: record.invocation?.id ?? "preserved",
@@ -1732,10 +1825,11 @@ async function compileRecoverablePlan(
       return result;
     },
     reviewGraph: async (request) => {
-      if (record.reviewResponse) return structuredClone(record.reviewResponse);
+      if (record.review?.response !== undefined)
+        return structuredClone(record.review.response);
       const result = await model.reviewGraph(request);
       retainResult(result);
-      record.reviewResponse = structuredClone(result);
+      record.review!.response = structuredClone(result);
       record.phase = "ready";
       save();
       return result;
@@ -1777,10 +1871,13 @@ async function compileRecoverablePlan(
         localExecutables,
         executionBounds,
       );
+      record.review = retainedPlanningReview(record, packet, configDigest);
+      save();
       review = await checkedPlanReview(
         observedModel,
         packet,
         invocation("graph-review"),
+        record.review.packet,
       );
       if (!review.findings.length && !review.failure) {
         const candidate = buildPlanCandidate(
@@ -1799,15 +1896,22 @@ async function compileRecoverablePlan(
         state.plan = candidate;
         delete record.response;
         delete record.responseFailure;
-        delete record.reviewResponse;
         record.phase = "complete";
         save();
         return candidate;
       }
       failure = JSON.stringify(review);
     } catch (error) {
-      if (context.stopped?.() || String(record.phase) === "submitted")
+      if (
+        error instanceof PlanningReviewBindingError ||
+        context.stopped?.() ||
+        String(record.phase) === "submitted"
+      )
         throw error;
+      if (record.review)
+        throw new PlanningReviewBindingError(
+          "Retained planning review compiled input cannot be validated; preserve its evidence and use supported cancellation before a corrected successor",
+        );
       failure = error instanceof Error ? error.message : String(error);
     }
     if (String(record.phase) === "submitted")
@@ -1922,6 +2026,7 @@ async function compileRecoverablePlan(
       kind: diagnosis.kind as RepairClass,
       diagnosis: diagnosis.diagnosis,
       correction: diagnosis.correction,
+      ...(record.review ? { review: structuredClone(record.review) } : {}),
     });
     record.invocations = [];
     corrections = [
@@ -1929,7 +2034,7 @@ async function compileRecoverablePlan(
     ];
     delete record.response;
     delete record.responseFailure;
-    delete record.reviewResponse;
+    delete record.review;
     record.phase = "ready";
     save();
   }

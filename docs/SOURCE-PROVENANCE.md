@@ -91,6 +91,27 @@ implementation, private source or prompts, extra lifecycle ledger, provider
 call or retry allowance supplied this implementation. Source tests do not
 establish published-artifact or live qualification acceptance.
 
+## Retained initial-planning review binding (#464)
+
+The complete public v0.1.68 planning rejection correctly decoded against its
+original review packet, but unchanged continuation generated another packet UUID
+and misclassified the retained response as a protocol failure. The existing atomic
+preparation snapshot now retains the submitted packet and full deterministic
+canonical review-context/configuration binding beside its completed response.
+Reuse validates that original request; it never assigns an old response identity
+to a new packet. Clean completion preserves the envelope, and normal admitted
+correction retains rejected envelopes in the existing planning history.
+
+Complete synthetic SDK responses exercise actual schemas, decoding, snapshot
+serialization, unchanged clean/rejected continuation, changed/damaged context,
+pre-submission pause, unknown submission, malformed findings and finite limits.
+The complete historical response/record independently exercises explicit missing
+binding refusal without calls, mutation or consumption. Older records are not
+migrated or reconstructed; owned cessation and supported cancellation precede a
+separately bounded corrected successor. No archived runtime or tests, private
+adopter material, new ledger, acceptance override or provider call supplied this
+correction. Source gates do not accept the separately owned live #448 outcome.
+
 ## Cancellation after a vanished local worker (#437)
 
 The public reproduction in #437, existing adapter-owned durable handles and

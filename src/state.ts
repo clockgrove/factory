@@ -1,3 +1,4 @@
+import { objectiveCandidate } from "./qa.js";
 import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
 import { assertFinalAcceptance } from "./completion.js";
 import { assertRepairLedger } from "./repair-policy.js";
@@ -1093,6 +1094,7 @@ export function parseFactoryState(
   if (state.error !== undefined && typeof state.error !== "string")
     throw new Error("state.error is invalid");
   const validated = value as FactoryState;
+  objectiveCandidate(validated);
   const selectedMembers = finalValidationLfsMembers(validated);
   // Item validation may hydrate dependencies or selected sibling pointers already
   // present in its tree, so compare against all selected required-LFS members.

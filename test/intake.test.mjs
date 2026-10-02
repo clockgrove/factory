@@ -652,6 +652,7 @@ for (const [descendant, dependent] of [
           candidate.prerequisites.predecessors[0].acceptance,
           Object.fromEntries(
             [
+              "candidateBasis",
               "sealedAt",
               "commit",
               "tree",

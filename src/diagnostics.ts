@@ -1,3 +1,4 @@
+import { objectiveCandidate } from "./qa.js";
 import { objectiveComplete } from "./completion.js";
 import { graphDigest } from "./graph-amendments.js";
 import { randomUUID } from "node:crypto";
@@ -1230,6 +1231,7 @@ export function statusDocument(
     configuredSlots: configuredSlots ?? null,
     baseSha: state.baseSha,
     integratedSha: state.integratedSha ?? null,
+    candidate: objectiveCandidate(state) ?? null,
     finalValidation: state.finalValidation?.passed ?? false,
     finalAcceptance: state.finalAcceptance ?? null,
     finalAcceptancePending: pendingDecision(state.finalAcceptancePending),
@@ -1470,7 +1472,13 @@ export class StateDiagnostics {
         runId: this.state.runId,
         operation: "objective-finalization",
         outcome: "completed",
-        metadata: { integratedSha: this.state.integratedSha ?? "" },
+        metadata: {
+          candidateCommitSha: objectiveCandidate(this.state)!.commitSha,
+          candidateBasis: objectiveCandidate(this.state)!.basis,
+          ...(this.state.integratedSha
+            ? { integratedSha: this.state.integratedSha }
+            : {}),
+        },
       });
       this.previousFinal = true;
     }

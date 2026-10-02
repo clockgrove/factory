@@ -1577,8 +1577,8 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
     const objectiveEvidence = objectiveReviewEvidence({
       state,
       checkout: target.checkout,
-      integratedCommitSha: finalIntegrated,
-      integratedTreeSha: finalTree,
+      candidateCommitSha: finalIntegrated,
+      candidateTreeSha: finalTree,
     });
     const observations = JSON.parse(objectiveEvidence.observations);
     assert.equal(observations.work.length, 3);
@@ -1724,8 +1724,8 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
           objectiveReviewEvidence({
             state: tampered,
             checkout: target.checkout,
-            integratedCommitSha: finalIntegrated,
-            integratedTreeSha: finalTree,
+            candidateCommitSha: finalIntegrated,
+            candidateTreeSha: finalTree,
           }),
         expected,
         name,
@@ -1796,8 +1796,8 @@ test("truncated per-Work-Item evidence cannot ground an automatic pass", async (
       const objectiveEvidence = objectiveReviewEvidence({
         state,
         checkout: target.checkout,
-        integratedCommitSha: integrated,
-        integratedTreeSha: treeSha,
+        candidateCommitSha: integrated,
+        candidateTreeSha: treeSha,
       });
       assert.equal(objectiveEvidence.evidence[0].complete, true);
       assert.equal(objectiveEvidence.evidence[1].complete, false);
@@ -2051,8 +2051,8 @@ test("final review shares one text budget across ordinary and materialization pa
         const objectiveEvidence = objectiveReviewEvidence({
           state,
           checkout: target.checkout,
-          integratedCommitSha: integratedTwo,
-          integratedTreeSha: materializedTwo.tree,
+          candidateCommitSha: integratedTwo,
+          candidateTreeSha: materializedTwo.tree,
         });
         assert.deepEqual(
           objectiveEvidence.evidence

@@ -1,3 +1,4 @@
+import { objectiveCandidate } from "./qa.js";
 import { createHash } from "node:crypto";
 import type { FactoryConfig } from "./config.js";
 import type { GitHubGateway, PlanningPrerequisites } from "./contracts.js";
@@ -31,7 +32,7 @@ export async function planningPrerequisites(
       !previous.finalAcceptance
     )
       throw new Error(
-        `Predecessor #${predecessor} lacks bound accepted integration evidence`,
+        `Predecessor #${predecessor} lacks bound accepted candidate evidence`,
       );
     const remote = await github.objective(predecessor);
     if (
@@ -64,6 +65,7 @@ export async function planningPrerequisites(
       objective: predecessor,
       bodyDigest: previous.objectiveBodyDigest,
       acceptance: {
+        candidateBasis: objectiveCandidate(previous)!.basis,
         sealedAt,
         commit,
         tree,

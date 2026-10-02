@@ -45,6 +45,23 @@ reused and amended projections; packaged setup/director guidance carries the
 same convention. No archived implementation, private target material, model call,
 new taxonomy, authority policy or state store supplied this correction.
 
+## Read-only pinned-baseline qualification (#459)
+
+The public source reproduction in #459 and the existing typed compiler, QA,
+atomic snapshot, exact Git validation and final-acceptance boundaries supply
+this correction. The accepted all-QA graph selects its pinned base through a
+controller-derived candidate basis; implementation graphs continue to require
+actual integration. No baseline is written into an integration field. Actual
+provider choices, canonical validation, admission, QA/final packets, sealing,
+closure, native predecessor acceptance and status share that selection.
+New public temporary-Git tests exercise the complete emitted schema and decoder
+through admitted execution and closure with real exact command and worktree
+receipts, zero coding workers or delivery, and source, stale-head and foreign
+identity refusals. Historical seals and failed runs are retained. No archived
+implementation, private source or prompts, extra lifecycle ledger, provider
+call or retry allowance supplied this implementation. Source tests do not
+establish published-artifact or live qualification acceptance.
+
 ## Cancellation after a vanished local worker (#437)
 
 The public reproduction in #437, existing adapter-owned durable handles and

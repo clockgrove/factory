@@ -1,3 +1,4 @@
+import { objectiveCandidate } from "./qa.js";
 import { installedControllerCapabilities } from "./controller-capabilities.js";
 import { assertAdmissionBinding } from "./admission.js";
 import { assertGraphRevisions } from "./graph-amendments.js";
@@ -474,15 +475,29 @@ export function workItemReviewObservations(
       : {}),
     objectiveBaseCommitSha: state.baseSha,
     currentIntegratedCommitSha: state.integratedSha ?? null,
+    candidateBasis: objectiveCandidate(state)?.basis ?? null,
+    selectedCandidateCommitSha: objectiveCandidate(state)?.commitSha ?? null,
     reviewedItemId: item.id,
     delivery,
     ...(item.kind === "qa" || item.kind === "aggregate"
       ? {
           validationPhase: {
-            kind: "post-integration-read-only",
+            kind:
+              objectiveCandidate(state)?.basis === "pinned-baseline"
+                ? "pinned-baseline-read-only"
+                : "post-integration-read-only",
+            candidateBasis: objectiveCandidate(state)?.basis,
+            selectedCandidateCommitSha: current.changeRef,
+            selectedCandidateTreeSha: current.treeSha,
             attemptId: current.attempt,
-            selectedIntegratedCommitSha: current.changeRef,
-            selectedIntegratedTreeSha: current.treeSha,
+            selectedIntegratedCommitSha:
+              objectiveCandidate(state)?.basis === "pinned-baseline"
+                ? null
+                : current.changeRef,
+            selectedIntegratedTreeSha:
+              objectiveCandidate(state)?.basis === "pinned-baseline"
+                ? null
+                : current.treeSha,
             validationTreeSha: current.validation?.treeSha,
             commands: current.validation?.commands,
             worker: false,
@@ -1213,9 +1228,21 @@ function workItemResultEvidence(args: {
       id: item.id,
       kind: item.kind,
       attemptId: current.attempt,
-      validationPhase: "post-integration-read-only",
-      selectedIntegratedCommitSha: current.changeRef,
-      selectedIntegratedTreeSha: current.treeSha,
+      validationPhase:
+        objectiveCandidate(state)?.basis === "pinned-baseline"
+          ? "pinned-baseline-read-only"
+          : "post-integration-read-only",
+      candidateBasis: objectiveCandidate(state)?.basis,
+      selectedCandidateCommitSha: current.changeRef,
+      selectedCandidateTreeSha: current.treeSha,
+      selectedIntegratedCommitSha:
+        objectiveCandidate(state)?.basis === "pinned-baseline"
+          ? null
+          : current.changeRef,
+      selectedIntegratedTreeSha:
+        objectiveCandidate(state)?.basis === "pinned-baseline"
+          ? null
+          : current.treeSha,
       status: current.status,
       resultCommitSha: current.changeRef,
       resultTreeSha: current.treeSha,
@@ -1627,7 +1654,7 @@ export function workItemReviewEvidence(args: {
     textBudget,
   });
   if (item.kind === "qa" || item.kind === "aggregate") {
-    if (current.changeRef !== state.integratedSha)
+    if (current.changeRef !== objectiveCandidate(state)?.commitSha)
       throw new Error(`QA ${item.id} selected integration is stale`);
     evidence.push(
       ...workItemResultEvidence({ state, item, checkout, textBudget }).evidence,
@@ -1646,7 +1673,13 @@ export function workItemReviewEvidence(args: {
       (work.status !== "done" &&
         !(delivery === "native-stack" && work.status === "published")) ||
       !work.changeRef ||
-      (work.status === "done" && !work.integratedSha) ||
+      (work.status === "done" &&
+        !work.integratedSha &&
+        !(
+          objectiveCandidate(state)?.basis === "pinned-baseline" &&
+          dependency.kind === "qa" &&
+          work.changeRef === state.baseSha
+        )) ||
       (work.status === "published" && (!work.pullRequest || work.integratedSha))
     )
       throw new Error(
@@ -1717,22 +1750,23 @@ export function workItemReviewEvidence(args: {
 export function objectiveReviewEvidence(args: {
   state: FactoryState;
   checkout: string;
-  integratedCommitSha: string;
-  integratedTreeSha: string;
+  candidateCommitSha: string;
+  candidateTreeSha: string;
 }): {
   observations: string;
   evidence: ResultReviewEvidenceSource[];
 } {
-  const { state, checkout, integratedCommitSha, integratedTreeSha } = args;
-  if (state.integratedSha !== integratedCommitSha)
+  const { state, checkout, candidateCommitSha, candidateTreeSha } = args;
+  const candidate = objectiveCandidate(state);
+  if (candidate?.commitSha !== candidateCommitSha)
     throw new Error(
-      "Final integrated commit differs from the atomic supervisor snapshot",
+      "Final candidate commit differs from the atomic supervisor snapshot",
     );
   assertCommitTree(
     checkout,
-    integratedCommitSha,
-    integratedTreeSha,
-    "Final integrated",
+    candidateCommitSha,
+    candidateTreeSha,
+    "Final candidate",
   );
   const evidence: ResultReviewEvidenceSource[] = [];
   const integrationRecords: {
@@ -1751,7 +1785,7 @@ export function objectiveReviewEvidence(args: {
       !current.baseSha ||
       !current.changeRef ||
       !current.treeSha ||
-      !current.integratedSha ||
+      (!current.integratedSha && candidate.basis !== "pinned-baseline") ||
       !current.validation
     )
       throw new Error(
@@ -1763,24 +1797,31 @@ export function objectiveReviewEvidence(args: {
       checkout,
       textBudget,
     });
-    assertAncestor(
-      checkout,
-      current.changeRef,
-      current.integratedSha,
-      `Work Item ${item.id} result integration`,
-    );
-    assertAncestor(
-      checkout,
-      current.integratedSha,
-      integratedCommitSha,
-      `Work Item ${item.id} integration`,
-    );
+    if (current.integratedSha) {
+      assertAncestor(
+        checkout,
+        current.changeRef,
+        current.integratedSha,
+        `Work Item ${item.id} result integration`,
+      );
+      assertAncestor(
+        checkout,
+        current.integratedSha,
+        candidateCommitSha,
+        `Work Item ${item.id} integration`,
+      );
+    } else if (
+      current.changeRef !== candidateCommitSha ||
+      current.baseSha !== candidateCommitSha
+    ) {
+      throw new Error(`QA ${item.id} does not qualify the pinned baseline`);
+    }
     if (item.kind !== "qa" && item.kind !== "aggregate")
       integrationRecords.push({
         item,
         resultBaseSha: current.baseSha,
         resultCommitSha: current.changeRef,
-        integratedCommitSha: current.integratedSha,
+        integratedCommitSha: current.integratedSha!,
       });
     evidence.push(...proof.evidence);
     return proof.record;
@@ -1788,8 +1829,11 @@ export function objectiveReviewEvidence(args: {
   assertIntegrationBindings(checkout, integrationRecords);
   return {
     observations: JSON.stringify({
-      integratedCommitSha,
-      integratedTreeSha,
+      candidateBasis: candidate.basis,
+      candidateCommitSha,
+      candidateTreeSha,
+      integratedCommitSha: state.integratedSha ?? null,
+      integratedTreeSha: state.integratedSha ? candidateTreeSha : null,
       work,
     }),
     evidence,

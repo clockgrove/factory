@@ -106,6 +106,22 @@ rewriting admitted snapshots. Final-review/controller coverage retains the
 original Objective obligations separately from parent acceptance. Aggregate
 validation and independent review still run after actual child integration.
 
+An explicitly authorized unchanged-baseline qualification may compile a nonempty
+all-QA graph with no coding worker, owned change, implementation dependency or
+PR. Its controller-derived candidate basis is `pinned-baseline`, bound to the
+accepted base and current authenticated default-branch head; an implementation
+graph instead uses `current-graph-integration` from actual delivery. Baseline
+qualification never writes an integration identity or fabricates native or
+WorkGraph dependencies. Original final-review/controller criteria owned by QA
+remain at final Objective acceptance; current QA acceptance uses its actual
+phase-available commands and semantic evidence. Source-required implementation
+cannot be omitted by selecting read-only nodes. QA and final evidence, sealing,
+closure, status and native predecessor acceptance retain the honest candidate
+basis. Exact default-head checks precede baseline QA and final validation and
+follow final independent review. Existing mixed implementation graphs retain
+actual integration dependencies and candidate freshness. [#459](https://github.com/clockgrove/factory/issues/459)
+owns this bounded correction and its exact installed qualification.
+
 Current, completed dependency and final review receive the harness discovery
 retained on the Work Item attempt, bound to that attempt and its current reviewed
 result commit/tree. The controller proves capture binding; proposal facts,

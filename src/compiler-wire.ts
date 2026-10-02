@@ -205,6 +205,8 @@ export function compilerWire(
       "integrated-semantic",
       "integrated-ci",
       "published-ci",
+      "final-review",
+      "final-controller",
     ],
     aggregate: [
       "result-command",

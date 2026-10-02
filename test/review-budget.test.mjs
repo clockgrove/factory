@@ -77,8 +77,8 @@ function fixture(run) {
       return objectiveReviewEvidence({
         state,
         checkout: target.checkout,
-        integratedCommitSha: head,
-        integratedTreeSha: git(target.checkout, "rev-parse", `${head}^{tree}`),
+        candidateCommitSha: head,
+        candidateTreeSha: git(target.checkout, "rev-parse", `${head}^{tree}`),
       }).evidence;
     };
     run({ append, final, state, checkout: target.checkout });

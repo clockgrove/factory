@@ -652,8 +652,8 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
       objectiveReviewEvidence({
         state: completed,
         checkout: target.checkout,
-        integratedCommitSha: completed.integratedSha,
-        integratedTreeSha: git(
+        candidateCommitSha: completed.integratedSha,
+        candidateTreeSha: git(
           target.checkout,
           "rev-parse",
           `${completed.integratedSha}^{tree}`,

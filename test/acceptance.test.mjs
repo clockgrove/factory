@@ -1608,9 +1608,19 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
         async reviewResult(request) {
           assert.deepEqual(
             request.evidence.filter(
-              (source) => source.path !== "Exact result tree inventory",
+              (source) =>
+                source.path !== "Exact result tree inventory" &&
+                source.path !== "Validator worktree observation",
             ),
             objectiveEvidence.evidence,
+          );
+          const worktree = request.evidence.find(
+            (source) => source.path === "Validator worktree observation",
+          );
+          assert.equal(JSON.parse(worktree.content).treeSha, finalTree);
+          assert.equal(
+            JSON.parse(worktree.content).postHydrationStatus.empty,
+            true,
           );
           return {
             packetId: request.reviewPacket.id,

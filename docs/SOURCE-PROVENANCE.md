@@ -891,3 +891,20 @@ later success, failure, stale/ambiguous receipts and no-requirement compatibilit
 No archived source, private target content, provider calls, target protection
 changes, new evidence store or retry framework was introduced. Source tests do
 not establish a later installed release or adopter acceptance.
+
+## Positive exact-tree worktree observation (#452)
+
+The existing public `validateTree` guards, ValidationEvidence, atomic snapshot
+validation and result/QA/final review paths supply this correction. Successful
+validation now emits a compact exact-tree observation only after its existing
+initial-cleanliness, post-command status equality, selected-LFS byte checks and
+subprocess ownership checks pass. The observation records the post-hydration
+baseline digest and whether it is empty, so an allowed nonempty hydrated baseline
+is never described as empty. The current reviewer packet receives that literal
+controller evidence; canonical snapshot and review boundaries reject malformed or
+wrong-tree facts, while historical absence stays absent. New public temporary-Git
+regressions cover real successful and dirty validation, applicable selected-LFS
+hydration and actual rendered Work Item, QA and final provider packets. No private
+source, archived runtime, additional model call, extra target command, controller
+manifest change, acceptance override or secondary state store was introduced.
+Source checks do not establish a later artifact or adopter qualification.

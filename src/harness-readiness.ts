@@ -1,7 +1,14 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, unlinkSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { redactDiagnosticDetail } from "./diagnostics.js";
@@ -10,6 +17,8 @@ import { sanitizedWorkerEnvironment } from "./process.js";
 export interface HarnessReadiness {
   status: "ready" | "unavailable";
   workspace: string;
+  outsideDirectory: string;
+  outsideHostWritable: boolean;
   workspaceWritable: boolean;
   outsideWriteRefused: boolean;
   detail: string;
@@ -19,7 +28,7 @@ export interface HarnessReadiness {
 export async function probeCodexReadiness(
   input: {
     workspace: string;
-    outsideDirectory: string;
+    outsideDirectory?: string;
     credentialDirectory: string;
     network: "host" | "off";
     allowedSecretNames?: string[];
@@ -27,21 +36,26 @@ export async function probeCodexReadiness(
   // Narrow process seam for credential-free protocol conformance tests.
   command?: string[],
 ): Promise<HarnessReadiness> {
-  if (![input.workspace, input.outsideDirectory].every(isAbsolute))
+  const selectedOutside = input.outsideDirectory ?? homedir();
+  if (![input.workspace, selectedOutside].every(isAbsolute))
     throw new Error(
       "Readiness requires absolute workspace and outside directory paths",
     );
   const workspace = realpathSync(input.workspace);
-  const outside = realpathSync(input.outsideDirectory);
+  const outside = realpathSync(selectedOutside);
   const location = relative(workspace, outside);
   if (!location.startsWith("../") && location !== "..")
-    throw new Error("Readiness refusal probe must be outside the workspace");
+    throw new Error(
+      "Readiness refusal probe must be outside the workspace; choose an owned existing directory with --outside-directory",
+    );
   const token = randomUUID();
   const insidePath = join(workspace, `.factory-readiness-${token}`);
   const outsidePath = join(outside, `.factory-readiness-${token}`);
   const result: HarnessReadiness = {
     status: "unavailable",
     workspace,
+    outsideDirectory: outside,
+    outsideHostWritable: false,
     workspaceWritable: false,
     outsideWriteRefused: false,
     detail: "Harness readiness has not been established",
@@ -54,6 +68,23 @@ export async function probeCodexReadiness(
     env[name] ? [env[name]!] : [],
   );
   const redact = (value: string) => redactDiagnosticDetail(value, secrets);
+  // A host permission denial cannot establish the worker sandbox boundary.
+  // Use the same exclusive sentinel path, then remove it before the sandbox
+  // attempt so an existing file cannot manufacture an apparent refusal.
+  try {
+    writeFileSync(outsidePath, token, { flag: "wx", mode: 0o600 });
+    if (readFileSync(outsidePath, "utf8") !== token)
+      throw new Error("Outside host sentinel bytes were not verified");
+    unlinkSync(outsidePath);
+    result.outsideHostWritable = true;
+  } catch (error) {
+    if (existsSync(outsidePath) && readFileSync(outsidePath, "utf8") === token)
+      unlinkSync(outsidePath);
+    result.detail = redact(
+      `Readiness requires a host-writable outside directory; choose an owned existing directory with --outside-directory: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return result;
+  }
   const bundled = () => {
     const require = createRequire(import.meta.url);
     return [
@@ -178,7 +209,7 @@ export async function probeCodexReadiness(
         : "unavailable";
     result.detail =
       result.status === "ready"
-        ? "Model-free worker-policy probe wrote in the named workspace and refused the named outside write. This does not prove model authentication, network availability, other workspaces or controller validation readiness."
+        ? "Model-free worker-policy probe wrote in the named workspace and refused the named outside write after a successful host write there. This does not prove model authentication, network availability, other workspaces or controller validation readiness."
         : "The named workspace write and outside-write refusal were not both proven under the configured worker policy.";
   } catch (error) {
     result.detail = redact(

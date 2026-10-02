@@ -37,7 +37,14 @@ async function fixture(fn) {
   writeFileSync(
     preload,
     `import fs from 'node:fs';
+import childProcess from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
 const root=process.env.FACTORY_SETUP_FIXTURE;
+if(fs.existsSync(root+'/readiness-mode')){
+ const spawn=childProcess.spawn;
+ childProcess.spawn=(file,args,options)=>args.includes('app-server')?spawn(process.execPath,[root+'/readiness-server.mjs',...args],options):spawn(file,args,options);
+ syncBuiltinESMExports();
+}
 globalThis.fetch=async (url, input={})=>{
  const address=String(url); const method=input.method??'GET';
  fs.appendFileSync(root+'/requests', JSON.stringify({address,method})+'\\n');
@@ -46,6 +53,22 @@ globalThis.fetch=async (url, input={})=>{
  const data=address.match(/\\/issues\\/1(?:$|\\?)/)?{number:1,title:'Closed approved issue',body:'fixture exact approved body',state:'closed',labels:[]}:[{number:1,state:'closed',labels:[]}];
  return new Response(JSON.stringify(data),{status:200,headers:{'content-type':'application/json',etag:'fixture-1'}});
 };`,
+  );
+  writeFileSync(
+    join(root, "readiness-server.mjs"),
+    `import fs from 'node:fs';import {createInterface} from 'node:readline';
+const root=${JSON.stringify(root)};
+const lines=createInterface({input:process.stdin});lines.on('line',line=>{
+ const message=JSON.parse(line);fs.appendFileSync(root+'/readiness-requests',JSON.stringify({message,args:process.argv.slice(2)})+'\\n');
+ if(!message.id)return;
+ if(message.method==='initialize'){console.log(JSON.stringify({id:message.id,result:{}}));return;}
+ if(message.method!=='command/exec')throw Error('Fixture forbids model requests');
+ const [,,,inside,outside,token]=message.params.command;
+ if(fs.existsSync(outside))throw Error('Host sentinel must be removed before sandbox probe');
+ fs.writeFileSync(inside,token);
+ const refused=fs.readFileSync(root+'/readiness-mode','utf8')==='refused';if(!refused)fs.writeFileSync(outside,token);
+ console.log(JSON.stringify({id:message.id,result:{exitCode:0,stdout:JSON.stringify({writable:true,refused}),stderr:''}}));
+});`,
   );
   writeFileSync(
     join(bin, "gh"),
@@ -305,6 +328,79 @@ test("actual guided setup checks admitted execution readiness and retains a clos
     assert.equal(status.document.authority.serviceConsent, false);
     assert.equal(status.document.serviceConsent.consent, true);
     assert.equal(status.document.observation.reasons[1], "Issue is closed");
+  }));
+
+test("actual setup and readiness CLI share the home default and preserve outside overrides before service effects", () =>
+  fixture(async ({ root, run, configPath, env, checkout }) => {
+    writeFileSync(
+      configPath,
+      JSON.stringify(factoryConfig(checkout, "example/setup")),
+      { mode: 0o600 },
+    );
+    const home = join(root, "owned-home");
+    const override = join(root, "outside-override");
+    mkdirSync(home);
+    mkdirSync(override);
+    env.HOME = home;
+    const authority = join(root, "authority.json");
+    writeFileSync(
+      authority,
+      JSON.stringify({
+        schemaVersion: 1,
+        actor: "fixture",
+        reason: "One approved fixture Objective",
+        executionConsent: true,
+        serviceConsent: false,
+        objectives: [1],
+        allowances: {
+          planningRevisions: 0,
+          implementationRepairs: 0,
+          resultRereviews: 0,
+        },
+        repairClasses: [],
+        resources: { maxConcurrency: 1 },
+        requiredEnvironment: [],
+      }),
+    );
+    writeFileSync(join(root, "readiness-mode"), "allowed");
+    for (const [args, selected] of [
+      [[], home],
+      [["--outside-directory", override], override],
+    ]) {
+      const result = run([
+        "setup",
+        ...consent,
+        "--authority",
+        authority,
+        ...args,
+      ]);
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.equal(result.document.blocked.stage, "execution-readiness");
+      const readiness = JSON.parse(result.document.blocked.detail);
+      assert.equal(readiness.outsideDirectory, realpathSync(selected));
+      assert.equal(readiness.outsideHostWritable, true);
+      assert.equal(readiness.outsideWriteRefused, false);
+      assert.equal(existsSync(join(root, "registered")), false);
+      assert.equal(existsSync(join(root, "starts")), false);
+    }
+    writeFileSync(join(root, "readiness-mode"), "refused");
+    const direct = run(["readiness"]);
+    assert.equal(direct.status, 0, direct.stdout + direct.stderr);
+    assert.equal(direct.document.outsideDirectory, realpathSync(home));
+    assert.equal(direct.document.outsideHostWritable, true);
+    assert.equal(direct.document.outsideWriteRefused, true);
+    const requests = readFileSync(join(root, "readiness-requests"), "utf8")
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.deepEqual(
+      requests.map(({ message }) => message.method),
+      Array(3).fill(["initialize", "initialized", "command/exec"]).flat(),
+    );
+    for (const { args } of requests) {
+      assert.ok(args.includes('sandbox_mode="workspace-write"'));
+      assert.ok(args.includes('approval_policy="never"'));
+    }
   }));
 
 test("guided ready requires the service owner's own GitHub observation and retains a blocked live watcher for correction", () =>

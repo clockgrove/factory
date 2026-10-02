@@ -55,6 +55,13 @@ new authority. Evidence describes the gap, scope, ownership, acceptance and
 prerequisites; the compiler still uses the original pinned source packet. Backlog
 discoveries remain proposed data and never enter current execution.
 
+Private discovery staging remains outside Git collection. A rejected collection
+retains its exact proposal bytes in the existing owned attempt worktree after
+worker cessation is verified; it supplies no accepted result or retry authority.
+Successful collection returns the proposal and removes the private staging file
+before ordinary worktree cleanup. A tracked or staged proposal cannot use this
+private-file exclusion. This bounded evidence-retention correction is #465.
+
 The existing atomic snapshot retains the admitted initial graph, immutable reviewed
 successors, one pending amendment and Objective-level allowance consumption. Each
 new attempt binds its accepted graph digest. A revision consumes one recorded

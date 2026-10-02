@@ -942,3 +942,16 @@ assertion correction; no product bytes changed. This later documentation records
 completed distribution acceptance without copying private source or altering
 published artifacts. Live public service qualification (#448) and adopter rollout
 (#445) remain separate gates.
+
+## Rejected discovery collection retention (#465)
+
+The public v0.1.68 local collector, existing private discovery/result contracts,
+staged candidate guard and owned local execution lifecycle supplied this bounded
+correction. Actual temporary-Git driver regressions reproduce loss at HEAD,
+asset, ownership, secret-scan and commit rejection without provider calls. The
+collector excludes the validated untracked proposal from Git before staging,
+retains its original bytes until successful collection, and the existing driver
+retains a settled failed proposal worktree at its existing handle-owned path.
+Tracked or staged proposals are rejected rather than silently excluded. No
+archived source, private adopter content, new state store, ledger, recovery
+operation, automatic retry or accepted failed result is introduced.

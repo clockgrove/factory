@@ -39,6 +39,43 @@ function fixture(items = [item("ordinary")]) {
     ),
   };
 }
+
+function versionedProjectionClient(f, beforeRequest = () => {}) {
+  return new GitHubClient(
+    new Octokit({
+      request: {
+        fetch: async (url, options) => {
+          assert.equal(new URL(url).origin, "https://api.github.com");
+          assert.equal(options.headers["x-github-api-version"], "2026-03-10");
+          const path = new URL(url).pathname.slice(1);
+          const body = options.body ? JSON.parse(options.body) : undefined;
+          beforeRequest(options.method, path, body);
+          let data;
+          try {
+            data =
+              options.method === "GET" &&
+              (/\/(labels|sub_issues|blocked_by)$/.test(path) ||
+                path.endsWith("/issues"))
+                ? await f.client.paginate(path)
+                : await f.client.request(options.method, path, body);
+          } catch (error) {
+            assert.ok(error instanceof GitHubRequestError);
+            return new Response(JSON.stringify({ message: "Rejected" }), {
+              status: error.status,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          for (const entry of Array.isArray(data) ? data : [data])
+            assert.ok(!Object.hasOwn(entry, "parent_issue_url"));
+          return new Response(JSON.stringify(data), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      },
+    }),
+  );
+}
 test("initial ordinary work and QA carry role labels and native Objective parents from a real Git baseline", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-projection-"));
   try {
@@ -417,7 +454,7 @@ test("reviewed amendment moves original Objective children under new aggregate w
   assert.equal(f.calls.filter((c) => c.method !== "GET").length, mutations);
 });
 
-test("interrupted reviewed move reconciles changed old parent and resumes without repeating known effects", async () => {
+test("gateway idempotence under fixture-confirmed hierarchy state does not repeat an already applied move", async () => {
   const { f, graph } = reparentFixture();
   const initial = await f.gateway.projectGraph(f.request);
   const request = {
@@ -446,6 +483,8 @@ test("interrupted reviewed move reconciles changed old parent and resumes withou
   };
   await assert.rejects(f.gateway.projectGraph(request), /interrupted response/);
   assert.deepEqual(f.hierarchy.get(1), [3, 4]);
+  // This fixture has established the completed server effect. It tests gateway
+  // idempotence, not controller permission to replay an unknown mutation.
   await f.gateway.projectGraph(request);
   assert.deepEqual(f.hierarchy.get(1), [6]);
   assert.deepEqual(f.hierarchy.get(6), [2, 3, 4, 5]);
@@ -527,39 +566,36 @@ test("complete preserved public 422 projection input replays through the real ve
       input.knownIssues[node.id],
       node.dependencies.map((id) => input.knownIssues[id]),
     );
-  const client = new GitHubClient(
-    new Octokit({
-      request: {
-        fetch: async (url, options) => {
-          assert.equal(options.headers["x-github-api-version"], "2026-03-10");
-          const path = new URL(url).pathname.slice(1);
-          let data;
-          try {
-            data =
-              options.method === "GET" &&
-              (/\/(labels|sub_issues|blocked_by)$/.test(path) ||
-                path.endsWith("/issues"))
-                ? await f.client.paginate(path)
-                : await f.client.request(
-                    options.method,
-                    path,
-                    options.body ? JSON.parse(options.body) : undefined,
-                  );
-          } catch (error) {
-            assert.ok(error instanceof GitHubRequestError);
-            return new Response(JSON.stringify({ message: "Not Found" }), {
-              status: error.status,
-              headers: { "content-type": "application/json" },
-            });
-          }
-          return new Response(JSON.stringify(data), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        },
-      },
-    }),
-  );
+  const client = versionedProjectionClient(f, (method, path, body) => {
+    if (method !== "POST" || !path.endsWith("/sub_issues")) return;
+    const prefix = `repos/${input.repository}`;
+    for (const parent of [1, 9])
+      assert.ok(
+        f.calls.some(
+          (call) =>
+            call.method === "GET" &&
+            call.route === `${prefix}/issues/${parent}/sub_issues`,
+        ),
+        "Every affected parent is observed before the first transfer",
+      );
+    const child = [...f.issues.values()].find(
+      (issue) => issue.id === body.sub_issue_id,
+    );
+    assert.ok(child);
+    assert.deepEqual(
+      f.calls.slice(-2).map(({ method, route }) => ({ method, route })),
+      [
+        { method: "GET", route: `${prefix}/issues/${child.number}` },
+        { method: "GET", route: `${prefix}/issues/${child.number}/parent` },
+      ],
+      "Fresh child and documented parent observations immediately precede attachment",
+    );
+    assert.equal(
+      body.replace_parent,
+      f.hierarchy.get(1).includes(child.number),
+      "Only an existing reviewed parent requires replacement",
+    );
+  });
   const gateway = new RealGitHubGateway(input.repository, undefined, client);
   const result = await gateway.projectGraph({ objectiveIssue: 1, ...input });
   assert.deepEqual(result.issueByItemId, input.knownIssues);
@@ -576,6 +612,13 @@ test("complete preserved public 422 projection input replays through the real ve
       .filter((c) => c.body?.replace_parent === true)
       .map((c) => c.body.sub_issue_id),
     [5683921369, 5683921426, 5683921495],
+  );
+  const mutations = f.calls.filter((call) => call.method !== "GET").length;
+  await gateway.projectGraph({ objectiveIssue: 1, ...input });
+  assert.equal(
+    f.calls.filter((call) => call.method !== "GET").length,
+    mutations,
+    "A fully acknowledged projection repeats observations without mutations",
   );
 });
 
@@ -605,6 +648,11 @@ for (const mode of [
       }
       return call(...args);
     };
+    f.gateway = new RealGitHubGateway(
+      "example/public-fixture",
+      undefined,
+      versionedProjectionClient(f),
+    );
     const before = f.calls.length;
     await assert.rejects(
       f.gateway.projectGraph({

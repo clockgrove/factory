@@ -24,6 +24,7 @@ type Issue = {
   pull_request?: unknown;
   labels?: (string | { name?: string })[];
   repository_url?: string;
+  parent_issue_url?: string | null;
 };
 type Pull = {
   number: number;
@@ -541,23 +542,37 @@ export class RealGitHubGateway implements GitHubGateway {
       }
     }
     {
-      const parentByChild = new Map(
-        request.graph.items.flatMap((parent) =>
-          (parent.children ?? []).map((id) => [id, parent.id] as const),
-        ),
+      const parentsFor = (graph: GraphProjection["graph"]) => {
+        const aggregateByChild = new Map(
+          graph.items.flatMap((parent) =>
+            (parent.children ?? []).map((id) => [id, parent.id] as const),
+          ),
+        );
+        return new Map(
+          graph.items.map((item) => [
+            issueByItemId[item.id]!,
+            aggregateByChild.has(item.id)
+              ? issueByItemId[aggregateByChild.get(item.id)!]!
+              : request.objectiveIssue,
+          ]),
+        );
+      };
+      const desiredParents = parentsFor(request.graph);
+      const previousParents = request.previousGraph
+        ? parentsFor(request.previousGraph)
+        : new Map<number, number>();
+      const childrenByParent = new Map<number, number[]>(
+        [
+          ...new Set([...desiredParents.values(), ...previousParents.values()]),
+        ].map((parent) => [parent, []]),
       );
-      const childrenByParent = new Map<number, number[]>();
-      for (const item of request.graph.items) {
-        const parentId = parentByChild.get(item.id);
-        const parent = parentId
-          ? issueByItemId[parentId]!
-          : request.objectiveIssue;
-        childrenByParent.set(parent, [
-          ...(childrenByParent.get(parent) ?? []),
-          issueByItemId[item.id]!,
-        ]);
-      }
-      for (const [parent, children] of childrenByParent) {
+      for (const [child, parent] of desiredParents)
+        childrenByParent.get(parent)!.push(child);
+
+      // Inspect the complete old/new hierarchy before changing any parent. A
+      // reviewed move may already have completed before an interrupted readback.
+      const observedParents = new Map<number, number>();
+      for (const parent of childrenByParent.keys()) {
         const existing = await this.client.paginate<Issue>(
           this.route(`issues/${parent}/sub_issues`),
         );
@@ -565,24 +580,46 @@ export class RealGitHubGateway implements GitHubGateway {
           authenticated(issue);
           if (issues.get(issue.number)?.id !== issue.id)
             throw new Error("Ambiguous remote hierarchy identity");
+          if (
+            observedParents.has(issue.number) ||
+            (desiredParents.get(issue.number) !== parent &&
+              previousParents.get(issue.number) !== parent)
+          )
+            throw new Error("Unreviewed remote hierarchy edit");
+          observedParents.set(issue.number, parent);
         }
+      }
+      for (const [child, parent] of desiredParents) {
+        const currentParent = observedParents.get(child);
+        if (currentParent === parent) continue;
+        const childIssue = authenticated(
+          await this.client.request<Issue>(
+            "GET",
+            this.route(`issues/${child}`),
+          ),
+          child,
+        );
+        if (childIssue.id !== issues.get(child)!.id)
+          throw new Error("Ambiguous remote hierarchy identity");
+        const replacing = currentParent !== undefined;
+        const expectedParentUrl = replacing
+          ? `${childIssue.repository_url}/issues/${currentParent}`
+          : undefined;
         if (
-          new Set(existing.map((issue) => issue.number)).size !==
-            existing.length ||
-          existing.some((issue) => !children.includes(issue.number))
+          (replacing &&
+            (previousParents.get(child) !== currentParent ||
+              childIssue.parent_issue_url !== expectedParentUrl)) ||
+          (!replacing && childIssue.parent_issue_url)
         )
-          throw new Error("Unreviewed remote hierarchy edit");
-        for (const child of children) {
-          if (existing.some((issue) => issue.number === child)) continue;
-          const childIssue = issues.get(child)!;
-          if (!Number.isSafeInteger(childIssue.id) || childIssue.id <= 0)
-            throw new Error("Sub-issue lacks authenticated database identity");
-          await this.client.request(
-            "POST",
-            this.route(`issues/${parent}/sub_issues`),
-            { sub_issue_id: childIssue.id, replace_parent: false },
-          );
-        }
+          throw new Error("Unreviewed remote hierarchy parent");
+        await this.client.request(
+          "POST",
+          this.route(`issues/${parent}/sub_issues`),
+          { sub_issue_id: childIssue.id, replace_parent: replacing },
+        );
+      }
+      // Read back every affected parent, including those that became empty.
+      for (const [parent, children] of childrenByParent) {
         const observed = await this.client.paginate<Issue>(
           this.route(`issues/${parent}/sub_issues`),
         );

@@ -8,6 +8,8 @@ import { objectiveComplete } from "./completion.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  accessSync,
+  constants,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -47,6 +49,15 @@ interface ServiceBinding {
   plan?: string;
   admission?: string;
 }
+const serviceEnvironment = [
+  "HOME",
+  "PATH",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "CODEX_HOME",
+  "CODEX_SQLITE_HOME",
+  "GH_CONFIG_DIR",
+] as const;
 const marker = "# Factory local supervision v1 ";
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export const serviceName = (repository: string) =>
@@ -76,7 +87,50 @@ function inspect(...args: string[]): string {
   const result = spawnSync("systemctl", ["--user", ...args], {
     encoding: "utf8",
   });
-  return result.stdout?.trim() || "unavailable";
+  if (result.error || result.status === null) return "unavailable";
+  const value = result.stdout?.trim();
+  const states: Record<string, string[]> = {
+    "is-system-running": [
+      "initializing",
+      "starting",
+      "running",
+      "degraded",
+      "maintenance",
+      "stopping",
+      "offline",
+      "unknown",
+    ],
+    "is-active": [
+      "active",
+      "reloading",
+      "inactive",
+      "failed",
+      "activating",
+      "deactivating",
+      "maintenance",
+      "refreshing",
+      "unknown",
+    ],
+    "is-enabled": [
+      "enabled",
+      "enabled-runtime",
+      "linked",
+      "linked-runtime",
+      "alias",
+      "masked",
+      "masked-runtime",
+      "static",
+      "indirect",
+      "disabled",
+      "generated",
+      "transient",
+      "not-found",
+      "bad",
+    ],
+  };
+  return value && (!states[args[0]!] || states[args[0]!]!.includes(value))
+    ? value
+    : "unavailable";
 }
 export function supervisorHost(): {
   supported: boolean;
@@ -125,15 +179,39 @@ function privateFile(path: string): void {
   )
     throw new Error(`Expected an owner-private file: ${path}`);
 }
-function binding(config: FactoryConfig): ServiceBinding {
-  const text = readFileSync(unitPath(config), "utf8");
+function decodeBinding(text: string): ServiceBinding {
   if (!text.startsWith(marker))
-    throw new Error("Refusing to modify a service not registered by Factory");
-  const value = JSON.parse(
-    text.split("\n")[0]!.slice(marker.length),
-  ) as ServiceBinding;
+    throw new Error("Refusing a service not registered by Factory");
+  const value = JSON.parse(text.split("\n")[0]!.slice(marker.length));
+  const path = (value: unknown) =>
+    typeof value === "string" && isAbsolute(value) && !/[\n\r\0]/.test(value);
   if (
+    !value ||
+    typeof value !== "object" ||
     value.version !== 1 ||
+    ![value.node, value.cli, value.config, value.stateHome].every(path) ||
+    !Number.isSafeInteger(value.objective) ||
+    (value.intake === true ? value.objective !== 0 : value.objective <= 0) ||
+    (value.intake !== undefined && typeof value.intake !== "boolean") ||
+    !value.environment ||
+    typeof value.environment !== "object" ||
+    Array.isArray(value.environment) ||
+    !Object.values(value.environment).every(
+      (value) => typeof value === "string",
+    ) ||
+    (value.plan !== undefined && !path(value.plan)) ||
+    (value.admission !== undefined && !path(value.admission)) ||
+    (value.credential !== undefined &&
+      (!value.credential ||
+        typeof value.credential.name !== "string" ||
+        !path(value.credential.file)))
+  )
+    throw new Error("Malformed Factory service binding");
+  return value as ServiceBinding;
+}
+function binding(config: FactoryConfig): ServiceBinding {
+  const value = decodeBinding(readFileSync(unitPath(config), "utf8"));
+  if (
     value.stateHome !==
       resolve(
         process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
@@ -142,6 +220,150 @@ function binding(config: FactoryConfig): ServiceBinding {
   )
     throw new Error("Service binding differs from this installation");
   return value;
+}
+interface BindingDiagnostic {
+  code: string;
+  message: string;
+  action: string;
+}
+interface BindingHealth {
+  status: "usable" | "unusable" | "unregistered";
+  limitation: string;
+  checks?: { node: boolean; cli: boolean; config: boolean };
+  diagnostics: BindingDiagnostic[];
+}
+function inspectBinding(
+  config: FactoryConfig,
+  registered: boolean,
+): {
+  binding?: ServiceBinding;
+  bindingHealth: BindingHealth;
+} {
+  const health: BindingHealth = {
+    status: registered ? "unusable" : "unregistered",
+    limitation:
+      "Local binding checks only; provider readiness, state compatibility and running ownership are not verified.",
+    diagnostics: [],
+  };
+  const report = (code: string, message: string, action: string) =>
+    health.diagnostics.push({ code, message, action });
+  if (!registered) {
+    report(
+      "unregistered",
+      "No local Factory service unit is registered.",
+      "Use supervisor install after explicit service consent; no work has been started.",
+    );
+    return { bindingHealth: health };
+  }
+  let text: string;
+  try {
+    text = readFileSync(unitPath(config), "utf8");
+  } catch {
+    report(
+      "unreadable-unit",
+      "The local service unit cannot be read.",
+      "Inspect the unit's availability and owner permissions; preserve continuation state.",
+    );
+    return { bindingHealth: health };
+  }
+  let value: ServiceBinding;
+  try {
+    value = decodeBinding(text);
+  } catch {
+    report(
+      "malformed-binding",
+      "The unit does not contain a valid Factory service binding.",
+      "Inspect the retained unit before any lifecycle operation. Do not delete continuation state or start this binding.",
+    );
+    return { bindingHealth: health };
+  }
+  const available = (path: string, mode: number) => {
+    try {
+      accessSync(path, mode);
+      return statSync(path).isFile();
+    } catch {
+      return false;
+    }
+  };
+  health.checks = {
+    node: available(value.node, constants.X_OK),
+    cli: available(value.cli, constants.R_OK),
+    config: available(value.config, constants.R_OK),
+  };
+  if (!health.checks.node)
+    report(
+      "unavailable-node",
+      "The bound Node executable is missing or cannot be executed.",
+      "Restore the bound runtime, then use supported supervisor lifecycle commands. Preserve continuation state.",
+    );
+  if (!health.checks.cli)
+    report(
+      "missing-cli",
+      "The bound installed CLI is missing or unreadable.",
+      "Use supervisor upgrade --cli ABSOLUTE_INSTALLED_CLI with a compatible durable installation; the supported upgrade drains the owner and validates state.",
+    );
+  if (!health.checks.config)
+    report(
+      "missing-config",
+      "The bound configuration is missing or unreadable.",
+      "Restore the exact authorized configuration before lifecycle operations; do not replace or reset continuation state.",
+    );
+  let matches =
+    value.stateHome ===
+    resolve(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"));
+  if (health.checks.config) {
+    try {
+      const bound = readConfig(value.config);
+      matches =
+        matches &&
+        bound.repository === config.repository &&
+        factoryConfigDigest(bound) === factoryConfigDigest(config);
+    } catch {
+      report(
+        "invalid-config",
+        "The bound configuration cannot be validated.",
+        "Restore the exact authorized configuration before lifecycle operations; no binding has been executed.",
+      );
+    }
+  }
+  if (!matches)
+    report(
+      "installation-mismatch",
+      "The bound state root or configuration differs from this installation.",
+      "Select the original configuration and state environment. Do not overwrite another installation's unit or evidence.",
+    );
+  health.status = health.diagnostics.length ? "unusable" : "usable";
+  // Unit markers are local input, not a trusted source of safe output fields.
+  const safeBinding: ServiceBinding = {
+    version: value.version,
+    node: value.node,
+    cli: value.cli,
+    config: value.config,
+    objective: value.objective,
+    stateHome: value.stateHome,
+    ...(value.intake === undefined ? {} : { intake: value.intake }),
+    ...(value.plan === undefined ? {} : { plan: value.plan }),
+    ...(value.admission === undefined ? {} : { admission: value.admission }),
+    ...(value.credential === undefined
+      ? {}
+      : {
+          credential: {
+            name: value.credential.name,
+            file: value.credential.file,
+          },
+        }),
+    environment: Object.fromEntries(
+      serviceEnvironment.flatMap((key) =>
+        value.environment[key] === undefined
+          ? []
+          : [[key, value.environment[key]]],
+      ),
+    ),
+  };
+  return {
+    ...(matches ? { binding: safeBinding } : {}),
+    bindingHealth: health,
+  };
 }
 export function renderService(value: ServiceBinding): string {
   const args = [
@@ -337,15 +559,17 @@ export async function supervise(
   }
   const path = unitPath(config),
     name = serviceName(config.repository);
-  if (action === "status")
+  if (action === "status") {
+    const registered = existsSync(path);
     return {
       ...supervisorHost(),
       unit: name,
-      registered: existsSync(path),
+      registered,
       active: inspect("is-active", name),
       enabled: inspect("is-enabled", name),
-      ...(existsSync(path) ? { binding: binding(config) } : {}),
+      ...inspectBinding(config, registered),
     };
+  }
   requireHost();
   if (action === "install") {
     if (
@@ -358,15 +582,7 @@ export async function supervise(
     for (const file of [input.plan, input.admission])
       if (file) privateFile(file);
     const environment: Record<string, string> = {};
-    for (const key of [
-      "HOME",
-      "PATH",
-      "XDG_CONFIG_HOME",
-      "XDG_DATA_HOME",
-      "CODEX_HOME",
-      "CODEX_SQLITE_HOME",
-      "GH_CONFIG_DIR",
-    ])
+    for (const key of serviceEnvironment)
       if (process.env[key]) environment[key] = process.env[key]!;
     const credentialName = requiredProviderCredential(config);
     if (credentialName && !input.credentialFile)

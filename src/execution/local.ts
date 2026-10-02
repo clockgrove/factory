@@ -1,6 +1,3 @@
-import { assertDurableValue } from "./checkpoint.js";
-import { SettledAttemptFailure } from "../work-repair.js";
-import { assertDiscovery } from "../graph-amendments.js";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -41,21 +38,26 @@ import type {
 } from "../contracts.js";
 import { AuthenticationRequiredError } from "../contracts.js";
 import { assertExecutionBinding } from "../execution-profiles.js";
+import { assertDiscovery } from "../graph-amendments.js";
 import {
   captureAssetSets,
   importSourceAssets,
   parseProducedAssetSets,
 } from "../media.js";
 import {
+  commandAsync,
   hasUnresolvedSubprocesses,
   linuxProcessIdentity,
   pinnedGit,
   pinnedGitAsync,
+  pinnedGitEnvironment,
   processGroupExists,
   sanitizedWorkerEnvironment,
   withProcessCancellation,
 } from "../process.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
+import { SettledAttemptFailure } from "../work-repair.js";
+import { assertDurableValue } from "./checkpoint.js";
 import { parseAuthenticationRequest } from "./harness-support.js";
 import { checkStagedCandidate } from "./staged-candidate.js";
 
@@ -373,7 +375,17 @@ export async function collectWorktreeResult(
       );
     discovery = JSON.parse(readFileSync(discoveryPath, "utf8"));
     assertDiscovery(discovery!);
-    rmSync(discoveryPath);
+    if (
+      pinnedGit(worktree, "ls-tree", "HEAD", "--", ".factory-discovery.json") ||
+      pinnedGit(
+        worktree,
+        "ls-files",
+        "--stage",
+        "--",
+        ".factory-discovery.json",
+      )
+    )
+      throw new Error("Discovery manifest must be untracked private staging");
   }
   if (pinnedGit(worktree, "rev-parse", "HEAD") !== request.baseSha) {
     throw new Error(
@@ -419,7 +431,22 @@ export async function collectWorktreeResult(
     worktree,
     assets,
   );
-  await pinnedGitAsync(worktree, "add", "-A");
+  if (discovery)
+    await commandAsync(
+      "git",
+      [
+        "-C",
+        worktree,
+        "add",
+        "-A",
+        "--",
+        ".",
+        ":(exclude,literal).factory-discovery.json",
+      ],
+      undefined,
+      { ...pinnedGitEnvironment(), GIT_LITERAL_PATHSPECS: "0" },
+    );
+  else await pinnedGitAsync(worktree, "add", "-A");
   if (assetDestinations.length)
     await pinnedGitAsync(worktree, "reset", "HEAD", "--", ...assetDestinations);
   const acceptedIgnoredLinks: string[] = [];
@@ -444,6 +471,7 @@ export async function collectWorktreeResult(
     );
   const commit = pinnedGit(worktree, "rev-parse", "HEAD");
   const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
+  if (discovery) rmSync(discoveryPath);
   return {
     changeRef: commit,
     treeSha,
@@ -745,18 +773,23 @@ export class LocalExecutionDriver implements ExecutionDriver {
       failureClassification =
         observed.state === "complete" ? "implementation" : "interruption";
       this.active.delete(handle.identity);
-      try {
-        await withProcessCancellation(undefined, () =>
-          pinnedGitAsync(
-            this.checkout,
-            "worktree",
-            "remove",
-            "--force",
-            active.worktree,
-          ),
-        );
-      } catch {
-        rmSync(active.worktree, { recursive: true, force: true });
+      if (
+        !failed ||
+        !existsSync(join(active.worktree, ".factory-discovery.json"))
+      ) {
+        try {
+          await withProcessCancellation(undefined, () =>
+            pinnedGitAsync(
+              this.checkout,
+              "worktree",
+              "remove",
+              "--force",
+              active.worktree,
+            ),
+          );
+        } catch {
+          rmSync(active.worktree, { recursive: true, force: true });
+        }
       }
     }
     if (failed) {

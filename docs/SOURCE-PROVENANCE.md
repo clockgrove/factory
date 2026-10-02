@@ -1025,3 +1025,16 @@ Gantt labels; a capacity refusal verifies diagnosis gains no reviewer retries.
 Previously emitted compile records remain unchanged and cannot be retrospectively
 classified by prompt parsing. No archived runtime, private source, provider call,
 new lifecycle store or historical-accounting rewrite was introduced.
+
+## Rejected discovery collection retention (#465)
+
+The public v0.1.68 local collector, existing private discovery/result contracts,
+staged candidate guard and owned local execution lifecycle supplied this bounded
+correction. Actual temporary-Git driver regressions reproduce loss at HEAD,
+asset, ownership, secret-scan and commit rejection without provider calls. The
+collector excludes the validated untracked proposal from Git before staging,
+retains its original bytes until successful collection, and the existing driver
+retains a settled failed proposal worktree at its existing handle-owned path.
+Tracked or staged proposals are rejected rather than silently excluded. No
+archived source, private adopter content, new state store, ledger, recovery
+operation, automatic retry or accepted failed result is introduced.

@@ -6,6 +6,19 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Private control socket directory lifetime (#468)
+
+A deterministic public temporary-directory reproduction demonstrated that the
+native listener retains its procfs pathname through close. Closing its bound
+directory descriptor early let another directory reuse that identity and receive
+the former listener's unlink. The existing private control transport now retains
+the descriptor through native close and cleans both resources after startup
+permission failure. Real long-path and failure regressions exercise original
+socket retirement and unrelated listener responsiveness. Setup fixture diagnostics
+retain both the original body error and cleanup error. This reproduction does not
+establish the cause of an earlier CI ENOENT. No retry loop, timeout increase,
+archived implementation, new state or private target supplied the correction.
+
 ## Settled dirty validation evidence and diagnosis identity (#438 / #461)
 
 The current exact-tree validation, candidate failure classification and existing

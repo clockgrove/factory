@@ -311,6 +311,32 @@ for (const [name, change] of [
   });
 }
 
+for (const tree of ["installed", "packageRoot"]) {
+  for (const [name, bit] of [
+    ["setuid", 0o4000],
+    ["setgid", 0o2000],
+    ["sticky", 0o1000],
+  ]) {
+    test(`release integrity refuses ${name} permission changes in ${tree}`, (t) => {
+      const baseline = integrityFixture(t);
+      verifyReleaseIntegrity(baseline);
+      const file = join(baseline[tree], "package.json");
+      chmodSync(file, 0o644 | bit);
+      assert.equal(
+        releaseTree(baseline[tree], tree === "installed").entries.find(
+          (entry) => entry.path === "package.json",
+        ).mode,
+        0o644 | bit,
+      );
+      assert.throws(
+        () => verifyReleaseIntegrity(baseline),
+        /release tree changed/,
+      );
+      assert(existsSync(file));
+    });
+  }
+}
+
 test("release archive tree refuses links before installed checks", (t) => {
   const baseline = integrityFixture(t);
   symlinkSync("package.json", join(baseline.packageRoot, "alias"));

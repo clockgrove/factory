@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 /** Transient wire identities; labels and repository text never define authority. */
 export interface ReviewEvidenceInput {
@@ -51,7 +52,14 @@ export function reviewPacket(
   criteria: string[],
   sources: ReviewEvidenceInput[],
 ): ReviewPacket {
-  const id = randomUUID();
+  return packetWithIdentity(randomUUID(), criteria, sources);
+}
+
+function packetWithIdentity(
+  id: string,
+  criteria: string[],
+  sources: ReviewEvidenceInput[],
+): ReviewPacket {
   const identity = (kind: string, index: number) =>
     createHash("sha256")
       .update(`${id}:${kind}:${index}`)
@@ -70,6 +78,28 @@ export function reviewPacket(
       complete: source.complete !== false,
     })),
   };
+}
+
+/** Check a retained request; never assign its identity to a different request. */
+export function assertReviewPacketBinding(
+  packet: ReviewPacket,
+  criteria: string[],
+  sources: ReviewEvidenceInput[],
+): void {
+  if (
+    !packet ||
+    typeof packet.id !== "string" ||
+    !packet.id ||
+    !isDeepStrictEqual(
+      JSON.parse(JSON.stringify(packet)),
+      JSON.parse(
+        JSON.stringify(packetWithIdentity(packet.id, criteria, sources)),
+      ),
+    )
+  )
+    throw new ReviewProtocolError(
+      "Retained review packet differs from its inputs",
+    );
 }
 
 /** Provider choices omit opaque identities; the packet envelope binds their meaning. */

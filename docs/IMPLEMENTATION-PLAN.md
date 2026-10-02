@@ -444,3 +444,19 @@ activation. Graph amendments share the same planning counter and path limit.
 Original admitted item IDs anchor work repair scopes; aggregate children inherit
 those scopes, and otherwise new work shares the Objective discovery scope. Neither
 new children, explicit retry commands, recompilation nor restart resets limits.
+
+A retained planning review pairs its original packet and complete canonical
+review-context/configuration digest with its completed response in that same
+preparation snapshot. The request is retained before provider submission. An
+unchanged known review uses the original packet and resolved evidence identities;
+pause/restart cannot create an identity-only protocol failure or correction charge.
+Completed clean reviews and prior rejected review envelopes remain retained.
+Actual rejected findings can still consume an evidenced, admitted correction and
+require a fresh independent review of the corrected graph (#464).
+
+Changed or damaged review context, a response lacking its original request binding,
+and unknown submitted outcomes never inherit acceptance or get rebound to new
+packet identities. They stop without a diagnostic call or allowance reset. A
+historical unbound preparation requires supported owned cessation/cancellation
+before a separately bounded corrected successor; preserve its rejected evidence
+and accounting rather than reconstruct a binding or migrate the record (#464).

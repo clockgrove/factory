@@ -1271,6 +1271,33 @@ for (const scope of ["work", "final"])
         /canonical exact-tree evidence/,
       );
     }
+    const hydrated = structuredClone(valid);
+    receipt(hydrated).worktreeObservation.postHydrationStatus = {
+      porcelainSha256: createHash("sha256")
+        .update(" M approved/image.png\n")
+        .digest("hex"),
+      empty: false,
+    };
+    assert.doesNotThrow(() =>
+      parseFactoryState(hydrated, repository, objective),
+    );
+    for (const digest of [
+      [
+        receipt(hydrated).worktreeObservation.postHydrationStatus
+          .porcelainSha256,
+      ],
+      1,
+      null,
+      {},
+    ]) {
+      const invalid = structuredClone(hydrated);
+      receipt(invalid).worktreeObservation.postHydrationStatus.porcelainSha256 =
+        digest;
+      assert.throws(
+        () => parseFactoryState(invalid, repository, objective),
+        /canonical exact-tree evidence/,
+      );
+    }
     delete receipt(valid).worktreeObservation;
     assert.equal(
       receipt(parseFactoryState(valid, repository, objective))

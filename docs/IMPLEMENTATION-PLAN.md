@@ -432,9 +432,14 @@ environment correction. `factory repair --objective N --proposal FILE` accepts
 `item`, its exact `treeSha`, and a `correction` containing `kind`, `failureDigest`,
 `actor`, `diagnosis` and `correction`. The status response supplies the failure
 identity. The operator restores only the already authorized prerequisite; changing
-installation policy requires new authority, not this command. Recovery revalidates
-the preserved commit/tree and runs full independent review, never implementation
-or manual acceptance. Evidence-only review recovery uses the same exact candidate
+installation policy requires new authority, not this command. Recovery retains the original failed candidate and its history. When native
+delivery replays the unchanged owned implementation onto an independently accepted
+integration base, result commit/tree identities may change. Verify the exact owned
+path inventory, modes and blob bytes, unchanged attempt/execution base and replay
+parent/result-base binding; revalidate the actual selected result tree and run full
+independent review before exact-head protected integration. Preserve both candidate
+identities rather than claiming whole-tree equality. Recovery never restarts
+implementation or records manual acceptance. Evidence-only review recovery uses the same exact candidate
 and carries the concrete rejected transport field into a fresh review packet.
 Missing/truncated evidence and semantic decisions require their actual correction;
 a repeated unchanged failure is not silently accepted.

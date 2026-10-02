@@ -56,9 +56,15 @@ new node identities and projects native issue hierarchy.
 - The required discovered QA and aggregate parent pass against the integrated
   current graph; discovery alone is not acceptance.
 - The named disposable test condition passes `factory-fixture-prerequisite` during
-  beta result validation before acceptance. A failed probe preserves the produced
-  candidate and requires a diagnosed, authorized environment correction;
-  it must never be skipped or replaced with a mock success.
+  beta result validation before acceptance. A failed probe preserves the original
+  candidate objects and failure history and requires a diagnosed, authorized
+  environment correction; it must never be skipped or replaced with a mock success.
+  Preserve beta's exact owned path inventory, file mode and blob bytes, attempt and
+  execution base. Native replay may change the result commit/tree only onto the
+  independently accepted alpha integration commit, with exact parent and result-base
+  proof. Both beta commands and full independent review must validate the actual
+  replayed tree before exact-head CI and protected integration; no new beta worker
+  or implementation attempt is permitted.
 - Independent review and the required `source-check` GitHub check pass on exact
   published heads before protected integration.
 

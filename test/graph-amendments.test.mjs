@@ -203,8 +203,25 @@ for (const delivery of ["regular", "native-stack"])
               JSON.parse(host.content),
               request.localExecutables,
             );
-            if (request.amendment)
+            if (request.amendment) {
               assert.equal(request.amendment.work.result.status, "done");
+              const parent = request.graph.items.find(
+                (entry) => entry.kind === "aggregate",
+              );
+              assert.match(
+                parent.acceptance[0],
+                /Implementation child results/,
+              );
+              assert.match(
+                parent.acceptance[0],
+                /read-only QA and aggregate children have accepted proof/,
+              );
+              assert.doesNotMatch(
+                parent.acceptance[0],
+                /Every explicit child.*its result is integrated/,
+                "The controller cannot require delivery from the read-only QA child",
+              );
+            }
             return {
               packetId: request.reviewPacket.id,
               findings: [],
@@ -286,6 +303,8 @@ for (const delivery of ["regular", "native-stack"])
         assert.equal(state.work.result.discoveryDisposition, "accepted");
         assert.equal(state.work.qa.status, "done");
         assert.equal(state.work.qa.pullRequest, undefined);
+        assert.equal(state.work.qa.execution, undefined);
+        assert.equal(state.work.qa.changeRef, state.integratedSha);
         assert.equal(
           readEvents(setup.eventsPath).filter((event) => event.type === "start")
             .length,
@@ -295,6 +314,8 @@ for (const delivery of ["regular", "native-stack"])
         assert.doesNotThrow(() => checkServiceState(config, 1));
         assert.equal(state.work.aggregate.status, "done");
         assert.equal(state.work.aggregate.pullRequest, undefined);
+        assert.equal(state.work.aggregate.execution, undefined);
+        assert.equal(state.work.aggregate.changeRef, state.work.qa.changeRef);
         const finalPacket = packets.find(
           (packet) => packet.reviewPhase === "objective-review",
         );

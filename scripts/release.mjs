@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmdirSync,
   rmSync,
@@ -102,6 +103,115 @@ function files(root) {
     const path = join(root, entry.name);
     return entry.isDirectory() ? files(path) : entry.isFile() ? [path] : [];
   });
+}
+
+/** Exact bytes and topology, with only npm's internal installed bin links. */
+export function releaseTree(root, installed = false) {
+  assert(
+    lstatSync(root).isDirectory(),
+    `Release root is not a directory: ${root}`,
+  );
+  const canonical = realpathSync(root);
+  const entries = [];
+  function visit(directory) {
+    for (const name of readdirSync(directory).sort()) {
+      const path = join(directory, name);
+      const local = relative(root, path);
+      const info = lstatSync(path);
+      if (info.isDirectory()) {
+        entries.push({ path: local, type: "directory" });
+        visit(path);
+      } else if (info.isFile()) {
+        entries.push({
+          path: local,
+          type: "file",
+          sha256: digest(readFileSync(path)),
+          mode: info.mode & 0o7777,
+        });
+      } else {
+        assert(
+          info.isSymbolicLink() &&
+            installed &&
+            dirname(local) === "node_modules/.bin",
+          `Unexpected release entry: ${local}`,
+        );
+        const target = readlinkSync(path);
+        const resolved = relative(canonical, realpathSync(path));
+        assert(
+          !isAbsolute(target) &&
+            resolved &&
+            resolved !== ".." &&
+            !resolved.startsWith(`..${sep}`) &&
+            !isAbsolute(resolved),
+          `Escaping release link: ${local}`,
+        );
+        assert(
+          statSync(path).isFile(),
+          `Release bin link is not a file: ${local}`,
+        );
+        entries.push({ path: local, type: "link", target, resolved });
+      }
+    }
+  }
+  visit(root);
+  for (const link of entries.filter((entry) => entry.type === "link"))
+    assert(
+      entries.some(
+        (entry) => entry.type === "file" && entry.path === link.resolved,
+      ),
+      `Release link target is not packaged: ${link.path}`,
+    );
+  return { root: canonical, entries };
+}
+
+/** Compare to retained original identities, never to two potentially changed trees. */
+export function verifyReleaseIntegrity(baseline) {
+  const {
+    archive,
+    archiveSha256,
+    checksum,
+    sums,
+    packageRoot,
+    unpacked,
+    installed,
+    installation,
+  } = baseline;
+  assert(lstatSync(archive).isFile(), "Release archive is not a regular file");
+  assert.equal(
+    digest(readFileSync(archive)),
+    archiveSha256,
+    "Release archive changed",
+  );
+  assert(
+    lstatSync(checksum).isFile(),
+    "Release checksum is not a regular file",
+  );
+  assert.equal(
+    readFileSync(checksum, "utf8"),
+    sums,
+    "Release checksum changed",
+  );
+  assert.deepEqual(
+    releaseTree(packageRoot),
+    unpacked,
+    "Unpacked release tree changed",
+  );
+  assert.deepEqual(
+    releaseTree(installed, true),
+    installation,
+    "Installed release tree changed",
+  );
+  // npm sets executable permissions on package bins; bytes and paths must still match.
+  const regularFiles = (tree) =>
+    tree.entries
+      .filter((entry) => entry.type === "file")
+      .map(({ path, sha256 }) => ({ path, sha256 }));
+  assert.deepEqual(
+    regularFiles(installation),
+    regularFiles(unpacked),
+    "Installed regular-file inventory differs from archive",
+  );
+  return regularFiles(unpacked).length;
 }
 
 /** Node child caches are release evidence; every other test remainder is a failure. */
@@ -331,6 +441,7 @@ export async function main(argv = process.argv.slice(2)) {
         "--no-same-owner",
       ]);
       const packageRoot = join(extracted, "package");
+      const unpacked = releaseTree(packageRoot);
       const prefix = join(output, "prefix");
       const cache = join(output, "empty-cache");
       mkdirSync(prefix);
@@ -346,15 +457,18 @@ export async function main(argv = process.argv.slice(2)) {
         archive,
       ]);
       const installed = join(prefix, "node_modules/@clockgrove/factory");
-      let compared = 0;
-      for (const path of files(packageRoot)) {
-        const rel = relative(packageRoot, path);
-        assert(
-          readFileSync(path).equals(readFileSync(join(installed, rel))),
-          `Installed byte mismatch: ${rel}`,
-        );
-        compared++;
-      }
+      const installation = releaseTree(installed, true);
+      const integrity = {
+        archive,
+        archiveSha256,
+        checksum: join(artifacts, "SHA256SUMS"),
+        sums,
+        packageRoot,
+        unpacked,
+        installed,
+        installation,
+      };
+      const compared = verifyReleaseIntegrity(integrity);
       const guidance = [
         "package.json",
         ".codex-plugin/plugin.json",
@@ -483,6 +597,7 @@ export async function main(argv = process.argv.slice(2)) {
       );
       const counts = testCounts(tested);
       retireTestScratch(testTmp, output);
+      verifyReleaseIntegrity(integrity);
       const preflights = [];
       for (const path of options.preflight) {
         const absolute = resolve(source, path);
@@ -496,11 +611,13 @@ export async function main(argv = process.argv.slice(2)) {
           digest(bytes),
           "Preflight source changed during execution",
         );
+        verifyReleaseIntegrity(integrity);
         preflights.push({
           name: relative(source, absolute),
           sha256: digest(bytes),
         });
       }
+      verifyReleaseIntegrity(integrity);
       assert.deepEqual(frozen(), identity);
       record = {
         ...identity,

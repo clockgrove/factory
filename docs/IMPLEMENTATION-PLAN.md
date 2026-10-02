@@ -109,13 +109,16 @@ responses, projected work and terminal states remain fenced. No automatic retry
 loop or second state root is introduced.
 
 New aggregate compiler choices omit free-form acceptance. The controller supplies
-one structural child acceptance/integration criterion; new semantic assertions
-belong to read-only QA children. Existing parent acceptance, or the acceptance of
-unstarted work decomposed into a parent, remains exactly as accepted through the
+one structural child acceptance criterion: implementation results are integrated
+into the selected candidate, while read-only QA and aggregate children supply
+accepted proof against that candidate without a worker or delivery. New semantic
+assertions belong to read-only QA children. Existing parent acceptance, or the
+acceptance of unstarted work decomposed into a parent, remains exactly as accepted through the
 trusted previous graph. Candidate validation enforces that derivation without
 rewriting admitted snapshots. Final-review/controller coverage retains the
 original Objective obligations separately from parent acceptance. Aggregate
-validation and independent review still run after actual child integration.
+validation and independent review run after implementation-child integration and
+read-only-child acceptance; a read-only child is never required to deliver a PR.
 
 An explicitly authorized unchanged-baseline qualification may compile a nonempty
 all-QA graph with no coding worker, owned change, implementation dependency or
@@ -304,6 +307,8 @@ Implement local content-addressed storage, safe source import, multi-file `Asset
 ### Slice 5 — Release candidate
 
 Pack the plugin, installed use skills, and CLI. MCP is not a first-release requirement; discuss a thin adapter only if later installed-agent use demonstrates a concrete need. Use the same immutable versioned public artifact for one self-contained disposable Objective that combines concurrent local work, native stack delivery, real harness-declared AssetSets, selection, LFS, and exact final-head validation. Assemble the target from public fixture inputs; the target repository may be private. Document and test the full install/use flow from a fresh target checkout using only public options and the documented CLI and skills. A private adopter must then run its own source-grounded W0-001/LFS pilot under its own repository authority, using the published public artifact and interface exactly as an unrelated third party would. No source-module import, direct state edit, internal hook, unpublished local path, or adopter-specific Factory code path is allowed in that pilot. Its private notes record evidence only; they are not hidden operating instructions. The private pilot is required trunk evidence; the public fixture and operator flow make the generic gate independently reproducible by any contributor in a repository they control, without private material.
+
+Contributor release integrity (#486) binds the original archive/checksum and complete extracted and installed inventories before checks. Installed regular paths and bytes must exactly match the archive; only npm's internal bin links are permitted, and executable permission normalization during installation is distinguished from later mutation. Original bytes, file modes, directory topology and literal/resolved links remain unchanged after tests, after each preflight and before acceptance/publication. Added, removed, mutated, escaping or broken entries fail closed even when both trees change identically. This is a source producer boundary, separate from independent public verification and live Objective qualification.
 
 ### Trunk review checkpoint
 

@@ -55,9 +55,9 @@ export function objectiveCandidate(
     : undefined;
 }
 
-/** New parents join accepted child results; semantic assertions belong to QA. */
+/** New parents join implementation delivery and read-only proof, not fictional QA delivery. */
 const aggregateJoinCriterion =
-  "Every explicit child Work Item has completed acceptance and its result is integrated into this aggregate's exact candidate.";
+  "Every explicit child Work Item has completed acceptance. Implementation child results are integrated into this aggregate's exact candidate; read-only QA and aggregate children have accepted proof against that candidate without a worker or delivery.";
 
 export function aggregateAcceptance(
   item: Pick<WorkItem, "id">,

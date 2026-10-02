@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Octokit } from "@octokit/core";
-import { GitHubClient } from "../dist/github-client.js";
+import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -182,8 +182,10 @@ test("projection refuses existing foreign parent and ambiguous authenticated hie
         labels: ["factory:work-item"],
       }),
     );
-    if (mode === "parent") f.hierarchy.set(99, [2]);
-    else f.hierarchy.set(1, mode === "duplicate" ? [2, 2] : [2]);
+    if (mode === "parent") {
+      f.issues.set(99, f.issue(99));
+      f.hierarchy.set(99, [2]);
+    } else f.hierarchy.set(1, mode === "duplicate" ? [2, 2] : [2]);
     if (mode === "database") {
       const paginate = f.client.paginate;
       f.client.paginate = async (route) => {
@@ -488,17 +490,14 @@ for (const mode of [
         return result.map((i) => ({ ...i, id: 900 }));
       return result;
     };
-    let reads = 0;
     f.client.request = async (...args) => {
       const result = await call(...args);
       if (
         mode === "changed-parent-before-move" &&
         args[0] === "GET" &&
-        args[1].endsWith("/issues/2") &&
-        ++reads === 2
+        args[1].endsWith("/issues/2/parent")
       )
-        result.parent_issue_url =
-          "https://api.github.com/repos/example/public-fixture/issues/99";
+        return f.issue(99);
       return result;
     };
     const before = f.calls.length;
@@ -509,7 +508,7 @@ for (const mode of [
         previousGraph: f.request.graph,
         knownIssues: initial.issueByItemId,
       }),
-      /hierarchy/,
+      /hierarchy|authenticated issue identity/,
     );
     assert.ok(f.calls.slice(before).every((c) => !c.body?.replace_parent));
   });
@@ -534,16 +533,25 @@ test("complete preserved public 422 projection input replays through the real ve
         fetch: async (url, options) => {
           assert.equal(options.headers["x-github-api-version"], "2026-03-10");
           const path = new URL(url).pathname.slice(1);
-          const data =
-            options.method === "GET" &&
-            (/\/(labels|sub_issues|blocked_by)$/.test(path) ||
-              path.endsWith("/issues"))
-              ? await f.client.paginate(path)
-              : await f.client.request(
-                  options.method,
-                  path,
-                  options.body ? JSON.parse(options.body) : undefined,
-                );
+          let data;
+          try {
+            data =
+              options.method === "GET" &&
+              (/\/(labels|sub_issues|blocked_by)$/.test(path) ||
+                path.endsWith("/issues"))
+                ? await f.client.paginate(path)
+                : await f.client.request(
+                    options.method,
+                    path,
+                    options.body ? JSON.parse(options.body) : undefined,
+                  );
+          } catch (error) {
+            assert.ok(error instanceof GitHubRequestError);
+            return new Response(JSON.stringify({ message: "Not Found" }), {
+              status: error.status,
+              headers: { "content-type": "application/json" },
+            });
+          }
           return new Response(JSON.stringify(data), {
             status: 200,
             headers: { "content-type": "application/json" },
@@ -570,3 +578,46 @@ test("complete preserved public 422 projection input replays through the real ve
     [5683921369, 5683921426, 5683921495],
   );
 });
+
+for (const mode of [
+  "forbidden",
+  "server-error",
+  "malformed",
+  "listed-parent-missing",
+  "wrong-parent-database",
+  "wrong-parent-repository",
+])
+  test(`documented parent observation ${mode} never grants a hierarchy mutation`, async () => {
+    const { f, graph } = reparentFixture();
+    const initial = await f.gateway.projectGraph(f.request);
+    const call = f.client.request;
+    f.client.request = async (...args) => {
+      if (args[0] === "GET" && args[1].endsWith("/issues/2/parent")) {
+        if (mode === "forbidden") throw new GitHubRequestError(403);
+        if (mode === "server-error") throw new GitHubRequestError(500);
+        if (mode === "listed-parent-missing") throw new GitHubRequestError(404);
+        if (mode === "malformed") return {};
+        const observed = await call(...args);
+        if (mode === "wrong-parent-database") observed.id = 999;
+        if (mode === "wrong-parent-repository")
+          observed.repository_url = "https://api.github.com/repos/foreign/repo";
+        return observed;
+      }
+      return call(...args);
+    };
+    const before = f.calls.length;
+    await assert.rejects(
+      f.gateway.projectGraph({
+        ...f.request,
+        graph,
+        previousGraph: f.request.graph,
+        knownIssues: initial.issueByItemId,
+      }),
+    );
+    assert.ok(
+      f.calls
+        .slice(before)
+        .every((c) => c.method !== "POST" || !c.route.endsWith("/sub_issues")),
+    );
+    assert.deepEqual(f.hierarchy.get(1), [2, 3, 4]);
+  });

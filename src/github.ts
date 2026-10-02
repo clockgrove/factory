@@ -13,7 +13,11 @@ import type {
   WorkItem,
 } from "./contracts.js";
 import { NativeStackDelivery } from "./delivery/native-stack.js";
-import { GitHubClient, sharedGitHubClient } from "./github-client.js";
+import {
+  GitHubClient,
+  GitHubRequestError,
+  sharedGitHubClient,
+} from "./github-client.js";
 
 type Issue = {
   id: number;
@@ -24,7 +28,6 @@ type Issue = {
   pull_request?: unknown;
   labels?: (string | { name?: string })[];
   repository_url?: string;
-  parent_issue_url?: string | null;
 };
 type Pull = {
   number: number;
@@ -602,14 +605,30 @@ export class RealGitHubGateway implements GitHubGateway {
         if (childIssue.id !== issues.get(child)!.id)
           throw new Error("Ambiguous remote hierarchy identity");
         const replacing = currentParent !== undefined;
-        const expectedParentUrl = replacing
-          ? `${childIssue.repository_url}/issues/${currentParent}`
-          : undefined;
+        let observedParent: Issue | undefined;
+        try {
+          observedParent = authenticated(
+            await this.client.request<Issue>(
+              "GET",
+              this.route(`issues/${child}/parent`),
+            ),
+          );
+        } catch (error) {
+          if (!(error instanceof GitHubRequestError && error.status === 404))
+            throw error;
+        }
+        const expectedParent =
+          currentParent === request.objectiveIssue
+            ? objective
+            : currentParent === undefined
+              ? undefined
+              : issues.get(currentParent);
         if (
           (replacing &&
             (previousParents.get(child) !== currentParent ||
-              childIssue.parent_issue_url !== expectedParentUrl)) ||
-          (!replacing && childIssue.parent_issue_url)
+              observedParent?.number !== currentParent ||
+              observedParent?.id !== expectedParent?.id)) ||
+          (!replacing && observedParent !== undefined)
         )
           throw new Error("Unreviewed remote hierarchy parent");
         await this.client.request(

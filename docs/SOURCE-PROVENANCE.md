@@ -42,17 +42,21 @@ historical evidence, without whole-gate acceptance.
 
 The existing gateway now derives previous and desired parent relations from those
 verified graph inputs, reads every affected hierarchy before mutation, and uses
-GitHub's documented replacement only for a fresh authenticated exact old-parent
-transition. All affected parent lists, including emptied parents, receive exact
+the documented child-parent GET before each pending attachment or move. A typed
+HTTP 404 permits only a new nonreplacing attachment after child authentication;
+other failures remain failures. Replacement requires the authenticated database
+identity of the exact reviewed old parent. Ordinary issue parent fields are not
+required or interpreted. All affected parent lists, including emptied parents, receive exact
 final readback. Current desired relations reconcile without repeated known
 mutations; foreign parents and unreviewed/ambiguous children remain refused.
 Dependencies, role labels and completed issue identities retain their contracts.
 
-The new public fixture preserves the complete original and pending reviewed graphs
+The existing HTTP boundary exposes only sanitized numeric rejection status;
+unknown submitted mutations retain their original uncertainty fence. The new public fixture preserves the complete original and pending reviewed graphs
 and relevant public issue bodies from the actual failed target. It supplies the
 real Octokit/GitHubClient `2026-03-10` projection regression with narrow single-parent
 HTTP semantics. Additional cases cover partial moves, unchanged replay, closed
-completed work, changed parent URLs, foreign parents, duplicate relationships and
+completed work, changed parent observations, foreign parents, duplicate relationships and
 wrong database identities. These are current public source and collaboration
 facts; no archived code, private adopter source, secrets or raw provider responses
 are copied. No snapshot repair, compatibility fallback, extra model call, journal,

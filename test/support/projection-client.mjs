@@ -1,7 +1,12 @@
+import { GitHubRequestError } from "../../dist/github-client.js";
 export const roleLabels = ["factory:objective", "factory:work-item"];
 export function projectionClient(repository, initial = []) {
   const issues = new Map(
-    initial.map((issue) => [issue.number, structuredClone(issue)]),
+    initial.map((issue) => {
+      const copy = structuredClone(issue);
+      delete copy.parent_issue_url;
+      return [issue.number, copy];
+    }),
   );
   const hierarchy = new Map();
   const deps = new Map();
@@ -37,13 +42,14 @@ export function projectionClient(repository, initial = []) {
       calls.push({ method, route, body: structuredClone(body) });
       const number = Number(route.match(/issues\/(\d+)/)?.[1]);
       if (method === "GET") {
-        const found = structuredClone(issues.get(number));
-        const parent = [...hierarchy].find(([, children]) =>
-          children.includes(number),
-        )?.[0];
-        if (found && parent !== undefined)
-          found.parent_issue_url = `https://api.github.com/repos/${repository}/issues/${parent}`;
-        return found;
+        if (route.endsWith("/parent")) {
+          const parent = [...hierarchy].find(([, children]) =>
+            children.includes(number),
+          )?.[0];
+          if (parent === undefined) throw new GitHubRequestError(404);
+          return structuredClone(issues.get(parent));
+        }
+        return structuredClone(issues.get(number));
       }
       if (route.endsWith("/labels") && !route.includes("/issues/")) {
         labels.push({ name: body.name, color: body.color, archived_at: null });

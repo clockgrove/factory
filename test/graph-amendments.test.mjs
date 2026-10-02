@@ -1364,7 +1364,21 @@ test("real gateway reconciles reviewed issue bodies, native hierarchy and depend
     async request(method, route, value) {
       calls.push({ method, route, value });
       const n = Number(route.match(/issues\/(\d+)/)?.[1]);
-      if (method === "GET") return structuredClone(issues.get(n));
+      if (method === "GET") {
+        if (route.endsWith("/parent")) {
+          const parent = [...hierarchy].find(([, children]) =>
+            children.includes(n),
+          )?.[0];
+          if (parent === undefined) {
+            const { GitHubRequestError } = await import(
+              "../dist/github-client.js"
+            );
+            throw new GitHubRequestError(404);
+          }
+          return structuredClone(issues.get(parent));
+        }
+        return structuredClone(issues.get(n));
+      }
       if (method === "PATCH") {
         Object.assign(issues.get(n), value);
         return structuredClone(issues.get(n));

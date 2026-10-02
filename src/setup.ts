@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExecutionAuthority } from "./admission.js";
+import { type ExecutionAuthority, sameAuthority } from "./admission.js";
 import { readConfig } from "./config.js";
 import { requestControl } from "./coordinator-control.js";
 import { redactDiagnosticDetail } from "./diagnostics.js";
@@ -250,10 +250,7 @@ export async function setupTarget(
         readFileSync(authorityPath, "utf8"),
       ) as ExecutionAuthority;
       // A repeated setup reuses an identical selection rather than refilling live work.
-      if (
-        !intake?.authority ||
-        JSON.stringify(intake.authority) !== JSON.stringify(authority)
-      ) {
+      if (!intake?.authority || !sameAuthority(intake.authority, authority)) {
         intake = await composeIntake(config).enqueueIntake(authority, {
           watch: true,
           ...(option(args, "poll-seconds")

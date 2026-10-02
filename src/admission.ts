@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { PlanningLocalExecutables } from "./contracts.js";
 import type { FactoryConfig } from "./config.js";
 import { factoryConfigDigest } from "./config.js";
@@ -167,6 +168,16 @@ export function validateAuthority(value: ExecutionAuthority): void {
     )
   )
     throw new Error("Admission requires explicit requiredEnvironment names");
+}
+
+/** Reuse compares validated authority values; stored admission digests remain exact. */
+export function sameAuthority(
+  left: ExecutionAuthority,
+  right: ExecutionAuthority,
+): boolean {
+  validateAuthority(left);
+  validateAuthority(right);
+  return isDeepStrictEqual(left, right);
 }
 
 /** Planning observes ceilings after checking actual authority; it does not complete admission. */

@@ -9,6 +9,7 @@ import {
   assertAdmissionBinding,
   checkAuthority,
   validateAuthority,
+  sameAuthority,
   preflightObjective,
 } from "../dist/admission.js";
 import { compilePlan, planReviewPacket } from "../dist/compiler.js";
@@ -42,6 +43,49 @@ function authority(overrides = {}) {
     ...overrides,
   };
 }
+
+test("authority reuse ignores object key order while preserving every value, ordered array and optional field", () => {
+  const original = authority({
+    objectives: [1, 2],
+    repairClasses: ["planning-output", "planning-evidence"],
+    requiredEnvironment: ["FIXTURE_FIRST", "FIXTURE_SECOND"],
+    repairPolicy: {
+      perPath: {
+        planningRevisions: 1,
+        implementationRepairs: 0,
+        resultRereviews: 0,
+      },
+    },
+  });
+  const reordered = Object.fromEntries(
+    Object.entries(structuredClone(original)).reverse(),
+  );
+  reordered.allowances = Object.fromEntries(
+    Object.entries(reordered.allowances).reverse(),
+  );
+  reordered.repairPolicy.perPath = Object.fromEntries(
+    Object.entries(reordered.repairPolicy.perPath).reverse(),
+  );
+  assert.notEqual(JSON.stringify(original), JSON.stringify(reordered));
+  assert.equal(sameAuthority(original, reordered), true);
+  for (const field of ["objectives", "repairClasses", "requiredEnvironment"]) {
+    const changed = structuredClone(reordered);
+    changed[field].reverse();
+    assert.equal(sameAuthority(original, changed), false, field);
+  }
+  const absentPolicy = structuredClone(original);
+  delete absentPolicy.repairPolicy;
+  assert.equal(sameAuthority(original, absentPolicy), false);
+  for (const invalid of [
+    { ...original, unknownPolicy: true },
+    { ...original, executionConsent: false },
+    { ...original, requiredEnvironment: [42] },
+    { ...original, resources: { maxConcurrency: 0 } },
+  ]) {
+    assert.throws(() => sameAuthority(original, invalid));
+    assert.throws(() => sameAuthority(invalid, invalid));
+  }
+});
 const body =
   "## Acceptance\n- `test -s result.txt`\n\n## Planning sources\n- `docs/source.md#Scope`\n\n## Final validation\n- `test -s result.txt`\n";
 async function fixture(name, callback, options = {}) {
@@ -189,6 +233,21 @@ test("admit and check are read-only and bind exact authority, plan, source, body
       );
       const policy = authority();
       const admission = await application.admitObjective(1, candidate, policy);
+      const reorderedAuthority = Object.fromEntries(
+        Object.entries(structuredClone(admission.authority)).reverse(),
+      );
+      assert.equal(
+        sameAuthority(admission.authority, reorderedAuthority),
+        true,
+      );
+      assert.throws(
+        () =>
+          assertAdmissionBinding({
+            ...admission,
+            authority: reorderedAuthority,
+          }),
+        /binding changed/,
+      );
       assert.equal(
         admission.prerequisitesDigest,
         createHash("sha256").update("null").digest("hex"),

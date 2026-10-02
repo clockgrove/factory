@@ -24,6 +24,7 @@ import {
   type ExecutionAuthority,
   preflightObjective,
   planningExecutionBounds,
+  sameAuthority,
   verifyAdmission,
 } from "./admission.js";
 import type { SourceSelector } from "./compiler.js";
@@ -230,7 +231,8 @@ export async function planObjective(
           preparation.baseSha !== baseSha ||
           preparation.objectiveBodyDigest !== bodyDigest ||
           preparation.configDigest !== factoryConfigDigest(config) ||
-          JSON.stringify(preparation.authority) !== JSON.stringify(authority))
+          !preparation.authority ||
+          !sameAuthority(preparation.authority, authority))
       )
         throw new Error(
           "Planning authority or immutable preparation identity changed",
@@ -358,9 +360,10 @@ function checkActiveAdmission(
     state &&
     (!state.admission || state.admission.digest !== admission.digest) &&
     !(
+      !state.admission &&
       state.schemaVersion === 5 &&
       state.authority &&
-      JSON.stringify(state.authority) === JSON.stringify(admission.authority) &&
+      sameAuthority(state.authority, admission.authority) &&
       state.plan?.graphDigest === admission.graphDigest
     )
   )
@@ -1206,8 +1209,7 @@ async function runObjectivePass(
     } else if (preparation && admission) {
       if (
         !preparation.authority ||
-        JSON.stringify(preparation.authority) !==
-          JSON.stringify(admission.authority) ||
+        !sameAuthority(preparation.authority, admission.authority) ||
         !preparation.plan
       )
         throw new Error("Preparation cannot gain unbound admission on restart");

@@ -23,6 +23,7 @@ import {
   checkAuthority,
   type ExecutionAuthority,
   preflightObjective,
+  planningExecutionBounds,
   verifyAdmission,
 } from "./admission.js";
 import type { SourceSelector } from "./compiler.js";
@@ -292,6 +293,7 @@ export async function planObjective(
         : undefined,
       prerequisites,
       localExecutables,
+      planningExecutionBounds(config, objective, authority),
     );
     if (preparation) {
       preparation.plan = result;
@@ -1191,6 +1193,8 @@ async function runObjectivePass(
         preparation.baseSha,
         config.checkout,
         installationConfigDigest,
+        false,
+        config.execution.concurrency,
       );
       preparation.plan = structuredClone(acceptedPlan);
       saveState(path, preparation);
@@ -1340,6 +1344,8 @@ async function runObjectivePass(
           state.baseSha,
           config.checkout,
           installationConfigDigest,
+          false,
+          config.execution.concurrency,
         );
         if (
           JSON.stringify(acceptedPlan.graph) !==
@@ -1452,6 +1458,8 @@ async function runObjectivePass(
           baseSha,
           config.checkout,
           installationConfigDigest,
+          false,
+          config.execution.concurrency,
         );
         if (admission)
           verifyAdmission(
@@ -1563,6 +1571,11 @@ async function runObjectivePass(
                   : undefined,
                 prerequisites,
                 localExecutables,
+                planningExecutionBounds(
+                  config,
+                  objective,
+                  preparation!.authority,
+                ),
               );
             }
             verifyPlanCandidate(
@@ -1572,6 +1585,8 @@ async function runObjectivePass(
               baseSha,
               config.checkout,
               installationConfigDigest,
+              false,
+              config.execution.concurrency,
             );
             return candidate;
           },

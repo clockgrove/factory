@@ -4,7 +4,7 @@ import {
   failureDigest,
   type RepairCorrection,
 } from "./repair-policy.js";
-import { preflightObjective } from "./admission.js";
+import { preflightObjective, planningExecutionBounds } from "./admission.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -735,6 +735,11 @@ export async function applyPendingAmendment(args: {
           },
           prerequisites,
           localExecutables,
+          planningExecutionBounds(
+            config,
+            state.objective,
+            state.admission!.authority,
+          ),
         );
       }
       pending.phase = "compiled";
@@ -757,6 +762,11 @@ export async function applyPendingAmendment(args: {
         choices,
         prerequisites,
         localExecutables,
+        planningExecutionBounds(
+          config,
+          state.objective,
+          state.admission!.authority,
+        ),
       );
       packet.amendment = {
         previousGraph: state.graph,

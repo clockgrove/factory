@@ -577,6 +577,7 @@ test("admit and check validate required CI shape and pinned authority even with 
           invalid.executionProfiles,
           invalid.prerequisites,
           invalid.localExecutables,
+          invalid.executionBounds,
         );
         invalid.packetDigest = hash(JSON.stringify(packet));
         invalid.reviewDigest = hash(
@@ -602,5 +603,94 @@ test("admit and check validate required CI shape and pinned authority even with 
       assert.deepEqual(readEvents(planningPath), calls);
     },
     { namedCi: true },
+  );
+});
+
+test("controller planning bounds are observed from configuration and checked authority and refuse rehashed authored claims", async () => {
+  await fixture(
+    "execution-bounds",
+    async ({
+      application,
+      config,
+      target,
+      objectiveBody,
+      github,
+      planningPath,
+    }) => {
+      const preview = await application.planObjective(1);
+      assert.deepEqual(preview.executionBounds, {
+        configuredConcurrency: config.execution.concurrency,
+        authorizedMaxConcurrency: null,
+      });
+      const previewAdmission = await application.admitObjective(
+        1,
+        preview,
+        authority(),
+      );
+      await application.checkAdmission(1, preview, previewAdmission);
+      const candidate = await application.planObjective(1, [], authority());
+      assert.deepEqual(candidate.executionBounds, {
+        configuredConcurrency: config.execution.concurrency,
+        authorizedMaxConcurrency: 2,
+      });
+      const admission = await application.admitObjective(
+        1,
+        candidate,
+        authority(),
+      );
+      const hash = (value) => createHash("sha256").update(value).digest("hex");
+      const before = github.state();
+      const calls = readEvents(planningPath);
+      for (const altered of [
+        {
+          configuredConcurrency: config.execution.concurrency + 1,
+          authorizedMaxConcurrency: 5,
+        },
+        {
+          configuredConcurrency: config.execution.concurrency,
+          authorizedMaxConcurrency: 3,
+        },
+      ]) {
+        const invalid = structuredClone(candidate);
+        invalid.executionBounds = altered;
+        const packet = planReviewPacket(
+          objectiveBody,
+          target.baseSha,
+          invalid.sources,
+          invalid.graph,
+          target.checkout,
+          invalid.executionProfiles,
+          invalid.prerequisites,
+          invalid.localExecutables,
+          altered,
+        );
+        invalid.packetDigest = hash(JSON.stringify(packet));
+        invalid.reviewDigest = hash(
+          JSON.stringify({
+            packetDigest: invalid.packetDigest,
+            revisions: invalid.review.revisions,
+            findings: invalid.review.findings,
+          }),
+        );
+        await assert.rejects(
+          application.admitObjective(1, invalid, authority()),
+          /execution bounds differ/,
+        );
+        await assert.rejects(
+          application.checkAdmission(1, invalid, admission),
+          /execution bounds differ/,
+        );
+      }
+      assert.deepEqual(github.state(), before);
+      assert.deepEqual(readEvents(planningPath), calls);
+      await assert.rejects(
+        application.planObjective(
+          1,
+          [],
+          authority({ resources: { maxConcurrency: 1 } }),
+        ),
+        /concurrency exceeds/,
+      );
+    },
   );
 });

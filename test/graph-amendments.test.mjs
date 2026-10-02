@@ -137,6 +137,11 @@ for (const delivery of ["regular", "native-stack"])
         const planningModel = {
           async generateStructured(request) {
             generated++;
+            assert.deepEqual(request.executionBounds, {
+              configuredConcurrency: config.execution.concurrency,
+              authorizedMaxConcurrency:
+                generated === 1 ? null : authority.resources.maxConcurrency,
+            });
             assert.equal(
               request.localExecutables.provenance,
               "controller-local-validation-executable-preflight",
@@ -174,6 +179,18 @@ for (const delivery of ["regular", "native-stack"])
           },
           async reviewGraph(request) {
             reviews++;
+            const bounds = request.reviewPacket.evidence.find(
+              (entry) => entry.path === "FACTORY_EXECUTION_BOUNDS",
+            );
+            assert.equal(bounds.origin, "controller");
+            assert.deepEqual(
+              JSON.parse(bounds.content),
+              request.executionBounds,
+            );
+            assert.equal(
+              request.executionBounds.authorizedMaxConcurrency,
+              request.amendment ? authority.resources.maxConcurrency : null,
+            );
             assert.equal(
               request.localExecutables.provenance,
               "controller-local-validation-executable-preflight",

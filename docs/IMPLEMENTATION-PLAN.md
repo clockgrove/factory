@@ -433,6 +433,32 @@ observe the same scoped facts at their own planning boundary. These observations
 use the existing preparation and review bindings, not a readiness ledger or
 native Objective predecessor receipt (#403).
 
+Planning compilation selects a source-required named CI check by semantic check
+name and an existing pinned source index. The controller supplies that complete
+source's canonical path, digest and literal text; models do not copy line bounds.
+Independent graph and amendment review assess the resulting canonical entry and
+its full pre-integration scope, rather than asking for discarded compiler choices.
+Complete transport is not semantic acceptance. Planning diagnosis receives the
+actual rejected canonical graph when one exists; failed wire decoding supplies
+null, never a reconstructed graph. Findings and diagnosis remain claims evaluated
+against supplied sources and controller facts (#458).
+
+Compilation, graph review, diagnosis and amendment review also receive typed
+configured concurrency and the checked finite authority maximum when supplied.
+Explicit previews record no authorized maximum. These controller ceilings prove
+neither available driver capacity, completed admission nor measured worker overlap;
+authored worker prose cannot establish them. Review packets supply the facts as
+controller evidence, candidates bind exactly what review saw, and activation and
+admission check current configuration and authority. Existing immutable source,
+configuration, authority and consumed-planning bindings remain intact (#458).
+
+Native compilation validates copied Work Item primitives and collections before
+proof, path, review or projection consumers. Identifiers, task text, string arrays
+and asset declarations retain actual types across ordinary, read-only and retained
+nodes. Malformed complete provider output is rejected without string coercion or
+an independent review submission; the emitted schema does not substitute for
+native validation (#460).
+
 Planning with a repair policy, or within authorized intake, first persists its
 body/base/configuration/authority binding. Initial compilation, diagnosis,
 corrective compilation and independent review have explicit invocation identities.

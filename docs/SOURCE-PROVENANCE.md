@@ -6,6 +6,29 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Canonical planning evidence and native field types (#458 / #460)
+
+The public v0.1.68 service qualification and complete preserved model responses
+exposed a compiler-choice versus canonical-review mismatch and absent controller
+concurrency facts. Existing pinned source selection, configuration, checked finite
+authority, preparation, review and candidate bindings supply the correction.
+Compilation selects a semantic check name and one existing source; deterministic
+hydration supplies complete canonical evidence. Review and diagnosis use actual
+canonical graphs and controller ceilings, retaining the distinction between those
+ceilings, eventual admission and runtime overlap. Existing preparation identities
+and consumed history are unchanged. Complete local historical-response replay and
+an unmodified cloned preparation exercise the remaining supported correction
+without provider calls or target writes; scripted review is no qualification.
+
+The related actual SDK replay demonstrated schema-invalid primitive and collection
+types reaching review. Narrow native Work Item field guards now precede proof,
+path, review and projection consumers. Whole-response regressions cover ordinary,
+read-only and retained contracts and refuse malformed types without coercion.
+No archived implementation, private adopter source, new dependency, model call,
+duplicate state or acceptance override supplied these changes. Independent source
+review and exact-head CI precede integration; installed/live qualification remains
+owned separately by #448.
+
 ## Cancellation after a vanished local worker (#437)
 
 The public reproduction in #437, existing adapter-owned durable handles and

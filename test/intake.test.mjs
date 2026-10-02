@@ -1143,6 +1143,90 @@ const watcherConsent = {
   reason: "Observe approved target without spending",
   consent: true,
 };
+
+test("idle intake status does not rescan or race an immediate same-owner refill", async () =>
+  fixture(async (f) => {
+    const { watchIntake } = await import("../dist/intake.js");
+    const firstScan = Promise.withResolvers();
+    const releaseFirst = Promise.withResolvers();
+    const secondScan = Promise.withResolvers();
+    const releaseSecond = Promise.withResolvers();
+    let scans = 0;
+    f.github.intakePage = async () => {
+      scans++;
+      if (scans === 1) {
+        firstScan.resolve();
+        await releaseFirst.promise;
+      } else {
+        secondScan.resolve();
+        await releaseSecond.promise;
+      }
+      return { status: 200, etag: '"deferred"', data: [] };
+    };
+    await watchIntake(f.config, watcherConsent, { pollSeconds: 60 });
+    const running = f.application.runIntake();
+    try {
+      await firstScan.promise;
+      releaseFirst.resolve();
+      // The socket response follows the released scan's microtasks. No polling
+      // or timed retries are needed to reach the first settled boundary.
+      const status = await intakeControl(f.config, "status");
+      assert.equal(status.observation.idleReason, "awaiting-approved-work");
+      assert.equal(status.activeObjective, null);
+      assert.equal(
+        scans,
+        1,
+        "status must preserve the 60-second poll schedule",
+      );
+      const before = readIntake(f.config);
+      const owner = readControllerOwner(
+        join(stateRoot(f.config.repository), "controller.lock"),
+      );
+      assert.deepEqual(await intakeControl(f.config, "status"), status);
+      assert.deepEqual(readIntake(f.config), before);
+      assert.equal(scans, 1);
+      const admitted = await f.application.enqueueIntake({
+        ...authority,
+        objectives: [1],
+      });
+      assert.deepEqual(admitted.authority.objectives, [1]);
+      assert.equal(
+        readControllerOwner(
+          join(stateRoot(f.config.repository), "controller.lock"),
+        ).token,
+        owner.token,
+      );
+      // A mutation still wakes observation. Its existing refill fence remains
+      // enforced while that second GitHub scan is deliberately outstanding.
+      await secondScan.promise;
+      await assert.rejects(
+        f.application.enqueueIntake({ ...authority, objectives: [1] }),
+        /settled refill boundary/,
+      );
+      await assert.rejects(
+        watchIntake(f.config, watcherConsent, { pollSeconds: 60 }),
+        /settled refill boundary/,
+      );
+      await intakeControl(f.config, "status");
+      assert.equal(scans, 2);
+      assert.deepEqual(f.plans, []);
+    } finally {
+      // Keep cleanup model-free even if an assertion fails on the old code.
+      f.issues.get(1).state = "closed";
+      releaseFirst.resolve();
+      releaseSecond.resolve();
+      await intakeControl(f.config, "drain");
+      await running;
+    }
+    assert.deepEqual(f.plans, []);
+    assert.equal(
+      readControllerOwner(
+        join(stateRoot(f.config.repository), "controller.lock"),
+      ),
+      undefined,
+    );
+  }));
+
 async function waitFor(check) {
   for (let attempt = 0; attempt < 300; attempt++) {
     if (await check()) return;

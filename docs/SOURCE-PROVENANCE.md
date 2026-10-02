@@ -23,11 +23,24 @@ correction.
 
 Complete ordered source reconstruction and the bounded model-free fixture
 preflight passed; the first restricted-host refusal remains preserved. The full
-actual installed compiler/reviewer/source-phase and refusal proof is pending,
-and #489 remains Open/In progress. Original semantic criteria, final checks and
-implementation/check baseline bytes remain intact. No provider call, new live
-attempt or release stage supplied the source preparation. Existing rejected
-proposals, actual per-release phases and exhausted allowances remain untouched.
+installed source/input gate was pending at the first handoff and subsequently
+[passed independent executed-result review](https://github.com/clockgrove/factory/issues/489#issuecomment-5959143930) on accepted v0.1.72. Receipt
+`bac76cf09f5ee0fc5f05b47d93277288a1079388b705ee65b38273dec58f6029`
+binds the 42-file capture/evidence map
+`ff01786e76c66cab0d4da0e37211bef53812d2dafb78cc99cce1ed4501627367`.
+Complete corrected source and worker transports, emitted schemas, native
+initial/guide/amendment hydration, retained leaves, final commands and source CI
+remain bound. The negative extra-probe candidate stays lexically authorized;
+its explicitly synthetic source-grounded reviewer refusal and native decoder
+controls do not become a generic phase guard or real model semantic acceptance.
+QA/final packet checks cover local validator rendering only. Full managed
+continuation and actual #448/private acceptance retain separate gates.
+
+Original semantic criteria, check/implementation bytes, old 22/49/57-file evidence
+and internal installation links remain intact. Owner/reader failures and external
+test corrections remain preserved. No provider call, real qualification lifecycle
+operation or release stage supplied this proof. Existing rejected proposals,
+actual per-release phases and exhausted allowances remain untouched.
 [BUILD-STATUS](BUILD-STATUS.md#qualification-fixture-source-clarification-489)
 records source completion separately from actual unaccepted service #448 and
 private #445. No published archive, tag, asset, version, prior receipt or

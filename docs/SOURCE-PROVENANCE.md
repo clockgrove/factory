@@ -33,8 +33,18 @@ matched public bytes, sealed acceptance, protected annotated tag and pinned plug
 [BUILD-STATUS](BUILD-STATUS.md#immutable-v0172-artifact-record) records their exact
 identities and failure provenance. Earlier artifacts, scripts and accounting
 remain preserved. Current-main prose changes no published bytes or archived
-guidance. Actual #444/#447/#448 and private #445 are unaccepted; the operator's
-scoped same-run artifact-transition decision for #448 is pending.
+guidance. Actual #444/#447/#448 and private #445 remain unaccepted. The later
+[operator-approved #448 continuation](https://github.com/clockgrove/factory/issues/448#issuecomment-5957494560) permits one supported same-Objective
+v0.1.71-to-v0.1.72 transition, preserving original failed/unaccepted one-artifact
+qualification, authentic phase attribution, rejected evidence and accounting.
+The [recorded event map](BUILD-STATUS.md#approved-448-current-runtime-qualification)
+binds exactly two v0.1.72 activations: a paused cold start with zero model dispatch
+and the sole controlled quiescent restart. Remaining phases require fresh
+validation, independent semantic review and complete mixed-phase acceptance.
+No runtime, package, worker permission, release byte or historical evidence changed
+for this decision. All other artifact gates remain unchanged; public acceptance
+still precedes separately owned private #445 on the same v0.1.72 artifact and
+proven scope.
 
 ## Verified v0.1.71 authority-reuse handoff (#479 / #480)
 

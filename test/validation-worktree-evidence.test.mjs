@@ -256,6 +256,37 @@ test("selected LFS hydration records an honest nonempty baseline and unchanged p
         sources: [],
       });
       assert.deepEqual(observation, evidence.worktreeObservation);
+      // A singleton array coerces to the same hex string under RegExp.test;
+      // the actual nonempty hydrated baseline must still refuse its shape.
+      let malformedReviewCalls = 0;
+      for (const digest of [
+        [evidence.worktreeObservation.postHydrationStatus.porcelainSha256],
+        1,
+        null,
+        {},
+      ]) {
+        const invalid = structuredClone(evidence);
+        invalid.worktreeObservation.postHydrationStatus.porcelainSha256 =
+          digest;
+        await assert.rejects(
+          reviewAcceptance({
+            model: {
+              async reviewResult() {
+                malformedReviewCalls++;
+                throw new Error("Should not submit malformed observation");
+              },
+            },
+            checkout: target.checkout,
+            baseSha: target.baseSha,
+            commit: target.baseSha,
+            evidence: invalid,
+            criteria: ["Commands preserve post-hydration status."],
+            sources: [],
+          }),
+          /canonical exact-tree evidence/,
+        );
+      }
+      assert.equal(malformedReviewCalls, 0);
       // Raw porcelain preserves staged vs unstaged columns and trailing bytes.
       assert.equal(
         evidence.worktreeObservation.postHydrationStatus.porcelainSha256,

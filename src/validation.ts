@@ -147,6 +147,7 @@ export function assertValidationWorktreeObservation(
     Object.keys(observation.postHydrationStatus).sort().join() !==
       "empty,porcelainSha256" ||
     typeof observation.postHydrationStatus.empty !== "boolean" ||
+    typeof observation.postHydrationStatus.porcelainSha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(observation.postHydrationStatus.porcelainSha256) ||
     observation.postHydrationStatus.empty !==
       (observation.postHydrationStatus.porcelainSha256 === emptyDigest) ||

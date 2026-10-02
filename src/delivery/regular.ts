@@ -13,6 +13,7 @@ export class RegularDelivery implements DeliveryStrategy {
   constructor(
     private checkout: string,
     private github: GitHubGateway,
+    private requiredChecks: string[] = [],
   ) {}
 
   async publish(request: DeliveryRequest): Promise<DeliveryResult> {
@@ -67,7 +68,7 @@ export class RegularDelivery implements DeliveryStrategy {
     beforeMerge?: (observation: DeliveryObservation) => void,
   ): Promise<MergeResult> {
     const observation = await this.observe(result);
-    assertDeliveryReady(observation);
+    assertDeliveryReady(observation, this.requiredChecks, result.headSha);
     beforeMerge?.(observation);
     return this.github.merge(
       {

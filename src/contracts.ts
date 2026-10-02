@@ -103,7 +103,15 @@ export interface AcceptanceCoverage extends CoverageObligation {
   };
 }
 
+export interface RequiredPreIntegrationCheck {
+  checkName: string;
+  /** Exact pinned source span authorizing this gate, hydrated by the controller. */
+  source: { path: string; digest: string; text: string };
+}
+
 export interface WorkGraph {
+  /** Source-required gates on every ordinary delivery head, separate from final proof. */
+  requiredPreIntegrationChecks?: RequiredPreIntegrationCheck[];
   /** Complete Objective-wide mapping from source obligations to executable proof. */
   coverage: AcceptanceCoverage[];
   objective: number;

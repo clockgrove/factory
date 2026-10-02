@@ -1,3 +1,4 @@
+import { assertDeliveryReady } from "./readiness.js";
 import { DeliveryReadinessPending } from "./readiness.js";
 import { executionContext } from "../execution/checkpoint.js";
 import {
@@ -106,6 +107,13 @@ export async function runRegularGraph(args: {
         if (args.cancelled()) throw new Error("Objective cancelled");
         await args.reconcile?.();
         const merged = await delivery.merge(published, (observation) => {
+          assertDeliveryReady(
+            observation,
+            (state.graph.requiredPreIntegrationChecks ?? []).map(
+              (check) => check.checkName,
+            ),
+            published.headSha,
+          );
           if (args.cancelled()) throw new Error("Objective cancelled");
           if (args.paused?.() && readinessWasWaiting)
             throw new DeliveryReadinessPending();

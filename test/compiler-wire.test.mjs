@@ -91,6 +91,7 @@ function setup(extra = {}) {
   const wire = compilerWire(input, compilerCitationChoices(input.sources));
   const value = {
     contextId: wire.data.contextId,
+    requiredPreIntegrationChecks: [],
     items: [item({ coverage: [entry()] })],
   };
   return {
@@ -553,6 +554,7 @@ test("actual initial and revision SDK schemas require real probes without invent
       );
       const value = {
         contextId: choices.contextId,
+        requiredPreIntegrationChecks: [],
         items: [item({ coverage: [entry()] })],
       };
       captured.push({ prompt, schema: options.outputSchema, value });
@@ -688,6 +690,7 @@ test("actual SDK boundary classifies completed invalid choices and compiled grap
       captured = { prompt, schema: options.outputSchema };
       const value = {
         contextId: choices.contextId,
+        requiredPreIntegrationChecks: [],
         items: [item({ coverage: [entry()] })],
       };
       if (mode === "invalid") value.items[0].coverage[0].obligationIndex = 999;
@@ -762,6 +765,7 @@ test("completed SDK decoder failure enters the admitted bounded planning repair 
         );
         response = {
           contextId: choices.contextId,
+          requiredPreIntegrationChecks: [],
           items: [item({ coverage: [entry()] })],
         };
         if (calls.compile === 1)
@@ -1159,6 +1163,7 @@ test("amendment references retain exact started definitions while moving source 
     delete qa[field];
   const value = {
     contextId: next.wire.data.contextId,
+    requiredPreIntegrationChecks: [],
     items: [{ kind: "retained", id: trusted.id, coverage: [] }, qa],
   };
   assert(next.conforms(value), JSON.stringify(next.conforms.errors));
@@ -1197,6 +1202,7 @@ test("amendment references retain exact started definitions while moving source 
   });
   const defaultValue = {
     contextId: defaultKind.wire.data.contextId,
+    requiredPreIntegrationChecks: [],
     items: [{ kind: "retained", id: trusted.id, coverage: [entry()] }],
   };
   assert(
@@ -1275,6 +1281,7 @@ test("compileObjective supplies trusted retained identity and keeps pending item
         if (calls === 1)
           return wire.decode({
             contextId: wire.data.contextId,
+            requiredPreIntegrationChecks: [],
             items: [
               item({ coverage: [entry()] }),
               item({
@@ -1310,6 +1317,7 @@ test("compileObjective supplies trusted retained identity and keeps pending item
         });
         return wire.decode({
           contextId: wire.data.contextId,
+          requiredPreIntegrationChecks: [],
           items: [
             { kind: "retained", id: "implementation", coverage: [] },
             pending,
@@ -1372,4 +1380,122 @@ test("compileObjective supplies trusted retained identity and keeps pending item
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("actual SDK binds source-required quality independently of compound final proof and rejects changed admission authority", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-source-ci-wire-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const target = createTarget(root);
+  const compound = body.replace(
+    "Source-defined result exists.",
+    "Source-defined result exists and Quality workflow job `quality` succeeds on every exact PR head before integration; workflow files remain intact.",
+  );
+  let captured;
+  let invalid = false;
+  t.mock.method(Codex.prototype, "startThread", () => ({
+    async runStreamed(prompt, options) {
+      const choices = JSON.parse(
+        prompt.split("\nCompiler choices (JSON data):\n")[1],
+      );
+      captured = { prompt, schema: options.outputSchema };
+      const value = {
+        contextId: choices.contextId,
+        requiredPreIntegrationChecks: [
+          {
+            checkName: "quality",
+            sourceIndex: 0,
+            firstLine: 3,
+            lastLine: invalid ? 999 : 3,
+          },
+        ],
+        items: [
+          item({
+            coverage: [entry()],
+            acceptance: ["Source-defined result exists"],
+          }),
+        ],
+      };
+      return {
+        events: (async function* () {
+          yield {
+            type: "item.completed",
+            item: {
+              id: "scripted",
+              type: "agent_message",
+              text: JSON.stringify(value),
+            },
+          };
+          yield { type: "turn.completed", usage: null };
+        })(),
+      };
+    },
+  }));
+  const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
+  const model = new CodexPlanningModel(target.checkout, selection, selection);
+  const graph = await compileObjective(
+    17,
+    compound,
+    target.baseSha,
+    target.checkout,
+    model,
+  );
+  assert(captured.schema.required.includes("requiredPreIntegrationChecks"));
+  assert.match(
+    captured.prompt,
+    /Final-review.*cannot enforce pre-merge ordering/,
+  );
+  assert.deepEqual(graph.coverage[0].proof, { kind: "final-review" });
+  assert.deepEqual(graph.requiredPreIntegrationChecks, [
+    {
+      checkName: "quality",
+      source: {
+        path: "OBJECTIVE",
+        digest: createHash("sha256").update(compound).digest("hex"),
+        text: compound.split("\n")[3],
+      },
+    },
+  ]);
+  assert.doesNotThrow(() =>
+    validateGraphSources(
+      graph,
+      [{ path: "OBJECTIVE", content: compound }],
+      target.checkout,
+      compound,
+      target.baseSha,
+    ),
+  );
+  const tampered = structuredClone(graph);
+  tampered.requiredPreIntegrationChecks[0].source.text =
+    "Reconstructed authority";
+  assert.throws(
+    () =>
+      validateGraphSources(
+        tampered,
+        [{ path: "OBJECTIVE", content: compound }],
+        target.checkout,
+        compound,
+        target.baseSha,
+      ),
+    /pinned source/,
+  );
+  const dropped = structuredClone(graph);
+  dropped.requiredPreIntegrationChecks = [];
+  assert.throws(
+    () =>
+      validateGraph(dropped, 17, target.baseSha, new Set(["OBJECTIVE"]), graph),
+    /preserve.*pre-integration/,
+  );
+  const duplicated = structuredClone(graph);
+  duplicated.requiredPreIntegrationChecks.push(
+    structuredClone(duplicated.requiredPreIntegrationChecks[0]),
+  );
+  assert.throws(
+    () => validateGraph(duplicated, 17, target.baseSha, new Set(["OBJECTIVE"])),
+    /unique name/,
+  );
+  invalid = true;
+  await assert.rejects(
+    compileObjective(17, compound, target.baseSha, target.checkout, model),
+    /lastLine/,
+  );
 });

@@ -874,3 +874,20 @@ failures; no runtime state, journal, automatic retry or release-stage parallelis
 was added. Real temporary Git/archive fixtures exercise evidence and target
 binding, mutation acknowledgements and partial failures without provider calls or
 live Objective/adopter qualification. Published artifacts remain unchanged.
+
+## Source-required pre-integration CI (#446)
+
+The current public compiler choice schema, pinned source packet, graph review,
+atomic graph and regular/native readiness paths supply this correction. The
+public issue's complete empty-check/CLEAN-readiness reproduction is replayed
+without credentials or real remote mutations. The model selects exact named
+requirements and source spans; deterministic code hydrates source identities,
+verifies literal pinned evidence and derives delivery gates from the accepted
+graph. Compound final coverage stays intact, while required checks separately
+block each exact published delivery head before merge intent. Admission source
+checks and graph amendments retain this policy; historical terminal results
+remain unchanged. Temporary Git application tests cover missing registration,
+later success, failure, stale/ambiguous receipts and no-requirement compatibility.
+No archived source, private target content, provider calls, target protection
+changes, new evidence store or retry framework was introduced. Source tests do
+not establish a later installed release or adopter acceptance.

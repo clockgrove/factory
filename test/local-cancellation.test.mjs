@@ -54,7 +54,10 @@ async function worker(descendant = false) {
       `
     const { spawn } = require("node:child_process");
     ${descendant ? 'const nested = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); nested.unref();' : ""}
-    process.on("message", () => process.exit(7));
+    process.on("message", message => {
+      if (message === "probe") process.send("alive");
+      else process.exit(7);
+    });
     process.send("ready");
   `,
     ],
@@ -169,7 +172,18 @@ for (const [name, create, subdirectory] of adapters) {
         );
         if (result) writeFileSync(h.data.resultPath, '{"state":"complete"}\n');
         await assert.rejects(create(root).cancel(h), /identity changed/);
-        assert.deepEqual(linuxProcessIdentity(h.data.pid), foreign.identity);
+        const observed = linuxProcessIdentity(h.data.pid);
+        assert.ok(observed);
+        assert.equal(observed.group, foreign.identity.group);
+        assert.equal(observed.startTime, foreign.identity.startTime);
+        assert.equal(foreign.child.exitCode, null);
+        assert.equal(foreign.child.signalCode, null);
+        const responsive = once(foreign.child, "message", {
+          signal: AbortSignal.timeout(5_000),
+        });
+        foreign.child.send("probe");
+        const [reply] = await responsive;
+        assert.equal(reply, "alive");
         assert.equal(processGroupExists(h.data.pid), true);
       } finally {
         await foreign.cleanup();

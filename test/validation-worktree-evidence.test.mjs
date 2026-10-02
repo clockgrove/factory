@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { CodexPlanningModel, objectiveCriteria } from "../dist/compiler.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { coverageObligations } from "../dist/qa.js";
+import { pinnedGit } from "../dist/process.js";
 import { validateTree, reviewAcceptance } from "../dist/validation.js";
 import {
   createTarget,
@@ -211,6 +212,30 @@ test("selected LFS hydration records an honest nonempty baseline and unchanged p
   const digest = hash(bytes);
   await fixture(
     async ({ root, target, validate }) => {
+      // This is a local validator fixture, not an LFS publication test. Publish
+      // the ordinary initial target first, then seed its exact pointer using
+      // the controller's pinned Git environment, excluding inherited filters.
+      writeFileSync(
+        join(target.checkout, ".gitattributes"),
+        "asset.bin filter=lfs diff=lfs merge=lfs -text\n",
+      );
+      writeFileSync(
+        join(target.checkout, "asset.bin"),
+        `version https://git-lfs.github.com/spec/v1\noid sha256:${digest}\nsize ${bytes.length}\n`,
+      );
+      pinnedGit(target.checkout, "add", ".gitattributes", "asset.bin");
+      pinnedGit(
+        target.checkout,
+        "-c",
+        "user.name=Factory Test",
+        "-c",
+        "user.email=factory-test@example.invalid",
+        "commit",
+        "-m",
+        "Seed local validator pointer",
+      );
+      target.baseSha = pinnedGit(target.checkout, "rev-parse", "HEAD");
+      target.treeSha = pinnedGit(target.checkout, "rev-parse", "HEAD^{tree}");
       const store = new LocalContentStore(join(root, "content"));
       await store.put(
         new ReadableStream({
@@ -293,7 +318,13 @@ test("selected LFS hydration records an honest nonempty baseline and unchanged p
         hash(" M asset.bin\n"),
       );
       await assert.rejects(
-        validate(["git add asset.bin"], selected, store),
+        validate(
+          [
+            "git -c filter.lfs.process= -c filter.lfs.clean=cat -c filter.lfs.required=false add asset.bin",
+          ],
+          selected,
+          store,
+        ),
         /modified the result tree/,
       );
       await assert.rejects(
@@ -301,10 +332,7 @@ test("selected LFS hydration records an honest nonempty baseline and unchanged p
         /could not restore selected LFS bytes/,
       );
     },
-    {
-      ".gitattributes": "asset.bin filter=lfs diff=lfs merge=lfs -text\n",
-      "asset.bin": `version https://git-lfs.github.com/spec/v1\noid sha256:${digest}\nsize ${bytes.length}\n`,
-    },
+    { "base.txt": "public baseline\n" },
   );
 });
 

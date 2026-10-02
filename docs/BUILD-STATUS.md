@@ -4,6 +4,68 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.72 artifact record
+
+[Release v0.1.72](https://github.com/clockgrove/factory/releases/tag/v0.1.72)
+was published on 2026-10-02 at 13:08:08 UTC from independently reviewed and
+integrated source `f1f68b7aa99a9a360699cfc456e0e0fc312cf7ff`, tree
+`81eb67fbe641322c2df557b5da05a73598588190`.
+[PR #484](https://github.com/clockgrove/factory/pull/484) integrates truthful
+aggregate child acceptance (#483) and complete release integrity (#486).
+[Independent final source/guidance review](https://github.com/clockgrove/factory/pull/484#issuecomment-5951983013),
+[required PR Quality CI](https://github.com/clockgrove/factory/actions/runs/37004806343)
+and [exact integrated-main Quality CI](https://github.com/clockgrove/factory/actions/runs/37005550388)
+passed before release execution.
+
+The `clockgrove-factory-0.1.72.tgz` archive is 153618195 bytes, SHA-256
+`265c7fc0a921514571c69a25771f0abc23a503f7c387ac143dc024dfb592ca45`,
+recorded in the [prepublication fingerprint](https://github.com/clockgrove/factory/issues/485#issuecomment-5953088162).
+The 96-byte `SHA256SUMS` asset has SHA-256
+`e8f2a8fbe9198bf2f0bf0d85c9a064503990b2387619ce600c7e168d30ada238`.
+Annotated tag `6bf9580f2f9a22020c3ac7f82ccd6fb9be723c6a` resolves to the source above.
+Active exact-tag ruleset `24365241` prohibits updates and deletion, with no bypass
+actors or ref exclusions.
+
+Offline installation matched all 6364 regular archive files and 95 bundled
+lock-addressed dependency roots. The producer retained original archive/checksum
+and complete extracted/installed inventories through tests, each preflight and
+before acceptance/publication, including full file modes, directory topology and
+internal bin links. All 514 tests across 50 whole committed installed files passed,
+with zero failures, cancellations, skips or todos. Seven reviewed model-free
+preflights passed: four unchanged retained scopes, the actual bundled-harness
+readiness successor with only its strict version literals changed, unchanged
+structural-authority mechanics, and complete preserved-response aggregate replay.
+The seventh preserved all 49 original evidence files, exact original responses
+and substantive review findings. It verified the new controller-derived criterion
+and canonical validation while retaining prior canonical items. The unsupported
+aggregate command and original semantic rejection remain unchanged and unaccepted;
+no new review, provider call, lifecycle operation or state write occurred.
+
+The [first unpublished producer attempt](https://github.com/clockgrove/factory/issues/485#issuecomment-5952355880)
+passed the same 514 installed tests and first six preflights, then stopped because
+the seventh helper incorrectly expected the producer's network-denial preload
+and locked-tool lookup context to be absent. The reviewed correction explicitly
+binds that known context and retains network denial, refusing arbitrary loaders.
+A separate restricted-host diagnostic stopped on empty nested-process output;
+[normal authorized execution passed](https://github.com/clockgrove/factory/issues/485#issuecomment-5952982641)
+without changing source, release bytes, validators or the preload. Both failures
+remain preserved. The bounded second producer passed all gates from the same
+reviewed source and identical archive bytes; no published artifact was replaced.
+
+Acceptance SHA-256 is
+`dd3780680c0528cca9f1c6deaf1c12c02c0c984741b6b3488c106ab0622ae808`.
+[Independent public verification and canonical release completion](https://github.com/clockgrove/factory/issues/485#issuecomment-5953125869)
+matched anonymous archive/checksum bytes, sealed acceptance, annotated source/tree,
+exact protection and the enabled public pinned plugin. Independent public receipt
+SHA-256 is `06792e14d72ef94da044ca03810700f97b8b7d016022a920247a77e589ae7171`.
+#485 and its Factory Project item are complete. Actual #444/#447 live outcomes
+remain with [public service qualification #448](https://github.com/clockgrove/factory/issues/448),
+followed by [private handoff #445](https://github.com/clockgrove/factory/issues/445).
+The operator decision about a scoped same-run artifact transition in #448 remains
+pending; this distribution does not approve it or accept the retained rejected
+amendment. Earlier artifacts, failed attempts and accounting retain their own
+scope. This later source record changes no published bytes, version or guidance.
+
 ## Immutable v0.1.71 artifact record
 
 [Release v0.1.71](https://github.com/clockgrove/factory/releases/tag/v0.1.71)

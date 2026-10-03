@@ -386,6 +386,44 @@ test("managed CLI readiness and fresh supervised starts use loaded private crede
     }
   }));
 
+test("a supervised service binds every configured provider credential, including planning", () =>
+  fixture(async ({ root, config, configPath, state }) => {
+    config.planning = {
+      kind: "claude-api",
+      credentialEnv: "FACTORY_PLANNING_TEST_KEY",
+      maxOutputTokens: 1000,
+      planner: { model: "claude-opus-5-5", reasoningEffort: "high" },
+      reviewer: { model: "claude-opus-5-5", reasoningEffort: "high" },
+    };
+    writeFileSync(configPath, JSON.stringify(config));
+    await registerIntake(config, state);
+    await assert.rejects(
+      supervise("install", configPath, { intake: true }),
+      /--credential-file FACTORY_PLANNING_TEST_KEY=ABSOLUTE_PRIVATE_FILE/,
+    );
+    const key = join(root, "planning-key");
+    writeFileSync(key, "planning-secret", { mode: 0o600 });
+    await supervise("install", configPath, {
+      intake: true,
+      credentialFiles: [`FACTORY_PLANNING_TEST_KEY=${key}`],
+    });
+    const unit = readFileSync(
+      join(
+        process.env.XDG_CONFIG_HOME,
+        "systemd/user",
+        serviceName(config.repository),
+      ),
+      "utf8",
+    );
+    assert.match(unit, /^LoadCredential="FACTORY_PLANNING_TEST_KEY:\//m);
+    assert.match(unit, /"--service-credential" "FACTORY_PLANNING_TEST_KEY"/);
+    assert.doesNotMatch(unit, /planning-secret/);
+    const status = await supervise("status", configPath);
+    assert.deepEqual(status.binding.credentials, [
+      { name: "FACTORY_PLANNING_TEST_KEY", file: key },
+    ]);
+  }));
+
 test("supervised install and upgrade retain the caller's nonsecret SQLite path", () =>
   fixture(async ({ root, config, configPath }) => {
     process.env.CODEX_HOME = join(root, "codex-home");
@@ -587,11 +625,9 @@ test("CLI status retains observations for malformed and mismatched bindings and 
     const value = JSON.parse(original.split("\n")[0].slice(prefix.length));
     value.environment.PRIVATE_TOKEN = "dummy-secret";
     value.privateSecret = "dummy-secret";
-    value.credential = {
-      name: "KEY",
-      file: "/private/credential",
-      extra: "dummy-secret",
-    };
+    value.credentials = [
+      { name: "KEY", file: "/private/credential", extra: "dummy-secret" },
+    ];
     writeFileSync(unitFile(config), renderService(value));
     status = await cliStatus(configPath);
     assert.equal(status.bindingHealth.status, "usable");
@@ -599,10 +635,9 @@ test("CLI status retains observations for malformed and mismatched bindings and 
       JSON.stringify(status),
       /dummy-secret|PRIVATE_TOKEN|privateSecret/,
     );
-    assert.deepEqual(status.binding.credential, {
-      name: "KEY",
-      file: "/private/credential",
-    });
+    assert.deepEqual(status.binding.credentials, [
+      { name: "KEY", file: "/private/credential" },
+    ]);
   }));
 
 test("CLI status preserves local health when the manager is unavailable and keeps invalid config details private", () =>

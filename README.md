@@ -16,7 +16,7 @@ Factory is an open-source plugin for Codex and Claude Code, built for developers
 ## Requirements
 
 - Linux x64, including a Linux environment under WSL2; Node.js 22 or later for the published bundled Codex path.
-- Git, authenticated GitHub CLI access to your target repository, and an authenticated Codex environment, because planning and review run on Codex under any host. The plugin requires Codex or Claude Code with plugin support.
+- Git, authenticated GitHub CLI access to your target repository, and authenticated access for your configured providers: a Codex environment for the default Codex planning and worker path, or an Anthropic API key when planning and review use the Claude API (see the [user guide](docs/USER-GUIDE.md#models-network-and-delivery)). The plugin requires Codex or Claude Code with plugin support.
 - Your target's build and validation tools; Git LFS for LFS-backed media work.
 - A trusted repository with committed instructions and requirements. Local workers run under your OS account; they are not a security boundary for hostile code.
 
@@ -97,7 +97,7 @@ Create an Objective issue **in the target repository** describing the outcome, a
 
 > Use Factory to plan Objective #123. Show me the plan and any unresolved questions before running it.
 
-Planning uses Codex compilation and review, but does not start workers or create Work Item issues. Inspect the scope, dependencies, and validation commands. Resolve any specific review question, then ask:
+Planning compiles and reviews with the configured planning provider, but does not start workers or create Work Item issues. Inspect the scope, dependencies, and validation commands. Resolve any specific review question, then ask:
 
 > Use Factory to run the accepted plan for Objective #123.
 

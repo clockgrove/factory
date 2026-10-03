@@ -1,5 +1,9 @@
 import { DaytonaSandboxProvider } from "./execution/daytona.js";
-import { resolveProviderCredential } from "./provider-credentials.js";
+import {
+  executionCredential,
+  planningCredential,
+  resolveProviderCredential,
+} from "./provider-credentials.js";
 import {
   ClaudeManagedExecutionDriver,
   validateClaudeManagedConfig,
@@ -20,6 +24,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { AutonomousAdmission, ExecutionAuthority } from "./admission.js";
 import type { SourceSelector } from "./compiler.js";
+import { ClaudePlanningModel } from "./claude-planning.js";
 import { CodexPlanningModel, type PlanCandidate } from "./compiler.js";
 import type { FactoryConfig, JsonValue, LocalHarnessConfig } from "./config.js";
 import {
@@ -260,6 +265,33 @@ export function composeIntake(
   };
 }
 
+/** The configured PlanningModel; provider credentials stay in controller memory. */
+function composePlanningModel(
+  config: FactoryConfig,
+  serviceCredentials?: string[],
+): PlanningModel {
+  if (config.planning.kind === "claude-api")
+    return new ClaudePlanningModel(
+      config.planning,
+      resolveProviderCredential(
+        config,
+        planningCredential(config)!,
+        serviceCredentials,
+      ),
+    );
+  return new CodexPlanningModel(
+    config.checkout,
+    config.planning.planner,
+    config.planning.reviewer,
+    undefined,
+    {
+      redactionValues: config.policy.allowedSecretNames.flatMap((name) =>
+        process.env[name] ? [process.env[name]!] : [],
+      ),
+    },
+  );
+}
+
 /** Planning composition never constructs a driver, content store, or run state. */
 export function composePlanning(
   config: FactoryConfig,
@@ -269,17 +301,7 @@ export function composePlanning(
 > {
   validateTarget(config.repository, config.checkout);
   const services = {
-    planningModel: new CodexPlanningModel(
-      config.checkout,
-      config.planning.planner,
-      config.planning.reviewer,
-      undefined,
-      {
-        redactionValues: config.policy.allowedSecretNames.flatMap((name) =>
-          process.env[name] ? [process.env[name]!] : [],
-        ),
-      },
-    ),
+    planningModel: composePlanningModel(config),
     github: new RealGitHubGateway(
       config.repository,
       new NativeStackDelivery(config.repository),
@@ -373,19 +395,7 @@ function composeLocal(
     },
   );
   return createApplication(config, {
-    planningModel:
-      options.planningModel ??
-      new CodexPlanningModel(
-        config.checkout,
-        config.planning.planner,
-        config.planning.reviewer,
-        undefined,
-        {
-          redactionValues: config.policy.allowedSecretNames.flatMap((name) =>
-            process.env[name] ? [process.env[name]!] : [],
-          ),
-        },
-      ),
+    planningModel: options.planningModel ?? composePlanningModel(config),
     driver,
     github,
     delivery: new RegularDelivery(config.checkout, github),
@@ -531,22 +541,34 @@ function builtInHarness(
 /** The single production composition point for the installed application. */
 export function compose(
   input: FactoryConfig,
-  serviceCredential?: string,
+  /** Credential names a supervised service loaded through systemd. */
+  serviceCredentials?: string[],
 ): FactoryApplication {
   const config = cloneAndValidateConfig(input);
+  const planningModel = composePlanningModel(config, serviceCredentials);
+  const executionKey = () =>
+    resolveProviderCredential(
+      config,
+      executionCredential(config)!,
+      serviceCredentials,
+    );
   if (
     config.execution.kind === "sandbox" &&
     config.execution.provider === "daytona"
   )
-    return composeWithSandbox(config, {
-      identity: "daytona",
-      provider: new DaytonaSandboxProvider(
-        config.execution.config,
-        resolveProviderCredential(config, serviceCredential)!,
-      ),
-    });
+    return composeWithSandbox(
+      config,
+      {
+        identity: "daytona",
+        provider: new DaytonaSandboxProvider(
+          config.execution.config,
+          executionKey(),
+        ),
+      },
+      { planningModel },
+    );
   if (config.execution.kind === "managed-agent") {
-    const apiKey = resolveProviderCredential(config, serviceCredential);
+    const apiKey = executionKey();
     const root = stateRoot(config.repository);
     const contentStore = new LocalContentStore(join(root, "content"));
     const github = new RealGitHubGateway(
@@ -571,11 +593,7 @@ export function compose(
             config: validateOpenAIManagedConfig(config.execution.config),
           });
     return createApplication(config, {
-      planningModel: new CodexPlanningModel(
-        config.checkout,
-        config.planning.planner,
-        config.planning.reviewer,
-      ),
+      planningModel,
       driver,
       github,
       delivery: new RegularDelivery(config.checkout, github),
@@ -587,12 +605,14 @@ export function compose(
     throw new Error(
       `Execution mode ${config.execution.kind} is not implemented`,
     );
-  if (config.execution.profiles) return composeWithLocalProfiles(config);
+  if (config.execution.profiles)
+    return composeWithLocalProfiles(config, {}, { planningModel });
   const harness = config.execution.harness!;
   return composeLocal(
     config,
     builtInHarness(config, harness),
     harness.kind === "codex-sdk" ? harness.kind : harness.adapter,
+    { planningModel },
   );
 }
 
@@ -616,13 +636,7 @@ export function composeWithSandbox(
       new NativeStackDelivery(config.repository),
     );
   return createApplication(config, {
-    planningModel:
-      options.planningModel ??
-      new CodexPlanningModel(
-        config.checkout,
-        config.planning.planner,
-        config.planning.reviewer,
-      ),
+    planningModel: options.planningModel ?? composePlanningModel(config),
     driver: new SandboxExecutionDriver({
       repository: config.repository,
       checkout: config.checkout,

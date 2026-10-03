@@ -129,6 +129,29 @@ export type ExecutionConfig =
       argv: string[];
     };
 
+export interface ClaudeModelSelection {
+  model: string;
+  reasoningEffort: HarnessReasoningEffort;
+}
+
+/** Planning and review run through one configured provider. */
+export type PlanningConfig =
+  | {
+      kind: "codex-sdk";
+      planner: CodexModelSelection;
+      reviewer: CodexModelSelection;
+    }
+  | {
+      /** Claude Messages API through the pinned @anthropic-ai/sdk. */
+      kind: "claude-api";
+      /** Controller environment variable holding the Anthropic API key. */
+      credentialEnv: string;
+      /** Messages API max_tokens for every planning and review call. */
+      maxOutputTokens: number;
+      planner: ClaudeModelSelection;
+      reviewer: ClaudeModelSelection;
+    };
+
 export type ResourcePhase = "coding" | "validation" | "review" | "delivery";
 
 export interface SchedulingConfig {
@@ -187,11 +210,7 @@ export interface FactoryConfig {
   schemaVersion: 1;
   repository: string;
   checkout: string;
-  planning: {
-    kind: "codex-sdk";
-    planner: CodexModelSelection;
-    reviewer: CodexModelSelection;
-  };
+  planning: PlanningConfig;
   execution: ExecutionConfig;
   delivery: { kind: "regular" | "native-stack" };
   contentStore: { kind: "local" };
@@ -308,6 +327,53 @@ function assertCodexModelSelection(
     !codexReasoningEfforts.has(value.reasoningEffort as CodexReasoningEffort)
   )
     throw new Error(`${name}.reasoningEffort is unsupported`);
+}
+
+function assertClaudeModelSelection(
+  value: unknown,
+  name: string,
+): asserts value is ClaudeModelSelection {
+  assertObject(value, name);
+  assertOnlyKeys(value, ["model", "reasoningEffort"], name);
+  if (typeof value.model !== "string" || value.model.trim().length === 0)
+    throw new Error(`${name}.model must be a non-empty string`);
+  if (
+    typeof value.reasoningEffort !== "string" ||
+    !harnessReasoningEfforts.has(
+      value.reasoningEffort as HarnessReasoningEffort,
+    )
+  )
+    throw new Error(`${name}.reasoningEffort is unsupported`);
+}
+
+function validatePlanning(
+  value: unknown,
+): asserts value is FactoryConfig["planning"] {
+  assertObject(value, "planning");
+  if (value.kind === "codex-sdk") {
+    assertCodexModelSelection(value.planner, "planning.planner");
+    assertCodexModelSelection(value.reviewer, "planning.reviewer");
+    return;
+  }
+  if (value.kind !== "claude-api")
+    throw new Error("Unsupported planning model");
+  assertOnlyKeys(
+    value,
+    ["kind", "credentialEnv", "maxOutputTokens", "planner", "reviewer"],
+    "planning",
+  );
+  if (
+    typeof value.credentialEnv !== "string" ||
+    !/^[A-Z_][A-Z0-9_]*$/.test(value.credentialEnv)
+  )
+    throw new Error("planning.credentialEnv must name an environment variable");
+  if (
+    !Number.isSafeInteger(value.maxOutputTokens) ||
+    (value.maxOutputTokens as number) <= 0
+  )
+    throw new Error("planning.maxOutputTokens must be a positive integer");
+  assertClaudeModelSelection(value.planner, "planning.planner");
+  assertClaudeModelSelection(value.reviewer, "planning.reviewer");
 }
 
 function assertUniqueStrings(value: unknown, name: string): string[] {
@@ -502,11 +568,7 @@ export function validateConfig(value: unknown): FactoryConfig {
     throw new Error("repository and checkout are required");
   }
   validateTarget(value.repository, value.checkout);
-  assertObject(value.planning, "planning");
-  if (value.planning.kind !== "codex-sdk")
-    throw new Error("Unsupported planning model");
-  assertCodexModelSelection(value.planning.planner, "planning.planner");
-  assertCodexModelSelection(value.planning.reviewer, "planning.reviewer");
+  validatePlanning(value.planning);
   if (value.scheduling !== undefined) {
     assertObject(value.scheduling, "scheduling");
     assertOnlyKeys(

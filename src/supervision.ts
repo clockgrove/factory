@@ -1,5 +1,6 @@
 import {
-  requiredProviderCredential,
+  credentialFileBindings,
+  requiredProviderCredentials,
   validateCredentialFile,
 } from "./provider-credentials.js";
 import type { ContinuationState } from "./state.js";
@@ -43,7 +44,8 @@ import { command, linuxProcessIdentity } from "./process.js";
 import { readContinuation, readControllerOwner } from "./state-store.js";
 
 interface ServiceBinding {
-  credential?: { name: string; file: string };
+  /** One systemd LoadCredential per credential the configured providers need. */
+  credentials?: { name: string; file: string }[];
   intake?: boolean;
   version: 1;
   node: string;
@@ -207,10 +209,18 @@ function decodeBinding(text: string): ServiceBinding {
     ) ||
     (value.plan !== undefined && !path(value.plan)) ||
     (value.admission !== undefined && !path(value.admission)) ||
-    (value.credential !== undefined &&
-      (!value.credential ||
-        typeof value.credential.name !== "string" ||
-        !path(value.credential.file)))
+    (value.credentials !== undefined &&
+      (!Array.isArray(value.credentials) ||
+        !value.credentials.length ||
+        !value.credentials.every(
+          (entry: { name?: unknown; file?: unknown }) =>
+            entry &&
+            typeof entry.name === "string" &&
+            /^[A-Z_][A-Z0-9_]*$/.test(entry.name) &&
+            path(entry.file),
+        ) ||
+        new Set(value.credentials.map((entry: { name: string }) => entry.name))
+          .size !== value.credentials.length))
   )
     throw new Error("Malformed Factory service binding");
   return value as ServiceBinding;
@@ -350,13 +360,13 @@ function inspectBinding(
     ...(value.intake === undefined ? {} : { intake: value.intake }),
     ...(value.plan === undefined ? {} : { plan: value.plan }),
     ...(value.admission === undefined ? {} : { admission: value.admission }),
-    ...(value.credential === undefined
+    ...(value.credentials === undefined
       ? {}
       : {
-          credential: {
-            name: value.credential.name,
-            file: value.credential.file,
-          },
+          credentials: value.credentials.map(({ name, file }) => ({
+            name,
+            file,
+          })),
         }),
     environment: Object.fromEntries(
       serviceEnvironment.flatMap((key) =>
@@ -379,9 +389,10 @@ export function renderService(value: ServiceBinding): string {
     "serve",
     "--config",
     value.config,
-    ...(value.credential
-      ? ["--service-credential", value.credential.name]
-      : []),
+    ...(value.credentials ?? []).flatMap(({ name }) => [
+      "--service-credential",
+      name,
+    ]),
     ...(value.intake ? ["--intake"] : ["--objective", String(value.objective)]),
     ...(value.plan ? ["--plan", value.plan] : []),
     ...(value.admission ? ["--admission", value.admission] : []),
@@ -392,7 +403,7 @@ export function renderService(value: ServiceBinding): string {
     .map(([key, val]) => `Environment=${quoted(`${key}=${val}`, false)}`)
     .join(
       "\n",
-    )}\n${value.credential ? `LoadCredential=${quoted(`${value.credential.name}:${value.credential.file}`, false)}\n` : ""}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nRestartPreventExitStatus=1\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
+    )}\n${(value.credentials ?? []).map(({ name, file }) => `LoadCredential=${quoted(`${name}:${file}`, false)}\n`).join("")}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nRestartPreventExitStatus=1\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
 }
 function checkServiceContinuationFields(state: ContinuationState): void {
   // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
@@ -564,7 +575,8 @@ export async function supervise(
     plan?: string;
     admission?: string;
     cli?: string;
-    credentialFile?: string;
+    /** `NAME=ABSOLUTE_PRIVATE_FILE` for each required provider credential. */
+    credentialFiles?: string[];
   } = {},
 ): Promise<unknown> {
   const config = readConfig(configPath);
@@ -600,24 +612,12 @@ export async function supervise(
     const environment: Record<string, string> = {};
     for (const key of serviceEnvironment)
       if (process.env[key]) environment[key] = process.env[key]!;
-    const credentialName = requiredProviderCredential(config);
-    if (credentialName && !input.credentialFile)
-      throw new Error(
-        `Managed supervision requires --credential-file for ${credentialName}`,
-      );
-    if (!credentialName && input.credentialFile)
-      throw new Error(
-        "Credential file is only supported for managed execution",
-      );
+    const credentials = credentialFileBindings(
+      config,
+      input.credentialFiles ?? [],
+    );
     const value: ServiceBinding = {
-      ...(credentialName
-        ? {
-            credential: {
-              name: credentialName,
-              file: validateCredentialFile(config, input.credentialFile!),
-            },
-          }
-        : {}),
+      ...(credentials.length ? { credentials } : {}),
       version: 1,
       node: realpathSync(process.execPath),
       cli: realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url))),
@@ -655,12 +655,17 @@ export async function supervise(
     return { registered: false };
   const value = binding(config);
   if (action === "start") {
-    const required = requiredProviderCredential(config);
-    if (required && value.credential?.name !== required)
+    const required = requiredProviderCredentials(config);
+    const bound = (value.credentials ?? []).map(({ name }) => name);
+    if (
+      required.length !== bound.length ||
+      required.some((name) => !bound.includes(name))
+    )
       throw new Error(
-        "Managed service credential binding is missing or differs; reinstall with --credential-file",
+        `Service credential bindings differ from the configured providers (${required.join(", ") || "none"}); reinstall with --credential-file NAME=ABSOLUTE_PRIVATE_FILE`,
       );
-    if (value.credential) validateCredentialFile(config, value.credential.file);
+    for (const { name, file } of value.credentials ?? [])
+      validateCredentialFile(config, name, file);
     validateArtifact(value);
     if (hasOwner(config) && inspect("is-active", name) !== "active")
       throw new Error(

@@ -172,6 +172,8 @@ export interface ModelInvocationObservation {
   /** Maximum provider attempts allowed for this logical model invocation. */
   providerMaxAttempts?: number;
   retryDelayMs?: number;
+  /** Pinned SDK identity of the provider adapter, for opt-in captures. */
+  adapter?: string;
   provider?: string;
   model?: string;
   reasoningEffort?: string;

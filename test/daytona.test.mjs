@@ -16,7 +16,7 @@ import {
   validateDaytonaConfig,
 } from "../dist/index.js";
 import {
-  requiredProviderCredential,
+  requiredProviderCredentials,
   resolveProviderCredential,
 } from "../dist/provider-credentials.js";
 const config = {
@@ -102,9 +102,15 @@ test("Daytona configuration and existing credential readiness are explicit", () 
     { ...config, factoryRoot: "relative" },
   ])
     assert.throws(() => validateDaytonaConfig(bad));
-  const c = { execution: { kind: "sandbox", provider: "daytona", config } };
-  assert.equal(requiredProviderCredential(c), config.apiKeyEnv);
-  assert.throws(() => resolveProviderCredential(c), /Set FACTORY_DAYTONA_TEST/);
+  const c = {
+    planning: { kind: "codex-sdk" },
+    execution: { kind: "sandbox", provider: "daytona", config },
+  };
+  assert.deepEqual(requiredProviderCredentials(c), [config.apiKeyEnv]);
+  assert.throws(
+    () => resolveProviderCredential(c, config.apiKeyEnv),
+    /Set FACTORY_DAYTONA_TEST/,
+  );
 });
 test("Daytona SDK mapping preserves identities, argv, stream transfers and confirmed deletion", async (t) => {
   const f = fixture(t),

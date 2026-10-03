@@ -8,7 +8,7 @@ Local Codex, Claude, GitHub Copilot, and registered harnesses run as the develop
 
 Assigned profile instructions are private additive worker inputs, bound by the accepted configuration digest. They do not confer authority. The optional Claude `factory-worktree-read@1` environment exposes one in-process regular-file reader with exact SDK provenance and runtime inventory checks; it grants no commands, credential configuration, new external destinations or installation. All model tools remain denied until this environment is ready. Each attempt owns its server, and opened file descriptors are checked against that attempt's worktree. Profile membership still authorizes access to the whole worktree and supplied inputs; owned paths are not a read-isolation boundary.
 
-The complete capability, lifecycle, authentication, SDK-extension, and local-process boundary is documented in [local agent harnesses](docs/AGENT-HARNESSES.md).
+The local-process boundary is documented in [agent harnesses](docs/AGENT-HARNESSES.md); remote providers in [remote execution](docs/REMOTE-EXECUTION.md).
 
 ## Report a vulnerability
 

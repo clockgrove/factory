@@ -49,7 +49,7 @@ The attestation verification is the independent check: it proves that the bytes 
 
 ## Live qualification
 
-Deterministic tests run on every release. A live qualification, a real Objective against a disposable public target with real models and GitHub delivery, is required for **minor** versions (`X.Y.0`) and optional for patches. Use the [installed public qualification scenario](PUBLIC-AUTONOMY.md), which is being simplified for v0.2.0 in [#448](https://github.com/clockgrove/factory/issues/448), and link the result from the release notes. A failed qualification is fixed in a patch release and rerun.
+Deterministic tests run on every release. A live qualification, a real Objective against a disposable public target with real models and GitHub delivery, is required for **minor** versions (`X.Y.0`) and optional for patches. Use the [autonomous target](../test/fixtures/autonomous-target/) with its [first](../test/fixtures/objectives/autonomy-first.md) and [second](../test/fixtures/objectives/autonomy-second.md) Objectives ([#448](https://github.com/clockgrove/factory/issues/448) simplifies this), and link the result from the release notes. A failed qualification is fixed in a patch release and rerun.
 
 ## Version numbers
 

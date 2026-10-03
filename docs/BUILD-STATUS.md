@@ -4,6 +4,33 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Atomic controller lease publication (#501 / #497)
+
+The first unpublished v0.1.73 installed gate stopped during initial watcher setup:
+703 of 704 tests passed, then `Controller lock is unreadable; operator direction
+required` prevented startup. No external preflight or publication occurred. The
+[failed gate checkpoint](https://github.com/clockgrove/factory/issues/497#issuecomment-5963742769)
+preserves its exact candidate and outputs; the original transient lock bytes were
+not captured.
+
+Independent deterministic reproduction exposed two shared filesystem windows:
+acquisition published an empty public lock before writing its owner identity, and
+reading treated a lease removed after a presence check as corruption. The shared
+state-store boundary now writes and syncs complete owner bytes to a restricted
+private inode, then publishes with an atomic no-clobber link under the existing
+acquisition guard. Direct observation treats actual `ENOENT` as absence; malformed,
+permission, foreign/live-owner and crashed-guard failures retain their refusals.
+No consumer retry, sleep, extra lock or alternate state root supplies the correction.
+
+[#501](https://github.com/clockgrove/factory/issues/501) records six deterministic
+boundary regressions and 45 passing tests across four whole files, with independent
+source review. Guarded exact-head integration, freshly bound installed inputs and
+one bounded corrected v0.1.73 gate remain required under #497. The failed first gate
+and published v0.1.72 stay unchanged. The legacy projection remains unresolved;
+[#499](https://github.com/clockgrove/factory/issues/499) separately proposes supported
+permanent unaccepted abandonment and awaits the explicit operator decision. This
+source correction grants no target activation or Objective acceptance.
+
 ## Read-only intake status correction (#444)
 
 The active v0.1.72 public qualification exposed a settled-refill race: reading
@@ -47,8 +74,10 @@ unresolved submitted call. Unrelated children, foreign parents, duplicate
 relations and changed issue identities remain refused. A complete preserved
 public graph/body replay exercises the actual versioned Octokit gateway against
 faithful native single-parent semantics; focused real-Git, transport and amendment
-regressions accompany the correction. Source review and guarded integration of
-this correction still precede release.
+regressions accompany the correction. [PR #496](https://github.com/clockgrove/factory/pull/496) integrated the reviewed
+source batch as `a3ae1cac1990efa06cc6841bead2e9d7abdeb80e`;
+[main Quality CI](https://github.com/clockgrove/factory/actions/runs/37080573594) passed.
+Installed distribution acceptance remains separate.
 
 A separate stopped-projection retirement candidate was prepared for
 [#498](https://github.com/clockgrove/factory/issues/498), but its source acceptance
@@ -75,17 +104,18 @@ Actual versioned producer/persistence tests pair completed rejection with respon
 loss for initial and amendment calls, including early role failures and intermediate
 multiple-dependency additions. The complete original stopped snapshot refuses native
 CLI cancellation with no API/provider call and unchanged bytes. These source checks
-remain subject to independent exact-source review and head CI.
+passed independent exact-source review and head CI in PR #496; the installed gate
+then stopped on the separate shared lock publication defect recorded above.
 
 The original v0.1.72 snapshot retains generic projecting history; no authentic
 completed-response receipt was found in retained transport/scenario evidence.
 It remains unresolved and unaccepted. Installing the new typed producer cannot
 retrospectively manufacture that fact. Any exact-run terminal disposition needs a
 separate explicit operator decision and supported implementation, preserving all
-old evidence and uncertainty. The next action is final source/guidance review,
-exact-head CI and the sequential release gate in
-[#497](https://github.com/clockgrove/factory/issues/497). Integration, release and live
-execution remain held during review. A subsequent full public qualification retains
+old evidence and uncertainty. The next action is guarded integration of the shared lock correction and the
+bounded corrected sequential release gate in
+[#497](https://github.com/clockgrove/factory/issues/497). Live execution remains
+fenced pending supported historical disposition and corrected artifact acceptance. A subsequent full public qualification retains
 original substantive acceptance and bounded resources; predecessor histories and
 published v0.1.72 bytes remain intact. #444/#447/#448 stay open for actual public
 acceptance; private #445 remains gated on that full proof and the corrected artifact.

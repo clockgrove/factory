@@ -65,7 +65,7 @@ for (const phase of ["clone", "lfs-pull"])
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
-const isClone = args[0] === "clone";
+const isClone = args[0] === "clone" || args[2] === "clone";
 const isPull = args[2] === "lfs" && args[3] === "pull";
 if ((${JSON.stringify(phase)} === "clone" && isClone) ||
     (${JSON.stringify(phase)} === "lfs-pull" && isPull)) {

@@ -1316,3 +1316,34 @@ for (const scope of ["work", "final"])
       undefined,
     );
   });
+
+test("state ingress validates repeat records and structured waits", () => {
+  const record = {
+    since: "2026-10-03T00:00:00.000Z",
+    count: 1,
+    last: {
+      kind: "transient",
+      detail: "GitHub HTTP 502",
+      outcomeUnknown: false,
+    },
+    nextAt: "2026-10-03T00:00:01.000Z",
+  };
+  const valid = state();
+  valid.repeats = {
+    "objective/close": record,
+    "asset/attempt-1/publish": record,
+  };
+  valid.wait = { kind: "outage", detail: "GitHub is unavailable" };
+  valid.work.asset.wait = { kind: "dependency", detail: "Waiting for one" };
+  parseFactoryState(valid, repository, objective);
+  for (const corrupt of [
+    (bad) => (bad.repeats = { "missing/attempt-1/publish": record }),
+    (bad) => (bad.repeats = { "objective/close": { ...record, last: {} } }),
+    (bad) => (bad.wait = { kind: "sleeping", detail: "x" }),
+    (bad) => (bad.work.asset.wait = "Interrupted, repeating"),
+  ]) {
+    const bad = structuredClone(valid);
+    corrupt(bad);
+    assert.throws(() => parseFactoryState(bad, repository, objective));
+  }
+});

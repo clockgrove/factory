@@ -1,3 +1,5 @@
+import { attachFault, classifyFaults, transient } from "../fault.js";
+import { executionFault } from "./fault.js";
 import { randomUUID } from "node:crypto";
 import {
   cpSync,
@@ -29,6 +31,7 @@ import { collectWorktreeResult } from "./local.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import {
   ClaudeManagedClient,
+  claudeGone,
   claudeTransient,
   validateClaudeManagedConfig,
   type ClaudeManagedConfig,
@@ -145,6 +148,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       args.client ??
       new ClaudeManagedClient(args.config, { apiKey: args.apiKey });
   }
+  @classifyFaults(executionFault)
   async availableSlots(): Promise<"unknown"> {
     return "unknown";
   }
@@ -192,12 +196,25 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     context: ExecutionContext,
   ): Promise<never> {
     const data = this.active(handle);
-    return failAttempt(error, {
-      transient: claudeTransient,
-      expired: this.expired(data),
-      cancelled: context.cancelled(),
-      settle: (detail) => this.settle(handle, context, detail, false),
-    });
+    try {
+      return await failAttempt(error, {
+        transient: claudeTransient,
+        expired: this.expired(data),
+        cancelled: context.cancelled(),
+        settle: (detail) => this.settle(handle, context, detail, false),
+      });
+    } catch (settled) {
+      // The provider no longer has the session: its worker is gone with it.
+      throw claudeGone(error) && settled instanceof SettledAttemptFailure
+        ? attachFault(
+            settled,
+            transient(
+              `Claude managed session is gone: ${settled.message}`,
+              true,
+            ),
+          )
+        : settled;
+    }
   }
   /** Records why the attempt ended, stops its session and reports a settled failure. */
   private async settle(
@@ -345,6 +362,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     });
     data.evidenceDigest = claudeByteDigest(bytes);
   }
+  @classifyFaults(executionFault)
   async start(
     input: ExecutionRequest,
     context?: ExecutionContext,
@@ -533,6 +551,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       throw new Error("Claude result download is truncated");
     return { bytes: Buffer.concat(chunks), id: file.id };
   }
+  @classifyFaults(executionFault)
   async observe(
     handle: ExecutionHandle,
     context?: ExecutionContext,
@@ -806,13 +825,19 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       if (!["idle", "terminated"].includes(session.status))
         throw new Error("Claude session is still active");
       if (sessionId === data.sessionId) {
-        const events = await this.client.events(
-          sessionId,
-          this.remaining(data),
-        );
-        this.preserve(data, session, events);
-        this.usage(session, handle, context);
-        this.save(handle, context);
+        let events;
+        try {
+          events = await this.client.events(sessionId, this.remaining(data));
+        } catch (error) {
+          // Deleted since it was observed: nothing is left to preserve, and
+          // the deletion below confirms it is absent.
+          if (!claudeGone(error)) throw error;
+        }
+        if (events) {
+          this.preserve(data, session, events);
+          this.usage(session, handle, context);
+          this.save(handle, context);
+        }
       }
       // Deleting a session removes its sandbox, not the reusable environment.
       await this.client.deleteSession(sessionId, this.remaining(data));
@@ -849,12 +874,18 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     if (session) {
       this.assertSession(session, handle);
       if (session.status === "running" || session.status === "rescheduling")
-        await this.interrupt(handle, context);
+        try {
+          await this.interrupt(handle, context);
+        } catch (error) {
+          // A session deleted meanwhile has no turn left to interrupt.
+          if (!claudeGone(error)) throw error;
+        }
     }
     data.terminal ??= terminal;
     this.save(handle, context);
     await this.dispose(handle, context);
   }
+  @classifyFaults(executionFault)
   async cancel(
     handle: ExecutionHandle,
     context?: ExecutionContext,
@@ -865,6 +896,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
    * Any failure either interrupts the step (it reattaches) or stops the
    * session first, so a repeated attempt never runs beside it.
    */
+  @classifyFaults(executionFault)
   async collect(
     handle: ExecutionHandle,
     context?: ExecutionContext,

@@ -6,6 +6,7 @@ import type {
   Options,
   SDKAssistantMessageError,
   SDKMessage,
+  SDKRateLimitInfo,
   SDKResultMessage,
   SDKSystemMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -38,6 +39,7 @@ import {
 } from "./execution/claude-usage.js";
 import { authenticationFailure, redact } from "./execution/harness-support.js";
 import { claudeCaptureEvents } from "./execution/interaction-capture.js";
+import { type Fault, transient } from "./fault.js";
 import { serviceLoginSecrets } from "./provider-credentials.js";
 import {
   closeProviderEventStream,
@@ -332,11 +334,45 @@ function failureClass(
   return undefined;
 }
 
+/**
+ * A fault the runtime's structured facts settle: an exhausted balance, or a
+ * subscription limit with its reset time (`resetsAt` is epoch seconds).
+ */
+function structuredFault(
+  failure: string,
+  status: number | undefined,
+  facts: SessionFacts,
+): Fault | undefined {
+  if (
+    facts.assistantError === "billing_error" ||
+    facts.limit?.errorCode === "credits_required"
+  )
+    return {
+      kind: "config",
+      detail: failure,
+      fix: "Restore the Claude plan, credits or billing for the controller login, then `factory run`",
+    };
+  const resetsAt = facts.limit?.resetsAt;
+  if (
+    resetsAt !== undefined &&
+    Number.isFinite(resetsAt) &&
+    (status === 429 || facts.assistantError === "rate_limit")
+  )
+    return transient(
+      `Claude usage limit: ${failure}`,
+      false,
+      new Date(resetsAt * 1000).toISOString(),
+    );
+  return undefined;
+}
+
 interface SessionFacts {
   initialized: boolean;
   /** A real model message arrived, not only a runtime-synthesized one. */
   modelResponded: boolean;
   assistantError?: SDKAssistantMessageError;
+  /** The last subscription limit the runtime reported as rejecting requests. */
+  limit?: SDKRateLimitInfo;
 }
 
 /** One isolated Agent SDK query per attempt, constrained by JSON schema. */
@@ -426,6 +462,11 @@ class ClaudePlanningTransport implements PlanningTransport {
         guard.progress();
         if ("session_id" in message && typeof message.session_id === "string")
           state.providerThreadId ??= message.session_id;
+        if (
+          message.type === "rate_limit_event" &&
+          message.rate_limit_info.status === "rejected"
+        )
+          facts.limit = message.rate_limit_info;
         if (message.type === "assistant") {
           if (message.error) facts.assistantError = message.error;
           if (message.message.model !== SYNTHETIC_MODEL)
@@ -578,6 +619,8 @@ class ClaudePlanningTransport implements PlanningTransport {
         },
       },
     });
+    if (failure !== undefined)
+      state.fault = structuredFault(failure, status, facts);
     if (authentication)
       throw new AuthenticationRequiredError(failure!, {
         provider: "claude",

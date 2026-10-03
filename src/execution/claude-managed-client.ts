@@ -182,6 +182,14 @@ export function validateClaudeManagedConfig(
   return structuredClone(value) as unknown as ClaudeManagedConfig;
 }
 
+/** The provider no longer has the session or file the request named. */
+export function claudeGone(error: unknown): boolean {
+  return (
+    error instanceof Anthropic.NotFoundError ||
+    (error as { status?: unknown } | null | undefined)?.status === 404
+  );
+}
+
 /** A request that failed in transit; the SDK's connection errors carry no status. */
 export function claudeTransient(error: unknown): boolean {
   return (

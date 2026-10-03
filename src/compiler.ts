@@ -37,9 +37,18 @@ import type {
   WorkGraph,
 } from "./contracts.js";
 import {
+  AuthenticationRequiredError,
   CompletedModelInvocationError,
   assertPlanningExecutionBounds,
 } from "./contracts.js";
+import { authenticationFailure } from "./execution/harness-support.js";
+import {
+  attachFault,
+  decision,
+  networkFailure,
+  transient,
+  type Fault,
+} from "./fault.js";
 import {
   assertInstalledControllerCapabilities,
   CONTROLLER_CAPABILITIES_DIGEST,
@@ -121,6 +130,161 @@ class ProviderCapacityFailure extends CompletedModelInvocationError {
     super(cause);
     this.name = "ProviderCapacityFailure";
   }
+}
+
+/**
+ * Output the decoder refused. It counts against the paid bound like a lost
+ * answer, so the step re-asks with this detail a bounded number of times
+ * and then asks the operator.
+ */
+function invalidOutput(cause: unknown): MalformedPlannerOutput {
+  const error = new MalformedPlannerOutput(cause);
+  return attachFault(
+    error,
+    transient(`Model output was invalid: ${error.message}`, true),
+  );
+}
+
+/**
+ * When a usage limit resets, read from the message only when the provider
+ * gave no structured reset time.
+ */
+function usageReset(detail: string, now: number): string | undefined {
+  // Claude: "Claude AI usage limit reached|<epoch seconds>".
+  const epoch = /usage limit reached\|(\d{10})\b/i.exec(detail);
+  if (epoch) return new Date(Number(epoch[1]) * 1000).toISOString();
+  // Codex: "... try again in 2 days 3 hours" (also minutes/seconds).
+  const relative =
+    /try again in ((?:\s*(?:and\s+)?\d+\s+(?:days?|hours?|minutes?|seconds?),?)+)/i.exec(
+      detail,
+    );
+  if (!relative) return undefined;
+  const unit = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1_000 } as const;
+  let total = 0;
+  for (const [, count, name] of relative[1]!.matchAll(
+    /(\d+)\s+(day|hour|minute|second)/gi,
+  ))
+    total += Number(count) * unit[name!.toLowerCase()[0] as keyof typeof unit];
+  return total ? new Date(now + total).toISOString() : undefined;
+}
+
+const BILLING_FIX =
+  "Restore the provider plan, credits or billing for the configured login, then `factory run`";
+
+/**
+ * Classify a failed structured model call, the paid effect behind planning,
+ * review and diagnosis. Faults with `outcomeUnknown` count against the paid
+ * bound; limits that name a reset wait without counting.
+ */
+export function modelFault(
+  error: unknown,
+  call: {
+    provider: string;
+    ended: boolean;
+    failureClass: string;
+    /** The transport's classification from structured provider facts. */
+    fault?: Fault;
+  },
+  now = Date.now(),
+): Fault {
+  if (call.fault) return call.fault;
+  const detail = error instanceof Error ? error.message : String(error);
+  const codex = call.provider === CODEX_PLANNING_PROVIDER;
+  // Billing first: OpenAI reports exhausted quota as HTTP 429.
+  if (
+    /insufficient_quota|exceeded your current quota|quota exceeded|billing|credit balance|credits_required|spend limit|shared budget|usage not included|upgrade to plus/i.test(
+      detail,
+    )
+  )
+    return { kind: "config", detail, fix: BILLING_FIX };
+  if (error instanceof AuthenticationRequiredError)
+    return {
+      kind: "config",
+      detail,
+      fix: `Run \`${error.authentication.command}\` on the controller host, then \`factory run\``,
+    };
+  if (/usage limit|hit your limit/i.test(detail))
+    return transient(
+      `Model provider usage limit: ${detail}`,
+      false,
+      usageReset(detail, now),
+    );
+  switch (call.failureClass) {
+    case "structured-output-parse":
+    case "provider-structured-output":
+      return transient(`Model output was invalid: ${detail}`, true);
+    case "provider-refusal":
+      return decision(
+        "The model refused the request. Revise the Objective, retry or cancel.",
+        detail,
+      );
+    case "provider-capacity":
+      return transient(`Model provider is over capacity: ${detail}`, false);
+    case "provider-rate-limit":
+      return transient(
+        `Model provider rate limit: ${detail}`,
+        false,
+        usageReset(detail, now),
+      );
+    case "provider-authentication":
+      return {
+        kind: "config",
+        detail,
+        fix: `Run \`${codex ? "codex login" : "claude auth login"}\` on the controller host, then \`factory run\``,
+      };
+  }
+  if (/selected model .*, expected /i.test(detail))
+    return {
+      kind: "config",
+      detail,
+      fix: "Choose a model the provider login can use in the Factory configuration",
+    };
+  // Fail-closed session checks are invariants, not provider weather.
+  if (
+    /unconfigured (tool|MCP server)|did not report its initialized session/i.test(
+      detail,
+    )
+  )
+    return { kind: "defect", detail };
+  const authentication = authenticationFailure(
+    codex ? "codex" : "claude",
+    detail,
+  );
+  if (authentication)
+    return {
+      kind: "config",
+      detail,
+      fix: `Run \`${authentication.authentication.command}\` on the controller host, then \`factory run\``,
+    };
+  // The provider was never reached: nothing ran, so nothing was paid.
+  if (
+    !call.ended &&
+    (networkFailure(error) ||
+      /can't reach the API|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|Could not resolve host|error sending request|Connection failed/i.test(
+        detail,
+      ))
+  )
+    return transient(`Model provider unreachable: ${detail}`, false);
+  if (
+    (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT" &&
+    /^spawn /.test(String((error as NodeJS.ErrnoException).syscall))
+  )
+    return {
+      kind: "config",
+      detail,
+      fix: "Install the provider CLI on the controller host, then `factory run`",
+    };
+  // A programming error in Factory is not provider weather.
+  if (
+    error instanceof TypeError ||
+    error instanceof ReferenceError ||
+    error instanceof RangeError ||
+    (error as NodeJS.ErrnoException | undefined)?.syscall !== undefined
+  )
+    return { kind: "defect", detail };
+  // A lost session, a dropped stream, a turn that never completed or a
+  // provider failure after it ran: the paid call may have happened.
+  return transient(`Model call did not complete: ${detail}`, true);
 }
 
 function providerFailureClass(error: unknown): string {
@@ -260,6 +424,8 @@ export interface PlanningTurn {
   ended: boolean;
   /** Transport-classified failure; otherwise the shared classifier applies. */
   failureClass?: string;
+  /** Fault from structured provider facts (billing, a limit's reset time). */
+  fault?: Fault;
 }
 
 /**
@@ -650,8 +816,16 @@ export class StructuredPlanningModel implements PlanningModel {
       });
       return parsed;
     } catch (error) {
+      const failureClass = invalidStructuredOutput
+        ? "structured-output-parse"
+        : (turn.failureClass ?? providerFailureClass(error));
+      const fault = modelFault(error, {
+        provider,
+        ended: turn.ended,
+        failureClass,
+        fault: turn.fault,
+      });
       if (!invalidStructuredOutput) {
-        const failureClass = turn.failureClass ?? providerFailureClass(error);
         observeModelInvocation(invocation, {
           type: "failed",
           provider,
@@ -671,11 +845,13 @@ export class StructuredPlanningModel implements PlanningModel {
           detail: error instanceof Error ? error.message : String(error),
         });
         if (failureClass === "provider-capacity" && turn.ended)
-          throw new ProviderCapacityFailure(error);
+          throw attachFault(new ProviderCapacityFailure(error), fault);
       }
-      if (invalidStructuredOutput) throw new MalformedPlannerOutput(error);
-      if (turn.ended) throw new CompletedModelInvocationError(error);
-      throw error;
+      if (invalidStructuredOutput)
+        throw attachFault(new MalformedPlannerOutput(error), fault);
+      if (turn.ended)
+        throw attachFault(new CompletedModelInvocationError(error), fault);
+      throw attachFault(error, fault);
     }
   }
   async generateStructured<T>(request: PlanningRequest<T>): Promise<T> {
@@ -756,7 +932,7 @@ ${JSON.stringify(wire.data)}`;
         failureField: "compiler-choices",
         detail: error instanceof Error ? error.message : String(error),
       });
-      throw new MalformedPlannerOutput(error);
+      throw invalidOutput(error);
     }
   }
 
@@ -1916,8 +2092,7 @@ async function compileRecoverablePlan(
     generateStructured: async (request) => {
       if (record.response !== undefined)
         return structuredClone(record.response) as never;
-      if (record.responseFailure)
-        throw new MalformedPlannerOutput(record.responseFailure);
+      if (record.responseFailure) throw invalidOutput(record.responseFailure);
       let result;
       try {
         result = await model.generateStructured(request);

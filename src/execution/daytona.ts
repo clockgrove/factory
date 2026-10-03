@@ -1,3 +1,5 @@
+import { classifyFaults } from "../fault.js";
+import { daytonaFault } from "./fault.js";
 import { randomUUID } from "node:crypto";
 import { createWriteStream, readFileSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -173,6 +175,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
     return s;
   }
   /** Lists sandboxes labeled with the attempt, keeps one and deletes any extras. */
+  @classifyFaults(daytonaFault)
   async find({
     attemptId,
   }: SandboxRequest): Promise<SandboxHandle | undefined> {
@@ -200,6 +203,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       data: { owner },
     };
   }
+  @classifyFaults(daytonaFault)
   async create({ attemptId }: SandboxRequest): Promise<SandboxHandle> {
     // Adopt a sandbox an earlier call created before its response was lost.
     const found = await this.find({ attemptId });
@@ -218,6 +222,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
     );
     return this.handle(s, attemptId, created);
   }
+  @classifyFaults(daytonaFault)
   async prepareRepository(
     h: SandboxHandle,
     input: SandboxRepositoryInput,
@@ -275,6 +280,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       throw new Error("Invalid Daytona file digest");
     return result;
   }
+  @classifyFaults(daytonaFault)
   async upload(h: SandboxHandle, input: SandboxInput): Promise<void> {
     within(h, input.remotePath);
     const digest = await sandboxFileDigest(input.localPath);
@@ -288,6 +294,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
     if (remote.digest !== input.digest || remote.bytes !== input.bytes)
       throw new Error("Daytona uploaded bytes mismatch");
   }
+  @classifyFaults(daytonaFault)
   async execute(
     h: SandboxHandle,
     command: SandboxCommand,
@@ -326,6 +333,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       throw new Error("Daytona process ownership mismatch");
     return session;
   }
+  @classifyFaults(daytonaFault)
   async observe(
     h: SandboxHandle,
     p: RemoteProcess,
@@ -346,10 +354,12 @@ export class DaytonaSandboxProvider implements SandboxProvider {
             : "failed",
     };
   }
+  @classifyFaults(daytonaFault)
   async cancel(h: SandboxHandle, p: RemoteProcess): Promise<void> {
     this.process(h, p);
     await this.destroy(h);
   }
+  @classifyFaults(daytonaFault)
   async download(
     h: SandboxHandle,
     output: SandboxOutput,
@@ -369,6 +379,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       throw new Error("Daytona downloaded bytes mismatch");
     return actual;
   }
+  @classifyFaults(daytonaFault)
   async destroy(h: SandboxHandle): Promise<void> {
     data(h);
     let s: Sandbox;

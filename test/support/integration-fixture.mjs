@@ -510,6 +510,9 @@ class ScriptedHarness {
     if (existsSync(`${data.resultPath}.cancelled`))
       return { state: "cancelled" };
     if (existsSync(`${data.resultPath}.failed`)) return { state: "failed" };
+    // The worker ended without writing a result, like a crashed process.
+    if (existsSync(`${data.resultPath}.died`))
+      return { state: "failed", interrupted: true };
     if (existsSync(data.resultPath)) return { state: "complete" };
     return { state: "running" };
   }
@@ -547,6 +550,13 @@ class ScriptedHarness {
     const starts = readEvents(this.eventsPath).filter(
       (event) => event.type === "start" && event.item === data.item,
     ).length;
+    if (starts <= (action.dieAttempts ?? 0)) {
+      appendEvent(this.eventsPath, { type: "died", item: data.item });
+      writeFileSync(`${data.resultPath}.died`, "died\n");
+      throw new Error(
+        `Scripted worker for ${data.item} ended without a result`,
+      );
+    }
     if (starts <= (action.failAttempts ?? 0)) {
       appendEvent(this.eventsPath, { type: "failed", item: data.item });
       writeFileSync(`${data.resultPath}.failed`, "failed\n");

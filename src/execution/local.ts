@@ -204,8 +204,9 @@ export class CodexHarness implements AgentHarness {
       ? { state: "running" }
       : {
           state: "failed",
+          interrupted: true,
           detail:
-            "Worker exited without a durable result; operator direction required",
+            "Worker exited without a durable result; repeating with a fresh attempt",
         };
   }
 
@@ -770,8 +771,9 @@ export class LocalExecutionDriver implements ExecutionDriver {
         throw new Error(
           "Collection subprocess ownership unresolved; checkout retained",
         );
-      failureClassification =
-        observed.state === "complete" ? "implementation" : "interruption";
+      failureClassification = observed.interrupted
+        ? "interruption"
+        : "implementation";
       this.active.delete(handle.identity);
       if (
         !failed ||

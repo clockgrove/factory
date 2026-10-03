@@ -101,7 +101,7 @@ One controller owns an Objective at a time, through a lock and a private control
   - a merge first checks whether the PR or stack is already merged at the expected head.
 - **Restart** reattaches to the recorded attempt handle; it does not start a second agent.
 - **Real decisions still stop:** an edited or closed Objective, a PR changed by someone else, failing required checks, or a criterion the reviewer could not decide.
-- **Failures stop.** A failed Work Item keeps its evidence. A new attempt needs `factory retry` or an admitted repair policy.
+- **Interruptions repeat; failures stop.** A worker that ends without a result, a lost model or GitHub response, or a GitHub server error interrupts a step rather than failing the work, so the step is repeated in the same run (a dead worker gets a fresh attempt). After two interruptions in one attempt the Work Item stops. A real failure (validation failed, a criterion refused, the worker reported failure) keeps its evidence; a new attempt needs `factory retry` or an admitted repair policy.
 
 Diagnostics (`factory diagnostics`, `logs`, `analyze`) are a private timeline of observations. They never drive lifecycle decisions.
 

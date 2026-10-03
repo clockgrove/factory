@@ -1,12 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { CompletedModelInvocationError } from "./contracts.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { CompletedModelInvocationError, Interruption } from "./contracts.js";
+import { GitHubOutcomeUnknown, GitHubRequestError } from "./github-client.js";
+import {
+  ProviderTurnIncompleteError,
+  ProviderTurnTimeoutError,
+} from "./provider-turn.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import type { PlanningModel, WorkItem } from "./contracts.js";
 import {
   installedControllerCapabilities,
   CONTROLLER_CAPABILITIES_DIGEST,
 } from "./controller-capabilities.js";
-import type { FactoryState } from "./state.js";
+import type { FactoryState, WorkState } from "./state.js";
 import {
   archiveAttempt,
   chargeRepair,
@@ -26,6 +32,62 @@ export class SettledAttemptFailure extends Error {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
   }
 }
+/**
+ * Whether an error interrupted a step rather than reporting on the work:
+ * a worker that ended without a result, a lost or failed provider or GitHub
+ * response, or a provider turn that never completed. Repeating is safe.
+ */
+export function isInterruption(error: unknown): boolean {
+  return (
+    error instanceof Interruption ||
+    (error instanceof SettledAttemptFailure &&
+      error.classification === "interruption") ||
+    error instanceof GitHubOutcomeUnknown ||
+    (error instanceof GitHubRequestError &&
+      (error.status >= 500 || error.status === 429)) ||
+    error instanceof ProviderTurnTimeoutError ||
+    error instanceof ProviderTurnIncompleteError
+  );
+}
+
+/** Interruptions repeated per Work Item attempt before it stops as failed. */
+export const MAX_INTERRUPTIONS = 2;
+
+/**
+ * Run one Work Item step, repeating it after an interruption. A worker that
+ * ended without a result gets a fresh attempt from the same base. After
+ * MAX_INTERRUPTIONS the error propagates and the item fails with evidence.
+ */
+export async function repeatInterrupted<T>(
+  work: WorkState,
+  save: () => void,
+  step: () => Promise<T>,
+  backoffMs = 1_000,
+): Promise<T> {
+  for (;;) {
+    try {
+      const result = await step();
+      delete work.interruptions;
+      return result;
+    } catch (error) {
+      if (
+        !isInterruption(error) ||
+        (work.interruptions ?? 0) >= MAX_INTERRUPTIONS
+      )
+        throw error;
+      work.interruptions = (work.interruptions ?? 0) + 1;
+      work.waitingReason = `Interrupted (${work.interruptions}/${MAX_INTERRUPTIONS}), repeating: ${error instanceof Error ? error.message : String(error)}`;
+      if (error instanceof SettledAttemptFailure) {
+        delete work.execution;
+        work.attempt = randomUUID();
+        work.step = "execute";
+      }
+      save();
+      await delay(backoffMs * work.interruptions);
+    }
+  }
+}
+
 /** The exact collected candidate exists, but settled local validation failed. */
 export class CandidateValidationFailure extends Error {}
 export class CandidateEnvironmentFailure extends Error {}
@@ -53,7 +115,9 @@ export function recordWorkFailure(
         : error instanceof CandidateEnvironmentFailure
           ? "validation-environment"
           : "implementation"
-      : "uncertain",
+      : isInterruption(error)
+        ? "interruption"
+        : "uncertain",
     continuation:
       error instanceof CandidateEnvironmentFailure
         ? "exact-candidate-revalidation"
@@ -64,7 +128,9 @@ export function recordWorkFailure(
       error instanceof SettledAttemptFailure ? "removed" : "unavailable",
     decision: isolated
       ? "Supply a concrete diagnosis and correction or use the admitted implementation repair policy"
-      : "Resolve external outcome or ownership before another attempt",
+      : isInterruption(error)
+        ? "Interrupted repeatedly; check the provider, network or GitHub status, then run again"
+        : "Resolve external outcome or ownership before another attempt",
   };
   work.recovery = {
     ...work.recovery,

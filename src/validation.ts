@@ -40,7 +40,7 @@ import type {
   WorkItem,
   WorkDiscovery,
 } from "./contracts.js";
-import { CompletedModelInvocationError } from "./contracts.js";
+import { CompletedModelInvocationError, Interruption } from "./contracts.js";
 import { assetSelectionDigest, type HydrationReceipt } from "./media.js";
 import {
   hasUnresolvedSubprocesses,
@@ -1956,19 +1956,19 @@ export async function reviewAcceptance(args: {
   let decoded: ReturnType<typeof decodeReview> | undefined;
   let reviewFailure: string | undefined;
   let responseReceived = false;
+  args.beforeSubmit?.();
   try {
     if (!model.reviewResult)
       throw new CompletedModelInvocationError(
         "No independent result reviewer is configured",
       );
-    // Local evidence and packet preparation must not claim provider submission.
-    args.beforeSubmit?.();
     const response = await model.reviewResult(request);
     responseReceived = true;
     decoded = decodeReview(response, packet);
   } catch (error) {
+    // No completed answer arrived: the review did not happen, so ask again.
     if (!responseReceived && !(error instanceof CompletedModelInvocationError))
-      throw error;
+      throw new Interruption(error);
     reviewFailure = error instanceof Error ? error.message : String(error);
   }
   const proven: CriterionEvidence[] = [];

@@ -5,6 +5,7 @@ import {
   recordWorkFailure,
   diagnoseWorkRepair,
   prepareEvidenceRecovery,
+  repeatInterrupted,
 } from "../work-repair.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
 import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
@@ -207,142 +208,126 @@ export async function runRegularGraph(args: {
     save();
     await integratePublished(item, published);
   };
-  const execute = async (
+  const runStep = async (
     item: WorkItem,
     itemBase: string,
     existingHandle?: NonNullable<FactoryState["work"][string]["execution"]>,
   ): Promise<void> => {
     const work = state.work[item.id]!;
-    try {
-      if (work.status === "published") {
-        await integratePublished(item, {
-          branch: `factory/objective-${objective}/${item.id}`,
-          pullRequest: work.pullRequest!,
-          headSha: work.changeRef!,
-        });
-        return;
-      }
-      if (item.kind === "qa" || item.kind === "aggregate") {
-        if (args.paused?.() && work.waitingReason) return;
-        await runQaItem({
-          config,
-          root,
-          state,
-          item,
-          github,
-          model: args.planningModel,
-          diagnostics: args.diagnostics,
-          objectiveBody: args.objectiveBody,
-          store: contentStore,
-          save,
-          cancelled: args.cancelled,
-          paused: args.paused,
-          phases,
-        });
-        return;
-      }
-      if (work.step === "deliver" && work.validation) {
-        await deliverReviewed(item, itemBase);
-        return;
-      }
-      if (!existingHandle && work.step === "execute") {
-        await phases.reserve(item.id, "validation");
-        await preflightItemEnvironment({
-          config,
-          root,
-          state,
-          objectiveBody: args.objectiveBody,
-          item,
-          store: contentStore,
-          baseSha: itemBase,
-        });
-      }
-      await phases.reserve(
-        item.id,
-        work.step === "execute" ? "coding" : "validation",
+    if (work.status === "published") {
+      await integratePublished(item, {
+        branch: `factory/objective-${objective}/${item.id}`,
+        pullRequest: work.pullRequest!,
+        headSha: work.changeRef!,
+      });
+      return;
+    }
+    if (item.kind === "qa" || item.kind === "aggregate") {
+      if (args.paused?.() && work.waitingReason) return;
+      await runQaItem({
+        config,
+        root,
+        state,
+        item,
+        github,
+        model: args.planningModel,
+        diagnostics: args.diagnostics,
+        objectiveBody: args.objectiveBody,
+        store: contentStore,
+        save,
+        cancelled: args.cancelled,
+        paused: args.paused,
+        phases,
+      });
+      return;
+    }
+    if (work.step === "deliver" && work.validation) {
+      await deliverReviewed(item, itemBase);
+      return;
+    }
+    if (!existingHandle && work.step === "execute") {
+      await phases.reserve(item.id, "validation");
+      await preflightItemEnvironment({
+        config,
+        root,
+        state,
+        objectiveBody: args.objectiveBody,
+        item,
+        store: contentStore,
+        baseSha: itemBase,
+      });
+    }
+    await phases.reserve(
+      item.id,
+      work.step === "execute" ? "coding" : "validation",
+    );
+    if (work.step === "approve-asset") {
+      const selected = work.assets?.find(
+        (set) => set.id === work.selectedAssetSet,
       );
-      if (work.step === "approve-asset") {
-        const selected = work.assets?.find(
-          (set) => set.id === work.selectedAssetSet,
-        );
-        if (!selected || !work.changeRef)
-          throw new Error("Selected AssetSet or captured change is missing");
-        const materialize = () =>
-          materializeAssetSet({
-            checkout: config.checkout,
-            workRoot: join(root, "asset-materialization"),
-            baseCommit: work.changeRef!,
-            item,
-            set: selected,
-            store: contentStore,
-          });
-        const applied = args.diagnostics
-          ? await args.diagnostics.span(
-              {
-                runId: state.runId,
-                itemId: item.id,
-                attemptId: work.attempt,
-                operation: "media-materialization",
-                metadata: { setId: selected.id },
-              },
-              materialize,
-              (result) => ({
-                treeSha: result.treeSha,
-                headSha: result.changeRef,
-              }),
-            )
-          : await materialize();
-        work.changeRef = applied.changeRef;
-        work.treeSha = applied.treeSha;
-      } else if (work.step !== "validate") {
-        const handle =
-          (existingHandle ? structuredClone(existingHandle) : undefined) ??
-          (await driver.start(
+      if (!selected || !work.changeRef)
+        throw new Error("Selected AssetSet or captured change is missing");
+      const materialize = () =>
+        materializeAssetSet({
+          checkout: config.checkout,
+          workRoot: join(root, "asset-materialization"),
+          baseCommit: work.changeRef!,
+          item,
+          set: selected,
+          store: contentStore,
+        });
+      const applied = args.diagnostics
+        ? await args.diagnostics.span(
             {
-              captureContext: { objective, runId: state.runId },
-              item: work.recovery?.correction
-                ? {
-                    ...item,
-                    brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
-                  }
-                : item,
-              baseSha: itemBase,
+              runId: state.runId,
+              itemId: item.id,
               attemptId: work.attempt,
-              objectiveBody: args.objectiveBody,
-              selectedAssets: selectedInputsForItem(state, item),
+              operation: "media-materialization",
+              metadata: { setId: selected.id },
             },
-            executionContext(work, save, args.cancelled, (workerUsage) =>
-              args.diagnostics?.emit({
-                runId: state.runId,
-                itemId: item.id,
-                attemptId: work.attempt,
-                operation: "worker-usage",
-                outcome: "observed",
-                workerUsage,
-              }),
-            ),
-          ));
-        if (!existingHandle) {
-          work.execution = structuredClone(handle);
-          save();
-        }
-        if (args.cancelled()) {
-          await driver.cancel(
-            handle,
-            executionContext(work, save, args.cancelled, (workerUsage) =>
-              args.diagnostics?.emit({
-                runId: state.runId,
-                itemId: item.id,
-                attemptId: work.attempt,
-                operation: "worker-usage",
-                outcome: "observed",
-                workerUsage,
-              }),
-            ),
-          );
-          throw new Error("Objective cancelled");
-        }
-        const result = await driver.collect(
+            materialize,
+            (result) => ({
+              treeSha: result.treeSha,
+              headSha: result.changeRef,
+            }),
+          )
+        : await materialize();
+      work.changeRef = applied.changeRef;
+      work.treeSha = applied.treeSha;
+    } else if (work.step !== "validate") {
+      const handle =
+        (existingHandle ? structuredClone(existingHandle) : undefined) ??
+        (await driver.start(
+          {
+            captureContext: { objective, runId: state.runId },
+            item: work.recovery?.correction
+              ? {
+                  ...item,
+                  brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
+                }
+              : item,
+            baseSha: itemBase,
+            attemptId: work.attempt,
+            objectiveBody: args.objectiveBody,
+            selectedAssets: selectedInputsForItem(state, item),
+          },
+          executionContext(work, save, args.cancelled, (workerUsage) =>
+            args.diagnostics?.emit({
+              runId: state.runId,
+              itemId: item.id,
+              attemptId: work.attempt,
+              operation: "worker-usage",
+              outcome: "observed",
+              workerUsage,
+            }),
+          ),
+        ));
+      if (!existingHandle) {
+        work.execution = structuredClone(handle);
+        save();
+      }
+      if (args.cancelled()) {
+        await driver.cancel(
           handle,
           executionContext(work, save, args.cancelled, (workerUsage) =>
             args.diagnostics?.emit({
@@ -355,144 +340,173 @@ export async function runRegularGraph(args: {
             }),
           ),
         );
-        phases.release(item.id);
-        recordWorkerDiscovery(state, item.id, result.discovery);
-        save();
-        if (result.collection)
-          args.diagnostics?.emit({
-            runId: state.runId,
-            itemId: item.id,
-            attemptId: work.attempt,
-            operation: "collection-ignored-links",
-            outcome: "completed",
-            metadata: {
-              observation: "original-worktree-scan",
-              acceptedIgnoredLinkCount:
-                result.collection.acceptedIgnoredLinks.length,
-              treeSha: result.treeSha,
-              headSha: result.changeRef,
-            },
-            detail: JSON.stringify(result.collection),
-          });
-        if (args.cancelled()) throw new Error("Objective cancelled");
-        work.changeRef = result.changeRef;
-        work.treeSha = result.treeSha;
-        if (result.assets?.length) {
-          work.assets = result.assets;
-          work.status = "waiting";
-          work.step = "approve-asset";
-          save();
-          return;
-        }
+        throw new Error("Objective cancelled");
       }
-      await phases.reserve(item.id, "validation");
-      work.step = "validate";
-      save();
-      work.validation = await validateWorkItem(
-        config.checkout,
-        join(root, "validation"),
-        item,
-        work.changeRef!,
-        work.treeSha!,
-        state.baseSha,
-        (entry) =>
+      const result = await driver.collect(
+        handle,
+        executionContext(work, save, args.cancelled, (workerUsage) =>
           args.diagnostics?.emit({
             runId: state.runId,
             itemId: item.id,
             attemptId: work.attempt,
-            operation: "validation-command",
-            outcome: entry.passed ? "completed" : "failed",
-            durationMs: entry.durationMs,
-            metadata: {
-              commandIndex: entry.index,
-              exitCode: entry.exitCode,
-              treeSha: work.treeSha!,
-            },
-            detail: entry.output,
+            operation: "worker-usage",
+            outcome: "observed",
+            workerUsage,
           }),
-        (entry) =>
-          args.diagnostics?.emitStream(
-            {
-              runId: state.runId,
-              itemId: item.id,
-              attemptId: work.attempt,
-              operation: "validation-output",
-              outcome: "observed",
-              metadata: { commandIndex: entry.index, stream: entry.stream },
-            },
-            entry.output,
-            entry.final,
-          ),
-        itemBase,
-        validationLfsMembersForItem(
+        ),
+      );
+      phases.release(item.id);
+      recordWorkerDiscovery(state, item.id, result.discovery);
+      save();
+      if (result.collection)
+        args.diagnostics?.emit({
+          runId: state.runId,
+          itemId: item.id,
+          attemptId: work.attempt,
+          operation: "collection-ignored-links",
+          outcome: "completed",
+          metadata: {
+            observation: "original-worktree-scan",
+            acceptedIgnoredLinkCount:
+              result.collection.acceptedIgnoredLinks.length,
+            treeSha: result.treeSha,
+            headSha: result.changeRef,
+          },
+          detail: JSON.stringify(result.collection),
+        });
+      if (args.cancelled()) throw new Error("Objective cancelled");
+      work.changeRef = result.changeRef;
+      work.treeSha = result.treeSha;
+      if (result.assets?.length) {
+        work.assets = result.assets;
+        work.status = "waiting";
+        work.step = "approve-asset";
+        save();
+        return;
+      }
+    }
+    await phases.reserve(item.id, "validation");
+    work.step = "validate";
+    save();
+    work.validation = await validateWorkItem(
+      config.checkout,
+      join(root, "validation"),
+      item,
+      work.changeRef!,
+      work.treeSha!,
+      state.baseSha,
+      (entry) =>
+        args.diagnostics?.emit({
+          runId: state.runId,
+          itemId: item.id,
+          attemptId: work.attempt,
+          operation: "validation-command",
+          outcome: entry.passed ? "completed" : "failed",
+          durationMs: entry.durationMs,
+          metadata: {
+            commandIndex: entry.index,
+            exitCode: entry.exitCode,
+            treeSha: work.treeSha!,
+          },
+          detail: entry.output,
+        }),
+      (entry) =>
+        args.diagnostics?.emitStream(
+          {
+            runId: state.runId,
+            itemId: item.id,
+            attemptId: work.attempt,
+            operation: "validation-output",
+            outcome: "observed",
+            metadata: { commandIndex: entry.index, stream: entry.stream },
+          },
+          entry.output,
+          entry.final,
+        ),
+      itemBase,
+      validationLfsMembersForItem(
+        state,
+        item,
+        config.checkout,
+        work.changeRef!,
+      ),
+      args.contentStore,
+      workspacePackageAdditions(args.objectiveBody),
+    );
+    await phases.reserve(item.id, "review");
+    const reviewResult = () =>
+      reviewAcceptance({
+        model: args.planningModel,
+        checkout: config.checkout,
+        baseSha: itemBase,
+        commit: work.changeRef!,
+        evidence: work.validation!,
+        criteria: item.acceptance,
+        sources: planningSources(
+          args.objectiveBody,
+          state.baseSha,
+          config.checkout,
+          state.additionalSources,
+        ),
+        decisions: work.acceptanceDecisions,
+        evidenceSources: workItemReviewEvidence({
           state,
           item,
-          config.checkout,
-          work.changeRef!,
-        ),
-        args.contentStore,
-        workspacePackageAdditions(args.objectiveBody),
-      );
-      await phases.reserve(item.id, "review");
-      const reviewResult = () =>
-        reviewAcceptance({
-          model: args.planningModel,
           checkout: config.checkout,
-          baseSha: itemBase,
-          commit: work.changeRef!,
-          evidence: work.validation!,
-          criteria: item.acceptance,
-          sources: planningSources(
-            args.objectiveBody,
-            state.baseSha,
-            config.checkout,
-            state.additionalSources,
-          ),
-          decisions: work.acceptanceDecisions,
-          evidenceSources: workItemReviewEvidence({
-            state,
-            item,
-            checkout: config.checkout,
-            delivery: "regular",
+          delivery: "regular",
+        }),
+        observations: workItemReviewObservations(
+          state,
+          item,
+          { kind: "regular" },
+          work.assets?.find((set) => set.id === work.selectedAssetSet),
+        ),
+        invocation: {
+          invocationId: randomUUID(),
+          phase: "result-review",
+          ordinal: 0,
+          observe: args.diagnostics?.modelObserver({
+            scopeId: work.attempt!,
+            runId: state.runId,
+            itemId: item.id,
+            attemptId: work.attempt,
           }),
-          observations: workItemReviewObservations(
-            state,
-            item,
-            { kind: "regular" },
-            work.assets?.find((set) => set.id === work.selectedAssetSet),
-          ),
-          invocation: {
-            invocationId: randomUUID(),
-            phase: "result-review",
-            ordinal: 0,
-            observe: args.diagnostics?.modelObserver({
-              scopeId: work.attempt!,
-              runId: state.runId,
-              itemId: item.id,
-              attemptId: work.attempt,
-            }),
+        },
+      });
+    work.validation = args.diagnostics
+      ? await args.diagnostics.span(
+          {
+            runId: state.runId,
+            itemId: item.id,
+            attemptId: work.attempt,
+            operation: "acceptance-review",
+            metadata: { treeSha: work.treeSha! },
           },
-        });
-      work.validation = args.diagnostics
-        ? await args.diagnostics.span(
-            {
-              runId: state.runId,
-              itemId: item.id,
-              attemptId: work.attempt,
-              operation: "acceptance-review",
-              metadata: { treeSha: work.treeSha! },
-            },
-            reviewResult,
-            (result) => ({ criteria: result.criteria?.length ?? 0 }),
-            (error) =>
-              error instanceof AcceptanceDecisionRequired
-                ? "waiting"
-                : "failed",
-          )
-        : await reviewResult();
-      delete work.acceptancePending;
-      if (args.cancelled()) throw new Error("Objective cancelled");
-      await deliverReviewed(item, itemBase);
+          reviewResult,
+          (result) => ({ criteria: result.criteria?.length ?? 0 }),
+          (error) =>
+            error instanceof AcceptanceDecisionRequired ? "waiting" : "failed",
+        )
+      : await reviewResult();
+    delete work.acceptancePending;
+    if (args.cancelled()) throw new Error("Objective cancelled");
+    await deliverReviewed(item, itemBase);
+  };
+  const execute = async (
+    item: WorkItem,
+    itemBase: string,
+    existingHandle?: NonNullable<FactoryState["work"][string]["execution"]>,
+  ): Promise<void> => {
+    const work = state.work[item.id]!;
+    // A recorded handle is only for the first run; a repeated step after a
+    // dead worker starts a fresh attempt.
+    let handle = existingHandle;
+    try {
+      await repeatInterrupted(work, save, () => {
+        const resumed = handle;
+        handle = undefined;
+        return runStep(item, itemBase, resumed);
+      });
     } catch (error) {
       if (error instanceof DeliveryReadinessPending) {
         work.waitingReason = error.message;

@@ -76,6 +76,8 @@ export interface WorkState {
   phaseReservation?: import("./config.js").ResourcePhase;
   requestedPhase?: import("./config.js").ResourcePhase;
   graphRevisionDigest?: string;
+  /** Interruptions repeated during the current attempt (see repeatInterrupted). */
+  interruptions?: number;
   discovery?: import("./contracts.js").WorkDiscovery & { attempt: string };
   discoveryDisposition?: "proposed" | "accepted";
   qaChecks?: NamedCheckEvidence[];

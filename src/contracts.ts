@@ -402,6 +402,8 @@ export class AuthenticationRequiredError extends Error {
 }
 export interface ExecutionObservation {
   state: "running" | "complete" | "failed" | "cancelled";
+  /** Failed only because the worker ended without writing a result; repeat it. */
+  interrupted?: boolean;
   detail?: string;
   authentication?: AuthenticationRequest;
 }
@@ -474,6 +476,8 @@ export interface HarnessHandle {
 }
 export interface HarnessObservation {
   state: "running" | "complete" | "failed" | "cancelled";
+  /** Failed only because the worker ended without writing a result; repeat it. */
+  interrupted?: boolean;
   detail?: string;
   /** Present when the attempt is paused on a developer-local login. */
   authentication?: AuthenticationRequest;
@@ -836,5 +840,16 @@ export class CompletedModelInvocationError extends Error {
   constructor(cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
     this.name = "CompletedModelInvocationError";
+  }
+}
+
+/**
+ * A step that did not finish for reasons unrelated to the work itself, such
+ * as a lost provider response. Repeating the step is safe.
+ */
+export class Interruption extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "Interruption";
   }
 }

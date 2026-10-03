@@ -179,7 +179,10 @@ test("fresh packed artifact composes a registered harness through the package ro
       ["status", "--objective", "1", "--config", config],
       { encoding: "utf8", env: environment },
     );
-    assert.match(status, /no active Objective/);
+    assert.match(
+      status,
+      /^Objective #1: not started — no Factory run recorded\nNext: factory run --objective 1\n/,
+    );
     const installedPackage = await import(
       pathToFileURL(
         join(
@@ -280,6 +283,7 @@ test("fresh packed artifact composes a registered harness through the package ro
       ),
     );
     assert.equal(before.state, "not-started");
+    assert.equal(before.phase, "not-started");
     assert.deepEqual(before.work, []);
 
     const runner = join(prefix, "packed-harness-runner.mjs");
@@ -332,6 +336,8 @@ test("fresh packed artifact composes a registered harness through the package ro
       ),
     );
     assert.equal(after.state, "complete");
+    assert.equal(after.phase, "complete");
+    assert.equal(after.nextAction, null);
     assert.equal(after.finalValidation, true);
     const timeline = execFileSync(
       cli,

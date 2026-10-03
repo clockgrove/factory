@@ -29,14 +29,12 @@ import {
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
 import { requestControl } from "./coordinator-control.js";
-import { linearDeliveryUnits } from "./delivery/plan.js";
 import {
   readAgentTimeline,
   readUsageSummaryEvents,
+  continuationStatusDocument,
   readWorkerOutput,
-  redactCoordinatorDisposition,
   redactDiagnosticDetail,
-  statusDocument,
   summarizeDiagnosticUsage,
 } from "./diagnostics.js";
 import { probeCodexReadiness } from "./harness-readiness.js";
@@ -48,8 +46,13 @@ import {
 } from "./runner.js";
 import { intakeControl, watchIntake } from "./intake.js";
 import { setupTarget } from "./setup.js";
-import { itemsConflict } from "./scheduler.js";
-import { readContinuation, readState } from "./state-store.js";
+import { linuxProcessIdentity } from "./process.js";
+import {
+  readContinuation,
+  readControllerOwner,
+  readState,
+} from "./state-store.js";
+import { renderStatusText } from "./status-summary.js";
 import {
   checkServiceState,
   checkIntakeServiceState,
@@ -65,6 +68,27 @@ function options(args: string[], name: string): string[] {
   return args.flatMap((arg, index) =>
     arg === `--${name}` && args[index + 1] ? [args[index + 1]!] : [],
   );
+}
+
+/** Whether a live controller owns this Objective; null when the lock is unreadable. */
+function controllerActive(
+  repository: string,
+  objective: number,
+): boolean | null {
+  try {
+    const owner = readControllerOwner(
+      join(stateRoot(repository), "controller.lock"),
+    );
+    if (!owner) return false;
+    const current = linuxProcessIdentity(owner.pid);
+    return (
+      current?.startTime === owner.startTime &&
+      current.state !== "Z" &&
+      (owner.intake === true || owner.objective === objective)
+    );
+  } catch {
+    return null;
+  }
 }
 
 function help(): void {
@@ -619,119 +643,19 @@ async function main(): Promise<void> {
     const secrets = config.policy.allowedSecretNames
       .map((name) => process.env[name])
       .filter((value): value is string => Boolean(value));
-    const continuation = readContinuation(config.repository, objective);
-    if (continuation?.schemaVersion === 5) {
-      console.log(
-        JSON.stringify({
-          repository: config.repository,
-          objective,
-          runId: continuation.runId,
-          state: "preparing",
-          coordinator: redactCoordinatorDisposition(
-            continuation.coordinator,
-            secrets,
-          ),
-          planned: Boolean(continuation.plan),
-          issueByItemId: continuation.issueByItemId,
-          error: continuation.error
-            ? redactDiagnosticDetail(continuation.error, secrets)
-            : continuation.error,
-          waitReason: continuation.coordinator.waitReason
-            ? redactDiagnosticDetail(
-                continuation.coordinator.waitReason,
-                secrets,
-              )
-            : undefined,
-          nextAction: "run",
-        }),
-      );
-      return;
-    }
-    const state = readState(config.repository, objective);
-    if (args.includes("--json")) {
-      console.log(
-        JSON.stringify(
-          statusDocument(
-            state,
-            config.repository,
-            objective,
-            config.delivery.kind,
-            secrets,
-            config.execution.concurrency,
-          ),
-        ),
-      );
-    } else if (!state)
-      console.log(`Factory for ${config.repository}: no active Objective`);
-    else {
-      const printStatus = (text: string): void =>
-        console.log(redactDiagnosticDetail(text, secrets));
-      const unitByItem = new Map(
-        linearDeliveryUnits(state.graph).flatMap((unit) =>
-          unit.items.map((item) => [item.id, unit.id] as const),
-        ),
-      );
-      const describe = (id: string): string => {
-        const work = state.work[id]!;
-        if (work.status !== "pending")
-          return `${id} ${work.status}${work.step ? ` (${work.step})` : ""}${work.status === "done" && work.githubClosure !== "complete" ? " (GitHub close pending)" : ""}`;
-        const item = state.graph.items.find(
-          (candidate) => candidate.id === id,
-        )!;
-        const dependency = item.dependencies.find(
-          (name) =>
-            state.work[name]?.status !== "done" &&
-            !(
-              config.delivery.kind === "native-stack" &&
-              state.work[name]?.status === "published" &&
-              unitByItem.get(name) === unitByItem.get(id)
-            ),
-        );
-        if (dependency) return `${id} waiting for ${dependency}`;
-        const conflict = state.graph.items.find(
-          (candidate) =>
-            state.work[candidate.id]?.status === "running" &&
-            itemsConflict(item, candidate),
-        );
-        return conflict
-          ? `${id} waiting for ${conflict.id} path/resource`
-          : `${id} ready`;
-      };
-      printStatus(
-        `Objective #${objective}: ${state.graph.items.map((item) => describe(item.id)).join(", ")}; final validation ${state.finalValidation?.passed ? "passed" : state.cancelledAt ? "cancelled" : state.error ? "failed" : "pending"}${state.finalValidation?.passed && state.objectiveClosure !== "complete" ? "; Objective GitHub close pending" : ""}${state.error ? `; error: ${state.error}` : ""}${state.githubClosureError ? `; GitHub: ${state.githubClosureError}` : ""}`,
-      );
-      for (const [id, work] of Object.entries(state.work)) {
-        if (work.authentication)
-          printStatus(
-            `Work Item ${id} requires ${work.authentication.provider} authentication; run \`${work.authentication.command}\` in the developer environment, then retry it.`,
-          );
-        if (
-          work.status === "waiting" &&
-          work.step === "approve-result" &&
-          work.acceptancePending
-        ) {
-          printStatus(
-            `Work Item ${id} awaits criterion decision at tree ${work.acceptancePending.treeSha}: ${work.acceptancePending.criterion}`,
-          );
-          printStatus(`  ${work.acceptancePending.question}`);
-          printStatus(`  Evidence: ${work.acceptancePending.detail}`);
-        }
-        if (work.status !== "waiting" || work.step !== "approve-asset")
-          continue;
-        printStatus(`Work Item ${id} awaits selection. Candidate AssetSets:`);
-        for (const set of work.assets ?? [])
-          printStatus(
-            `  ${set.id}: ${set.members.map((member) => `${member.role} → ${member.destination} (${member.ref.digest})`).join(", ")}`,
-          );
-      }
-      if (state.finalAcceptancePending) {
-        printStatus(
-          `Objective awaits criterion decision at tree ${state.finalAcceptancePending.treeSha}: ${state.finalAcceptancePending.criterion}`,
-        );
-        printStatus(`  ${state.finalAcceptancePending.question}`);
-        printStatus(`  Evidence: ${state.finalAcceptancePending.detail}`);
-      }
-    }
+    const document = continuationStatusDocument(
+      readContinuation(config.repository, objective),
+      config.repository,
+      objective,
+      config.delivery.kind,
+      secrets,
+      config.execution.concurrency,
+      controllerActive(config.repository, objective),
+    );
+    if (args.includes("--json")) console.log(JSON.stringify(document));
+    else
+      for (const line of renderStatusText(document))
+        console.log(redactDiagnosticDetail(line, secrets));
   } else if (command === "export-captures") {
     const result = await runCaptureExportCommand(config, objective, args);
     console.log(JSON.stringify(result, null, 2));

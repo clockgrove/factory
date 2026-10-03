@@ -20,6 +20,7 @@ import {
 } from "../dist/repair-policy.js";
 import {
   applyWorkCorrection,
+  isInterruption,
   recordWorkFailure,
   CandidateValidationFailure,
   CandidateEnvironmentFailure,
@@ -285,9 +286,10 @@ test("settled failures ignore sibling processes while correction still requires 
       Object.assign(uncertain.work.result, guard.work);
       Object.assign(uncertain.coordinator, guard.coordinator);
       assert.equal(recordWorkFailure(uncertain, "result", error), false);
+      // Not isolated either way; an interrupted worker is still named as such.
       assert.equal(
         uncertain.work.result.recovery.failure.classification,
-        "uncertain",
+        isInterruption(error) ? "interruption" : "uncertain",
       );
     }
     assert.equal(

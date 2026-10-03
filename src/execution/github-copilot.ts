@@ -209,8 +209,9 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
       ? { state: "running" }
       : {
           state: "failed",
+          interrupted: true,
           detail:
-            "GitHub Copilot worker exited without a durable result; operator direction required",
+            "GitHub Copilot worker exited without a durable result; repeating with a fresh attempt",
         };
   }
 

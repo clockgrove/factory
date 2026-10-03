@@ -189,8 +189,9 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       ? { state: "running" }
       : {
           state: "failed",
+          interrupted: true,
           detail:
-            "Claude worker exited without a durable result; operator direction required",
+            "Claude worker exited without a durable result; repeating with a fresh attempt",
         };
   }
 

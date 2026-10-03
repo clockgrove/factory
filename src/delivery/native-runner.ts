@@ -4,6 +4,7 @@ import {
   recordWorkFailure,
   diagnoseWorkRepair,
   prepareEvidenceRecovery,
+  repeatInterrupted,
 } from "../work-repair.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
 import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
@@ -158,46 +159,63 @@ export async function runNativeGraph(args: {
         work.startedAt = new Date().toISOString();
         save();
         try {
-          await phases.reserve(item.id, "validation");
-          await preflightItemEnvironment({
-            config,
-            root,
-            state,
-            objectiveBody: args.objectiveBody,
-            item,
-            store: contentStore,
-            baseSha: work.baseSha!,
-          });
-          await phases.reserve(item.id, "coding");
-          const handle = await driver.start(
-            {
-              captureContext: { objective, runId: state.runId },
-              item: work.recovery?.correction
-                ? {
-                    ...item,
-                    brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
-                  }
-                : item,
-              baseSha: work.baseSha!,
-              attemptId: work.attempt,
+          // A worker that ends without a result is started again (bounded).
+          await repeatInterrupted(work, save, async () => {
+            await phases.reserve(item.id, "validation");
+            await preflightItemEnvironment({
+              config,
+              root,
+              state,
               objectiveBody: args.objectiveBody,
-              selectedAssets: selectedInputsForItem(state, item),
-            },
-            executionContext(work, save, args.cancelled, (workerUsage) =>
-              args.diagnostics?.emit({
-                runId: state.runId,
-                itemId: item.id,
+              item,
+              store: contentStore,
+              baseSha: work.baseSha!,
+            });
+            await phases.reserve(item.id, "coding");
+            const handle = await driver.start(
+              {
+                captureContext: { objective, runId: state.runId },
+                item: work.recovery?.correction
+                  ? {
+                      ...item,
+                      brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
+                    }
+                  : item,
+                baseSha: work.baseSha!,
                 attemptId: work.attempt,
-                operation: "worker-usage",
-                outcome: "observed",
-                workerUsage,
-              }),
-            ),
-          );
-          work.execution = structuredClone(handle);
-          save();
-          if (args.cancelled()) {
-            await driver.cancel(
+                objectiveBody: args.objectiveBody,
+                selectedAssets: selectedInputsForItem(state, item),
+              },
+              executionContext(work, save, args.cancelled, (workerUsage) =>
+                args.diagnostics?.emit({
+                  runId: state.runId,
+                  itemId: item.id,
+                  attemptId: work.attempt,
+                  operation: "worker-usage",
+                  outcome: "observed",
+                  workerUsage,
+                }),
+              ),
+            );
+            work.execution = structuredClone(handle);
+            save();
+            if (args.cancelled()) {
+              await driver.cancel(
+                handle,
+                executionContext(work, save, args.cancelled, (workerUsage) =>
+                  args.diagnostics?.emit({
+                    runId: state.runId,
+                    itemId: item.id,
+                    attemptId: work.attempt,
+                    operation: "worker-usage",
+                    outcome: "observed",
+                    workerUsage,
+                  }),
+                ),
+              );
+              throw new Error("Objective cancelled");
+            }
+            const result = await driver.collect(
               handle,
               executionContext(work, save, args.cancelled, (workerUsage) =>
                 args.diagnostics?.emit({
@@ -210,50 +228,36 @@ export async function runNativeGraph(args: {
                 }),
               ),
             );
-            throw new Error("Objective cancelled");
-          }
-          const result = await driver.collect(
-            handle,
-            executionContext(work, save, args.cancelled, (workerUsage) =>
+            phases.release(item.id);
+            recordWorkerDiscovery(state, item.id, result.discovery);
+            save();
+            if (result.collection)
               args.diagnostics?.emit({
                 runId: state.runId,
                 itemId: item.id,
                 attemptId: work.attempt,
-                operation: "worker-usage",
-                outcome: "observed",
-                workerUsage,
-              }),
-            ),
-          );
-          phases.release(item.id);
-          recordWorkerDiscovery(state, item.id, result.discovery);
-          save();
-          if (result.collection)
-            args.diagnostics?.emit({
-              runId: state.runId,
-              itemId: item.id,
-              attemptId: work.attempt,
-              operation: "collection-ignored-links",
-              outcome: "completed",
-              metadata: {
-                observation: "original-worktree-scan",
-                acceptedIgnoredLinkCount:
-                  result.collection.acceptedIgnoredLinks.length,
-                treeSha: result.treeSha,
-                headSha: result.changeRef,
-              },
-              detail: JSON.stringify(result.collection),
-            });
-          if (args.cancelled()) throw new Error("Objective cancelled");
-          if (result.assets?.length)
-            throw new Error(
-              `Independent preparation ${item.id} unexpectedly returned AssetSets`,
-            );
-          work.changeRef = result.changeRef;
-          work.treeSha = result.treeSha;
-          delete work.execution;
-          work.step = "validate";
-          save();
+                operation: "collection-ignored-links",
+                outcome: "completed",
+                metadata: {
+                  observation: "original-worktree-scan",
+                  acceptedIgnoredLinkCount:
+                    result.collection.acceptedIgnoredLinks.length,
+                  treeSha: result.treeSha,
+                  headSha: result.changeRef,
+                },
+                detail: JSON.stringify(result.collection),
+              });
+            if (args.cancelled()) throw new Error("Objective cancelled");
+            if (result.assets?.length)
+              throw new Error(
+                `Independent preparation ${item.id} unexpectedly returned AssetSets`,
+              );
+            work.changeRef = result.changeRef;
+            work.treeSha = result.treeSha;
+            delete work.execution;
+            work.step = "validate";
+            save();
+          });
         } catch (error) {
           work.status = "failed";
           work.error = error instanceof Error ? error.message : String(error);
@@ -791,62 +795,64 @@ export async function runNativeGraph(args: {
         delete work.step;
         save();
       };
-      const task = perform().catch(async (error: unknown) => {
-        if (error instanceof AcceptanceDecisionRequired) {
-          phases.release(item.id);
-          work.status = "waiting";
-          work.step = "approve-result";
-          work.acceptancePending = error.pending;
-          if (!args.cancelled() && !args.paused?.())
-            prepareEvidenceRecovery(state, item.id);
-          save();
-          return;
-        }
-        if (work.status !== "done" && work.status !== "published") {
-          work.status = "failed";
-          work.error = error instanceof Error ? error.message : String(error);
-          if (
-            error instanceof AuthenticationRequiredError &&
-            work.status === "failed"
-          )
-            work.authentication = error.authentication;
-          else delete work.authentication;
-          save();
-        }
-        const isolated = recordWorkFailure(state, item.id, error);
-        if (
-          isolated &&
-          state.admission?.authority.repairPolicy &&
-          !unit.items.some((entry) => state.work[entry.id]?.pullRequest) &&
-          !args.cancelled()
-        ) {
-          phases.release(item.id);
-          save();
-          await phases.reserve(item.id, "review");
-          try {
-            await diagnoseWorkRepair({
-              state,
-              item,
-              model: args.planningModel,
-              diagnostics: args.diagnostics,
-              sources: planningSources(
-                args.objectiveBody,
-                state.baseSha,
-                config.checkout,
-                state.additionalSources,
-              ),
-              save,
-              stopped: () => args.cancelled() || Boolean(args.paused?.()),
-            });
-          } finally {
+      const task = repeatInterrupted(work, save, perform).catch(
+        async (error: unknown) => {
+          if (error instanceof AcceptanceDecisionRequired) {
             phases.release(item.id);
+            work.status = "waiting";
+            work.step = "approve-result";
+            work.acceptancePending = error.pending;
+            if (!args.cancelled() && !args.paused?.())
+              prepareEvidenceRecovery(state, item.id);
+            save();
+            return;
           }
-          return;
-        }
-        if (work.phaseReservation !== "coding") phases.release(item.id);
-        save();
-        throw error;
-      });
+          if (work.status !== "done" && work.status !== "published") {
+            work.status = "failed";
+            work.error = error instanceof Error ? error.message : String(error);
+            if (
+              error instanceof AuthenticationRequiredError &&
+              work.status === "failed"
+            )
+              work.authentication = error.authentication;
+            else delete work.authentication;
+            save();
+          }
+          const isolated = recordWorkFailure(state, item.id, error);
+          if (
+            isolated &&
+            state.admission?.authority.repairPolicy &&
+            !unit.items.some((entry) => state.work[entry.id]?.pullRequest) &&
+            !args.cancelled()
+          ) {
+            phases.release(item.id);
+            save();
+            await phases.reserve(item.id, "review");
+            try {
+              await diagnoseWorkRepair({
+                state,
+                item,
+                model: args.planningModel,
+                diagnostics: args.diagnostics,
+                sources: planningSources(
+                  args.objectiveBody,
+                  state.baseSha,
+                  config.checkout,
+                  state.additionalSources,
+                ),
+                save,
+                stopped: () => args.cancelled() || Boolean(args.paused?.()),
+              });
+            } finally {
+              phases.release(item.id);
+            }
+            return;
+          }
+          if (work.phaseReservation !== "coding") phases.release(item.id);
+          save();
+          throw error;
+        },
+      );
       active.set(item.id, task);
       try {
         await task;
@@ -951,17 +957,22 @@ export async function runNativeGraph(args: {
     // restart simply asks again.
     if (layers.length === 1) {
       const layer = layers[0]!;
-      const merge = async () =>
-        (
-          await github.merge(
-            {
-              number: layer.pullRequest,
-              branch: layer.branch,
-              headSha: layer.headSha,
-            },
-            layer.headSha,
-          )
-        ).integratedSha;
+      const merge = () =>
+        repeatInterrupted(
+          topWork,
+          save,
+          async () =>
+            (
+              await github.merge(
+                {
+                  number: layer.pullRequest,
+                  branch: layer.branch,
+                  headSha: layer.headSha,
+                },
+                layer.headSha,
+              )
+            ).integratedSha,
+        );
       integratedSha = args.diagnostics
         ? await args.diagnostics.span(mergeOperation, merge, (headSha) => ({
             integratedSha: headSha,
@@ -969,7 +980,10 @@ export async function runNativeGraph(args: {
         : await merge();
     } else {
       state.stackNumbers ??= {};
-      const ensureStack = () => github.ensureNativeStack(layers, defaultBranch);
+      const ensureStack = () =>
+        repeatInterrupted(topWork, save, () =>
+          github.ensureNativeStack(layers, defaultBranch),
+        );
       const stackNumber =
         state.stackNumbers[unit.id] ??
         (args.diagnostics
@@ -1002,24 +1016,27 @@ export async function runNativeGraph(args: {
           "Pending native merge identity changed; operator direction required",
         );
       const mergeStack = () =>
-        github.mergeNativeStack(layers, defaultBranch, stackNumber, {
-          resumeUuid: pending?.uuid,
-          beforeMerge: () => {
-            if (args.cancelled()) throw new Error("Objective cancelled");
-            if (args.paused?.() && readinessWasWaiting)
-              throw new DeliveryReadinessPending();
-          },
-          onPending: (uuid) => {
-            state.stackMerges ??= {};
-            state.stackMerges[unit.id] = {
-              topPullRequest: layers.at(-1)!.pullRequest,
-              expectedHeadSha: layers.at(-1)!.headSha,
-              uuid,
-            };
-            save();
-          },
-          cancelled: args.cancelled,
-        });
+        repeatInterrupted(topWork, save, () =>
+          github.mergeNativeStack(layers, defaultBranch, stackNumber, {
+            // A repeat resumes the async merge recorded by an earlier call.
+            resumeUuid: state.stackMerges?.[unit.id]?.uuid ?? pending?.uuid,
+            beforeMerge: () => {
+              if (args.cancelled()) throw new Error("Objective cancelled");
+              if (args.paused?.() && readinessWasWaiting)
+                throw new DeliveryReadinessPending();
+            },
+            onPending: (uuid) => {
+              state.stackMerges ??= {};
+              state.stackMerges[unit.id] = {
+                topPullRequest: layers.at(-1)!.pullRequest,
+                expectedHeadSha: layers.at(-1)!.headSha,
+                uuid,
+              };
+              save();
+            },
+            cancelled: args.cancelled,
+          }),
+        );
       try {
         integratedSha = args.diagnostics
           ? await args.diagnostics.span(

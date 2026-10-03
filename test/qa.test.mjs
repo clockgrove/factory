@@ -935,7 +935,7 @@ test("native paused admission does not start a pending QA proof", async () => {
 
 for (const delivery of ["regular", "native"])
   for (const outcome of ["unknown", "refused"])
-    test(`${delivery} ${outcome} QA review preserves the correct retry boundary`, async () =>
+    test(`${delivery} ${outcome} QA review: lost response repeats, refusal needs retry`, async () =>
       fixture(async (root) => {
         const target = createTarget(root, {
           "real-environment.txt": "actual local resource",
@@ -992,19 +992,23 @@ for (const delivery of ["regular", "native"])
           detailsUrl: "https://github.com/example/check/94",
         });
         const plan = await application.planObjective(1);
+        if (outcome === "unknown") {
+          // A lost review response is an interruption: asked again in the
+          // same run, without a retry.
+          const completed = await application.runObjective(1, plan);
+          assert.equal(completed.finalValidation.passed, true);
+          assert.equal(submissions, 2);
+          return;
+        }
         await assert.rejects(
           application.runObjective(1, plan),
-          outcome === "unknown"
-            ? /QA provider response was lost/
-            : /criterion disproved/,
+          /criterion disproved/,
         );
         const state = readState(repository, 1);
-        assert.equal(state.work.qa.pendingEffect, undefined);
         assert.equal(state.work.qa.status, "failed");
         await assert.rejects(application.runObjective(1, plan));
         assert.equal(submissions, 1);
-        // A review has no side effects, so neither a refusal nor a lost
-        // response blocks an explicit retry, which reviews once more.
+        // A refusal is a real failure: an explicit retry reviews once more.
         assert.equal(state.work.qa.execution, undefined);
         application.retryWorkItem(1, "qa");
         const completed = await application.runObjective(1, plan);

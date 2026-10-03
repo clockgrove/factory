@@ -1,20 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { APIConnectionError, APIError } from "@anthropic-ai/sdk";
 import { Codex } from "@openai/codex-sdk";
 import {
   ClaudePlanningModel,
-  claudeMessageUsage,
   claudeOutputSchema,
 } from "../dist/claude-planning.js";
 import {
@@ -24,7 +16,8 @@ import {
 } from "../dist/compiler.js";
 import { validateConfig } from "../dist/config.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
-import { compose, composePlanning } from "../dist/index.js";
+import { composePlanning } from "../dist/index.js";
+import { ProviderTurnTimeoutError } from "../dist/provider-turn.js";
 import { reviewPacket } from "../dist/review-evidence.js";
 import { compilerRequest, compilerResponse } from "./support/compiler-wire.mjs";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
@@ -32,72 +25,102 @@ import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 const baseSha = "a".repeat(40);
 const treeSha = "b".repeat(40);
 const claudePlanning = {
-  kind: "claude-api",
-  credentialEnv: "ANTHROPIC_API_KEY",
+  kind: "claude-agent-sdk",
   maxOutputTokens: 64000,
   planner: { model: "claude-opus-5-5", reasoningEffort: "high" },
   reviewer: { model: "claude-sonnet-5-5", reasoningEffort: "medium" },
 };
+const session = "session-planning";
+const usage = {
+  input_tokens: 10,
+  output_tokens: 5,
+  cache_read_input_tokens: 3,
+  cache_creation_input_tokens: 2,
+};
 
-function message(text, overrides = {}) {
-  return {
-    id: "msg_planning",
-    type: "message",
-    role: "assistant",
-    model: "claude-opus-5-5",
-    content: [
-      { type: "thinking", thinking: "", signature: "sig" },
-      { type: "text", text },
-    ],
-    stop_reason: "end_turn",
-    stop_details: null,
-    usage: {
-      input_tokens: 10,
-      output_tokens: 5,
-      cache_read_input_tokens: 3,
-      cache_creation_input_tokens: 2,
-      output_tokens_details: { thinking_tokens: 4 },
+/** One Agent SDK session as the pinned runtime emits it for outputFormat. */
+function sdkSession(options, structured, result = {}, init = {}) {
+  return [
+    {
+      type: "system",
+      subtype: "init",
+      model: options.model,
+      tools: ["StructuredOutput"],
+      mcp_servers: [],
+      permissionMode: "dontAsk",
+      session_id: session,
+      uuid: "init",
+      ...init,
     },
-    ...overrides,
-  };
+    {
+      type: "assistant",
+      message: {
+        id: "msg_planning",
+        model: options.model,
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_1",
+            name: "StructuredOutput",
+            input: structured,
+          },
+        ],
+        usage,
+      },
+      parent_tool_use_id: null,
+      session_id: session,
+      uuid: "assistant",
+    },
+    {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      num_turns: 2,
+      result: JSON.stringify(structured),
+      stop_reason: "tool_use",
+      structured_output: structured,
+      usage,
+      modelUsage: {
+        [options.model]: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadInputTokens: 3,
+          cacheCreationInputTokens: 2,
+          thinkingTokens: 4,
+          costUSD: 0.01,
+        },
+      },
+      total_cost_usd: 0.01,
+      permission_denials: [],
+      session_id: session,
+      uuid: "result",
+      ...result,
+    },
+  ];
 }
 
-/** Scripted Messages API boundary: each call answers from `respond(params)`. */
-function stubClient(respond) {
+/** Scripted Agent SDK boundary: each call answers from `respond`. */
+function fakeQuery(respond) {
   const calls = [];
   return {
     calls,
-    client: {
-      messages: {
-        stream(params, options) {
-          calls.push({ params, options });
-          const outcome = respond(params, calls.length - 1);
-          return {
-            async *[Symbol.asyncIterator]() {
-              if (outcome instanceof Error) throw outcome;
-              yield {
-                type: "message_start",
-                message: { ...outcome, content: [] },
-              };
-              yield { type: "message_stop" };
-            },
-            async finalMessage() {
-              if (outcome instanceof Error) throw outcome;
-              return outcome;
-            },
-          };
-        },
-      },
+    query({ prompt, options }) {
+      calls.push({ prompt, options, cwdExisted: existsSync(options.cwd) });
+      const outcome = respond(prompt, options, calls.length - 1);
+      return (async function* () {
+        if (outcome instanceof Error) throw outcome;
+        yield* outcome;
+      })();
     },
   };
 }
 
 function claudeModel(respond, options = {}) {
-  const stub = stubClient(respond);
+  const fake = fakeQuery(respond);
   return {
-    ...stub,
-    model: new ClaudePlanningModel(claudePlanning, "unused-key", {
-      client: stub.client,
+    ...fake,
+    model: new ClaudePlanningModel(claudePlanning, {
+      query: fake.query,
       wait: async () => undefined,
       ...options,
     }),
@@ -165,11 +188,12 @@ const diagnosisInput = () => ({
 /** The same deterministic answer for whichever provider receives a prompt. */
 function answer(prompt) {
   if (prompt.includes("\nCompiler choices (JSON data):\n"))
-    return JSON.stringify(compilerResponse(prompt));
+    return compilerResponse(prompt);
   if (prompt.startsWith("Return only the requested diagnostic JSON"))
-    return JSON.stringify({ decision: "stop" });
-  return JSON.stringify({ packetId: "packet", findings: [] });
+    return { decision: "stop" };
+  return { packetId: "packet", findings: [] };
 }
+const answered = (prompt, options) => sdkSession(options, answer(prompt));
 
 /** No keyword the structured-output API rejects reaches the request. */
 function assertClaudeSchemaSubset(node) {
@@ -197,7 +221,14 @@ async function runAllPhases(model) {
   ];
 }
 
-test("Claude planning sends the Codex prompts and schemas and decodes identically", async (t) => {
+const invocation = (phase, observations) => ({
+  invocationId: phase,
+  phase,
+  ordinal: 0,
+  observe: (event) => observations.push(event),
+});
+
+test("Claude planning sends the Codex prompts and schemas through a tool-free Agent SDK session", async (t) => {
   const codexCalls = [];
   t.mock.method(Codex.prototype, "startThread", (options) => ({
     id: "thread",
@@ -206,7 +237,11 @@ test("Claude planning sends the Codex prompts and schemas and decodes identicall
       async function* events() {
         yield {
           type: "item.completed",
-          item: { id: "m", type: "agent_message", text: answer(prompt) },
+          item: {
+            id: "m",
+            type: "agent_message",
+            text: JSON.stringify(answer(prompt)),
+          },
         };
         yield { type: "turn.completed", usage: null };
       }
@@ -218,31 +253,56 @@ test("Claude planning sends the Codex prompts and schemas and decodes identicall
     new CodexPlanningModel("/unused", selection, selection),
   );
 
-  const { model, calls } = claudeModel((params) =>
-    message(answer(params.messages[0].content)),
-  );
-  const claudeResults = await runAllPhases(model);
+  const savedToken = process.env.GH_TOKEN;
+  process.env.GH_TOKEN = "github-token-never-forwarded";
+  let claudeResults;
+  let calls;
+  try {
+    const claude = claudeModel(answered);
+    calls = claude.calls;
+    claudeResults = await runAllPhases(claude.model);
+  } finally {
+    if (savedToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = savedToken;
+  }
 
   assert.deepEqual(claudeResults, codexResults);
   assert.equal(calls.length, codexCalls.length);
-  for (const [index, call] of calls.entries()) {
+  for (const [index, { prompt, options, cwdExisted }] of calls.entries()) {
     const codex = codexCalls[index];
-    assert.deepEqual(call.params.messages, [
-      { role: "user", content: codex.prompt },
-    ]);
-    assert.deepEqual(call.params.output_config.format, {
+    assert.equal(prompt, codex.prompt);
+    assert.deepEqual(options.outputFormat, {
       type: "json_schema",
       schema: claudeOutputSchema(codex.schema),
     });
-    assert.deepEqual(call.params.thinking, { type: "adaptive" });
-    assert.equal(call.params.max_tokens, 64000);
-    assert.equal(call.params.tools, undefined);
-    assert.ok(call.options.signal instanceof AbortSignal);
-    assertClaudeSchemaSubset(call.params.output_config.format.schema);
+    assertClaudeSchemaSubset(options.outputFormat.schema);
+    assert.deepEqual(options.tools, []);
+    assert.deepEqual(options.allowedTools, []);
+    assert.deepEqual(options.mcpServers, {});
+    assert.equal(options.strictMcpConfig, true);
+    assert.deepEqual(options.settingSources, []);
+    assert.deepEqual(options.agents, {});
+    assert.deepEqual(options.plugins, []);
+    assert.deepEqual(options.skills, []);
+    assert.equal(options.permissionMode, "dontAsk");
+    assert.equal(options.persistSession, false);
+    assert.equal(options.verbatimPrompts, true);
+    assert.deepEqual(options.thinking, { type: "adaptive" });
+    assert.ok(options.abortController instanceof AbortController);
+    // An empty private working directory that is removed afterwards.
+    assert.equal(cwdExisted, true);
+    assert.equal(existsSync(options.cwd), false);
+    assert.equal(options.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "64000");
+    assert.equal(options.env.GH_TOKEN, undefined);
+    assert.notEqual(options.env.GH_CONFIG_DIR, undefined);
+    assert.match(
+      options.env.CLAUDE_AGENT_SDK_CLIENT_APP,
+      /^clockgrove-factory\//,
+    );
   }
   // Compile and diagnosis use the planner; every review uses the reviewer.
   assert.deepEqual(
-    calls.map(({ params }) => [params.model, params.output_config.effort]),
+    calls.map(({ options }) => [options.model, options.effort]),
     [
       ["claude-opus-5-5", "high"],
       ["claude-sonnet-5-5", "medium"],
@@ -303,52 +363,37 @@ test("Claude output schema keeps discriminators and moves unsupported bounds to 
   assert.deepEqual(converted.required, schema.required);
 });
 
-test("Claude usage is observed in cache-inclusive token categories", async () => {
-  assert.deepEqual(claudeMessageUsage(message("{}").usage), {
-    inputTokens: 15,
-    cachedInputTokens: 3,
-    cacheWriteInputTokens: 2,
-    outputTokens: 5,
-    reasoningOutputTokens: 4,
-  });
-  assert.deepEqual(
-    claudeMessageUsage({
-      input_tokens: 7,
-      output_tokens: 1,
-      cache_read_input_tokens: null,
-      cache_creation_input_tokens: null,
-    }),
-    { inputTokens: 7, outputTokens: 1 },
-  );
+test("Claude usage and interactions are observed from the Agent SDK result", async () => {
   const observations = [];
-  const { model } = claudeModel((params) =>
-    message(answer(params.messages[0].content)),
-  );
+  const { model } = claudeModel(answered);
   await model.reviewGraph({
     ...graphReviewInput(),
-    invocation: {
-      invocationId: "review",
-      phase: "graph-review",
-      ordinal: 0,
-      observe: (event) => observations.push(event),
-    },
+    invocation: invocation("graph-review", observations),
   });
   const started = observations.find(({ type }) => type === "started");
-  assert.equal(started.adapter, "@anthropic-ai/sdk@0.129.0");
-  assert.equal(started.provider, "anthropic-claude-api");
+  assert.equal(started.adapter, "@anthropic-ai/claude-agent-sdk@0.3.281");
+  assert.equal(started.provider, "anthropic-claude-agent-sdk");
   assert.equal(started.model, "claude-sonnet-5-5");
   assert.equal(started.reasoningEffort, "medium");
-  const usageCapture = observations.find(
-    ({ capture }) => capture?.event.kind === "usage",
+  const toolCall = observations.find(
+    ({ capture }) => capture?.event.tool === "StructuredOutput",
   );
-  assert.deepEqual(usageCapture.capture.event.usage.raw, {
-    input_tokens: 10,
-    output_tokens: 5,
-    cache_read_input_tokens: 3,
-    cache_creation_input_tokens: 2,
+  assert.equal(toolCall.capture.event.providerSessionId, session);
+  const terminal = observations.find(
+    ({ capture }) =>
+      capture?.event.kind === "usage" && capture.event.usage.terminal,
+  );
+  assert.equal(terminal.capture.event.reportedModel, "claude-sonnet-5-5");
+  assert.deepEqual(terminal.capture.event.usage.raw, usage);
+  assert.deepEqual(terminal.capture.event.usage.cost, {
+    value: 0.01,
+    currency: "USD",
+    kind: "provider-estimate",
+    completeness: "available",
+    provenance: "Claude SDK total_cost_usd",
   });
   const completed = observations.find(({ type }) => type === "completed");
-  assert.equal(completed.providerThreadId, "msg_planning");
+  assert.equal(completed.providerThreadId, session);
   assert.equal(completed.usageAvailable, true);
   assert.deepEqual(completed.usage, {
     inputTokens: 15,
@@ -359,104 +404,118 @@ test("Claude usage is observed in cache-inclusive token categories", async () =>
   });
 });
 
-test("malformed Claude output fails closed as MalformedPlannerOutput", async () => {
+test("Claude output without structured output or for another request fails closed", async () => {
   const observations = [];
-  const invocation = (phase) => ({
-    invocationId: phase,
-    phase,
-    ordinal: 0,
-    observe: (event) => observations.push(event),
-  });
-  const unparsable = claudeModel(() => message('{"packetId": "packet"'));
-  await assert.rejects(
-    unparsable.model.reviewResult({
-      ...resultReviewInput(),
-      invocation: invocation("result-review"),
-    }),
-    MalformedPlannerOutput,
+  const missing = claudeModel((prompt, options) =>
+    sdkSession(options, answer(prompt), { structured_output: undefined }),
   );
-  const invalid = observations.find(({ type }) => type === "response-invalid");
-  assert.equal(invalid.failureClass, "structured-output-parse");
-  assert.equal(invalid.usageAvailable, true);
+  await assert.rejects(
+    missing.model.reviewResult({
+      ...resultReviewInput(),
+      invocation: invocation("result-review", observations),
+    }),
+    (error) =>
+      error instanceof CompletedModelInvocationError &&
+      /no structured output/.test(error.message),
+  );
+  const failed = observations.find(({ type }) => type === "failed");
+  assert.equal(failed.failureClass, "provider-incomplete");
+  assert.equal(failed.usageAvailable, true);
 
   // Schema-valid JSON for another request is still rejected by the decoder.
-  const foreign = claudeModel((params) =>
-    message(
-      JSON.stringify({
-        ...compilerResponse(params.messages[0].content),
-        contextId: "f".repeat(64),
-      }),
-    ),
+  const foreign = claudeModel((prompt, options) =>
+    sdkSession(options, {
+      ...compilerResponse(prompt),
+      contextId: "f".repeat(64),
+    }),
   );
   await assert.rejects(
-    foreign.model.generateStructured({
-      ...compileInput(),
-      invocation: invocation("compile"),
-    }),
+    foreign.model.generateStructured(compileInput()),
     (error) =>
       error instanceof MalformedPlannerOutput &&
       /context identity/.test(error.message),
   );
 });
 
-test("Claude refusals and truncation are completed invocations, never accepted output", async () => {
-  for (const [stop, failureClass] of [
-    ["refusal", "provider-refusal"],
-    ["max_tokens", "provider-incomplete"],
+test("Claude refusals, limits and login failures are completed invocations, never accepted output", async () => {
+  for (const [result, failureClass, detail] of [
+    [{ stop_reason: "refusal" }, "provider-refusal", /refusal/],
+    [
+      {
+        subtype: "error_max_turns",
+        is_error: true,
+        errors: ["Reached maximum number of turns"],
+      },
+      "provider-incomplete",
+      /error_max_turns/,
+    ],
+    [
+      {
+        subtype: "error_max_structured_output_retries",
+        is_error: true,
+        errors: ["schema mismatch"],
+      },
+      "provider-structured-output",
+      /schema mismatch/,
+    ],
+    [
+      {
+        is_error: true,
+        api_error_status: 401,
+        result: "Invalid authentication credentials",
+      },
+      "provider-authentication",
+      /claude auth login/,
+    ],
   ]) {
     const observations = [];
-    const { model } = claudeModel(() =>
-      message('{"packetId": "packet", "findings": []}', {
-        stop_reason: stop,
-        stop_details:
-          stop === "refusal"
-            ? { type: "refusal", category: "cyber", explanation: null }
-            : null,
-      }),
+    const { model } = claudeModel((prompt, options) =>
+      sdkSession(options, answer(prompt), result),
     );
     await assert.rejects(
       model.reviewGraph({
         ...graphReviewInput(),
-        invocation: {
-          invocationId: stop,
-          phase: "graph-review",
-          ordinal: 0,
-          observe: (event) => observations.push(event),
-        },
+        invocation: invocation("graph-review", observations),
       }),
       (error) =>
         error instanceof CompletedModelInvocationError &&
         !(error instanceof MalformedPlannerOutput) &&
-        error.message.includes(stop),
+        detail.test(error.message),
     );
     const failed = observations.find(({ type }) => type === "failed");
     assert.equal(failed.failureClass, failureClass);
-    assert.equal(failed.usageAvailable, true);
   }
 });
 
-test("Claude overload retries only reviews; a lost connection stays ambiguous", async () => {
-  const overloaded = () =>
-    new APIError(
-      529,
-      { type: "error", error: { type: "overloaded_error", message: "x" } },
-      "Overloaded",
-      new Headers(),
-      "overloaded_error",
+test("Claude sessions exposing anything beyond structured output fail closed", async () => {
+  for (const [init, pattern] of [
+    [{ tools: ["StructuredOutput", "Bash"] }, /unconfigured tool Bash/],
+    [{ mcp_servers: [{ name: "x", status: "connected" }] }, /MCP server/],
+    [{ model: "claude-other" }, /selected model claude-other/],
+  ]) {
+    const { model } = claudeModel((prompt, options) =>
+      sdkSession(options, answer(prompt), {}, init),
     );
+    await assert.rejects(model.reviewGraph(graphReviewInput()), pattern);
+  }
+});
+
+test("Claude overload retries only reviews; a lost session stays ambiguous", async () => {
+  const overloaded = (prompt, options) =>
+    sdkSession(options, answer(prompt), {
+      is_error: true,
+      api_error_status: 529,
+      result: "API Error: 529 Overloaded",
+      structured_output: undefined,
+    });
   const observations = [];
-  const review = claudeModel((params, index) =>
-    index === 0 ? overloaded() : message(answer(params.messages[0].content)),
+  const review = claudeModel((prompt, options, index) =>
+    index === 0 ? overloaded(prompt, options) : answered(prompt, options),
   );
   assert.deepEqual(
     await review.model.reviewGraph({
       ...graphReviewInput(),
-      invocation: {
-        invocationId: "review",
-        phase: "graph-review",
-        ordinal: 0,
-        observe: (event) => observations.push(event),
-      },
+      invocation: invocation("graph-review", observations),
     }),
     { packetId: "packet", findings: [] },
   );
@@ -473,39 +532,64 @@ test("Claude overload retries only reviews; a lost connection stays ambiguous", 
     ],
   );
 
-  const compile = claudeModel(() => overloaded());
+  const compile = claudeModel(overloaded);
   await assert.rejects(
     compile.model.generateStructured(compileInput()),
     CompletedModelInvocationError,
   );
   assert.equal(compile.calls.length, 1);
 
-  const lost = claudeModel(
-    () => new APIConnectionError({ message: "socket hang up" }),
-  );
+  // A runtime that dies before reporting a result is not a provider verdict.
+  const lost = claudeModel(() => new Error("Claude Code process exited"));
   await assert.rejects(
     lost.model.reviewGraph(graphReviewInput()),
     (error) =>
-      error instanceof APIConnectionError &&
+      /process exited/.test(error.message) &&
+      !(error instanceof CompletedModelInvocationError),
+  );
+  const truncated = claudeModel((prompt, options) =>
+    answered(prompt, options).slice(0, 2),
+  );
+  await assert.rejects(
+    truncated.model.reviewGraph(graphReviewInput()),
+    (error) =>
+      /without turn.completed/.test(error.message) &&
       !(error instanceof CompletedModelInvocationError),
   );
 });
 
-test("configuration validates Claude planning and composition requires its credential", () => {
+test("an idle Claude session times out and aborts the Agent SDK query", async () => {
+  let aborted;
+  const model = new ClaudePlanningModel(claudePlanning, {
+    providerTurnIdleTimeoutMs: 20,
+    query: ({ options }) =>
+      (async function* () {
+        await new Promise((resolve) =>
+          options.abortController.signal.addEventListener("abort", resolve),
+        );
+        aborted = options.abortController.signal.aborted;
+        yield* [];
+      })(),
+  });
+  await assert.rejects(
+    model.generateStructured(compileInput()),
+    ProviderTurnTimeoutError,
+  );
+  assert.equal(aborted, true);
+});
+
+test("configuration validates Claude planning and composition needs no API key", () => {
   const root = mkdtempSync(join(tmpdir(), "factory-claude-planning-"));
-  const saved = process.env.FACTORY_TEST_CLAUDE_KEY;
+  const saved = process.env.ANTHROPIC_API_KEY;
   try {
+    delete process.env.ANTHROPIC_API_KEY;
     const target = createTarget(root);
     const config = factoryConfig(target.checkout, "example/claude-planning");
-    config.planning = {
-      ...structuredClone(claudePlanning),
-      credentialEnv: "FACTORY_TEST_CLAUDE_KEY",
-    };
+    config.planning = structuredClone(claudePlanning);
     assert.deepEqual(validateConfig(config).planning, config.planning);
     for (const [change, pattern] of [
-      [(p) => (p.kind = "claude"), /Unsupported planning model/],
-      [(p) => (p.extra = true), /planning/],
-      [(p) => (p.credentialEnv = "lower"), /credentialEnv/],
+      [(p) => (p.kind = "claude-api"), /Unsupported planning model/],
+      [(p) => (p.credentialEnv = "ANTHROPIC_API_KEY"), /planning/],
       [(p) => (p.maxOutputTokens = 0), /maxOutputTokens/],
       [
         (p) => (p.planner.reasoningEffort = "ultra"),
@@ -517,38 +601,9 @@ test("configuration validates Claude planning and composition requires its crede
       change(invalid.planning);
       assert.throws(() => validateConfig(invalid), pattern);
     }
-    delete process.env.FACTORY_TEST_CLAUDE_KEY;
-    assert.throws(
-      () => composePlanning(config),
-      /Set FACTORY_TEST_CLAUDE_KEY in the controller environment/,
-    );
-    process.env.FACTORY_TEST_CLAUDE_KEY = "test-key";
     assert.equal(typeof composePlanning(config).planObjective, "function");
-
-    // A supervised service reads the systemd-loaded file, never the ambient value.
-    const loaded = join(root, "loaded");
-    process.env.CREDENTIALS_DIRECTORY = loaded;
-    assert.throws(
-      () => compose(config, []),
-      /binding lacks FACTORY_TEST_CLAUDE_KEY/,
-    );
-    assert.throws(
-      () => compose(config, ["FACTORY_TEST_CLAUDE_KEY"]),
-      /FACTORY_TEST_CLAUDE_KEY is unavailable/,
-    );
-    rmSync(loaded, { recursive: true, force: true });
-    mkdirSync(loaded);
-    writeFileSync(join(loaded, "FACTORY_TEST_CLAUDE_KEY"), "loaded-key", {
-      mode: 0o600,
-    });
-    assert.equal(
-      typeof compose(config, ["FACTORY_TEST_CLAUDE_KEY"]).runObjective,
-      "function",
-    );
   } finally {
-    if (saved === undefined) delete process.env.FACTORY_TEST_CLAUDE_KEY;
-    else process.env.FACTORY_TEST_CLAUDE_KEY = saved;
-    delete process.env.CREDENTIALS_DIRECTORY;
+    if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved;
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -572,7 +627,7 @@ test("install writes explicit Claude planning selections", () => {
           "--concurrency",
           "1",
           "--planning",
-          "claude-api",
+          "claude-agent-sdk",
           ...extra,
           "--config",
           configPath,
@@ -596,8 +651,7 @@ test("install writes explicit Claude planning selections", () => {
       "xhigh",
     ]);
     assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")).planning, {
-      kind: "claude-api",
-      credentialEnv: "ANTHROPIC_API_KEY",
+      kind: "claude-agent-sdk",
       maxOutputTokens: 64000,
       planner: { model: "claude-opus-5-5", reasoningEffort: "high" },
       reviewer: { model: "claude-sonnet-5-5", reasoningEffort: "xhigh" },

@@ -36,8 +36,7 @@ export function claudeCaptureEvents(
   const base: CaptureEvent = {
     kind: "interaction",
     providerEvent: message.type,
-    providerSessionId:
-      "session_id" in message ? message.session_id : undefined,
+    providerSessionId: "session_id" in message ? message.session_id : undefined,
     coverage: "sdk-exposed",
   };
   if (message.type === "system" && message.subtype === "init") {
@@ -49,17 +48,14 @@ export function claudeCaptureEvents(
       base.reportedModel = message.message.model;
     } else base.providerMessageId = message.uuid;
     const content = message.message.content;
-    if (typeof content === "string")
-      record(base, () => ({ text: content }));
+    if (typeof content === "string") record(base, () => ({ text: content }));
     else
       for (const block of content) {
-        if (block.type === "text")
-          record(base, () => ({ text: block.text }));
+        if (block.type === "text") record(base, () => ({ text: block.text }));
         else if (block.type === "tool_use")
-          record(
-            { ...base, tool: block.name, toolCallId: block.id },
-            () => ({ arguments: block.input }),
-          );
+          record({ ...base, tool: block.name, toolCallId: block.id }, () => ({
+            arguments: block.input,
+          }));
         else if (block.type === "tool_result")
           record(
             { ...base, role: "tool", toolCallId: block.tool_use_id },
@@ -101,18 +97,16 @@ export function claudeCaptureEvents(
       });
     }
   } else if (message.type === "result") {
-    record(
-      { ...base, kind: "response", role: "assistant" },
-      () =>
-        message.subtype === "success"
-          ? {
-              text: message.result,
-              isError: message.is_error,
-              ...(message.structured_output !== undefined && {
-                structuredOutput: message.structured_output,
-              }),
-            }
-          : { errors: message.errors },
+    record({ ...base, kind: "response", role: "assistant" }, () =>
+      message.subtype === "success"
+        ? {
+            text: message.result,
+            isError: message.is_error,
+            ...(message.structured_output !== undefined && {
+              structuredOutput: message.structured_output,
+            }),
+          }
+        : { errors: message.errors },
     );
     record({
       ...base,

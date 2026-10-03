@@ -225,7 +225,10 @@ function failureClass(
     return "provider-capacity";
   if (status === 429 || assistantError === "rate_limit")
     return "provider-rate-limit";
-  if (status === 401 || (assistantError && authenticationErrors.has(assistantError)))
+  if (
+    status === 401 ||
+    (assistantError && authenticationErrors.has(assistantError))
+  )
     return "provider-authentication";
   if (
     result.subtype === "error_max_turns" ||

@@ -156,81 +156,41 @@ test("loaded controller key authenticates the actual OpenAI client without envir
   }
 });
 
-test("a service binds every credential its execution and planning providers need", () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-credentials-many-"));
+test("Claude planning uses the operator's login and adds no service credential", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-credentials-planning-"));
   const checkout = join(root, "target");
   mkdirSync(checkout);
   const config = {
     ...cfg,
     checkout,
-    planning: { kind: "claude-api", credentialEnv: "FACTORY_DUMMY_PLANNING" },
+    planning: { kind: "claude-agent-sdk" },
   };
-  const previous = process.env.CREDENTIALS_DIRECTORY;
   try {
     assert.deepEqual(requiredProviderCredentials(config), [
       "FACTORY_DUMMY_KEY",
-      "FACTORY_DUMMY_PLANNING",
     ]);
-    // A shared variable name is one credential, not two bindings.
     assert.deepEqual(
       requiredProviderCredentials({
         ...config,
-        planning: { kind: "claude-api", credentialEnv: "FACTORY_DUMMY_KEY" },
+        execution: { kind: "local", concurrency: 1 },
       }),
-      ["FACTORY_DUMMY_KEY"],
+      [],
     );
-    for (const name of ["FACTORY_DUMMY_KEY", "FACTORY_DUMMY_PLANNING"])
+    for (const name of ["FACTORY_DUMMY_KEY", "ANTHROPIC_API_KEY"])
       writeFileSync(join(root, name), `${name}-value`, { mode: 0o600 });
-    const entries = ["FACTORY_DUMMY_PLANNING", "FACTORY_DUMMY_KEY"].map(
-      (name) => `${name}=${join(root, name)}`,
-    );
-    const bindings = credentialFileBindings(config, entries);
-    assert.deepEqual(bindings, [
+    const key = `FACTORY_DUMMY_KEY=${join(root, "FACTORY_DUMMY_KEY")}`;
+    assert.deepEqual(credentialFileBindings(config, [key]), [
       { name: "FACTORY_DUMMY_KEY", file: join(root, "FACTORY_DUMMY_KEY") },
-      {
-        name: "FACTORY_DUMMY_PLANNING",
-        file: join(root, "FACTORY_DUMMY_PLANNING"),
-      },
     ]);
-    for (const [invalid, pattern] of [
-      [entries.slice(0, 1), /--credential-file FACTORY_DUMMY_KEY=/],
-      [
-        [...entries, `OTHER_KEY=${join(root, "FACTORY_DUMMY_KEY")}`],
-        /OTHER_KEY is not required/,
-      ],
-      [[...entries, entries[0]], /bound more than once/],
-      [[join(root, "FACTORY_DUMMY_KEY")], /NAME=ABSOLUTE_PRIVATE_FILE/],
-    ])
-      assert.throws(() => credentialFileBindings(config, invalid), pattern);
-    const unit = renderService({
-      version: 1,
-      node: "/node",
-      cli: "/cli",
-      config: "/config",
-      objective: 1,
-      stateHome: "/state",
-      environment: {},
-      credentials: bindings,
-    });
-    assert.equal(unit.match(/^LoadCredential=/gm).length, 2);
-    assert.equal(unit.match(/--service-credential/g).length, 2);
-    process.env.CREDENTIALS_DIRECTORY = root;
-    const loaded = ["FACTORY_DUMMY_KEY", "FACTORY_DUMMY_PLANNING"];
-    for (const name of loaded)
-      assert.equal(
-        resolveProviderCredential(config, name, loaded),
-        `${name}-value`,
-      );
     assert.throws(
       () =>
-        resolveProviderCredential(config, "FACTORY_DUMMY_PLANNING", [
-          "FACTORY_DUMMY_KEY",
+        credentialFileBindings(config, [
+          key,
+          `ANTHROPIC_API_KEY=${join(root, "ANTHROPIC_API_KEY")}`,
         ]),
-      /binding lacks FACTORY_DUMMY_PLANNING/,
+      /ANTHROPIC_API_KEY is not required/,
     );
   } finally {
-    if (previous === undefined) delete process.env.CREDENTIALS_DIRECTORY;
-    else process.env.CREDENTIALS_DIRECTORY = previous;
     rmSync(root, { recursive: true, force: true });
   }
 });

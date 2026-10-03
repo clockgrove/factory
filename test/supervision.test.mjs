@@ -386,27 +386,26 @@ test("managed CLI readiness and fresh supervised starts use loaded private crede
     }
   }));
 
-test("a supervised service binds every configured provider credential, including planning", () =>
+test("a supervised Claude planning service binds no API key credential", () =>
   fixture(async ({ root, config, configPath, state }) => {
     config.planning = {
-      kind: "claude-api",
-      credentialEnv: "FACTORY_PLANNING_TEST_KEY",
+      kind: "claude-agent-sdk",
       maxOutputTokens: 1000,
       planner: { model: "claude-opus-5-5", reasoningEffort: "high" },
       reviewer: { model: "claude-opus-5-5", reasoningEffort: "high" },
     };
     writeFileSync(configPath, JSON.stringify(config));
     await registerIntake(config, state);
-    await assert.rejects(
-      supervise("install", configPath, { intake: true }),
-      /--credential-file FACTORY_PLANNING_TEST_KEY=ABSOLUTE_PRIVATE_FILE/,
-    );
     const key = join(root, "planning-key");
     writeFileSync(key, "planning-secret", { mode: 0o600 });
-    await supervise("install", configPath, {
-      intake: true,
-      credentialFiles: [`FACTORY_PLANNING_TEST_KEY=${key}`],
-    });
+    await assert.rejects(
+      supervise("install", configPath, {
+        intake: true,
+        credentialFiles: [`ANTHROPIC_API_KEY=${key}`],
+      }),
+      /ANTHROPIC_API_KEY is not required/,
+    );
+    await supervise("install", configPath, { intake: true });
     const unit = readFileSync(
       join(
         process.env.XDG_CONFIG_HOME,
@@ -415,13 +414,9 @@ test("a supervised service binds every configured provider credential, including
       ),
       "utf8",
     );
-    assert.match(unit, /^LoadCredential="FACTORY_PLANNING_TEST_KEY:\//m);
-    assert.match(unit, /"--service-credential" "FACTORY_PLANNING_TEST_KEY"/);
-    assert.doesNotMatch(unit, /planning-secret/);
+    assert.doesNotMatch(unit, /LoadCredential|--service-credential/);
     const status = await supervise("status", configPath);
-    assert.deepEqual(status.binding.credentials, [
-      { name: "FACTORY_PLANNING_TEST_KEY", file: key },
-    ]);
+    assert.deepEqual(status.binding.credentials ?? [], []);
   }));
 
 test("a retired single-credential binding is refused for reuse and only removable", () =>

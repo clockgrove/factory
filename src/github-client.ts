@@ -119,14 +119,16 @@ export function gitHubFault(
           detail: "GitHub does not show the repository to this login",
           fix: GITHUB_PERMISSION_FIX,
         };
+      // An object Factory created moments ago may not be visible yet,
+      // even through its dependency or sub-issue routes.
+      if (call.createdAt !== undefined && now - call.createdAt < GITHUB_LAG_MS)
+        return transient(`GitHub does not show ${what} yet`, false);
       if (FEATURE_ROUTE.test(path))
         return {
           kind: "config",
           detail: `GitHub does not offer ${what} for this repository`,
           fix: "Enable issue dependencies, sub-issues and stacked pull requests for the repository, then `factory run`",
         };
-      if (call.createdAt !== undefined && now - call.createdAt < GITHUB_LAG_MS)
-        return transient(`GitHub does not show ${what} yet`, false);
       return decision(
         "GitHub no longer shows an object Factory recorded. Was it deleted or transferred? Inspect it, then retry or cancel.",
         `${what} returned 404`,

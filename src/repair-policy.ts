@@ -264,6 +264,12 @@ export function repairScopes(state: FactoryState, id: string): string[] {
   visit(id);
   return scopes.size ? [...scopes].sort() : ["$objective"];
 }
+/** Commits earlier attempts of this Work Item produced, oldest first. */
+export function earlierHeads(work: WorkState): string[] {
+  return (work.recovery?.history ?? []).flatMap((attempt) =>
+    attempt.work.changeRef ? [attempt.work.changeRef] : [],
+  );
+}
 export function archiveAttempt(work: WorkState): WorkRecovery {
   const recovery = work.recovery ?? {};
   const { recovery: _old, ...attempt } = work;

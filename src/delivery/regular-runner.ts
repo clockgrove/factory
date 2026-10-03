@@ -31,6 +31,7 @@ import {
   validationLfsMembersForItem,
 } from "../media.js";
 import { attachFault, transient } from "../fault.js";
+import { earlierHeads } from "../repair-policy.js";
 import { git, gitAsync } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
 import { phaseAdmission } from "../phase-admission.js";
@@ -184,6 +185,7 @@ export async function runRegularGraph(args: {
         changeRef: work.changeRef!,
         branch,
         lfs: Boolean(work.selectedAssetSet),
+        earlierHeads: earlierHeads(work),
       });
     await args.reconcile?.();
     const published = args.diagnostics

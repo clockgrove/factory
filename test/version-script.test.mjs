@@ -14,6 +14,7 @@ import { bump, check, releaseNotes, versions } from "../scripts/version.mjs";
 function fixture(version = "1.2.3") {
   const root = mkdtempSync(join(tmpdir(), "factory-version-"));
   mkdirSync(join(root, ".codex-plugin"));
+  mkdirSync(join(root, ".claude-plugin"));
   mkdirSync(join(root, ".agents", "plugins"), { recursive: true });
   const json = (path, value) =>
     writeFileSync(join(root, path), `${JSON.stringify(value, null, 2)}\n`);
@@ -32,6 +33,14 @@ function fixture(version = "1.2.3") {
       { name: "factory", source: { source: "url", ref: `v${version}` } },
     ],
   });
+  json(".claude-plugin/plugin.json", { name: "factory", version });
+  json(".claude-plugin/marketplace.json", {
+    name: "clockgrove",
+    plugins: [
+      { name: "factory", source: { source: "github", ref: `v${version}` } },
+      { name: "other", source: { ref: "v9.9.9" } },
+    ],
+  });
   writeFileSync(
     join(root, "CHANGELOG.md"),
     `# Changelog\n\nIntro.\n\n## ${version} — 2026-01-01\n\n- Earlier change.\n`,
@@ -44,7 +53,14 @@ test("check accepts aligned identities and reports each mismatch", () => {
   try {
     assert.deepEqual(check("1.2.3", root), []);
     const problems = check("1.2.4", root);
-    assert.equal(problems.length, 6);
+    assert.equal(problems.length, 8);
+    for (const where of [
+      ".codex-plugin/plugin.json",
+      ".claude-plugin/plugin.json",
+      ".agents/plugins/marketplace.json ref",
+      ".claude-plugin/marketplace.json ref",
+    ])
+      assert.ok(problems.includes(`${where} is 1.2.3, expected 1.2.4`), where);
     assert.match(problems.at(-1), /no non-empty "## 1\.2\.4" section/);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -59,10 +75,16 @@ test("bump moves every identity and adds a changelog heading that check refuses 
       new Set(Object.values(versions(root))),
       new Set(["1.3.0"]),
     );
-    const marketplace = JSON.parse(
-      readFileSync(join(root, ".agents/plugins/marketplace.json"), "utf8"),
+    const marketplace = (path) =>
+      JSON.parse(readFileSync(join(root, path), "utf8"));
+    assert.equal(
+      marketplace(".agents/plugins/marketplace.json").plugins[0].source.ref,
+      "v9.9.9",
     );
-    assert.equal(marketplace.plugins[0].source.ref, "v9.9.9");
+    assert.equal(
+      marketplace(".claude-plugin/marketplace.json").plugins[1].source.ref,
+      "v9.9.9",
+    );
     const changelog = readFileSync(join(root, "CHANGELOG.md"), "utf8");
     assert.ok(
       changelog.indexOf("## 1.3.0 — 2026-10-03") <

@@ -1,0 +1,13 @@
+{
+  "name": "factory",
+  "version": "0.1.75",
+  "description": "Run source-grounded development Objectives in a target repository.",
+  "author": {
+    "name": "Clockgrove",
+    "url": "https://github.com/clockgrove"
+  },
+  "homepage": "https://github.com/clockgrove/factory#readme",
+  "repository": "https://github.com/clockgrove/factory",
+  "license": "MIT",
+  "keywords": ["development", "github", "objectives"]
+}

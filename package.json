@@ -11,6 +11,7 @@
     "url": "https://github.com/clockgrove/factory/issues"
   },
   "keywords": [
+    "claude-code",
     "codex",
     "development",
     "github",
@@ -31,6 +32,7 @@
     "assets",
     "docs/AGENT-HARNESSES.md",
     ".codex-plugin",
+    ".claude-plugin/plugin.json",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",

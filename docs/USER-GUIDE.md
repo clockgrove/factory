@@ -67,12 +67,15 @@ Background success returns `status: ready`, verified active/enabled service stat
 
 ## Bind a checkout
 
-After installing the CLI, choose the maximum number of concurrent local workers and bind your target:
+After installing the CLI, bind your target:
 
 ```sh
-factory install --repository OWNER/REPO \
-  --checkout /absolute/path/to/target --concurrency 2
+factory install --repository OWNER/REPO --checkout /absolute/path/to/target
 ```
+
+Without `--concurrency`, Factory sizes workers and [scheduling](#resource-limits-in-the-upcoming-autonomous-release) from this host. It keeps 2 CPUs and 4 GiB for the OS and controller. From the rest, each coding worker reserves 2 CPUs and 2 GiB, each validation job 4 CPUs and 4 GiB, and each review or delivery 0.5 CPU and 512 MiB. A phase's ceiling is how many of its reservations fit; review allows two per coding worker. On a 24-thread, 45 GiB host this gives 11 workers, 5 validation jobs and 22 reviews. Setup reports the result as `capacity`.
+
+Pass `--concurrency N` to choose the worker ceiling yourself. Factory then writes no `scheduling`, so validation and review share that ceiling, as before. Edit `scheduling` in the configuration before accepting a plan to change any derived value. An admission authority's `maxConcurrency` must be at least the configured concurrency.
 
 Setup writes configuration without starting an Objective. The CLI prints its configuration path. Defaults live under `$XDG_CONFIG_HOME/clockgrove-factory` (or `~/.config/clockgrove-factory`); run state lives under `$XDG_STATE_HOME/clockgrove-factory` (or `~/.local/state/clockgrove-factory`). Plan output, logs, and review exports may contain private source and should also stay outside the checkout.
 
@@ -90,7 +93,7 @@ These are installation choices, not recovery commands. Keep provider authenticat
 
 ### Resource limits in the upcoming autonomous release
 
-Before accepting a plan, an operator may add `scheduling` to the installation configuration. For example, the following declares four CPU units and 4096 MiB shared by active phases, with one concurrent reviewer and one validation job:
+Before accepting a plan, an operator may add or change `scheduling` in the installation configuration. Installing without `--concurrency` writes host-derived values. For example, the following declares four CPU units and 4096 MiB shared by active phases, with one concurrent reviewer and one validation job:
 
 ```json
 {

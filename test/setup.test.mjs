@@ -11,9 +11,10 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { hostSchedulingDefaults } from "../dist/config.js";
 import {
   admitObjective,
   checkAdmission,
@@ -598,6 +599,40 @@ for (const fault of ["refill", "foreign"]) {
         assert.deepEqual(status.document.authority.objectives, [1]);
     }));
 }
+
+test("guided setup sizes omitted concurrency and scheduling from the host and reports them", () =>
+  fixture(async ({ run, installArgs, configPath }) => {
+    const omitted = installArgs().slice(0, -2);
+    const configured = run(["setup", "--config-only", ...omitted]);
+    assert.equal(configured.status, 0, configured.stdout + configured.stderr);
+    const expected = hostSchedulingDefaults({
+      cpus: availableParallelism(),
+      memoryBytes: totalmem(),
+    });
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    assert.equal(config.execution.concurrency, expected.concurrency);
+    assert.deepEqual(config.scheduling, expected.scheduling);
+    assert.deepEqual(configured.document.capacity, {
+      ...expected,
+      sizedFromHost: {
+        cpus: availableParallelism(),
+        memoryMiB: Math.floor(totalmem() / 1024 ** 2),
+      },
+    });
+    const repeated = run(["setup", "--config-only"]);
+    assert.equal(repeated.status, 0, repeated.stdout + repeated.stderr);
+    assert.deepEqual(repeated.document.capacity, expected);
+  }));
+
+test("guided setup keeps an explicit concurrency as the whole capacity choice", () =>
+  fixture(async ({ run, installArgs, configPath }) => {
+    const configured = run(["setup", "--config-only", ...installArgs()]);
+    assert.equal(configured.status, 0, configured.stdout + configured.stderr);
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    assert.equal(config.execution.concurrency, 1);
+    assert.equal(config.scheduling, undefined);
+    assert.deepEqual(configured.document.capacity, { concurrency: 1 });
+  }));
 
 test("guided setup rejects configuration inside the target before writing it and preserves conflicting existing choices", () =>
   fixture(async ({ checkout, run, installArgs, configPath }) => {

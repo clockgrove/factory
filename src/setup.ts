@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { availableParallelism, totalmem } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExecutionAuthority, sameAuthority } from "./admission.js";
@@ -112,6 +113,19 @@ export async function setupTarget(
     }
     const config = readConfig(configPath);
     result.repository = config.repository;
+    result.capacity = {
+      concurrency: config.execution.concurrency,
+      scheduling: config.scheduling,
+      ...(completed.includes("configuration-created") &&
+      option(args, "concurrency") === undefined
+        ? {
+            sizedFromHost: {
+              cpus: availableParallelism(),
+              memoryMiB: Math.floor(totalmem() / 1024 ** 2),
+            },
+          }
+        : {}),
+    };
     if (
       withinCheckout(config.checkout, configPath) ||
       withinCheckout(config.checkout, cli())

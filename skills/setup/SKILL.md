@@ -9,7 +9,7 @@ Use this skill on a target repository. Follow contributor instructions when buil
 
 Resolve the operator's intended outcome first. Recommend background operation on a supported Linux/WSL systemd user host when the request is to keep processing approved work. Honor an install-only or “do not start work” request with configuration-only setup. Package download alone grants no service or execution consent. Reuse positive choices, authority and limits already supplied in this session; ask together only for genuinely missing choices. Do not make registration, startup and verification separate operator chores.
 
-Inspect `factory help` and the existing binding before writing. Confirm the GitHub `OWNER/REPO`, trusted absolute checkout, requested positive worker concurrency, regular or native-stack delivery, and any role model/reasoning choices. Read the target's instructions. Reuse a matching existing configuration; preserve conflicting state and report it rather than deleting or inventing another root. Fresh configuration persists explicit defaults when no model choices were supplied: planner `gpt-5.6-sol` with `medium` reasoning, reviewer `gpt-5.6-sol` with `medium` reasoning, and worker `gpt-5.6-luna` with `medium` reasoning. Keep configuration, credentials, state and the immutable installed package outside the target repository. Retain that exact package until supported upgrade/uninstall; do not register a scratch directory scheduled for cleanup.
+Inspect `factory help` and the existing binding before writing. Confirm the GitHub `OWNER/REPO`, trusted absolute checkout, any requested positive worker concurrency (omit `--concurrency` to size workers and scheduling from the host; report the returned `capacity`), regular or native-stack delivery, and any role model/reasoning choices. Read the target's instructions. Reuse a matching existing configuration; preserve conflicting state and report it rather than deleting or inventing another root. Fresh configuration persists explicit defaults when no model choices were supplied: planner `gpt-5.6-sol` with `medium` reasoning, reviewer `gpt-5.6-sol` with `medium` reasoning, and worker `gpt-5.6-luna` with `medium` reasoning. Keep configuration, credentials, state and the immutable installed package outside the target repository. Retain that exact package until supported upgrade/uninstall; do not register a scratch directory scheduled for cleanup.
 
 During an explicitly authorized Objective's graph projection, Factory establishes the target role labels `factory:objective` and `factory:work-item`. The Objective receives the first; every compiled work, QA and aggregate issue receives the second. Missing repository labels use neutral `ededed` color. Existing colors, descriptions and unrelated issue labels remain intact. Archived or ambiguous role labels stop projection for an operator decision; Factory does not rename or unarchive them. Initial Work Items become native children of their Objective, and aggregate children attach to their aggregate. Dependency edges remain separate from parent links. Labels and hierarchy describe context; they grant no execution authority. Configuration-only and observation-only setup do not write these target labels.
 
@@ -18,7 +18,7 @@ Use the installed guided entry point when available:
 ```sh
 factory setup --background --service-consent --actor OPERATOR --reason REASON \
   --retain-package --repository OWNER/REPO --checkout ABSOLUTE_PATH \
-  --concurrency N --config ABSOLUTE_PRIVATE_CONFIG
+  [--concurrency N] --config ABSOLUTE_PRIVATE_CONFIG
 ```
 
 For an existing matching configuration, omit installation choices already bound. Pass selected role options, delivery or network policy when creating a fresh configuration. `--retain-package` records the caller's commitment to retain the exact external installed path; it is not permission to delete another installation. The background flags reflect the operator's requested service operation. They grant no provider spending. An idle watcher with no execution authority observes GitHub, reports unapproved candidate IDs and waits model-free. Polling defaults to 30 seconds; pass `--poll-seconds N` only for an operator-selected interval.
@@ -29,7 +29,7 @@ For configuration only:
 
 ```sh
 factory setup --config-only --repository OWNER/REPO \
-  --checkout ABSOLUTE_PATH --concurrency N --config ABSOLUTE_PRIVATE_CONFIG
+  --checkout ABSOLUTE_PATH [--concurrency N] --config ABSOLUTE_PRIVATE_CONFIG
 ```
 
 This outcome remains usable without a supported user manager and stops before admission or service activation. Older artifacts without `setup` retain their documented `install` surface for configuration only; do not claim the new guided background outcome from a manually assembled substitute.

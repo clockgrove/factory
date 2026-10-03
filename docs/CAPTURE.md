@@ -61,11 +61,7 @@ factory analyze --objective 123 --filter phase=implementation --json
 - Fields are the metadata identities (`runId`, `itemId`, `invocationId`, `phase`, `provider`, `model`, `reportedModel`, `adapter` and so on) and the four digests. An unknown field is refused with the full list.
 - Planning and repair diagnosis use phase `diagnosis`; graph compilation uses `compile`.
 
-Reading the report:
-
-- Unavailable counters stay unavailable and partial totals say so. Cached input and reasoning output are subsets of their parent categories.
-- Concurrent intervals overlap. Elapsed time is the observed envelope, not a sum of durations.
-- Provider completion is not review acceptance.
+Partial totals say so, and cached input and reasoning output are subsets of their parents. Concurrent intervals overlap, so elapsed time is the observed envelope, not a sum.
 
 Save a report with `--output /absolute/new-file`: a new file in an existing directory outside the target checkout, with no symlinked parents, created with mode `0600`. Keep reports private.
 
@@ -80,12 +76,10 @@ factory analyze --objective 123 --filter runId=RUN_ID --gantt \
 
 `--gantt` needs `--output` and excludes `--json`.
 
-- Rows name their Objective, run, item and attempt; provider rows add phase and invocation.
 - **Blue bars** span one provider invocation, which can hold many model and tool calls. Incomplete invocations show only observed points.
-- **Amber bars** are controller operations (planning, validation, review, media, GitHub delivery). Their start is derived from the reported duration.
-- Other observations are dots.
-- The axis is elapsed wall-clock seconds. Rows overlap, so never sum them.
-- Validation labels show the command index; executable names are not recorded.
+- **Amber bars** are controller operations such as validation and delivery, with the start derived from the reported duration.
+- Other observations are dots. The axis is elapsed wall-clock seconds; rows overlap, so never sum them.
+- Validation labels show the command index, not the executable name.
 
 ## Export to OpenTelemetry
 
@@ -99,12 +93,12 @@ factory export-captures --objective 123 \
   --send --authorize PREVIEW_DIGEST
 ```
 
-- **Endpoint:** pass the OTLP base URL; Factory appends `/v1/traces`. It must be HTTPS with no credentials, query or fragment.
-- **Headers:** optional, from `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, else `OTEL_EXPORTER_OTLP_HEADERS` (comma-separated, URL-encoded `key=value`). Factory never prints them and refuses a malformed value without echoing it.
-- **Preview first:** without `--send` the command only previews the endpoint, identities, content status and payload size. `--send` needs `--authorize` with that preview's digest; any change invalidates it.
+- **Endpoint:** pass the OTLP base URL; Factory appends `/v1/traces` and refuses a URL that already ends in it. Use HTTPS with no credentials, query or fragment. Plain HTTP is allowed only for a loopback collector (`localhost`, `127.0.0.0/8`, `[::1]`).
+- **Headers:** optional, from `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, else `OTEL_EXPORTER_OTLP_HEADERS` (comma-separated, URL-encoded `key=value`). Names must be RFC 9110 tokens and values must have no control characters; a malformed entry is refused without echo. Values are never printed.
+- **Preview first:** without `--send` the command only previews the endpoint, header names, identities, content status and payload size. `--send` needs `--authorize` with that preview's digest. The digest binds the selection, endpoint, payload and header names and values (values only as a hash), so any change invalidates it.
 - **Content:** `metadata` reads no captured text. `retained` adds the already-redacted text.
 - **Selection:** `--run ID` and `--invocation ID` repeat and intersect. An unknown ID or empty selection is refused.
 
 Each invocation attempt becomes one root span with stable trace and span IDs. Spans share `session.id` (`OWNER/REPO#OBJECTIVE`). `factory.metadata` holds identities, models, outcomes and usage; in `retained` mode, `factory.input` and `factory.output` hold the request and response. Usage and cost estimates stay in metadata, not billing attributes.
 
-One send is one HTTP request: 30-second timeout, no redirects, no retries, 4 MiB response cap. Anything but an `accepted` receipt exits non-zero; response text is discarded because it can echo secrets. A re-send reuses the same IDs, but the destination may still duplicate records, so check it first.
+One send is one HTTP request: 30-second timeout, no redirects, no retries, 4 MiB response cap. A full acknowledgement, including a collector's `{"partialSuccess":{}}`, is `accepted`. Anything else exits non-zero; response text is discarded because it can echo secrets. A re-send reuses the same IDs, but the destination may still duplicate records, so check it first.

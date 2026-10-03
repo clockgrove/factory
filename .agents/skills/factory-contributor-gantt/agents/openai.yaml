@@ -1,4 +1,0 @@
-interface:
-  display_name: "Factory Contributor Gantt"
-  short_description: "Debug Factory contributor timing with detailed Gantts"
-  default_prompt: "Use $factory-contributor-gantt to chart the selected Factory contributor observations and explain their timing limits."

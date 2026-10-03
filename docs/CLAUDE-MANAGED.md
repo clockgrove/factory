@@ -51,9 +51,9 @@ still apply to the encoded input and result.
 
 A bootstrap-only turn executes the supplied foreground script. Factory checks
 complete provider tool history and the full base/tree/file receipt before sending
-implementation instructions. It rejects intervening activity and unknown send
-outcomes instead of replaying them. This requires exclusive ownership of each
-session; it is not remote attestation against arbitrary outside administrators.
+implementation instructions. It rejects intervening activity. This requires
+exclusive ownership of each session; it is not remote attestation against
+arbitrary outside administrators.
 
 Result acceptance requires the recorded implementation turn, session-scoped output,
 matching attempt/input/base identities, and verified paths, lengths and digests.
@@ -61,18 +61,34 @@ Output publication can lag an idle session. The normal collector checks returned
 immutable asset bytes, owned paths, whole AssetSets and repository LFS policy.
 Provider completion is not product acceptance.
 
-Controller checkpoints preserve known sessions before submissions and cleanup.
-Cancellation waits for interruption where needed, then deletes the owned session
-and verifies absence. Anthropic documents that session deletion removes its
-associated sandbox. Factory preserves result and compact lifecycle/accounting
-receipts first, then deletes its uploaded files separately. It never deletes the
-reusable agent or environment. An acknowledgement or idle status alone does not
-establish cleanup; unresolved effects remain stopped rather than duplicated.
+## Restart and lost responses
+
+Controller checkpoints record each submission before it is sent, and every
+session carries the attempt identity as `factory_attempt` metadata. A lost
+response interrupts the step, and the repeated step resolves it from the
+provider (see [State and recovery](ARCHITECTURE.md#state-and-recovery)):
+
+- **Session create:** Factory lists the agent's sessions created since the
+  recorded submission time. It adopts the session tagged with the attempt, or
+  creates one when none exists.
+- **Bootstrap or implementation message:** Factory reads the session history.
+  It continues when the exact message is recorded and sends it again when the
+  session is idle with no new message. Anything else stops the session and
+  repeats the Work Item with a fresh attempt.
+- **Upload:** Factory uploads the file again. The orphaned file cannot be
+  identified and is left behind.
+
+Cancellation and collection failures stop the session first, so a repeated
+attempt never runs beside it. Cancellation waits for interruption where needed,
+then deletes every session tagged with the attempt and verifies absence.
+Anthropic documents that session deletion removes its associated sandbox.
+Factory preserves result and compact lifecycle/accounting receipts first, then
+deletes its uploaded files separately. Deletion repeats until absence is
+confirmed. It never deletes the reusable agent or environment.
 
 Attempt and cleanup each receive one recorded deadline window. SDK mutation
 retries are disabled. Missing usage remains unknown; token counts alone do not
-prove complete charges. Uploaded resources whose creation response is lost remain
-unresolved for operator reconciliation, not silently retried.
+prove complete charges.
 
 ## Building Factory's adapter
 

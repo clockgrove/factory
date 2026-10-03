@@ -492,21 +492,18 @@ export async function runRegularGraph(args: {
     if (args.cancelled()) throw new Error("Objective cancelled");
     await deliverReviewed(item, itemBase);
   };
-  const execute = async (
-    item: WorkItem,
-    itemBase: string,
-    existingHandle?: NonNullable<FactoryState["work"][string]["execution"]>,
-  ): Promise<void> => {
+  const execute = async (item: WorkItem, itemBase: string): Promise<void> => {
     const work = state.work[item.id]!;
-    // A recorded handle is only for the first run; a repeated step after a
-    // dead worker starts a fresh attempt.
-    let handle = existingHandle;
+    // A repeated step reattaches to the recorded attempt. A settled dead
+    // worker's handle was cleared, so it starts a fresh attempt.
     try {
-      await repeatInterrupted(work, save, () => {
-        const resumed = handle;
-        handle = undefined;
-        return runStep(item, itemBase, resumed);
-      });
+      await repeatInterrupted(work, save, () =>
+        runStep(
+          item,
+          itemBase,
+          work.step === "execute" ? work.execution : undefined,
+        ),
+      );
     } catch (error) {
       if (error instanceof DeliveryReadinessPending) {
         work.waitingReason = error.message;
@@ -619,7 +616,7 @@ export async function runRegularGraph(args: {
         `Work Item ${item.id} has ambiguous active state at ${work.step ?? "unknown"}; operator direction required`,
       );
     }
-    const promise = execute(item, work.baseSha, work.execution).finally(() => {
+    const promise = execute(item, work.baseSha).finally(() => {
       active.delete(item.id);
     });
     void promise.catch(() => undefined);

@@ -552,6 +552,7 @@ export interface SandboxRepositoryInput {
   lfsSources: { path: string; digest: string; bytes: number }[];
 }
 export interface SandboxProvider {
+  /** Return this attempt's sandbox. Tag it with the attempt, and adopt an existing tagged sandbox instead of creating another, so a call whose response was lost can repeat. */
   create(request: SandboxRequest): Promise<SandboxHandle>;
   /** Trusted preparation, before any harness runs: fetch exact Git objects into workspace/repo and selected LFS objects into workspace/lfs/<index>. Remove all usable GitHub authentication, credential helpers and auth-bearing remotes before returning. Never put credentials in handles, config, argv or returned data. Failure must not start a harness. */
   prepareRepository(

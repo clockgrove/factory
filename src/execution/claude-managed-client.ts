@@ -339,28 +339,59 @@ export class ClaudeManagedClient {
       requestOptions(timeout),
     );
   }
-  async deleteSession(sessionId: string, timeout?: number) {
-    return this.sdk.beta.sessions.delete(
-      sessionId,
-      this.headers,
+  /** Sessions carrying this attempt's tag, so a lost create response can be resolved. */
+  async findSessions(
+    identity: string,
+    createdAfter: string,
+    timeout?: number,
+  ): Promise<BetaManagedAgentsSession[]> {
+    const result: BetaManagedAgentsSession[] = [];
+    for await (const session of this.sdk.beta.sessions.list(
+      {
+        ...this.headers,
+        agent_id: this.config.agentId,
+        "created_at[gte]": createdAfter,
+      },
       requestOptions(timeout),
-    );
+    ))
+      if (session.metadata?.factory_attempt === identity) result.push(session);
+    return result;
   }
-  async sessionAbsent(sessionId: string, timeout?: number): Promise<boolean> {
+  /** The session, or undefined once it no longer exists. */
+  async present(
+    sessionId: string,
+    timeout?: number,
+  ): Promise<BetaManagedAgentsSession | undefined> {
     try {
-      await this.retrieve(sessionId, timeout);
-      return false;
+      return await this.retrieve(sessionId, timeout);
     } catch (error) {
-      if (error instanceof Anthropic.NotFoundError) return true;
+      if (error instanceof Anthropic.NotFoundError) return undefined;
       throw error;
     }
   }
-  async deleteFile(fileId: string, timeout?: number) {
-    return this.sdk.beta.files.delete(
-      fileId,
-      this.headers,
-      requestOptions(timeout),
-    );
+  /** Deleting an already deleted session is a no-op, so deletion can repeat. */
+  async deleteSession(sessionId: string, timeout?: number): Promise<void> {
+    try {
+      await this.sdk.beta.sessions.delete(
+        sessionId,
+        this.headers,
+        requestOptions(timeout),
+      );
+    } catch (error) {
+      if (!(error instanceof Anthropic.NotFoundError)) throw error;
+    }
+  }
+  /** Deleting an already deleted file is a no-op, so deletion can repeat. */
+  async deleteFile(fileId: string, timeout?: number): Promise<void> {
+    try {
+      await this.sdk.beta.files.delete(
+        fileId,
+        this.headers,
+        requestOptions(timeout),
+      );
+    } catch (error) {
+      if (!(error instanceof Anthropic.NotFoundError)) throw error;
+    }
   }
   async fileAbsent(fileId: string, timeout?: number): Promise<boolean> {
     try {

@@ -103,8 +103,6 @@ for (const delivery of ["regular", "native-stack"])
                 "input-submitted",
               );
               submissions++;
-              if (outcome === "lost-input")
-                throw new Error("Managed input acknowledgement was lost");
               assert.equal(body.events[0].input[0].role, "user");
               writeFileSync(
                 join(remote, "repo", "managed.txt"),
@@ -118,6 +116,9 @@ for (const delivery of ["regular", "native-stack"])
               bytes = readFileSync(
                 join(remote, "outputs", "factory-result.tar"),
               );
+              // The provider accepted the input but its response was lost.
+              if (outcome === "lost-input")
+                throw new Error("Managed input acknowledgement was lost");
               return {};
             }
             if (method === "DELETE") {
@@ -174,31 +175,8 @@ for (const delivery of ["regular", "native-stack"])
           actions: {},
           driver,
         });
-        if (outcome === "lost-input") {
-          await assert.rejects(
-            application.runObjective(1),
-            /Managed input acknowledgement was lost/,
-          );
-          const failed = readState(repository, 1);
-          assert.equal(
-            failed.work.managed.execution.data.sessionId,
-            "session_fixture",
-          );
-          assert.equal(
-            failed.work.managed.execution.data.phase,
-            "input-submitted",
-          );
-          assert.equal(
-            failed.work.managed.recovery.failure.classification,
-            "uncertain",
-          );
-          assert.throws(
-            () => application.retryWorkItem(1, "managed"),
-            /unresolved|unknown/,
-          );
-          assert.equal(submissions, 1);
-          return;
-        }
+        // A lost input response repeats the step, which reattaches to the
+        // same session and finds the recorded turn instead of resubmitting.
         const state = await application.runObjective(1);
         assert.equal(state.work.managed.status, "done");
         assert.equal(state.finalValidation.passed, true);

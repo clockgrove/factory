@@ -78,10 +78,22 @@ product acceptance. An output archive must fit the provider's 200 MiB file limit
 ## Restart, cancellation and accounting
 
 Factory saves provider identity and submission disposition in its existing
-continuation snapshot. It never resends an ambiguous create or Work Item input.
-A stopped stream and an idle session do not establish success. Restart reads
-current session and paginated turn/artifact history. Unresolved identity or
-unexpected additional turns stop for operator direction.
+continuation snapshot. A stopped stream and an idle session do not establish
+success. Restart reads current session and paginated turn/artifact history.
+Unexpected additional turns stop the attempt.
+
+A lost response interrupts the step, and the repeated step resolves it:
+
+- **Session create:** the API used here cannot list sessions by attempt tag, so
+  Factory repeats the Work Item with a fresh attempt. A session the lost request
+  created never receives input.
+- **Work Item input:** a recorded turn means the input was accepted, and the
+  attempt continues. Without one, Factory cancels and deletes the session and
+  repeats the Work Item with a fresh attempt.
+- **Restart during hosted setup:** Factory waits for setup and submits the input.
+
+A failed or cancelled turn deletes the session before the attempt ends, so a
+repeated attempt never runs beside it.
 
 The configured `timeoutSeconds` bounds the whole attempt, including setup and
 artifact retrieval; each request uses only the remaining time. Cancellation and

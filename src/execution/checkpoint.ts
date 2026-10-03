@@ -1,9 +1,23 @@
-import type {
-  ExecutionContext,
-  ExecutionHandle,
-  WorkerUsageObservation,
+import {
+  Interruption,
+  type ExecutionContext,
+  type ExecutionHandle,
+  type WorkerUsageObservation,
 } from "../contracts.js";
 import type { WorkState } from "../state.js";
+
+/**
+ * Send a remote submission whose outcome the checkpointed handle can resolve
+ * or safely repeat. A failure leaves the outcome unknown, so it interrupts
+ * the step: the repeated step reattaches to the handle and resolves it.
+ */
+export async function submitted<T>(request: Promise<T>): Promise<T> {
+  try {
+    return await request;
+  } catch (error) {
+    throw new Interruption(error);
+  }
+}
 
 /** Bind asynchronous provider checkpoints to the same owned Work Item attempt. */
 export function executionContext(

@@ -159,44 +159,49 @@ export async function runNativeGraph(args: {
         work.startedAt = new Date().toISOString();
         save();
         try {
-          // A worker that ends without a result is started again (bounded).
+          // A worker that ends without a result is started again (bounded);
+          // an interrupted step reattaches to its recorded attempt.
           await repeatInterrupted(work, save, async () => {
-            await phases.reserve(item.id, "validation");
-            await preflightItemEnvironment({
-              config,
-              root,
-              state,
-              objectiveBody: args.objectiveBody,
-              item,
-              store: contentStore,
-              baseSha: work.baseSha!,
-            });
-            await phases.reserve(item.id, "coding");
-            const handle = await driver.start(
-              {
-                captureContext: { objective, runId: state.runId },
-                item: work.recovery?.correction
-                  ? {
-                      ...item,
-                      brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
-                    }
-                  : item,
-                baseSha: work.baseSha!,
-                attemptId: work.attempt,
+            if (!work.execution) {
+              await phases.reserve(item.id, "validation");
+              await preflightItemEnvironment({
+                config,
+                root,
+                state,
                 objectiveBody: args.objectiveBody,
-                selectedAssets: selectedInputsForItem(state, item),
-              },
-              executionContext(work, save, args.cancelled, (workerUsage) =>
-                args.diagnostics?.emit({
-                  runId: state.runId,
-                  itemId: item.id,
+                item,
+                store: contentStore,
+                baseSha: work.baseSha!,
+              });
+            }
+            await phases.reserve(item.id, "coding");
+            const handle: ExecutionHandle =
+              (work.execution ? structuredClone(work.execution) : undefined) ??
+              (await driver.start(
+                {
+                  captureContext: { objective, runId: state.runId },
+                  item: work.recovery?.correction
+                    ? {
+                        ...item,
+                        brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
+                      }
+                    : item,
+                  baseSha: work.baseSha!,
                   attemptId: work.attempt,
-                  operation: "worker-usage",
-                  outcome: "observed",
-                  workerUsage,
-                }),
-              ),
-            );
+                  objectiveBody: args.objectiveBody,
+                  selectedAssets: selectedInputsForItem(state, item),
+                },
+                executionContext(work, save, args.cancelled, (workerUsage) =>
+                  args.diagnostics?.emit({
+                    runId: state.runId,
+                    itemId: item.id,
+                    attemptId: work.attempt,
+                    operation: "worker-usage",
+                    outcome: "observed",
+                    workerUsage,
+                  }),
+                ),
+              ));
             work.execution = structuredClone(handle);
             save();
             if (args.cancelled()) {

@@ -17,6 +17,8 @@ import { SandboxExecutionDriver } from "../dist/index.js";
 import { sandboxFiles } from "../dist/execution/sandbox-files.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { executionContext } from "../dist/execution/checkpoint.js";
+import { SettledAttemptFailure } from "../dist/work-repair.js";
+import { Interruption } from "../dist/contracts.js";
 import {
   FixtureSandboxProvider,
   writeSandboxInvoker,
@@ -160,32 +162,59 @@ test("restarted controller cancels the same owned attempt without another harnes
   assert.equal(f.provider.resources.size, 0);
   assert.equal(f.work.execution.data.terminal, "cancelled");
 });
-test("unknown create or execute acknowledgement cannot duplicate external work", async (t) => {
-  for (const field of ["createUnknown", "executeUnknown"]) {
-    const f = fixture(t);
-    f.provider[field] = true;
-    await assert.rejects(
-      f.driver.start(f.request, f.context),
-      /acknowledgement lost/,
-    );
-    const starts = f.provider.starts;
-    await assert.rejects(
-      new SandboxExecutionDriver(f.options).observe(
-        f.work.execution,
-        f.context,
-      ),
-      /unknown/,
-    );
-    assert.equal(f.provider.starts, starts);
-    for (const h of f.provider.resources.values()) {
-      if (field === "executeUnknown") {
-        for (const p of f.provider.processes.values())
-          if (p.state === "running")
-            await new Promise((r) => p.child.once("exit", r));
-      }
-      await f.provider.destroy(h);
-    }
-  }
+test("lost create acknowledgement adopts the tagged sandbox and completes", async (t) => {
+  const f = fixture(t);
+  f.provider.createUnknown = true;
+  f.provider.autoRelease = true;
+  await assert.rejects(
+    f.driver.start(f.request, f.context),
+    (error) => error instanceof Interruption,
+  );
+  assert.equal(f.work.execution.data.phase, "creating");
+  const result = await new SandboxExecutionDriver(f.options).collect(
+    JSON.parse(JSON.stringify(f.work.execution)),
+    f.context,
+  );
+  assert.equal(f.git("show", result.changeRef + ":keep.txt"), "changed");
+  assert.equal(f.provider.creates, 2);
+  assert.equal(f.provider.maxActive, 1);
+  assert.equal(f.provider.resources.size, 0);
+});
+test("lost harness start destroys the sandbox and interrupts the attempt without another start", async (t) => {
+  const f = fixture(t);
+  f.provider.executeUnknown = true;
+  await assert.rejects(
+    f.driver.start(f.request, f.context),
+    (error) => error instanceof Interruption,
+  );
+  const starts = f.provider.starts;
+  const restored = JSON.parse(JSON.stringify(f.work.execution));
+  const observed = await new SandboxExecutionDriver(f.options).observe(
+    restored,
+    f.context,
+  );
+  assert.equal(observed.interrupted, true);
+  await assert.rejects(
+    new SandboxExecutionDriver(f.options).collect(restored, f.context),
+    (error) =>
+      error instanceof SettledAttemptFailure &&
+      error.classification === "interruption",
+  );
+  assert.equal(f.provider.starts, starts);
+  assert.equal(f.provider.resources.size, 0);
+  assert.equal(f.work.execution.data.phase, "destroyed");
+});
+test("cancellation after a lost create adopts and destroys the tagged sandbox", async (t) => {
+  const f = fixture(t);
+  f.provider.createUnknown = true;
+  await assert.rejects(f.driver.start(f.request, f.context), /lost/);
+  assert.equal(f.provider.resources.size, 1);
+  await new SandboxExecutionDriver(f.options).cancel(
+    JSON.parse(JSON.stringify(f.work.execution)),
+    f.context,
+  );
+  assert.equal(f.provider.resources.size, 0);
+  assert.equal(f.work.execution.data.terminal, "cancelled");
 });
 test("wrong reply digest, identity and unsafe result path fail closed; cleanup failure remains visible", async (t) => {
   for (const variant of [

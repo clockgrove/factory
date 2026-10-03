@@ -127,6 +127,14 @@ test("Daytona adapter runs the shared driver through real separate processes, co
     async get(id) {
       return sandboxes.get(id);
     },
+    async *list({ labels }) {
+      for (const sandbox of sandboxes.values())
+        if (
+          sandbox.state !== "destroyed" &&
+          sandbox.labels["factory-attempt"] === labels["factory-attempt"]
+        )
+          yield sandbox;
+    },
   };
   const providerConfig = {
     snapshot: "installed-fixture",

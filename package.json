@@ -60,7 +60,7 @@
     "lint": "biome lint . && eslint src",
     "format:check": "biome format . && prettier --check package-lock.json \"**/*.{md,yml,yaml}\"",
     "format": "biome format --write . && prettier --write package-lock.json \"**/*.{md,yml,yaml}\"",
-    "test": "npm run build && node --test test/*.test.mjs",
+    "test": "npm run build && node --import ./test/support/isolated-state.mjs --test test/*.test.mjs",
     "package": "npm pack --dry-run",
     "notices": "node scripts/generate-notices.mjs",
     "notices:check": "node scripts/generate-notices.mjs --check"

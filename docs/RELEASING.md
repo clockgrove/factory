@@ -57,4 +57,4 @@ Factory is pre-1.0. Patch versions carry fixes and small improvements. Minor ver
 
 ## History
 
-Releases up to v0.1.74 used a manual procedure with independently audited artifact records. Those records are preserved in [the release history](history/PUBLIC-RELEASE-2026-10-03.md) and [artifact records](history/BUILD-STATUS-2026-10-03.md).
+Releases up to v0.1.74 used a manual procedure; their verification is linked from each [changelog](../CHANGELOG.md) entry.

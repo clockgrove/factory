@@ -66,7 +66,7 @@ gh attestation verify "clockgrove-factory-$VERSION.tgz" --repo clockgrove/factor
 sha256sum --check SHA256SUMS
 ```
 
-`gh attestation verify` proves the tarball was built by this repository's [release workflow](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md) from the tagged source. Do not install a tarball that fails verification. Releases before v0.1.75 predate attestations; their evidence is in the [release history](https://github.com/clockgrove/factory/blob/main/docs/history/BUILD-STATUS-2026-10-03.md).
+`gh attestation verify` proves the tarball was built by this repository's [release workflow](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md) from the tagged source. Do not install a tarball that fails verification. Releases before v0.1.75 predate attestations; their verification is linked from each entry in the [changelog](CHANGELOG.md).
 
 Choose an absolute installation directory outside your target repository:
 

@@ -323,17 +323,19 @@ export function decodeGraphReview(
       )
     )
       throw new ReviewProtocolError("Graph finding contains unknown fields");
+    const detail = text(value.detail, "detail");
     return {
       evidence: resolveReviewReferences(
         reviewEvidenceIds(value.evidenceIndices, packet),
         packet,
         false,
       ),
-      detail: text(value.detail, "detail"),
-      // A finding without a question is still a finding; the detail says what to change.
+      detail,
+      // A finding without a question is still a finding; the operator is
+      // asked about its detail, which says what to change.
       question:
         text(value.question, "question", false).trim() ||
-        "How should the plan change to fix this?",
+        `How should the plan change to fix this: ${detail.trim().replace(/[.?!:;\s]+$/, "")}?`,
     };
   });
 }

@@ -89,7 +89,7 @@ async function fixture(name, callback, options = {}) {
     };
     const objectiveBody = options.namedCi
       ? body +
-        "\n## Delivery\nThe named check `quality` must pass on every exact published PR head before integration.\n"
+        "\n## Required checks\n- quality\n\n## Delivery\nThe named check `quality` must pass on every exact published PR head before integration.\n"
       : body;
     if (options.namedCi)
       graph.requiredPreIntegrationChecks = [
@@ -332,9 +332,24 @@ test("plan decisions validate required CI shape and pinned authority even with c
         [
           (plan) => {
             plan.graph.requiredPreIntegrationChecks[0].source.text =
-              "Unsupported reconstructed pre-integration authority";
+              "Unsupported reconstructed `quality` pre-integration authority";
           },
           /exact pinned source authority/,
+        ],
+        // A check name must be a workflow job at the base or an exact entry
+        // under the Objective's Required checks.
+        [
+          (plan) => {
+            plan.graph.requiredPreIntegrationChecks[0].checkName =
+              "invented-check";
+          },
+          /"invented-check" is not a job in the base's GitHub workflows or an entry under the Objective's Required checks/,
+        ],
+        [
+          (plan) => {
+            plan.graph.requiredPreIntegrationChecks[0].checkName = "qual";
+          },
+          /"qual" is not a job/,
         ],
       ]) {
         const invalid = structuredClone(original);

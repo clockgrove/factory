@@ -20,9 +20,16 @@ export function encodeCompilerWire(input, promptOrChoices) {
       const lines = choices.sources[sourceIndex]?.lines.map(
         (line) => line.text,
       );
-      if (sourceIndex < 0 || !lines.join("\n").includes(gate.source.text))
+      const checkIndex = choices.checkNames.findIndex(
+        (entry) => entry.name === gate.checkName,
+      );
+      if (
+        sourceIndex < 0 ||
+        checkIndex < 0 ||
+        !lines.join("\n").includes(gate.source.text)
+      )
         throw new Error("Fixture check authority is not supplied");
-      return { checkName: gate.checkName, sourceIndex };
+      return { checkIndex, sourceIndex };
     }),
     items: graph.items
       .map(compilerItem)
@@ -84,8 +91,17 @@ export function encodeCompilerWire(input, promptOrChoices) {
           else if (proof.kind === "published-ci")
             proof = {
               kind: proof.kind,
-              checkName: proof.checkName,
+              checkIndex: choices.checkNames.findIndex(
+                (entry) => entry.name === proof.checkName,
+              ),
               dependencyIndex: item.dependencies.indexOf(proof.targetItem),
+            };
+          else if (proof.kind === "integrated-ci")
+            proof = {
+              kind: proof.kind,
+              checkIndex: choices.checkNames.findIndex(
+                (entry) => entry.name === proof.checkName,
+              ),
             };
           const { probe, ...environment } = entry.environment;
           return [

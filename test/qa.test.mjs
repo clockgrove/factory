@@ -5,9 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  commandAuthority,
   compileObjective,
   compilePlan,
   objectiveCriteria,
+  planningSources,
   validateCommandProvenance,
 } from "../dist/compiler.js";
 import { runNativeGraph } from "../dist/delivery/native-runner.js";
@@ -18,6 +20,7 @@ import {
   assertCoverageSources,
   coverageObligations,
 } from "../dist/qa.js";
+import { installedControllerCapabilities } from "../dist/controller-capabilities.js";
 import { runQaItem } from "../dist/qa-execution.js";
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
 import { readState } from "../dist/state-store.js";
@@ -79,6 +82,8 @@ const body = `# Public multi-item QA fixture
 - test -s real-environment.txt
 ## Final validation
 - test -s integration.txt
+## Required checks
+- dependency-version-test
 `;
 function graph(baseSha) {
   const unit = work("unit");
@@ -319,6 +324,189 @@ test("coverage rejects missing, unknown, premature and unready proof without wea
         },
       }),
       /coverage.*nonempty/,
+    );
+  }));
+
+test("a command obligation is proved by exactly that command; other obligations are semantic", () => {
+  const guarantee = installedControllerCapabilities().guarantees[0].id;
+  const check = (
+    criterion,
+    proof,
+    runs = ["test -s unit.txt"],
+    isCommand = undefined,
+  ) => {
+    const objective = `## Acceptance\n- ${criterion}\n## Final validation\n- \`test -s final.txt\`\n`;
+    const obligations = coverageObligations(
+      objective,
+      objectiveCriteria(objective),
+    );
+    const unit = work("unit");
+    unit.validation = runs.map((command) => ({
+      command,
+      provenance: "source-declared",
+      source: "OBJECTIVE",
+    }));
+    assertCoverageSources(
+      {
+        objective: 1,
+        baseSha: "a".repeat(40),
+        items: [unit],
+        coverage: [
+          {
+            ...obligations[0],
+            itemId: "unit",
+            proof,
+            environment: {
+              kind: "local",
+              readiness: "available",
+              probe: "",
+              preparedBy: "",
+            },
+          },
+        ],
+      },
+      [{ path: "OBJECTIVE", content: objective }],
+      obligations,
+      ["test -s final.txt"],
+      isCommand,
+    );
+  };
+  const command = (validationIndex = 0) => ({
+    kind: "result-command",
+    validationIndex,
+  });
+  const refused = (name) =>
+    new RegExp(
+      `obligation \`${name.replace(/[-.*+?^${}()|[\]\\]/g, "\\$&")}\` is a command, so its proof must be a result-command or integrated-command whose validationIndex selects exactly`,
+    );
+  // A bullet that is exactly one command: proved by that command, or by
+  // anything when Final validation runs it.
+  check("`test -s unit.txt`", command());
+  check("`test  -s unit.txt`", command());
+  check("test -s unit.txt", command());
+  check("`test -s final.txt`", { kind: "final-review" });
+  for (const proof of [
+    { kind: "final-review" },
+    { kind: "final-controller", guaranteeId: guarantee },
+    { kind: "result-semantic", acceptanceIndex: 0 },
+  ]) {
+    assert.throws(
+      () => check("`test -s unit.txt`", proof),
+      refused("test -s unit.txt"),
+    );
+    assert.throws(
+      () => check("test -s unit.txt", proof),
+      refused("test -s unit.txt"),
+    );
+  }
+  // The proof must select that exact command, not another the item runs.
+  assert.throws(
+    () =>
+      check("`npm test -- --coverage`", command(0), [
+        "npm test",
+        "npm test -- --coverage",
+      ]),
+    refused("npm test -- --coverage"),
+  );
+  check("`npm test -- --coverage`", command(1), [
+    "npm test",
+    "npm test -- --coverage",
+  ]);
+  // A command with authority that no item runs, and Final validation does
+  // not, cannot be proved; without authority the bullet is semantic.
+  const lint = (command, backticked) =>
+    backticked && command === "npm run lint";
+  assert.throws(
+    () => check("`npm run lint`", { kind: "final-review" }, [], lint),
+    refused("npm run lint"),
+  );
+  check("`npm run lint`", { kind: "final-review" }, []);
+  check("`README.md`", { kind: "final-review" }, [], lint);
+  // Any other wording is semantic: the planner's proof choice stands and
+  // review judges whether it fits.
+  for (const criterion of [
+    "`test -s unit.txt` passes",
+    "README documents how to run `npm test`",
+    "`npm run lint` and `test -s unit.txt` pass",
+  ])
+    check(criterion, { kind: "final-review" });
+});
+
+test("a backticked bullet is a command only with authority beyond itself", async () =>
+  fixture(async (root) => {
+    const target = createTarget(root, {
+      "package.json": JSON.stringify({ scripts: { lint: "true" } }),
+      "docs/run.md": "# Run\n\n- `test -s docs.txt`\n",
+    });
+    const objective = [
+      "## Acceptance",
+      "- `npm run lint`",
+      "- `README.md`",
+      "- `test -s docs.txt`",
+      "- `echo only-here`",
+      "- `test -s twice.txt`",
+      "- `test -s final.txt`",
+      "",
+      "## Validation",
+      "- `test -s twice.txt`",
+      "",
+      "## Final validation",
+      "- `test -s final.txt`",
+      "",
+      "## Planning sources",
+      "- docs/run.md",
+      "- `README.md`",
+      "",
+      "## Required checks",
+      "- `npm run lint`",
+      "",
+    ].join("\n");
+    const sources = planningSources(objective, target.baseSha, target.checkout);
+    const plan = (commands) => ({
+      objective: 1,
+      baseSha: target.baseSha,
+      items: [
+        {
+          ...work("unit"),
+          validation: commands.map((command) => ({
+            command,
+            provenance: "source-declared",
+            source: "OBJECTIVE",
+          })),
+        },
+      ],
+      coverage: [],
+    });
+    const isCommand = commandAuthority(
+      plan([]),
+      sources,
+      objective,
+      target.baseSha,
+      target.checkout,
+    );
+    // A package script at the base, a line declared in another source or
+    // section, and a Final validation command have authority.
+    for (const command of [
+      "npm run lint",
+      "test -s docs.txt",
+      "test -s twice.txt",
+      "test -s final.txt",
+    ])
+      assert(isCommand(command, true), command);
+    // A bullet that only declares itself, or a line repeated as prose or as a
+    // planning source, is a semantic obligation.
+    for (const command of ["README.md", "echo only-here", "npm run missing"])
+      assert(!isCommand(command, true), command);
+    assert(!isCommand("test -s docs.txt", false));
+    // Once the plan runs it with authority, it is a command obligation.
+    assert(
+      commandAuthority(
+        plan(["echo only-here"]),
+        sources,
+        objective,
+        target.baseSha,
+        target.checkout,
+      )("echo only-here", true),
     );
   }));
 

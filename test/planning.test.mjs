@@ -303,6 +303,11 @@ test("preview shows an undeclared command as blocked before host execution", asy
     const target = createTarget(root, {
       "docs/plan.md": "# Plan\n\n## Wave 0\nCanonical obligation\n",
     });
+    // The criterion does not require the command, so only authority blocks it.
+    const declared = body.replace(
+      "- `test -s one.txt`",
+      "- one.txt exists\n\n## Validation\n- `test -s one.txt`",
+    );
     const invented = graph(target.baseSha);
     invented.items[0].validation[0].command = "test -s one";
     const model = {
@@ -318,7 +323,7 @@ test("preview shows an undeclared command as blocked before host execution", asy
     };
     const candidate = await compilePlan(
       1,
-      body,
+      declared,
       target.baseSha,
       target.checkout,
       model,
@@ -329,7 +334,7 @@ test("preview shows an undeclared command as blocked before host execution", asy
         verifyPlanCandidate(
           candidate,
           1,
-          body,
+          declared,
           target.baseSha,
           target.checkout,
         ),
@@ -1002,7 +1007,7 @@ test("graph review rejects malformed protocol fields without retaining finding c
   });
 });
 
-test("graph review accepts a finding without a question and revises from its detail", async () => {
+test("graph review asks about a finding without a question from its detail", async () => {
   await fixture("review-no-question", async (root) => {
     const target = createTarget(root, {
       "docs/plan.md": "# Plan\n\n## Wave 0\nCanonical obligation\n",
@@ -1045,7 +1050,7 @@ test("graph review accepts a finding without a question and revises from its det
     );
     assert.match(
       requests[1].compileContext.instructions,
-      /How should the plan change to fix this\?/,
+      /"source":"independent review".*"question":"How should the plan change to fix this: Name the missing owner\?"/,
     );
   });
 });
@@ -1105,7 +1110,7 @@ test("a plan refused by deterministic validation spends the one revision with th
       assert.equal(requests[0].compileContext.instructions, "");
       assert.match(
         requests[1].compileContext.instructions,
-        /Factory refused the compiled plan: .*\/absolute\/one\.txt/,
+        /"source":"Factory check","detail":"Work Item one has invalid ownership path .*\/absolute\/one\.txt/,
       );
       assert.deepEqual(
         requests.map((request) => request.invocation.ordinal),

@@ -76,7 +76,16 @@ async function fixture(route, name, run, chain = false, namedGate = false) {
   process.env.XDG_STATE_HOME = join(root, "state");
   let active;
   try {
-    const target = createTarget(root);
+    // The required check is a job in the base's workflow.
+    const target = createTarget(
+      root,
+      namedGate
+        ? {
+            ".github/workflows/quality.yml":
+              "name: Quality\non: pull_request\njobs:\n  quality:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n",
+          }
+        : {},
+    );
     const config = {
       ...factoryConfig(
         target.checkout,

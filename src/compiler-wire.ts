@@ -21,6 +21,15 @@ export interface CompilerCitationChoice {
   content: string;
 }
 
+/**
+ * A well-formed response whose choices Factory refuses: an index out of range,
+ * or a duplicated or omitted obligation.
+ * The planner can revise these, unlike a response of the wrong shape.
+ */
+export class PlannerChoiceError extends Error {
+  override readonly name = "PlannerChoiceError";
+}
+
 function object(value: unknown, label: string): ObjectValue {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error(`Planner ${label} must be an object`);
@@ -36,7 +45,7 @@ function index(value: unknown, length: number, label: string): number {
     (value as number) < 0 ||
     (value as number) >= length
   )
-    throw new Error(`Planner ${label} is invalid`);
+    throw new PlannerChoiceError(`Planner ${label} is invalid`);
   return value as number;
 }
 const integer = (length?: number): Schema => ({
@@ -51,6 +60,7 @@ const strict = (properties: Record<string, Schema>): Schema => ({
   required: Object.keys(properties),
 });
 const text: Schema = { type: "string" };
+
 /** A transient model language: choices in, canonical controller facts out. */
 export function compilerWire(
   request: PlanningRequest<unknown>,
@@ -95,6 +105,7 @@ export function compilerWire(
         request.sources,
         request.executionProfiles,
         request.controllerCapabilitiesDigest,
+        ...(request.checkNames?.length ? [request.checkNames] : []),
       ]),
     )
     .digest("hex");
@@ -183,6 +194,10 @@ export function compilerWire(
       }),
     ),
   };
+  // CI checks are chosen from the names the base and Objective define, so an
+  // invented name cannot be expressed.
+  const checkNames = request.checkNames ?? [];
+  const checkIndex = integer(checkNames.length);
   const proofForms: Record<string, Record<string, Schema>> = {
     "result-command": { validationIndex: integer() },
     "result-semantic": { acceptanceIndex: integer() },
@@ -190,8 +205,8 @@ export function compilerWire(
     "integrated-semantic": { acceptanceIndex: integer() },
     "final-review": {},
     "final-controller": { guaranteeIndex: integer(guarantees.length) },
-    "integrated-ci": { checkName: text },
-    "published-ci": { checkName: text, dependencyIndex: integer() },
+    "integrated-ci": { checkIndex },
+    "published-ci": { checkIndex, dependencyIndex: integer() },
   };
   const modes: Record<string, string[]> = {
     work: [
@@ -203,8 +218,7 @@ export function compilerWire(
     qa: [
       "integrated-command",
       "integrated-semantic",
-      "integrated-ci",
-      "published-ci",
+      ...(checkNames.length ? ["integrated-ci", "published-ci"] : []),
       "final-review",
       "final-controller",
     ],
@@ -248,8 +262,9 @@ export function compilerWire(
     contextId: { type: "string", enum: [contextId] },
     requiredPreIntegrationChecks: {
       type: "array",
+      ...(checkNames.length ? {} : { maxItems: 0 }),
       items: strict({
-        checkName: { ...text, minLength: 1 },
+        checkIndex,
         sourceIndex: integer(request.sources.length),
       }),
     },
@@ -333,6 +348,7 @@ export function compilerWire(
     })),
     executionProfiles: request.executionProfiles ?? null,
     executionBounds: request.executionBounds ?? null,
+    checkNames: checkNames.map((name, checkIndex) => ({ checkIndex, name })),
   };
   return {
     schema,
@@ -353,15 +369,16 @@ export function compilerWire(
       const requiredPreIntegrationChecks =
         wire.requiredPreIntegrationChecks.map((raw) => {
           const gate = object(raw, "pre-integration check");
-          keys(gate, ["checkName", "sourceIndex"], "pre-integration check");
+          keys(gate, ["checkIndex", "sourceIndex"], "pre-integration check");
           const source =
             request.sources[
               index(gate.sourceIndex, request.sources.length, "sourceIndex")
             ]!;
-          if (typeof gate.checkName !== "string" || !gate.checkName.trim())
-            throw new Error("Planner pre-integration check name is invalid");
           return {
-            checkName: gate.checkName,
+            checkName:
+              checkNames[
+                index(gate.checkIndex, checkNames.length, "checkIndex")
+              ]!,
             source: {
               path: source.path,
               digest: createHash("sha256").update(source.content).digest("hex"),
@@ -387,7 +404,7 @@ export function compilerWire(
               ? retainedItems.get(item.id)
               : undefined;
           if (!retained || referenced.has(retained.id))
-            throw new Error(
+            throw new PlannerChoiceError(
               "Planner retained item is unavailable or duplicated",
             );
           referenced.add(retained.id);
@@ -470,7 +487,9 @@ export function compilerWire(
               )
                 command = command.slice(1, -1);
               if (!command)
-                throw new Error("Planner source command line is empty");
+                throw new PlannerChoiceError(
+                  "Planner source command line is empty",
+                );
               return {
                 command,
                 provenance: "source-declared",
@@ -499,7 +518,9 @@ export function compilerWire(
         if (!Array.isArray(item.coverage))
           throw new Error("Planner item coverage must be an array");
         if (item.kind === "qa" && item.coverage.length === 0)
-          throw new Error("Planner QA node has no acceptance coverage");
+          throw new PlannerChoiceError(
+            "Planner QA node has no acceptance coverage",
+          );
         const coverage = item.coverage;
         delete item.coverage;
         const owner = item as unknown as WorkGraph["items"][number];
@@ -512,7 +533,9 @@ export function compilerWire(
             "obligationIndex",
           );
           if (seen.has(obligationIndex))
-            throw new Error("Planner obligationIndex is duplicated");
+            throw new PlannerChoiceError(
+              "Planner obligationIndex is duplicated",
+            );
           seen.add(obligationIndex);
           const obligation = obligations[obligationIndex]!;
           const proof = object(entry.proof, "proof");
@@ -569,17 +592,16 @@ export function compilerWire(
               };
               break;
             case "integrated-ci":
-            case "published-ci":
-              if (
-                typeof proof.checkName !== "string" ||
-                !proof.checkName.trim()
-              )
-                throw new Error("Planner CI check name is invalid");
+            case "published-ci": {
+              const checkName =
+                checkNames[
+                  index(proof.checkIndex, checkNames.length, "checkIndex")
+                ]!;
               canonicalProof =
                 proof.kind === "published-ci"
                   ? {
                       kind: proof.kind,
-                      checkName: proof.checkName,
+                      checkName,
                       targetItem:
                         owner.dependencies[
                           index(
@@ -589,8 +611,9 @@ export function compilerWire(
                           )
                         ]!,
                     }
-                  : { kind: proof.kind, checkName: proof.checkName };
+                  : { kind: proof.kind, checkName };
               break;
+            }
             default:
               throw new Error("Planner proof form is invalid");
           }
@@ -623,9 +646,9 @@ export function compilerWire(
         graph.items.push(owner);
       }
       if (referenced.size !== retainedItems.size)
-        throw new Error("Planner omitted retained Work Items");
+        throw new PlannerChoiceError("Planner omitted retained Work Items");
       if (seen.size !== obligations.length)
-        throw new Error("Planner omitted Objective coverage");
+        throw new PlannerChoiceError("Planner omitted Objective coverage");
       return graph;
     },
   };

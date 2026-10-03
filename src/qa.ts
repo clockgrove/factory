@@ -296,12 +296,67 @@ export function assertCoverageShape(graph: WorkGraph): void {
       throw new Error("QA node has no acceptance coverage");
 }
 
+export function normalizedCommand(command: string): string {
+  return command.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * The command an Acceptance bullet consists of: exactly one backticked
+ * command, or a plain line, that has command authority of its own. Any other
+ * bullet is a semantic obligation for review to judge.
+ */
+export function commandObligation(
+  text: string,
+  isCommand: (command: string, backticked: boolean) => boolean,
+): string | undefined {
+  const quoted = text.trim().match(/^`([^`]+)`$/)?.[1];
+  const candidate = quoted ?? text.trim();
+  return isCommand(candidate, quoted !== undefined)
+    ? normalizedCommand(candidate)
+    : undefined;
+}
+
 export function assertCoverageSources(
   graph: WorkGraph,
   sources: { path: string; content: string }[],
   obligations: CoverageObligation[],
+  finalCommands: string[] = [],
+  isCommand?: (command: string, backticked: boolean) => boolean,
 ): void {
   assertCoverageShape(graph);
+  const checks = (graph.requiredPreIntegrationChecks ?? []).map(
+    (gate) => gate.checkName,
+  );
+  const finals = finalCommands.map(normalizedCommand);
+  const planned = new Set([
+    ...graph.items.flatMap((item) =>
+      item.validation.map((check) => normalizedCommand(check.command)),
+    ),
+    ...finals,
+  ]);
+  const authority =
+    isCommand ?? ((command: string) => planned.has(normalizedCommand(command)));
+  for (const { itemId, proof, source } of graph.coverage) {
+    // A command obligation is proved by running exactly that command, on
+    // its owning item or in Final validation.
+    const command = commandObligation(source.text, authority);
+    if (
+      command === undefined ||
+      finals.includes(command) ||
+      checks.includes(command) ||
+      ("checkName" in proof && proof.checkName === command)
+    )
+      continue;
+    const owner = graph.items.find((item) => item.id === itemId)!;
+    const proved =
+      "validationIndex" in proof &&
+      normalizedCommand(owner.validation[proof.validationIndex]!.command) ===
+        command;
+    if (!proved)
+      throw new Error(
+        `Objective obligation \`${command}\` is a command, so its proof must be a result-command or integrated-command whose validationIndex selects exactly \`${command}\` on its owning item, or the command must be in Final validation; it is proved by ${proof.kind} on ${itemId}`,
+      );
+  }
   for (const required of obligations) {
     const actual = graph.coverage.find(
       (entry) => entry.criterionId === required.criterionId,

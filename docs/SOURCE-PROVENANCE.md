@@ -15,7 +15,10 @@ upstream omission handling are unchanged. The focused regression executes the
 actual generator copied into a temporary fixture with current public license
 files. It changes only Factory root versions before separately testing dependency
 and license changes. No archived code, runtime behavior, compatibility format or
-release workflow is introduced.
+release workflow is introduced. The existing Quality workflow (#509) invokes
+the same strict compiler once and tests its output through the existing PR
+selector or full main suite. Actual packing/installation tests retain package
+coverage; local developer npm commands remain available.
 
 ## Permanent stopped uncertainty abandonment (#499)
 

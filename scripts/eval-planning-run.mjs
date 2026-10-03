@@ -97,10 +97,7 @@ try {
   result.plan = join(spec.directory, "plan.json");
   writeFileSync(result.plan, `${JSON.stringify(plan, null, 2)}\n`);
   const facts = repositoryFacts(checkout, spec.commit);
-  result.metrics = planMetrics(plan, [
-    ...plan.sources.map((source) => source.content),
-    ...facts.workflows.map((workflow) => workflow.content),
-  ]);
+  result.metrics = planMetrics(plan, facts);
   if (spec.judges?.length)
     result.judges = await runPanel(
       loadJudges(spec.judges),

@@ -31,13 +31,10 @@ import {
   expectation,
   finalReviewInsteadOfCommand,
   firstTry,
-  ownLifecycleAcceptance,
+  proofKinds,
+  workflowCheckNames,
 } from "../scripts/eval-planning/metrics.mjs";
-import {
-  DEFECTS,
-  localized,
-  planVariants,
-} from "../scripts/eval-planning/mutations.mjs";
+import { DEFECTS, planVariants } from "../scripts/eval-planning/mutations.mjs";
 import {
   compareReports,
   reviewRunMetrics,
@@ -249,17 +246,6 @@ test("each seeded defect changes exactly its rule in the authored plan", () => {
     crowded.graph.requiredPreIntegrationChecks[0].checkName,
     "ci / build-and-test-2",
   );
-  assert.equal(
-    localized(
-      [{ detail: "Item b assumes a merge", question: "" }],
-      ["b", "merge"],
-    ),
-    true,
-  );
-  assert.equal(
-    localized([{ detail: "unrelated", question: "?" }], ["zzz"]),
-    false,
-  );
 });
 
 test("Wilson intervals and the paired bootstrap match known values", () => {
@@ -327,41 +313,23 @@ test("Wilson intervals and the paired bootstrap match known values", () => {
   assert.equal(clusteredRate(new Map()).rate, null);
 });
 
-test("judge-free metrics read the plan, sources and diagnostics only", () => {
+test("judge-free metrics count structured fields only", () => {
   const plan = {
-    finalCommands: ["node check.mjs a"],
+    commands: [
+      { command: "node check.mjs a", hostExecution: "authorized" },
+      { command: "pnpm lint", hostExecution: "blocked" },
+    ],
     graph: {
       requiredPreIntegrationChecks: [{ checkName: "unit-tests" }],
       items: [
-        {
-          id: "a",
-          dependencies: [],
-          acceptance: ["merge=lfs rule kept"],
-          validation: [],
-        },
-        {
-          id: "b",
-          dependencies: ["a"],
-          acceptance: ["b is merged into main"],
-          validation: [],
-        },
-        {
-          id: "c",
-          dependencies: ["b", "a"],
-          acceptance: [
-            "Every pull request passes the required `unit-tests` check before it merges.",
-            "`gallery.json` lists every published image.",
-            "Uploads larger than 1 MB are rejected.",
-            "The image is uploaded to Git LFS.",
-            "The selected file hydrates in a fresh clone.",
-          ],
-          validation: [],
-        },
+        { id: "a", dependencies: [], acceptance: [], validation: [] },
+        { id: "b", dependencies: ["a"], acceptance: [], validation: [] },
+        { id: "c", dependencies: ["b", "a"], acceptance: [], validation: [] },
         {
           id: "q",
           kind: "qa",
           dependencies: ["c"],
-          acceptance: ["upload ok"],
+          acceptance: [],
           validation: [],
         },
       ],
@@ -370,14 +338,15 @@ test("judge-free metrics read the plan, sources and diagnostics only", () => {
           proof: { kind: "final-review" },
           source: { text: "`node check.mjs a` passes" },
         },
+        // Not an authorized command line, so not a command-line obligation.
         {
           proof: { kind: "final-review" },
           source: { text: "`pnpm lint` passes" },
         },
         { proof: { kind: "final-review" }, source: { text: "Docs read well" } },
         {
-          proof: { kind: "final-review" },
-          source: { text: "`test/slug.test.mjs` and `go.mod` exist" },
+          proof: { kind: "result-command", validationIndex: 0 },
+          source: { text: "node check.mjs a" },
         },
         {
           proof: { kind: "integrated-ci", checkName: "ci / invented" },
@@ -387,14 +356,26 @@ test("judge-free metrics read the plan, sources and diagnostics only", () => {
     },
   };
   assert.equal(criticalPath(plan.graph), 4);
-  // Paths in backticks are not commands.
-  assert.equal(finalReviewInsteadOfCommand(plan).count, 2);
-  assert.deepEqual(ownLifecycleAcceptance(plan.graph).acceptance, [
-    { item: "b", text: "b is merged into main" },
-    { item: "c", text: "The image is uploaded to Git LFS." },
-    { item: "c", text: "The selected file hydrates in a fresh clone." },
+  assert.deepEqual(finalReviewInsteadOfCommand(plan), {
+    count: 1,
+    criteria: ["`node check.mjs a` passes"],
+  });
+  assert.deepEqual(proofKinds(plan.graph), {
+    "final-review": 3,
+    "result-command": 1,
+    "integrated-ci": 1,
+  });
+  const jobs = workflowCheckNames([
+    {
+      path: ".github/workflows/ci.yml",
+      content:
+        "jobs:\n  test:\n    name: unit-tests\n    runs-on: x\n  lint:\n    runs-on: x\n",
+    },
+    { path: ".github/workflows/bad.yml", content: "jobs: [unclosed" },
   ]);
-  assert.deepEqual(ciCheckNames(plan.graph, ["must pass `unit-tests`"]), {
+  assert.deepEqual([...jobs], ["unit-tests", "lint"]);
+  // A name that appears only in prose is not a workflow job.
+  assert.deepEqual(ciCheckNames(plan.graph, jobs), {
     total: 2,
     grounded: 1,
     ungrounded: ["ci / invented"],
@@ -484,35 +465,19 @@ test("judge-free metrics read the plan, sources and diagnostics only", () => {
       ],
     },
   );
-  const asking = {
-    planned: true,
-    review: "question",
-    failure: { detail: "x", question: "Who publishes to the npm registry?" },
-  };
-  assert.equal(
-    expectation({ outcome: "question" }, asking, plan.graph).met,
-    true,
-  );
+  // A question outcome is a structural stop; whether it asked the right
+  // question is the judges' scope dimension.
   assert.equal(
     expectation(
-      { outcome: "question", questionPattern: "registry" },
-      asking,
+      { outcome: "question" },
+      { planned: true, review: "question" },
       plan.graph,
     ).met,
     true,
   );
-  assert.deepEqual(
-    expectation(
-      { outcome: "question", questionPattern: "bench" },
-      asking,
-      plan.graph,
-    ).failed,
-    ["the operator question does not mention /bench/"],
-  );
-  // Planning that stops on an undelegated decision is an operator question.
   assert.equal(
     expectation(
-      { outcome: "question", questionPattern: "bench" },
+      { outcome: "question" },
       {
         planned: false,
         error: "Planning needs an undelegated decision: no bench script",
@@ -828,7 +793,6 @@ test("review metrics keep false positives apart from recall", () => {
     review: "findings",
     flagged: true,
     defect: "missing-dependency",
-    localized: false,
   });
   assert.deepEqual(
     [good.falsePositive, good.recall, hit.falsePositive, hit.recall],
@@ -842,7 +806,6 @@ test("review metrics keep false positives apart from recall", () => {
       review: "x",
       flagged,
       defect,
-      localized: flagged,
     }),
   });
   const before = {

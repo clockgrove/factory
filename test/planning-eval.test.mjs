@@ -140,7 +140,10 @@ test("plan mode plans public cases through planObjective and reports review, jud
         ungrounded: [],
       });
       assert.equal(entry.metrics.finalReviewInsteadOfCommand.count, 0);
-      assert.equal(entry.metrics.ownLifecycleAcceptance.count, 0);
+      assert.deepEqual(entry.metrics.proofKinds, {
+        "result-command": 3,
+        "final-controller": 1,
+      });
       assert.deepEqual(entry.invocations.byPhase, {
         compile: 1,
         "graph-review": 1,
@@ -462,6 +465,40 @@ test("a run that dies with a truncated result.json is reported as an errored run
     assert.match(
       readFileSync(join(output, "summary.md"), "utf8"),
       /- single-item #1: Run result is unreadable/,
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("a private case with a leftover sources key is refused with a clear message", () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-sources-"));
+  try {
+    const target = join(work, "target");
+    materializeFixture(join(root, "evals/targets/node-lib"), target);
+    mkdirSync(join(work, "cases", "old"), { recursive: true });
+    writeFileSync(join(work, "cases", "old", "objective.md"), "# Old\n");
+    writeFileSync(
+      join(work, "cases", "old", "case.json"),
+      JSON.stringify({ commit: "main", sources: ["docs/SPEC.md#Wrap"] }),
+    );
+    assert.throws(
+      () =>
+        run([
+          "--cases",
+          join(work, "cases"),
+          "--target",
+          target,
+          "--config",
+          writeConfig(work),
+          "--output",
+          join(work, "out"),
+        ]),
+      (error) =>
+        error.status === 2 &&
+        /old: case.json `sources` is no longer supported; declare sources in the Objective's `## Planning sources` section/.test(
+          error.stderr,
+        ),
     );
   } finally {
     rmSync(work, { recursive: true, force: true });

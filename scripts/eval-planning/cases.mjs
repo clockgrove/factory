@@ -28,7 +28,6 @@ const expectKeys = new Set([
   "maxWorkItems",
   "maxCriticalPath",
   "readOnly",
-  "questionPattern",
 ]);
 
 export class CaseError extends Error {}
@@ -124,6 +123,10 @@ export function loadCase(root, { defaultTarget, repository, targets }) {
   }
   if (!spec || typeof spec !== "object" || Array.isArray(spec))
     fail("case.json must be an object");
+  if ("sources" in spec)
+    fail(
+      "case.json `sources` is no longer supported; declare sources in the Objective's `## Planning sources` section",
+    );
   const unknown = Object.keys(spec).filter((key) => !caseKeys.has(key));
   if (unknown.length) fail(`unknown case.json keys ${unknown}`);
   const objective = spec.objective ?? 1;

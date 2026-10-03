@@ -46,23 +46,25 @@ To compare planner or reviewer versions, change one thing per report and compare
 
 Rates show a 95% interval clustered by case (by fixture in review-only mode), because repeats of one case are not independent. The interval is the wider of a case-level bootstrap and a Wilson interval on the number of cases, so more cases narrow it more than more repeats. `--compare` shows mean(B − A) per case with a paired-bootstrap 95% interval. An interval that contains 0 is no evidence of a change.
 
-| Number                          | Meaning                                                                                                                 |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Production review clean         | The plan ended clean, with no review findings or questions.                                                             |
-| Judge pass                      | A frozen judge passed all seven dimensions. Shown per judge, separately from the production review.                     |
-| Judges agree                    | How often two judges gave the same verdict, with both-pass, both-fail and one-fails counts.                             |
-| Case expectation met            | The case's `expect` held: outcome (`plan` or `question`), required checks, size, critical path, read-only.              |
-| First try                       | How the first compile ended: `accepted`, `review-findings`, `review-invalid`, `parse`, `semantic:<field>`, `provider`.  |
-| Final review for command        | Coverage that leaves a command-shaped criterion to final review. Should be 0.                                           |
-| Own-lifecycle acceptance        | Work Item acceptance that mentions merge, upload, publication or hydration. Should be 0.                                |
-| Ungrounded CI                   | Named CI checks that appear in no pinned source or workflow file. Should be 0.                                          |
-| Critical path, items, revisions | Longest dependency chain, Work Items, planning revisions.                                                               |
-| Tokens, wall                    | Planning tokens (judge tokens are separate) and planning wall time.                                                     |
-| Recall (review-only)            | The reviewer returned a finding for a plan with that defect. Localized: a finding names the item or defect (heuristic). |
-| False positive (review-only)    | The reviewer returned a finding for a known-good plan. Compared separately from recall.                                 |
-| Caught by compile validation    | A seeded defect that deterministic validation already refuses; it never reaches review.                                 |
+| Number                           | Meaning                                                                                                                |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Production review clean          | The plan ended clean, with no review findings or questions.                                                            |
+| Judge pass                       | A frozen judge passed all seven dimensions. Shown per judge, separately from the production review.                    |
+| Judges agree                     | How often two judges gave the same verdict, with both-pass, both-fail and one-fails counts.                            |
+| Case expectation met             | The case's `expect` held: outcome (`plan` or `question`), required checks, size, critical path, read-only.             |
+| First try                        | How the first compile ended: `accepted`, `review-findings`, `review-invalid`, `parse`, `semantic:<field>`, `provider`. |
+| Final review for command         | Obligations whose criterion contains an authorized command line verbatim but whose proof is final review. Should be 0. |
+| Proof kinds, final-review proofs | Coverage proofs per kind (result command, semantic, QA, CI, final review).                                             |
+| Ungrounded CI                    | Named CI checks that no workflow job produces (job `name`, or job id). Should be 0.                                    |
+| Critical path, items, revisions  | Longest dependency chain, Work Items, planning revisions.                                                              |
+| Tokens, wall                     | Planning tokens (judge tokens are separate) and planning wall time.                                                    |
+| Recall (review-only)             | The reviewer returned a finding for a plan with that defect.                                                           |
+| False positive (review-only)     | The reviewer returned a finding for a known-good plan. Compared separately from recall.                                |
+| Caught by compile validation     | A seeded defect that deterministic validation already refuses; it never reaches review.                                |
 
 The seeded defects are: invented CI check name, acceptance that needs the item's own merge or upload, native-stack dependency assumed merged, final review replacing a required command, missing file ownership, missing dependency, and a worker-written test as the only proof.
+
+Judge-free metrics count structured fields only: proofs, commands, workflow jobs, dependencies and diagnostics. They never interpret prose. Questions that need interpretation, such as acceptance that depends on the item's own merge, belong to the judges' rubric.
 
 ## Frozen judges
 
@@ -91,7 +93,7 @@ Public cases live in `evals/cases/`. Keep private cases outside this repository 
 - For a private case use `commit` and optionally `target` (a checkout; default `--target`) instead of `fixture`. Use a full SHA so the case stays repeatable; a branch resolves at start and the report records the SHA.
 - Sources come from the Objective's own `## Planning sources`, as in `factory run`.
 - `repository` defaults to the configuration's; `objective` defaults to 1.
-- `expect` is optional: `outcome`, `requiredChecks`, `maxWorkItems`, `maxCriticalPath`, `readOnly`, and `questionPattern`, a regular expression the operator question must match when `outcome` is `question`. Planning that stops on an undelegated decision also counts as a question.
+- `expect` is optional: `outcome`, `requiredChecks`, `maxWorkItems`, `maxCriticalPath`, `readOnly`. A `question` outcome is met when planning stopped for an operator: a plan waiting for a decision, or the controller's undelegated-decision refusal. Whether it asked the right question is the judges' `scope` dimension.
 
 Predecessor cases are text only: the eval serves no predecessor Objectives, so `planningPrerequisites` evidence never reaches the planner. They test how the planner reads an Objective that names a predecessor, not native prerequisite admission.
 

@@ -52,7 +52,7 @@ export const DEFECTS = [
       if (gate) gate.checkName = name;
       for (const entry of graph.coverage)
         if (entry.proof.checkName === old) entry.proof.checkName = name;
-      return { graph, itemId: null, terms: [name, "check"] };
+      return { graph, itemId: null };
     },
   },
   {
@@ -71,7 +71,7 @@ export const DEFECTS = [
           ? "The selected files are uploaded to Git LFS, merged into main, and hydrate in a fresh clone."
           : "This item's pull request is merged into main and the main-branch CI run is green.",
       );
-      return { graph, itemId: item.id, terms: [item.id, "merge"] };
+      return { graph, itemId: item.id };
     },
   },
   {
@@ -93,7 +93,7 @@ export const DEFECTS = [
       item.acceptance.push(
         `\`${dependency}\` is merged into main before this item starts, and this item builds on main.`,
       );
-      return { graph, itemId: item.id, terms: [item.id, "merge"] };
+      return { graph, itemId: item.id };
     },
   },
   {
@@ -112,12 +112,11 @@ export const DEFECTS = [
       const item = graph.items.find(
         (candidate) => candidate.id === entry.itemId,
       );
-      const removed = dropValidation(graph, item, entry.proof.validationIndex);
+      dropValidation(graph, item, entry.proof.validationIndex);
       entry.proof = { kind: "final-review" };
       return {
         graph,
         itemId: item.id,
-        terms: [item.id, removed.command, "final review"],
       };
     },
   },
@@ -136,7 +135,7 @@ export const DEFECTS = [
           .find((candidate) => item.brief.includes(candidate)) ??
         item.ownedPaths.at(-1);
       item.ownedPaths = item.ownedPaths.filter((owned) => owned !== path);
-      return { graph, itemId: item.id, terms: [item.id, path, "own"] };
+      return { graph, itemId: item.id };
     },
   },
   {
@@ -159,7 +158,6 @@ export const DEFECTS = [
       return {
         graph,
         itemId: item.id,
-        terms: [item.id, dependency, "depend"],
       };
     },
   },
@@ -175,7 +173,6 @@ export const DEFECTS = [
         (candidate) => candidate.id === entry.itemId,
       );
       const index = entry.proof.validationIndex;
-      const removed = item.validation[index];
       const testPath = `${context.workerTest.directory}${item.id}.test.mjs`;
       const existing = item.validation.findIndex(
         (check) => check.command === context.workerTest.command,
@@ -196,7 +193,6 @@ export const DEFECTS = [
       return {
         graph,
         itemId: item.id,
-        terms: [item.id, removed.command, "test"],
       };
     },
   },
@@ -220,14 +216,4 @@ export function planVariants(graph, context) {
         : [];
     }),
   ];
-}
-
-/** Whether any finding names the mutated item or a defect-specific term. */
-export function localized(findings, terms) {
-  const wanted = terms.filter(Boolean).map((term) => term.toLowerCase());
-  return findings.some((finding) =>
-    wanted.some((term) =>
-      `${finding.detail} ${finding.question}`.toLowerCase().includes(term),
-    ),
-  );
 }

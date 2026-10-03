@@ -40,12 +40,10 @@ import {
 import {
   acquireControllerLock,
   readContinuation,
-  readControllerOwner,
   releaseControllerLock,
   retargetControllerLock,
   saveState,
   statePath,
-  type ControllerLock,
 } from "./state-store.js";
 import type { PreparationState, ContinuationState } from "./state.js";
 

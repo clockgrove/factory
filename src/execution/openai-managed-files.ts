@@ -6,7 +6,6 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { create, extract, list } from "tar";
@@ -16,7 +15,7 @@ import type {
   HarnessRequest,
 } from "../contracts.js";
 import { importSourceAssets } from "../media.js";
-import { pinnedGit, pinnedGitAsync, pinnedGitRaw } from "../process.js";
+import { pinnedGitAsync, pinnedGitRaw } from "../process.js";
 
 export const OPENAI_INPUT_MAX_BYTES = 5 * 1024 * 1024;
 export const OPENAI_OUTPUT_MAX_BYTES = 200 * 1024 * 1024;

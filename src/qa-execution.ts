@@ -11,7 +11,6 @@ import type {
   PlanningModel,
   WorkItem,
 } from "./contracts.js";
-import { CompletedModelInvocationError } from "./contracts.js";
 import { repeatInterrupted } from "./work-repair.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { validationLfsMembersForItem } from "./media.js";

@@ -9,12 +9,11 @@ import {
   amendmentBlocksDispatch,
   applyPendingAmendment,
   graphDigest,
-  validateAmendment,
   submitAmendment,
   type AmendmentProposal,
 } from "./graph-amendments.js";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { userInfo } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import {
@@ -48,13 +47,7 @@ import {
   GitHubClosureFailure,
 } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
-import {
-  CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
-  GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
-  factoryConfigDigest,
-  stateRoot,
-  validateTarget,
-} from "./config.js";
+import { factoryConfigDigest, stateRoot, validateTarget } from "./config.js";
 import type {
   ContentStore,
   DeliveryStrategy,

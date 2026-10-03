@@ -23,10 +23,7 @@ import type {
   PlanningModel,
   WorkItem,
 } from "../contracts.js";
-import {
-  AuthenticationRequiredError,
-  CompletedModelInvocationError,
-} from "../contracts.js";
+import { AuthenticationRequiredError } from "../contracts.js";
 import type { DiagnosticEmitter } from "../diagnostics.js";
 import {
   materializeAssetSet,

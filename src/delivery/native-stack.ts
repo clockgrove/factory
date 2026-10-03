@@ -1,5 +1,5 @@
 import {
-  GitHubClient,
+  type GitHubClient,
   sharedGitHubClient,
   timelineMergeCommit,
 } from "../github-client.js";

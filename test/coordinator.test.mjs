@@ -578,7 +578,7 @@ test("resumed preparation retains its admitted policy without requiring command-
   );
 });
 
-test("regular and native cancellation preserves unknown publication without terminal success or replay", async () => {
+test("regular and native cancellation during publication succeeds and nothing replays", async () => {
   for (const delivery of ["regular", "native-stack"])
     await fixture(
       `publication-${delivery}`,
@@ -594,30 +594,36 @@ test("regular and native cancellation preserves unknown publication without term
           throw new Error("publication acknowledgement lost");
         };
         const run = application.runObjective(1);
-        const rejected = assert.rejects(run, /acknowledgement lost/);
+        const rejected = assert.rejects(run);
         await until(() => creates === 1);
         await requestControl(config.repository, {
           objective: 1,
           action: "cancel",
         });
-        await until(
-          () => readState(config.repository, 1)?.coordinator.cancelError,
+        // Cancellation never has to prove what the in-flight call did; it is
+        // acknowledged and becomes terminal once that call settles.
+        await until(() =>
+          /cancellation acknowledged/.test(
+            readState(config.repository, 1)?.coordinator.waitReason ?? "",
+          ),
         );
-        assert.match(
+        assert.equal(
           readState(config.repository, 1).coordinator.cancelError,
-          /publication.*unknown/,
+          undefined,
         );
         pending.resolve();
         await rejected;
         const state = readState(config.repository, 1);
-        assert.equal(state.cancelledAt, undefined);
-        assert.equal(state.work.result.pendingEffect, "publication");
+        assert.ok(state.cancelledAt);
+        assert.equal("pendingEffect" in state.work.result, false);
+        // The Objective stays cancelled: a later run neither publishes again
+        // nor merges the PR the lost call created.
         await assert.rejects(application.runObjective(1), /cancel/);
         assert.equal(creates, 1);
+        const pulls = Object.values(github.state().pullRequests);
+        assert.equal(pulls.length, 1);
         assert.equal(
-          Object.values(github.state().pullRequests).some(
-            (pr) => pr.state === "merged",
-          ),
+          pulls.some((pr) => pr.state === "merged"),
           false,
         );
       },

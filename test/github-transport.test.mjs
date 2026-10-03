@@ -187,24 +187,36 @@ test("projection persists intent before creation and identity before next work",
   assert.deepEqual(create.body.labels, ["factory:work-item"]);
 });
 
+// Current 2026-03-10 PR responses for an open PR and a merged PR.
+const openPull = {
+  number: 4,
+  state: "open",
+  merged: false,
+  head: { sha: headSha, ref: "branch" },
+  base: { ref: "main" },
+};
+const mergedPull = { ...openPull, state: "closed", merged: true };
+
 test("regular merge sends the exact expected head and verifies integrated identity", async () => {
   const calls = [];
+  let merged = false;
   const client = clientFor(async (_url, options) => {
     calls.push(options);
-    return options.method === "PUT"
-      ? json({ merged: true, sha: integratedSha })
-      : json({
-          state: "closed",
-          merged: true,
-          head: { sha: headSha, ref: "branch" },
-        });
+    if (options.method !== "PUT") return json(merged ? mergedPull : openPull);
+    merged = true;
+    return json({ merged: true, sha: integratedSha });
   });
   const gateway = new RealGitHubGateway("a/b", {}, client);
   assert.deepEqual(
     await gateway.merge({ number: 4, headSha, branch: "branch" }, headSha),
     { integratedSha },
   );
-  assert.deepEqual(JSON.parse(calls[0].body), {
+  // Look up the PR first, merge it at the exact head, then confirm it.
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ["GET", "PUT", "GET"],
+  );
+  assert.deepEqual(JSON.parse(calls[1].body), {
     sha: headSha,
     merge_method: "merge",
   });
@@ -212,12 +224,79 @@ test("regular merge sends the exact expected head and verifies integrated identi
     gateway.merge({ number: 4, headSha, branch: "branch" }, "other"),
     /expected head/,
   );
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.ok(
     calls.every(
       (call) => call.headers["x-github-api-version"] === "2026-03-10",
     ),
   );
+});
+
+test("regular merge of an already merged PR at the expected head confirms it without merging again", async () => {
+  const methods = [];
+  const client = clientFor(async (url, options) => {
+    methods.push(options.method);
+    assert.match(String(url), /\/pulls\/4$/);
+    return json({ ...mergedPull, merge_commit_sha: integratedSha });
+  });
+  const gateway = new RealGitHubGateway("a/b", {}, client);
+  // Repeating the step after a lost response converges on the same result.
+  for (let attempt = 0; attempt < 2; attempt++)
+    assert.deepEqual(
+      await gateway.merge({ number: 4, headSha, branch: "branch" }, headSha),
+      { integratedSha },
+    );
+  assert.deepEqual(methods, ["GET", "GET"]);
+});
+
+// 2026-03-10 PR responses omit merge_commit_sha (see the native merge
+// fixtures below), so a real lost merge response cannot be confirmed from the
+// PR alone. Its merge identity is the PR timeline's "merged" event.
+test("regular merge confirms an already merged PR from current API evidence", {
+  todo: "gateway reads merge_commit_sha, which 2026-03-10 omits",
+}, async () => {
+  const methods = [];
+  const client = clientFor(async (url, options) => {
+    methods.push(options.method);
+    if (String(url).includes("/timeline"))
+      return json([{ event: "merged", commit_id: integratedSha }]);
+    return json(mergedPull);
+  });
+  assert.deepEqual(
+    await new RealGitHubGateway("a/b", {}, client).merge(
+      { number: 4, headSha, branch: "branch" },
+      headSha,
+    ),
+    { integratedSha },
+  );
+  assert.ok(!methods.includes("PUT"));
+});
+
+test("regular merge refuses a PR already merged at a different head or branch", async () => {
+  for (const detail of [
+    { head: { sha: "b".repeat(40), ref: "branch" } },
+    { head: { sha: headSha, ref: "changed" } },
+    { merge_commit_sha: null },
+    { merge_commit_sha: "not-a-commit" },
+  ]) {
+    const methods = [];
+    const client = clientFor(async (_url, options) => {
+      methods.push(options.method);
+      return json({
+        ...mergedPull,
+        merge_commit_sha: integratedSha,
+        ...detail,
+      });
+    });
+    await assert.rejects(
+      new RealGitHubGateway("a/b", {}, client).merge(
+        { number: 4, headSha, branch: "branch" },
+        headSha,
+      ),
+      /PR #4 was merged at a different head/,
+    );
+    assert.deepEqual(methods, ["GET"]);
+  }
 });
 
 test("cancelled in-flight mutation retains unknown outcome", async () => {
@@ -359,15 +438,11 @@ test("regular merge rejects unsuccessful acknowledgement and changed current PR 
     const client = clientFor(async (_url, options) => {
       methods.push(options.method);
       assert.equal(options.headers["x-github-api-version"], "2026-03-10");
-      return options.method === "PUT"
-        ? json(result)
-        : json({
-            number: 4,
-            state: "closed",
-            merged: true,
-            head: { sha: headSha, ref: "branch" },
-            ...detail,
-          });
+      if (options.method === "PUT") return json(result);
+      // The lookup before merging sees the open PR; the confirmation after.
+      return methods.includes("PUT")
+        ? json({ ...mergedPull, ...detail })
+        : json(openPull);
     });
     await assert.rejects(
       new RealGitHubGateway("a/b", {}, client).merge(
@@ -377,6 +452,7 @@ test("regular merge rejects unsuccessful acknowledgement and changed current PR 
       expected,
     );
     assert.equal(methods.filter((method) => method === "PUT").length, 1);
+    assert.equal(methods[0], "GET");
   }
 });
 

@@ -67,16 +67,18 @@ export class RegularDelivery implements DeliveryStrategy {
     result: DeliveryResult,
     beforeMerge?: (observation: DeliveryObservation) => void,
   ): Promise<MergeResult> {
+    const identity = {
+      number: result.pullRequest,
+      branch: result.branch,
+      headSha: result.headSha,
+    };
     const observation = await this.observe(result);
+    // A merge that already happened (its response was lost) is confirmed by
+    // the gateway; its readiness evidence was recorded before it was sent.
+    if (observation.state === "merged")
+      return this.github.merge(identity, result.headSha);
     assertDeliveryReady(observation, this.requiredChecks, result.headSha);
     beforeMerge?.(observation);
-    return this.github.merge(
-      {
-        number: result.pullRequest,
-        branch: result.branch,
-        headSha: result.headSha,
-      },
-      result.headSha,
-    );
+    return this.github.merge(identity, result.headSha);
   }
 }

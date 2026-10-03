@@ -18,6 +18,7 @@ import {
   GitHubClient,
   GitHubRequestError,
   sharedGitHubClient,
+  timelineMergeCommit,
 } from "./github-client.js";
 
 type Issue = {
@@ -1017,6 +1018,28 @@ export class RealGitHubGateway implements GitHubGateway {
   ): Promise<MergeResult> {
     if (expectedHead !== identity.headSha)
       throw new Error("Merge expected head differs from PR identity");
+    // A merge whose response was lost has already happened: confirm it
+    // rather than merging again.
+    const current = await this.client.request<Pull>(
+      "GET",
+      this.route(`pulls/${identity.number}`),
+    );
+    if (current.merged) {
+      if (
+        current.head.sha !== expectedHead ||
+        current.head.ref !== identity.branch
+      )
+        throw new Error(
+          `PR #${identity.number} was merged at a different head; operator direction required`,
+        );
+      return {
+        integratedSha: await timelineMergeCommit(
+          this.client,
+          this.repository,
+          identity.number,
+        ),
+      };
+    }
     const result = await this.client.request<{ merged: boolean; sha: string }>(
       "PUT",
       this.route(`pulls/${identity.number}/merge`),

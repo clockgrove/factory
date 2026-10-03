@@ -17,8 +17,10 @@ try {
       issues: Object.keys(remote.issues).sort(),
       pullRequests: pulls.length,
       merged: pulls.filter((pull) => pull.state === "merged").length,
-      mergeEvents: remote.events.filter((event) => event.type === "merge")
-        .length,
+      // One event per merge call: a regular PR merge or a native stack merge.
+      mergeEvents: remote.events.filter((event) =>
+        ["merge", "merge-stack"].includes(event.type),
+      ).length,
       closedIssues: Object.keys(remote.closedIssues).length,
     }),
   );

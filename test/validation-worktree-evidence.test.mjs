@@ -240,7 +240,7 @@ test("settled dirty refusals retain structured relative tracked, generated, spec
       assert.deepEqual(state.work.result.usage, {
         availability: "unavailable",
       });
-      state.work.result.pendingEffect = "publication";
+      state.work.result.pullRequest = 1;
       assert.equal(recordWorkFailure(state, "result", failure), false);
       assert.equal(
         state.work.result.recovery.failure.classification,

@@ -185,11 +185,15 @@ async function fixture(route, name, run, chain = false, namedGate = false) {
       };
     };
     const merge = github.merge.bind(github);
-    github.merge = async (...args) => {
+    github.merge = async (identity, expectedHead) => {
+      // No intent marker precedes a merge any more: the merge names the
+      // retained publication's exact PR and head, so repeating it is safe.
       const work = readState(config.repository, 1).work.result;
-      assert.equal(work.pendingEffect, "merge");
+      assert.equal(work.status, "published");
+      assert.equal(identity.number, work.pullRequest);
+      assert.equal(expectedHead, work.changeRef);
       merges++;
-      return merge(...args);
+      return merge(identity, expectedHead);
     };
     const mergeStack = github.mergeNativeStack.bind(github);
     github.mergeNativeStack = async (...args) => {
@@ -243,7 +247,6 @@ const identityOf = (state) => ({
 });
 function assertWait(state) {
   assert.equal(state.work.result.status, "published");
-  assert.equal(state.work.result.pendingEffect, undefined);
   assert.match(state.work.result.waitingReason, /Awaiting/);
   assert.equal(state.work.result.recovery, undefined);
   assert.equal(state.error, undefined);
@@ -346,6 +349,12 @@ for (const route of ["regular", "native-stack"]) {
           .length,
         1,
       );
+      assert.equal(f.counts().merges, 1);
+      assert.equal(
+        f.github.state().events.filter((event) => event.type === "publish")
+          .length,
+        1,
+      );
     }));
   test(`${route}: cancellation of known read-only wait submits no merge`, async () =>
     fixture(route, "cancel", async (f) => {
@@ -361,7 +370,7 @@ for (const route of ["regular", "native-stack"]) {
       await cancelled;
       const state = readState(f.config.repository, 1);
       assert.ok(state.cancelledAt);
-      assert.equal(state.work.result.pendingEffect, undefined);
+      assert.equal(state.work.result.status, "published");
       assert.equal(state.coordinator.cancelError, undefined);
       assert.equal(f.counts().merges, 0);
     }));
@@ -407,7 +416,6 @@ for (const route of ["regular", "native-stack"]) {
       );
       const stopped = readState(f.config.repository, 1);
       assert.deepEqual(identityOf(stopped), identity);
-      assert.equal(stopped.work.result.pendingEffect, undefined);
       assert.equal(f.counts().merges, 0);
       assert.equal(
         readEvents(f.eventsPath).filter((event) => event.type === "start")
@@ -457,7 +465,7 @@ for (const route of ["regular", "native-stack"]) {
       false,
       true,
     ));
-  test(`${route}: failed source-required check stops before merge intent`, async () =>
+  test(`${route}: failed source-required check stops before merge submission`, async () =>
     fixture(
       route,
       "named-fail",
@@ -471,10 +479,6 @@ for (const route of ["regular", "native-stack"]) {
           /not mergeable/,
         );
         assert.equal(f.counts().merges, 0);
-        assert.equal(
-          readState(f.config.repository, 1).work.result.pendingEffect,
-          undefined,
-        );
       },
       false,
       true,
@@ -521,17 +525,20 @@ test("intake keeps its ordinary pending-CI Objective owned and finishes it when 
     );
   }));
 
-test("native multi-layer wait preserves every exact published layer and submits intent only at async merge", async () =>
+test("native multi-layer wait preserves every exact published layer and creates and merges the stack only after readiness", async () =>
   fixture(
     "native-stack",
     "chain",
     async (f) => {
+      const stacks = () =>
+        f.github.state().events.filter((event) => event.type === "stack")
+          .length;
       const plan = await f.application.planObjective(1);
       const waiting = await f.application.runObjective(1, plan);
       assert.equal(waiting.work.result.status, "published");
       assert.equal(waiting.work.next.status, "published");
-      assert.equal(waiting.work.next.pendingEffect, undefined);
       assert.equal(waiting.error, undefined);
+      assert.equal(stacks(), 0);
       assert.equal(f.counts().merges, 0);
       const identities = Object.fromEntries(
         Object.entries(waiting.work).map(([id, work]) => [
@@ -539,24 +546,25 @@ test("native multi-layer wait preserves every exact published layer and submits 
           { attempt: work.attempt, head: work.changeRef, pr: work.pullRequest },
         ]),
       );
-      const ensureStack = f.github.ensureNativeStack.bind(f.github);
-      f.github.ensureNativeStack = async (...args) => {
-        assert.notEqual(
-          readState(f.config.repository, 1).work.next.pendingEffect,
-          "merge",
-        );
-        return ensureStack(...args);
-      };
       const mergeStack = f.github.mergeNativeStack.bind(f.github);
       f.github.mergeNativeStack = async (...args) => {
+        // The merge names the exact retained layers; nothing was republished.
+        assert.deepEqual(
+          args[0].map((layer) => [layer.pullRequest, layer.headSha]),
+          Object.values(identities).map((identity) => [
+            identity.pr,
+            identity.head,
+          ]),
+        );
         const beforeMerge = args[3].beforeMerge;
         args[3] = {
           ...args[3],
           beforeMerge: () => {
             beforeMerge();
-            assert.equal(
-              readState(f.config.repository, 1).work.next.pendingEffect,
-              "merge",
+            assert.ok(
+              Object.values(
+                readState(f.config.repository, 1).stackNumbers ?? {},
+              ).includes(args[2]),
             );
           },
         };
@@ -579,6 +587,7 @@ test("native multi-layer wait preserves every exact published layer and submits 
           .length,
         2,
       );
+      assert.equal(stacks(), 1);
       assert.equal(f.counts().merges, 1);
     },
     true,

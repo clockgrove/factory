@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { validateConfig } from "../dist/config.js";
-import { readState } from "../dist/state-store.js";
+import { readState, saveState, statePath } from "../dist/state-store.js";
 import {
   createTarget,
   factoryConfig,
@@ -135,6 +141,7 @@ for (const delivery of ["regular", "native-stack"]) {
           },
         });
         let stackMerges = 0;
+        let crashSnapshot;
         for (const method of ["merge", "mergeNativeStack"]) {
           const original = github[method].bind(github);
           github[method] = async (...args) => {
@@ -155,14 +162,11 @@ for (const delivery of ["regular", "native-stack"]) {
             );
             if (method === "mergeNativeStack") {
               stackMerges++;
-              if (slowFirst === "unknown-merge") {
-                // Simulate a submitted mutation whose acknowledgement is lost,
-                // rather than a failure in the preceding read-only preparation.
-                args[3].beforeMerge();
-                assert.equal(
-                  readState(repository, 1).work.tail.pendingEffect,
-                  "merge",
-                );
+              if (slowFirst === "unknown-merge" && stackMerges === 1) {
+                // The merge is applied but the controller dies before it
+                // records the result: keep the snapshot a crash would leave.
+                await original(...args);
+                crashSnapshot = readFileSync(statePath(repository, 1), "utf8");
                 throw new Error("Native merge response lost");
               }
             }
@@ -185,15 +189,27 @@ for (const delivery of ["regular", "native-stack"]) {
             application.runObjective(1, plan),
             /Native merge response lost/,
           );
-          const preserved = readState(repository, 1);
-          assert.equal(preserved.work.tail.pendingEffect, "merge");
-          assert.equal(preserved.work.tail.phaseReservation, "delivery");
-          assert.equal(stackMerges, 1);
-          await assert.rejects(
-            application.runObjective(1, plan),
-            /Objective stopped/,
+          const merged = () =>
+            github
+              .state()
+              .events.filter((event) => event.type === "merge-stack").length;
+          assert.equal(merged(), 1);
+          // Restart from the snapshot a crash after the merge call leaves:
+          // the published unit still holds its delivery reservation.
+          saveState(statePath(repository, 1), JSON.parse(crashSnapshot));
+          const crashed = readState(repository, 1);
+          assert.equal(crashed.error, undefined);
+          assert.equal(crashed.work.tail.status, "published");
+          assert.equal(crashed.work.tail.phaseReservation, "delivery");
+          // The restart repeats the merge; the gateway confirms the merged
+          // stack instead of merging again.
+          const final = await application.runObjective(1, plan);
+          assert.equal(final.finalValidation.passed, true);
+          assert.equal(stackMerges, 2);
+          assert.equal(merged(), 1);
+          assert.ok(
+            Object.values(final.work).every((work) => !work.phaseReservation),
           );
-          assert.equal(stackMerges, 1);
           return;
         }
         const final = await application.runObjective(1, plan);

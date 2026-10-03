@@ -39,8 +39,7 @@ export function objectiveCandidate(
           work.execution ||
           work.pullRequest ||
           work.integratedSha ||
-          work.preIntegrationChecks?.length ||
-          work.pendingEffect,
+          work.preIntegrationChecks?.length,
       ) ||
       Object.keys(state.stackNumbers ?? {}).length ||
       Object.keys(state.stackMerges ?? {}).length

@@ -78,7 +78,7 @@ export interface WorkState {
   graphRevisionDigest?: string;
   discovery?: import("./contracts.js").WorkDiscovery & { attempt: string };
   discoveryDisposition?: "proposed" | "accepted";
-  pendingEffect?: "review" | "publication" | "merge";
+  pendingEffect?: "publication" | "merge";
   qaChecks?: NamedCheckEvidence[];
   /** Exact-head successful named checks observed before submitting integration. */
   preIntegrationChecks?: NamedCheckEvidence[];
@@ -240,63 +240,37 @@ export function assertPermanentAbandonmentRequest(
 
 export type PermanentAbandonment = PermanentAbandonmentRequest & {
   at: string;
-  effect: "read-only-review" | "graph-projection";
+  effect: "graph-projection";
 };
 
-/** Derive the only two permanently abandonable uncertainty boundaries from the snapshot. */
+/** The only remaining abandonable boundary: a graph amendment interrupted mid-projection (#515). */
 export function permanentAbandonmentEffect(
   state: ContinuationState,
 ): PermanentAbandonment["effect"] | undefined {
-  if (state.planningRecovery?.phase === "submitted") return undefined;
-  if (state.schemaVersion === 5) return undefined;
-  const projection = state.pendingAmendment?.phase === "projecting";
   if (
+    state.schemaVersion === 5 ||
+    state.planningRecovery?.phase === "submitted" ||
+    state.pendingAmendment?.phase !== "projecting" ||
     Object.keys(state.stackMerges ?? {}).length ||
     state.finalAcceptancePending ||
-    (state.pendingAmendment &&
-      (["compiling", "reviewing", "projecting"].includes(
-        state.pendingAmendment.phase,
-      ) ||
-        state.pendingAmendment.projectionPending) &&
-      !projection)
+    state.coordinator?.phase.includes("submitted")
   )
     return undefined;
-  const review =
-    state.coordinator?.phase === "objective-review-submitted" ||
-    Object.values(state.work).some((work) => work.pendingEffect === "review");
-  if (
-    state.coordinator?.phase.includes("submitted") &&
-    !(
-      review &&
-      !projection &&
-      state.coordinator.phase === "objective-review-submitted"
-    )
-  )
-    return undefined;
-  for (const work of Object.values(state.work)) {
+  for (const work of Object.values(state.work))
     if (
-      (work.pendingEffect && (projection || work.pendingEffect !== "review")) ||
+      work.pendingEffect ||
       work.status === "running" ||
       work.status === "published" ||
       (work.step === "deliver" && work.status !== "done") ||
       work.githubClosure === "pending"
     )
       return undefined;
-  }
-  return projection
-    ? "graph-projection"
-    : review
-      ? "read-only-review"
-      : undefined;
+  return "graph-projection";
 }
 
 /** Historical uncertainty remains intact; only this explicit terminal disposition is new. */
 export function assertPermanentAbandonmentBinding(value: unknown): void {
   const state = record(value, "state");
-  if (Object.hasOwn(state, "readOnlyReviewAbandonment"))
-    throw new Error(
-      "Unsupported permanent abandonment snapshot form; historical bytes must remain unchanged",
-    );
   if (state.permanentAbandonment === undefined) return;
   const abandonment = record(
     state.permanentAbandonment,
@@ -317,9 +291,7 @@ export function assertPermanentAbandonmentBinding(value: unknown): void {
     record(state.finalValidation ?? {}, "finalValidation").passed === true ||
     Date.parse(abandonment.cessation.verifiedAt) >
       Date.parse(String(abandonment.at)) ||
-    !["read-only-review", "graph-projection"].includes(
-      String(abandonment.effect),
-    ) ||
+    abandonment.effect !== "graph-projection" ||
     permanentAbandonmentEffect(state as unknown as ContinuationState) !==
       abandonment.effect
   )
@@ -714,7 +686,7 @@ export function parseFactoryState(
     const item = record(work[id], `work.${id}`);
     if (
       item.pendingEffect !== undefined &&
-      !["review", "publication", "merge"].includes(String(item.pendingEffect))
+      !["publication", "merge"].includes(String(item.pendingEffect))
     )
       throw new Error(`Work Item ${id} has invalid pending effect`);
     if (!statuses.has(item.status as WorkStatus))

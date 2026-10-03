@@ -112,8 +112,6 @@ const reference = {
 // Boundaries where a crash still stops for the operator. Phase A (#515)
 // removes these fences one class at a time; each removal deletes its row.
 const fenced = new Map([
-  ["planning-reviewResult-before", /submitted review has unknown outcome/],
-  ["planning-reviewResult-after", /submitted review has unknown outcome/],
   ["github-publish-before", /submitted publication has unknown outcome/],
   ["github-publish-after", /submitted publication has unknown outcome/],
   ["github-merge-before", /submitted merge has unknown outcome/],

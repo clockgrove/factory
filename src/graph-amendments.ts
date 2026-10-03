@@ -433,7 +433,6 @@ function validateAmendmentReplacement(
     state.coordinator?.mode !== "paused" ||
     state.coordinator.cancelError ||
     state.coordinator.processes?.length ||
-    state.coordinator.phase === "objective-review-submitted" ||
     (state.error !== undefined && state.error !== rejected.error) ||
     Object.values(state.work).some(
       (work) =>

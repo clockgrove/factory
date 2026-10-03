@@ -777,7 +777,7 @@ test("one resume wakes both concurrent GitHub outage waiters without replaying w
   );
 });
 
-test("response-less result review preserves unknown effect and refuses implementation retry", async () => {
+test("a response-less result review leaves no unknown effect and allows retry", async () => {
   for (const delivery of ["regular", "native-stack"])
     await fixture(
       `unknown-review-${delivery}`,
@@ -788,11 +788,13 @@ test("response-less result review preserves unknown effect and refuses implement
           /review response lost/,
         );
         const state = readState(config.repository, 1);
-        assert.equal(state.work.result.pendingEffect, "review");
+        assert.equal(state.work.result.pendingEffect, undefined);
         assert.equal(state.work.result.acceptancePending, undefined);
-        assert.throws(
-          () => application.retryWorkItem(1, "result"),
-          /Submitted effect outcome is unknown/,
+        // Reviews have no side effects; nothing blocks asking again.
+        application.retryWorkItem(1, "result");
+        assert.equal(
+          readState(config.repository, 1).work.result.status,
+          "pending",
         );
       },
       undefined,

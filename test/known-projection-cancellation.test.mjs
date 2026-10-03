@@ -766,7 +766,7 @@ for (const producer of ["amendment"])
                     ]
                   : [
                       (snapshot) => {
-                        snapshot.work.result.pendingEffect = "review";
+                        snapshot.work.result.pendingEffect = "publication";
                       },
                       (snapshot) => {
                         snapshot.coordinator.phase =

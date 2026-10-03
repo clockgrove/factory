@@ -1391,7 +1391,7 @@ for (const delivery of ["regular", "native-stack"])
     }
   });
 
-test("unknown diagnosis response or ambiguous publication never authorizes another attempt", async () => {
+test("a lost diagnosis is reissued once charged; ambiguous publication never authorizes another attempt", async () => {
   const { diagnoseWorkRepair } = await import("../dist/work-repair.js");
   const work = {
     status: "failed",
@@ -1430,11 +1430,14 @@ test("unknown diagnosis response or ambiguous publication never authorizes anoth
     }),
     /unknown/,
   );
-  assert.equal(work.pendingEffect, "review");
+  assert.equal(work.pendingEffect, undefined);
   assert.equal(work.recovery.phase, "diagnosing");
+  const charged = state.allowanceConsumption.implementationRepairs;
+  // A restart asks again; the diagnosis was already charged when first sent.
+  const restarted = JSON.parse(JSON.stringify(state));
   await assert.rejects(
     diagnoseWorkRepair({
-      state: JSON.parse(JSON.stringify(state)),
+      state: restarted,
       item: item(),
       model: planner,
       save: () => {},
@@ -1442,7 +1445,8 @@ test("unknown diagnosis response or ambiguous publication never authorizes anoth
     }),
     /unknown/,
   );
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
+  assert.equal(restarted.allowanceConsumption.implementationRepairs, charged);
   work.pendingEffect = "publication";
   recordWorkFailure(state, "result", new Error("publication response lost"));
   assert.equal(work.recovery.failure.classification, "uncertain");
@@ -1456,7 +1460,7 @@ test("unknown diagnosis response or ambiguous publication never authorizes anoth
     }),
     false,
   );
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
 });
 
 test("real structured adapter uses a diagnosis request rather than a graph-compilation prompt", async (t) => {

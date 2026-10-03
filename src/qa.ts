@@ -40,7 +40,7 @@ export function objectiveCandidate(
           work.pullRequest ||
           work.integratedSha ||
           work.preIntegrationChecks?.length ||
-          (work.pendingEffect && work.pendingEffect !== "review"),
+          work.pendingEffect,
       ) ||
       Object.keys(state.stackNumbers ?? {}).length ||
       Object.keys(state.stackMerges ?? {}).length

@@ -315,17 +315,17 @@ factory cancel --objective ISSUE_NUMBER
 
 Cancellation stops owned local work. Inspect its resulting status before attempting anything else.
 
-An uncertain read-only result review or submitted synchronous GitHub graph projection
-normally prevents terminal cancellation. An operator may explicitly **permanently
-abandon** an exact stopped unaccepted run with
+Interrupted planning, reviews and initial issue projection resume when you run the
+Objective again, so they never block cancellation. A graph amendment interrupted
+mid-projection still prevents terminal cancellation; an operator may explicitly
+**permanently abandon** such an exact stopped unaccepted run with
 built-in local workers, after verifying that all owned workers, SDK descendants,
 subprocesses and model activity have ceased. Stop the service/controller first.
 An empty controller lock or process list does not prove SDK/model cessation.
 Unknown live resources, unsupported harnesses, sealed final acceptance, unresolved
 planning/model jobs, review outside the selected boundary, publication, merge and
 other effects remain refused. The controller derives the allowed boundary from the
-snapshot: stopped read-only result review, initial projection after reviewed planning,
-or reviewed amendment projection. The request cannot choose or override that boundary.
+snapshot; the request cannot choose or override it.
 
 Use `factory status --objective ISSUE_NUMBER --json` to inspect the identities,
 then hash the exact private `objectives/ISSUE_NUMBER/state.json` bytes with
@@ -367,8 +367,7 @@ operation adds the operator disposition and terminal cancellation to the existin
 atomic snapshot. Every original review marker, error, accepted/failed Work Item,
 evidence, consumed allowance and unknown outcome/accounting stays intact; no
 non-submission or successful cleanup is asserted. Historical submission and
-billing uncertainty need not be resolved to abandon a ceased read-only review or
-synchronous graph projection. Projection outcomes stay unknown, including unidentified
+billing uncertainty need not be resolved to abandon a ceased amendment projection. Projection outcomes stay unknown, including unidentified
 issue creations: no GitHub request, provider call, cancellation, cleanup or replay
 is issued. Every Work Item keeps its original status, including independently accepted
 and failed results; these are historical evidence, not successor acceptance.

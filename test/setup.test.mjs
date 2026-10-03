@@ -558,7 +558,6 @@ for (const fault of ["refill", "foreign"]) {
         const snapshot = {
           schemaVersion: 5,
           kind: "preparing",
-          projection: "ready",
           repository: config.repository,
           objective: 2,
           configDigest: factoryConfigDigest(config),
@@ -571,7 +570,6 @@ for (const fault of ["refill", "foreign"]) {
             phaseStartedAt: new Date().toISOString(),
           },
           error: "Retained submitted outcome requires operator recovery",
-          planning: "submitted",
           issueByItemId: {},
         };
         writeFileSync(
@@ -811,7 +809,7 @@ test("actual setup and preparation reuse preserve equivalent authority values re
       assert.match(result.document.blocked.detail, /paused or draining/);
       assert.deepEqual(readIntake(config), intakeBefore);
       assert.equal(readFileSync(path, "utf8"), before);
-      assert.equal(readContinuation(config.repository, 1).planning, "complete");
+      assert.ok(readContinuation(config.repository, 1).plan);
       for (const change of [
         (value) => (value.actor = "another operator"),
         (value) => (value.reason = "changed reason"),

@@ -111,14 +111,7 @@ const reference = {
 
 // Boundaries where a crash still stops for the operator. Phase A (#515)
 // removes these fences one class at a time; each removal deletes its row.
-const planningFence = /Interrupted projection or planning cannot be replayed/;
 const fenced = new Map([
-  ["planning-generateStructured-before", planningFence],
-  ["planning-generateStructured-after", planningFence],
-  ["planning-reviewGraph-before", planningFence],
-  ["planning-reviewGraph-after", planningFence],
-  ["github-projectGraph-before", planningFence],
-  ["github-projectGraph-after", planningFence],
   ["planning-reviewResult-before", /submitted review has unknown outcome/],
   ["planning-reviewResult-after", /submitted review has unknown outcome/],
   ["github-publish-before", /submitted publication has unknown outcome/],

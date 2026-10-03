@@ -107,7 +107,7 @@ async function fixture(name, fn, model, customize) {
   }
 }
 
-test("planning submission persists before provider entry and owner remains responsive; cancellation cannot publish a late result", async () => {
+test("owner remains responsive during planning; cancellation succeeds and cannot publish a late result", async () => {
   const pending = deferred();
   let calls = 0;
   await fixture(
@@ -115,9 +115,7 @@ test("planning submission persists before provider entry and owner remains respo
     async ({ application, config, github }) => {
       const running = application.runObjective(1);
       const rejected = assert.rejects(running, /cancellation requested/);
-      await until(
-        () => readContinuation(config.repository, 1)?.planning === "submitted",
-      );
+      await until(() => calls === 1);
       const snapshot = readContinuation(config.repository, 1);
       assert.equal(snapshot.schemaVersion, 5);
       assert.equal(snapshot.plan, undefined);
@@ -142,17 +140,15 @@ test("planning submission persists before provider entry and owner remains respo
         objective: 1,
         action: "cancel",
       });
+      // A planning call has no side effects, so cancelling during it is safe.
       assert.equal(
-        readContinuation(config.repository, 1).cancelledAt,
-        undefined,
-      );
-      assert.match(
         readContinuation(config.repository, 1).coordinator.cancelError,
-        /unknown outcome/,
+        undefined,
       );
       pending.resolve();
       await rejected;
       assert.equal(calls, 1);
+      assert.ok(readContinuation(config.repository, 1).cancelledAt);
       assert.equal(Object.keys(github.state().issues).length, 0);
     },
     (graph) => ({
@@ -171,41 +167,38 @@ test("planning submission persists before provider entry and owner remains respo
   );
 });
 
-test("partial projection saves each known identity and refuses unresolved replay without planning again", async () => {
+test("partial projection saves each known identity and resumes with it without planning again", async () => {
   await fixture(
     "partial",
     async ({ application, config, github, planningPath }) => {
       let calls = 0;
       github.projectGraph = async (request) => {
         calls++;
+        if (calls === 2) {
+          // The restart hands the already created issue back as known.
+          assert.deepEqual(request.knownIssues, { result: 42 });
+          throw Error("stop after known identities were supplied");
+        }
         await request.beforeCreate("result");
         request.projected("result", 42);
         throw Error("API interruption after known issue");
       };
       await assert.rejects(application.runObjective(1), /API interruption/);
-      const path = statePath(config.repository, 1);
-      const frozen = readFileSync(path);
       const saved = readContinuation(config.repository, 1);
-      assert.equal(saved.planning, "complete");
-      assert.equal(saved.projection, "submitted");
+      assert.ok(saved.plan);
       assert.deepEqual(saved.issueByItemId, { result: 42 });
       const before = readEvents(planningPath);
       await assert.rejects(
         application.runObjective(1),
-        /Interrupted projection or planning cannot be replayed/,
+        /stop after known identities were supplied/,
       );
-      await assert.rejects(
-        controlObjective(config, { objective: 1, action: "resume" }),
-        /cannot be resumed/,
-      );
-      assert.deepEqual(readFileSync(path), frozen);
       assert.deepEqual(readEvents(planningPath), before);
-      assert.equal(calls, 1);
+      assert.equal(calls, 2);
     },
   );
 });
 
-test("compound: interrupted projection and rate-limited refresh retain unknown disposition without replay", async () => {
+test("compound: after an interrupted projection, read-only observations keep the rate gate", async () => {
   await fixture("unknown", async ({ application, config, github }) => {
     let creates = 0;
     github.projectGraph = async (request) => {
@@ -214,10 +207,6 @@ test("compound: interrupted projection and rate-limited refresh retain unknown d
       throw new Error("lost create reply");
     };
     await assert.rejects(application.runObjective(1), /lost create reply/);
-    assert.equal(
-      readContinuation(config.repository, 1).projectionPending,
-      "result",
-    );
     const original = readContinuation(config.repository, 1);
     const observed = await github.objective(1);
     const reads = [];
@@ -249,16 +238,6 @@ test("compound: interrupted projection and rate-limited refresh retain unknown d
       ),
     );
     github.objective = gateway.objective.bind(gateway);
-    const frozen = readFileSync(statePath(config.repository, 1));
-    await assert.rejects(
-      application.runObjective(1),
-      /Interrupted projection or planning cannot be replayed/,
-    );
-    await assert.rejects(
-      controlObjective(config, { objective: 1, action: "resume" }),
-      /cannot be resumed/,
-    );
-    assert.deepEqual(readFileSync(statePath(config.repository, 1)), frozen);
     assert.equal(reads.length, 0);
     // Independent read-only observations retain the transport rate gate, without lifecycle replay.
     await assert.rejects(github.objective(1), /HTTP 403/);
@@ -279,7 +258,6 @@ test("compound: interrupted projection and rate-limited refresh retain unknown d
       stopped.allowanceConsumption,
       original.allowanceConsumption,
     );
-    assert.equal(stopped.projectionPending, "result");
     assert.equal(creates, 1);
   });
 });
@@ -679,22 +657,19 @@ test("pause acknowledged during exact observation prevents regular and native di
 
 test("pause during planning stops issue projection until resumed or cancelled", async () => {
   const pending = deferred();
+  let calls = 0;
   await fixture(
     "pause-planning",
     async ({ application, config, github }) => {
       const run = application.runObjective(1);
       const rejected = assert.rejects(run, /cancel/);
-      await until(
-        () => readContinuation(config.repository, 1)?.planning === "submitted",
-      );
+      await until(() => calls === 1);
       await requestControl(config.repository, {
         objective: 1,
         action: "pause",
       });
       pending.resolve();
-      await until(
-        () => readContinuation(config.repository, 1)?.planning === "complete",
-      );
+      await until(() => Boolean(readContinuation(config.repository, 1)?.plan));
       await new Promise((resolve) => setTimeout(resolve, 30));
       assert.equal(Object.keys(github.state().issues).length, 0);
       await requestControl(config.repository, {
@@ -706,6 +681,7 @@ test("pause during planning stops issue projection until resumed or cancelled", 
     },
     (graph) => ({
       async generateStructured(request) {
+        calls++;
         await pending.promise;
         return withCoverage(request, graph);
       },
@@ -973,7 +949,7 @@ test("SIGTERM before the first snapshot persists drain and starts no planning or
       await rejected;
       const state = readContinuation(config.repository, 1);
       assert.equal(state.coordinator.mode, "draining");
-      assert.equal(state.planning, "ready");
+      assert.equal(state.plan, undefined);
       assert.equal(state.cancelRequested, undefined);
       assert.equal(
         readEvents(eventsPath).filter((event) => event.type === "start").length,

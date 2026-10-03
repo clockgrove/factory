@@ -491,7 +491,9 @@ test("complete public partial projection reconciles all five identities using GE
 });
 
 // Real transport classification drives durable lifecycle; retained message text never supplies certainty.
-for (const producer of ["initial", "amendment"])
+// Initial projection now resumes by repetition (#515); only amendments retain
+// stopped-projection cancellation until their own step.
+for (const producer of ["amendment"])
   for (const effect of producer === "initial"
     ? [
         "labels",
@@ -917,7 +919,9 @@ for (const producer of ["initial", "amendment"])
         });
       });
 
-for (const producer of ["initial", "amendment"])
+// Initial projection now resumes by repetition (#515); only amendments retain
+// stopped-projection cancellation until their own step.
+for (const producer of ["amendment"])
   test(`${producer}: interrupted submitted projection refuses before intent and never-dispatched projection cancels`, async () => {
     await fixture(async ({ config, state, path, gateway, driver }) => {
       let snapshot;
@@ -983,15 +987,7 @@ test("settled readback refuses a removed common dependency before any mutation",
   });
 });
 
-for (const invalid of [
-  "missing-outcome",
-  "planning-projection-conflict",
-  "ready-map",
-  "unknown-item",
-  "duplicate",
-  "incomplete-projected",
-  "settled-create",
-]) {
+for (const invalid of ["unknown-item", "duplicate", "map-without-plan"]) {
   test(`preparation decoder refuses ${invalid} without changing snapshot`, async () => {
     await fixture(async ({ config, state, path }) => {
       const snapshot = {
@@ -1003,20 +999,13 @@ for (const invalid of [
         configDigest: factoryConfigDigest(config),
         baseSha: state.baseSha,
         objectiveBodyDigest: digest(body),
-        planning: "complete",
-        projection: "rejected",
         issueByItemId: { result: 2 },
         plan: { graph: state.pendingAmendment.graph },
         coordinator: state.coordinator,
       };
-      if (invalid === "missing-outcome") delete snapshot.projection;
-      if (invalid === "planning-projection-conflict")
-        snapshot.planning = "submitted";
-      if (invalid === "ready-map") snapshot.projection = "ready";
       if (invalid === "unknown-item") snapshot.issueByItemId.foreign = 8;
       if (invalid === "duplicate") snapshot.issueByItemId.qa = 2;
-      if (invalid === "incomplete-projected") snapshot.projection = "projected";
-      if (invalid === "settled-create") snapshot.projectionPending = "qa";
+      if (invalid === "map-without-plan") delete snapshot.plan;
       saveState(path, snapshot);
       const frozen = readFileSync(path);
       assert.throws(

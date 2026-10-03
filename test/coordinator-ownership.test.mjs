@@ -420,90 +420,75 @@ test("private control socket refuses missing or stale owner tokens before lifecy
   }
 });
 
-for (const planning of ["ready", "submitted"]) {
-  test(`restart from ${planning} preparation never duplicates uncertain planning`, {
-    timeout: 10_000,
-  }, async () => {
-    const root = mkdtempSync(join(tmpdir(), "fc-prepare-"));
-    const previous = process.env.XDG_STATE_HOME;
-    process.env.XDG_STATE_HOME = join(root, "state");
-    try {
-      const target = createTarget(root);
-      const config = factoryConfig(
-        target.checkout,
-        `example/restart-${planning}`,
-      );
-      const objectiveBody =
-        "## Acceptance\n- `test -s result.txt`\n\n## Final validation\n- `test -s result.txt`\n";
-      let calls = 0;
-      const descriptor = {
-        config,
-        objectiveBody,
-        fakeRoot: join(root, "fake"),
-        actions: {},
-        planningModel: {
-          async generateStructured() {
-            calls++;
-            const snapshot = readContinuation(config.repository, 1);
-            assert.equal(snapshot.planning, "submitted");
-            assert.equal(snapshot.runId, "preserved-preparation-run");
-            throw new Error("fixture planning reply lost");
-          },
-          async reviewGraph() {
-            throw new Error("review must not run without a planning reply");
-          },
+test("a lost planning reply is reissued on restart under the same run", {
+  timeout: 10_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "fc-prepare-"));
+  const previous = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  try {
+    const target = createTarget(root);
+    const config = factoryConfig(target.checkout, "example/restart-planning");
+    const objectiveBody =
+      "## Acceptance\n- `test -s result.txt`\n\n## Final validation\n- `test -s result.txt`\n";
+    let calls = 0;
+    const descriptor = {
+      config,
+      objectiveBody,
+      fakeRoot: join(root, "fake"),
+      actions: {},
+      planningModel: {
+        async generateStructured() {
+          calls++;
+          assert.equal(
+            readContinuation(config.repository, 1).runId,
+            "preserved-preparation-run",
+          );
+          throw new Error("fixture planning reply lost");
         },
-      };
-      saveState(statePath(config.repository, 1), {
-        schemaVersion: 5,
-        kind: "preparing",
-        projection: "ready",
-        repository: config.repository,
-        objective: 1,
-        runId: "preserved-preparation-run",
-        configDigest: factoryConfigDigest(config),
-        baseSha: target.baseSha,
-        objectiveBodyDigest: createHash("sha256")
-          .update(objectiveBody)
-          .digest("hex"),
-        planning,
-        issueByItemId: {},
-        coordinator: {
-          mode: "running",
-          phase: "planning",
-          phaseStartedAt: new Date().toISOString(),
+        async reviewGraph() {
+          throw new Error("review must not run without a planning reply");
         },
-      });
-      const first = makeApplication(descriptor);
+      },
+    };
+    saveState(statePath(config.repository, 1), {
+      schemaVersion: 5,
+      kind: "preparing",
+      repository: config.repository,
+      objective: 1,
+      runId: "preserved-preparation-run",
+      configDigest: factoryConfigDigest(config),
+      baseSha: target.baseSha,
+      objectiveBodyDigest: createHash("sha256")
+        .update(objectiveBody)
+        .digest("hex"),
+      issueByItemId: {},
+      coordinator: {
+        mode: "running",
+        phase: "planning",
+        phaseStartedAt: new Date().toISOString(),
+      },
+    });
+    // Model calls have no side effects, so every restart simply asks again.
+    for (const attempt of [1, 2]) {
+      const run = makeApplication(descriptor);
       await assert.rejects(
-        first.application.runObjective(1),
-        planning === "ready"
-          ? /fixture planning reply lost/
-          : /Interrupted projection or planning cannot be replayed/,
+        run.application.runObjective(1),
+        /fixture planning reply lost/,
       );
-      assert.equal(calls, planning === "ready" ? 1 : 0);
-      const second = makeApplication(descriptor);
-      await assert.rejects(
-        second.application.runObjective(1),
-        /Interrupted projection or planning cannot be replayed/,
-      );
-      assert.equal(calls, planning === "ready" ? 1 : 0);
-      assert.equal(
-        readContinuation(config.repository, 1).runId,
-        "preserved-preparation-run",
-      );
-      assert.equal(
-        readContinuation(config.repository, 1).planning,
-        "submitted",
-      );
-      assert.deepEqual(first.github.state().issues, {});
-    } finally {
-      if (previous === undefined) delete process.env.XDG_STATE_HOME;
-      else process.env.XDG_STATE_HOME = previous;
-      rmSync(root, { recursive: true, force: true });
+      assert.equal(calls, attempt);
+      const snapshot = readContinuation(config.repository, 1);
+      assert.equal(snapshot.runId, "preserved-preparation-run");
+      assert.equal(snapshot.plan, undefined);
+      assert.match(snapshot.coordinator.waitReason, /planning reply lost/);
+      assert.deepEqual(run.github.state().issues, {});
     }
-  });
-}
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("offline cancellation verifies recorded subprocess cessation and refuses a mismatched identity", async () => {
   const { cancelObjective } = await import("../dist/runner.js");

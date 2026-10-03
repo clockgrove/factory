@@ -11,7 +11,7 @@ import {
   ProviderTurnTimeoutError,
 } from "./provider-turn.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
-import type { PlanningModel, WorkItem } from "./contracts.js";
+import type { ExecutionDriver, PlanningModel, WorkItem } from "./contracts.js";
 import {
   installedControllerCapabilities,
   CONTROLLER_CAPABILITIES_DIGEST,
@@ -85,18 +85,53 @@ export const TRANSIENT_RETRY_MS = 120_000;
 export async function retryTransient<T>(
   step: () => Promise<T>,
   transient: (error: unknown) => boolean,
-  budgetMs = TRANSIENT_RETRY_MS,
-  firstDelayMs = 250,
+  options: {
+    budgetMs?: number;
+    firstDelayMs?: number;
+    cancelled?: () => boolean;
+  } = {},
 ): Promise<T> {
+  const { budgetMs = TRANSIENT_RETRY_MS, firstDelayMs = 250 } = options;
   const started = Date.now();
   for (let wait = firstDelayMs; ; wait = Math.min(wait * 2, 10_000)) {
     try {
       return await step();
     } catch (error) {
-      if (!transient(error) || Date.now() - started + wait > budgetMs)
+      if (
+        !transient(error) ||
+        options.cancelled?.() ||
+        Date.now() - started + wait > budgetMs
+      )
         throw error;
       await delay(wait);
     }
+  }
+}
+
+/** Cleanup that has not finished yet. Deletion is idempotent, so it repeats. */
+export class CleanupIncomplete extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "CleanupIncomplete";
+  }
+}
+
+/**
+ * Run idempotent cleanup, repeating it in place while it is incomplete or
+ * fails in transit. After the bound it interrupts the step, which repeats
+ * the cleanup again; only a definitive failure surfaces as is.
+ */
+export async function repeatCleanup(
+  cleanup: () => Promise<void>,
+  transient: (error: unknown) => boolean,
+  options: { budgetMs?: number; firstDelayMs?: number } = {},
+): Promise<void> {
+  const retryable = (error: unknown) =>
+    error instanceof CleanupIncomplete || transient(error);
+  try {
+    await retryTransient(cleanup, retryable, options);
+  } catch (error) {
+    throw retryable(error) ? new Interruption(error) : error;
   }
 }
 
@@ -193,6 +228,31 @@ export async function repeatInterrupted<T>(
 export class CandidateValidationFailure extends Error {}
 export class CandidateEnvironmentFailure extends Error {}
 
+/**
+ * Before a fresh attempt starts, repeat the cleanup of every earlier
+ * attempt that retry or repair archived with its handle. Cancelling a
+ * settled handle is a no-op, so a cleanup that failed before is simply
+ * done again; a handle is dropped from the archive once cancelled.
+ */
+export async function settleEarlierAttempts(
+  work: WorkState,
+  driver: ExecutionDriver,
+  save: () => void,
+): Promise<void> {
+  for (const attempt of work.recovery?.history ?? []) {
+    if (!attempt.work.execution) continue;
+    await driver.cancel(structuredClone(attempt.work.execution), {
+      cancelled: () => false,
+      checkpoint: (handle) => {
+        attempt.work.execution = structuredClone(handle);
+        save();
+      },
+    });
+    delete attempt.work.execution;
+    save();
+  }
+}
+
 export function recordWorkFailure(
   state: FactoryState,
   id: string,
@@ -202,7 +262,6 @@ export function recordWorkFailure(
   const detail = error instanceof Error ? error.message : String(error);
   const isolated =
     !work.pullRequest &&
-    !state.coordinator?.cancelError &&
     (error instanceof SettledAttemptFailure ||
       error instanceof CandidateValidationFailure ||
       error instanceof CandidateEnvironmentFailure);
@@ -218,7 +277,7 @@ export function recordWorkFailure(
           : "implementation"
       : isInterruption(error)
         ? "interruption"
-        : "uncertain",
+        : "unclassified",
     continuation:
       error instanceof CandidateEnvironmentFailure
         ? "exact-candidate-revalidation"
@@ -231,7 +290,7 @@ export function recordWorkFailure(
       ? "Supply a concrete diagnosis and correction or use the admitted implementation repair policy"
       : isInterruption(error)
         ? "Interrupted repeatedly; check the provider, network or GitHub status, then run again"
-        : "Resolve external outcome or ownership before another attempt",
+        : "Check the error, then retry; retry repeats the recorded cleanup before a fresh attempt",
   };
   work.recovery = {
     ...work.recovery,
@@ -254,15 +313,12 @@ export function applyWorkCorrection(
     work.integratedSha ||
     state.cancelRequested ||
     state.cancelledAt ||
-    state.coordinator?.cancelError ||
     state.coordinator?.processes?.length
   )
     throw new Error(
       "Repair cannot cross an unsettled, published or cancelled boundary",
     );
   validateCorrection(work, correction);
-  if (work.recovery?.failure?.classification === "uncertain")
-    throw new Error("Unknown outcome cannot be repaired automatically");
 
   const recovery = archiveAttempt(work);
   recovery.correction = correction;
@@ -340,7 +396,7 @@ export async function diagnoseWorkRepair(args: {
   if (
     !failure ||
     work.status !== "failed" ||
-    failure.classification === "uncertain" ||
+    failure.classification === "unclassified" ||
     args.stopped()
   )
     return false;

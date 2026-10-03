@@ -371,7 +371,6 @@ for (const route of ["regular", "native-stack"]) {
       const state = readState(f.config.repository, 1);
       assert.ok(state.cancelledAt);
       assert.equal(state.work.result.status, "published");
-      assert.equal(state.coordinator.cancelError, undefined);
       assert.equal(f.counts().merges, 0);
     }));
 }

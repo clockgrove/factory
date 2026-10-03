@@ -51,6 +51,8 @@ import {
   pinnedGit,
   pinnedGitAsync,
   pinnedGitEnvironment,
+  attemptWorkerGroups,
+  killProcessGroup,
   processGroupExists,
   sanitizedWorkerEnvironment,
   withProcessCancellation,
@@ -213,28 +215,14 @@ export class CodexHarness implements AgentHarness {
   async cancel(handle: HarnessHandle): Promise<void> {
     const data = this.require(handle);
     const current = linuxProcessIdentity(data.pid);
-    if (!current) {
-      if (processGroupExists(data.pid))
-        throw new Error(
-          "Worker cessation remains unresolved; checkout retained",
-        );
-      return;
-    }
-    if (current.startTime !== data.startTime || current.group !== data.pid)
+    // The recorded pid now belongs to another process: ours is gone, and
+    // its group cannot outlive it while the pid is reused.
+    if (current && current.startTime !== data.startTime) return;
+    if (current && current.group !== data.pid)
       throw new Error("Worker identity changed before cancellation");
-    try {
-      process.kill(-data.pid, "SIGKILL");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-    }
-    for (
-      let attempt = 0;
-      attempt < 100 && processGroupExists(data.pid);
-      attempt++
-    )
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
-    if (processGroupExists(data.pid))
-      throw new Error("Worker cessation remains unresolved; checkout retained");
+    // With the leader gone, surviving descendants still hold its group.
+    if (current || processGroupExists(data.pid))
+      await killProcessGroup(data.pid);
   }
 
   async collect(handle: HarnessHandle): Promise<HarnessResult> {
@@ -733,6 +721,27 @@ export class LocalExecutionDriver implements ExecutionDriver {
       active.request.item,
       active.executionBinding,
     ).cancel(active.handle);
+  }
+
+  /** A worker whose handle was never recorded is found by its request file and killed. */
+  async cancelUnrecorded(attemptId: string): Promise<void> {
+    if (!/^[A-Za-z0-9_-]+$/.test(attemptId))
+      throw new Error("Invalid local attempt identity");
+    for (const group of attemptWorkerGroups(attemptId))
+      await killProcessGroup(group);
+    const worktree = join(this.workRoot, attemptId);
+    if (!existsSync(worktree)) return;
+    try {
+      await pinnedGitAsync(
+        this.checkout,
+        "worktree",
+        "remove",
+        "--force",
+        worktree,
+      );
+    } catch {
+      rmSync(worktree, { recursive: true, force: true });
+    }
   }
 
   async collect(handle: ExecutionHandle): Promise<ExecutionResult> {

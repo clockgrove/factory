@@ -183,7 +183,12 @@ export class FixtureSandboxProvider {
   async destroy(h) {
     if (!this.resources.has(h.identity)) return;
     this.own(h);
-    if (this.destroyFailure) throw Error("sandbox destruction not confirmed");
+    // A number fails that many times, then destruction succeeds.
+    if (this.destroyFailure) {
+      if (typeof this.destroyFailure === "number") this.destroyFailure--;
+      this.destroyAttempts = (this.destroyAttempts ?? 0) + 1;
+      throw Error("sandbox destruction not confirmed");
+    }
     for (const s of this.processes.values())
       if (s.sandboxIdentity === h.identity && s.state === "running") {
         s.child.kill("SIGTERM");

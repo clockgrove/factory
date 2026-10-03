@@ -451,6 +451,15 @@ export interface ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<ExecutionObservation>;
   cancel(handle: ExecutionHandle, context?: ExecutionContext): Promise<void>;
+  /**
+   * Stop an attempt whose start never recorded a handle, found by its
+   * attempt identity. Nothing found means nothing of it runs. Record a
+   * possible orphan where the provider cannot be searched.
+   */
+  cancelUnrecorded?(
+    attemptId: string,
+    context?: ExecutionContext,
+  ): Promise<void>;
   collect(
     handle: ExecutionHandle,
     context?: ExecutionContext,

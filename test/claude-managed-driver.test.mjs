@@ -435,15 +435,19 @@ test("Claude cancellation deletes a stray tagged session left by a lost create",
   assert.ok(f.state.calls.includes("delete:sesn_stray"));
   assert.equal(f.state.strays.length, 0);
 });
-test("Claude deletion repeats until absence is confirmed", async (t) => {
+test("Claude unconfirmed deletion repeats in place until absence is confirmed", async (t) => {
   const f = fixture(t);
   const handle = await f.driver().start(f.request, f.context);
   f.state.absence = false;
-  await assert.rejects(f.driver().cancel(handle, f.context), /not confirmed/);
-  await assert.rejects(f.driver().cancel(handle, f.context), /not confirmed/);
-  assert.equal(f.state.calls.filter((c) => c === "delete:sesn_1").length, 2);
-  f.state.absence = true;
+  const deleteSession = f.driver().args.client.deleteSession;
+  f.driver().args.client.deleteSession = async (id) => {
+    await deleteSession(id);
+    // The provider confirms absence only after the second deletion.
+    if (f.state.calls.filter((c) => c === `delete:${id}`).length >= 2)
+      f.state.absence = true;
+  };
   await f.driver().cancel(handle, f.context);
+  assert.equal(f.state.calls.filter((c) => c === "delete:sesn_1").length, 2);
   assert.equal(f.saved.at(-1).data.phase, "disposed");
 });
 test("Claude running cancellation records processed interrupt then deletes owned sandbox", async (t) => {
@@ -661,4 +665,17 @@ test("Claude preserves binary selected bytes through the ordinary collector", as
       .git("ls-tree", "-r", "--name-only", collected.changeRef)
       .includes(".factory-inputs"),
   );
+});
+test("Claude attempt without a recorded handle is found by its tag, stopped and deleted", async (t) => {
+  const f = fixture(t);
+  await f.driver().start(f.request, f.context);
+  f.state.session.status = "running";
+  await f.driver().cancelUnrecorded("attempt");
+  assert.ok(
+    f.state.calls.indexOf("user.interrupt") <
+      f.state.calls.indexOf("delete:sesn_1"),
+  );
+  assert.equal(await f.driver().args.client.present("sesn_1"), undefined);
+  // Nothing tagged means nothing of the attempt runs.
+  await f.driver().cancelUnrecorded("another-attempt");
 });

@@ -314,7 +314,14 @@ test("terminal, paused, cancellation and finalization states", () => {
   });
   const cancelling = summarizeStatus(
     execution([], {
-      coordinator: { mode: "running", phase: "waiting", cancelError: "pid 4" },
+      cancelRequested: true,
+      runActive: false,
+      coordinator: {
+        mode: "running",
+        phase: "waiting",
+        waitReason:
+          "Cancellation incomplete (pid 4); cancel or run again to repeat it",
+      },
     }),
   );
   assert.equal(cancelling.phase, "needs-decision");

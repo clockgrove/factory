@@ -37,7 +37,6 @@ export interface CoordinatorView {
   mode: "running" | "paused" | "draining";
   phase: string;
   waitReason?: string;
-  cancelError?: string;
 }
 
 export interface StatusItemView {
@@ -78,6 +77,8 @@ export interface ExecutionStatusView {
   objective: number;
   state: "active" | "waiting" | "complete" | "failed" | "cancelled";
   runActive: boolean | null;
+  /** Cancellation was requested but has not yet stopped all owned work. */
+  cancelRequested?: boolean;
   coordinator: CoordinatorView | null;
   pendingAmendment: { phase: string; error: string | null } | null;
   repairs: Record<
@@ -423,10 +424,10 @@ export function summarizeStatus(view: StatusView): StatusSummary {
       summary: "final validation passed; Objective closed",
       nextAction: null,
     };
-  if (view.coordinator?.cancelError)
+  if (view.cancelRequested && view.runActive !== true)
     return {
       phase: "needs-decision",
-      summary: `cancellation unresolved: ${short(view.coordinator.cancelError, 80)}`,
+      summary: `cancellation incomplete${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
       nextAction: {
         command: `factory cancel --objective ${objective}`,
         reason: "Repeats cancellation of the recorded work",

@@ -213,12 +213,10 @@ test("Daytona adapter runs the shared driver through real separate processes, co
     attemptId: randomUUID(),
   });
   const starts = infrastructure.starts;
-  infrastructure.destroyFailure = true;
-  await assert.rejects(restarted.cancel(cancellation), /not confirmed/);
-  assert.equal(cancellation.data.phase, "destroying");
-  assert.equal(infrastructure.resources.size, 1);
-  infrastructure.destroyFailure = false;
-  await restarted.cancel(JSON.parse(JSON.stringify(cancellation)));
+  // A failed destruction repeats until it is confirmed.
+  infrastructure.destroyFailure = 1;
+  await restarted.cancel(cancellation);
+  assert.equal(infrastructure.destroyAttempts, 1);
   assert.equal(infrastructure.resources.size, 0);
   assert.equal(infrastructure.starts, starts);
   assert.equal(readFileSync(join(checkout, "keep.txt"), "utf8"), "base\n");

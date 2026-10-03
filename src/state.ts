@@ -72,7 +72,7 @@ export interface AcceptancePending {
 
 export interface WorkState {
   recovery?: import("./repair-policy.js").WorkRecovery;
-  /** Reservation survives an uncertain effect; item ownership is separate. */
+  /** Reservation survives a failed attempt until its cleanup repeats; item ownership is separate. */
   phaseReservation?: import("./config.js").ResourcePhase;
   requestedPhase?: import("./config.js").ResourcePhase;
   graphRevisionDigest?: string;
@@ -120,7 +120,6 @@ export interface CoordinatorDisposition {
   observedAt?: string;
   observationError?: string;
   waitReason?: string;
-  cancelError?: string;
   processes?: { pid: number; startTime: string }[];
 }
 

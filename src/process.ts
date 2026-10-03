@@ -174,6 +174,48 @@ export function processGroupExists(group: number): boolean {
   return false;
 }
 
+/**
+ * SIGKILL a worker's process group and wait for it to go. A group that
+ * survives SIGKILL is a host problem; repeating the kill is always safe.
+ */
+export async function killProcessGroup(group: number): Promise<void> {
+  try {
+    process.kill(-group, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+  for (let poll = 0; poll < 250 && processGroupExists(group); poll++)
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  if (processGroupExists(group))
+    throw new Error(
+      `Worker process group ${group} survived SIGKILL; the host must reap it before the attempt can be repeated`,
+    );
+}
+
+/**
+ * Process groups led by a worker whose arguments name this attempt's
+ * request file (`<attemptId>.request.json`). This finds a worker whose
+ * start never recorded a handle.
+ */
+export function attemptWorkerGroups(attemptId: string): number[] {
+  const suffix = `/${attemptId}.request.json`;
+  const groups: number[] = [];
+  for (const name of readdirSync("/proc")) {
+    if (!/^[1-9]\d*$/.test(name)) continue;
+    let argv: string[];
+    try {
+      argv = readFileSync(`/proc/${name}/cmdline`, "utf8").split("\0");
+    } catch {
+      continue;
+    }
+    if (!argv.some((arg) => arg.endsWith(suffix))) continue;
+    const identity = linuxProcessIdentity(Number(name));
+    if (identity?.group === Number(name) && identity.state !== "Z")
+      groups.push(identity.group);
+  }
+  return groups;
+}
+
 export interface OwnedSubprocess {
   pid: number;
   startTime: string;

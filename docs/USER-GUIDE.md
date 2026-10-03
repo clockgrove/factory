@@ -316,6 +316,8 @@ For an ordinary failed or cancelled unpublished item without an admitted repair 
 factory retry --objective ISSUE_NUMBER --item WORK_ITEM_ID
 ```
 
+Retry never refuses because an earlier cleanup failed. The next run first cancels the earlier attempt's recorded worker again, then starts a fresh attempt. If `factory cancel` reports that cancellation is incomplete, run `factory cancel` again to repeat it.
+
 If the controller stops for any reason, run the Objective again. Factory re-reads its state and GitHub and repeats the step it was on: planning and reviews are asked again, issues and PRs are found by their markers and branches instead of being created twice, and a merge that already happened is confirmed rather than repeated. A running worker is reattached by its recorded handle.
 
 ## Allow diagnosed repairs

@@ -278,18 +278,14 @@ test("settled failures ignore sibling processes while correction still requires 
       /unsettled/,
     );
     assert.equal(state.allowanceConsumption, undefined);
-    for (const guard of [
-      { work: { pullRequest: 1 } },
-      { coordinator: { cancelError: "owned cancellation unresolved" } },
-    ]) {
-      const uncertain = structuredClone(state);
-      Object.assign(uncertain.work.result, guard.work);
-      Object.assign(uncertain.coordinator, guard.coordinator);
-      assert.equal(recordWorkFailure(uncertain, "result", error), false);
-      // Not isolated either way; an interrupted worker is still named as such.
+    {
+      const published = structuredClone(state);
+      published.work.result.pullRequest = 1;
+      assert.equal(recordWorkFailure(published, "result", error), false);
+      // Not isolated; an interrupted worker is still named as such.
       assert.equal(
-        uncertain.work.result.recovery.failure.classification,
-        isInterruption(error) ? "interruption" : "uncertain",
+        published.work.result.recovery.failure.classification,
+        isInterruption(error) ? "interruption" : "unclassified",
       );
     }
     assert.equal(
@@ -298,7 +294,7 @@ test("settled failures ignore sibling processes while correction still requires 
     );
     assert.equal(
       state.work.result.recovery.failure.classification,
-      "uncertain",
+      "unclassified",
     );
   }
 });
@@ -1449,7 +1445,7 @@ test("a lost diagnosis is reissued once charged; ambiguous publication never aut
   assert.equal(restarted.allowanceConsumption.implementationRepairs, charged);
   work.pullRequest = 1;
   recordWorkFailure(state, "result", new Error("publication response lost"));
-  assert.equal(work.recovery.failure.classification, "uncertain");
+  assert.equal(work.recovery.failure.classification, "unclassified");
   assert.equal(
     await diagnoseWorkRepair({
       state,
@@ -1809,7 +1805,6 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
       "sibling completion and global quiescence",
     );
     assert.equal(settled.error, undefined);
-    assert.equal(settled.coordinator.cancelError, undefined);
     const drained = assert.rejects(running, /drained and released ownership/);
     await requestControl(config.repository, {
       objective: 1,

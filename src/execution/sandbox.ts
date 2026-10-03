@@ -16,11 +16,13 @@ import type {
   SandboxProvider,
   WorkGraph,
 } from "../contracts.js";
-import { AuthenticationRequiredError, Interruption } from "../contracts.js";
+import { AuthenticationRequiredError } from "../contracts.js";
 import type { JsonValue } from "../config.js";
 import {
   SettledAttemptFailure,
   failAttempt,
+  CleanupIncomplete,
+  repeatCleanup,
   retryTransient,
   transientRequestFailure,
 } from "../work-repair.js";
@@ -277,9 +279,10 @@ export class SandboxExecutionDriver implements ExecutionDriver {
   private async launch(
     handle: ExecutionHandle,
     context?: ExecutionContext,
+    resumed = false,
   ): Promise<void> {
     const a = this.active(handle);
-    if (a.phase === "creating") await this.prepare(handle, context);
+    if (a.phase === "creating") await this.prepare(handle, context, resumed);
     else if (!this.resumable(a))
       await this.settle(
         handle,
@@ -292,10 +295,15 @@ export class SandboxExecutionDriver implements ExecutionDriver {
   private async prepare(
     handle: ExecutionHandle,
     context?: ExecutionContext,
+    resumed = false,
   ): Promise<void> {
     const a = this.active(handle);
     const identity = handle.identity;
     const request = a.request;
+    // A resumed create may have lost its response; if nothing tagged is
+    // visible, the earlier request may still have made a sandbox.
+    if (resumed && !(await this.options.provider.find({ attemptId: identity })))
+      this.orphan(handle, context);
     a.sandbox = sandboxJsonValue(
       await this.options.provider.create({ attemptId: identity }),
     ) as SandboxHandle;
@@ -425,12 +433,19 @@ export class SandboxExecutionDriver implements ExecutionDriver {
         if (found) {
           a.sandbox = sandboxJsonValue(found) as SandboxHandle;
           this.save(handle, context);
-        }
+        } else if (a.phase === "creating") this.orphan(handle, context);
       }
       a.phase = "destroying";
       a.terminal = terminal;
       this.save(handle, context);
-      if (a.sandbox) await this.options.provider.destroy(a.sandbox);
+      // Destruction is idempotent, so any failure repeats.
+      if (a.sandbox)
+        await this.options.provider.destroy(a.sandbox).catch((error) => {
+          throw new CleanupIncomplete(
+            `Sandbox destruction is not confirmed: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        });
       a.phase = "destroyed";
       this.save(handle, context);
     }
@@ -449,15 +464,31 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     const a = this.active(handle);
     a.stopped ??= { detail, interrupted };
     this.save(handle, context);
-    try {
-      await this.destroy(handle, a.terminal ?? "failed", context);
-    } catch (error) {
-      throw transientRequestFailure(error) ? new Interruption(error) : error;
-    }
+    await repeatCleanup(
+      () => this.destroy(handle, a.terminal ?? "failed", context),
+      transientRequestFailure,
+    );
     throw new SettledAttemptFailure(
       new Error(a.stopped.detail),
       a.stopped.interrupted ? "interruption" : "implementation",
     );
+  }
+  /** A sandbox whose handle was never recorded is found by its attempt tag and destroyed. */
+  async cancelUnrecorded(attemptId: string): Promise<void> {
+    await repeatCleanup(async () => {
+      const found = await this.options.provider.find({ attemptId });
+      if (found)
+        await this.options.provider.destroy(found).catch((error) => {
+          throw new CleanupIncomplete(
+            `Sandbox destruction is not confirmed: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        });
+    }, transientRequestFailure);
+    rmSync(join(this.options.workRoot, attemptId), {
+      recursive: true,
+      force: true,
+    });
   }
   async cancel(
     handle: ExecutionHandle,
@@ -465,11 +496,22 @@ export class SandboxExecutionDriver implements ExecutionDriver {
   ): Promise<void> {
     // All supported sandbox-harness execution resources belong to this attempt's
     // sandbox. Confirmed destruction is cancellation; no helper can run afterward.
-    await this.destroy(
-      handle,
-      this.active(handle).terminal ?? "cancelled",
-      context,
+    await repeatCleanup(
+      () =>
+        this.destroy(
+          handle,
+          this.active(handle).terminal ?? "cancelled",
+          context,
+        ),
+      transientRequestFailure,
     );
+  }
+  /** A create whose response was lost left nothing `find` can see; record it for operator cleanup. */
+  private orphan(handle: ExecutionHandle, context?: ExecutionContext): void {
+    context?.observeOrphan?.({
+      resource: "sandbox",
+      detail: `Sandbox create for attempt ${handle.identity} has an unknown outcome and no tagged sandbox was found at ${new Date().toISOString()}`,
+    });
   }
   /**
    * Any failure either interrupts the step (it reattaches) or destroys the
@@ -495,11 +537,10 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       }
       this.save(handle, context);
     }
-    try {
-      await this.destroy(handle, "complete", context);
-    } catch (error) {
-      throw transientRequestFailure(error) ? new Interruption(error) : error;
-    }
+    await repeatCleanup(
+      () => this.destroy(handle, "complete", context),
+      transientRequestFailure,
+    );
     return a.result!;
   }
   private async produce(
@@ -510,10 +551,12 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     // Launch and observe resume from the recorded phase, so a transient
     // failure is retried in place.
     const step = <T>(run: () => Promise<T>) =>
-      retryTransient(run, transientRequestFailure);
+      retryTransient(run, transientRequestFailure, {
+        cancelled: () => context?.cancelled() ?? false,
+      });
     if (a.operation !== "collect") {
       let observed = await step(async () => {
-        if (!a.harnessStarted) await this.launch(handle, context);
+        if (!a.harnessStarted) await this.launch(handle, context, true);
         return this.observe(handle, context);
       });
       while (observed.state === "running") {

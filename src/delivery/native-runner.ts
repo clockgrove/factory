@@ -5,6 +5,7 @@ import {
   diagnoseWorkRepair,
   prepareEvidenceRecovery,
   repeatInterrupted,
+  settleEarlierAttempts,
 } from "../work-repair.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
 import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
@@ -163,6 +164,7 @@ export async function runNativeGraph(args: {
           // an interrupted step reattaches to its recorded attempt.
           await repeatInterrupted(work, save, async () => {
             if (!work.execution) {
+              await settleEarlierAttempts(work, driver, save);
               await phases.reserve(item.id, "validation");
               await preflightItemEnvironment({
                 config,
@@ -359,7 +361,7 @@ export async function runNativeGraph(args: {
           Object.values(state.work).some(
             (work) =>
               work.status === "failed" &&
-              work.recovery?.failure?.classification !== "uncertain",
+              work.recovery?.failure?.classification !== "unclassified",
           ))
       )
         return settlePrepared();
@@ -502,6 +504,7 @@ export async function runNativeGraph(args: {
           work.treeSha = applied.treeSha;
         } else if (work.step === "execute") {
           if (!work.execution) {
+            await settleEarlierAttempts(work, driver, save);
             await phases.reserve(item.id, "validation");
             await preflightItemEnvironment({
               config,

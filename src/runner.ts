@@ -1,5 +1,5 @@
 import { hasReadinessWait, isReadinessWait } from "./delivery/readiness.js";
-import { executionContext } from "./execution/checkpoint.js";
+import { executionContext, workerContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
 import { applyWorkCorrection } from "./work-repair.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
@@ -479,8 +479,7 @@ export class CoordinatorHandoff extends Error {
 }
 
 function canHandoff(state: ContinuationState): boolean {
-  if (state.coordinator?.processes?.length || state.coordinator?.cancelError)
-    return false;
+  if (state.coordinator?.processes?.length) return false;
   // Preparation resumes by repeating its current step, so any point is safe.
   if (state.schemaVersion === 5) return true;
   return (
@@ -501,7 +500,8 @@ interface LocalOwner {
   abort: AbortController;
   changed: boolean;
   deadlineAt?: string;
-  cancellation?: Promise<void>;
+  /** Resolves true once owned work stopped; false leaves it to repeat. */
+  cancellation?: Promise<boolean>;
   waitForWake: () => Promise<void>;
 }
 const owners = new Map<string, LocalOwner>();
@@ -616,35 +616,50 @@ async function cancelRecordedSubprocesses(
   if (state.coordinator) state.coordinator.processes = [];
 }
 
+/** Cancellation stops work by repeating it: the next cancel, run or retry cancels the recorded handles again. */
+function cancellationIncomplete(error: unknown): string {
+  return `Cancellation incomplete (${error instanceof Error ? error.message : String(error)}); cancel or run again to repeat it`;
+}
+
 async function cancelKnownWork(
   state: ContinuationState,
   driver: ExecutionDriver,
   save: () => void,
+  diagnostics?: DiagnosticEmitter,
 ): Promise<void> {
   const errors: string[] = [];
   const tasks: (() => Promise<void>)[] = [];
   if (state.schemaVersion === 4)
-    for (const work of Object.values(state.work)) {
+    for (const [itemId, work] of Object.entries(state.work)) {
       if (
         work.step !== "execute" ||
         work.status === "done" ||
         work.status === "cancelled"
       )
         continue;
-      if (!work.execution) {
-        errors.push(
-          "Active attempt has no stable handle; cessation is unknown",
+      const context = workerContext(work, save, () => true, diagnostics, {
+        runId: state.runId,
+        itemId,
+      });
+      if (work.execution)
+        tasks.push(() =>
+          driver.cancel(structuredClone(work.execution!), context),
         );
-        continue;
+      else if (work.attempt) {
+        // The controller stopped before the start recorded a handle: find
+        // the attempt by its identity instead.
+        const attempt = work.attempt;
+        tasks.push(async () => {
+          if (driver.cancelUnrecorded)
+            await driver.cancelUnrecorded(attempt, context);
+          else
+            context.observeOrphan?.({
+              resource: "worker",
+              detail: `Attempt ${attempt} recorded no handle and this driver cannot look it up`,
+            });
+        });
       }
-      tasks.push(() =>
-        driver.cancel(
-          structuredClone(work.execution!),
-          executionContext(work, save),
-        ),
-      );
     }
-  if (errors.length) throw new Error(errors.join("; "));
   tasks.push(() => cancelRecordedSubprocesses(state));
   for (const result of await Promise.allSettled(tasks.map((task) => task())))
     if (result.status === "rejected") errors.push(String(result.reason));
@@ -761,19 +776,24 @@ export async function runObjective(
     if (owner.cancellation) return;
     owner.cancellation = (async () => {
       const state = owner.snapshot!;
+      let stopped = true;
       try {
-        await cancelKnownWork(state, services.driver, persist);
+        await cancelKnownWork(
+          state,
+          services.driver,
+          persist,
+          new DiagnosticEmitter(config.repository, objective),
+        );
         // The run settles its in-flight effect before recording terminal cancellation.
         state.coordinator!.waitReason =
           "Owned cancellation acknowledged; waiting for in-flight phase to settle";
       } catch (error) {
-        state.coordinator!.cancelError =
-          error instanceof Error ? error.message : String(error);
-        state.coordinator!.waitReason =
-          "Cancellation unresolved; operator direction required";
+        stopped = false;
+        state.coordinator!.waitReason = cancellationIncomplete(error);
       }
       persist();
       wake();
+      return stopped;
     })();
   };
   if (owner.snapshot?.coordinator?.deadlineAt) {
@@ -928,8 +948,7 @@ export async function runObjective(
       const state = owner.snapshot;
       if (state?.cancelRequested) {
         cancel();
-        await owner.cancellation;
-        if (!state.coordinator?.cancelError) {
+        if (await owner.cancellation) {
           state.cancelledAt = new Date().toISOString();
           if (state.schemaVersion === 4)
             for (const work of Object.values(state.work))
@@ -2101,14 +2120,14 @@ async function runObjectivePass(
     ) {
       for (const work of Object.values(current.work)) {
         if (!work.execution || work.status !== "running") continue;
-        try {
-          await driver.cancel(
+        // A failed cancel leaves the handle recorded; the cleanup below,
+        // a restart or a retry repeats it.
+        await driver
+          .cancel(
             structuredClone(work.execution),
             executionContext(work, () => saveState(path, current)),
-          );
-        } catch (cancelError) {
-          current.coordinator!.cancelError = String(cancelError);
-        }
+          )
+          .catch(() => undefined);
       }
       await Promise.allSettled(active.values());
     }
@@ -2136,17 +2155,16 @@ async function runObjectivePass(
               executionContext(work, () => saveState(path, current)),
             );
         } catch (cessationError) {
-          current.coordinator!.cancelError = `Owned worker cessation unresolved: ${String(cessationError)}`;
-          current.coordinator!.waitReason =
-            "Operator direction required before retry";
+          // The handle stays recorded, so a restart or retry repeats this.
+          current.coordinator!.waitReason = `Worker cleanup incomplete (${String(cessationError)}); it repeats on restart or retry`;
         }
       }
     }
     if (current) {
       if (cancellationRequested()) {
-        await owner.cancellation;
+        const stopped = await owner.cancellation;
         await Promise.allSettled(active.values());
-        if (!current.coordinator?.cancelError && active.size === 0) {
+        if (stopped && active.size === 0) {
           current.cancelledAt = new Date().toISOString();
           if (current.schemaVersion === 4)
             for (const work of Object.values(current.work))
@@ -2209,8 +2227,11 @@ export async function cancelObjective(
     continuation.cancelRequested = true;
     saveState(statePath(config.repository, objective), continuation);
     try {
-      await cancelKnownWork(continuation, driver, () =>
-        saveState(statePath(config.repository, objective), continuation),
+      await cancelKnownWork(
+        continuation,
+        driver,
+        () => saveState(statePath(config.repository, objective), continuation),
+        new DiagnosticEmitter(config.repository, objective),
       );
     } catch (error) {
       continuation.coordinator ??= {
@@ -2218,9 +2239,7 @@ export async function cancelObjective(
         phase: "waiting",
         phaseStartedAt: new Date().toISOString(),
       };
-      continuation.coordinator.cancelError = String(error);
-      continuation.coordinator.waitReason =
-        "Cancellation unresolved; operator direction required";
+      continuation.coordinator.waitReason = cancellationIncomplete(error);
       saveState(statePath(config.repository, objective), continuation);
       throw error;
     }
@@ -2273,23 +2292,15 @@ export function retryWorkItem(
     if (!state) throw new Error("Objective has no Factory state");
     if (state.finalValidation?.passed)
       throw new Error("Objective is already complete");
-    if (state.coordinator?.cancelError || state.coordinator?.processes?.length)
+    if (state.coordinator?.processes?.length)
       throw new Error(
-        "Owned work cessation is unresolved; operator direction required before retry",
+        "Recorded controller subprocesses are still owned; run the Objective to stop them before retry",
       );
     if (Object.values(state.work).some((work) => work.status === "running"))
       throw new Error("Finish or cancel active work before retry");
     const work = state.work[itemId];
     if (!work || (work.status !== "failed" && work.status !== "cancelled"))
       throw new Error("Only a failed or cancelled Work Item can be retried");
-    if (
-      work.step === "execute" &&
-      work.execution !== undefined &&
-      work.recovery?.failure?.classification === "uncertain"
-    )
-      throw new Error(
-        "Submitted effect outcome is unknown; operator direction required before retry",
-      );
     const nativeUnit =
       config.delivery.kind === "native-stack"
         ? linearDeliveryUnits(state.graph).find((unit) =>

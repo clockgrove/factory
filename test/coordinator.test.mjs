@@ -141,9 +141,9 @@ test("owner remains responsive during planning; cancellation succeeds and cannot
         action: "cancel",
       });
       // A planning call has no side effects, so cancelling during it is safe.
-      assert.equal(
-        readContinuation(config.repository, 1).coordinator.cancelError,
-        undefined,
+      assert.doesNotMatch(
+        readContinuation(config.repository, 1).coordinator.waitReason ?? "",
+        /incomplete/,
       );
       pending.resolve();
       await rejected;
@@ -432,14 +432,17 @@ test("cancellation while GitHub is unavailable stops locally with no dispatch", 
   );
 });
 
-test("failed worker cancellation preserves unresolved ownership and cannot become terminal success", async () => {
+test("failed worker cancellation is repeated, never left as a permanent refusal", async () => {
   await fixture(
     "cancel-failure",
     async ({ application, config, driver, descriptor, eventsPath, root }) => {
       const barrier = join(root, "barrier", "go");
       descriptor.actions.result.barrier = barrier;
-      driver.cancel = async () => {
-        throw new Error("driver cessation not confirmed");
+      const cancel = driver.cancel.bind(driver);
+      let failures = 1;
+      driver.cancel = async (...args) => {
+        if (failures-- > 0) throw new Error("driver cessation not confirmed");
+        return cancel(...args);
       };
       const run = application.runObjective(1);
       const rejected = assert.rejects(run, /cancel|aborted/i);
@@ -450,30 +453,24 @@ test("failed worker cancellation preserves unresolved ownership and cannot becom
         objective: 1,
         action: "cancel",
       });
-      await until(
-        () => readContinuation(config.repository, 1)?.coordinator.cancelError,
+      await until(() =>
+        /Cancellation incomplete/.test(
+          readContinuation(config.repository, 1)?.coordinator.waitReason ?? "",
+        ),
       );
       const state = readState(config.repository, 1);
       assert.equal(state.cancelledAt, undefined);
-      assert.match(state.coordinator.cancelError, /cessation not confirmed/);
-      assert.equal(
-        (
-          await requestControl(config.repository, {
-            objective: 1,
-            action: "status",
-          })
-        ).handled,
-        true,
-      );
+      assert.match(state.coordinator.waitReason, /cessation not confirmed/);
+      assert.equal("cancelError" in state.coordinator, false);
       assert.ok(existsSync(state.work.result.execution.data.worktree));
       mkdirSync(join(root, "barrier"), { recursive: true });
       writeFileSync(barrier, "go");
       await rejected;
+      // Owned work did not provably stop, so the Objective is not cancelled
+      // yet; cancelling again repeats the cancellation of the recorded handle.
       assert.equal(readState(config.repository, 1).cancelledAt, undefined);
-      assert.throws(
-        () => application.retryWorkItem(1, "result"),
-        /cessation is unresolved/,
-      );
+      assert.equal(await application.cancelObjective(1), "cancelled");
+      assert.ok(readState(config.repository, 1).cancelledAt);
     },
   );
 });
@@ -606,10 +603,6 @@ test("regular and native cancellation during publication succeeds and nothing re
           /cancellation acknowledged/.test(
             readState(config.repository, 1)?.coordinator.waitReason ?? "",
           ),
-        );
-        assert.equal(
-          readState(config.repository, 1).coordinator.cancelError,
-          undefined,
         );
         pending.resolve();
         await rejected;

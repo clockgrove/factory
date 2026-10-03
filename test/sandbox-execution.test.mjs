@@ -214,14 +214,53 @@ test("cancellation after a lost create finds and destroys the tagged sandbox wit
     throw Object.assign(Error("create never arrived"), { status: 503 });
   };
   await other.driver.start(other.request, other.context);
+  const orphans = [];
   await new SandboxExecutionDriver(other.options).cancel(
     JSON.parse(JSON.stringify(other.work.execution)),
-    other.context,
+    executionContext(
+      other.work,
+      () => {},
+      () => false,
+      undefined,
+      (orphan) => orphans.push(orphan),
+    ),
   );
   assert.equal(other.provider.resources.size, 0);
   assert.equal(f.provider.creates, creates);
+  // A lost create that left nothing visible is recorded for operator cleanup.
+  assert.equal(orphans.length, 1);
+  assert.equal(orphans[0].resource, "sandbox");
+  assert.match(orphans[0].detail, /attempt-one/);
 });
-test("wrong reply digest, identity and unsafe result path fail closed and settle the sandbox; cleanup failure remains visible", async (t) => {
+test("a resumed create records a possible orphan when nothing tagged is visible", async (t) => {
+  const f = fixture(t);
+  f.provider.autoRelease = true;
+  const create = f.provider.create.bind(f.provider);
+  let lost = true;
+  f.provider.create = async (request) => {
+    if (lost) {
+      lost = false;
+      throw Object.assign(Error("create never arrived"), { status: 503 });
+    }
+    return create(request);
+  };
+  await f.driver.start(f.request, f.context);
+  const orphans = [];
+  const result = await new SandboxExecutionDriver(f.options).collect(
+    JSON.parse(JSON.stringify(f.work.execution)),
+    executionContext(
+      f.work,
+      () => {},
+      () => false,
+      undefined,
+      (orphan) => orphans.push(orphan),
+    ),
+  );
+  assert.equal(f.git("show", result.changeRef + ":keep.txt"), "changed");
+  assert.equal(orphans.length, 1);
+  assert.equal(orphans[0].resource, "sandbox");
+});
+test("wrong reply digest, identity and unsafe result path fail closed and settle the sandbox; failed destruction repeats in place", async (t) => {
   for (const variant of [
     "digest",
     "identity",
@@ -246,19 +285,21 @@ test("wrong reply digest, identity and unsafe result path fail closed and settle
       f.provider.mutateReply = (d) => {
         if (d.operation === "collect") d.value.files[0].digest = "0".repeat(64);
       };
-    if (variant === "cleanup") f.provider.destroyFailure = true;
-    await assert.rejects(f.driver.collect(h, f.context), (error) =>
-      variant === "cleanup"
-        ? /destruction/.test(error.message)
-        : error instanceof SettledAttemptFailure &&
+    if (variant === "cleanup") {
+      // Destruction is idempotent, so a failed one repeats until confirmed.
+      f.provider.destroyFailure = 2;
+      await f.driver.collect(h, f.context);
+      assert.equal(f.provider.destroyAttempts, 2);
+    } else
+      await assert.rejects(
+        f.driver.collect(h, f.context),
+        (error) =>
+          error instanceof SettledAttemptFailure &&
           error.classification === "implementation" &&
           /digest|identity|Unsafe/.test(error.message),
-    );
-    assert.equal(f.provider.resources.size, variant === "cleanup" ? 1 : 0);
-    assert.equal(
-      f.work.execution.data.phase,
-      variant === "cleanup" ? "destroying" : "destroyed",
-    );
+      );
+    assert.equal(f.provider.resources.size, 0);
+    assert.equal(f.work.execution.data.phase, "destroyed");
   }
 });
 test("source and selected bytes reach the sandbox, and a complete AssetSet returns through controller capture", async (t) => {
@@ -335,8 +376,8 @@ test("immediate collection waits for the running harness without a premature col
   assert.equal(f.provider.resources.size, 0);
 });
 
-test("completed result survives restart after destruction and a recoverable cleanup failure", async (t) => {
-  for (const failure of ["after-destroy", "cleanup"]) {
+test("completed result survives restart after destruction", async (t) => {
+  for (const failure of ["after-destroy"]) {
     const f = fixture(t);
     const h = await f.driver.start(f.request, f.context);
     release(f, h);
@@ -712,4 +753,15 @@ test("optional normalization does not accept invalid array values or non-JSON va
       () => assertDurableValue(sandboxJsonValue(value), "reply"),
       /JSON/,
     );
+});
+test("sandbox attempt without a recorded handle is found by its tag and destroyed", async (t) => {
+  const f = fixture(t);
+  await f.provider.create({ attemptId: "unrecorded" });
+  assert.equal(f.provider.resources.size, 1);
+  const creates = f.provider.creates;
+  await f.driver.cancelUnrecorded("unrecorded");
+  assert.equal(f.provider.resources.size, 0);
+  // Nothing tagged means nothing runs, and lookup never creates a sandbox.
+  await f.driver.cancelUnrecorded("unrecorded");
+  assert.equal(f.provider.creates, creates);
 });

@@ -1,25 +1,59 @@
-// Planning evals: run Factory's `factory plan` path over a directory of
-// Objective cases and report plan, review, usage and timing per run. No GitHub
-// issues are created and no workers run. Requires `npm run build`.
+// Planning evals. Three modes:
+//   plan (default)  plan each case through `factory run`'s planning path and
+//                   report production review, frozen-judge verdict and
+//                   judge-free metrics per run;
+//   --review-only   feed known-good and seeded-defect plans to the production
+//                   reviewer and report recall per defect and false positives;
+//   --compare A B   paired comparison of two report.json files.
+// No GitHub issues are created and no workers run. Requires `npm run build`.
 // Usage and case format: docs/PLANNING-EVALS.md.
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
+  closeSync,
   existsSync,
   mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import {
+  loadCases,
+  prepareCheckout,
+  repositoryFacts,
+} from "./eval-planning/cases.mjs";
+import { judgeInput, loadJudges, runPanel } from "./eval-planning/judge.mjs";
+import {
+  compareMarkdown,
+  compareReports,
+  planMarkdown,
+  reviewMarkdown,
+  summarizePlanRuns,
+  summarizeReviewRuns,
+} from "./eval-planning/report.mjs";
+import {
+  loadReviewFixtures,
+  prepareVariants,
+  reviewVariant,
+  variantPlan,
+} from "./eval-planning/review.mjs";
 
-const usage = `Usage: node scripts/eval-planning.mjs --cases DIR --config FACTORY_CONFIG --output NEW_DIR
-  [--target CHECKOUT] [--case NAME ...] [--repeat K] [--parallel N] [--planning-model MODULE]`;
-
-const caseKeys = new Set(["commit", "target", "repository", "objective"]);
+const root = resolve(import.meta.dirname, "..");
+const usage = `Usage:
+  node scripts/eval-planning.mjs --config FACTORY_CONFIG --output NEW_DIR
+    [--cases DIR ...] [--target CHECKOUT] [--case NAME ...] [--repeat N]
+    [--parallel N] [--planning-model MODULE] [--judge JUDGE_JSON ...]
+    [--judge-transport MODULE]
+  node scripts/eval-planning.mjs --review-only --config FACTORY_CONFIG --output NEW_DIR
+    [--fixtures DIR] [--case NAME ...] [--repeat N] [--parallel N]
+    [--planning-model MODULE] [--judge JUDGE_JSON ...] [--judge-transport MODULE]
+  node scripts/eval-planning.mjs --compare A/report.json B/report.json [--output DIR]`;
 
 function fail(message) {
   console.error(`${message}\n${usage}`);
@@ -33,61 +67,20 @@ function positiveInteger(value, name) {
   return number;
 }
 
-function git(cwd, ...args) {
-  return execFileSync("git", ["-C", cwd, ...args], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
-}
-
-/** Read and validate every selected case before any model call. */
-function loadCases(directory, names, defaultTarget, config) {
-  const selected = readdirSync(directory, { withFileTypes: true })
-    .filter(
-      (entry) =>
-        entry.isDirectory() &&
-        existsSync(join(directory, entry.name, "case.json")),
-    )
-    .map((entry) => entry.name)
-    .filter((name) => !names.length || names.includes(name))
-    .sort();
-  for (const name of names)
-    if (!selected.includes(name)) fail(`Unknown case: ${name}`);
-  if (!selected.length) fail(`No cases with case.json in ${directory}`);
-  return selected.map((name) => {
-    const root = join(directory, name);
-    const spec = JSON.parse(readFileSync(join(root, "case.json"), "utf8"));
-    const unknown = Object.keys(spec).filter((key) => !caseKeys.has(key));
-    if (unknown.length) fail(`${name}: unknown case.json keys ${unknown}`);
-    if (typeof spec.commit !== "string" || !spec.commit)
-      fail(`${name}: case.json requires commit`);
-    const objective = spec.objective ?? 1;
-    if (!Number.isSafeInteger(objective) || objective <= 0)
-      fail(`${name}: objective must be a positive integer`);
-    const target = spec.target ? resolve(root, spec.target) : defaultTarget;
-    if (!target) fail(`${name}: no target; pass --target or set case target`);
-    let commit;
-    try {
-      commit = git(target, "rev-parse", "--verify", `${spec.commit}^{commit}`);
-    } catch {
-      fail(`${name}: commit ${spec.commit} is not in ${target}`);
+async function runAll(tasks, parallel, start) {
+  const results = new Array(tasks.length);
+  let next = 0;
+  const lane = async () => {
+    while (next < tasks.length) {
+      const index = next++;
+      results[index] = await start(tasks[index]);
     }
-    if (!existsSync(join(root, "objective.md")))
-      fail(`${name}: objective.md is missing`);
-    const body = readFileSync(join(root, "objective.md"), "utf8");
-    return {
-      name,
-      target,
-      commit,
-      repository: spec.repository ?? config.repository,
-      objective,
-      title: /^#\s+(.+)$/m.exec(body)?.[1]?.trim() ?? name,
-      body,
-    };
-  });
+  };
+  await Promise.all(Array.from({ length: parallel }, lane));
+  return results;
 }
 
-/** Each run is its own process so state, diagnostics and env stay isolated. */
+/** Each plan run is its own process so state, diagnostics and env stay isolated. */
 function runOne(evalCase, repeat, options) {
   const id = `${evalCase.name}-${repeat}`;
   const directory = join(options.output, "runs", id);
@@ -95,7 +88,18 @@ function runOne(evalCase, repeat, options) {
   const spec = join(directory, "spec.json");
   writeFileSync(
     spec,
-    `${JSON.stringify({ ...evalCase, config: options.config, planningModule: options.planningModule, directory }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        ...evalCase,
+        config: options.config,
+        planningModule: options.planningModule,
+        judges: options.judges.map((judge) => judge.path),
+        judgeTransport: options.judgeTransport,
+        directory,
+      },
+      null,
+      2,
+    )}\n`,
   );
   const log = openSync(join(directory, "worker.log"), "w");
   const child = spawn(
@@ -110,6 +114,8 @@ function runOne(evalCase, repeat, options) {
       },
     },
   );
+  // The child holds its own copy of the log descriptor.
+  closeSync(log);
   const started = Date.now();
   return new Promise((done) => {
     child.on("close", (code, signal) => {
@@ -119,140 +125,280 @@ function runOne(evalCase, repeat, options) {
         repeat,
         repository: evalCase.repository,
         commit: evalCase.commit,
+        sources: evalCase.sources,
+        tags: evalCase.tags,
       };
-      const result = existsSync(resultPath)
-        ? JSON.parse(readFileSync(resultPath, "utf8"))
-        : {
-            planned: false,
-            wallMs: Date.now() - started,
-            error: `Run process exited with ${signal ?? `code ${code}`}; see ${relative(options.output, join(directory, "worker.log"))}`,
-          };
+      const log = relative(options.output, join(directory, "worker.log"));
+      let result;
+      try {
+        result = JSON.parse(readFileSync(resultPath, "utf8"));
+      } catch (error) {
+        // A missing or truncated result is an errored run, not a harness crash.
+        result = {
+          planned: false,
+          wallMs: Date.now() - started,
+          error: existsSync(resultPath)
+            ? `Run result is unreadable (${error.message}); process exited with ${signal ?? `code ${code}`}; see ${log}`
+            : `Run process exited with ${signal ?? `code ${code}`}; see ${log}`,
+        };
+      }
       if (result.plan) result.plan = relative(options.output, result.plan);
+      const judge = (result.judges ?? [])
+        .map((grade) => `, ${grade.judge} ${grade.verdict}`)
+        .join("");
       console.error(
-        `${id}: ${result.error ? `error: ${result.error.split("\n")[0]}` : (result.review ?? "no plan")}`,
+        `${id}: ${result.error ? `error: ${result.error.split("\n")[0]}` : `${result.review ?? "no plan"}${judge}`}`,
       );
       done({ ...base, ...result });
     });
   });
 }
 
-async function runAll(runs, parallel, start) {
-  const results = new Array(runs.length);
-  let next = 0;
-  const lane = async () => {
-    while (next < runs.length) {
-      const index = next++;
-      results[index] = await start(runs[index]);
-    }
-  };
-  await Promise.all(Array.from({ length: parallel }, lane));
-  return results;
-}
-
-const mean = (values) =>
-  values.length
-    ? values.reduce((total, value) => total + value, 0) / values.length
-    : null;
-const range = (values) =>
-  values.length
-    ? { min: Math.min(...values), max: Math.max(...values), mean: mean(values) }
-    : null;
-
-/** Per-case aggregates across repeats; null when no run produced the value. */
-function summarizeCase(name, runs) {
-  const planned = runs.filter((run) => run.planned);
-  const reviewCount = (status) =>
-    runs.filter((run) => run.review === status).length;
-  const tokens = (key) =>
-    runs.flatMap((run) =>
-      typeof run.tokens?.[key] === "number" ? [run.tokens[key]] : [],
-    );
-  return {
-    case: name,
-    runs: runs.length,
-    planned: planned.length,
-    errors: runs.filter((run) => run.error).length,
-    review: {
-      clean: reviewCount("clean"),
-      findings: reviewCount("findings"),
-      question: reviewCount("question"),
-    },
-    findingCount: range(planned.map((run) => run.findingCount)),
-    revisions: range(planned.map((run) => run.revisions)),
-    workItems: range(planned.map((run) => run.workItems)),
-    invocations: range(runs.map((run) => run.invocations?.total ?? 0)),
-    inputTokens: range(tokens("inputTokens")),
-    outputTokens: range(tokens("outputTokens")),
-    wallMs: range(runs.map((run) => run.wallMs)),
-  };
-}
-
-function markdown(report) {
-  const number = (value, digits = 1) =>
-    value === null || value === undefined
-      ? "–"
-      : Number.isInteger(value)
-        ? String(value)
-        : value.toFixed(digits);
-  const spread = (value, digits) =>
-    !value
-      ? "–"
-      : value.min === value.max
-        ? number(value.min, digits)
-        : `${number(value.mean, digits)} (${number(value.min, digits)}–${number(value.max, digits)})`;
-  const thousands = (value) =>
-    value && {
-      min: value.min / 1000,
-      max: value.max / 1000,
-      mean: value.mean / 1000,
+function readConfig(path) {
+  if (!path) fail("--config is required");
+  try {
+    return {
+      path: resolve(path),
+      config: JSON.parse(readFileSync(resolve(path), "utf8")),
     };
-  const { planning } = report.config;
-  const lines = [
-    "# Planning eval",
-    "",
-    `Config \`${report.config.path}\`: planning \`${planning.kind}\`, planner ${planning.planner?.model ?? "?"}/${planning.planner?.reasoningEffort ?? "?"}, reviewer ${planning.reviewer?.model ?? "?"}/${planning.reviewer?.reasoningEffort ?? "?"}${report.planningModule ? `, planning model module \`${report.planningModule}\`` : ""}.`,
-    `Repeat ${report.repeat}, parallel ${report.parallel}, ${report.startedAt} to ${report.finishedAt}.`,
-    "",
-    "Cells show the mean with (min–max) across repeats. Tokens are thousands.",
-    "",
-    "| Case | Runs | Planned | Clean / findings / question | Findings | Revisions | Work Items | Invocations | Input tokens (k) | Output tokens (k) | Wall (s) | Errors |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    ...report.cases
-      .map((entry) =>
-        [
-          entry.case,
-          entry.runs,
-          entry.planned,
-          `${entry.review.clean} / ${entry.review.findings} / ${entry.review.question}`,
-          spread(entry.findingCount),
-          spread(entry.revisions),
-          spread(entry.workItems),
-          spread(entry.invocations),
-          spread(thousands(entry.inputTokens)),
-          spread(thousands(entry.outputTokens)),
-          spread(thousands(entry.wallMs)),
-          entry.errors,
-        ].join(" | "),
-      )
-      .map((row) => `| ${row} |`),
-  ];
-  const errors = report.runs.filter((run) => run.error);
-  if (errors.length)
-    lines.push(
-      "",
-      "## Errors",
-      "",
-      ...errors.map(
-        (run) => `- ${run.case} #${run.repeat}: ${run.error.split("\n")[0]}`,
-      ),
+  } catch (error) {
+    fail(`--config ${path}: ${error.message}`);
+  }
+}
+
+function newOutput(path) {
+  if (!path) fail("--output is required");
+  const output = resolve(path);
+  const existed = existsSync(output);
+  if (existed && readdirSync(output).length)
+    fail(`--output ${output} must be a new or empty directory`);
+  return { output, existed };
+}
+
+/**
+ * Refuse before any model call: empty the output again (removing it only if
+ * this run created it) so a rerun can use it, then exit 2.
+ */
+function refuse(common, error) {
+  if (common.outputExisted)
+    for (const entry of readdirSync(common.output))
+      rmSync(join(common.output, entry), { recursive: true, force: true });
+  else rmSync(common.output, { recursive: true, force: true });
+  fail(error instanceof Error ? error.message : String(error));
+}
+
+function judgeSummaries(common) {
+  return common.judges.map((judge) => ({
+    name: judge.name,
+    path: judge.path,
+    model: judge.model,
+    digest: judge.digest,
+    ...(common.judgeTransport
+      ? { transportModule: common.judgeTransport }
+      : {}),
+  }));
+}
+
+function write(output, report, markdown) {
+  writeFileSync(
+    join(output, "report.json"),
+    `${JSON.stringify(report, null, 2)}\n`,
+  );
+  writeFileSync(join(output, "summary.md"), markdown);
+}
+
+async function planMode(values, common) {
+  const directories = (
+    values.cases.length ? values.cases : [join(root, "evals/cases")]
+  ).map((directory) => resolve(directory));
+  let cases;
+  try {
+    cases = loadCases(directories, values.case, {
+      defaultTarget: values.target && resolve(values.target),
+      repository: common.config.repository,
+      targets: join(common.output, "targets"),
+    });
+  } catch (error) {
+    refuse(common, error);
+  }
+  const startedAt = new Date().toISOString();
+  const tasks = cases.flatMap((evalCase) =>
+    Array.from({ length: common.repeat }, (_, index) => ({
+      evalCase,
+      repeat: index + 1,
+    })),
+  );
+  const runs = await runAll(tasks, common.parallel, ({ evalCase, repeat }) =>
+    runOne(evalCase, repeat, common),
+  );
+  const summary = summarizePlanRuns(runs);
+  const report = {
+    schemaVersion: 2,
+    mode: "plan",
+    path: "planObjective",
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    config: { path: common.configPath, planning: common.config.planning },
+    ...(common.config.autonomy ? { autonomy: common.config.autonomy } : {}),
+    ...(common.planningModule ? { planningModule: common.planningModule } : {}),
+    judges: judgeSummaries(common),
+    repeat: common.repeat,
+    parallel: common.parallel,
+    summary,
+    units: summary.cases,
+    runs,
+  };
+  write(common.output, report, planMarkdown(report));
+  console.log(
+    `Planning eval: ${runs.filter((run) => run.planned).length}/${runs.length} runs planned; wrote ${join(common.output, "report.json")} and summary.md`,
+  );
+}
+
+async function reviewMode(values, common) {
+  const { composePlanningModel, validateConfig } = await import(
+    pathToFileURL(join(root, "dist/index.js")).href
+  );
+  let prepared;
+  try {
+    const fixtures = loadReviewFixtures(
+      resolve(values.fixtures ?? join(root, "evals/review")),
+      values.case,
+      {
+        defaultTarget: values.target && resolve(values.target),
+        repository: common.config.repository,
+        targets: join(common.output, "targets"),
+      },
     );
-  return `${lines.join("\n")}\n`;
+    prepared = [];
+    for (const fixture of fixtures) {
+      const checkout = prepareCheckout(
+        fixture.case,
+        join(common.output, "checkouts", fixture.name),
+      );
+      const config = validateConfig({
+        ...common.config,
+        repository: fixture.case.repository,
+        checkout,
+      });
+      prepared.push({
+        fixture,
+        config,
+        variants: await prepareVariants(fixture, config),
+        facts: repositoryFacts(checkout, fixture.case.commit),
+      });
+    }
+    for (const entry of prepared) {
+      const directory = join(common.output, "models", entry.fixture.name);
+      mkdirSync(directory, { recursive: true });
+      entry.model = common.planningModule
+        ? await (
+            await import(pathToFileURL(common.planningModule).href)
+          ).createPlanningModel({
+            config: entry.config,
+            directory,
+          })
+        : composePlanningModel(entry.config);
+    }
+  } catch (error) {
+    refuse(common, error);
+  }
+  const startedAt = new Date().toISOString();
+  const tasks = prepared.flatMap((entry) =>
+    entry.variants
+      .filter((variant) => !variant.refused)
+      .flatMap((variant) =>
+        Array.from({ length: common.repeat }, (_, index) => ({
+          entry,
+          variant,
+          repeat: index + 1,
+        })),
+      ),
+  );
+  const runs = await runAll(
+    tasks,
+    common.parallel,
+    async ({ entry, variant, repeat }) => {
+      const run = await reviewVariant(
+        entry.model,
+        entry.fixture,
+        variant,
+        repeat,
+      );
+      if (variant.rule) run.rule = variant.rule;
+      if (common.judges.length)
+        run.judges = await runPanel(
+          common.judges,
+          judgeInput(variantPlan(variant), entry.facts, false),
+          entry.config.checkout,
+          common.judgeTransport,
+        );
+      console.error(
+        `${entry.fixture.name}/${variant.variant} #${repeat}: ${run.review}${(run.judges ?? []).map((grade) => `, ${grade.judge} ${grade.verdict}`).join("")}`,
+      );
+      return run;
+    },
+  );
+  const refusals = prepared.flatMap((entry) =>
+    entry.variants
+      .filter((variant) => variant.refused)
+      .map((variant) => ({
+        fixture: entry.fixture.name,
+        defect: variant.defect,
+        reason: variant.refused,
+      })),
+  );
+  const summary = summarizeReviewRuns(runs, refusals);
+  const report = {
+    schemaVersion: 2,
+    mode: "review",
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    config: { path: common.configPath, planning: common.config.planning },
+    ...(common.planningModule ? { planningModule: common.planningModule } : {}),
+    judges: judgeSummaries(common),
+    repeat: common.repeat,
+    parallel: common.parallel,
+    summary,
+    units: summary.units,
+    runs,
+  };
+  write(common.output, report, reviewMarkdown(report));
+  console.log(
+    `Review eval: ${runs.length} reviews of ${prepared.length} fixtures; wrote ${join(common.output, "report.json")} and summary.md`,
+  );
+}
+
+function compareMode(values, positionals) {
+  if (positionals.length !== 2) fail("--compare needs two report.json paths");
+  const [a, b] = positionals.map((path) => resolve(path));
+  let comparison;
+  try {
+    comparison = compareReports(
+      JSON.parse(readFileSync(a, "utf8")),
+      JSON.parse(readFileSync(b, "utf8")),
+    );
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  const markdown = compareMarkdown(comparison, a, b);
+  if (values.output) {
+    const output = resolve(values.output);
+    mkdirSync(output, { recursive: true });
+    writeFileSync(
+      join(output, "compare.json"),
+      `${JSON.stringify(comparison, null, 2)}\n`,
+    );
+    writeFileSync(join(output, "compare.md"), markdown);
+  }
+  process.stdout.write(markdown);
 }
 
 async function main() {
-  const { values } = parseArgs({
+  const { values, positionals } = parseArgs({
+    allowPositionals: true,
     options: {
-      cases: { type: "string" },
+      cases: { type: "string", multiple: true, default: [] },
+      fixtures: { type: "string" },
       config: { type: "string" },
       output: { type: "string" },
       target: { type: "string" },
@@ -263,6 +409,10 @@ async function main() {
         default: String(Math.max(1, Math.floor(availableParallelism() / 4))),
       },
       "planning-model": { type: "string" },
+      judge: { type: "string", multiple: true, default: [] },
+      "judge-transport": { type: "string" },
+      "review-only": { type: "boolean" },
+      compare: { type: "boolean" },
       help: { type: "boolean" },
     },
   });
@@ -270,61 +420,42 @@ async function main() {
     console.log(usage);
     return;
   }
-  if (!values.cases || !values.config || !values.output)
-    fail("--cases, --config and --output are required");
-  const output = resolve(values.output);
-  if (existsSync(output) && readdirSync(output).length)
-    fail(`--output ${output} must be a new or empty directory`);
-  const configPath = resolve(values.config);
-  const config = JSON.parse(readFileSync(configPath, "utf8"));
-  const repeat = positiveInteger(values.repeat, "repeat");
-  const parallel = positiveInteger(values.parallel, "parallel");
-  const planningModule = values["planning-model"]
-    ? resolve(values["planning-model"])
-    : undefined;
-  if (planningModule && !statSync(planningModule).isFile())
-    fail(`--planning-model ${planningModule} is not a file`);
-  const cases = loadCases(
-    resolve(values.cases),
-    values.case,
-    values.target && resolve(values.target),
-    config,
-  );
-  mkdirSync(output, { recursive: true });
-  const startedAt = new Date().toISOString();
-  const runs = cases.flatMap((evalCase) =>
-    Array.from({ length: repeat }, (_, index) => ({
-      evalCase,
-      repeat: index + 1,
-    })),
-  );
-  const results = await runAll(runs, parallel, ({ evalCase, repeat }) =>
-    runOne(evalCase, repeat, { output, config, planningModule }),
-  );
-  const report = {
-    schemaVersion: 1,
-    startedAt,
-    finishedAt: new Date().toISOString(),
-    config: { path: configPath, planning: config.planning },
-    ...(planningModule ? { planningModule } : {}),
-    repeat,
-    parallel,
-    cases: cases.map(({ name }) =>
-      summarizeCase(
-        name,
-        results.filter((run) => run.case === name),
-      ),
-    ),
-    runs: results,
+  if (values.compare) return compareMode(values, positionals);
+  if (positionals.length)
+    fail(`Unexpected arguments: ${positionals.join(" ")}`);
+  const { path: configPath, config } = readConfig(values.config);
+  const { output, existed } = newOutput(values.output);
+  const moduleOption = (name) => {
+    if (!values[name]) return undefined;
+    const path = resolve(values[name]);
+    if (!existsSync(path) || !statSync(path).isFile())
+      fail(`--${name} ${path} is not a file`);
+    return path;
   };
-  writeFileSync(
-    join(output, "report.json"),
-    `${JSON.stringify(report, null, 2)}\n`,
-  );
-  writeFileSync(join(output, "summary.md"), markdown(report));
-  console.log(
-    `Planning eval: ${results.filter((run) => run.planned).length}/${results.length} runs planned; wrote ${join(output, "report.json")} and summary.md`,
-  );
+  const planningModule = moduleOption("planning-model");
+  const judgeTransportModule = moduleOption("judge-transport");
+  if (judgeTransportModule && !values.judge.length)
+    fail("--judge-transport needs --judge");
+  let judges;
+  try {
+    judges = loadJudges(values.judge);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  const common = {
+    configPath,
+    config,
+    output,
+    outputExisted: existed,
+    planningModule,
+    judges,
+    judgeTransport: judgeTransportModule,
+    repeat: positiveInteger(values.repeat, "repeat"),
+    parallel: positiveInteger(values.parallel, "parallel"),
+  };
+  mkdirSync(output, { recursive: true });
+  if (values["review-only"]) await reviewMode(values, common);
+  else await planMode(values, common);
 }
 
 await main();

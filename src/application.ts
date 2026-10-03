@@ -225,7 +225,7 @@ export function composeIntake(
 }
 
 /** The configured PlanningModel; it authenticates with the operator's provider login. */
-function composePlanningModel(config: FactoryConfig): PlanningModel {
+export function composePlanningModel(config: FactoryConfig): PlanningModel {
   const redactionValues = config.policy.allowedSecretNames.flatMap((name) =>
     process.env[name] ? [process.env[name]!] : [],
   );

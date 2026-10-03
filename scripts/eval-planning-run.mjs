@@ -1,7 +1,8 @@
 // One planning eval run, started by scripts/eval-planning.mjs in its own
-// process with private XDG state. It plans one local Objective body against an
-// isolated checkout at the pinned commit and writes result.json.
-import { execFileSync } from "node:child_process";
+// process with private XDG state. It plans one local Objective body through
+// the same planObjective path `factory run` uses, against an isolated checkout
+// at the pinned commit, computes judge-free metrics, optionally asks the
+// frozen judge panel, and writes result.json.
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -10,6 +11,13 @@ import {
   summarizeModelInvocations,
 } from "../dist/diagnostics.js";
 import { composePlanning, validateConfig } from "../dist/index.js";
+import { prepareCheckout, repositoryFacts } from "./eval-planning/cases.mjs";
+import { judgeInput, loadJudges, runPanel } from "./eval-planning/judge.mjs";
+import {
+  expectation,
+  firstTry,
+  planMetrics,
+} from "./eval-planning/metrics.mjs";
 
 const spec = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const checkout = join(spec.directory, "checkout");
@@ -46,25 +54,6 @@ function evalGateway() {
   });
 }
 
-/** An isolated checkout at the pinned commit, bound to the case repository. */
-function prepareCheckout() {
-  const git = (...args) =>
-    execFileSync("git", args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, GIT_LFS_SKIP_SMUDGE: "1" },
-    });
-  git("clone", "--quiet", "--shared", "--no-checkout", spec.target, checkout);
-  git("-C", checkout, "checkout", "--quiet", "--detach", spec.commit);
-  git(
-    "-C",
-    checkout,
-    "remote",
-    "set-url",
-    "origin",
-    `https://github.com/${spec.repository}.git`,
-  );
-}
-
 function reviewOutcome(review) {
   if (review.failure) return "question";
   return review.findings.length ? "findings" : "clean";
@@ -72,8 +61,9 @@ function reviewOutcome(review) {
 
 const result = { planned: false, wallMs: 0, error: null };
 let started;
+let plan;
 try {
-  prepareCheckout();
+  prepareCheckout(spec, checkout);
   const config = validateConfig({
     ...spec.config,
     repository: spec.repository,
@@ -89,9 +79,12 @@ try {
     planningModel,
   });
   started = performance.now();
-  const plan = await application.planObjective(spec.objective);
+  // The production path: the same recoverable planning `factory run` uses,
+  // bounded by the configuration's autonomy allowances.
+  plan = await application.planObjective(spec.objective, spec.sources);
   result.wallMs = Math.round(performance.now() - started);
   result.planned = true;
+  result.reviewStatus = plan.review.status;
   result.review = reviewOutcome(plan.review);
   result.findingCount = plan.review.findings.length;
   result.revisions = plan.review.revisions;
@@ -103,16 +96,29 @@ try {
   if (plan.review.failure) result.failure = plan.review.failure;
   result.plan = join(spec.directory, "plan.json");
   writeFileSync(result.plan, `${JSON.stringify(plan, null, 2)}\n`);
+  const facts = repositoryFacts(checkout, spec.commit);
+  result.metrics = planMetrics(plan, [
+    ...plan.sources.map((source) => source.content),
+    ...facts.workflows.map((workflow) => workflow.content),
+  ]);
+  if (spec.judges?.length)
+    result.judges = await runPanel(
+      loadJudges(spec.judges),
+      judgeInput(plan, facts, plan.review.status !== "clean"),
+      checkout,
+      spec.judgeTransport,
+    );
 } catch (error) {
-  if (started) result.wallMs = Math.round(performance.now() - started);
+  if (started && !result.wallMs)
+    result.wallMs = Math.round(performance.now() - started);
   result.error = error instanceof Error ? error.message : String(error);
 } finally {
   rmSync(checkout, { recursive: true, force: true });
 }
+result.expectation = expectation(spec.expect, result, plan?.graph);
 try {
-  const usage = summarizeModelInvocations(
-    readDiagnosticMetadata(spec.repository, spec.objective),
-  );
+  const events = readDiagnosticMetadata(spec.repository, spec.objective);
+  const usage = summarizeModelInvocations(events);
   result.invocations = {
     total: usage.objective.invocationCount,
     completed: usage.objective.completedCount,
@@ -126,6 +132,7 @@ try {
     ),
   };
   result.tokens = usage.objective.tokenTotals;
+  result.firstTry = firstTry(events, result.review === "clean");
 } catch (error) {
   result.error ??= `Diagnostics unreadable: ${error instanceof Error ? error.message : String(error)}`;
 }

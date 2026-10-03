@@ -1,0 +1,7 @@
+{
+  "fixture": "../../targets/node-lib",
+  "tags": ["multi-item", "dependencies"],
+  "expect": {
+    "outcome": "plan"
+  }
+}

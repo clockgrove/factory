@@ -54,7 +54,8 @@ const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
 /** One answer plus the SDK's bounded schema-repair turns. */
 const CLAUDE_PLANNING_MAX_TURNS = 4;
 
-const systemPrompt = [
+/** Shared by every Claude planning call; plan-eval judges hash it into their digest. */
+export const CLAUDE_PLANNING_SYSTEM_PROMPT = [
   "You are the planning and review model for Clockgrove Factory.",
   "The user message is the complete request; you have no tools, files or network.",
   "Return exactly the requested result through the structured output.",
@@ -173,7 +174,7 @@ export function claudePlanningOptions(input: {
       disableBundledSkills: true,
       claudeMdExcludes: ["**"],
     },
-    systemPrompt,
+    systemPrompt: CLAUDE_PLANNING_SYSTEM_PROMPT,
     // Prompts carry untrusted source text; never expand @paths or commands.
     verbatimPrompts: true,
     maxTurns: CLAUDE_PLANNING_MAX_TURNS,

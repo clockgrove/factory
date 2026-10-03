@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "name": "strict-rubric-v1-codex",
+  "description": "Seven pass/fail plan dimensions graded against the Objective. Independent of the production reviewer prompt.",
+  "model": {
+    "kind": "codex-sdk",
+    "model": "gpt-5.6-sol",
+    "reasoningEffort": "high"
+  },
+  "prompt": "strict-rubric-v1.md",
+  "promptSha256": "b4d05e8b829f4ab1ff6982de8d4138670416640909ece80e472ba36ba01fcbe4"
+}

@@ -1,0 +1,8 @@
+{
+  "fixture": "../../targets/node-lib",
+  "tags": ["multi-item", "parallel"],
+  "expect": {
+    "outcome": "plan",
+    "maxCriticalPath": 1
+  }
+}

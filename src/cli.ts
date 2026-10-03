@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { objectiveCandidate } from "./qa.js";
 import {
   credentialFileBindings,
   executionCredential,
@@ -8,11 +7,9 @@ import {
   requiredProviderCredentials,
   resolveProviderCredential,
 } from "./provider-credentials.js";
-import { objectiveComplete } from "./completion.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { availableParallelism, totalmem } from "node:os";
+import { userInfo } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
-import type { AutonomousAdmission, ExecutionAuthority } from "./admission.js";
 import { runAnalysisCommand } from "./analysis-cli.js";
 import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { readInteractionContent, readInteractionMetadata } from "./capture.js";
@@ -25,7 +22,6 @@ import {
   DEFAULT_REVIEWER_MODEL_SELECTION,
   DEFAULT_WORKER_MODEL_SELECTION,
   GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
-  hostSchedulingDefaults,
   readConfig,
   stateRoot,
   validateConfig,
@@ -47,7 +43,12 @@ import {
   controlObjective,
   selectAssetSetFromCli,
 } from "./runner.js";
-import { intakeControl, watchIntake } from "./intake.js";
+import {
+  type IntakeAuthorization,
+  intakeControl,
+  watchIntake,
+} from "./intake.js";
+import { assertKnownFlags } from "./cli-flags.js";
 import { setupTarget } from "./setup.js";
 import { linuxProcessIdentity } from "./process.js";
 import {
@@ -56,6 +57,8 @@ import {
   readState,
 } from "./state-store.js";
 import { renderStatusText } from "./status-summary.js";
+import { intakeExitCode, runOutcome } from "./run-outcome.js";
+import type { ContinuationState } from "./state.js";
 import {
   checkServiceState,
   checkIntakeServiceState,
@@ -96,13 +99,14 @@ function controllerActive(
 
 function help(): void {
   console.log(
-    `Factory CLI\n\nCommands:\n  setup --background --service-consent --actor NAME --reason TEXT --retain-package [--authority FILE] [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [INSTALL_OPTIONS] [--config PATH]\n  setup --config-only [INSTALL_OPTIONS] [--config PATH]\n  intake watch --service-consent --actor NAME --reason TEXT [--poll-seconds N] [--config PATH]\n  intake enqueue --authority FILE [--priority-label LABEL ...] [--poll-seconds N] [--watch] [--config PATH]\n  intake run|status|pause|resume|drain [--config PATH]\n  intake dequeue --objective N [--config PATH]\n  readiness [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...] [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--config PATH] (outside default: home directory)\n  supervisor install|status|start|stop|disable|uninstall|upgrade [--intake | --objective N] [--plan PATH --admission PATH] [--cli ABSOLUTE_INSTALLED_CLI] [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...] [--config PATH]\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH [--concurrency N] [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning codex-sdk|claude-agent-sdk] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  export-captures --objective N --endpoint HTTPS_OTLP_BASE_URL --content metadata|retained [--run ID ...] [--invocation ID ...] [--send --authorize PREVIEW_DIGEST] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  propose-amendment --objective N --proposal FILE [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--config PATH]\n  repair --objective N --proposal FILE [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
+    `Factory CLI\n\nCommands:\n  setup --background --service-consent --actor NAME --reason TEXT --retain-package [--objective N ...] [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [INSTALL_OPTIONS] [--config PATH]\n  setup --config-only [INSTALL_OPTIONS] [--config PATH]\n  intake watch --service-consent --actor NAME --reason TEXT [--poll-seconds N] [--config PATH]\n  intake enqueue --objective N [--objective N ...] [--priority-label LABEL ...] [--poll-seconds N] [--watch] [--config PATH]\n  intake run|status|pause|resume|drain [--config PATH]\n  intake dequeue --objective N [--config PATH]\n  readiness [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...] [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--config PATH] (outside default: home directory)\n  supervisor install|status|start|stop|disable|uninstall|upgrade [--intake | --objective N] [--cli ABSOLUTE_INSTALLED_CLI] [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...] [--config PATH]\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH [--concurrency N] [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning codex-sdk|claude-agent-sdk] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--config PATH]\n  decide --objective N --plan DIGEST --outcome accept --answer TEXT --reason TEXT [--actor NAME] [--config PATH]\n  decide --objective N [--plan DIGEST] --outcome refuse --reason TEXT [--actor NAME] [--config PATH]\n  plan --objective N [--output ABSOLUTE_NEW_FILE] [--config PATH]   (read-only preview)\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  export-captures --objective N --endpoint HTTPS_OTLP_BASE_URL --content metadata|retained [--run ID ...] [--invocation ID ...] [--send --authorize PREVIEW_DIGEST] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  propose-amendment --objective N --proposal FILE [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--config PATH]\n  repair --objective N --proposal FILE [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
   );
 }
 
 async function main(): Promise<void> {
   const [, , command, ...args] = process.argv;
   if (!command || command === "help" || command === "--help") return help();
+  assertKnownFlags(command, args);
   const path = option(args, "config") ?? configPath();
   if (command === "setup") {
     const result = await setupTarget(args, path);
@@ -235,27 +239,24 @@ async function main(): Promise<void> {
         ),
       );
     } else if (action === "enqueue") {
-      const authorityPath = option(args, "authority");
-      if (!authorityPath)
-        throw new Error("intake enqueue requires --authority FILE");
+      const objectives = options(args, "objective").map(Number);
+      if (!objectives.length)
+        throw new Error("intake enqueue requires --objective N");
       console.log(
         JSON.stringify(
-          await composeIntake(config).enqueueIntake(
-            JSON.parse(readFileSync(authorityPath, "utf8")),
-            {
-              priorityLabels: options(args, "priority-label"),
-              ...(option(args, "poll-seconds")
-                ? { pollSeconds: Number(option(args, "poll-seconds")) }
-                : {}),
-              ...(args.includes("--watch") ? { watch: true } : {}),
-            },
-          ),
+          await composeIntake(config).enqueueIntake(objectives, {
+            priorityLabels: options(args, "priority-label"),
+            ...(option(args, "poll-seconds")
+              ? { pollSeconds: Number(option(args, "poll-seconds")) }
+              : {}),
+            ...(args.includes("--watch") ? { watch: true } : {}),
+          }),
           null,
           2,
         ),
       );
     } else if (action === "run") {
-      console.log(JSON.stringify(await compose(config).runIntake(), null, 2));
+      reportIntake(await compose(config).runIntake());
     } else if (
       ["status", "pause", "resume", "drain", "dequeue"].includes(action)
     ) {
@@ -278,8 +279,6 @@ async function main(): Promise<void> {
     const input = {
       objective: Number(option(args, "objective")),
       intake: args.includes("--intake"),
-      plan: option(args, "plan"),
-      admission: option(args, "admission"),
       cli: option(args, "cli"),
       credentialFiles: options(args, "credential-file"),
     };
@@ -290,18 +289,12 @@ async function main(): Promise<void> {
       loadServiceLoginCredentials(config, loaded);
       if (input.intake) {
         checkIntakeServiceState(config);
-        await compose(config, loaded).runIntake();
+        reportIntake(await compose(config, loaded).runIntake());
         return;
       }
-      checkServiceState(config, input.objective, input.admission);
+      checkServiceState(config, input.objective);
       try {
-        await compose(config, loaded).runObjective(
-          input.objective,
-          input.plan ? JSON.parse(readFileSync(input.plan, "utf8")) : undefined,
-          input.admission
-            ? JSON.parse(readFileSync(input.admission, "utf8"))
-            : undefined,
-        );
+        reportRun(await compose(config, loaded).runObjective(input.objective));
       } catch (error) {
         if (!(error instanceof CoordinatorHandoff)) throw error;
       }
@@ -318,15 +311,10 @@ async function main(): Promise<void> {
     const checkout = option(args, "checkout");
     if (!repository || !checkout)
       throw new Error("install requires --repository and --checkout");
-    // An explicit worker ceiling is the operator's whole choice; otherwise size every phase from this host.
-    const sized = option(args, "concurrency")
-      ? undefined
-      : hostSchedulingDefaults({
-          cpus: availableParallelism(),
-          memoryBytes: totalmem(),
-        });
-    const concurrency =
-      sized?.concurrency ?? Number(option(args, "concurrency"));
+    // An explicit worker ceiling is the operator's whole choice; otherwise every run sizes from its host.
+    const concurrency = option(args, "concurrency")
+      ? Number(option(args, "concurrency"))
+      : undefined;
     const harness = option(args, "harness") ?? "codex-sdk";
     if (
       harness !== "codex-sdk" &&
@@ -375,7 +363,7 @@ async function main(): Promise<void> {
       "grep",
       "glob",
     ];
-    const config = validateConfig({
+    const config = {
       schemaVersion: 1,
       repository,
       checkout,
@@ -414,7 +402,7 @@ async function main(): Promise<void> {
             },
       execution: {
         kind: "local",
-        concurrency,
+        ...(concurrency === undefined ? {} : { concurrency }),
         harness:
           harness === "claude-agent-sdk"
             ? {
@@ -461,7 +449,6 @@ async function main(): Promise<void> {
                     DEFAULT_WORKER_MODEL_SELECTION.reasoningEffort,
                 },
       },
-      ...(sized ? { scheduling: sized.scheduling } : {}),
       delivery: { kind: option(args, "delivery") ?? "regular" },
       contentStore: { kind: "local" },
       ...(args.includes("--capture-content")
@@ -479,7 +466,8 @@ async function main(): Promise<void> {
         allowedSecretNames: [],
         deployments: "denied",
       },
-    });
+    };
+    validateConfig(config);
     if (existsSync(path) || existsSync(stateRoot(repository))) {
       throw new Error(
         "Factory installation requires an empty configuration and state root",
@@ -491,15 +479,13 @@ async function main(): Promise<void> {
       mode: 0o600,
     });
     console.log(
-      `Installed Factory for ${repository} at ${path} with concurrency ${concurrency}${sized ? " and scheduling sized from this host" : ""}`,
+      `Installed Factory for ${repository} at ${path} with ${concurrency === undefined ? "concurrency and scheduling sized from the host at run time" : `concurrency ${concurrency}`}`,
     );
     return;
   }
   if (
     ![
       "plan",
-      "admit",
-      "check-admission",
       "decide",
       "run",
       "status",
@@ -526,10 +512,7 @@ async function main(): Promise<void> {
   const objective = Number(option(args, "objective"));
   if (!Number.isSafeInteger(objective) || objective <= 0)
     throw new Error(`${command} requires --objective N`);
-  const savePlan = (
-    output: string,
-    candidate: PlanCandidate | AutonomousAdmission,
-  ): void => {
+  const savePlan = (output: string, candidate: PlanCandidate): void => {
     if (!output.startsWith("/"))
       throw new Error("Plan output requires an absolute file path");
     const target = resolve(config.checkout);
@@ -543,21 +526,7 @@ async function main(): Promise<void> {
     });
   };
   if (command === "plan") {
-    const additionalSources = options(args, "source").map((value) => {
-      const at = value.indexOf("#");
-      return at < 0
-        ? { path: value }
-        : { path: value.slice(0, at), heading: value.slice(at + 1) };
-    });
-    const candidate = await composePlanning(config).planObjective(
-      objective,
-      additionalSources,
-      option(args, "authority")
-        ? (JSON.parse(
-            readFileSync(option(args, "authority")!, "utf8"),
-          ) as ExecutionAuthority)
-        : undefined,
-    );
+    const candidate = await composePlanning(config).planObjective(objective);
     const output = option(args, "output");
     const json = `${JSON.stringify(candidate, null, 2)}\n`;
     if (output) {
@@ -571,74 +540,25 @@ async function main(): Promise<void> {
         console.log(candidate.review.findings[0]!.question);
     } else console.log(json.trimEnd());
     return;
-  } else if (command === "admit" || command === "check-admission") {
-    const planPath = option(args, "plan");
-    if (!planPath) throw new Error(`${command} requires --plan`);
-    const candidate = JSON.parse(
-      readFileSync(planPath, "utf8"),
-    ) as PlanCandidate;
-    const application = composePlanning(config);
-    if (command === "admit") {
-      const authorityPath = option(args, "authority");
-      const output = option(args, "output");
-      if (!authorityPath || !output)
-        throw new Error("admit requires --authority and --output");
-      const authority = JSON.parse(
-        readFileSync(authorityPath, "utf8"),
-      ) as ExecutionAuthority;
-      savePlan(
-        output,
-        await application.admitObjective(objective, candidate, authority),
-      );
-      console.log(
-        `Admission for Objective #${objective} saved ${output}; background service and automatic repairs are not activated`,
-      );
-    } else {
-      const admissionPath = option(args, "admission");
-      if (!admissionPath)
-        throw new Error("check-admission requires --admission");
-      await application.checkAdmission(
-        objective,
-        candidate,
-        JSON.parse(readFileSync(admissionPath, "utf8")) as AutonomousAdmission,
-      );
-      console.log(
-        `Admission for Objective #${objective} matches current inputs and prerequisites`,
-      );
-    }
-    return;
   } else if (command === "decide") {
-    const planPath = option(args, "plan");
     const outcome = option(args, "outcome");
-    const actor = option(args, "actor");
     const reason = option(args, "reason");
-    const output = option(args, "output");
-    if (
-      !planPath ||
-      !actor ||
-      !reason ||
-      !output ||
-      !["accept", "refuse"].includes(outcome ?? "")
-    )
-      throw new Error(
-        "decide requires --plan, --outcome, --actor, --reason, and --output",
-      );
-    const candidate = JSON.parse(
-      readFileSync(planPath, "utf8"),
-    ) as PlanCandidate;
-    const decided = await composePlanning(config).decidePlan(
-      objective,
-      candidate,
-      {
-        actor,
-        outcome: outcome as "accept" | "refuse",
-        answer: option(args, "answer") ?? "",
-        reason,
-      },
-    );
-    savePlan(output, decided);
+    const answer = option(args, "answer");
+    if (!reason || (outcome !== "accept" && outcome !== "refuse"))
+      throw new Error("decide requires --outcome accept|refuse and --reason");
+    if (outcome === "accept" && !answer)
+      throw new Error("Accepting a plan requires --answer to its question");
+    const decided = await composePlanning(config).decidePlan(objective, {
+      plan: option(args, "plan"),
+      actor: option(args, "actor") ?? userInfo().username,
+      outcome,
+      answer: answer ?? "",
+      reason,
+    });
     console.log(
-      `Plan decision for Objective #${objective}: ${decided.review.status}; saved ${output}`,
+      outcome === "accept"
+        ? `Accepted the plan for Objective #${objective}; run \`factory run --objective ${objective}\` to continue`
+        : `Refused and discarded the plan for Objective #${decided.objective}; the next run plans again`,
     );
     return;
   }
@@ -672,13 +592,14 @@ async function main(): Promise<void> {
     const secrets = config.policy.allowedSecretNames
       .map((name) => process.env[name])
       .filter((value): value is string => Boolean(value));
+    const continuation = readContinuation(config.repository, objective);
     const document = continuationStatusDocument(
-      readContinuation(config.repository, objective),
+      continuation,
       config.repository,
       objective,
       config.delivery.kind,
       secrets,
-      config.execution.concurrency,
+      continuation?.capacity.concurrency,
       controllerActive(config.repository, objective),
     );
     if (args.includes("--json")) console.log(JSON.stringify(document));
@@ -713,7 +634,7 @@ async function main(): Promise<void> {
             readUsageSummaryEvents(
               config.repository,
               objective,
-              continuation?.schemaVersion === 4 ? continuation : undefined,
+              continuation?.schemaVersion === 6 ? continuation : undefined,
             ),
           ),
         ),
@@ -726,7 +647,7 @@ async function main(): Promise<void> {
       const timeline = readAgentTimeline(
         config.repository,
         objective,
-        continuation?.schemaVersion === 4 ? continuation : undefined,
+        continuation?.schemaVersion === 6 ? continuation : undefined,
       );
       for (const event of timeline) {
         const json = JSON.stringify(event);
@@ -800,7 +721,7 @@ async function main(): Promise<void> {
       input,
     });
     if (!reply.handled) requireApplication().repairWorkItem(objective, input);
-    console.log("Diagnosed repair recorded within admitted allowance");
+    console.log("Diagnosed repair recorded within the configured allowance");
   } else if (command === "retry") {
     const item = option(args, "item");
     if (!item) throw new Error("retry requires --item ID");
@@ -912,26 +833,25 @@ async function main(): Promise<void> {
     );
     console.log(`Exported AssetSet ${set} to ${output} for review`);
   } else {
-    const planPath = option(args, "plan");
-    const acceptedPlan = planPath
-      ? (JSON.parse(readFileSync(planPath, "utf8")) as PlanCandidate)
-      : undefined;
-    const state = await requireApplication().runObjective(
-      objective,
-      acceptedPlan,
-      option(args, "admission")
-        ? (JSON.parse(
-            readFileSync(option(args, "admission")!, "utf8"),
-          ) as AutonomousAdmission)
-        : undefined,
-      { deadlineAt: option(args, "deadline") },
-    );
-    console.log(
-      objectiveComplete(state)
-        ? `Objective #${objective} completed at ${objectiveCandidate(state)!.commitSha} (${objectiveCandidate(state)!.basis}); final validation passed`
-        : `Objective #${objective} awaits a decision; use status for the specific pending criterion or AssetSet`,
+    reportRun(
+      await requireApplication().runObjective(objective, {
+        deadlineAt: option(args, "deadline"),
+      }),
     );
   }
+}
+
+/** Print the intake record and set the documented exit code. */
+function reportIntake(record: IntakeAuthorization): void {
+  console.log(JSON.stringify(record, null, 2));
+  process.exitCode = intakeExitCode(record);
+}
+
+/** Print how a run ended and set the documented exit code. */
+function reportRun(state: ContinuationState): void {
+  const outcome = runOutcome(state);
+  console.log(outcome.message);
+  process.exitCode = outcome.code;
 }
 
 main().catch((error: unknown) => {

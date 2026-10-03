@@ -17,6 +17,7 @@ import { encodeCompilerWire } from "./support/compiler-wire.mjs";
 import { planObjective } from "../dist/runner.js";
 import { intakeControl, readIntake } from "../dist/intake.js";
 import { stateRoot, factoryConfigDigest } from "../dist/config.js";
+import { resolveAutonomy } from "../dist/index.js";
 import { createHash } from "node:crypto";
 import { objectiveComplete } from "../dist/completion.js";
 import {
@@ -35,21 +36,15 @@ import {
   readEvents,
 } from "./support/integration-fixture.mjs";
 
-const authority = {
-  schemaVersion: 1,
-  actor: "fixture",
-  reason: "Two bounded public Objectives",
-  executionConsent: true,
-  serviceConsent: true,
-  objectives: [1, 2],
+const objectives = [1, 2];
+/** No unattended repair or amendment unless a test raises a limit. */
+const limits = {
   allowances: {
     planningRevisions: 0,
     implementationRepairs: 0,
     resultRereviews: 0,
   },
   repairClasses: [],
-  resources: { maxConcurrency: 2 },
-  requiredEnvironment: [],
 };
 const body = (id) =>
   `## Acceptance\n- result-${id}.txt exists\n\n## Commands\n- test -s result-${id}.txt\n\n## Final validation\n- test -s result-${id}.txt\n`;
@@ -77,13 +72,16 @@ const item = (id) => ({
   minimumAssetSets: 0,
   requiredLfsRoles: [],
 });
-async function fixture(fn) {
+async function fixture(fn, autonomy = limits) {
   const root = mkdtempSync(join(tmpdir(), "factory-intake-"));
   const previous = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = join(root, "state");
   try {
     const target = createTarget(root);
-    const config = factoryConfig(target.checkout, "example/intake");
+    const config = {
+      ...factoryConfig(target.checkout, "example/intake"),
+      autonomy,
+    };
     const plans = [],
       issues = new Map(
         [1, 2].map((id) => [
@@ -198,7 +196,7 @@ async function fixture(fn) {
 
 test("two explicitly authorized Objectives advance with accepted predecessor baseline and no replay on reopen", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
     await f.application.runIntake();
     assert.deepEqual(
       f.plans.map((entry) => entry.objective),
@@ -221,6 +219,23 @@ test("two explicitly authorized Objectives advance with accepted predecessor bas
       2,
     );
   }));
+
+/** One diagnosed planning-evidence revision, nothing else. */
+const plannedRevision = {
+  allowances: {
+    planningRevisions: 1,
+    implementationRepairs: 0,
+    resultRereviews: 0,
+  },
+  repairClasses: ["planning-evidence"],
+  repairPolicy: {
+    perPath: {
+      planningRevisions: 1,
+      implementationRepairs: 0,
+      resultRereviews: 0,
+    },
+  },
+};
 
 test("sequential planning supplies grounded native acceptance in every rendered phase and preserves compound final timing", async (t) =>
   fixture(async (f) => {
@@ -279,7 +294,6 @@ test("sequential planning supplies grounded native acceptance in every rendered 
         );
         assert.deepEqual(JSON.parse(bounds.content), {
           configuredConcurrency: f.config.execution.concurrency,
-          authorizedMaxConcurrency: authority.resources.maxConcurrency,
         });
         const executables = packet.evidence.find(
           (entry) =>
@@ -324,17 +338,7 @@ test("sequential planning supplies grounded native acceptance in every rendered 
       request.graph.objective === 2
         ? real.reviewGraph(request)
         : reviewed(request);
-    const bounded = structuredClone(authority);
-    bounded.allowances.planningRevisions = 1;
-    bounded.repairClasses = ["planning-evidence"];
-    bounded.repairPolicy = {
-      perPath: {
-        planningRevisions: 1,
-        implementationRepairs: 0,
-        resultRereviews: 0,
-      },
-    };
-    await f.application.enqueueIntake(bounded, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
     await f.application.runIntake();
     const first = readState(f.config.repository, 1);
     assert.equal(
@@ -390,7 +394,7 @@ test("sequential planning supplies grounded native acceptance in every rendered 
       readEvents(f.eventsPath).filter((event) => event.type === "start").length,
       2,
     );
-  }));
+  }, plannedRevision));
 
 test("native planning facts refuse missing, unaccepted, changed and mismatched predecessors and bind descendant bases honestly", async () =>
   fixture(async (f) => {
@@ -398,10 +402,7 @@ test("native planning facts refuse missing, unaccepted, changed and mismatched p
       planObjective(f.config, 2, { github: f.github, planningModel: f.model }),
       /lacks bound accepted/,
     );
-    await f.application.enqueueIntake(
-      { ...structuredClone(authority), objectives: [1] },
-      { pollSeconds: 0.01 },
-    );
+    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
     await f.application.runIntake();
     const first = readState(f.config.repository, 1);
     const exact = await planningPrerequisites(
@@ -447,12 +448,6 @@ test("native planning facts refuse missing, unaccepted, changed and mismatched p
       /body changed after acceptance/,
     );
     f.issues.get(1).body = body(1);
-    f.dependencies.set(2, []);
-    await assert.rejects(
-      f.application.runObjective(2, candidate),
-      /native prerequisites changed/,
-    );
-    f.dependencies.set(2, [1]);
     writeFileSync(
       join(f.config.checkout, "later.txt"),
       "Later authenticated base\n",
@@ -497,16 +492,17 @@ test("native planning facts refuse missing, unaccepted, changed and mismatched p
     );
   }));
 
+const twoRevisions = {
+  ...limits,
+  allowances: { ...limits.allowances, planningRevisions: 2 },
+};
 async function activatedSuccessor(
   f,
   descendant = false,
   dependent = true,
   historical = false,
 ) {
-  await f.application.enqueueIntake(
-    { ...structuredClone(authority), objectives: [1] },
-    { pollSeconds: 0.01 },
-  );
+  await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
   await f.application.runIntake();
   const first = readState(f.config.repository, 1);
   assert.equal(objectiveComplete(first), true);
@@ -531,20 +527,16 @@ async function activatedSuccessor(
     git(f.config.checkout, "push", "origin", "main");
   }
   if (!dependent) f.dependencies.set(2, []);
+  // A read-only preview of the plan the run compiles from the same deterministic model.
   const candidate = await f.application.planObjective(2);
-  const bounded = structuredClone(authority);
-  bounded.allowances.planningRevisions = 2;
-  const admission = await f.application.admitObjective(2, candidate, bounded);
   // Refuse a worker start only after production activation has persisted the successor.
   f.driver.start = async () => {
     throw new Error("Fixture activated hold");
   };
-  await assert.rejects(
-    f.application.runObjective(2, candidate, admission),
-    /Fixture activated hold/,
-  );
+  await assert.rejects(f.application.runObjective(2), /Fixture activated hold/);
   const second = readState(f.config.repository, 2);
-  assert.equal(second.admission.packetDigest, candidate.packetDigest);
+  assert.equal(second.graphRevisions, undefined);
+  assert.deepEqual(second.graph, candidate.graph);
   assert.equal(second.work["result-2"].status, "failed");
   second.coordinator.mode = "running";
   return { first, second, candidate };
@@ -688,12 +680,6 @@ for (const [descendant, dependent, historical] of [
           descendant ? "descendant" : "equal",
         );
       }
-      assert.equal(
-        second.admission.prerequisitesDigest,
-        createHash("sha256")
-          .update(JSON.stringify(candidate.prerequisites ?? null))
-          .digest("hex"),
-      );
       assert.notDeepEqual(
         currentRequest.localExecutables,
         candidate.localExecutables,
@@ -710,7 +696,6 @@ for (const [descendant, dependent, historical] of [
       assert.equal(second.baseSha, candidate.baseSha);
       assert.equal(second.objectiveBodyDigest, candidate.bodyDigest);
       assert.equal(second.configDigest, candidate.configDigest);
-      assert.equal(second.admission.packetDigest, candidate.packetDigest);
       if (historical) {
         assert.equal(
           Object.hasOwn(
@@ -719,18 +704,12 @@ for (const [descendant, dependent, historical] of [
           ),
           false,
         );
-        assert.equal(
-          second.admission.prerequisitesDigest,
-          createHash("sha256")
-            .update(JSON.stringify(candidate.prerequisites))
-            .digest("hex"),
-        );
         assert.deepEqual(
           readState(f.config.repository, 1).finalAcceptance,
           first.finalAcceptance,
         );
       }
-    }));
+    }, twoRevisions));
 
 test("native successor amendments refuse missing, unaccepted, changed and removed original evidence before model calls", async () =>
   fixture(async (f) => {
@@ -752,23 +731,9 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
       "body",
       "relationship",
       "tree",
-      "historical",
     ]) {
       const state = structuredClone(second);
       successorDiscovery(state);
-      if (fault === "historical") {
-        delete state.admission.prerequisitesDigest;
-        const { digest, ...bound } = state.admission;
-        state.admission.digest = createHash("sha256")
-          .update(JSON.stringify(bound))
-          .digest("hex");
-        saveState(statePath(f.config.repository, 2), state);
-        assert.equal(
-          readState(f.config.repository, 2).admission.prerequisitesDigest,
-          undefined,
-        );
-        f.dependencies.set(2, []);
-      }
       if (fault === "missing") rmSync(statePath(f.config.repository, 1));
       if (fault === "unaccepted")
         saveState(statePath(f.config.repository, 1), {
@@ -803,7 +768,7 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
       f.issues.get(1).body = body(1);
       f.dependencies.set(2, [1]);
     }
-  }));
+  }, twoRevisions));
 
 test("one intake listener serves entry and terminal return controls under the same owner", async (t) =>
   fixture(async (f) => {
@@ -823,19 +788,20 @@ test("one intake listener serves entry and terminal return controls under the sa
     const releaseEntry = Promise.withResolvers();
     const returned = Promise.withResolvers();
     const releaseReturn = Promise.withResolvers();
-    const objective = f.github.objective.bind(f.github);
+    // Hold Objective entry once its persisted plan starts projection.
+    const project = f.github.projectGraph.bind(f.github);
     let entryHeld = false;
-    f.github.objective = async (id) => {
+    f.github.projectGraph = async (request) => {
       if (
         !entryHeld &&
-        id === 1 &&
+        request.objectiveIssue === 1 &&
         Boolean(readContinuation(f.config.repository, 1)?.plan)
       ) {
         entryHeld = true;
         entry.resolve();
         await releaseEntry.promise;
       }
-      return objective(id);
+      return project(request);
     };
     const scan = f.github.intakePage.bind(f.github);
     f.github.intakePage = async (...args) => {
@@ -848,7 +814,7 @@ test("one intake listener serves entry and terminal return controls under the sa
       }
       return scan(...args);
     };
-    await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
     const running = f.application.runIntake();
     const ownerPath = join(stateRoot(f.config.repository), "controller.lock");
     try {
@@ -926,7 +892,7 @@ test("pause after predecessor completion and restart keep accepted work and pres
       if (!args[2].workItem && ++closures === 1)
         await intakeControl(f.config, "pause");
     };
-    await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
     const running = f.application.runIntake();
     for (let i = 0; i < 500; i++) {
       if (
@@ -950,7 +916,7 @@ test("pause after predecessor completion and restart keep accepted work and pres
 
 test("changed queued issue and missing predecessor remain precisely ineligible without provider calls", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
     f.issues.get(1).body += "Changed requirement\n";
     f.dependencies.set(2, [99]);
     const running = f.application.runIntake();
@@ -970,10 +936,7 @@ test("changed queued issue and missing predecessor remain precisely ineligible w
 
 test("dirty compilation checkout is retained and cannot start planning", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake(
-      { ...authority, objectives: [1] },
-      { pollSeconds: 0.01 },
-    );
+    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
     writeFileSync(join(f.config.checkout, "README.md"), "User change\n");
     const running = f.application.runIntake();
     for (let i = 0; i < 100; i++) {
@@ -990,7 +953,7 @@ test("dirty compilation checkout is retained and cannot start planning", async (
 test("configured existing priority reorders only authorized pending Objectives", async () =>
   fixture(async (f) => {
     f.dependencies.clear();
-    await f.application.enqueueIntake(authority, {
+    await f.application.enqueueIntake(objectives, {
       priorityLabels: ["high"],
       pollSeconds: 0.01,
     });
@@ -1011,10 +974,7 @@ test("configured existing priority reorders only authorized pending Objectives",
 
 test("discovery omission refreshes exact authorized ID instead of treating work as deleted", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake(
-      { ...authority, objectives: [1] },
-      { pollSeconds: 0.01 },
-    );
+    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
     f.github.intakePage = async () => ({ status: 200, data: [] });
     await f.application.runIntake();
     assert.deepEqual(
@@ -1026,13 +986,15 @@ test("discovery omission refreshes exact authorized ID instead of treating work 
 for (const disposition of ["failed", "cancelled"])
   test(`${disposition} predecessor cannot admit its dependent`, async () =>
     fixture(async (f) => {
-      await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
+      await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
       saveState(statePath(f.config.repository, 1), {
-        schemaVersion: 5,
+        schemaVersion: 7,
         kind: "preparing",
         repository: f.config.repository,
         objective: 1,
         runId: "failed-preparation",
+        autonomy: resolveAutonomy(limits),
+        capacity: { concurrency: f.config.execution.concurrency },
         configDigest: factoryConfigDigest(f.config),
         baseSha: f.target.baseSha,
         objectiveBodyDigest: createHash("sha256").update(body(1)).digest("hex"),
@@ -1066,7 +1028,7 @@ for (const disposition of ["failed", "cancelled"])
 
 test("pause during durable compilation and restart reuse known model output without a second compile", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
     const generate = f.model.generateStructured.bind(f.model);
     let entered, release;
     const started = new Promise((resolve) => {
@@ -1083,7 +1045,7 @@ test("pause during durable compilation and restart reuse known model output with
     const running = f.application.runIntake();
     await started;
     const before = readContinuation(f.config.repository, 1);
-    assert.equal(before.authority.executionConsent, true);
+    assert.deepEqual(before.autonomy, resolveAutonomy(limits));
     assert.equal(before.configDigest, factoryConfigDigest(f.config));
     for (const action of ["status", "cancel", "pause"])
       await assert.rejects(
@@ -1102,7 +1064,11 @@ test("pause during durable compilation and restart reuse known model output with
         break;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    await intakeControl(f.config, "drain");
+    // A paused preparation keeps its owner waiting for resume; hand off to stop it.
+    await requestControl(f.config.repository, {
+      objective: 0,
+      action: "handoff",
+    });
     await running;
     assert.equal(f.plans.length, 1);
     await intakeControl(f.config, "resume");
@@ -1115,10 +1081,7 @@ test("pause during durable compilation and restart reuse known model output with
 
 test("closed selection stays ineligible until explicit dequeue without model calls", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake(
-      { ...authority, objectives: [1] },
-      { pollSeconds: 0.01 },
-    );
+    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
     f.issues.get(1).state = "closed";
     const running = f.application.runIntake();
     for (
@@ -1183,11 +1146,8 @@ test("idle intake status does not rescan or race an immediate same-owner refill"
       assert.deepEqual(await intakeControl(f.config, "status"), status);
       assert.deepEqual(readIntake(f.config), before);
       assert.equal(scans, 1);
-      const admitted = await f.application.enqueueIntake({
-        ...authority,
-        objectives: [1],
-      });
-      assert.deepEqual(admitted.authority.objectives, [1]);
+      const selected = await f.application.enqueueIntake([1]);
+      assert.deepEqual(selected.objectives, [1]);
       assert.equal(
         readControllerOwner(
           join(stateRoot(f.config.repository), "controller.lock"),
@@ -1198,7 +1158,7 @@ test("idle intake status does not rescan or race an immediate same-owner refill"
       // enforced while that second GitHub scan is deliberately outstanding.
       await secondScan.promise;
       await assert.rejects(
-        f.application.enqueueIntake({ ...authority, objectives: [1] }),
+        f.application.enqueueIntake([1]),
         /settled refill boundary/,
       );
       await assert.rejects(
@@ -1248,7 +1208,7 @@ test("consented continuous intake stays model-free while idle and refills throug
   fixture(async (f) => {
     const { watchIntake } = await import("../dist/intake.js");
     await watchIntake(f.config, watcherConsent, { pollSeconds: 0.05 });
-    assert.equal(readIntake(f.config).authority, undefined);
+    assert.deepEqual(readIntake(f.config).objectives, []);
     const running = f.application.runIntake();
     await waitFor(
       () =>
@@ -1260,11 +1220,11 @@ test("consented continuous intake stays model-free while idle and refills throug
     const owner = readControllerOwner(
       join(stateRoot(f.config.repository), "controller.lock"),
     );
-    await settledEnqueue(f.application, { ...authority, objectives: [1] });
+    await settledEnqueue(f.application, [1]);
     await waitFor(() => {
       const state = readContinuation(f.config.repository, 1);
       return (
-        state?.schemaVersion === 4 &&
+        state?.schemaVersion === 6 &&
         objectiveComplete(state) &&
         readIntake(f.config).observation?.idleReason ===
           "awaiting-approved-work"
@@ -1277,11 +1237,11 @@ test("consented continuous intake stays model-free while idle and refills throug
       ).token,
       owner.token,
     );
-    await settledEnqueue(f.application, { ...authority, objectives: [1, 2] });
+    await settledEnqueue(f.application, [1, 2]);
     await waitFor(() => {
       const state = readContinuation(f.config.repository, 2);
       return (
-        state?.schemaVersion === 4 &&
+        state?.schemaVersion === 6 &&
         objectiveComplete(state) &&
         readIntake(f.config).observation?.idleReason ===
           "awaiting-approved-work"
@@ -1324,10 +1284,9 @@ test("consented continuous intake stays model-free while idle and refills throug
 
 test("watch retains changed-body fences and reports unavailable observations without candidate body storage or model calls", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake(
-      { ...authority, objectives: [1] },
-      { watch: true, pollSeconds: 0.05 },
-    );
+    const { watchIntake } = await import("../dist/intake.js");
+    await watchIntake(f.config, watcherConsent, { pollSeconds: 0.05 });
+    await f.application.enqueueIntake([1], { watch: true, pollSeconds: 0.05 });
     f.issues.get(1).body += "Changed after explicit authorization";
     const running = f.application.runIntake();
     await waitFor(() =>
@@ -1358,20 +1317,19 @@ test("watch and refill preserve failed nonterminal fences and require real servi
       /explicit service consent/,
     );
     await assert.rejects(
-      f.application.enqueueIntake(
-        { ...authority, serviceConsent: false },
-        { watch: true },
-      ),
+      f.application.enqueueIntake(objectives, { watch: true }),
       /explicit service consent/,
     );
     await watchIntake(f.config, watcherConsent);
     const failed = {
-      schemaVersion: 5,
+      schemaVersion: 7,
       kind: "preparing",
       repository: f.config.repository,
       objective: 1,
       configDigest: factoryConfigDigest(f.config),
       runId: "preserved-failure",
+      autonomy: resolveAutonomy(limits),
+      capacity: { concurrency: f.config.execution.concurrency },
       baseSha: "a".repeat(40),
       objectiveBodyDigest: "b".repeat(64),
       coordinator: {
@@ -1384,7 +1342,7 @@ test("watch and refill preserve failed nonterminal fences and require real servi
     };
     saveState(statePath(f.config.repository, 1), failed);
     await assert.rejects(
-      f.application.enqueueIntake(authority),
+      f.application.enqueueIntake(objectives),
       /active Objective prevents/,
     );
     await assert.rejects(
@@ -1392,5 +1350,5 @@ test("watch and refill preserve failed nonterminal fences and require real servi
       /active Objective prevents/,
     );
     assert.deepEqual(readContinuation(f.config.repository, 1), failed);
-    assert.equal(readIntake(f.config).authority, undefined);
+    assert.deepEqual(readIntake(f.config).objectives, []);
   }));

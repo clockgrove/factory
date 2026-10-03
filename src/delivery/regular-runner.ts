@@ -74,7 +74,7 @@ export async function runRegularGraph(args: {
     save,
     active,
   } = args;
-  const phases = phaseAdmission(config, state, save, args.cancelled);
+  const phases = phaseAdmission(state, save, args.cancelled);
   const graph = state.graph;
   const baseSha = state.baseSha;
   let failure: unknown;
@@ -427,7 +427,6 @@ export async function runRegularGraph(args: {
           args.objectiveBody,
           state.baseSha,
           config.checkout,
-          state.additionalSources,
         ),
         decisions: work.acceptanceDecisions,
         evidenceSources: workItemReviewEvidence({
@@ -512,11 +511,7 @@ export async function runRegularGraph(args: {
       else delete work.authentication;
       if (work.phaseReservation !== "coding") phases.release(item.id);
       const isolated = recordWorkFailure(state, item.id, error);
-      if (
-        isolated &&
-        state.admission?.authority.repairPolicy &&
-        !args.cancelled()
-      ) {
+      if (isolated && !args.cancelled()) {
         phases.release(item.id);
         save();
         await phases.reserve(item.id, "review");
@@ -530,7 +525,6 @@ export async function runRegularGraph(args: {
               args.objectiveBody,
               state.baseSha,
               config.checkout,
-              state.additionalSources,
             ),
             save,
             stopped: () =>
@@ -613,7 +607,7 @@ export async function runRegularGraph(args: {
       outcome: "observed",
       metadata: {
         driverAvailableSlots: reported,
-        operatorCeiling: config.execution.concurrency,
+        operatorCeiling: state.capacity.concurrency,
         codingReservations: phases.codingCount(),
       },
     });

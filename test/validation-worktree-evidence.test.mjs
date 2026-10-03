@@ -650,8 +650,7 @@ for (const route of ["regular", "native-stack"])
           },
           resultReviewer: (request) => model.reviewResult(request),
         });
-        const candidate = await application.planObjective(1);
-        const state = await application.runObjective(1, candidate);
+        const state = await application.runObjective(1);
         assert.equal(state.finalValidation.passed, true);
         for (const evidence of [
           state.work.result.validation,

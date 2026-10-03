@@ -37,7 +37,7 @@ import type {
   PreparationState,
   WorkState,
 } from "./state.js";
-import { summarizeStatus } from "./status-summary.js";
+import { shortPlanDigest, summarizeStatus } from "./status-summary.js";
 import { normalizeTokenUsage, tokenCategories } from "./usage.js";
 
 export interface DiagnosticEvent {
@@ -1295,8 +1295,14 @@ export function preparationStatusDocument(
       redactCoordinatorDisposition(preparation.coordinator, secrets) ?? null,
     planned: Boolean(preparation.plan),
     planReview: review?.status
-      ? { status: review.status, question: redact(question) }
+      ? {
+          status: review.status,
+          question: redact(question),
+          digest: shortPlanDigest(preparation.plan!),
+        }
       : null,
+    planningStopped:
+      !preparation.plan && preparation.planningRecovery?.phase === "stopped",
     issueByItemId: preparation.issueByItemId,
     cancelledAt: preparation.cancelledAt ?? null,
     error: redact(preparation.error),
@@ -1315,7 +1321,7 @@ export function continuationStatusDocument(
   concurrency?: number,
   runActive: boolean | null = null,
 ) {
-  return continuation?.schemaVersion === 5
+  return continuation?.schemaVersion === 7
     ? preparationStatusDocument(continuation, secrets, runActive)
     : statusDocument(
         continuation,

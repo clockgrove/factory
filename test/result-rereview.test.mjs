@@ -33,6 +33,8 @@ for (const delivery of ["regular", "native-stack"]) {
         "example/rereview",
         delivery,
       );
+      // Without automatic repair, a malformed review waits for the operator.
+      config.autonomy = { repairClasses: [] };
       const commands = ["test -s first.txt", "test -s second.txt"];
       const items = ["first", "second"].map((id, index) => ({
         id,

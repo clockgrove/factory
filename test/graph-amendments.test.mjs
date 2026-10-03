@@ -23,7 +23,7 @@ import {
 } from "../dist/compiler.js";
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
 import { readState, statePath } from "../dist/state-store.js";
-import { failureDigest } from "../dist/repair-policy.js";
+import { failureDigest, resolveAutonomy } from "../dist/repair-policy.js";
 import { parseFactoryState } from "../dist/state.js";
 import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
@@ -52,21 +52,23 @@ const discovery = {
   acceptance: ["result.txt exists at integrated head"],
   dependencies: ["result"],
 };
-const authority = {
-  schemaVersion: 1,
-  actor: "fixture",
-  reason: "Bounded amendment regression",
-  executionConsent: true,
-  serviceConsent: false,
-  objectives: [1],
+// One planning revision pays for one amendment; no repair is enabled.
+const autonomyConfig = {
   allowances: {
     planningRevisions: 1,
     implementationRepairs: 0,
     resultRereviews: 0,
   },
   repairClasses: [],
-  resources: { maxConcurrency: 2 },
-  requiredEnvironment: [],
+};
+const autonomy = resolveAutonomy(autonomyConfig);
+// Two planning revisions, both chargeable as diagnosed planning-output repairs.
+const replacementAutonomy = {
+  allowances: { ...autonomyConfig.allowances, planningRevisions: 2 },
+  repairClasses: ["planning-output"],
+  repairPolicy: {
+    perPath: { ...autonomyConfig.allowances, planningRevisions: 2 },
+  },
 };
 const body =
   "## Acceptance\n- result.txt exists\n\n## Commands\n- test -s result.txt\n\n## Final validation\n- test -s result.txt\n";
@@ -121,6 +123,7 @@ async function fixture(name, fn, delivery = "regular") {
       `example/amend-${name}`,
       delivery,
     );
+    config.autonomy = structuredClone(autonomyConfig);
     const initial = { objective: 1, baseSha: target.baseSha, items: [item()] };
     await fn({ root, config, initial, target });
   } finally {
@@ -143,8 +146,6 @@ for (const delivery of ["regular", "native-stack"])
             generated++;
             assert.deepEqual(request.executionBounds, {
               configuredConcurrency: config.execution.concurrency,
-              authorizedMaxConcurrency:
-                generated === 1 ? null : authority.resources.maxConcurrency,
             });
             assert.equal(
               request.localExecutables.provenance,
@@ -190,10 +191,6 @@ for (const delivery of ["regular", "native-stack"])
             assert.deepEqual(
               JSON.parse(bounds.content),
               request.executionBounds,
-            );
-            assert.equal(
-              request.executionBounds.authorizedMaxConcurrency,
-              request.amendment ? authority.resources.maxConcurrency : null,
             );
             assert.equal(
               request.localExecutables.provenance,
@@ -288,21 +285,15 @@ for (const delivery of ["regular", "native-stack"])
             },
           },
         });
-        const candidate = await setup.application.planObjective(1);
-        const admission = await setup.application.admitObjective(1, candidate, {
-          ...authority,
-          serviceConsent: true,
-        });
-        const state = await setup.application.runObjective(
-          1,
-          candidate,
-          admission,
-        );
+        const state = await setup.application.runObjective(1);
         assert.equal(state.finalValidation.passed, true);
         assert.equal(generated, 2);
         assert.equal(reviews, 2);
         assert.equal(state.graphRevisions.length, 2);
-        assert.equal(state.admission.graphDigest, graphDigest(candidate.graph));
+        assert.deepEqual(
+          state.graphRevisions[0].graph.items.map(({ id }) => id),
+          ["result"],
+        );
         assert.equal(state.allowanceConsumption.planningRevisions, 1);
         assert.equal(state.work.result.discoveryDisposition, "accepted");
         assert.equal(state.work.qa.status, "done");
@@ -482,7 +473,9 @@ test("amendment validation preserves cycles, stable/completed identity, command 
       baseSha: initial.baseSha,
       issueByItemId: { result: 2 },
       work: { result: { status: "pending" } },
-      admission: { graphDigest: graphDigest(graph), authority },
+      autonomy,
+      capacity: { concurrency: config.execution.concurrency },
+      planGraphDigest: graphDigest(graph),
     };
     const proposal = {
       ...discovery,
@@ -583,6 +576,8 @@ for (const delivery of ["regular", "native-stack"])
               return decoded;
             },
             async reviewGraph(request) {
+              // The initial review sees the canonical graph the run activates.
+              if (!request.amendment) first = structuredClone(request.graph);
               if (request.amendment) {
                 amendmentReviews++;
                 assert.deepEqual(request.amendment.previousGraph, first);
@@ -674,18 +669,6 @@ for (const delivery of ["regular", "native-stack"])
               },
             },
           });
-          const candidate = await setup.application.planObjective(1);
-          assert.equal(
-            candidate.review.status,
-            "clean",
-            JSON.stringify(candidate.review),
-          );
-          const admission = await setup.application.admitObjective(
-            1,
-            candidate,
-            authority,
-          );
-          first = structuredClone(candidate.graph);
           const projected = [];
           const project = setup.github.projectGraph.bind(setup.github);
           setup.github.projectGraph = async (request) => {
@@ -694,10 +677,10 @@ for (const delivery of ["regular", "native-stack"])
           };
           if (weakened)
             await assert.rejects(
-              setup.application.runObjective(1, candidate, admission),
+              setup.application.runObjective(1),
               /Independent amendment review rejected/,
             );
-          else await setup.application.runObjective(1, candidate, admission);
+          else await setup.application.runObjective(1);
           const state = readState(config.repository, 1);
           assert.equal(generated, 2);
           assert.equal(amendmentReviews, 1);
@@ -796,7 +779,9 @@ test("operator amendment source inputs are hydrated from pinned citations before
       runId: "fixture",
       issueByItemId: { result: 2 },
       work: { result: { status: "done", attempt: "preserved" } },
-      admission: { graphDigest: graphDigest(graph), authority },
+      autonomy,
+      capacity: { concurrency: config.execution.concurrency },
+      planGraphDigest: graphDigest(graph),
       coordinator: { mode: "running" },
     };
     const candidate = qaGraph(graph);
@@ -903,7 +888,9 @@ async function assertProjectionRepeats(name, lostError, pattern) {
         runId: "fixture",
         issueByItemId: { result: 2 },
         work: { result: { status: "done", attempt: "preserved" } },
-        admission: { graphDigest: graphDigest(graph), authority },
+        autonomy,
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: graphDigest(graph),
         coordinator: { mode: "running" },
       };
       submitAmendment(state, {
@@ -1014,13 +1001,12 @@ test("interrupted amendment compile is repeated and charged once", async () => {
           runId: "fixture",
           issueByItemId: { result: 2 },
           work: { result: { status: "done", attempt: "preserved" } },
-          admission: {
-            graphDigest: graphDigest(graph),
-            authority: {
-              ...authority,
-              allowances: { ...authority.allowances, planningRevisions: 2 },
-            },
-          },
+          autonomy: resolveAutonomy({
+            ...autonomyConfig,
+            allowances: { ...autonomyConfig.allowances, planningRevisions: 2 },
+          }),
+          capacity: { concurrency: config.execution.concurrency },
+          planGraphDigest: graphDigest(graph),
           coordinator: { mode: "running" },
         };
         submitAmendment(state, {
@@ -1098,7 +1084,6 @@ test("interrupted amendment compile is repeated and charged once", async () => {
 
 test("compound: amendment invalidates final review before lost closure acknowledgement is reconciled", async () => {
   await fixture("final-race", async ({ config, initial, root }) => {
-    let accepted;
     let finals = 0;
     let setup;
     const planningModel = {
@@ -1114,13 +1099,15 @@ test("compound: amendment invalidates final review before lost closure acknowled
       async reviewResult(request) {
         if (request.invocation.phase === "objective-review") {
           finals++;
-          if (finals === 1)
+          if (finals === 1) {
+            const { graph } = readState(config.repository, 1);
             await setup.application.proposeAmendment(1, {
               ...discovery,
               actor: "operator",
-              expectedGraphDigest: graphDigest(accepted.graph),
-              graph: qaGraph(accepted.graph),
+              expectedGraphDigest: graphDigest(graph),
+              graph: qaGraph(graph),
             });
+          }
         }
         return {
           packetId: request.reviewPacket.id,
@@ -1148,12 +1135,6 @@ test("compound: amendment invalidates final review before lost closure acknowled
       planningModel,
       actions: { result: { files: [{ path: "result.txt", text: "done\n" }] } },
     });
-    accepted = await setup.application.planObjective(1);
-    const admission = await setup.application.admitObjective(
-      1,
-      accepted,
-      authority,
-    );
     const close = setup.github.closeIssue.bind(setup.github);
     let closures = 0;
     let sealed;
@@ -1164,28 +1145,20 @@ test("compound: amendment invalidates final review before lost closure acknowled
         throw new Error("Acknowledgement lost after amended Objective closure");
       }
     };
-    const running = setup.application.runObjective(1, accepted, admission);
-    for (let i = 0; i < 300; i++) {
-      const state = readState(config.repository, 1);
-      if (
-        state?.objectiveClosure === "pending" &&
-        state.coordinator.mode === "paused"
-      )
-        break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await assert.rejects(
+      setup.application.runObjective(1),
+      /Acknowledgement lost after amended Objective closure/,
+    );
     const pending = readState(config.repository, 1);
     assert.equal(pending.objectiveClosure, "pending");
-    assert.equal(pending.coordinator.mode, "paused");
     assert.equal(pending.graphRevisions.length, 2);
     assert.equal(pending.work.qa.status, "done");
     assert.equal(finals, 2);
     const consumption = structuredClone(pending.allowanceConsumption);
     assert.equal(sealed.graphDigest, graphDigest(pending.graph));
-    assert.notEqual(sealed.graphDigest, graphDigest(accepted.graph));
+    assert.notEqual(sealed.graphDigest, pending.graphRevisions[0].digest);
     assert.equal(sealed.usage.availability, "unavailable");
-    await controlObjective(config, { objective: 1, action: "resume" });
-    const state = await running;
+    const state = await setup.application.runObjective(1);
     assert.equal(closures, 2);
     assert.equal(state.objectiveClosure, "complete");
     assert.deepEqual(state.finalAcceptance, sealed);
@@ -1368,13 +1341,7 @@ test("out-of-scope discovery is retained as backlog without consuming authority 
         },
       },
     });
-    const candidate = await setup.application.planObjective(1);
-    const admission = await setup.application.admitObjective(
-      1,
-      candidate,
-      authority,
-    );
-    const state = await setup.application.runObjective(1, candidate, admission);
+    const state = await setup.application.runObjective(1);
     assert.equal(state.work.result.discovery.scope, "backlog");
     assert.equal(state.allowanceConsumption, undefined);
     assert.equal(state.graph.items.length, 1);
@@ -1399,7 +1366,9 @@ test("native amendments cannot repartition a started published stack", async () 
           result: { status: "published", attempt: "original", pullRequest: 4 },
           second: { status: "pending" },
         },
-        admission: { graphDigest: graphDigest(graph), authority },
+        autonomy,
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: graphDigest(graph),
       };
       const candidate = structuredClone(graph);
       candidate.items.push(item("fork", ["result"]));
@@ -1442,7 +1411,9 @@ test("planning consumption survives acceptance and cannot reset for a second rev
       runId: "fixture",
       issueByItemId: { result: 2 },
       work: { result: { status: "done", attempt: "original" } },
-      admission: { graphDigest: graphDigest(graph), authority },
+      autonomy,
+      capacity: { concurrency: config.execution.concurrency },
+      planGraphDigest: graphDigest(graph),
     };
     const args = {
       state,
@@ -1719,17 +1690,7 @@ for (const delivery of ["regular", "native-stack"])
             two: { files: [{ path: "two.txt", text: "two\n" }] },
           },
         });
-        const candidate = await setup.application.planObjective(1);
-        const admission = await setup.application.admitObjective(
-          1,
-          candidate,
-          authority,
-        );
-        const state = await setup.application.runObjective(
-          1,
-          candidate,
-          admission,
-        );
+        const state = await setup.application.runObjective(1);
         assert.equal(generated, 2);
         assert.equal(state.finalValidation.passed, true);
         assert.equal(state.work.parent.status, "done");
@@ -1772,7 +1733,9 @@ for (const mode of ["paused", "draining"])
               graphRevisionDigest: graphDigest(graph),
             },
           },
-          admission: { graphDigest: graphDigest(graph), authority },
+          autonomy,
+          capacity: { concurrency: config.execution.concurrency },
+          planGraphDigest: graphDigest(graph),
           coordinator: { mode: "running" },
         };
         const admittedBytes = JSON.stringify(graph);
@@ -1923,13 +1886,8 @@ test("owner handoff after known amendment review resumes without repeating model
         },
       },
     });
-    const candidate = await setup.application.planObjective(1);
-    const admission = await setup.application.admitObjective(1, candidate, {
-      ...authority,
-      serviceConsent: true,
-    });
     await assert.rejects(
-      setup.application.runObjective(1, candidate, admission),
+      setup.application.runObjective(1),
       (error) => error.constructor.name === "CoordinatorHandoff",
     );
     const stopped = readState(config.repository, 1);
@@ -1964,6 +1922,7 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
   test(`${transport}: diagnosed ${rejection} amendment replacement retains accepted work and charges one remaining revision`, async () => {
     await fixture("rejected-correction", async ({ root, config, initial }) => {
       config.policy.allowedSecretNames = ["FACTORY_TEST_AMENDMENT_SECRET"];
+      config.autonomy = structuredClone(replacementAutonomy);
       let first;
       let compilations = 0;
       let graphReviews = 0;
@@ -2080,18 +2039,8 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
           },
         },
       });
-      const candidate = await setup.application.planObjective(1);
-      const admission = await setup.application.admitObjective(1, candidate, {
-        ...authority,
-        serviceConsent: true,
-        allowances: { ...authority.allowances, planningRevisions: 2 },
-        repairClasses: ["planning-output"],
-        repairPolicy: {
-          perPath: { ...authority.allowances, planningRevisions: 2 },
-        },
-      });
       await assert.rejects(
-        setup.application.runObjective(1, candidate, admission),
+        setup.application.runObjective(1),
         rejection === "compilation"
           ? /QA node has no acceptance coverage/
           : /Independent amendment review rejected/,
@@ -2248,7 +2197,7 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
           s.objectiveClosure = "complete";
         },
         (s) => {
-          s.admission.authority.repairClasses = [];
+          s.autonomy.repairClasses = [];
         },
         (s) => {
           s.allowanceConsumption.planningRevisions = 2;
@@ -2333,7 +2282,7 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
       assert.deepEqual(replaced.rejectedAmendments, [stopped.pendingAmendment]);
       assert.deepEqual(replaced.graph, stopped.graph);
       assert.deepEqual(replaced.work, stopped.work);
-      assert.deepEqual(replaced.admission, stopped.admission);
+      assert.deepEqual(replaced.autonomy, stopped.autonomy);
       assert.equal(replaced.runId, stopped.runId);
       assert.equal(replaced.error, undefined);
       assert.equal(replaced.coordinator.mode, "paused");
@@ -2446,17 +2395,9 @@ test("actual review provider/protocol failures cannot authorize amendment replac
         graph,
         issueByItemId: { result: 2 },
         work: { result: { status: "done", attempt: "retained" } },
-        admission: {
-          graphDigest: graphDigest(graph),
-          authority: {
-            ...authority,
-            allowances: { ...authority.allowances, planningRevisions: 2 },
-            repairClasses: ["planning-output"],
-            repairPolicy: {
-              perPath: { ...authority.allowances, planningRevisions: 2 },
-            },
-          },
-        },
+        autonomy: resolveAutonomy(replacementAutonomy),
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: graphDigest(graph),
         coordinator: { mode: "running" },
       };
       submitAmendment(state, {
@@ -2616,7 +2557,9 @@ test("completed-rejection preserves projection history without replay", async ()
         runId: "fixture",
         issueByItemId: { result: 2 },
         work: { result: { status: "done", attempt: "preserved" } },
-        admission: { graphDigest: graphDigest(graph), authority },
+        autonomy,
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: graphDigest(graph),
         coordinator: { mode: "running" },
       };
       submitAmendment(state, {
@@ -2685,7 +2628,9 @@ test("completed-auth-rejection preserves projection history without replay", asy
         runId: "fixture",
         issueByItemId: { result: 2 },
         work: { result: { status: "done", attempt: "preserved" } },
-        admission: { graphDigest: graphDigest(graph), authority },
+        autonomy,
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: graphDigest(graph),
         coordinator: { mode: "running" },
       };
       submitAmendment(state, {

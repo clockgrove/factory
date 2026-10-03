@@ -199,7 +199,7 @@ test("private diagnostics redact secrets and validation streams command output",
     const stateDiagnostics = new StateDiagnostics(
       emitter,
       {
-        schemaVersion: 4,
+        schemaVersion: 6,
         repository: "example/diagnostics",
         objective: 1,
         runId: "run-review",

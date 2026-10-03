@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   existsSync,
@@ -19,6 +18,8 @@ import { ClaudeAgentSdkHarness } from "../dist/execution/claude.js";
 import { GitHubCopilotSdkHarness } from "../dist/execution/github-copilot.js";
 import { CodexHarness, LocalExecutionDriver } from "../dist/execution/local.js";
 import { linuxProcessIdentity, processGroupExists } from "../dist/process.js";
+import { resolveAutonomy } from "../dist/index.js";
+import { graphDigest } from "../dist/graph-amendments.js";
 import { cancelObjective } from "../dist/runner.js";
 import { coverageObligations } from "../dist/qa.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
@@ -280,30 +281,8 @@ test("supported Objective cancellation retains the ceased worker failure and con
         handle: h,
       },
     };
-    const bound = {
-      schemaVersion: 1,
-      repository: config.repository,
-      objective: 1,
-      configDigest: factoryConfigDigest(config),
-      authority: {
-        schemaVersion: 1,
-        actor: "fixture operator",
-        reason: "Cancellation regression",
-        executionConsent: true,
-        serviceConsent: false,
-        objectives: [1],
-        allowances: {
-          planningRevisions: 1,
-          implementationRepairs: 1,
-          resultRereviews: 1,
-        },
-        repairClasses: [],
-        resources: { maxConcurrency: 2 },
-        requiredEnvironment: [],
-      },
-    };
     const state = {
-      schemaVersion: 4,
+      schemaVersion: 6,
       repository: config.repository,
       objective: 1,
       runId: "failed-run",
@@ -329,12 +308,18 @@ test("supported Objective cancellation retains the ceased worker failure and con
         })),
       },
       issueByItemId: { worker: 2 },
-      admission: {
-        ...bound,
-        digest: createHash("sha256")
-          .update(JSON.stringify(bound))
-          .digest("hex"),
+      capacity: { concurrency: 1 },
+      get planGraphDigest() {
+        return graphDigest(this.graph);
       },
+      autonomy: resolveAutonomy({
+        allowances: {
+          planningRevisions: 1,
+          implementationRepairs: 1,
+          resultRereviews: 1,
+        },
+        repairClasses: [],
+      }),
       allowanceConsumption: {
         planningRevisions: 1,
         implementationRepairs: 1,

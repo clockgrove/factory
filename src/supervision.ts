@@ -31,10 +31,6 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  type AutonomousAdmission,
-  assertAdmissionBinding,
-} from "./admission.js";
-import {
   type FactoryConfig,
   factoryConfigDigest,
   readConfig,
@@ -55,8 +51,6 @@ interface ServiceBinding {
   objective: number;
   stateHome: string;
   environment: Record<string, string>;
-  plan?: string;
-  admission?: string;
 }
 const serviceEnvironment = [
   "HOME",
@@ -226,8 +220,6 @@ function decodeBinding(text: string, teardown = false): ServiceBinding {
     !Object.values(value.environment).every(
       (value) => typeof value === "string",
     ) ||
-    (value.plan !== undefined && !path(value.plan)) ||
-    (value.admission !== undefined && !path(value.admission)) ||
     (value.credentials !== undefined &&
       (!Array.isArray(value.credentials) ||
         !value.credentials.length ||
@@ -384,8 +376,6 @@ function inspectBinding(
     objective: value.objective,
     stateHome: value.stateHome,
     ...(value.intake === undefined ? {} : { intake: value.intake }),
-    ...(value.plan === undefined ? {} : { plan: value.plan }),
-    ...(value.admission === undefined ? {} : { admission: value.admission }),
     ...(value.credentials === undefined
       ? {}
       : {
@@ -420,8 +410,6 @@ export function renderService(value: ServiceBinding): string {
       name,
     ]),
     ...(value.intake ? ["--intake"] : ["--objective", String(value.objective)]),
-    ...(value.plan ? ["--plan", value.plan] : []),
-    ...(value.admission ? ["--admission", value.admission] : []),
   ];
   return `${marker}${JSON.stringify(value)}\n[Unit]\nDescription=Factory local Objective coordinator\n[Service]\nType=exec\nUMask=0077\nExecStart=${args.map((value) => quoted(value)).join(" ")}\n${Object.entries(
     { ...value.environment, XDG_STATE_HOME: value.stateHome },
@@ -429,52 +417,27 @@ export function renderService(value: ServiceBinding): string {
     .map(([key, val]) => `Environment=${quoted(`${key}=${val}`, false)}`)
     .join(
       "\n",
-    )}\n${(value.credentials ?? []).map(({ name, file }) => `LoadCredential=${quoted(`${name}:${file}`, false)}\n`).join("")}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nRestartPreventExitStatus=1\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
+    )}\n${(value.credentials ?? []).map(({ name, file }) => `LoadCredential=${quoted(`${name}:${file}`, false)}\n`).join("")}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nSuccessExitStatus=2\nRestartPreventExitStatus=1 2\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
 }
 function checkServiceContinuationFields(state: ContinuationState): void {
   // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
   const fields =
-    state.schemaVersion === 5
-      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest admission authority allowanceConsumption repairConsumption planningRecovery coordinator plan issueByItemId error cancelRequested cancelledAt permanentAbandonment"
-      : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment rejectedAmendments allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
+    state.schemaVersion === 7
+      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest autonomy capacity allowanceConsumption repairConsumption planningRecovery coordinator plan issueByItemId error cancelRequested cancelledAt permanentAbandonment"
+      : "schemaVersion repository objective runId configDigest baseSha autonomy capacity planGraphDigest prerequisitesDigest coordinator graph graphRevisions pendingAmendment rejectedAmendments allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
   for (const field of Object.keys(state))
     if (!fields.split(" ").includes(field))
       throw new Error(
         `Artifact cannot validate continuation field ${field}; upgrade/rollback refused`,
       );
 }
+/** Installing a service for an Objective is its service consent; state must match this installation. */
 export function checkServiceState(
   config: FactoryConfig,
   objective: number,
-  admissionPath?: string,
-  consentFromIntake = false,
 ): void {
   const state = readContinuation(config.repository, objective);
   if (state) checkServiceContinuationFields(state);
-  const admission =
-    state?.admission ??
-    (admissionPath
-      ? (JSON.parse(readFileSync(admissionPath, "utf8")) as AutonomousAdmission)
-      : undefined);
-  if (!admission)
-    throw new Error(
-      "Background operation requires an existing exact admission",
-    );
-  assertAdmissionBinding(admission);
-  const intake = consentFromIntake ? readIntake(config) : undefined;
-  const explicitlyConsentedIntake =
-    !!intake &&
-    intakeServiceConsent(intake) &&
-    (intake.authority?.objectives ?? []).includes(objective);
-  if (
-    (!admission.authority.serviceConsent && !explicitlyConsentedIntake) ||
-    admission.repository !== config.repository ||
-    admission.objective !== objective ||
-    admission.configDigest !== factoryConfigDigest(config)
-  )
-    throw new Error(
-      "Service consent or exact installation/admission binding is missing",
-    );
   if (state && state.configDigest !== factoryConfigDigest(config))
     throw new Error(
       "Continuation configuration differs; refusing compatibility claim",
@@ -495,13 +458,7 @@ export function checkIntakeServiceState(config: FactoryConfig): void {
     throw new Error(
       "Intake background operation requires explicit service consent",
     );
-  for (const id of intake.authority?.objectives ?? []) {
-    const state = readContinuation(config.repository, id);
-    if (state) checkServiceContinuationFields(state);
-    if (state?.admission) checkServiceState(config, id, undefined, true);
-    else if (state && state.schemaVersion !== 5)
-      throw new Error("Intake continuation has no admission");
-  }
+  for (const id of intake.objectives) checkServiceState(config, id);
 }
 
 export async function handoffService(
@@ -523,11 +480,18 @@ export async function handoffService(
     await pause(100);
   }
 }
+/** A stopped service whose run exited 2 is waiting for a human decision, not failed. */
+function awaitsDecision(name: string): boolean {
+  return (
+    inspect("is-active", name) !== "active" &&
+    inspect("show", name, "--property=ExecMainStatus", "--value") === "2"
+  );
+}
 async function verifyServiceOwner(
   config: FactoryConfig,
   objective: number,
   name: string,
-): Promise<void> {
+): Promise<"owner" | "settled" | "needs-decision"> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const owner = readControllerOwner(
@@ -543,16 +507,18 @@ async function verifyServiceOwner(
         objective,
         action: "status",
       });
-      if (reply.handled) return;
+      if (reply.handled) return "owner";
     }
     const intake = objective === 0 ? readIntake(config) : undefined;
-    if (intake && !intake.watch && intakeComplete(config, intake)) return;
+    if (intake && !intake.watch && intakeComplete(config, intake))
+      return "settled";
     const current = readContinuation(config.repository, objective);
     if (
       current?.cancelledAt ||
-      (current?.schemaVersion === 4 && objectiveComplete(current))
+      (current?.schemaVersion === 6 && objectiveComplete(current))
     )
-      return;
+      return "settled";
+    if (awaitsDecision(name)) return "needs-decision";
     if (inspect("is-active", name) === "failed") break;
     await pause(100);
   }
@@ -572,7 +538,6 @@ function validateArtifact(value: ServiceBinding): void {
       ...(value.intake
         ? ["--intake"]
         : ["--objective", String(value.objective)]),
-      ...(value.admission ? ["--admission", value.admission] : []),
     ],
     undefined,
     { ...process.env, ...value.environment, XDG_STATE_HOME: value.stateHome },
@@ -594,8 +559,6 @@ export async function supervise(
   input: {
     objective?: number;
     intake?: boolean;
-    plan?: string;
-    admission?: string;
     cli?: string;
     /** `NAME=ABSOLUTE_PRIVATE_FILE` for each required provider credential. */
     credentialFiles?: string[];
@@ -604,7 +567,7 @@ export async function supervise(
   const config = readConfig(configPath);
   if (action === "check") {
     if (input.intake) checkIntakeServiceState(config);
-    else checkServiceState(config, input.objective!, input.admission);
+    else checkServiceState(config, input.objective!);
     return "factory-supervision-compatible-v1";
   }
   const path = unitPath(config),
@@ -617,6 +580,9 @@ export async function supervise(
       registered,
       active: inspect("is-active", name),
       enabled: inspect("is-enabled", name),
+      ...(registered && awaitsDecision(name)
+        ? { waitingFor: "human-decision" }
+        : {}),
       ...inspectBinding(config, registered),
     };
   }
@@ -629,8 +595,6 @@ export async function supervise(
       throw new Error("supervisor install requires --objective N");
     const configFile = realpathSync(configPath);
     privateFile(configFile);
-    for (const file of [input.plan, input.admission])
-      if (file) privateFile(file);
     const environment: Record<string, string> = {};
     for (const key of serviceEnvironment)
       if (process.env[key]) environment[key] = process.env[key]!;
@@ -650,17 +614,9 @@ export async function supervise(
         process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
       ),
       environment,
-      ...(input.plan ? { plan: realpathSync(input.plan) } : {}),
-      ...(input.admission ? { admission: realpathSync(input.admission) } : {}),
     };
-    if (
-      !value.intake &&
-      !readContinuation(config.repository, value.objective) &&
-      !(value.plan && value.admission)
-    )
-      throw new Error("A new service requires both --plan and --admission");
     if (value.intake) checkIntakeServiceState(config);
-    else checkServiceState(config, value.objective, value.admission);
+    else checkServiceState(config, value.objective);
     if (existsSync(path)) {
       if (JSON.stringify(binding(config)) !== JSON.stringify(value))
         throw new Error(
@@ -698,8 +654,11 @@ export async function supervise(
         "An existing foreground owner must hand off before service start",
       );
     systemctl("start", name);
-    await verifyServiceOwner(config, value.objective, name);
-    return { active: inspect("is-active", name) };
+    const outcome = await verifyServiceOwner(config, value.objective, name);
+    return {
+      active: inspect("is-active", name),
+      ...(outcome === "needs-decision" ? { waitingFor: "human-decision" } : {}),
+    };
   }
   if (["stop", "disable", "uninstall", "upgrade"].includes(action)) {
     let candidate: ServiceBinding | undefined;

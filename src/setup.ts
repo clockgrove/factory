@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type ExecutionAuthority, sameAuthority } from "./admission.js";
-import { readConfig } from "./config.js";
+import { installFlags } from "./cli-flags.js";
+import { readConfig, resolveCapacity } from "./config.js";
 import { requestControl } from "./coordinator-control.js";
 import { redactDiagnosticDetail } from "./diagnostics.js";
 import { sharedGitHubClient } from "./github-client.js";
@@ -20,6 +20,14 @@ const options = (args: string[], name: string) =>
   args.flatMap((arg, index) =>
     arg === `--${name}` && args[index + 1] ? [args[index + 1]!] : [],
   );
+/** The installation choices among setup's arguments; `install` refuses any other option. */
+function installArgs(args: string[]): string[] {
+  return args.flatMap((arg, index) => {
+    const name = arg.slice(2);
+    if (!arg.startsWith("--") || !installFlags.includes(name)) return [];
+    return name === "capture-content" ? [arg] : [arg, args[index + 1]!];
+  });
+}
 const cli = () =>
   realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url)));
 function withinCheckout(checkout: string, path: string): boolean {
@@ -108,16 +116,14 @@ export async function setupTarget(
         throw new Error(
           "Setup configuration and retained package must be outside the target checkout",
         );
-      await invoke(["install", ...args, "--config", configPath]);
+      await invoke(["install", ...installArgs(args), "--config", configPath]);
       completed.push("configuration-created");
     }
     const config = readConfig(configPath);
     result.repository = config.repository;
     result.capacity = {
-      concurrency: config.execution.concurrency,
-      scheduling: config.scheduling,
-      ...(completed.includes("configuration-created") &&
-      option(args, "concurrency") === undefined
+      ...resolveCapacity(config),
+      ...(config.execution.concurrency === undefined
         ? {
             sizedFromHost: {
               cpus: availableParallelism(),
@@ -206,10 +212,10 @@ export async function setupTarget(
       : (service.binding?.credentials ?? []).map(
           ({ name, file }) => `${name}=${file}`,
         );
-    const authorityPath = option(args, "authority");
+    const objectives = options(args, "objective").map(Number);
     let intake = readIntake(config);
     stage = "execution-readiness";
-    if (authorityPath || intake?.authority) {
+    if (objectives.length || intake?.objectives.length) {
       const proof = JSON.parse(
         await invoke([
           "readiness",
@@ -230,7 +236,7 @@ export async function setupTarget(
     } else
       result.readiness = {
         status: "not-assessed",
-        reason: "Observation-only watcher has no Objective execution authority",
+        reason: "Observation-only watcher has no selected Objectives",
       };
     stage = "github-readiness";
     const observed = await sharedGitHubClient.request<unknown>(
@@ -261,13 +267,10 @@ export async function setupTarget(
           : {},
       );
     }
-    if (authorityPath) {
-      const authority = JSON.parse(
-        readFileSync(authorityPath, "utf8"),
-      ) as ExecutionAuthority;
+    if (objectives.length) {
       // A repeated setup reuses an identical selection rather than refilling live work.
-      if (!intake?.authority || !sameAuthority(intake.authority, authority)) {
-        intake = await composeIntake(config).enqueueIntake(authority, {
+      if (JSON.stringify(intake.objectives) !== JSON.stringify(objectives)) {
+        intake = await composeIntake(config).enqueueIntake(objectives, {
           watch: true,
           ...(option(args, "poll-seconds")
             ? { pollSeconds: Number(option(args, "poll-seconds")) }
@@ -279,9 +282,9 @@ export async function setupTarget(
       watch: intake.watch,
       mode: intake.mode,
       pollSeconds: intake.pollSeconds,
-      approvedObjectives: intake.authority?.objectives ?? [],
-      idleReason: intake.authority
-        ? "finite explicit execution authority bound"
+      approvedObjectives: intake.objectives,
+      idleReason: intake.objectives.length
+        ? "selected Objectives queued"
         : "awaiting approved work",
     };
     if (intake.mode !== "running")

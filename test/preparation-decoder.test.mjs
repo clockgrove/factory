@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { factoryConfigDigest } from "../dist/config.js";
+import { defaultAutonomy } from "../dist/index.js";
 import { readContinuation, saveState, statePath } from "../dist/state-store.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 
@@ -19,7 +20,7 @@ for (const invalid of ["unknown-item", "duplicate", "map-without-plan"])
       const target = createTarget(root);
       const config = factoryConfig(target.checkout, "example/decoder");
       const snapshot = {
-        schemaVersion: 5,
+        schemaVersion: 7,
         kind: "preparing",
         repository: config.repository,
         objective: 1,
@@ -27,6 +28,8 @@ for (const invalid of ["unknown-item", "duplicate", "map-without-plan"])
         configDigest: factoryConfigDigest(config),
         baseSha: target.baseSha,
         objectiveBodyDigest: createHash("sha256").update("body").digest("hex"),
+        autonomy: structuredClone(defaultAutonomy),
+        capacity: { concurrency: 1 },
         issueByItemId: { result: 2 },
         plan: {
           graph: {

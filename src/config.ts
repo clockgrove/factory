@@ -4,7 +4,9 @@ import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { availableParallelism, totalmem } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { type AutonomyConfig, resolveAutonomy } from "./repair-policy.js";
 
 export type CodexReasoningEffort =
   | "minimal"
@@ -109,20 +111,20 @@ export interface ExecutionProfile {
 export type ExecutionConfig =
   | {
       kind: "local";
-      concurrency: number;
+      concurrency?: number;
       harness?: LocalHarnessConfig;
       defaultProfile?: string;
       profiles?: Record<string, ExecutionProfile>;
     }
   | {
       kind: "managed-agent";
-      concurrency: number;
+      concurrency?: number;
       provider: "openai-agents" | "claude-managed-agents";
       config: { [key: string]: JsonValue };
     }
   | {
       kind: "sandbox";
-      concurrency: number;
+      concurrency?: number;
       provider: string;
       config?: { [key: string]: JsonValue };
       harness: Extract<LocalHarnessConfig, { kind: "registered" }>;
@@ -164,8 +166,9 @@ export interface SchedulingConfig {
 }
 
 /**
- * Install-time defaults sized from the host (`os.availableParallelism()`, `os.totalmem()`).
- * Keep 2 CPUs and 4 GiB for the OS and controller and share the rest. A coding worker reserves
+ * Defaults sized from the host (`os.availableParallelism()`, `os.totalmem()`) whenever
+ * `execution.concurrency` is omitted, recomputed each time the configuration is read so they
+ * follow the host. Keep 2 CPUs and 4 GiB for the OS and controller and share the rest. A coding worker reserves
  * 2 CPUs and 2 GiB; validation (builds and tests) 4 CPUs and 4 GiB; review and delivery mostly
  * wait on remote APIs, so 0.5 CPU and 512 MiB. Each reservation is capped at the totals, and a
  * phase ceiling is how many of its reservations fit. Review allows two per coding worker.
@@ -206,6 +209,8 @@ export function hostSchedulingDefaults(host: {
 
 export interface FactoryConfig {
   scheduling?: SchedulingConfig;
+  /** Limits on unattended repair and amendment; omitted fields use bounded defaults. */
+  autonomy?: AutonomyConfig;
   /** Explicit local sensitive-content opt-in; absent remains disabled. */
   capture?: { enabled: boolean; maxBytesPerInvocation: number };
   schemaVersion: 1;
@@ -553,6 +558,82 @@ export function validateTarget(repository: string, checkout: string): void {
   validateLfsRouting(root);
 }
 
+/** Validate declared scheduling reservations; also used for the copy stored in state. */
+export function validateScheduling(
+  scheduling: unknown,
+): asserts scheduling is SchedulingConfig {
+  assertObject(scheduling, "scheduling");
+  assertOnlyKeys(
+    scheduling,
+    [
+      "cpu",
+      "memoryMiB",
+      "reviewConcurrency",
+      "validationConcurrency",
+      "phases",
+    ],
+    "scheduling",
+  );
+  for (const key of [
+    "cpu",
+    "memoryMiB",
+    "reviewConcurrency",
+    "validationConcurrency",
+  ]) {
+    const amount = scheduling[key];
+    if (
+      amount !== undefined &&
+      (typeof amount !== "number" ||
+        !Number.isFinite(amount) ||
+        amount <= 0 ||
+        (key.endsWith("Concurrency") && !Number.isSafeInteger(amount)))
+    )
+      throw new Error(
+        `scheduling.${key} must be a positive finite reservation or integer ceiling`,
+      );
+  }
+  if (scheduling.phases !== undefined) {
+    assertObject(scheduling.phases, "scheduling.phases");
+    assertOnlyKeys(
+      scheduling.phases,
+      ["coding", "validation", "review", "delivery"],
+      "scheduling.phases",
+    );
+    for (const [phase, declaration] of Object.entries(scheduling.phases)) {
+      assertObject(declaration, `scheduling.phases.${phase}`);
+      assertOnlyKeys(
+        declaration,
+        ["cpu", "memoryMiB"],
+        `scheduling.phases.${phase}`,
+      );
+      for (const key of ["cpu", "memoryMiB"])
+        if (
+          declaration[key] !== undefined &&
+          (typeof declaration[key] !== "number" ||
+            !Number.isFinite(declaration[key]) ||
+            Number(declaration[key]) < 0)
+        )
+          throw new Error(
+            `scheduling.phases.${phase}.${key} must be a nonnegative finite reservation`,
+          );
+    }
+  }
+  for (const key of ["cpu", "memoryMiB"]) {
+    if (scheduling[key] === undefined) continue;
+    const phases = scheduling.phases as
+      | Record<string, Record<string, number>>
+      | undefined;
+    for (const phase of ["coding", "validation", "review", "delivery"])
+      if (
+        phases?.[phase]?.[key] === undefined ||
+        phases[phase]![key]! > Number(scheduling[key])
+      )
+        throw new Error(
+          `Binding scheduling.${key} requires a fitting declaration for every phase; missing capacity is unknown`,
+        );
+  }
+}
+
 export function validateConfig(value: unknown): FactoryConfig {
   assertObject(value, "configuration");
   if (value.schemaVersion !== 1)
@@ -565,80 +646,7 @@ export function validateConfig(value: unknown): FactoryConfig {
   }
   validateTarget(value.repository, value.checkout);
   validatePlanning(value.planning);
-  if (value.scheduling !== undefined) {
-    assertObject(value.scheduling, "scheduling");
-    assertOnlyKeys(
-      value.scheduling,
-      [
-        "cpu",
-        "memoryMiB",
-        "reviewConcurrency",
-        "validationConcurrency",
-        "phases",
-      ],
-      "scheduling",
-    );
-    for (const key of [
-      "cpu",
-      "memoryMiB",
-      "reviewConcurrency",
-      "validationConcurrency",
-    ]) {
-      const amount = value.scheduling[key];
-      if (
-        amount !== undefined &&
-        (typeof amount !== "number" ||
-          !Number.isFinite(amount) ||
-          amount <= 0 ||
-          (key.endsWith("Concurrency") && !Number.isSafeInteger(amount)))
-      )
-        throw new Error(
-          `scheduling.${key} must be a positive finite reservation or integer ceiling`,
-        );
-    }
-    if (value.scheduling.phases !== undefined) {
-      assertObject(value.scheduling.phases, "scheduling.phases");
-      assertOnlyKeys(
-        value.scheduling.phases,
-        ["coding", "validation", "review", "delivery"],
-        "scheduling.phases",
-      );
-      for (const [phase, declaration] of Object.entries(
-        value.scheduling.phases,
-      )) {
-        assertObject(declaration, `scheduling.phases.${phase}`);
-        assertOnlyKeys(
-          declaration,
-          ["cpu", "memoryMiB"],
-          `scheduling.phases.${phase}`,
-        );
-        for (const key of ["cpu", "memoryMiB"])
-          if (
-            declaration[key] !== undefined &&
-            (typeof declaration[key] !== "number" ||
-              !Number.isFinite(declaration[key]) ||
-              Number(declaration[key]) < 0)
-          )
-            throw new Error(
-              `scheduling.phases.${phase}.${key} must be a nonnegative finite reservation`,
-            );
-      }
-    }
-    for (const key of ["cpu", "memoryMiB"]) {
-      if (value.scheduling[key] === undefined) continue;
-      const phases = value.scheduling.phases as
-        | Record<string, Record<string, number>>
-        | undefined;
-      for (const phase of ["coding", "validation", "review", "delivery"])
-        if (
-          phases?.[phase]?.[key] === undefined ||
-          phases[phase]![key]! > Number(value.scheduling[key])
-        )
-          throw new Error(
-            `Binding scheduling.${key} requires a fitting declaration for every phase; missing capacity is unknown`,
-          );
-    }
-  }
+  if (value.scheduling !== undefined) validateScheduling(value.scheduling);
   assertObject(value.execution, "execution");
   if (
     value.execution.kind !== "local" &&
@@ -650,11 +658,12 @@ export function validateConfig(value: unknown): FactoryConfig {
     );
   }
   if (
-    !Number.isSafeInteger(value.execution.concurrency) ||
-    (value.execution.concurrency as number) <= 0
+    value.execution.concurrency !== undefined &&
+    (!Number.isSafeInteger(value.execution.concurrency) ||
+      (value.execution.concurrency as number) <= 0)
   ) {
     throw new Error(
-      "execution.concurrency must be a positive operator-selected integer",
+      "execution.concurrency must be a positive integer, or omitted to size from this host",
     );
   }
   if (value.execution.kind === "sandbox") {
@@ -841,13 +850,141 @@ export function validateConfig(value: unknown): FactoryConfig {
         "capture requires enabled boolean and positive maxBytesPerInvocation",
       );
   }
+  if (value.autonomy !== undefined)
+    resolveAutonomy(value.autonomy as AutonomyConfig);
   return value as unknown as FactoryConfig;
 }
 
-/** Digest of every validated installation choice, including adapter config. */
+/** The worker ceiling and scheduling an Objective runs with; it stores them when it starts. */
+export interface Capacity {
+  concurrency: number;
+  scheduling?: SchedulingConfig;
+  /** Which values came from the host rather than the configuration. */
+  hostSized?: { concurrency?: true; scheduling?: true };
+}
+
+/** The declared capacity, or this host's defaults when `execution.concurrency` is omitted. */
+export function resolveCapacity(config: FactoryConfig): Capacity {
+  if (config.execution.concurrency !== undefined)
+    return {
+      concurrency: config.execution.concurrency,
+      ...(config.scheduling ? { scheduling: config.scheduling } : {}),
+    };
+  const host = currentHostDefaults();
+  return {
+    concurrency: host.concurrency,
+    scheduling: config.scheduling ?? host.scheduling,
+    hostSized: config.scheduling
+      ? { concurrency: true }
+      : { concurrency: true, scheduling: true },
+  };
+}
+
+function currentHostDefaults() {
+  return hostSchedulingDefaults({
+    cpus: availableParallelism(),
+    memoryBytes: totalmem(),
+  });
+}
+
+/**
+ * The capacity to schedule with now. Stored values bind plan bounds; a host-sized value never
+ * exceeds what the current host offers, so a smaller host is not oversubscribed.
+ */
+export function liveCapacity(capacity: Capacity): Capacity {
+  const sized = capacity.hostSized;
+  if (!sized) return capacity;
+  const host = currentHostDefaults();
+  const least = (stored: number | undefined, live: number | undefined) =>
+    stored === undefined || live === undefined
+      ? stored
+      : Math.min(stored, live);
+  const stored = capacity.scheduling;
+  const scheduling =
+    sized.scheduling && stored
+      ? {
+          ...stored,
+          ...Object.fromEntries(
+            (
+              [
+                "cpu",
+                "memoryMiB",
+                "reviewConcurrency",
+                "validationConcurrency",
+              ] as const
+            ).flatMap((key) =>
+              stored[key] === undefined
+                ? []
+                : [[key, least(stored[key], host.scheduling[key])]],
+            ),
+          ),
+          ...(stored.phases
+            ? {
+                phases: Object.fromEntries(
+                  Object.entries(stored.phases).map(([phase, reserve]) => {
+                    const live = host.scheduling.phases[phase as ResourcePhase];
+                    return [
+                      phase,
+                      {
+                        ...reserve,
+                        ...(reserve?.cpu === undefined
+                          ? {}
+                          : { cpu: least(reserve.cpu, live?.cpu) }),
+                        ...(reserve?.memoryMiB === undefined
+                          ? {}
+                          : {
+                              memoryMiB: least(
+                                reserve.memoryMiB,
+                                live?.memoryMiB,
+                              ),
+                            }),
+                      },
+                    ];
+                  }),
+                ),
+              }
+            : {}),
+        }
+      : stored;
+  return {
+    concurrency: sized.concurrency
+      ? Math.min(capacity.concurrency, host.concurrency)
+      : capacity.concurrency,
+    ...(scheduling ? { scheduling } : {}),
+  };
+}
+
+export function validateCapacity(value: Capacity): Capacity {
+  assertObject(value, "capacity");
+  assertOnlyKeys(value, ["concurrency", "scheduling", "hostSized"], "capacity");
+  if (!Number.isSafeInteger(value.concurrency) || value.concurrency <= 0)
+    throw new Error("capacity.concurrency must be a positive integer");
+  if (value.scheduling !== undefined) validateScheduling(value.scheduling);
+  if (value.hostSized !== undefined) {
+    assertObject(value.hostSized, "capacity.hostSized");
+    assertOnlyKeys(
+      value.hostSized,
+      ["concurrency", "scheduling"],
+      "capacity.hostSized",
+    );
+    if (
+      Object.values(value.hostSized).some((flag) => flag !== true) ||
+      (value.hostSized.scheduling && !value.scheduling)
+    )
+      throw new Error("capacity.hostSized is invalid");
+  }
+  return value;
+}
+
+/**
+ * Digest of every declared installation choice, including adapter config; an omitted
+ * concurrency stays omitted, so the digest does not follow the host. Autonomy limits are
+ * excluded: each Objective snapshots them, and its capacity, when it starts.
+ */
 export function factoryConfigDigest(config: FactoryConfig): string {
-  assertJsonValue(config, "configuration");
-  return createHash("sha256").update(JSON.stringify(config)).digest("hex");
+  const { autonomy: _autonomy, ...bound } = config;
+  assertJsonValue(bound, "configuration");
+  return createHash("sha256").update(JSON.stringify(bound)).digest("hex");
 }
 
 export function configPath(): string {

@@ -452,13 +452,10 @@ for (const strategy of ["regular", "native-stack"])
         { standard: registrations.standard },
         options,
       );
-      await assert.rejects(
-        missing.runObjective(1, plan),
-        /focused.*unavailable/,
-      );
+      await assert.rejects(missing.runObjective(1), /focused.*unavailable/);
       assert.equal(events.length, 0);
       assert.equal(projected, undefined);
-      const state = await app.runObjective(1, plan);
+      const state = await app.runObjective(1);
       assert.equal(state.finalValidation?.passed, true, JSON.stringify(state));
       assert.equal(state.work.joined.status, "done");
       assert.equal(projected.items[0].executionProfile.id, "standard");

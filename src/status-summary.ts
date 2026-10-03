@@ -69,7 +69,14 @@ export interface PreparingStatusView {
   /** Whether a controller process owns this installation; null when unknown. */
   runActive: boolean | null;
   coordinator: CoordinatorView | null;
-  planReview: { status: string; question: string | null } | null;
+  /** `digest` is the short review digest `decide --plan` must name. */
+  planReview: {
+    status: string;
+    question: string | null;
+    digest: string;
+  } | null;
+  /** Planning stopped for a decision before producing a reviewable plan. */
+  planningStopped: boolean;
   cancelledAt: string | null;
   error?: string | null;
 }
@@ -97,7 +104,25 @@ export type StatusView =
   | PreparingStatusView
   | ExecutionStatusView;
 
+/** The short identity of the reviewed plan an operator decides on. */
+export function shortPlanDigest(plan: { reviewDigest: string }): string {
+  return plan.reviewDigest.slice(0, 12);
+}
+
+/** Whether a decision names this plan: any prefix of its review digest, at least the short form. */
+export function namesPlan(
+  plan: { reviewDigest: string },
+  named: string | undefined,
+): boolean {
+  return (
+    named !== undefined &&
+    /^[0-9a-f]{12,64}$/.test(named) &&
+    plan.reviewDigest.startsWith(named)
+  );
+}
+
 const REASON = '"WHY"';
+const ANSWER = '"ANSWER"';
 const ACTOR = '"$USER"';
 
 function short(text: string, limit = 100): string {
@@ -352,19 +377,22 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
         reason: "Inspect the failure before running again",
       },
     };
-  if (view.planReview?.status === "refused")
-    return {
-      phase: "failed",
-      summary: "the plan was refused",
-      nextAction: null,
-    };
   if (view.planReview?.status === "needs-human")
     return {
       phase: "needs-plan-decision",
       summary: "plan review needs a human decision",
       nextAction: {
-        command: `factory decide --objective ${objective} --plan PLAN_FILE --outcome accept|refuse --actor ${ACTOR} --reason ${REASON} --output ABSOLUTE_NEW_FILE`,
-        reason: `Answer the question below; then factory run --objective ${objective} --plan ABSOLUTE_NEW_FILE`,
+        command: `factory decide --objective ${objective} --plan ${view.planReview.digest} --outcome accept|refuse --answer ${ANSWER} --reason ${REASON}`,
+        reason: `Answer the question below; then ${run(objective)}`,
+      },
+    };
+  if (view.planningStopped)
+    return {
+      phase: "needs-plan-decision",
+      summary: `planning stopped for a decision${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
+      nextAction: {
+        command: `factory decide --objective ${objective} --outcome refuse --reason ${REASON}`,
+        reason: `Discards the stopped planning; resolve the decision in the Objective, then ${run(objective)} plans again`,
       },
     };
   if (view.coordinator?.mode === "paused")

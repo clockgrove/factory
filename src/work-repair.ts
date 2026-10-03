@@ -228,7 +228,7 @@ export function recordWorkFailure(
     unfinishedEdits:
       error instanceof SettledAttemptFailure ? "removed" : "unavailable",
     decision: isolated
-      ? "Supply a concrete diagnosis and correction or use the admitted implementation repair policy"
+      ? "Supply a concrete diagnosis and correction or enable implementation repair in the configured autonomy"
       : isInterruption(error)
         ? "Interrupted repeatedly; check the provider, network or GitHub status, then run again"
         : "Resolve external outcome or ownership before another attempt",
@@ -350,11 +350,7 @@ export async function diagnoseWorkRepair(args: {
     save();
     return true;
   }
-  if (
-    !state.admission?.authority.repairPolicy ||
-    !state.admission.authority.repairClasses.includes("implementation")
-  )
-    return false;
+  if (!state.autonomy.repairClasses.includes("implementation")) return false;
   // A diagnosis interrupted by a restart is issued again. It was charged
   // before it was first sent, so the reissue is not charged twice.
   if (work.recovery?.phase !== "diagnosing") {
@@ -415,7 +411,7 @@ export async function diagnoseWorkRepair(args: {
     failureDigest: failure.digest,
     diagnosis: response.diagnosis,
     correction: response.correction,
-    actor: "admitted-controller",
+    actor: "factory-controller",
   };
   try {
     validateCorrection(work, correction);
@@ -459,15 +455,14 @@ export function prepareEvidenceRecovery(
   };
   if (
     rejection.reason === "source-truncated" ||
-    !state.admission?.authority.repairPolicy ||
-    !state.admission.authority.repairClasses.includes("review-evidence")
+    !state.autonomy.repairClasses.includes("review-evidence")
   )
     return false;
   try {
     applyWorkCorrection(state, id, {
       kind: "review-evidence",
       failureDigest: work.recovery.failure!.digest,
-      actor: "admitted-controller",
+      actor: "factory-controller",
       diagnosis: `Review transport rejected ${rejection.field}: ${rejection.reason}`,
       correction:
         "Revalidate the preserved exact candidate and rerun independent review against a fresh complete evidence packet; use only supplied source IDs and the required response schema.",

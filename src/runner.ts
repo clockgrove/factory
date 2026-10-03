@@ -1,7 +1,12 @@
 import { serviceLoginSecrets } from "./provider-credentials.js";
 import { hasReadinessWait, isReadinessWait } from "./delivery/readiness.js";
 import { executionContext } from "./execution/checkpoint.js";
-import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
+import {
+  archiveAttempt,
+  checkRequiredEnvironment,
+  type RepairCorrection,
+  resolveAutonomy,
+} from "./repair-policy.js";
 import { applyWorkCorrection } from "./work-repair.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
@@ -13,21 +18,9 @@ import {
   type AmendmentProposal,
 } from "./graph-amendments.js";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { userInfo } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
-import {
-  type AutonomousAdmission,
-  assertAdmissionBinding,
-  bindAdmission,
-  checkAuthority,
-  type ExecutionAuthority,
-  preflightObjective,
-  planningExecutionBounds,
-  sameAuthority,
-  verifyAdmission,
-} from "./admission.js";
-import type { SourceSelector } from "./compiler.js";
 import {
   assertObjectiveCriteria,
   compilePlan,
@@ -47,7 +40,12 @@ import {
   GitHubClosureFailure,
 } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
-import { factoryConfigDigest, stateRoot, validateTarget } from "./config.js";
+import {
+  factoryConfigDigest,
+  resolveCapacity,
+  stateRoot,
+  validateTarget,
+} from "./config.js";
 import type {
   ContentStore,
   DeliveryStrategy,
@@ -65,11 +63,15 @@ import { runNativeGraph } from "./delivery/native-runner.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { runRegularGraph } from "./delivery/regular-runner.js";
 import { DiagnosticEmitter, StateDiagnostics } from "./diagnostics.js";
+import { namesPlan, shortPlanDigest } from "./status-summary.js";
 import {
   executionProfileChoices,
   verifyExecutionProfiles,
 } from "./execution-profiles.js";
-import { preflightLocalExecutables } from "./local-preflight.js";
+import {
+  preflightLocalExecutables,
+  preflightObjective,
+} from "./local-preflight.js";
 import {
   assetSelectionDigest,
   finalValidationLfsMembers,
@@ -148,21 +150,14 @@ function configuredDiagnosticSecrets(config: FactoryConfig): string[] {
   ];
 }
 
-/** Explicit previews remain read-only; admitted repair or intake planning persists one bound preparation. */
+/** A read-only preview: plans and reviews without writing Objective state. */
 export async function planObjective(
   config: FactoryConfig,
   objective: number,
   services: Pick<ApplicationServices, "planningModel" | "github">,
-  additionalSources: SourceSelector[] = [],
-  authority?: ExecutionAuthority,
-  options?: {
-    ownerLock?: ControllerLock;
-    observePreparation?: (state: PreparationState) => void;
-    stopped?: () => boolean;
-  },
 ): Promise<PlanCandidate> {
   validateTarget(config.repository, config.checkout);
-  if (authority) checkAuthority(config, objective, authority);
+  checkRequiredEnvironment(config);
   const diagnostics = new DiagnosticEmitter(
     config.repository,
     objective,
@@ -177,95 +172,9 @@ export async function planObjective(
     outcome: "started",
     metadata: { scopeId: planningScopeId },
   });
-  let lock: ControllerLock | undefined;
-  let preparation: PreparationState | undefined;
-  const persistPreparation = () => {
-    if (preparation) {
-      saveState(statePath(config.repository, objective), preparation);
-      options?.observePreparation?.(preparation);
-    }
-  };
   try {
     const issue = await services.github.objective(objective);
     const baseSha = git(config.checkout, "rev-parse", "HEAD");
-    const prerequisites = await planningPrerequisites(
-      config,
-      services.github,
-      objective,
-      baseSha,
-    );
-    const sources = planningSources(
-      issue.body,
-      baseSha,
-      config.checkout,
-      additionalSources,
-    );
-    const localExecutables = preflightObjective(config, issue.body, baseSha);
-    const sourcePacketDigest = preparationSourceDigest(
-      sources,
-      prerequisites,
-      localExecutables,
-    );
-    if (authority?.repairPolicy || options?.ownerLock) {
-      if (!authority)
-        throw new Error("Owned durable planning requires bound authority");
-      mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
-      if (options?.ownerLock) {
-        const owner = readControllerOwner(
-          join(stateRoot(config.repository), "controller.lock"),
-        );
-        if (
-          !owner ||
-          owner.token !== options.ownerLock.token ||
-          owner.pid !== process.pid ||
-          owner.objective !== objective ||
-          owner.startTime !== linuxProcessIdentity(process.pid)?.startTime
-        )
-          throw new Error(
-            "Planning owner lock differs from the current process and Objective",
-          );
-        lock = options.ownerLock;
-      } else lock = mutationLock(config, objective);
-      const previous = readContinuation(config.repository, objective);
-      if (previous && previous.schemaVersion !== 5)
-        throw new Error("An activated Objective cannot be recompiled");
-      preparation = previous as PreparationState | undefined;
-      const bodyDigest = createHash("sha256").update(issue.body).digest("hex");
-      if (
-        preparation &&
-        (preparation.sourcePacketDigest !== sourcePacketDigest ||
-          preparation.baseSha !== baseSha ||
-          preparation.objectiveBodyDigest !== bodyDigest ||
-          preparation.configDigest !== factoryConfigDigest(config) ||
-          !preparation.authority ||
-          !sameAuthority(preparation.authority, authority))
-      )
-        throw new Error(
-          "Planning authority or immutable preparation identity changed",
-        );
-      preparation ??= {
-        schemaVersion: 5,
-        kind: "preparing",
-        repository: config.repository,
-        objective,
-        runId: planningScopeId,
-        configDigest: factoryConfigDigest(config),
-        baseSha,
-        objectiveBodyDigest: bodyDigest,
-        sourcePacketDigest,
-        authority: structuredClone(authority),
-        issueByItemId: {},
-        coordinator: {
-          mode: "running",
-          phase: "planning",
-          phaseStartedAt: new Date().toISOString(),
-        },
-      };
-      if (preparation.cancelRequested || preparation.cancelledAt)
-        throw new Error("Preparation is cancelled");
-      if (preparation.plan) return preparation.plan;
-      persistPreparation();
-    }
     const result = await compilePlan(
       objective,
       issue.body,
@@ -275,25 +184,15 @@ export async function planObjective(
       factoryConfigDigest(config),
       diagnostics.modelObserver({ scopeId: planningScopeId }),
       executionProfileChoices(config),
-      additionalSources,
-      preparation
-        ? {
-            state: preparation,
-            save: persistPreparation,
-            stopped: () =>
-              preparation!.coordinator.mode !== "running" ||
-              Boolean(preparation!.cancelRequested) ||
-              Boolean(options?.stopped?.()),
-          }
-        : undefined,
-      prerequisites,
-      localExecutables,
-      planningExecutionBounds(config, objective, authority),
+      // The same recoverable planning as run, over a ledger nothing saves.
+      {
+        state: { autonomy: resolveAutonomy(config.autonomy) },
+        save: () => undefined,
+      },
+      await planningPrerequisites(config, services.github, objective, baseSha),
+      preflightObjective(config, issue.body, baseSha),
+      { configuredConcurrency: resolveCapacity(config).concurrency },
     );
-    if (preparation) {
-      preparation.plan = result;
-      persistPreparation();
-    }
     diagnostics.emit({
       operation: "planning-preview",
       outcome: "completed",
@@ -315,120 +214,26 @@ export async function planObjective(
       detail: error instanceof Error ? error.message : String(error),
     });
     throw error;
-  } finally {
-    if (lock && !options?.ownerLock)
-      releaseMutationLock(
-        join(stateRoot(config.repository), "controller.lock"),
-        lock,
-      );
   }
 }
 
-function samePreparedPlan(
-  prepared: PlanCandidate,
-  candidate: PlanCandidate,
-): boolean {
-  const { humanDecision: _preparedDecision, ...original } = prepared;
-  const { humanDecision: _candidateDecision, ...resolved } = candidate;
-  return (
-    JSON.stringify({
-      ...original,
-      review: { ...original.review, status: "bound" },
-    }) ===
-    JSON.stringify({
-      ...resolved,
-      review: { ...resolved.review, status: "bound" },
-    })
-  );
-}
-
-function checkActiveAdmission(
-  config: FactoryConfig,
-  objective: number,
-  admission: AutonomousAdmission,
-): void {
-  const state = readContinuation(config.repository, objective);
-  if (
-    state &&
-    (!state.admission || state.admission.digest !== admission.digest) &&
-    !(
-      !state.admission &&
-      state.schemaVersion === 5 &&
-      state.authority &&
-      sameAuthority(state.authority, admission.authority) &&
-      state.plan?.graphDigest === admission.graphDigest
-    )
-  )
-    throw new Error("Active Objective admission cannot be added or replaced");
-  const directory = join(stateRoot(config.repository), "objectives");
-  if (existsSync(directory))
-    for (const name of readdirSync(directory)) {
-      if (!/^\d+$/.test(name) || Number(name) === objective) continue;
-      const other = readContinuation(config.repository, Number(name));
-      if (
-        other &&
-        !(other.schemaVersion === 4 && objectiveComplete(other)) &&
-        !other.cancelledAt
-      )
-        throw new Error(
-          `Objective #${name} is already active in this installation`,
-        );
-    }
-}
-
-export async function admitObjective(
-  config: FactoryConfig,
-  objective: number,
-  services: Pick<ApplicationServices, "github">,
-  candidate: PlanCandidate,
-  authority: ExecutionAuthority,
-): Promise<AutonomousAdmission> {
-  validateTarget(config.repository, config.checkout);
-  const issue = await services.github.objective(objective);
-  const admission = bindAdmission(
-    config,
-    objective,
-    issue.body,
-    git(config.checkout, "rev-parse", "HEAD"),
-    candidate,
-    authority,
-  );
-  checkActiveAdmission(config, objective, admission);
-  return admission;
-}
-
-export async function checkAdmission(
-  config: FactoryConfig,
-  objective: number,
-  services: Pick<ApplicationServices, "github">,
-  candidate: PlanCandidate,
-  admission: AutonomousAdmission,
-): Promise<void> {
-  validateTarget(config.repository, config.checkout);
-  const issue = await services.github.objective(objective);
-  verifyAdmission(
-    config,
-    objective,
-    issue.body,
-    git(config.checkout, "rev-parse", "HEAD"),
-    candidate,
-    admission,
-  );
-  checkActiveAdmission(config, objective, admission);
-}
-
+/**
+ * Decide the plan a run persisted in state. `plan` names the short review digest status showed,
+ * so a decision binds to the plan the operator saw. Accepting binds the answer to that exact
+ * reviewed plan; refusing discards the unprojected preparation so the next run plans again.
+ */
 export async function decidePlan(
   config: FactoryConfig,
   objective: number,
   services: Pick<ApplicationServices, "github">,
-  candidate: PlanCandidate,
   input: {
+    plan?: string;
     actor: string;
     outcome: "accept" | "refuse";
     answer: string;
     reason: string;
   },
-): Promise<PlanCandidate> {
+): Promise<PreparationState> {
   validateTarget(config.repository, config.checkout);
   const diagnostics = new DiagnosticEmitter(
     config.repository,
@@ -439,25 +244,57 @@ export async function decidePlan(
   );
   const started = Date.now();
   diagnostics.emit({ operation: "planning-decision", outcome: "started" });
+  const lockPath = join(stateRoot(config.repository), "controller.lock");
+  const lock = mutationLock(config, objective);
   try {
-    const issue = await services.github.objective(objective);
-    const baseSha = git(config.checkout, "rev-parse", "HEAD");
-    const result = await resolvePlan(
-      candidate,
-      objective,
-      issue.body,
-      baseSha,
-      config.checkout,
-      input,
-      factoryConfigDigest(config),
-    );
+    const path = statePath(config.repository, objective);
+    const preparation = readContinuation(config.repository, objective);
+    if (preparation?.schemaVersion !== 7)
+      throw new Error(
+        "Objective has no persisted plan awaiting a decision; run it first",
+      );
+    if (preparation.plan && !namesPlan(preparation.plan, input.plan))
+      throw new Error(
+        `Decision names plan ${input.plan ?? "(none)"}, but the saved plan is ${shortPlanDigest(preparation.plan)}; inspect status and decide again`,
+      );
+    if (input.outcome === "refuse") {
+      if (!input.actor.trim() || !input.reason.trim())
+        throw new Error("A plan refusal needs actor and reason");
+      // Projection may have created an issue before recording it.
+      if (
+        Object.keys(preparation.issueByItemId).length ||
+        preparation.coordinator.phase === "projection"
+      )
+        throw new Error(
+          "Work Item projection has started; cancel the Objective instead",
+        );
+      rmSync(path);
+    } else {
+      if (!preparation.plan)
+        throw new Error("Objective planning has not produced a plan yet");
+      const issue = await services.github.objective(objective);
+      preparation.plan = await resolvePlan(
+        preparation.plan,
+        objective,
+        issue.body,
+        preparation.baseSha,
+        config.checkout,
+        input,
+        factoryConfigDigest(config),
+      );
+      delete preparation.coordinator.waitReason;
+      saveState(path, preparation);
+    }
     diagnostics.emit({
       operation: "planning-decision",
       outcome: "completed",
       durationMs: Date.now() - started,
-      metadata: { review: result.review.status },
+      metadata: {
+        review: input.outcome === "refuse" ? "refused" : "human-accepted",
+      },
+      detail: input.reason,
     });
-    return result;
+    return preparation;
   } catch (error) {
     diagnostics.emit({
       operation: "planning-decision",
@@ -466,6 +303,8 @@ export async function decidePlan(
       detail: error instanceof Error ? error.message : String(error),
     });
     throw error;
+  } finally {
+    releaseMutationLock(lockPath, lock);
   }
 }
 
@@ -479,7 +318,7 @@ function canHandoff(state: ContinuationState): boolean {
   if (state.coordinator?.processes?.length || state.coordinator?.cancelError)
     return false;
   // Preparation resumes by repeating its current step, so any point is safe.
-  if (state.schemaVersion === 5) return true;
+  if (state.schemaVersion === 7) return true;
   return (
     !state.coordinator?.phase.endsWith("-submitted") &&
     !Object.entries(state.work).some(
@@ -511,7 +350,7 @@ function mutationState(
   const snapshot =
     owners.get(ownerKey(config, objective))?.snapshot ??
     readContinuation(config.repository, objective);
-  if (snapshot?.schemaVersion === 5)
+  if (snapshot?.schemaVersion === 7)
     throw new Error("Objective is still preparing");
   const state = snapshot ?? readState(config.repository, objective);
   return state;
@@ -550,7 +389,7 @@ export async function controlObjective(
     if (!state) throw new Error("Objective has no Factory state");
     if (request.action === "status") return state.coordinator;
     if (request.action === "propose-amendment") {
-      if (state.schemaVersion !== 4 || !request.input?.replacement)
+      if (state.schemaVersion !== 6 || !request.input?.replacement)
         throw new Error(
           "Only diagnosed rejected-amendment replacement is supported without an active owner",
         );
@@ -620,7 +459,7 @@ async function cancelKnownWork(
 ): Promise<void> {
   const errors: string[] = [];
   const tasks: (() => Promise<void>)[] = [];
-  if (state.schemaVersion === 4)
+  if (state.schemaVersion === 6)
     for (const work of Object.values(state.work)) {
       if (
         work.step !== "execute" ||
@@ -648,12 +487,14 @@ async function cancelKnownWork(
   if (errors.length) throw new Error(errors.join("; "));
 }
 
+/**
+ * Plan if needed, then run within the configured autonomy until the Objective completes or
+ * needs a human decision. A rerun resumes from state and never plans an existing plan again.
+ */
 export async function runObjective(
   config: FactoryConfig,
   objective: number,
   services: ApplicationServices,
-  acceptedPlan?: PlanCandidate,
-  admission?: AutonomousAdmission,
   options: {
     deadlineAt?: string;
     ownerLock?: ControllerLock;
@@ -661,7 +502,7 @@ export async function runObjective(
       handler: ((request: ControlRequest) => Promise<unknown>) | undefined,
     ) => void;
   } = {},
-): Promise<FactoryState> {
+): Promise<ContinuationState> {
   if (!!options.ownerLock !== !!options.observeControl)
     throw new Error(
       "Borrowed Objective ownership requires its intake control handler",
@@ -739,7 +580,7 @@ export async function runObjective(
   };
   const cancel = (): void => {
     if (!owner.snapshot) return;
-    if (owner.snapshot.schemaVersion === 4 && owner.snapshot.finalAcceptance) {
+    if (owner.snapshot.schemaVersion === 6 && owner.snapshot.finalAcceptance) {
       owner.snapshot.coordinator!.waitReason =
         "Acceptance is sealed; reconcile Objective closure before successor work";
       persist();
@@ -824,7 +665,7 @@ export async function runObjective(
       };
       if (request.action === "status") return state.coordinator;
       if (request.action === "propose-amendment") {
-        if (state.schemaVersion !== 4)
+        if (state.schemaVersion !== 6)
           throw new Error("Planning has no active graph to amend");
         if (owner.abort.signal.aborted)
           throw new Error(
@@ -839,7 +680,7 @@ export async function runObjective(
         return result;
       }
       if (request.action === "cancel") {
-        if (state.schemaVersion === 4 && state.finalAcceptance)
+        if (state.schemaVersion === 6 && state.finalAcceptance)
           throw new Error(
             "Acceptance is sealed; resume to reconcile Objective closure",
           );
@@ -928,7 +769,7 @@ export async function runObjective(
         await owner.cancellation;
         if (!state.coordinator?.cancelError) {
           state.cancelledAt = new Date().toISOString();
-          if (state.schemaVersion === 4)
+          if (state.schemaVersion === 6)
             for (const work of Object.values(state.work))
               if (work.status === "pending" || work.status === "running")
                 work.status = "cancelled";
@@ -940,7 +781,7 @@ export async function runObjective(
         state?.coordinator?.mode !== "running" &&
         state?.coordinator &&
         !(
-          state.schemaVersion === 4 &&
+          state.schemaVersion === 6 &&
           Object.values(state.work).some(
             (work) => work.status === "running" || work.status === "published",
           )
@@ -951,15 +792,7 @@ export async function runObjective(
       }
       const result = await withProcessCancellation(
         owner.abort.signal,
-        () =>
-          runObjectivePass(
-            config,
-            objective,
-            services,
-            acceptedPlan,
-            admission,
-            owner,
-          ),
+        () => runObjectivePass(config, objective, services, owner),
         (process, settled) => {
           const disposition = owner.snapshot?.coordinator;
           if (!disposition) return;
@@ -974,20 +807,24 @@ export async function runObjective(
         },
       ).catch((error: unknown) => {
         const current = owner.snapshot;
+        // Planning stops at a pause or drain; the owner keeps serving control until resume.
         if (
-          !(error instanceof GitHubClosureFailure) ||
-          current?.schemaVersion !== 4 ||
-          !current.admission
+          current?.schemaVersion === 7 &&
+          current.coordinator.mode !== "running" &&
+          !current.cancelRequested &&
+          !owner.handoff
         )
-          throw error;
-        current.coordinator!.mode = "paused";
-        current.coordinator!.waitReason =
-          "GitHub closure acknowledgement unresolved; resume to reconcile";
-        persist();
-        return current;
+          return undefined;
+        throw error;
       });
+      if (!result) continue;
       owner.snapshot = result;
-      if (objectiveComplete(result) || result.cancelledAt || !result.admission)
+      // A preparation comes back only when its plan needs a human decision.
+      if (
+        result.schemaVersion === 7 ||
+        objectiveComplete(result) ||
+        result.cancelledAt
+      )
         return result;
       if (
         result.coordinator?.mode === "running" &&
@@ -1021,12 +858,11 @@ export async function runObjective(
               ? "Awaiting exact published checks or target protection readiness"
               : "Awaiting exact candidate decision or resume";
       persist();
+      // Nothing automatic remains: the Objective needs a human decision.
+      if (result.coordinator?.mode === "running" && !hasReadinessWait(result))
+        return result;
       // Read-only observations use the same owner and GitHub rate gate. No model work while idle.
-      await wait(
-        result.coordinator?.mode === "running" && hasReadinessWait(result)
-          ? 5_000
-          : undefined,
-      );
+      await wait(result.coordinator?.mode === "running" ? 5_000 : undefined);
     }
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
@@ -1045,10 +881,8 @@ async function runObjectivePass(
   config: FactoryConfig,
   objective: number,
   services: ApplicationServices,
-  acceptedPlan: PlanCandidate | undefined,
-  admission: AutonomousAdmission | undefined,
   owner: LocalOwner,
-): Promise<FactoryState> {
+): Promise<ContinuationState> {
   validateTarget(config.repository, config.checkout);
   if (
     config.execution.kind !== "local" &&
@@ -1139,70 +973,18 @@ async function runObjectivePass(
     const installationConfigDigest = factoryConfigDigest(config);
     const continuation = readContinuation(config.repository, objective);
     owner.snapshot = continuation;
+    checkRequiredEnvironment(config, continuation?.autonomy);
     if (owner.handoff && continuation?.coordinator) {
       continuation.coordinator.mode = "draining";
       saveState(path, continuation);
     }
     let preparation =
-      continuation?.schemaVersion === 5 ? continuation : undefined;
-    let state = continuation?.schemaVersion === 4 ? continuation : undefined;
-    if (preparation?.plan && acceptedPlan && !preparation.admission) {
-      if (!samePreparedPlan(preparation.plan, acceptedPlan))
-        throw new Error(
-          "Prepared plan changed; only its exact human decision can be resolved",
-        );
-      verifyPlanCandidate(
-        acceptedPlan,
-        objective,
-        issue.body,
-        preparation.baseSha,
-        config.checkout,
-        installationConfigDigest,
-        false,
-        config.execution.concurrency,
-      );
-      preparation.plan = structuredClone(acceptedPlan);
-      saveState(path, preparation);
-    }
-    if (preparation?.admission) {
-      if (admission && admission.digest !== preparation.admission.digest)
-        throw new Error("Preparation admission cannot be replaced on restart");
-      admission = preparation.admission;
-    } else if (preparation && admission) {
-      if (
-        !preparation.authority ||
-        !sameAuthority(preparation.authority, admission.authority) ||
-        !preparation.plan
-      )
-        throw new Error("Preparation cannot gain unbound admission on restart");
-      verifyAdmission(
-        config,
-        objective,
-        issue.body,
-        preparation.baseSha,
-        preparation.plan,
-        admission,
-      );
-      preparation.admission = admission;
-      saveState(path, preparation);
-    }
-    if (preparation?.authority && !admission)
-      throw new Error(
-        "Durable authorized planning requires its exact reviewed admission before activation",
-      );
+      continuation?.schemaVersion === 7 ? continuation : undefined;
+    let state = continuation?.schemaVersion === 6 ? continuation : undefined;
     if (issue.state === "closed" && !state?.finalValidation?.passed)
       throw new Error(
         "Objective issue is confirmed closed; operator direction required",
       );
-    if (admission && !state && !acceptedPlan && !preparation?.plan)
-      throw new Error("Admission dispatch requires its exact reviewed plan");
-    const localExecutables = !state
-      ? preflightObjective(
-          config,
-          issue.body,
-          git(config.checkout, "rev-parse", "HEAD"),
-        )
-      : undefined;
     if (state) {
       // Subprocesses recorded by an interrupted controller (for example a
       // validation command) are ours: stop any survivor and clear the
@@ -1212,93 +994,13 @@ async function runObjectivePass(
         saveState(path, state);
       }
       if (
-        admission &&
-        (!state.admission ||
-          JSON.stringify(admission) !== JSON.stringify(state.admission))
-      )
-        throw new Error(
-          "Active Objective admission cannot be added or replaced; existing runs gain no new authority",
-        );
-      if (state.admission) {
-        assertAdmissionBinding(state.admission);
-        checkAuthority(config, objective, state.admission.authority);
-        const sources = planningSources(
-          issue.body,
-          state.baseSha,
-          config.checkout,
-          state.admission.additionalSources,
-        );
-        const sourceDigests = sources.map(({ path, heading, content }) => ({
-          path,
-          ...(heading ? { heading } : {}),
-          digest: createHash("sha256").update(content).digest("hex"),
-        }));
-        if (
-          state.admission.graphDigest !==
-            (state.graphRevisions?.[0]?.digest ?? graphDigest(state.graph)) ||
-          JSON.stringify(state.admission.sourceDigests) !==
-            JSON.stringify(sourceDigests) ||
-          JSON.stringify(state.additionalSources) !==
-            JSON.stringify(state.admission.additionalSources)
-        )
-          throw new Error(
-            "Persisted admission differs from current graph or pinned source packet",
-          );
-        if (
-          state.admission.repository !== config.repository ||
-          state.admission.objective !== objective ||
-          state.admission.configDigest !== installationConfigDigest ||
-          state.admission.baseSha !== state.baseSha ||
-          state.admission.bodyDigest !==
-            createHash("sha256").update(issue.body).digest("hex")
-        )
-          throw new Error(
-            "Persisted admission differs from current Objective or installation",
-          );
-        if (acceptedPlan)
-          verifyAdmission(
-            config,
-            objective,
-            issue.body,
-            state.baseSha,
-            acceptedPlan,
-            state.admission,
-          );
-      }
-      if (
-        state.schemaVersion !== 4 ||
+        state.schemaVersion !== 6 ||
         state.repository !== config.repository ||
         state.configDigest !== installationConfigDigest
       ) {
         throw new Error(
           "Existing Objective state does not match this Factory installation",
         );
-      }
-      if (acceptedPlan) {
-        if (
-          JSON.stringify(acceptedPlan.executionProfiles) !==
-          JSON.stringify(executionProfileChoices(config))
-        )
-          throw new Error(
-            "Accepted plan execution profile policy differs from installation",
-          );
-        verifyPlanCandidate(
-          acceptedPlan,
-          objective,
-          issue.body,
-          state.baseSha,
-          config.checkout,
-          installationConfigDigest,
-          false,
-          config.execution.concurrency,
-        );
-        if (
-          JSON.stringify(acceptedPlan.graph) !==
-          JSON.stringify(state.graphRevisions?.[0]?.graph ?? state.graph)
-        )
-          throw new Error(
-            "Accepted plan differs from the already active Objective graph",
-          );
       }
       if (state.error)
         throw new Error(
@@ -1323,7 +1025,7 @@ async function runObjectivePass(
         diagnostics,
         state,
         config.delivery.kind,
-        config.execution.concurrency,
+        state.capacity.concurrency,
       );
       const saveCurrent = () => save(state!);
       for (const item of state.graph.items)
@@ -1363,22 +1065,13 @@ async function runObjectivePass(
         );
       reportRunStatus?.("Factory: resuming the existing run from atomic state");
     } else {
-      const baseline = git(config.checkout, "rev-parse", "HEAD");
+      const baseSha = git(config.checkout, "rev-parse", "HEAD");
       const prerequisites = await planningPrerequisites(
         config,
         github,
         objective,
-        baseline,
+        baseSha,
       );
-      for (const candidate of [acceptedPlan, preparation?.plan])
-        if (
-          candidate &&
-          JSON.stringify(candidate.prerequisites) !==
-            JSON.stringify(prerequisites)
-        )
-          throw new Error(
-            "Planning native prerequisites changed before activation",
-          );
       const objectivesRoot = join(root, "objectives");
       if (existsSync(objectivesRoot)) {
         for (const name of readdirSync(objectivesRoot)) {
@@ -1386,7 +1079,7 @@ async function runObjectivePass(
           const other = readContinuation(config.repository, Number(name));
           if (
             other &&
-            !(other.schemaVersion === 4 && objectiveComplete(other)) &&
+            !(other.schemaVersion === 6 && objectiveComplete(other)) &&
             !other.cancelledAt
           )
             throw new Error(
@@ -1394,43 +1087,16 @@ async function runObjectivePass(
             );
         }
       }
-      const baseSha = git(config.checkout, "rev-parse", "HEAD");
-      if (!preparation && acceptedPlan) {
-        verifyPlanCandidate(
-          acceptedPlan,
-          objective,
-          issue.body,
-          baseSha,
-          config.checkout,
-          installationConfigDigest,
-          false,
-          config.execution.concurrency,
-        );
-        if (admission)
-          verifyAdmission(
-            config,
-            objective,
-            issue.body,
-            baseSha,
-            acceptedPlan,
-            admission,
-          );
-      }
-      const sources = planningSources(
-        issue.body,
-        baseSha,
-        config.checkout,
-        acceptedPlan?.additionalSources ?? preparation?.plan?.additionalSources,
-      );
+      const localExecutables = preflightObjective(config, issue.body, baseSha);
       const sourcePacketDigest = preparationSourceDigest(
-        sources,
+        planningSources(issue.body, baseSha, config.checkout),
         prerequisites,
         localExecutables,
       );
       if (!preparation) {
         preparation = {
           sourcePacketDigest,
-          schemaVersion: 5,
+          schemaVersion: 7,
           kind: "preparing",
           repository: config.repository,
           objective,
@@ -1440,7 +1106,8 @@ async function runObjectivePass(
           objectiveBodyDigest: createHash("sha256")
             .update(issue.body)
             .digest("hex"),
-          ...(admission ? { admission } : {}),
+          autonomy: resolveAutonomy(config.autonomy),
+          capacity: resolveCapacity(config),
           issueByItemId: {},
           coordinator: {
             mode: owner.handoff ? "draining" : "running",
@@ -1453,36 +1120,55 @@ async function runObjectivePass(
         saveState(path, preparation);
       }
       if (
-        (preparation.sourcePacketDigest !== undefined &&
-          preparation.sourcePacketDigest !== sourcePacketDigest) ||
+        preparation.sourcePacketDigest !== sourcePacketDigest ||
         preparation.configDigest !== installationConfigDigest ||
         preparation.baseSha !== baseSha ||
         preparation.objectiveBodyDigest !==
           createHash("sha256").update(issue.body).digest("hex")
       )
         throw new Error(
-          "Preparation identity changed; operator direction required",
+          Object.keys(preparation.issueByItemId).length
+            ? "Base, Objective, sources or configuration changed during projection; operator direction required"
+            : "Base, Objective, sources or configuration changed since planning; refuse the plan with factory decide to plan again",
         );
       if (owner.handoff && canHandoff(preparation))
         throw new CoordinatorHandoff();
       const planningScopeId = preparation.runId;
-      const plan =
-        preparation.plan ??
-        (await diagnostics.span(
-          {
-            operation: "planning",
-            metadata: { baseSha, scopeId: planningScopeId },
-          },
-          async () => {
-            let candidate: PlanCandidate;
-            if (acceptedPlan) {
-              reportRunStatus?.("Factory: activating the accepted plan");
-              candidate = acceptedPlan;
-            } else {
+      // Planning that stopped without a reviewable plan waits for an operator refusal.
+      const stopPlanning = (detail: string) => {
+        preparation!.coordinator.phase = "waiting";
+        preparation!.coordinator.phaseStartedAt = new Date().toISOString();
+        preparation!.coordinator.waitReason = `Planning stopped for a decision: ${detail}`;
+        saveState(path, preparation!);
+        return preparation!;
+      };
+      if (
+        !preparation.plan &&
+        preparation.planningRecovery?.phase === "stopped"
+      )
+        return stopPlanning(
+          preparation.coordinator.waitReason?.replace(
+            /^Planning stopped for a decision: /,
+            "",
+          ) ?? "inspect the planning diagnostics",
+        );
+      if (preparation.plan)
+        reportRunStatus?.("Factory: continuing with the persisted plan");
+      const capacity = preparation.capacity;
+      let plan = preparation.plan;
+      if (!plan)
+        try {
+          plan = await diagnostics.span(
+            {
+              operation: "planning",
+              metadata: { baseSha, scopeId: planningScopeId },
+            },
+            () => {
               reportRunStatus?.(
                 "Factory: compiling and independently reviewing a fresh plan",
               );
-              candidate = await compilePlan(
+              // The plan and its review persist in the preparation, so a rerun never pays again.
+              return compilePlan(
                 objective,
                 issue.body,
                 baseSha,
@@ -1491,65 +1177,69 @@ async function runObjectivePass(
                 installationConfigDigest,
                 diagnostics.modelObserver({ scopeId: planningScopeId }),
                 executionProfileChoices(config),
-                [],
-                preparation!.authority?.repairPolicy
-                  ? {
-                      state: preparation!,
-                      save: () => saveState(path, preparation!),
-                      stopped: () =>
-                        cancellationRequested() ||
-                        preparation!.coordinator.mode !== "running",
-                    }
-                  : undefined,
+                {
+                  state: preparation!,
+                  save: () => saveState(path, preparation!),
+                  stopped: () =>
+                    cancellationRequested() ||
+                    preparation!.coordinator.mode !== "running",
+                },
                 prerequisites,
                 localExecutables,
-                planningExecutionBounds(
-                  config,
-                  objective,
-                  preparation!.authority,
-                ),
+                { configuredConcurrency: capacity.concurrency },
               );
-            }
-            verifyPlanCandidate(
-              candidate,
-              objective,
-              issue.body,
-              baseSha,
-              config.checkout,
-              installationConfigDigest,
-              false,
-              config.execution.concurrency,
-            );
-            return candidate;
-          },
-          (candidate) => ({ itemCount: candidate.graph.items.length }),
-        ));
-      const currentPrerequisites = await planningPrerequisites(
-        config,
-        github,
+            },
+            (candidate) => ({ itemCount: candidate.graph.items.length }),
+          );
+        } catch (error) {
+          if (
+            preparation.plan ||
+            preparation.planningRecovery?.phase !== "stopped"
+          )
+            throw error;
+          return stopPlanning(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      preparation.plan = plan;
+      if (!["clean", "human-accepted"].includes(plan.review.status)) {
+        verifyPlanCandidate(
+          plan,
+          objective,
+          issue.body,
+          baseSha,
+          config.checkout,
+          installationConfigDigest,
+          true,
+          capacity.concurrency,
+        );
+        preparation.coordinator.phase = "waiting";
+        preparation.coordinator.phaseStartedAt = new Date().toISOString();
+        preparation.coordinator.waitReason = `Plan needs a decision: ${plan.review.failure?.question ?? plan.review.findings[0]?.question ?? "inspect the plan review"}`;
+        saveState(path, preparation);
+        return preparation;
+      }
+      verifyPlanCandidate(
+        plan,
         objective,
+        issue.body,
         baseSha,
+        config.checkout,
+        installationConfigDigest,
+        false,
+        capacity.concurrency,
       );
-      if (
-        JSON.stringify(plan.prerequisites) !==
-        JSON.stringify(currentPrerequisites)
-      )
+      if (JSON.stringify(plan.prerequisites) !== JSON.stringify(prerequisites))
         throw new Error(
           "Planning native prerequisites changed before activation",
         );
-      const currentLocalExecutables = preflightObjective(
-        config,
-        issue.body,
-        baseSha,
-      );
       if (
         JSON.stringify(plan.localExecutables) !==
-        JSON.stringify(currentLocalExecutables)
+        JSON.stringify(localExecutables)
       )
         throw new Error(
           "Planning local executable observations changed before activation",
         );
-      preparation.plan = plan;
       preparation.coordinator.phase = "projection";
       preparation.coordinator.phaseStartedAt = new Date().toISOString();
       saveState(path, preparation);
@@ -1561,15 +1251,6 @@ async function runObjectivePass(
       )
         throw new Error(
           "Accepted plan execution profile policy differs from installation",
-        );
-      if (admission)
-        verifyAdmission(
-          config,
-          objective,
-          issue.body,
-          baseSha,
-          plan,
-          admission,
         );
       const graph = plan.graph;
       verifyExecutionProfiles(graph, executionProfileChoices(config));
@@ -1601,7 +1282,7 @@ async function runObjectivePass(
             detail: entry.detail,
           }),
       });
-      const waitForAdmission = async () => {
+      const waitWhileStopped = async () => {
         while (
           preparation!.coordinator.mode !== "running" &&
           !cancellationRequested()
@@ -1610,7 +1291,7 @@ async function runObjectivePass(
         if (cancellationRequested())
           throw new Error("Objective cancellation requested");
       };
-      await waitForAdmission();
+      await waitWhileStopped();
       // Projection finds existing issues by marker before creating any, so a
       // restart simply projects again; recorded numbers are passed as known.
       const projected = await diagnostics.span(
@@ -1623,11 +1304,7 @@ async function runObjectivePass(
             graph,
             objectiveIssue: objective,
             knownIssues: preparation!.issueByItemId,
-            beforeCreate: async () => {
-              await waitForAdmission();
-              if (cancellationRequested())
-                throw new Error("Objective cancellation requested");
-            },
+            beforeCreate: waitWhileStopped,
             projected: (id, number) => {
               preparation!.issueByItemId[id] = number;
               saveState(path, preparation!);
@@ -1635,7 +1312,7 @@ async function runObjectivePass(
           }),
       );
       state = {
-        schemaVersion: 4,
+        schemaVersion: 6,
         ...(preparation.planningRecovery
           ? { planningRecovery: preparation.planningRecovery }
           : {}),
@@ -1645,15 +1322,15 @@ async function runObjectivePass(
         ...(preparation.repairConsumption
           ? { repairConsumption: preparation.repairConsumption }
           : {}),
-        ...(admission
+        autonomy: preparation.autonomy,
+        capacity,
+        planGraphDigest: plan.graphDigest,
+        ...(plan.prerequisites
           ? {
-              admission: JSON.parse(
-                JSON.stringify(admission),
-              ) as AutonomousAdmission,
+              prerequisitesDigest: createHash("sha256")
+                .update(JSON.stringify(plan.prerequisites))
+                .digest("hex"),
             }
-          : {}),
-        ...(plan.additionalSources?.length
-          ? { additionalSources: plan.additionalSources }
           : {}),
         repository: config.repository,
         objective,
@@ -1679,7 +1356,7 @@ async function runObjectivePass(
         diagnostics,
         state,
         config.delivery.kind,
-        config.execution.concurrency,
+        capacity.concurrency,
       );
     }
     state.coordinator ??= {
@@ -1715,12 +1392,7 @@ async function runObjectivePass(
     await driver.preflight?.(graph);
     validateCommandProvenance(
       graph,
-      planningSources(
-        issue.body,
-        state.baseSha,
-        config.checkout,
-        state.additionalSources,
-      ),
+      planningSources(issue.body, state.baseSha, config.checkout),
       config.checkout,
     );
     stateForSignal = state;
@@ -1949,12 +1621,7 @@ async function runObjectivePass(
           commit: candidateCommitSha,
           evidence: acceptanceEvidence,
           criteria: objectiveCriteria(issue.body),
-          sources: planningSources(
-            issue.body,
-            state.baseSha,
-            config.checkout,
-            state.additionalSources,
-          ),
+          sources: planningSources(issue.body, state.baseSha, config.checkout),
           evidenceSources: [
             ...objectiveEvidence.evidence,
             ...(hydrationReceipt
@@ -2074,6 +1741,9 @@ async function runObjectivePass(
     return state;
   } catch (error) {
     if (error instanceof CoordinatorHandoff) throw error;
+    // A handoff that stopped planning releases ownership; the step repeats on restart.
+    if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
+      throw new CoordinatorHandoff();
     diagnostics.emit({
       runId: stateForSignal?.runId,
       operation: "objective-run",
@@ -2082,7 +1752,7 @@ async function runObjectivePass(
     });
     const current = owner.snapshot;
     if (
-      current?.schemaVersion === 4 &&
+      current?.schemaVersion === 6 &&
       current.finalAcceptance &&
       !(error instanceof GitHubClosureFailure)
     ) {
@@ -2093,7 +1763,7 @@ async function runObjectivePass(
     }
     if (
       active.size &&
-      current?.schemaVersion === 4 &&
+      current?.schemaVersion === 6 &&
       !cancellationRequested()
     ) {
       for (const work of Object.values(current.work)) {
@@ -2109,7 +1779,7 @@ async function runObjectivePass(
       }
       await Promise.allSettled(active.values());
     }
-    if (current?.schemaVersion === 4 && !cancellationRequested()) {
+    if (current?.schemaVersion === 6 && !cancellationRequested()) {
       for (const work of Object.values(current.work)) {
         if (
           !work.execution ||
@@ -2145,17 +1815,17 @@ async function runObjectivePass(
         await Promise.allSettled(active.values());
         if (!current.coordinator?.cancelError && active.size === 0) {
           current.cancelledAt = new Date().toISOString();
-          if (current.schemaVersion === 4)
+          if (current.schemaVersion === 6)
             for (const work of Object.values(current.work))
               if (work.status !== "done" && work.status !== "published")
                 work.status = "cancelled";
         }
       } else if (
         error instanceof GitHubClosureFailure &&
-        current.schemaVersion === 4
+        current.schemaVersion === 6
       ) {
         current.githubClosureError = error.message;
-      } else if (current.schemaVersion === 5) {
+      } else if (current.schemaVersion === 7) {
         // Preparation resumes by repeating its step; record why it paused.
         current.coordinator.waitReason =
           error instanceof Error ? error.message : String(error);
@@ -2195,11 +1865,11 @@ export async function cancelObjective(
     const continuation = readContinuation(config.repository, objective);
     if (!continuation) throw new Error("Objective has no Factory state");
     if (
-      (continuation.schemaVersion === 4 && objectiveComplete(continuation)) ||
+      (continuation.schemaVersion === 6 && objectiveComplete(continuation)) ||
       continuation.cancelledAt
     )
       return "cancelled";
-    if (continuation.schemaVersion === 4 && continuation.finalAcceptance)
+    if (continuation.schemaVersion === 6 && continuation.finalAcceptance)
       throw new Error(
         "Acceptance is sealed; resume to reconcile Objective closure",
       );
@@ -2221,7 +1891,7 @@ export async function cancelObjective(
       saveState(statePath(config.repository, objective), continuation);
       throw error;
     }
-    if (continuation.schemaVersion === 4)
+    if (continuation.schemaVersion === 6)
       for (const work of Object.values(continuation.work)) {
         if (work.execution && work.step === "execute")
           await driver
@@ -2302,10 +1972,6 @@ export function retryWorkItem(
           state.stackMerges?.[nativeUnit.id]))
     )
       throw new Error("Published PR requires operator direction before retry");
-    if (state.admission?.authority.repairPolicy)
-      throw new Error(
-        "Admitted repair requires a concrete diagnosed proposal; retry cannot reset its allowance",
-      );
     state.work[itemId] = { status: "pending", recovery: archiveAttempt(work) };
     state.cancelRequested = false;
     delete state.cancelledAt;
@@ -2322,7 +1988,7 @@ export function retryWorkItem(
   }
 }
 
-/** Diagnosed correction requests retain the exact failure and consume admitted limits. */
+/** Diagnosed correction requests retain the exact failure and consume configured limits. */
 export function repairWorkItem(
   config: FactoryConfig,
   objective: number,
@@ -2417,10 +2083,6 @@ export function rereviewWorkItem(
       );
     if (!input.actor.trim() || !input.reason.trim())
       throw new Error("Result re-review requires actor and reason");
-    if (state.admission?.authority.repairPolicy)
-      throw new Error(
-        "Admitted re-review requires a diagnosed repair proposal within its allowance",
-      );
     work.recovery = archiveAttempt(work);
     work.status = "running";
     work.step = "validate";

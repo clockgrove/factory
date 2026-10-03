@@ -12,7 +12,6 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { preflightObjective } from "../dist/admission.js";
 import { CodexPlanningModel, verifyPlanCandidate } from "../dist/compiler.js";
 import { factoryConfigDigest } from "../dist/config.js";
 import { compilerWire } from "../dist/compiler-wire.js";
@@ -21,7 +20,10 @@ import { decodeGraphReview } from "../dist/review-evidence.js";
 import { encodeCompilerWire } from "./support/compiler-wire.mjs";
 import { withCoverage } from "./support/coverage.mjs";
 import { readDiagnostics, statusDocument } from "../dist/diagnostics.js";
-import { preflightLocalExecutables } from "../dist/local-preflight.js";
+import {
+  preflightLocalExecutables,
+  preflightObjective,
+} from "../dist/local-preflight.js";
 import {
   localValidationShellArguments,
   resolveLocalExecutable,
@@ -187,7 +189,7 @@ test("missing work-item tools stop activation before projection, attempt or targ
     const plan = await setup.application.planObjective(1);
     assert.equal(plan.review.status, "clean");
     await assert.rejects(
-      setup.application.runObjective(1, plan),
+      setup.application.runObjective(1),
       /work-item bootstrap.*command index 0.*executable pnpm.*PATH=\/usr\/bin:\/bin/,
     );
     const events = readDiagnostics("example/preflight", 1).filter(
@@ -209,7 +211,7 @@ test("missing work-item tools stop activation before projection, attempt or targ
       pathContext: "/usr/bin:/bin",
     });
     const preparation = readContinuation("example/preflight", 1);
-    assert.equal(preparation.schemaVersion, 5);
+    assert.equal(preparation.schemaVersion, 7);
     assert.ok(preparation.plan);
     assert.deepEqual(preparation.issueByItemId, {});
     assert.match(preparation.coordinator.waitReason, /pnpm/);
@@ -246,7 +248,7 @@ test("task-private pinned host tools pass and newly created dependent scripts va
     const setup = makeApplication(descriptor(root, target, commands));
     const plan = await setup.application.planObjective(1);
     assert.ok(plan.commands.some((c) => /new|result/i.test(c.reason)));
-    const state = await setup.application.runObjective(1, plan);
+    const state = await setup.application.runObjective(1);
     assert.equal(state.finalValidation.passed, true);
     assert.equal(state.objectiveClosure, "complete");
     assert.equal(
@@ -285,10 +287,9 @@ test("activation rechecks changed PATH, final requirements, pinned mismatches an
         ["pnpm test"],
       ),
     );
-    const plan = await setup.application.planObjective(1);
     process.env.PATH = "/usr/bin:/bin";
     await assert.rejects(
-      setup.application.runObjective(1, plan),
+      setup.application.runObjective(1),
       /final.*command index 0.*executable pnpm/,
     );
     writeFileSync(join(tools.bin, "pnpm"), `#!/bin/sh\necho 8.0.0\n`, {
@@ -296,7 +297,7 @@ test("activation rechecks changed PATH, final requirements, pinned mismatches an
     });
     process.env.PATH = `${tools.bin}:/usr/bin:/bin`;
     await assert.rejects(
-      setup.application.runObjective(1, plan),
+      setup.application.runObjective(1),
       /version-mismatch.*pnpm@9.0.0.*8.0.0/,
     );
     assert.equal(readState("example/preflight", 1), undefined);
@@ -491,28 +492,14 @@ test("actual planning packets carry presence without executing acceptance, and b
       ["test -s proof.txt"],
       commands,
     );
-    const bounded = {
-      schemaVersion: 1,
-      actor: "fixture operator",
-      reason: "One diagnosis, no worker",
-      executionConsent: true,
-      serviceConsent: false,
-      objectives: [1],
+    // One planning diagnosis and no worker repair.
+    descriptorInput.config.autonomy = {
       allowances: {
         planningRevisions: 1,
         implementationRepairs: 0,
         resultRereviews: 0,
       },
       repairClasses: ["planning-evidence"],
-      repairPolicy: {
-        perPath: {
-          planningRevisions: 1,
-          implementationRepairs: 0,
-          resultRereviews: 0,
-        },
-      },
-      resources: { maxConcurrency: 2 },
-      requiredEnvironment: [],
     };
     const selection = { model: "gpt-5.6-sol", reasoningEffort: "low" };
     const real = new CodexPlanningModel(target.checkout, selection, selection);
@@ -573,7 +560,9 @@ test("actual planning packets carry presence without executing acceptance, and b
     };
     const setup = makeApplication({ ...descriptorInput, planningModel: model });
     process.env.PATH = `${bin}:/usr/bin:/bin`;
-    const candidate = await setup.application.planObjective(1, [], bounded);
+    const waiting = await setup.application.runObjective(1);
+    assert.equal(waiting.schemaVersion, 7);
+    const candidate = waiting.plan;
     const facts = candidate.localExecutables;
     assert.equal(
       facts.provenance,
@@ -667,9 +656,15 @@ test("actual planning packets carry presence without executing acceptance, and b
       /missing.*acceptance-only-tool/,
     );
     await assert.rejects(
-      setup.application.runObjective(1, candidate),
-      /specific human source decision/,
+      setup.application.runObjective(1),
+      /missing.*acceptance-only-tool/,
     );
+    chmodSync(executable, 0o700);
+    // A rerun returns the persisted plan decision without planning again.
+    const again = await setup.application.runObjective(1);
+    assert.equal(again.schemaVersion, 7);
+    assert.equal(again.plan.reviewDigest, candidate.reviewDigest);
+    assert.match(again.coordinator.waitReason, /Plan needs a decision/);
     assert.equal(existsSync(marker), false);
     assert.equal(rendered.length, 3);
   });

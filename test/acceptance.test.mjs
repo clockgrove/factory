@@ -46,6 +46,8 @@ import {
   git,
 } from "./support/integration-fixture.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
+import { defaultAutonomy } from "../dist/index.js";
+import { graphDigest } from "../dist/graph-amendments.js";
 
 function item(baseSha, validation) {
   return {
@@ -1501,11 +1503,16 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
       acceptance: ["follow-up is exact and preserves bootstrap paths"],
     });
     const state = {
-      schemaVersion: 4,
+      schemaVersion: 6,
       repository: "example/objective-item-deltas",
       objective: 1,
       runId: "delta-review",
       configDigest: "a".repeat(64),
+      autonomy: structuredClone(defaultAutonomy),
+      capacity: { concurrency: 1 },
+      get planGraphDigest() {
+        return graphDigest(this.graph);
+      },
       baseSha: target.baseSha,
       graph: {
         objective: 1,
@@ -1768,11 +1775,16 @@ test("truncated per-Work-Item evidence cannot ground an automatic pass", async (
     const graph = item(target.baseSha, []);
     graph.items[0].ownedPaths = ["result.txt"];
     const state = {
-      schemaVersion: 4,
+      schemaVersion: 6,
       repository: "example/objective-item-delta-budget",
       objective: 1,
       runId: "delta-budget",
       configDigest: "a".repeat(64),
+      autonomy: structuredClone(defaultAutonomy),
+      capacity: { concurrency: 1 },
+      get planGraphDigest() {
+        return graphDigest(this.graph);
+      },
       baseSha: target.baseSha,
       graph,
       issueByItemId: { one: 2 },
@@ -2015,11 +2027,16 @@ test("final review shares one text budget across ordinary and materialization pa
         },
       });
       const state = {
-        schemaVersion: 4,
+        schemaVersion: 6,
         repository: "example/objective-materialization-budget",
         objective: 1,
         runId: "materialization-budget",
         configDigest: "a".repeat(64),
+        autonomy: structuredClone(defaultAutonomy),
+        capacity: { concurrency: 1 },
+        get planGraphDigest() {
+          return graphDigest(this.graph);
+        },
         baseSha: target.baseSha,
         graph: {
           objective: 1,
@@ -2406,11 +2423,16 @@ test("operator decision records criterion and exact tree before resuming validat
       const treeSha = git(target.checkout, "rev-parse", "HEAD^{tree}");
       const config = factoryConfig(target.checkout, "example/acceptance");
       const state = {
-        schemaVersion: 4,
+        schemaVersion: 6,
         repository: config.repository,
         objective: 1,
         runId: "acceptance-test",
         configDigest: "a".repeat(64),
+        autonomy: structuredClone(defaultAutonomy),
+        capacity: { concurrency: 1 },
+        get planGraphDigest() {
+          return graphDigest(this.graph);
+        },
         baseSha: target.baseSha,
         graph: item(target.baseSha, []),
         objectiveCommands: [],

@@ -11,6 +11,7 @@ import {
   validateAmendment,
 } from "../dist/graph-amendments.js";
 import { readyItems } from "../dist/scheduler.js";
+import { resolveAutonomy } from "../dist/index.js";
 import { coverageObligations } from "../dist/qa.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 import { withCoverage } from "./support/coverage.mjs";
@@ -67,31 +68,22 @@ test("accepted reprioritization changes pending order without resetting running 
       baseSha: target.baseSha,
       graph,
       runId: "priority-fixture",
+      capacity: { concurrency: 3 },
+      planGraphDigest: graphDigest(graph),
       issueByItemId: { first: 2, second: 3, legacy: 4 },
       work: {
         first: { status: "pending" },
         second: { status: "pending" },
         legacy: { status: "done", attempt: "retained-legacy" },
       },
-      admission: {
-        graphDigest: graphDigest(graph),
-        authority: {
-          schemaVersion: 1,
-          actor: "fixture operator",
-          reason: "Bounded accepted reprioritization",
-          executionConsent: true,
-          serviceConsent: false,
-          objectives: [1],
-          repairClasses: [],
-          requiredEnvironment: [],
-          allowances: {
-            planningRevisions: 1,
-            implementationRepairs: 0,
-            resultRereviews: 0,
-          },
-          resources: { maxConcurrency: 2 },
+      autonomy: resolveAutonomy({
+        repairClasses: [],
+        allowances: {
+          planningRevisions: 1,
+          implementationRepairs: 0,
+          resultRereviews: 0,
         },
-      },
+      }),
     };
     assert.equal(
       readyItems(state.graph, state.work, new Set(), 1)[0].id,
@@ -121,9 +113,7 @@ test("accepted reprioritization changes pending order without resetting running 
         async reviewGraph(request) {
           reviews++;
           assert.deepEqual(request.executionBounds, {
-            configuredConcurrency: config.execution.concurrency,
-            authorizedMaxConcurrency:
-              state.admission.authority.resources.maxConcurrency,
+            configuredConcurrency: state.capacity.concurrency,
           });
           return {
             packetId: request.reviewPacket.id,

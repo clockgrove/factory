@@ -15,16 +15,9 @@ import { availableParallelism, tmpdir, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { hostSchedulingDefaults } from "../dist/config.js";
-import {
-  admitObjective,
-  checkAdmission,
-  controlObjective,
-  planObjective,
-  runObjective,
-} from "../dist/runner.js";
-import { readContinuation, statePath } from "../dist/state-store.js";
+import { defaultAutonomy } from "../dist/index.js";
+import { saveState, statePath } from "../dist/state-store.js";
 import { readIntake } from "../dist/intake.js";
-import { withCoverage } from "./support/coverage.mjs";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 
 const installedCli = realpathSync(new URL("../dist/cli.js", import.meta.url));
@@ -112,7 +105,7 @@ else if(action==='enable'){if(fs.existsSync(file('enable-failure')))process.exit
 else if(action==='disable'){fs.rmSync(file('enabled'),{force:true});}
 else if(action==='stop'&&fs.existsSync(file('refill-at-stop'))){
  fs.rmSync(file('refill-at-stop'));
- const target=spawnSync(process.execPath,[${JSON.stringify(installedCli)},'intake','enqueue','--authority',file('next-authority.json'),'--config',file('factory.json')],{env:process.env,encoding:'utf8'});
+ const target=spawnSync(process.execPath,[${JSON.stringify(installedCli)},'intake','enqueue','--objective','1','--config',file('factory.json')],{env:process.env,encoding:'utf8'});
  if(target.status!==0){console.error(target.stderr);process.exit(1);}
 }
 else if(action==='stop'&&fs.existsSync(file('foreign-at-stop'))){
@@ -252,7 +245,7 @@ test("actual guided CLI creates a consented idle watcher, verifies its owner and
     const state = run(["intake", "status"]).document;
     assert.deepEqual(state.observation.unapproved, [99]);
     assert.equal(state.observation.idleReason, "awaiting-approved-work");
-    assert.equal(state.authority, undefined);
+    assert.deepEqual(state.objectives, []);
     assert.deepEqual(state.bodyDigests, {});
     const repositoryState = join(
       root,
@@ -333,7 +326,7 @@ test("actual guided setup reports partial registration/start failures and comple
     assert.equal(readFileSync(join(root, "starts"), "utf8"), "start\n");
   }));
 
-test("actual guided setup checks admitted execution readiness and retains a closed finite selection without dispatch", () =>
+test("actual guided setup checks selected execution readiness and retains a closed finite selection without dispatch", () =>
   fixture(async ({ root, run, configPath, env, checkout }) => {
     const config = factoryConfig(checkout, "example/setup");
     config.execution = {
@@ -349,38 +342,18 @@ test("actual guided setup checks admitted execution readiness and retains a clos
       },
     };
     writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
-    const authority = join(root, "authority.json");
-    writeFileSync(
-      authority,
-      JSON.stringify({
-        schemaVersion: 1,
-        actor: "fixture",
-        reason: "One explicitly approved closed fixture Objective",
-        executionConsent: true,
-        serviceConsent: false,
-        objectives: [1],
-        allowances: {
-          planningRevisions: 0,
-          implementationRepairs: 0,
-          resultRereviews: 0,
-        },
-        repairClasses: [],
-        resources: { maxConcurrency: 1 },
-        requiredEnvironment: [],
-      }),
-    );
     const credential = join(root, "credential");
     writeFileSync(credential, "fixture-no-provider-call", { mode: 0o600 });
     const args = [
       "setup",
       ...consent,
-      "--authority",
-      authority,
+      "--objective",
+      "1",
       "--credential-file",
       `FACTORY_SERVICE_TEST_KEY=${credential}`,
     ];
     delete env.FACTORY_SERVICE_TEST_KEY;
-    const missing = run(["setup", ...consent, "--authority", authority]);
+    const missing = run(["setup", ...consent, "--objective", "1"]);
     assert.equal(missing.status, 1);
     assert.equal(missing.document.blocked.stage, "execution-readiness");
     assert.equal(existsSync(join(root, "registered")), false);
@@ -391,7 +364,7 @@ test("actual guided setup checks admitted execution readiness and retains a clos
     assert.doesNotMatch(ready.stdout, /fixture-no-provider-call/);
     const status = run(["intake", "status"]);
     assert.equal(status.status, 0);
-    assert.equal(status.document.authority.serviceConsent, false);
+    assert.deepEqual(status.document.objectives, [1]);
     assert.equal(status.document.serviceConsent.consent, true);
     assert.equal(status.document.observation.reasons[1], "Issue is closed");
   }));
@@ -408,38 +381,12 @@ test("actual setup and readiness CLI share the home default and preserve outside
     mkdirSync(home);
     mkdirSync(override);
     env.HOME = home;
-    const authority = join(root, "authority.json");
-    writeFileSync(
-      authority,
-      JSON.stringify({
-        schemaVersion: 1,
-        actor: "fixture",
-        reason: "One approved fixture Objective",
-        executionConsent: true,
-        serviceConsent: false,
-        objectives: [1],
-        allowances: {
-          planningRevisions: 0,
-          implementationRepairs: 0,
-          resultRereviews: 0,
-        },
-        repairClasses: [],
-        resources: { maxConcurrency: 1 },
-        requiredEnvironment: [],
-      }),
-    );
     writeFileSync(join(root, "readiness-mode"), "allowed");
     for (const [args, selected] of [
       [[], home],
       [["--outside-directory", override], override],
     ]) {
-      const result = run([
-        "setup",
-        ...consent,
-        "--authority",
-        authority,
-        ...args,
-      ]);
+      const result = run(["setup", ...consent, "--objective", "1", ...args]);
       assert.equal(result.status, 1, result.stdout + result.stderr);
       assert.equal(result.document.blocked.stage, "execution-readiness");
       const readiness = JSON.parse(result.document.blocked.detail);
@@ -559,35 +506,18 @@ for (const fault of ["refill", "foreign"]) {
       assert.equal(initial.status, 0, initial.stdout + initial.stderr);
       const config = JSON.parse(readFileSync(configPath, "utf8"));
       if (fault === "refill") {
-        writeFileSync(
-          join(root, "next-authority.json"),
-          JSON.stringify({
-            schemaVersion: 1,
-            actor: "fixture",
-            reason: "Concurrent explicit settled refill",
-            executionConsent: true,
-            serviceConsent: false,
-            objectives: [1],
-            allowances: {
-              planningRevisions: 0,
-              implementationRepairs: 0,
-              resultRereviews: 0,
-            },
-            repairClasses: [],
-            resources: { maxConcurrency: 1 },
-            requiredEnvironment: [],
-          }),
-        );
         writeFileSync(join(root, "refill-at-stop"), "");
       } else {
         const { factoryConfigDigest } = await import("../dist/config.js");
         const snapshot = {
-          schemaVersion: 5,
+          schemaVersion: 7,
           kind: "preparing",
           repository: config.repository,
           objective: 2,
           configDigest: factoryConfigDigest(config),
           runId: "retained-foreign-nonterminal",
+          autonomy: defaultAutonomy,
+          capacity: { concurrency: 1 },
           baseSha: "a".repeat(40),
           objectiveBodyDigest: "b".repeat(64),
           coordinator: {
@@ -619,12 +549,11 @@ for (const fault of ["refill", "foreign"]) {
       const status = run(["intake", "status"]);
       assert.equal(status.status, 0, status.stderr);
       assert.equal(status.document.mode, "draining");
-      if (fault === "refill")
-        assert.deepEqual(status.document.authority.objectives, [1]);
+      if (fault === "refill") assert.deepEqual(status.document.objectives, [1]);
     }));
 }
 
-test("guided setup sizes omitted concurrency and scheduling from the host and reports them", () =>
+test("guided setup leaves omitted concurrency to host sizing at run time and reports it", () =>
   fixture(async ({ run, installArgs, configPath }) => {
     const omitted = installArgs().slice(0, -2);
     const configured = run(["setup", "--config-only", ...omitted]);
@@ -634,18 +563,21 @@ test("guided setup sizes omitted concurrency and scheduling from the host and re
       memoryBytes: totalmem(),
     });
     const config = JSON.parse(readFileSync(configPath, "utf8"));
-    assert.equal(config.execution.concurrency, expected.concurrency);
-    assert.deepEqual(config.scheduling, expected.scheduling);
-    assert.deepEqual(configured.document.capacity, {
+    assert.equal(config.execution.concurrency, undefined);
+    assert.equal(config.scheduling, undefined);
+    const sized = {
       ...expected,
+      hostSized: { concurrency: true, scheduling: true },
       sizedFromHost: {
         cpus: availableParallelism(),
         memoryMiB: Math.floor(totalmem() / 1024 ** 2),
       },
-    });
+    };
+    assert.deepEqual(configured.document.capacity, sized);
+    // The configuration still omits concurrency, so a repeat reports the same host sizing.
     const repeated = run(["setup", "--config-only"]);
     assert.equal(repeated.status, 0, repeated.stdout + repeated.stderr);
-    assert.deepEqual(repeated.document.capacity, expected);
+    assert.deepEqual(repeated.document.capacity, sized);
   }));
 
 test("guided setup keeps an explicit concurrency as the whole capacity choice", () =>
@@ -686,39 +618,11 @@ test("guided setup rejects configuration inside the target before writing it and
     assert.deepEqual(readFileSync(configPath), before);
   }));
 
-test("actual setup and preparation reuse preserve equivalent authority values regardless of object property order", () =>
+test("setup reuses an identical Objective selection and refuses replacing it while an Objective is active", () =>
   fixture(async ({ root, run, configPath, env, checkout }) => {
     const config = factoryConfig(checkout, "example/setup");
     writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
     writeFileSync(join(root, "readiness-mode"), "refused");
-    const body =
-      "## Acceptance\n- proof.txt exists\n\n## Commands\n- test -s proof.txt\n\n## Final validation\n- test -s proof.txt\n";
-    writeFileSync(join(root, "objective-body"), body);
-    const authority = {
-      schemaVersion: 1,
-      actor: "fixture",
-      reason: "Retain one bounded prepared public Objective",
-      executionConsent: true,
-      serviceConsent: true,
-      objectives: [1],
-      allowances: {
-        planningRevisions: 0,
-        implementationRepairs: 0,
-        resultRereviews: 0,
-      },
-      repairClasses: [],
-      repairPolicy: {
-        perPath: {
-          planningRevisions: 0,
-          implementationRepairs: 0,
-          resultRereviews: 0,
-        },
-      },
-      resources: { maxConcurrency: 2 },
-      requiredEnvironment: [],
-    };
-    const authorityFile = join(root, "authority.json");
-    writeFileSync(authorityFile, JSON.stringify(authority));
     const watching = run([
       "intake",
       "watch",
@@ -729,240 +633,55 @@ test("actual setup and preparation reuse preserve equivalent authority values re
       "Consented model-free target watcher",
     ]);
     assert.equal(watching.status, 0, watching.stdout + watching.stderr);
-    const enqueue = run([
-      "intake",
-      "enqueue",
-      "--authority",
-      authorityFile,
-      "--watch",
-    ]);
+    const enqueue = run(["intake", "enqueue", "--objective", "1", "--watch"]);
     assert.equal(enqueue.status, 0, enqueue.stdout + enqueue.stderr);
-    let compilerCallbacks = 0;
-    const services = {
-      github: {
-        objective: async () => ({
-          number: 1,
-          title: "Public prepared fixture",
-          body,
-          state: "closed",
-          labels: [],
-        }),
-      },
-      planningModel: {
-        generateStructured: async (request) => {
-          compilerCallbacks++;
-          return withCoverage(request, {
-            objective: 1,
-            baseSha: request.baseSha,
-            items: [
-              {
-                id: "proof",
-                title: "Public proof",
-                kind: "work",
-                goal: "Write proof.txt",
-                brief: "Write proof.txt",
-                acceptance: ["proof.txt exists"],
-                nonGoals: ["No unrelated changes"],
-                citations: [{ path: "OBJECTIVE", heading: "Acceptance" }],
-                dependencies: [],
-                ownedPaths: ["proof.txt"],
-                resources: [],
-                validation: [
-                  {
-                    command: "test -s proof.txt",
-                    provenance: "source-declared",
-                    source: "OBJECTIVE",
-                  },
-                ],
-                sourceAssets: [],
-                expectedOutputRoles: [],
-                minimumAssetSets: 0,
-                requiredLfsRoles: [],
-              },
-            ],
-          });
-        },
-        reviewGraph: async (request) => ({
-          packetId: request.reviewPacket.id,
-          findings: [],
-        }),
-      },
-    };
+    const pause = run(["intake", "pause"]);
+    assert.equal(pause.status, 0, pause.stdout + pause.stderr);
     const oldStateHome = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = env.XDG_STATE_HOME;
     try {
-      const candidate = await planObjective(config, 1, services, [], authority);
-      const pause = run(["intake", "pause"]);
-      assert.equal(pause.status, 0, pause.stdout + pause.stderr);
-      const path = statePath(config.repository, 1),
-        before = readFileSync(path, "utf8");
+      const { factoryConfigDigest } = await import("../dist/config.js");
+      const path = statePath(config.repository, 1);
+      saveState(path, {
+        schemaVersion: 7,
+        kind: "preparing",
+        repository: config.repository,
+        objective: 1,
+        runId: "retained-preparation",
+        configDigest: factoryConfigDigest(config),
+        baseSha: "a".repeat(40),
+        objectiveBodyDigest: "b".repeat(64),
+        autonomy: defaultAutonomy,
+        capacity: { concurrency: 1 },
+        issueByItemId: {},
+        coordinator: {
+          mode: "paused",
+          phase: "planning",
+          phaseStartedAt: new Date().toISOString(),
+        },
+      });
+      const before = readFileSync(path, "utf8");
       const intakeBefore = readIntake(config);
-      const canonical = run([
+      const same = run(["setup", ...consent, "--objective", "1"]);
+      assert.equal(same.status, 1, same.stdout + same.stderr);
+      assert.match(same.document.blocked.detail, /paused or draining/);
+      const changed = run([
         "setup",
         ...consent,
-        "--authority",
-        authorityFile,
+        "--objective",
+        "1",
+        "--objective",
+        "2",
       ]);
-      const reordered = {
-        requiredEnvironment: [],
-        resources: { maxConcurrency: 2 },
-        repairPolicy: {
-          perPath: {
-            resultRereviews: 0,
-            implementationRepairs: 0,
-            planningRevisions: 0,
-          },
-        },
-        repairClasses: [],
-        allowances: {
-          resultRereviews: 0,
-          implementationRepairs: 0,
-          planningRevisions: 0,
-        },
-        objectives: [1],
-        serviceConsent: true,
-        executionConsent: true,
-        reason: authority.reason,
-        actor: authority.actor,
-        schemaVersion: 1,
-      };
-      writeFileSync(authorityFile, JSON.stringify(reordered));
-      const result = run(["setup", ...consent, "--authority", authorityFile]);
-      const reused = await planObjective(config, 1, services, [], reordered);
-      assert.deepEqual(reused, candidate);
-      assert.equal(compilerCallbacks, 1);
-      assert.match(canonical.document.blocked.detail, /paused or draining/);
-      assert.match(result.document.blocked.detail, /paused or draining/);
-      assert.deepEqual(readIntake(config), intakeBefore);
-      assert.equal(readFileSync(path, "utf8"), before);
-      assert.ok(readContinuation(config.repository, 1).plan);
-      for (const change of [
-        (value) => (value.actor = "another operator"),
-        (value) => (value.reason = "changed reason"),
-        (value) => (value.serviceConsent = false),
-        (value) => (value.objectives = [1, 2]),
-        (value) => (value.allowances.planningRevisions = 1),
-        (value) => (value.repairPolicy.perPath.resultRereviews = 1),
-        (value) => (value.resources.maxConcurrency = 3),
-      ]) {
-        const changed = structuredClone(authority);
-        change(changed);
-        writeFileSync(authorityFile, JSON.stringify(changed));
-        const refused = run([
-          "setup",
-          ...consent,
-          "--authority",
-          authorityFile,
-        ]);
-        assert.match(
-          refused.document.blocked.detail,
-          /active Objective prevents replacing intake authority/,
-        );
-        await assert.rejects(
-          planObjective(config, 1, services, [], changed),
-          /Planning authority or immutable preparation identity changed/,
-        );
-      }
-      const missingPolicy = structuredClone(authority);
-      delete missingPolicy.repairPolicy;
-      writeFileSync(authorityFile, JSON.stringify(missingPolicy));
+      assert.equal(changed.status, 1, changed.stdout + changed.stderr);
       assert.match(
-        run(["setup", ...consent, "--authority", authorityFile]).document
-          .blocked.detail,
-        /active Objective prevents replacing intake authority/,
+        changed.document.blocked.detail,
+        /active Objective prevents replacing the intake selection/,
       );
-      for (const invalid of [
-        { ...authority, unknownPolicy: true },
-        { ...authority, actor: 42 },
-        {
-          ...authority,
-          allowances: { ...authority.allowances, planningRevisions: -1 },
-        },
-      ]) {
-        writeFileSync(authorityFile, JSON.stringify(invalid));
-        const refused = run([
-          "setup",
-          ...consent,
-          "--authority",
-          authorityFile,
-        ]);
-        assert.equal(refused.status, 1);
-        assert.match(
-          refused.document.blocked.detail,
-          /Admission requires|Unsupported authority field/,
-        );
-        await assert.rejects(
-          planObjective(config, 1, services, [], invalid),
-          /Admission requires|Unsupported authority field/,
-        );
-      }
-      assert.equal(compilerCallbacks, 1);
       assert.deepEqual(readIntake(config), intakeBefore);
       assert.equal(readFileSync(path, "utf8"), before);
       assert.equal(existsSync(join(root, "registered")), false);
       assert.equal(existsSync(join(root, "starts")), false);
-      const originalAdmission = await admitObjective(
-        config,
-        1,
-        services,
-        candidate,
-        authority,
-      );
-      const originalAdmissionBytes = JSON.stringify(originalAdmission);
-      const newAdmission = await admitObjective(
-        config,
-        1,
-        services,
-        candidate,
-        reordered,
-      );
-      assert.notEqual(newAdmission.digest, originalAdmission.digest);
-      await checkAdmission(config, 1, services, candidate, newAdmission);
-      assert.equal(readFileSync(path, "utf8"), before);
-      assert.equal(JSON.stringify(originalAdmission), originalAdmissionBytes);
-      await controlObjective(config, { objective: 1, action: "resume" });
-      await assert.rejects(
-        runObjective(config, 1, services, candidate, newAdmission),
-        /Objective issue is confirmed closed/,
-      );
-      const bound = readContinuation(config.repository, 1);
-      const initial = JSON.parse(before);
-      for (const field of [
-        "runId",
-        "plan",
-        "authority",
-        "configDigest",
-        "baseSha",
-        "objectiveBodyDigest",
-        "sourcePacketDigest",
-        "allowanceConsumption",
-        "repairConsumption",
-        "planningRecovery",
-        "issueByItemId",
-        "planning",
-      ]) {
-        assert.deepEqual(bound[field], initial[field], field);
-      }
-      assert.deepEqual(bound.admission, newAdmission);
-      assert.deepEqual(readIntake(config), intakeBefore);
-      await assert.rejects(
-        checkAdmission(config, 1, services, candidate, originalAdmission),
-        /Active Objective admission cannot be added or replaced/,
-      );
-      await assert.rejects(
-        admitObjective(config, 1, services, candidate, authority),
-        /Active Objective admission cannot be added or replaced/,
-      );
-      await checkAdmission(config, 1, services, candidate, newAdmission);
-      await assert.rejects(
-        runObjective(config, 1, services, candidate, originalAdmission),
-        /Preparation admission cannot be replaced on restart/,
-      );
-      assert.deepEqual(
-        readContinuation(config.repository, 1).admission,
-        newAdmission,
-      );
-      assert.equal(compilerCallbacks, 1);
     } finally {
       if (oldStateHome === undefined) delete process.env.XDG_STATE_HOME;
       else process.env.XDG_STATE_HOME = oldStateHome;

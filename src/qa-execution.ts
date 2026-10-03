@@ -238,7 +238,6 @@ export async function runQaItem(args: {
           args.objectiveBody,
           state.baseSha,
           args.config.checkout,
-          state.additionalSources,
         ),
         decisions: work.acceptanceDecisions,
         observations: workItemReviewObservations(state, item, {

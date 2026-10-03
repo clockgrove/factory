@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { shortPlanDigest } from "../dist/status-summary.js";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel } from "../dist/compiler.js";
 import {
@@ -156,10 +157,14 @@ test("regular application path runs a source-grounded concurrent DAG with stable
     const runStatus = [];
     descriptor.reportRunStatus = (message) => runStatus.push(message);
     const { application, eventsPath, github } = makeApplication(descriptor);
-    const acceptedPlan = await application.planObjective(objective);
-    assert.equal(acceptedPlan.review.status, "clean");
+    const preview = await application.planObjective(objective);
+    assert.equal(preview.review.status, "clean");
+    assert.equal(
+      readContinuation(descriptor.config.repository, objective),
+      undefined,
+    );
     assert.equal(Object.keys(github.state().issues).length, 0);
-    const running = application.runObjective(objective, acceptedPlan);
+    const running = application.runObjective(objective);
     await waitFor(
       () => {
         const starts = readEvents(eventsPath).filter(
@@ -220,7 +225,9 @@ test("regular application path runs a source-grounded concurrent DAG with stable
     mkdirSync(join(root, "barriers"), { recursive: true });
     writeFileSync(barrier, "go\n");
     const state = await running;
-    assert.deepEqual(runStatus, ["Factory: activating the accepted plan"]);
+    assert.deepEqual(runStatus, [
+      "Factory: compiling and independently reviewing a fresh plan",
+    ]);
     assert.equal(state.finalValidation.passed, true);
     assert.ok(
       Object.values(state.work).every((work) => work.status === "done"),
@@ -243,8 +250,11 @@ test("regular application path runs a source-grounded concurrent DAG with stable
     );
     assert.deepEqual(
       modelInvocations.map((event) => event.metadata.phase).sort(),
+      // The read-only preview and the run each plan once.
       [
         "compile",
+        "compile",
+        "graph-review",
         "graph-review",
         "objective-review",
         "result-review",
@@ -287,7 +297,7 @@ test("regular application path runs a source-grounded concurrent DAG with stable
     };
     const rerun = await application.runObjective(objective);
     assert.deepEqual(runStatus, [
-      "Factory: activating the accepted plan",
+      "Factory: compiling and independently reviewing a fresh plan",
       "Factory: resuming the existing run from atomic state",
     ]);
     assert.equal(rerun.integratedSha, state.integratedSha);
@@ -587,8 +597,7 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
     process.env.PATH = `${bin}:${previousPath}`;
     try {
       const { application } = makeApplication(descriptor);
-      const acceptedPlan = await application.planObjective(objective);
-      const completed = await application.runObjective(objective, acceptedPlan);
+      const completed = await application.runObjective(objective);
       assert.equal(completed.finalValidation.passed, true);
       assert.equal(completed.finalAcceptancePending, undefined);
       assert.equal(
@@ -740,9 +749,7 @@ test("application retries capacity for exact Work Item and final review requests
         },
       };
       const { application, eventsPath } = makeApplication(descriptor);
-      const plan = await application.planObjective(objective);
-      assert.equal(plan.review.status, "clean");
-      const completed = await application.runObjective(objective, plan);
+      const completed = await application.runObjective(objective);
       assert.equal(completed.finalValidation.passed, true);
       assert.equal(completed.finalAcceptancePending, undefined);
       assert.equal(
@@ -874,16 +881,21 @@ test("application fails closed once after exhausted result-review capacity witho
         },
       };
       const { application, eventsPath, github } = makeApplication(descriptor);
-      const plan = await application.planObjective(objective);
-      const waiting = await application.runObjective(objective, plan);
+      const waiting = await application.runObjective(objective);
       assert.equal(waiting.work["review-exhausted"].status, "waiting");
       assert.equal(waiting.work["review-exhausted"].step, "approve-result");
       assert.match(
         waiting.work["review-exhausted"].acceptancePending.detail,
         /Independent review transport was invalid: reviewer capacity unavailable/,
       );
-      assert.equal(resultPrompts.length, 3);
-      assert.ok(resultPrompts.every((prompt) => prompt === resultPrompts[0]));
+      // Default autonomy repeats the review once on fresh evidence, then stops.
+      assert.equal(resultPrompts.length, 6);
+      assert.ok(
+        resultPrompts
+          .slice(0, 3)
+          .every((prompt) => prompt === resultPrompts[0]),
+      );
+      assert.equal(waiting.allowanceConsumption.resultRereviews, 1);
       assert.equal(
         readEvents(eventsPath).filter(
           (event) =>
@@ -895,8 +907,8 @@ test("application fails closed once after exhausted result-review capacity witho
       const summary = summarizeModelInvocations(
         readDiagnostics(descriptor.config.repository, objective),
       );
-      assert.equal(summary.byPhase["result-review"].invocationCount, 3);
-      assert.equal(summary.byPhase["result-review"].failedCount, 3);
+      assert.equal(summary.byPhase["result-review"].invocationCount, 6);
+      assert.equal(summary.byPhase["result-review"].failedCount, 6);
       assert.equal(summary.byPhase["result-review"].completedCount, 0);
     } finally {
       Codex.prototype.startThread = original;
@@ -1356,59 +1368,72 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
         };
       },
     };
+    const config = factoryConfig(
+      target.checkout,
+      "example/malformed-graph-integration",
+      "regular",
+      1,
+    );
     const { application, github } = makeApplication({
-      config: factoryConfig(
-        target.checkout,
-        "example/malformed-graph-integration",
-        "regular",
-        1,
-      ),
+      config,
       graph,
       objectiveBody: body([command]),
       fakeRoot: join(root, "fake"),
       planningModel,
       actions: { alpha: { files: [{ path: "alpha.txt", text: "alpha\n" }] } },
     });
-    const candidate = await application.planObjective(objective);
-    assert.equal(candidate.review.status, "needs-human");
+    const preparing = await application.runObjective(objective);
+    assert.equal(preparing.schemaVersion, 7);
+    assert.equal(preparing.plan.review.status, "needs-human");
+    assert.match(preparing.coordinator.waitReason, /^Plan needs a decision: /);
     assert.equal(Object.keys(github.state().issues).length, 0);
-    assert.equal(
-      existsSync(statePath("example/malformed-graph-integration", objective)),
-      false,
-    );
+    assert.equal(reviewCount, 1);
+    // A rerun resumes the persisted plan: no planning call, still waiting.
+    const again = await application.runObjective(objective);
+    assert.equal(again.schemaVersion, 7);
+    assert.equal(reviewCount, 1);
+    assert.equal(Object.keys(github.state().issues).length, 0);
+    // The persisted plan stays bound to the configuration it was planned with.
+    config.planning.reviewer.reasoningEffort = "high";
     await assert.rejects(
-      application.runObjective(objective, {
-        ...candidate,
-        review: {
-          ...candidate.review,
-          status: "clean",
-          findings: [],
-          failure: undefined,
-        },
+      application.decidePlan(objective, {
+        plan: shortPlanDigest(
+          readContinuation(config.repository, objective).plan,
+        ),
+        actor: "test operator",
+        outcome: "accept",
+        answer: "I inspected the exact graph and accept its sole item",
+        reason: "Pinned Objective and graph match",
       }),
       /differs from the current Objective/,
     );
-    assert.equal(Object.keys(github.state().issues).length, 0);
-    assert.equal(
-      existsSync(statePath("example/malformed-graph-integration", objective)),
-      false,
+    await assert.rejects(
+      application.runObjective(objective),
+      /changed since planning/,
     );
-    assert.equal(reviewCount, 1);
-    const accepted = await application.decidePlan(objective, candidate, {
+    config.planning.reviewer.reasoningEffort = "medium";
+    const decided = await application.decidePlan(objective, {
+      plan: shortPlanDigest(
+        readContinuation(config.repository, objective).plan,
+      ),
       actor: "test operator",
       outcome: "accept",
       answer: "I inspected the exact graph and accept its sole item",
       reason: "Pinned Objective and graph match",
     });
-    assert.equal(accepted.review.status, "human-accepted");
+    assert.equal(decided.plan.review.status, "human-accepted");
+    assert.equal(
+      readContinuation(config.repository, objective).plan.review.status,
+      "human-accepted",
+    );
     assert.equal(reviewCount, 1);
-    const completed = await application.runObjective(objective, accepted);
+    const completed = await application.runObjective(objective);
     assert.equal(completed.finalValidation.passed, true);
     assert.equal(reviewCount, 1);
   });
 });
 
-test("clean accepted plan activates without planning calls and rejects config drift", async () => {
+test("preview planning stays read-only and a refused plan is planned again", async () => {
   await fixture("clean-plan-activation", async (root) => {
     const target = createTarget(root);
     const command = 'test "$(cat clean.txt)" = clean';
@@ -1426,6 +1451,7 @@ test("clean accepted plan activates without planning calls and rejects config dr
     let generationCount = 0;
     let reviewCount = 0;
     let reviewedPacket;
+    let findings = [];
     const planningModel = {
       async generateStructured(request) {
         generationCount += 1;
@@ -1435,10 +1461,7 @@ test("clean accepted plan activates without planning calls and rejects config dr
         reviewCount += 1;
         const { invocation: _invocation, ...packet } = request;
         reviewedPacket = structuredClone(packet);
-        return {
-          packetId: request.reviewPacket.id,
-          findings: [],
-        };
+        return { packetId: request.reviewPacket.id, findings };
       },
       async reviewResult(request) {
         return {
@@ -1471,33 +1494,37 @@ test("clean accepted plan activates without planning calls and rejects config dr
     assert.equal(reviewCount, 1);
     assert.deepEqual(reviewedPacket.commands, candidate.commands);
     assert.deepEqual(reviewedPacket.finalCommands, [command]);
-
-    config.planning.reviewer.reasoningEffort = "high";
-    await assert.rejects(
-      application.runObjective(objective, candidate),
-      /differs from the current Objective/,
-    );
+    assert.deepEqual(candidate.executionBounds, { configuredConcurrency: 1 });
     assert.equal(Object.keys(github.state().issues).length, 0);
     assert.equal(existsSync(statePath(config.repository, objective)), false);
-    assert.equal(generationCount, 1);
-    assert.equal(reviewCount, 1);
 
-    config.planning.reviewer.reasoningEffort = "medium";
-    config.execution.harness.model = "worker-choice";
-    await assert.rejects(
-      application.runObjective(objective, candidate),
-      /differs from the current Objective/,
-    );
-    assert.equal(Object.keys(github.state().issues).length, 0);
+    findings = [
+      {
+        source: "invented",
+        quote: "not in any pinned source",
+        detail: "Malformed source citation",
+        question: "Approve?",
+      },
+    ];
+    const preparing = await application.runObjective(objective);
+    assert.equal(preparing.plan.review.status, "needs-human");
+    const planned = generationCount;
+    await application.decidePlan(objective, {
+      plan: shortPlanDigest(
+        readContinuation(config.repository, objective).plan,
+      ),
+      actor: "test operator",
+      outcome: "refuse",
+      answer: "",
+      reason: "Plan again",
+    });
     assert.equal(existsSync(statePath(config.repository, objective)), false);
-    assert.equal(generationCount, 1);
-    assert.equal(reviewCount, 1);
+    assert.equal(Object.keys(github.state().issues).length, 0);
 
-    config.execution.harness.model = "gpt-5.6-sol";
-    const completed = await application.runObjective(objective, candidate);
+    findings = [];
+    const completed = await application.runObjective(objective);
     assert.equal(completed.finalValidation.passed, true);
-    assert.equal(generationCount, 1);
-    assert.equal(reviewCount, 1);
+    assert.equal(generationCount, planned + 1);
   });
 });
 
@@ -1549,7 +1576,7 @@ test("application lifecycle reattaches once, cancels owned work, and retries onl
           const state = existsSync(restartStatePath)
             ? readContinuation(descriptor.config.repository, objective)
             : undefined;
-          return state?.schemaVersion === 4 && state.work.restart.execution
+          return state?.schemaVersion === 6 && state.work.restart.execution
             ? state
             : undefined;
         },
@@ -1942,12 +1969,10 @@ test("native execution failure is terminal until an explicit safe retry", async 
       },
     };
     const { application, eventsPath } = makeApplication(descriptor);
-    await assert.rejects(
-      application.runObjective(objective),
-      /Scripted failure for retry/,
-    );
-    const failed = readState(descriptor.config.repository, objective);
+    // The run stops with the failure retained and waits for a human decision.
+    const failed = await application.runObjective(objective);
     assert.equal(failed.work.retry.status, "failed");
+    assert.equal(failed.error, undefined);
     assert.match(failed.work.retry.error, /Scripted failure for retry/);
     assert.equal(failed.work.retry.pullRequest, undefined);
     const failureTimeline = readDiagnostics(
@@ -1963,7 +1988,15 @@ test("native execution failure is terminal until an explicit safe retry", async 
           /Scripted failure/.test(event.detail),
       ),
     );
-    await assert.rejects(application.runObjective(objective), /explicit retry/);
+    // A rerun does not start another attempt without an explicit retry.
+    const unchanged = await application.runObjective(objective);
+    assert.equal(unchanged.work.retry.status, "failed");
+    assert.equal(
+      readEvents(eventsPath).filter(
+        (event) => event.type === "start" && event.item === "retry",
+      ).length,
+      1,
+    );
     application.retryWorkItem(objective, "retry");
     const done = await application.runObjective(objective);
     assert.equal(done.finalValidation.passed, true);
@@ -3241,10 +3274,9 @@ for (const strategy of ["regular", "native-stack"]) {
         },
       };
       const { application } = makeApplication(descriptor);
-      await assert.rejects(
-        application.runObjective(objective),
-        /outside ownership/,
-      );
+      // An isolated failure stops for a human decision rather than failing the run.
+      const stopped = await application.runObjective(objective);
+      assert.equal(stopped.work.failed.status, "failed");
       const state = readState(descriptor.config.repository, objective);
       assert.equal(state.work.failed.status, "failed");
       assert.match(state.work.failed.error, /outside ownership/);

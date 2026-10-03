@@ -1,12 +1,8 @@
 import { objectiveCandidate } from "./qa.js";
 import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
 import { assertFinalAcceptance } from "./completion.js";
-import { assertRepairLedger } from "./repair-policy.js";
-import {
-  type AutonomousAdmission,
-  assertAdmissionBinding,
-} from "./admission.js";
-import type { SourceSelector } from "./compiler.js";
+import { assertRepairLedger, type Autonomy } from "./repair-policy.js";
+import { type Capacity, validateCapacity } from "./config.js";
 import type {
   AssetSelectionDecision,
   AuthenticationRequest,
@@ -128,13 +124,16 @@ export interface CoordinatorDisposition {
 export interface PreparationState {
   sourcePacketDigest?: string;
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
-  authority?: import("./admission.js").ExecutionAuthority;
+  /** Limits snapshotted from configuration when the Objective started. */
+  autonomy: Autonomy;
+  /** Worker ceiling and scheduling resolved when the Objective started. */
+  capacity: import("./config.js").Capacity;
   allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
   repairConsumption?: Record<
     string,
     import("./graph-amendments.js").AllowanceConsumption
   >;
-  schemaVersion: 5;
+  schemaVersion: 7;
   kind: "preparing";
   repository: string;
   objective: number;
@@ -142,7 +141,6 @@ export interface PreparationState {
   configDigest: string;
   baseSha: string;
   objectiveBodyDigest: string;
-  admission?: AutonomousAdmission;
   coordinator: CoordinatorDisposition;
   /** Present once planning completed; preparation then projects it. */
   plan?: import("./compiler.js").PlanCandidate;
@@ -168,9 +166,15 @@ export interface FactoryState {
   rejectedAmendments?: import("./graph-amendments.js").PendingAmendment[];
   allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
   coordinator?: CoordinatorDisposition;
-  admission?: AutonomousAdmission;
-  additionalSources?: SourceSelector[];
-  schemaVersion: 4;
+  /** Limits snapshotted from configuration when the Objective started. */
+  autonomy: Autonomy;
+  /** Worker ceiling and scheduling resolved when the Objective started. */
+  capacity: import("./config.js").Capacity;
+  /** Digest of the accepted plan's graph; the root of every graph revision. */
+  planGraphDigest: string;
+  /** Native predecessor facts the plan was made with; absent when it had none. */
+  prerequisitesDigest?: string;
+  schemaVersion: 6;
   repository: string;
   objective: number;
   runId: string;
@@ -410,17 +414,19 @@ export function parseFactoryState(
   const state = record(value, "state");
   assertCoordinator(state.coordinator);
   if (
-    state.schemaVersion !== 4 ||
+    state.schemaVersion !== 6 ||
     state.repository !== repository ||
     state.objective !== objective
   )
     throw new Error(
       "schema version, repository, or Objective identity differs from the installation",
     );
-  if (state.admission !== undefined)
-    assertAdmissionBinding(state.admission as AutonomousAdmission);
   string(state.runId, "runId");
   sha(state.configDigest, "configDigest", 64);
+  sha(state.planGraphDigest, "planGraphDigest", 64);
+  validateCapacity(state.capacity as Capacity);
+  if (state.prerequisitesDigest !== undefined)
+    sha(state.prerequisitesDigest, "prerequisitesDigest", 64);
   sha(state.baseSha, "baseSha");
   const graph = record(state.graph, "graph");
   if (

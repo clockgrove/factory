@@ -75,7 +75,7 @@ export async function runNativeGraph(args: {
     save,
     active,
   } = args;
-  const phases = phaseAdmission(config, state, save, args.cancelled);
+  const phases = phaseAdmission(state, save, args.cancelled);
   const branchFor = (id: string) => `factory/objective-${objective}/${id}`;
   const defaultBranch = await github.defaultBranch();
   const units = linearDeliveryUnits(state.graph);
@@ -107,7 +107,7 @@ export async function runNativeGraph(args: {
       outcome: "observed",
       metadata: {
         driverAvailableSlots: reported,
-        operatorCeiling: config.execution.concurrency,
+        operatorCeiling: state.capacity.concurrency,
         codingReservations: phases.codingCount(),
       },
     });
@@ -254,11 +254,7 @@ export async function runNativeGraph(args: {
             work.authentication = error.authentication;
           else delete work.authentication;
           const isolated = recordWorkFailure(state, item.id, error);
-          if (
-            isolated &&
-            state.admission?.authority.repairPolicy &&
-            !args.cancelled()
-          ) {
+          if (isolated && !args.cancelled()) {
             phases.release(item.id);
             save();
             await phases.reserve(item.id, "review");
@@ -272,7 +268,6 @@ export async function runNativeGraph(args: {
                   args.objectiveBody,
                   state.baseSha,
                   config.checkout,
-                  state.additionalSources,
                 ),
                 save,
                 stopped: () => args.cancelled() || Boolean(args.paused?.()),
@@ -352,12 +347,11 @@ export async function runNativeGraph(args: {
     if (!unit) {
       if (
         args.amendmentPending?.() ||
-        (state.admission?.authority.repairPolicy &&
-          Object.values(state.work).some(
-            (work) =>
-              work.status === "failed" &&
-              work.recovery?.failure?.classification !== "uncertain",
-          ))
+        Object.values(state.work).some(
+          (work) =>
+            work.status === "failed" &&
+            work.recovery?.failure?.classification !== "uncertain",
+        )
       )
         return settlePrepared();
       throw new Error("No dependency-ready delivery unit");
@@ -673,7 +667,6 @@ export async function runNativeGraph(args: {
                 args.objectiveBody,
                 state.baseSha,
                 config.checkout,
-                state.additionalSources,
               ),
               decisions: work.acceptanceDecisions,
               evidenceSources: workItemReviewEvidence({
@@ -791,7 +784,6 @@ export async function runNativeGraph(args: {
           const isolated = recordWorkFailure(state, item.id, error);
           if (
             isolated &&
-            state.admission?.authority.repairPolicy &&
             !unit.items.some((entry) => state.work[entry.id]?.pullRequest) &&
             !args.cancelled()
           ) {
@@ -808,7 +800,6 @@ export async function runNativeGraph(args: {
                   args.objectiveBody,
                   state.baseSha,
                   config.checkout,
-                  state.additionalSources,
                 ),
                 save,
                 stopped: () => args.cancelled() || Boolean(args.paused?.()),

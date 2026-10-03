@@ -89,7 +89,7 @@ try {
     planningModel,
   });
   started = performance.now();
-  const plan = await application.planObjective(spec.objective, spec.sources);
+  const plan = await application.planObjective(spec.objective);
   result.wallMs = Math.round(performance.now() - started);
   result.planned = true;
   result.review = reviewOutcome(plan.review);

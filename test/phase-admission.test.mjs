@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { syncBuiltinESMExports } from "node:module";
+import os from "node:os";
 import test from "node:test";
 import { phaseAdmission } from "../dist/phase-admission.js";
 import { readyItems } from "../dist/scheduler.js";
 
 function fixture(limit = 2) {
-  const config = {
-    execution: { concurrency: 3 },
+  // The run reads its ceilings from the capacity it stored when the Objective started.
+  const capacity = {
+    concurrency: 3,
     scheduling: {
       cpu: limit,
       memoryMiB: limit * 100,
@@ -20,19 +23,19 @@ function fixture(limit = 2) {
     },
   };
   const state = {
+    capacity,
     work: Object.fromEntries(
       ["a", "b", "c"].map((id) => [id, { status: "running" }]),
     ),
   };
   let cancelled = false;
   const phases = phaseAdmission(
-    config,
     state,
     () => {},
     () => cancelled,
   );
   return {
-    config,
+    capacity,
     state,
     phases,
     cancel: () => {
@@ -67,8 +70,8 @@ test("a waiting completion receives the next suitable grant before more coding",
 });
 
 test("unknown reservations and exhausted ceilings fail closed; cancellation releases no uncertain reservation", async () => {
-  const { config, state, phases, cancel } = fixture(1);
-  delete config.scheduling.phases.review.cpu;
+  const { capacity, state, phases, cancel } = fixture(1);
+  delete capacity.scheduling.phases.review.cpu;
   await assert.rejects(phases.reserve("b", "review"), /unknown/);
   delete state.work.b.requestedPhase;
   await phases.reserve("a", "coding");
@@ -79,12 +82,11 @@ test("unknown reservations and exhausted ceilings fail closed; cancellation rele
   assert.equal(state.work.c.phaseReservation, undefined);
 });
 
-test("restart consumes persisted reservations and admission worker ceilings", async () => {
-  const { config, state } = fixture(3);
+test("restart consumes persisted reservations and the configured worker ceiling", async () => {
+  const { state } = fixture(3);
   state.work.a.phaseReservation = "coding";
-  state.admission = { authority: { resources: { maxConcurrency: 1 } } };
+  state.capacity.concurrency = 1;
   const restarted = phaseAdmission(
-    config,
     state,
     () => {},
     () => false,
@@ -137,8 +139,8 @@ test("remaining provider slots compose with operator ceilings without subtractin
 });
 
 test("memory is a binding independent resource and deadlines stop waiting admission", async () => {
-  const { config, state, phases } = fixture(3);
-  config.scheduling.memoryMiB = 100;
+  const { capacity, state, phases } = fixture(3);
+  capacity.scheduling.memoryMiB = 100;
   await phases.reserve("a", "coding");
   assert.equal(phases.reason("b", "review"), "memoryMiB ceiling");
   state.coordinator = { deadlineAt: new Date(Date.now() - 1).toISOString() };
@@ -168,4 +170,35 @@ test("ready read-only QA gets the next suitable opportunity without preempting c
   work.coding.status = "running";
   assert.equal(readyItems(graph, work, new Set(["coding"]), 1)[0].id, "qa");
   assert.equal(work.coding.status, "running");
+});
+
+test("host-sized capacity never schedules beyond the current host; declared capacity is kept", async () => {
+  const { availableParallelism: cpus, totalmem: memory } = os;
+  try {
+    // The Objective started on a large host and now runs on a 4-CPU, 8 GiB one (1 worker).
+    os.availableParallelism = () => 4;
+    os.totalmem = () => 8 * 1024 ** 3;
+    syncBuiltinESMExports();
+    const run = (capacity) => {
+      const state = {
+        capacity,
+        work: { a: { status: "running" }, b: { status: "running" } },
+      };
+      return phaseAdmission(
+        state,
+        () => {},
+        () => false,
+      );
+    };
+    const sized = run({ concurrency: 8, hostSized: { concurrency: true } });
+    await sized.reserve("a", "coding");
+    assert.equal(sized.reason("b", "coding"), "coding concurrency ceiling");
+    const declared = run({ concurrency: 8 });
+    await declared.reserve("a", "coding");
+    assert.equal(declared.reason("b", "coding"), undefined);
+  } finally {
+    os.availableParallelism = cpus;
+    os.totalmem = memory;
+    syncBuiltinESMExports();
+  }
 });

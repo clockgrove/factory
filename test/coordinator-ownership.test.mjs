@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { once } from "node:events";
 import fs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
@@ -10,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
+import { defaultAutonomy } from "../dist/index.js";
 import { requestControl, serveControl } from "../dist/coordinator-control.js";
 import { linuxProcessIdentity } from "../dist/process.js";
 import {
@@ -431,7 +431,7 @@ test("a lost planning reply is reissued on restart under the same run", {
     const config = factoryConfig(target.checkout, "example/restart-planning");
     const objectiveBody =
       "## Acceptance\n- `test -s result.txt`\n\n## Final validation\n- `test -s result.txt`\n";
-    let calls = 0;
+    const runIds = [];
     const descriptor = {
       config,
       objectiveBody,
@@ -439,11 +439,7 @@ test("a lost planning reply is reissued on restart under the same run", {
       actions: {},
       planningModel: {
         async generateStructured() {
-          calls++;
-          assert.equal(
-            readContinuation(config.repository, 1).runId,
-            "preserved-preparation-run",
-          );
+          runIds.push(readContinuation(config.repository, 1).runId);
           throw new Error("fixture planning reply lost");
         },
         async reviewGraph() {
@@ -451,24 +447,6 @@ test("a lost planning reply is reissued on restart under the same run", {
         },
       },
     };
-    saveState(statePath(config.repository, 1), {
-      schemaVersion: 5,
-      kind: "preparing",
-      repository: config.repository,
-      objective: 1,
-      runId: "preserved-preparation-run",
-      configDigest: factoryConfigDigest(config),
-      baseSha: target.baseSha,
-      objectiveBodyDigest: createHash("sha256")
-        .update(objectiveBody)
-        .digest("hex"),
-      issueByItemId: {},
-      coordinator: {
-        mode: "running",
-        phase: "planning",
-        phaseStartedAt: new Date().toISOString(),
-      },
-    });
     // Model calls have no side effects, so every restart simply asks again.
     for (const attempt of [1, 2]) {
       const run = makeApplication(descriptor);
@@ -476,9 +454,9 @@ test("a lost planning reply is reissued on restart under the same run", {
         run.application.runObjective(1),
         /fixture planning reply lost/,
       );
-      assert.equal(calls, attempt);
+      assert.equal(runIds.length, attempt);
       const snapshot = readContinuation(config.repository, 1);
-      assert.equal(snapshot.runId, "preserved-preparation-run");
+      assert.equal(snapshot.runId, runIds[0]);
       assert.equal(snapshot.plan, undefined);
       assert.match(snapshot.coordinator.waitReason, /planning reply lost/);
       assert.deepEqual(run.github.state().issues, {});
@@ -511,13 +489,15 @@ test("offline cancellation verifies recorded subprocess cessation and refuses a 
       const target = createTarget(root);
       const config = factoryConfig(target.checkout, "example/offline-cancel");
       saveState(statePath(config.repository, 1), {
-        schemaVersion: 5,
+        schemaVersion: 7,
         kind: "preparing",
         projection: "ready",
         repository: config.repository,
         objective: 1,
         runId: "cancel-owned",
         configDigest: factoryConfigDigest(config),
+        autonomy: defaultAutonomy,
+        capacity: { concurrency: 1 },
         baseSha: target.baseSha,
         objectiveBodyDigest: "a".repeat(64),
         planning: "ready",
@@ -635,7 +615,7 @@ test("persisted drain reattaches an existing worker and leaves its dependent pen
       await waitForFile(
         () => {
           const state = readContinuation(config.repository, 1);
-          return state?.schemaVersion === 4 && state.work.first.execution;
+          return state?.schemaVersion === 6 && state.work.first.execution;
         },
         path,
         "existing drain worker",
@@ -649,7 +629,25 @@ test("persisted drain reattaches an existing worker and leaves its dependent pen
       await exited;
       writeFileSync(barrier, "go");
       const { application, eventsPath } = makeApplication(descriptor);
-      const drained = await application.runObjective(1);
+      // A draining owner stays alive once its attempts settle; handoff releases it.
+      const running = application.runObjective(1);
+      const handed = assert.rejects(
+        running,
+        (error) => error.constructor.name === "CoordinatorHandoff",
+      );
+      await waitForFile(
+        () =>
+          readContinuation(config.repository, 1)?.coordinator?.waitReason ===
+          "Drained; no owned attempts remain",
+        path,
+        "settled drain",
+      );
+      await requestControl(config.repository, {
+        objective: 1,
+        action: "handoff",
+      });
+      await handed;
+      const drained = readState(config.repository, 1);
       assert.equal(drained.coordinator.mode, "draining");
       assert.ok(["done", "published"].includes(drained.work.first.status));
       assert.equal(drained.work.second.status, "pending");

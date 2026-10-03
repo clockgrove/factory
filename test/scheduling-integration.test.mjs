@@ -183,10 +183,9 @@ for (const delivery of ["regular", "native-stack"]) {
           );
           return start(request);
         };
-        const plan = await application.planObjective(1);
         if (slowFirst === "unknown-merge") {
           await assert.rejects(
-            application.runObjective(1, plan),
+            application.runObjective(1),
             /Native merge response lost/,
           );
           const merged = () =>
@@ -203,7 +202,7 @@ for (const delivery of ["regular", "native-stack"]) {
           assert.equal(crashed.work.tail.phaseReservation, "delivery");
           // The restart repeats the merge; the gateway confirms the merged
           // stack instead of merging again.
-          const final = await application.runObjective(1, plan);
+          const final = await application.runObjective(1);
           assert.equal(final.finalValidation.passed, true);
           assert.equal(stackMerges, 2);
           assert.equal(merged(), 1);
@@ -212,7 +211,7 @@ for (const delivery of ["regular", "native-stack"]) {
           );
           return;
         }
-        const final = await application.runObjective(1, plan);
+        const final = await application.runObjective(1);
         assert.equal(reviewedWhileCoding, true);
         assert.equal(final.finalValidation.passed, true);
         if (delivery === "native-stack") assert.equal(stackMerges, 1);

@@ -2,7 +2,7 @@
 
 `scripts/eval-planning.mjs` measures planning quality on a set of real Objectives. Use it to compare planner prompt versions, models or planning providers on the same inputs before changing a default.
 
-Each run uses the same code as `factory plan`: pinned sources, compile, independent plan review and at most one revision. It creates no GitHub issues and starts no workers. Live runs spend your planning provider's usage.
+Each run uses the same code as `factory plan`: pinned sources, compile, independent plan review and diagnosed revisions within the configured planning-revision allowance. It creates no GitHub issues and starts no workers. Live runs spend your planning provider's usage.
 
 ## Run
 
@@ -41,14 +41,13 @@ Keep private eval sets outside this repository. A case directory contains:
 ```json
 {
   "commit": "<full SHA in the target>",
-  "sources": ["docs/SPEC.md#Scope"],
   "repository": "owner/name",
   "objective": 1,
   "target": "../relative/checkout"
 }
 ```
 
-Only `commit` is required. Use a full SHA so the case stays repeatable; a branch name resolves at start, and the report records the SHA. `sources` uses the `factory plan --source PATH#HEADING` syntax. `repository` defaults to the configuration's repository and `objective` to 1.
+Only `commit` is required. Use a full SHA so the case stays repeatable; a branch name resolves at start, and the report records the SHA. Declare extra planning sources in `objective.md`'s **Planning sources** section. `repository` defaults to the configuration's repository and `objective` to 1.
 
 [`test/fixtures/eval/`](../test/fixtures/eval/) holds a public example for the [`autonomous-target`](../test/fixtures/autonomous-target/) fixture. Commit that fixture to a new Git repository on `main` to use it as `--target`.
 

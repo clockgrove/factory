@@ -60,6 +60,11 @@ function foreignChange(message: string): Error {
   );
 }
 
+const latest = (...times: (number | undefined)[]): number | undefined => {
+  const known = times.filter((time): time is number => time !== undefined);
+  return known.length ? Math.max(...known) : undefined;
+};
+
 /** A readback has not caught up with a write GitHub accepted. */
 function notYet(message: string): Error {
   return attachFault(new Error(message), transient(message, false));
@@ -505,8 +510,10 @@ export class RealGitHubGateway implements GitHubGateway {
     }
     for (const item of request.graph.items) {
       const number = issueByItemId[item.id]!;
+      const fresh = { createdAt: createdAt.get(number) };
       const observations = await this.pages<Issue>(
         `issues/${number}/dependencies/blocked_by`,
+        fresh,
       );
       for (const issue of observations) {
         authenticated(issue);
@@ -535,10 +542,17 @@ export class RealGitHubGateway implements GitHubGateway {
             item.dependencies.some((id) => issueByItemId[id] === issue.number)
           )
             continue;
-          await this.api(
-            "DELETE",
-            `issues/${number}/dependencies/blocked_by/${issue.id}`,
-          );
+          try {
+            await this.api(
+              "DELETE",
+              `issues/${number}/dependencies/blocked_by/${issue.id}`,
+            );
+          } catch (error) {
+            // Already removed, perhaps by a repeat whose response was lost;
+            // the read-back below confirms the result.
+            if (!(error instanceof GitHubRequestError && error.status === 404))
+              throw error;
+          }
         }
       }
       for (const dependency of item.dependencies) {
@@ -549,14 +563,19 @@ export class RealGitHubGateway implements GitHubGateway {
             throw new Error(
               "Dependency issue has no authenticated database identity",
             );
-          await this.api("POST", `issues/${number}/dependencies/blocked_by`, {
-            issue_id: issue.id,
-          });
+          await this.api(
+            "POST",
+            `issues/${number}/dependencies/blocked_by`,
+            { issue_id: issue.id },
+            undefined,
+            fresh,
+          );
         }
       }
       {
         const observed = await this.pages<Issue>(
           `issues/${number}/dependencies/blocked_by`,
+          fresh,
         );
         const expected = item.dependencies.map((id) => issueByItemId[id]);
         if (
@@ -606,7 +625,10 @@ export class RealGitHubGateway implements GitHubGateway {
       // reviewed move may already have completed before an interrupted readback.
       const observedParents = new Map<number, number>();
       for (const parent of childrenByParent.keys()) {
-        const existing = await this.pages<Issue>(`issues/${parent}/sub_issues`);
+        const existing = await this.pages<Issue>(
+          `issues/${parent}/sub_issues`,
+          { createdAt: createdAt.get(parent) },
+        );
         for (const issue of existing) {
           authenticated(issue);
           if (issues.get(issue.number)?.id !== issue.id)
@@ -661,14 +683,21 @@ export class RealGitHubGateway implements GitHubGateway {
           (!replacing && observedParent !== undefined)
         )
           throw foreignChange("Unreviewed remote hierarchy parent");
-        await this.api("POST", `issues/${parent}/sub_issues`, {
-          sub_issue_id: childIssue.id,
-          replace_parent: replacing,
-        });
+        await this.api(
+          "POST",
+          `issues/${parent}/sub_issues`,
+          { sub_issue_id: childIssue.id, replace_parent: replacing },
+          undefined,
+          // Either side may be an issue GitHub does not show yet.
+          { createdAt: latest(createdAt.get(parent), createdAt.get(child)) },
+        );
       }
       // Read back every affected parent, including those that became empty.
       for (const [parent, children] of childrenByParent) {
-        const observed = await this.pages<Issue>(`issues/${parent}/sub_issues`);
+        const observed = await this.pages<Issue>(
+          `issues/${parent}/sub_issues`,
+          { createdAt: createdAt.get(parent) },
+        );
         if (
           observed.length !== children.length ||
           new Set(observed.map((issue) => issue.number)).size !==

@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type SpawnOptions, spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -68,6 +69,9 @@ export function gitFault(args: string[], error: unknown): Fault | undefined {
       detail: "Git LFS is not installed on the controller host",
       fix: "Install Git LFS, then `factory run`",
     };
+  // A stalled fetch was stopped so it does not hold the repository lock.
+  if (error instanceof GitDeadlineExceeded)
+    return transient(`git ${subcommand} stalled in transit`, false);
   // Another git process holds the repository lock; it releases it shortly.
   if (/Unable to create '[^']*\.lock': File exists/.test(detail))
     return transient(`git ${subcommand} found the repository locked`, false);
@@ -125,82 +129,99 @@ function classifiedGit<T>(args: string[], run: () => T): T {
 }
 
 /**
- * Git commands that change or walk a repository's worktree registry
- * (`.git/worktrees/<id>`), which git does not lock: `worktree remove`
- * deletes an entry file by file, and a concurrent fetch, whose connectivity
- * check resolves every worktree's HEAD, or a concurrent `worktree` command
- * dies with "Invalid path '.git/worktrees/<id>'". Concurrent fetches of one
- * branch also race on its remote-tracking ref ("incorrect old value
- * provided"). These run one at a time per repository.
+ * Git takes no lock on a repository's worktree registry
+ * (`.git/worktrees/<id>`). `worktree remove` deletes an entry file by file,
+ * and a command walking the registry at that moment (fetch's connectivity
+ * check resolves every worktree's HEAD; `worktree` commands find their
+ * entry) dies with "Invalid path '.git/worktrees/<id>'". Commands that change
+ * the registry therefore hold a per-repository lock exclusively and commands
+ * that walk it hold it shared. Fetches share it with each other because
+ * Factory's fetches write no shared ref (see fetchHead).
  */
-const SERIALIZED_GIT = new Set([
-  "worktree",
-  "fetch",
-  "pull",
-  "gc",
-  "prune",
-  "maintenance",
-]);
+type LockMode = "shared" | "exclusive";
 
-function serializedGit(args: string[]): boolean {
-  return SERIALIZED_GIT.has(gitSubcommand(args));
+function gitLockMode(args: string[]): LockMode | undefined {
+  const subcommand = gitSubcommand(args);
+  if (subcommand === "fetch") return "shared";
+  if (subcommand === "worktree") {
+    const index = args.indexOf("worktree");
+    return args[index + 1] === "list" ? "shared" : "exclusive";
+  }
+  if (["pull", "gc", "prune", "maintenance"].includes(subcommand))
+    return "exclusive";
+  return undefined;
 }
 
 /** A synchronous call cannot wait for the repository lock. */
-function assertUnserialized(args: string[]): void {
-  if (serializedGit(args))
+function assertUnlocked(args: string[]): void {
+  if (gitLockMode(args))
     throw new Error(
-      `git ${gitSubcommand(args)} must run through gitAsync or pinnedGitAsync, which serialize it per repository`,
+      `git ${gitSubcommand(args)} must run through gitAsync or pinnedGitAsync, which hold the repository lock`,
     );
 }
 
-/** The tail of each repository's FIFO queue, keyed by git common directory. */
-const repositoryQueues = new Map<string, Promise<void>>();
+/** A fair reader/writer lock: callers are granted in the order they queued. */
+class RepositoryLock {
+  private readers = 0;
+  private writer = false;
+  private readonly queue: { mode: LockMode; grant: () => void }[] = [];
 
-async function withRepositoryLock<T>(
-  key: string,
-  run: () => Promise<T>,
-): Promise<T> {
-  const previous = repositoryQueues.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  // A successor waits for every earlier holder, even one cancelled while queued.
-  const tail = previous.then(() => held);
-  repositoryQueues.set(key, tail);
-  try {
-    await turnOrCancellation(previous, currentProcessSignal());
-    return await run();
-  } finally {
-    release();
-    if (repositoryQueues.get(key) === tail) repositoryQueues.delete(key);
+  get idle(): boolean {
+    return !this.writer && this.readers === 0 && this.queue.length === 0;
+  }
+
+  /** Queues synchronously; a cancelled waiter leaves the queue. */
+  acquire(mode: LockMode, signal: AbortSignal | undefined): Promise<void> {
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    return new Promise<void>((resolve, reject) => {
+      const abort = () => {
+        const index = this.queue.indexOf(waiter);
+        if (index < 0) return;
+        this.queue.splice(index, 1);
+        this.drain();
+        reject(signal!.reason);
+      };
+      const waiter = {
+        mode,
+        grant: () => {
+          signal?.removeEventListener("abort", abort);
+          resolve();
+        },
+      };
+      this.queue.push(waiter);
+      signal?.addEventListener("abort", abort, { once: true });
+      this.drain();
+    });
+  }
+
+  release(mode: LockMode): void {
+    if (mode === "exclusive") this.writer = false;
+    else this.readers--;
+    this.drain();
+  }
+
+  private drain(): void {
+    for (let next = this.queue[0]; next; next = this.queue[0]) {
+      if (this.writer || (next.mode === "exclusive" && this.readers > 0))
+        return;
+      this.queue.shift();
+      if (next.mode === "exclusive") this.writer = true;
+      else this.readers++;
+      next.grant();
+    }
   }
 }
 
-function turnOrCancellation(
-  turn: Promise<void>,
-  signal: AbortSignal | undefined,
-): Promise<void> {
-  if (!signal) return turn;
-  signal.throwIfAborted();
-  return new Promise<void>((resolve, reject) => {
-    const abort = () => reject(signal.reason);
-    signal.addEventListener("abort", abort, { once: true });
-    void turn.then(() => {
-      signal.removeEventListener("abort", abort);
-      resolve();
-    });
-  });
-}
+/** Locks by git common directory; linked worktrees share their checkout's. */
+const repositoryLocks = new Map<string, RepositoryLock>();
+/** Common directory by checkout path, resolved once so queueing stays synchronous. */
+const repositoryKeys = new Map<string, string>();
 
-/** Linked worktrees share their main checkout's common directory and lock. */
-async function repositoryKey(
-  checkout: string,
-  env: NodeJS.ProcessEnv | undefined,
-): Promise<string> {
-  return realpathSync(
-    await commandAsync(
+function repositoryKey(checkout: string, env: NodeJS.ProcessEnv): string {
+  const cacheKey = `${env === process.env ? "ambient" : "pinned"}\0${checkout}`;
+  let key = repositoryKeys.get(cacheKey);
+  if (!key) {
+    const result = spawnSync(
       "git",
       [
         "-C",
@@ -209,24 +230,171 @@ async function repositoryKey(
         "--path-format=absolute",
         "--git-common-dir",
       ],
-      undefined,
-      env,
-    ),
-  );
+      { env, encoding: "utf8" },
+    );
+    if (result.error) throw result.error;
+    if (result.status !== 0)
+      throw new Error(
+        `git rev-parse --git-common-dir failed (${result.status}): ${result.stderr}`,
+      );
+    key = realpathSync(result.stdout.trim());
+    repositoryKeys.set(cacheKey, key);
+  }
+  return key;
 }
+
+async function withRepositoryLock<T>(
+  key: string,
+  mode: LockMode,
+  run: () => Promise<T>,
+): Promise<T> {
+  const lock = repositoryLocks.get(key) ?? new RepositoryLock();
+  repositoryLocks.set(key, lock);
+  const turn = lock.acquire(mode, currentProcessSignal());
+  let held = false;
+  try {
+    await turn;
+    held = true;
+    return await run();
+  } finally {
+    if (held) lock.release(mode);
+    if (lock.idle) repositoryLocks.delete(key);
+  }
+}
+
+/** Factory's git never starts background maintenance, which would walk the registry unlocked. */
+const GIT_CONFIG: [string, string][] = [
+  ["maintenance.auto", "false"],
+  ["gc.auto", "0"],
+];
+/** A stalled transfer must not hold the repository lock indefinitely. */
+const LOCKED_NETWORK_CONFIG: [string, string][] = [
+  ["http.lowSpeedLimit", "1000"],
+  ["http.lowSpeedTime", "60"],
+];
+/** Deadline for a locked network command (fetch, pull); tests shorten it. */
+export const lockedNetworkDeadline = { milliseconds: 15 * 60_000 };
+
+/** Append configuration through GIT_CONFIG_COUNT, after any entries already set. */
+function withGitConfig(
+  env: NodeJS.ProcessEnv,
+  entries: [string, string][],
+): NodeJS.ProcessEnv {
+  const result = { ...env };
+  let count = Number(result.GIT_CONFIG_COUNT ?? 0);
+  if (!Number.isSafeInteger(count) || count < 0) count = 0;
+  for (const [key, value] of entries) {
+    result[`GIT_CONFIG_KEY_${count}`] = key;
+    result[`GIT_CONFIG_VALUE_${count}`] = value;
+    count++;
+  }
+  result.GIT_CONFIG_COUNT = String(count);
+  return result;
+}
+
+function ambientGitEnvironment(): NodeJS.ProcessEnv {
+  return withGitConfig(process.env, GIT_CONFIG);
+}
+
+/** A locked network command outlived lockedNetworkDeadline. */
+export class GitDeadlineExceeded extends Error {}
 
 function gitProcess(
   checkout: string,
   args: string[],
-  env?: NodeJS.ProcessEnv,
+  pinned: boolean,
 ): Promise<string> {
-  const run = () =>
-    commandAsync("git", ["-C", checkout, ...args], undefined, env);
-  return classifiedGit(args, async () =>
-    serializedGit(args)
-      ? withRepositoryLock(await repositoryKey(checkout, env), run)
-      : run(),
+  const mode = gitLockMode(args);
+  const network = ["fetch", "pull"].includes(gitSubcommand(args));
+  let env = pinned ? pinnedGitEnvironment() : ambientGitEnvironment();
+  if (network) env = withGitConfig(env, LOCKED_NETWORK_CONFIG);
+  const run = async () => {
+    const deadline = network
+      ? AbortSignal.timeout(lockedNetworkDeadline.milliseconds)
+      : undefined;
+    try {
+      const result = await subprocessAsync("git", ["-C", checkout, ...args], {
+        env,
+        ...(deadline && { signal: deadline }),
+      });
+      if (result.status !== 0)
+        throw new Error(
+          `git -C ${checkout} ${args.join(" ")} failed (${result.status}): ${result.stderr || result.stdout}`,
+        );
+      return result.stdout.trim();
+    } catch (error) {
+      if (deadline?.aborted && !currentProcessSignal()?.aborted)
+        throw new GitDeadlineExceeded(
+          `git ${gitSubcommand(args)} exceeded ${lockedNetworkDeadline.milliseconds / 1000}s`,
+          { cause: error },
+        );
+      throw error;
+    }
+  };
+  return classifiedGit(args, () => {
+    if (!mode) return run();
+    let key: string;
+    try {
+      key = repositoryKey(checkout, pinned ? env : process.env);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return withRepositoryLock(key, mode, run);
+  });
+}
+
+/**
+ * Fetch `branch` from origin and return its head. The fetch writes neither
+ * FETCH_HEAD nor a remote-tracking ref, which concurrent fetches would race
+ * on, only a private ref it deletes again (the objects stay).
+ */
+export async function fetchHead(
+  checkout: string,
+  branch: string,
+): Promise<string> {
+  const ref = `refs/factory/fetch/${randomUUID()}`;
+  await gitAsync(
+    checkout,
+    "fetch",
+    "--no-tags",
+    "--no-write-fetch-head",
+    "--refmap=",
+    "origin",
+    `+refs/heads/${branch}:${ref}`,
   );
+  try {
+    return await gitAsync(checkout, "rev-parse", "--verify", `${ref}^{commit}`);
+  } finally {
+    await withProcessCancellation(undefined, () =>
+      gitAsync(checkout, "update-ref", "-d", ref),
+    );
+  }
+}
+
+/**
+ * Add a detached linked worktree of `checkout` at `commit`. Only the
+ * registration holds the repository lock; the files are checked out after.
+ */
+export async function addWorktree(
+  checkout: string,
+  worktree: string,
+  commit: string,
+): Promise<void> {
+  await pinnedGitAsync(
+    checkout,
+    "worktree",
+    "add",
+    "--no-checkout",
+    "--detach",
+    worktree,
+    commit,
+  );
+  try {
+    await pinnedGitAsync(worktree, "reset", "--quiet", "--hard", commit);
+  } catch (error) {
+    await removeWorktree(checkout, worktree);
+    throw error;
+  }
 }
 
 /**
@@ -257,8 +425,15 @@ export async function removeWorktree(
 }
 
 export function git(checkout: string, ...args: string[]): string {
-  assertUnserialized(args);
-  return classifiedGit(args, () => command("git", ["-C", checkout, ...args]));
+  assertUnlocked(args);
+  return classifiedGit(args, () =>
+    command(
+      "git",
+      ["-C", checkout, ...args],
+      undefined,
+      ambientGitEnvironment(),
+    ),
+  );
 }
 
 /** Keep inherited Git overrides from redirecting a pinned local tree operation. */
@@ -270,7 +445,7 @@ export function pinnedGit(checkout: string, ...args: string[]): string {
 
 /** Preserve exact pinned Git output without trimming or decoding. */
 export function pinnedGitRaw(checkout: string, ...args: string[]): Buffer {
-  assertUnserialized(args);
+  assertUnlocked(args);
   return classifiedGit(args, () => {
     const result = spawnSync("git", ["-C", checkout, ...args], {
       env: pinnedGitEnvironment(),
@@ -300,7 +475,7 @@ export function pinnedGitEnvironment(): NodeJS.ProcessEnv {
     GIT_LFS_SKIP_SMUDGE: "1",
     GIT_LITERAL_PATHSPECS: "1",
   });
-  return env;
+  return withGitConfig(env, GIT_CONFIG);
 }
 
 /** Give workers and validators only the ambient variables needed for local work. */
@@ -443,9 +618,14 @@ export async function subprocessAsync(
   observe?: (stream: "stdout" | "stderr", chunk: Buffer) => void,
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const scope = processCancellation.getStore();
-  const signal = scope?.signal;
+  // `options.signal` (such as a deadline) also stops the whole process group.
+  const { signal: extra, ...spawnOptions } = options;
+  const signal =
+    scope?.signal && extra
+      ? AbortSignal.any([scope.signal, extra])
+      : (scope?.signal ?? extra);
   signal?.throwIfAborted();
-  const child = spawn(file, args, { ...options, detached: true });
+  const child = spawn(file, args, { ...spawnOptions, detached: true });
   const identity = child.pid ? linuxProcessIdentity(child.pid) : null;
   const owned =
     child.pid && identity
@@ -535,12 +715,12 @@ export async function commandAsync(
 }
 
 export function gitAsync(checkout: string, ...args: string[]): Promise<string> {
-  return gitProcess(checkout, args);
+  return gitProcess(checkout, args, false);
 }
 
 export function pinnedGitAsync(
   checkout: string,
   ...args: string[]
 ): Promise<string> {
-  return gitProcess(checkout, args, pinnedGitEnvironment());
+  return gitProcess(checkout, args, true);
 }

@@ -25,7 +25,7 @@ import {
   requestControl,
   serveControl,
 } from "./coordinator-control.js";
-import { git, gitAsync } from "./process.js";
+import { fetchHead, git, gitAsync } from "./process.js";
 import {
   type ApplicationServices,
   runObjective,
@@ -475,13 +475,7 @@ async function resolveBase(
   predecessors: number[],
   objective: number,
 ): Promise<string> {
-  await gitAsync(
-    config.checkout,
-    "fetch",
-    "origin",
-    await github.defaultBranch(),
-  );
-  const head = git(config.checkout, "rev-parse", "FETCH_HEAD");
+  const head = await fetchHead(config.checkout, await github.defaultBranch());
   await planningPrerequisites(config, github, objective, head, predecessors);
   if (git(config.checkout, "status", "--porcelain"))
     throw new Error(

@@ -31,7 +31,7 @@ import {
 } from "../media.js";
 import { attachFault, transient } from "../fault.js";
 import { earlierHeads } from "../repair-policy.js";
-import { git, gitAsync } from "../process.js";
+import { fetchHead, git } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { itemsConflict, rankPending } from "../scheduler.js";
@@ -864,8 +864,7 @@ export async function runNativeGraph(args: {
       (observation) => observation.state === "merged",
     );
     if (!pendingMerge && !allMerged) {
-      await gitAsync(config.checkout, "fetch", "origin", defaultBranch);
-      const observedBefore = git(config.checkout, "rev-parse", "FETCH_HEAD");
+      const observedBefore = await fetchHead(config.checkout, defaultBranch);
       if (observedBefore !== state.work[unit.items[0]!.id]!.baseSha)
         throw new Error(
           `Default branch moved before native unit ${unit.id}; operator direction required`,
@@ -1017,7 +1016,7 @@ export async function runNativeGraph(args: {
         return settlePrepared();
       }
     }
-    await gitAsync(config.checkout, "fetch", "origin", defaultBranch);
+    const defaultHead = await fetchHead(config.checkout, defaultBranch);
     // Other work may have merged since; the unit's merge only needs to be on
     // the default branch.
     try {
@@ -1026,7 +1025,7 @@ export async function runNativeGraph(args: {
         "merge-base",
         "--is-ancestor",
         integratedSha,
-        "FETCH_HEAD",
+        defaultHead,
       );
     } catch (cause) {
       // Read-after-merge lag until the step's window passes (#515).

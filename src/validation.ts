@@ -47,11 +47,11 @@ import {
 } from "./fault.js";
 import { assetSelectionDigest, type HydrationReceipt } from "./media.js";
 import {
+  addWorktree,
   hasUnresolvedSubprocesses,
   localValidationEnvironment,
   localValidationShellArguments,
   pinnedGit,
-  pinnedGitAsync,
   pinnedGitEnvironment,
   pinnedGitRaw,
   removeWorktree,
@@ -2378,14 +2378,7 @@ export async function validateTree(
     );
   }
   const worktree = join(root, randomUUID());
-  await pinnedGitAsync(
-    checkout,
-    "worktree",
-    "add",
-    "--detach",
-    worktree,
-    commit,
-  );
+  await addWorktree(checkout, worktree, commit);
   try {
     const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
     if (treeSha !== expectedTree)

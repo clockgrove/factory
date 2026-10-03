@@ -31,6 +31,7 @@ import type {
 import { CONTROLLER_CAPABILITIES_DIGEST } from "./controller-capabilities.js";
 import { checkStagedCandidate } from "./execution/staged-candidate.js";
 import {
+  addWorktree,
   command,
   currentProcessSignal,
   gitAsync,
@@ -628,14 +629,7 @@ export async function materializeAssetSet(args: {
 }): Promise<{ changeRef: string; treeSha: string }> {
   const worktree = join(args.workRoot, `selected-${randomUUID()}`);
   mkdirSync(args.workRoot, { recursive: true });
-  await pinnedGitAsync(
-    args.checkout,
-    "worktree",
-    "add",
-    "--detach",
-    worktree,
-    args.baseCommit,
-  );
+  await addWorktree(args.checkout, worktree, args.baseCommit);
   try {
     await gitAsync(worktree, "lfs", "install", "--local");
     const destinations = new Set<string>();

@@ -516,7 +516,27 @@ function validateLfsRouting(checkout: string): void {
   }
 }
 
+/** Factory's git wrapper needs `rev-parse --path-format` and GIT_CONFIG_COUNT (Git 2.31). */
+export function assertSupportedGit(): void {
+  let output: string;
+  try {
+    output = execFileSync("git", ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    throw new Error("git is not installed on the controller host");
+  }
+  const version = /^git version (\d+)\.(\d+)/.exec(output);
+  const [major, minor] = [Number(version?.[1]), Number(version?.[2])];
+  if (!version || major < 2 || (major === 2 && minor < 31))
+    throw new Error(
+      `Factory requires Git 2.31 or later; the controller host has ${output}`,
+    );
+}
+
 export function validateTarget(repository: string, checkout: string): void {
+  assertSupportedGit();
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
     throw new Error("repository must be an owner/name GitHub repository");
   }

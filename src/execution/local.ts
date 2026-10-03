@@ -47,6 +47,7 @@ import {
   parseProducedAssetSets,
 } from "../media.js";
 import {
+  addWorktree,
   commandAsync,
   hasUnresolvedSubprocesses,
   linuxProcessIdentity,
@@ -613,14 +614,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     );
     if (verified !== request.baseSha)
       throw new Error("Execution base does not resolve exactly");
-    await pinnedGitAsync(
-      this.checkout,
-      "worktree",
-      "add",
-      "--detach",
-      worktree,
-      request.baseSha,
-    );
+    await addWorktree(this.checkout, worktree, request.baseSha);
     try {
       const sourceAssets = await importSourceAssets(
         this.contentStore,

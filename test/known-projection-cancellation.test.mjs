@@ -708,6 +708,139 @@ for (const producer of ["initial", "amendment"])
               /cannot be resumed/,
             );
             assert.deepEqual(readFileSync(path), frozen);
+            const abandonment = {
+              kind: "abandon-permanently",
+              repository: config.repository,
+              objective: 1,
+              runId: observed.runId,
+              configDigest: observed.configDigest,
+              snapshotDigest: digest(frozen),
+              actor: "fixture operator",
+              reason:
+                "Permanently abandon this stopped synchronous graph call without settling its outcome",
+              cessation: {
+                kind: "operator-verified-local-cessation",
+                verifiedAt: new Date().toISOString(),
+                basis:
+                  "All fixture controller, worker, model and subprocess activity ceased; this is the captured synchronous GitHub response-loss boundary",
+                workers: "ceased",
+                subprocesses: "ceased",
+                models: "ceased",
+                unknownOwnedResources: false,
+              },
+            };
+            if (effect === "body") {
+              const negatives =
+                producer === "initial"
+                  ? [
+                      (snapshot) => {
+                        snapshot.coordinator.phase = "planning-submitted";
+                      },
+                      (snapshot) => {
+                        snapshot.plan.sources[0].content +=
+                          "Changed retained source";
+                      },
+                      (snapshot) => {
+                        snapshot.sourcePacketDigest = "f".repeat(64);
+                      },
+                    ]
+                  : [
+                      (snapshot) => {
+                        snapshot.work.result.pendingEffect = "review";
+                      },
+                      (snapshot) => {
+                        snapshot.coordinator.phase =
+                          "objective-review-submitted";
+                      },
+                      (snapshot) => {
+                        snapshot.pendingAmendment.issueByItemId.result = 999;
+                      },
+                      (snapshot) => {
+                        delete snapshot.pendingAmendment.reviewDigest;
+                      },
+                    ];
+              for (const alter of negatives) {
+                const negative = structuredClone(observed);
+                alter(negative);
+                saveState(path, negative);
+                const refused = readFileSync(path);
+                await assert.rejects(
+                  cancelObjective(
+                    config,
+                    1,
+                    driver,
+                    { ...abandonment, snapshotDigest: digest(refused) },
+                    github,
+                  ),
+                  /outside permanent abandonment|source binding|candidate differs|reviewed graph|known issue binding/,
+                );
+                assert.deepEqual(readFileSync(path), refused);
+                assert.equal(remote.calls.length, requests);
+              }
+              saveState(path, observed);
+              assert.deepEqual(readFileSync(path), frozen);
+            }
+            assert.equal(
+              await cancelObjective(config, 1, driver, abandonment, github),
+              "cancelled",
+            );
+            const abandoned = readContinuation(config.repository, 1);
+            const {
+              permanentAbandonment,
+              cancelRequested,
+              cancelledAt,
+              ...history
+            } = abandoned;
+            assert.deepEqual(history, observed);
+            assert.equal(permanentAbandonment.effect, "graph-projection");
+            assert.equal(cancelRequested, true);
+            assert.equal(cancelledAt, permanentAbandonment.at);
+            assert.equal(remote.calls.length, requests);
+            if (producer === "amendment") {
+              const { sealFinalAcceptance } = await import(
+                "../dist/completion.js"
+              );
+              assert.throws(
+                () => sealFinalAcceptance(abandoned),
+                /permanently abandoned/,
+              );
+              await assert.rejects(
+                applyPendingAmendment({
+                  state: abandoned,
+                  config,
+                  body,
+                  github,
+                  model: {},
+                  save() {
+                    throw Error("No terminal write");
+                  },
+                  cancelled: () => false,
+                }),
+                /permanently abandoned/,
+              );
+            }
+            const { checkServiceState } = await import(
+              "../dist/supervision.js"
+            );
+            assert.throws(
+              () => checkServiceState(config, 1),
+              /permanently abandoned/,
+            );
+            const terminal = readFileSync(path);
+            await assert.rejects(
+              runObjective(config, 1, { driver, github }),
+              /permanently abandoned/,
+            );
+            await assert.rejects(
+              controlObjective(config, { objective: 1, action: "resume" }),
+              /permanently abandoned/,
+            );
+            assert.equal(
+              await cancelObjective(config, 1, driver, undefined, github),
+              "cancelled",
+            );
+            assert.deepEqual(readFileSync(path), terminal);
+            assert.equal(remote.calls.length, requests);
           } else {
             assert.equal(
               await cancelObjective(config, 1, driver, undefined, github),

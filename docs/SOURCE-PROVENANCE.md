@@ -6,6 +6,27 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Permanent stopped uncertainty abandonment (#499)
+
+The existing #363 exact-snapshot read-only-review disposition supplies the shared
+request, cessation, exclusive lock and atomic write boundary. #498's actual
+initial/amendment response-loss regressions demonstrate the synchronous graph
+projection variation. One `PermanentAbandonmentRequest` and stored disposition
+replace the one-off review interface; controller-known effect identity is derived
+from the retained lifecycle state. Initial preparation verifies its complete
+literal source packet against pinned Git and configuration. Amendment disposition
+preserves the native canonical graph/revision/proposal/map and review bindings
+without reconstructing absent Objective text or asserting current remote facts.
+
+The supported action leaves every Work Item status and all historical pending
+facts intact. Both snapshot decoders, application/CLI, status, mutation, acceptance,
+intake and supervision consumers retain the permanent terminal fence. Unsupported
+old disposition forms refuse rather than migrate or disappear. Whole committed
+model-free lifecycle/transport/watcher regressions supply reusable evidence; a
+complete preserved historical snapshot supplies only a local isolated-copy CLI
+proof, never a public raw runtime fixture. No archived runtime, recovery journal,
+compatibility alias, model repair, remote settlement or worker authority is added.
+
 ## Verified v0.1.73 shared-boundary handoff (#495 / #498 / #501 / #497)
 
 The current public gateway, atomic snapshots and shared lease boundary supplied
@@ -34,7 +55,7 @@ complete stopped-state refusal retain their exact external historical scope.
 No archived source, fallback format, new state store, journal, generic framework,
 extra model call or acceptance override supplies these corrections. Live public
 #444/#447/#448 and subsequent private #445 acceptance remain separate. #499 is
-still the pending human-owned historical projection disposition decision;
+the approved implementation of permanent UNACCEPTED stopped projection abandonment;
 publication does not fabricate completed transport provenance or retire that run.
 
 ## Atomic controller lease publication (#501)

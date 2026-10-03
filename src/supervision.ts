@@ -398,8 +398,8 @@ function checkServiceContinuationFields(state: ContinuationState): void {
   // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
   const fields =
     state.schemaVersion === 5
-      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest admission authority allowanceConsumption repairConsumption planningRecovery coordinator planning projection plan issueByItemId projectionPending error cancelRequested cancelledAt"
-      : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment rejectedAmendments allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
+      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest admission authority allowanceConsumption repairConsumption planningRecovery coordinator planning projection plan issueByItemId projectionPending error cancelRequested cancelledAt permanentAbandonment"
+      : "schemaVersion repository objective runId configDigest baseSha admission coordinator additionalSources graph graphRevisions pendingAmendment rejectedAmendments allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error permanentAbandonment";
   for (const field of Object.keys(state))
     if (!fields.split(" ").includes(field))
       throw new Error(
@@ -414,6 +414,10 @@ export function checkServiceState(
 ): void {
   const state = readContinuation(config.repository, objective);
   if (state) checkServiceContinuationFields(state);
+  if (state?.permanentAbandonment && !consentFromIntake)
+    throw new Error(
+      "Objective was permanently abandoned; Objective service admission is forbidden",
+    );
   const admission =
     state?.admission ??
     (admissionPath

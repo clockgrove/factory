@@ -108,7 +108,7 @@ export interface FactoryApplication {
   ): Promise<FactoryState>;
   cancelObjective(
     objective: number,
-    abandonment?: import("./state.js").ReadOnlyReviewAbandonmentRequest,
+    abandonment?: import("./state.js").PermanentAbandonmentRequest,
   ): Promise<"requested" | "cancelled">;
   retryWorkItem(objective: number, itemId: string): void;
   repairWorkItem(

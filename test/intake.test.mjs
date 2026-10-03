@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1398,4 +1398,80 @@ test("watch and refill preserve failed nonterminal fences and require real servi
     );
     assert.deepEqual(readContinuation(f.config.repository, 1), failed);
     assert.equal(readIntake(f.config).authority, undefined);
+  }));
+
+test("watcher restart never readmits a permanently abandoned projection with historical ready labels", async () =>
+  fixture(async (f) => {
+    const { checkIntakeServiceState } = await import("../dist/supervision.js");
+    const plan = await f.application.planObjective(1);
+    const admission = await f.application.admitObjective(1, plan, {
+      ...authority,
+      objectives: [1],
+    });
+    f.github.projectGraph = async () => {
+      throw new Error("Fixture synchronous graph response lost");
+    };
+    await assert.rejects(
+      f.application.runObjective(1, plan, admission),
+      /response lost/,
+    );
+    const path = statePath(f.config.repository, 1);
+    const before = readContinuation(f.config.repository, 1);
+    assert.equal(before.projection, "submitted");
+    await f.application.cancelObjective(1, {
+      kind: "abandon-permanently",
+      repository: f.config.repository,
+      objective: 1,
+      runId: before.runId,
+      configDigest: before.configDigest,
+      snapshotDigest: createHash("sha256")
+        .update(readFileSync(path))
+        .digest("hex"),
+      actor: "fixture operator",
+      reason: "Retire stopped unknown synchronous projection",
+      cessation: {
+        kind: "operator-verified-local-cessation",
+        verifiedAt: new Date().toISOString(),
+        basis:
+          "Fixture controller and synchronous graph call are stopped; all workers, descendants, model activity and subprocesses ceased",
+        workers: "ceased",
+        subprocesses: "ceased",
+        models: "ceased",
+        unknownOwnedResources: false,
+      },
+    });
+    const terminal = readFileSync(path);
+    f.issues.get(1).labels = ["factory:objective", "factory:ready"];
+    await f.application.enqueueIntake(
+      { ...authority, objectives: [1] },
+      { watch: true, pollSeconds: 60 },
+    );
+    checkIntakeServiceState(f.config);
+    for (let restart = 0; restart < 2; restart++) {
+      if (restart) await intakeControl(f.config, "resume");
+      const scanned = Promise.withResolvers();
+      const page = f.github.intakePage;
+      f.github.intakePage = async (...args) => {
+        const result = await page(...args);
+        scanned.resolve();
+        return result;
+      };
+      const running = f.application.runIntake();
+      try {
+        await scanned.promise;
+        const status = await intakeControl(f.config, "status");
+        assert.equal(status.activeObjective, null);
+        assert.deepEqual(readFileSync(path), terminal);
+        await assert.rejects(
+          controlObjective(f.config, { objective: 1, action: "resume" }),
+          /permanently abandoned/,
+        );
+        assert.deepEqual(readFileSync(path), terminal);
+        assert.equal(f.plans.length, 1);
+      } finally {
+        await intakeControl(f.config, "drain");
+        await running;
+      }
+    }
+    assert.deepEqual(readFileSync(path), terminal);
   }));

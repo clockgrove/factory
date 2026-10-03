@@ -5,12 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
-  requiredProviderCredential,
+  credentialFileBindings,
+  requiredProviderCredentials,
   resolveProviderCredential,
   validateCredentialFile,
 } from "../dist/provider-credentials.js";
 import { renderService } from "../dist/supervision.js";
 const cfg = {
+  planning: { kind: "codex-sdk" },
   execution: {
     kind: "managed-agent",
     provider: "openai-agents",
@@ -21,18 +23,25 @@ test("managed readiness derives names and rejects missing and empty credentials"
   const previous = process.env.FACTORY_DUMMY_KEY;
   try {
     delete process.env.FACTORY_DUMMY_KEY;
-    assert.equal(requiredProviderCredential(cfg), "FACTORY_DUMMY_KEY");
+    assert.deepEqual(requiredProviderCredentials(cfg), ["FACTORY_DUMMY_KEY"]);
     assert.throws(
-      () => resolveProviderCredential(cfg),
+      () => resolveProviderCredential(cfg, "FACTORY_DUMMY_KEY"),
       /Set FACTORY_DUMMY_KEY/,
     );
     process.env.FACTORY_DUMMY_KEY = " ";
-    assert.throws(() => resolveProviderCredential(cfg));
+    assert.throws(() => resolveProviderCredential(cfg, "FACTORY_DUMMY_KEY"));
     process.env.FACTORY_DUMMY_KEY = "dummy";
-    assert.equal(resolveProviderCredential(cfg), "dummy");
-    assert.equal(
-      requiredProviderCredential({ execution: { kind: "local" } }),
-      undefined,
+    assert.equal(resolveProviderCredential(cfg, "FACTORY_DUMMY_KEY"), "dummy");
+    assert.throws(
+      () => resolveProviderCredential(cfg, "OTHER_KEY"),
+      /not required by the configured providers/,
+    );
+    assert.deepEqual(
+      requiredProviderCredentials({
+        planning: { kind: "codex-sdk" },
+        execution: { kind: "local" },
+      }),
+      [],
     );
   } finally {
     if (previous === undefined) delete process.env.FACTORY_DUMMY_KEY;
@@ -47,7 +56,10 @@ test("fresh service processes resolve rotated private credentials without ambien
   const config = { ...cfg, checkout };
   try {
     writeFileSync(secret, "dummy-first", { mode: 0o600 });
-    assert.equal(validateCredentialFile(config, secret), secret);
+    assert.equal(
+      validateCredentialFile(config, "FACTORY_DUMMY_KEY", secret),
+      secret,
+    );
     const unit = renderService({
       version: 1,
       node: "/node",
@@ -56,7 +68,7 @@ test("fresh service processes resolve rotated private credentials without ambien
       objective: 1,
       stateHome: "/state",
       environment: {},
-      credential: { name: "FACTORY_DUMMY_KEY", file: secret },
+      credentials: [{ name: "FACTORY_DUMMY_KEY", file: secret }],
     });
     assert.match(unit, /LoadCredential=/);
     assert.match(unit, /--service-credential/);
@@ -69,7 +81,7 @@ test("fresh service processes resolve rotated private credentials without ambien
         [
           "--input-type=module",
           "-e",
-          `import {resolveProviderCredential} from ${JSON.stringify(module)}; try { const value=resolveProviderCredential(${JSON.stringify(cfg)},'FACTORY_DUMMY_KEY'); console.log(value==='dummy-second'?'rotated':'present'); } catch(e) { console.log(e.message); }`,
+          `import {resolveProviderCredential} from ${JSON.stringify(module)}; try { const value=resolveProviderCredential(${JSON.stringify(cfg)},'FACTORY_DUMMY_KEY',['FACTORY_DUMMY_KEY']); console.log(value==='dummy-second'?'rotated':'present'); } catch(e) { console.log(e.message); }`,
         ],
         {
           encoding: "utf8",
@@ -89,7 +101,12 @@ test("fresh service processes resolve rotated private credentials without ambien
     assert.match(run(), /empty/);
     writeFileSync(join(checkout, "key"), "dummy", { mode: 0o600 });
     assert.throws(
-      () => validateCredentialFile(config, join(checkout, "key")),
+      () =>
+        validateCredentialFile(
+          config,
+          "FACTORY_DUMMY_KEY",
+          join(checkout, "key"),
+        ),
       /outside/,
     );
   } finally {
@@ -111,7 +128,9 @@ test("loaded controller key authenticates the actual OpenAI client without envir
     process.env.FACTORY_DUMMY_KEY = "dummy-ambient";
     for (const value of ["dummy-loaded-first", "dummy-loaded-second"]) {
       writeFileSync(join(root, "FACTORY_DUMMY_KEY"), value, { mode: 0o600 });
-      const key = resolveProviderCredential(cfg, "FACTORY_DUMMY_KEY");
+      const key = resolveProviderCredential(cfg, "FACTORY_DUMMY_KEY", [
+        "FACTORY_DUMMY_KEY",
+      ]);
       const client = new OpenAIAgentsClient(
         "FACTORY_DUMMY_KEY",
         async (_url, options) => {
@@ -133,6 +152,85 @@ test("loaded controller key authenticates the actual OpenAI client without envir
       if (old === undefined) delete process.env[name];
       else process.env[name] = old;
     }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a service binds every credential its execution and planning providers need", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-credentials-many-"));
+  const checkout = join(root, "target");
+  mkdirSync(checkout);
+  const config = {
+    ...cfg,
+    checkout,
+    planning: { kind: "claude-api", credentialEnv: "FACTORY_DUMMY_PLANNING" },
+  };
+  const previous = process.env.CREDENTIALS_DIRECTORY;
+  try {
+    assert.deepEqual(requiredProviderCredentials(config), [
+      "FACTORY_DUMMY_KEY",
+      "FACTORY_DUMMY_PLANNING",
+    ]);
+    // A shared variable name is one credential, not two bindings.
+    assert.deepEqual(
+      requiredProviderCredentials({
+        ...config,
+        planning: { kind: "claude-api", credentialEnv: "FACTORY_DUMMY_KEY" },
+      }),
+      ["FACTORY_DUMMY_KEY"],
+    );
+    for (const name of ["FACTORY_DUMMY_KEY", "FACTORY_DUMMY_PLANNING"])
+      writeFileSync(join(root, name), `${name}-value`, { mode: 0o600 });
+    const entries = ["FACTORY_DUMMY_PLANNING", "FACTORY_DUMMY_KEY"].map(
+      (name) => `${name}=${join(root, name)}`,
+    );
+    const bindings = credentialFileBindings(config, entries);
+    assert.deepEqual(bindings, [
+      { name: "FACTORY_DUMMY_KEY", file: join(root, "FACTORY_DUMMY_KEY") },
+      {
+        name: "FACTORY_DUMMY_PLANNING",
+        file: join(root, "FACTORY_DUMMY_PLANNING"),
+      },
+    ]);
+    for (const [invalid, pattern] of [
+      [entries.slice(0, 1), /--credential-file FACTORY_DUMMY_KEY=/],
+      [
+        [...entries, `OTHER_KEY=${join(root, "FACTORY_DUMMY_KEY")}`],
+        /OTHER_KEY is not required/,
+      ],
+      [[...entries, entries[0]], /bound more than once/],
+      [[join(root, "FACTORY_DUMMY_KEY")], /NAME=ABSOLUTE_PRIVATE_FILE/],
+    ])
+      assert.throws(() => credentialFileBindings(config, invalid), pattern);
+    const unit = renderService({
+      version: 1,
+      node: "/node",
+      cli: "/cli",
+      config: "/config",
+      objective: 1,
+      stateHome: "/state",
+      environment: {},
+      credentials: bindings,
+    });
+    assert.equal(unit.match(/^LoadCredential=/gm).length, 2);
+    assert.equal(unit.match(/--service-credential/g).length, 2);
+    process.env.CREDENTIALS_DIRECTORY = root;
+    const loaded = ["FACTORY_DUMMY_KEY", "FACTORY_DUMMY_PLANNING"];
+    for (const name of loaded)
+      assert.equal(
+        resolveProviderCredential(config, name, loaded),
+        `${name}-value`,
+      );
+    assert.throws(
+      () =>
+        resolveProviderCredential(config, "FACTORY_DUMMY_PLANNING", [
+          "FACTORY_DUMMY_KEY",
+        ]),
+      /binding lacks FACTORY_DUMMY_PLANNING/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.CREDENTIALS_DIRECTORY;
+    else process.env.CREDENTIALS_DIRECTORY = previous;
     rmSync(root, { recursive: true, force: true });
   }
 });

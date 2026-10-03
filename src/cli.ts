@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { objectiveCandidate } from "./qa.js";
 import {
-  requiredProviderCredential,
+  credentialFileBindings,
+  executionCredential,
+  requiredProviderCredentials,
   resolveProviderCredential,
 } from "./provider-credentials.js";
 import { objectiveComplete } from "./completion.js";
@@ -67,7 +69,7 @@ function options(args: string[], name: string): string[] {
 
 function help(): void {
   console.log(
-    `Factory CLI\n\nCommands:\n  setup --background --service-consent --actor NAME --reason TEXT --retain-package [--authority FILE] [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [INSTALL_OPTIONS] [--config PATH]\n  setup --config-only [INSTALL_OPTIONS] [--config PATH]\n  intake watch --service-consent --actor NAME --reason TEXT [--poll-seconds N] [--config PATH]\n  intake enqueue --authority FILE [--priority-label LABEL ...] [--poll-seconds N] [--watch] [--config PATH]\n  intake run|status|pause|resume|drain [--config PATH]\n  intake dequeue --objective N [--config PATH]\n  readiness [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--config PATH] (outside default: home directory)\n  supervisor install|status|start|stop|disable|uninstall|upgrade [--intake | --objective N] [--plan PATH --admission PATH] [--cli ABSOLUTE_INSTALLED_CLI] [--credential-file ABSOLUTE_PRIVATE_FILE] [--config PATH]\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH [--concurrency N] [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  export-captures --objective N --destination langfuse|langsmith --endpoint HTTPS_BASE_URL --content metadata|retained [--project-id UUID] [--workspace-id UUID] [--run ID ...] [--invocation ID ...] [--send --authorize PREVIEW_DIGEST] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  propose-amendment --objective N --proposal FILE [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--abandon FILE] [--config PATH]\n  repair --objective N --proposal FILE [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
+    `Factory CLI\n\nCommands:\n  setup --background --service-consent --actor NAME --reason TEXT --retain-package [--authority FILE] [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [INSTALL_OPTIONS] [--config PATH]\n  setup --config-only [INSTALL_OPTIONS] [--config PATH]\n  intake watch --service-consent --actor NAME --reason TEXT [--poll-seconds N] [--config PATH]\n  intake enqueue --authority FILE [--priority-label LABEL ...] [--poll-seconds N] [--watch] [--config PATH]\n  intake run|status|pause|resume|drain [--config PATH]\n  intake dequeue --objective N [--config PATH]\n  readiness [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...] [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--config PATH] (outside default: home directory)\n  supervisor install|status|start|stop|disable|uninstall|upgrade [--intake | --objective N] [--plan PATH --admission PATH] [--cli ABSOLUTE_INSTALLED_CLI] [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...] [--config PATH]\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH [--concurrency N] [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning codex-sdk|claude-api] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  plan --objective N [--authority AUTHORITY_FILE] [--source PATH#HEADING ...] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  decide --objective N --plan PLAN_FILE --outcome accept|refuse --actor NAME --reason TEXT [--answer TEXT] --output ABSOLUTE_NEW_FILE [--config PATH]\n  admit --objective N --plan PLAN_FILE --authority AUTHORITY_FILE --output ABSOLUTE_NEW_FILE [--config PATH]\n  check-admission --objective N --plan PLAN_FILE --admission ADMISSION_FILE [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--plan PLAN_FILE] [--admission ADMISSION_FILE] [--config PATH]\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  export-captures --objective N --destination langfuse|langsmith --endpoint HTTPS_BASE_URL --content metadata|retained [--project-id UUID] [--workspace-id UUID] [--run ID ...] [--invocation ID ...] [--send --authorize PREVIEW_DIGEST] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  propose-amendment --objective N --proposal FILE [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--abandon FILE] [--config PATH]\n  repair --objective N --proposal FILE [--config PATH]\n  retry --objective N --item ID [--config PATH]`,
   );
 }
 
@@ -83,29 +85,37 @@ async function main(): Promise<void> {
   }
   if (command === "readiness") {
     const config = readConfig(path);
-    const credentialName = requiredProviderCredential(config);
-    if (credentialName) {
-      try {
-        resolveProviderCredential(config);
-        console.log(
-          JSON.stringify({
-            status: "present",
-            credential: credentialName,
-            source: "controller environment",
-            accountAccess: "not verified",
-          }),
-        );
-      } catch (error) {
-        console.log(
-          JSON.stringify({
-            status: "missing",
-            credential: credentialName,
-            detail: String(error),
-            accountAccess: "not verified",
-          }),
-        );
-        process.exitCode = 1;
-      }
+    // Service bindings are checked as files; foreground runs use the environment.
+    const credentialFiles = options(args, "credential-file");
+    const required = requiredProviderCredentials(config);
+    try {
+      if (credentialFiles.length)
+        credentialFileBindings(config, credentialFiles);
+      else for (const name of required) resolveProviderCredential(config, name);
+    } catch (error) {
+      console.log(
+        JSON.stringify({
+          status: "missing",
+          credentials: required,
+          detail: String(error),
+          accountAccess: "not verified",
+        }),
+      );
+      process.exitCode = 1;
+      return;
+    }
+    // Remote execution has no local harness to probe beyond its credential.
+    if (executionCredential(config)) {
+      console.log(
+        JSON.stringify({
+          status: "present",
+          credentials: required,
+          source: credentialFiles.length
+            ? "owner-private service credential"
+            : "controller environment",
+          accountAccess: "not verified",
+        }),
+      );
       return;
     }
     const outsideDirectory = option(args, "outside-directory");
@@ -220,25 +230,20 @@ async function main(): Promise<void> {
       plan: option(args, "plan"),
       admission: option(args, "admission"),
       cli: option(args, "cli"),
-      credentialFile: option(args, "credential-file"),
+      credentialFiles: options(args, "credential-file"),
     };
     if (action === "serve") {
       const config = readConfig(path);
-      if (
-        requiredProviderCredential(config) &&
-        !option(args, "service-credential")
-      )
-        throw new Error(
-          "Managed supervision requires a registered LoadCredential binding; reinstall with --credential-file",
-        );
+      // A service reads only the credentials systemd loaded for it.
+      const loaded = options(args, "service-credential");
       if (input.intake) {
         checkIntakeServiceState(config);
-        await compose(config, option(args, "service-credential")).runIntake();
+        await compose(config, loaded).runIntake();
         return;
       }
       checkServiceState(config, input.objective, input.admission);
       try {
-        await compose(config, option(args, "service-credential")).runObjective(
+        await compose(config, loaded).runObjective(
           input.objective,
           input.plan ? JSON.parse(readFileSync(input.plan, "utf8")) : undefined,
           input.admission
@@ -294,6 +299,16 @@ async function main(): Promise<void> {
       throw new Error(
         "GitHub Copilot installation requires --worker-model and --copilot-timeout-seconds",
       );
+    const planning = option(args, "planning") ?? "codex-sdk";
+    if (planning !== "codex-sdk" && planning !== "claude-api")
+      throw new Error("install --planning must be codex-sdk or claude-api");
+    if (
+      planning === "claude-api" &&
+      (!option(args, "planning-model") || !option(args, "review-model"))
+    )
+      throw new Error(
+        "Claude planning installation requires --planning-model and --review-model",
+      );
     const claudeTools = options(args, "claude-tool");
     const claudeAllowedTools = options(args, "claude-allow-tool");
     const defaultClaudeTools = ["Read", "Edit", "Write", "Glob", "Grep"];
@@ -310,25 +325,40 @@ async function main(): Promise<void> {
       schemaVersion: 1,
       repository,
       checkout,
-      planning: {
-        kind: "codex-sdk",
-        planner: {
-          model:
-            option(args, "planning-model") ??
-            DEFAULT_PLANNER_MODEL_SELECTION.model,
-          reasoningEffort:
-            option(args, "planning-reasoning") ??
-            DEFAULT_PLANNER_MODEL_SELECTION.reasoningEffort,
-        },
-        reviewer: {
-          model:
-            option(args, "review-model") ??
-            DEFAULT_REVIEWER_MODEL_SELECTION.model,
-          reasoningEffort:
-            option(args, "review-reasoning") ??
-            DEFAULT_REVIEWER_MODEL_SELECTION.reasoningEffort,
-        },
-      },
+      planning:
+        planning === "claude-api"
+          ? {
+              kind: "claude-api",
+              credentialEnv: "ANTHROPIC_API_KEY",
+              maxOutputTokens: 64000,
+              planner: {
+                model: option(args, "planning-model"),
+                reasoningEffort: option(args, "planning-reasoning") ?? "high",
+              },
+              reviewer: {
+                model: option(args, "review-model"),
+                reasoningEffort: option(args, "review-reasoning") ?? "high",
+              },
+            }
+          : {
+              kind: "codex-sdk",
+              planner: {
+                model:
+                  option(args, "planning-model") ??
+                  DEFAULT_PLANNER_MODEL_SELECTION.model,
+                reasoningEffort:
+                  option(args, "planning-reasoning") ??
+                  DEFAULT_PLANNER_MODEL_SELECTION.reasoningEffort,
+              },
+              reviewer: {
+                model:
+                  option(args, "review-model") ??
+                  DEFAULT_REVIEWER_MODEL_SELECTION.model,
+                reasoningEffort:
+                  option(args, "review-reasoning") ??
+                  DEFAULT_REVIEWER_MODEL_SELECTION.reasoningEffort,
+              },
+            },
       execution: {
         kind: "local",
         concurrency,

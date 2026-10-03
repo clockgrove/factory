@@ -10,16 +10,16 @@ import { redactDiagnosticDetail } from "./diagnostics.js";
 import { sharedGitHubClient } from "./github-client.js";
 import { composeIntake } from "./application.js";
 import { readIntake, watchIntake, type IntakeAuthorization } from "./intake.js";
-import {
-  requiredProviderCredential,
-  validateCredentialFile,
-} from "./provider-credentials.js";
 import { supervise, supervisorHost } from "./supervision.js";
 
 const option = (args: string[], name: string) => {
   const index = args.indexOf(`--${name}`);
   return index < 0 ? undefined : args[index + 1];
 };
+const options = (args: string[], name: string) =>
+  args.flatMap((arg, index) =>
+    arg === `--${name}` && args[index + 1] ? [args[index + 1]!] : [],
+  );
 const cli = () =>
   realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url)));
 function withinCheckout(checkout: string, path: string): boolean {
@@ -141,6 +141,7 @@ export async function setupTarget(
       concurrency: config.execution.concurrency,
       delivery: config.delivery.kind,
       network: config.policy.network,
+      planning: config.planning.kind,
       "planning-model": config.planning.planner.model,
       "planning-reasoning": config.planning.planner.reasoningEffort,
       "review-model": config.planning.reviewer.model,
@@ -182,9 +183,14 @@ export async function setupTarget(
         intake?: boolean;
         cli: string;
         config: string;
-        credential?: { name: string; file: string };
+        credentials?: { name: string; file: string }[];
       };
+      bindingHealth?: { diagnostics: { code: string; action: string }[] };
     };
+    const legacy = service.bindingHealth?.diagnostics.find(
+      ({ code }) => code === "legacy-credential-binding",
+    );
+    if (legacy) throw new Error(legacy.action);
     if (
       service.registered &&
       (!service.binding?.intake ||
@@ -193,32 +199,28 @@ export async function setupTarget(
       throw new Error(
         "Existing service is not this exact intake/configuration binding; inspect supervisor status and use supported lifecycle controls",
       );
+    // Supplied bindings replace an existing service's; otherwise reuse them.
+    const suppliedFiles = options(args, "credential-file");
+    const credentialFiles = suppliedFiles.length
+      ? suppliedFiles
+      : (service.binding?.credentials ?? []).map(
+          ({ name, file }) => `${name}=${file}`,
+        );
     const authorityPath = option(args, "authority");
     let intake = readIntake(config);
     stage = "execution-readiness";
     if (authorityPath || intake?.authority) {
-      const credentialFile =
-        option(args, "credential-file") ?? service.binding?.credential?.file;
-      const credentialName = requiredProviderCredential(config);
-      const proof: { status: string; [key: string]: unknown } =
-        credentialName && credentialFile
-          ? (validateCredentialFile(config, credentialFile),
-            {
-              status: "present",
-              credential: credentialName,
-              source: "owner-private service credential",
-              accountAccess: "not verified",
-            })
-          : (JSON.parse(
-              await invoke([
-                "readiness",
-                ...(option(args, "outside-directory")
-                  ? ["--outside-directory", option(args, "outside-directory")!]
-                  : []),
-                "--config",
-                configPath,
-              ]),
-            ) as { status: string });
+      const proof = JSON.parse(
+        await invoke([
+          "readiness",
+          ...credentialFiles.flatMap((entry) => ["--credential-file", entry]),
+          ...(option(args, "outside-directory")
+            ? ["--outside-directory", option(args, "outside-directory")!]
+            : []),
+          "--config",
+          configPath,
+        ]),
+      ) as { status: string; [key: string]: unknown };
       result.readiness = proof;
       if (!["ready", "present"].includes(proof.status))
         throw new Error(
@@ -300,8 +302,7 @@ export async function setupTarget(
     } else {
       await supervise("install", configPath, {
         intake: true,
-        credentialFile:
-          option(args, "credential-file") ?? service.binding?.credential?.file,
+        credentialFiles,
       });
       completed.push("service-registered");
     }

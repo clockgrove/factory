@@ -125,7 +125,7 @@ else if(action==='start'&&!alive()&&!fs.existsSync(file('start-failure'))){
  const binding=JSON.parse(unit.split('\\n')[0].slice('# Factory local supervision v1 '.length));
  const args=[binding.cli,'supervisor','serve','--intake','--config',binding.config];
  const env={...process.env,...binding.environment,XDG_STATE_HOME:binding.stateHome};
- if(binding.credential){const dir=file('loaded');fs.mkdirSync(dir,{recursive:true});fs.copyFileSync(binding.credential.file,dir+'/'+binding.credential.name);env.CREDENTIALS_DIRECTORY=dir;args.push('--service-credential',binding.credential.name);}
+ for(const credential of binding.credentials??[]){const dir=file('loaded');fs.mkdirSync(dir,{recursive:true});fs.copyFileSync(credential.file,dir+'/'+credential.name);env.CREDENTIALS_DIRECTORY=dir;args.push('--service-credential',credential.name);}
  const child=spawn(binding.node,args,{env,detached:true,stdio:['ignore',fs.openSync(file('service-out'),'a'),fs.openSync(file('service-error'),'a')]});
  fs.writeFileSync(file('pid'),String(child.pid));fs.appendFileSync(file('starts'),'start\\n');child.unref();
 }
@@ -265,6 +265,32 @@ test("actual guided CLI creates a consented idle watcher, verifies its owner and
     assert.equal(readFileSync(join(root, "service-error"), "utf8"), "");
   }));
 
+test("guided setup refuses to reuse a retired single-credential service binding", () =>
+  fixture(async ({ root, run, installArgs }) => {
+    const first = run(["setup", ...consent, ...installArgs()]);
+    assert.equal(first.status, 0, first.stderr + first.stdout);
+    const unit = readFileSync(join(root, "registered"), "utf8");
+    const prefix = "# Factory local supervision v1 ";
+    const text = readFileSync(unit, "utf8");
+    const value = JSON.parse(text.split("\n")[0].slice(prefix.length));
+    value.credential = { name: "KEY", file: join(root, "key") };
+    writeFileSync(
+      unit,
+      `${prefix}${JSON.stringify(value)}\n${text.split("\n").slice(1).join("\n")}`,
+      { mode: 0o600 },
+    );
+    const starts = readFileSync(join(root, "starts"), "utf8");
+    const again = run(["setup", ...consent]);
+    assert.equal(again.status, 1, again.stderr + again.stdout);
+    assert.equal(again.document.blocked.stage, "service-binding");
+    assert.match(
+      again.document.blocked.detail,
+      /retired single `credential` field.*--credential-file NAME=/,
+    );
+    assert.equal(readFileSync(join(root, "starts"), "utf8"), starts);
+    assert.equal(readFileSync(unit, "utf8").includes('"credential":'), true);
+  }));
+
 test("actual guided configuration-only setup succeeds with unavailable manager and requires explicit service consent for background", () =>
   fixture(async ({ root, run, installArgs, configPath }) => {
     writeFileSync(join(root, "unsupported"), "");
@@ -351,7 +377,7 @@ test("actual guided setup checks admitted execution readiness and retains a clos
       "--authority",
       authority,
       "--credential-file",
-      credential,
+      `FACTORY_SERVICE_TEST_KEY=${credential}`,
     ];
     delete env.FACTORY_SERVICE_TEST_KEY;
     const missing = run(["setup", ...consent, "--authority", authority]);

@@ -97,7 +97,9 @@ For a background controller, use an existing owner-private regular file outside
 the target checkout containing only the API key. Enter the value through your
 secure local credential workflow; do not paste it into chat, issues or command
 arguments. Keep the file owned by your user with mode `0600`. Register the service
-with `factory supervisor install ... --credential-file /absolute/private/key`.
+with `factory supervisor install ... --credential-file NAME=/absolute/private/key`,
+where `NAME` is the configured credential variable. Bind one file per credential
+the configured providers need.
 Factory uses systemd `LoadCredential` and retains only the variable name and file
 reference. It never copies the key into configuration, service metadata, model
 inputs or sandbox environment. A terminal export alone does not authenticate the

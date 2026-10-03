@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel } from "../dist/compiler.js";
 import {
   objectiveComplete,
@@ -50,6 +51,7 @@ const authority = {
 async function fixture(delivery, action, options = {}) {
   const root = mkdtempSync(join(tmpdir(), `factory-baseline-qa-${delivery}-`));
   const previous = process.env.XDG_STATE_HOME;
+  const startThread = Codex.prototype.startThread;
   process.env.XDG_STATE_HOME = join(root, "state");
   try {
     const target = createTarget(root, { "existing.txt": "alpha\n" });
@@ -62,7 +64,8 @@ async function fixture(delivery, action, options = {}) {
     const model = new CodexPlanningModel(target.checkout, selection, selection);
     const captures = [];
     const schemas = [];
-    model.startThread = () => ({
+    // Script the SDK boundary so no fixture call reaches a real provider.
+    Codex.prototype.startThread = () => ({
       runStreamed: async (prompt, { outputSchema }) => {
         let response;
         if (prompt.includes("Compiler choices (JSON data):\n")) {
@@ -279,6 +282,7 @@ async function fixture(delivery, action, options = {}) {
       body: scopeBody,
     });
   } finally {
+    Codex.prototype.startThread = startThread;
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previous;
     rmSync(root, { recursive: true, force: true });

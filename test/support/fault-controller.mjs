@@ -61,13 +61,6 @@ function faulty(object, target, faults, logPath) {
         return value;
       return async (...args) => {
         const request = args[0] ?? {};
-        record(logPath, {
-          target,
-          method: property,
-          phase: request.reviewPhase ?? request.invocation?.phase,
-          item: request.item?.id,
-          attempt: request.attemptId ?? request.identity,
-        });
         let fired;
         for (const rule of rules) {
           if (rule.method !== property) continue;
@@ -78,6 +71,16 @@ function faulty(object, target, faults, logPath) {
           )
             fired = rule;
         }
+        record(logPath, {
+          target,
+          method: property,
+          phase: request.reviewPhase ?? request.invocation?.phase,
+          item: request.item?.id,
+          attempt: request.attemptId ?? request.identity,
+          fault: fired?.kind,
+          // Whether the call reached its service (and may have had an effect).
+          reached: !["crash-before", "unavailable"].includes(fired?.kind),
+        });
         if (fired?.kind === "crash-before")
           process.kill(process.pid, "SIGKILL");
         if (fired?.kind === "unavailable") throw unavailable(target);
@@ -167,7 +170,8 @@ try {
   const state = await application.runObjective(descriptor.graph.objective);
   console.log(
     JSON.stringify({
-      outcome: "completed",
+      // A pass without admission returns while it waits (e.g. for readiness).
+      outcome: state.finalValidation?.passed ? "completed" : "returned",
       finalValidation: state.finalValidation?.passed === true,
       ...summary(),
     }),

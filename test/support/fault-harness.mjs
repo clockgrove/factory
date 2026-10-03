@@ -58,6 +58,10 @@ function readLines(path) {
  * Run `items` (alpha → beta by default) with `delivery`. `http` rules are
  * injected into the fake for the whole scenario (each fires once per its
  * `times`); `inProcess` faults apply to the first controller run only.
+ * `beforeRun(fake, index)` may change GitHub between controller runs.
+ * A run that crashed or stopped is restarted at most `maxRestarts` times; a
+ * run that returned while waiting (no admission keeps it alive) is resumed
+ * until `maxRuns`.
  */
 export async function runScenario({
   name,
@@ -66,7 +70,10 @@ export async function runScenario({
   http = [],
   inProcess = [],
   fake: fakeOptions = {},
-  maxRuns = 3,
+  maxRestarts = 2,
+  maxRuns = 8,
+  beforeRun,
+  earlierIssues = 0,
   runTimeoutMs = 90_000,
   timeScale = 0.01,
 }) {
@@ -87,7 +94,13 @@ export async function runScenario({
   const fake = new GitHubHttpFake({
     repository,
     origin: target.origin,
-    issues: [{ title: "Deterministic Objective", body: objectiveBody }],
+    issues: [
+      { title: "Deterministic Objective", body: objectiveBody },
+      ...Array.from({ length: earlierIssues }, (_, index) => ({
+        title: `Earlier issue ${index}`,
+        body: "Not a Factory issue",
+      })),
+    ],
     ...fakeOptions,
     onCrash: (entry) => {
       crashes.push(entry.endpoint);
@@ -145,6 +158,7 @@ export async function runScenario({
   const runs = [];
   try {
     for (let index = 0; index < maxRuns; index++) {
+      await beforeRun?.(fake, index);
       writeDescriptor(descriptorPath, {
         ...descriptor,
         faults: index === 0 ? inProcess : [],
@@ -157,11 +171,11 @@ export async function runScenario({
           ["--import", fastTimers, controller, descriptorPath],
           { env, cwd: repositoryRoot, stdio: ["ignore", "pipe", "pipe"] },
         );
+        let timedOut = false;
         const timer = setTimeout(() => {
           timedOut = true;
           child.kill("SIGKILL");
         }, runTimeoutMs);
-        let timedOut = false;
         child.stdout.on("data", (chunk) => (stdout += chunk));
         child.stderr.on("data", (chunk) => (stderr += chunk));
         child.on("close", (code, signal) => {
@@ -188,8 +202,12 @@ export async function runScenario({
       });
       child = undefined;
       runs.push(result);
-      if (result.outcome === "completed") break;
-      if (result.outcome === "hung") break;
+      if (["completed", "hung", "failed"].includes(result.outcome)) break;
+      if (
+        runs.filter((run) => ["crashed", "stopped"].includes(run.outcome))
+          .length > maxRestarts
+      )
+        break;
     }
     return {
       runs,

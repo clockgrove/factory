@@ -194,8 +194,9 @@ export class GitHubHttpFake {
    * @param {string} options.origin path of the bare Git repository
    * @param {{title: string, body: string, labels?: string[]}[]} [options.issues]
    *   issues created first, numbered from 1 (e.g. the Objective)
-   * @param {Record<string, number>} [options.lag] endpoint → number of reads
-   *   that still see the state before each write
+   * @param {{read: string, after?: string, reads: number}[]} [options.lag]
+   *   after each write (to `after`, or any endpoint), the next `reads` reads
+   *   of the `read` endpoint still see the state before that write
    * @param {(sha: string) => object[]} [options.checkRuns]
    * @param {(sha: string) => object} [options.statuses]
    * @param {number} [options.readinessUnknownReads] readiness reads per PR
@@ -211,7 +212,7 @@ export class GitHubHttpFake {
     this.origin = options.origin;
     this.defaultBranch = options.defaultBranch ?? "main";
     this.options = options;
-    this.lag = { ...(options.lag ?? {}) };
+    this.lag = options.lag ?? [];
     this.onCrash = options.onCrash;
     this.rules = [];
     this.log = [];
@@ -274,7 +275,8 @@ export class GitHubHttpFake {
    * to the `times - 1` matching requests after it.
    * Kinds: status (respond `status` with `headers`/`message`, no effect),
    * reset (close the connection before the effect), drop (apply the effect,
-   * then close the connection), crash-before, crash-after (onCrash then close).
+   * then close the connection), crash-before, crash-after (onCrash then close),
+   * after (respond normally once `run(fake, entry)` has changed the repository).
    */
   inject(rule) {
     const value = { occurrence: 1, times: 1, seen: 0, fired: 0, ...rule };
@@ -324,6 +326,27 @@ export class GitHubHttpFake {
 
   issue(number) {
     return this.state.issues[number];
+  }
+
+  /** Another actor pushes an empty commit to `branch` (default branch). */
+  async pushForeignCommit(branch = this.defaultBranch) {
+    const head = await git(this.origin, "rev-parse", `refs/heads/${branch}`);
+    const commit = await git(
+      this.origin,
+      "commit-tree",
+      `${head}^{tree}`,
+      "-p",
+      head,
+      "-m",
+      "Unrelated change by another contributor",
+    );
+    await git(this.origin, "update-ref", `refs/heads/${branch}`, commit, head);
+    return commit;
+  }
+
+  /** Another actor opens an issue. */
+  openForeignIssue(title = "Unrelated issue", body = "Not a Factory issue") {
+    return this.createIssueRecord(this.state, { title, body });
   }
 
   commentsOn(number) {
@@ -496,7 +519,12 @@ export class GitHubHttpFake {
     }
     if (!reading && result.status < 300) {
       entry.effect = true;
-      this.recordWrite(before);
+      this.recordWrite(before, route.endpoint);
+    }
+    // Another actor changes the repository between this request and the next.
+    if (rule?.kind === "after") {
+      entry.fault = "after";
+      await rule.run(this, entry);
     }
     if (this.postEffect(rule, entry, response)) return;
     entry.status = result.status;
@@ -526,18 +554,26 @@ export class GitHubHttpFake {
 
   // ---- read-after-write lag ---------------------------------------------
 
-  recordWrite(before) {
+  recordWrite(before, endpoint) {
     const pending = {};
-    for (const [endpoint, reads] of Object.entries(this.lag))
-      if (reads > 0) pending[endpoint] = reads;
+    for (const [index, rule] of this.lag.entries())
+      if (rule.reads > 0 && (!rule.after || rule.after === endpoint))
+        pending[index] = rule.reads;
     if (Object.keys(pending).length) this.writes.push({ before, pending });
   }
 
   /** The state a read of `endpoint` observes: before the oldest lagging write. */
   view(endpoint) {
-    const lagging = this.writes.find((write) => write.pending[endpoint] > 0);
+    const rules = [...this.lag.keys()].filter(
+      (index) => this.lag[index].read === endpoint,
+    );
+    if (!rules.length) return this.state;
+    const lagging = this.writes.find((write) =>
+      rules.some((index) => write.pending[index] > 0),
+    );
     for (const write of this.writes)
-      if (write.pending[endpoint] > 0) write.pending[endpoint]--;
+      for (const index of rules)
+        if (write.pending[index] > 0) write.pending[index]--;
     this.writes = this.writes.filter((write) =>
       Object.values(write.pending).some((reads) => reads > 0),
     );

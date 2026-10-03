@@ -8,30 +8,36 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  package-gate:
+  checks:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 2
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: git lfs version
-      - run: npm run build
-      - name: Run Biome lint and compatibility rules
-        run: npm run lint
-      - name: Check Biome and fallback formatting
-        run: npm run format:check
+      - uses: ./.github/actions/setup
+      - run: npm run lint
+      - run: npm run format:check
       - run: npm run notices:check
-      - name: Run proportional PR tests
-        if: github.event_name == 'pull_request'
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: node scripts/test-pr.mjs --base "$PR_BASE_SHA"
-      - name: Run complete main tests
-        if: github.event_name != 'pull_request'
-        run: node --test test/*.test.mjs
+
+  tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: git lfs version
+      - run: node --test --test-shard=${{ matrix.shard }}/4 test/*.test.mjs
+
+  # The single required check for main; it passes only when every job above passes.
+  package-gate:
+    if: always()
+    needs: [checks, tests]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: test "${{ needs.checks.result }}" = success && test "${{ needs.tests.result }}" = success

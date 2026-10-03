@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ExecutionAuthority } from "./admission.js";
+import type { FactoryConfig } from "./config.js";
 import type { AllowanceConsumption } from "./graph-amendments.js";
 import type { FactoryState, WorkState } from "./state.js";
 
@@ -15,9 +15,122 @@ export type RepairClass = (typeof repairClasses)[number];
 export interface RepairPolicy {
   perPath: AllowanceConsumption;
 }
+/** Limits on unattended work; each Objective snapshots them when it starts. */
+export interface Autonomy {
+  allowances: AllowanceConsumption;
+  repairClasses: RepairClass[];
+  repairPolicy: RepairPolicy;
+  /** Worker secrets checked before planning; each must also be in policy.allowedSecretNames. */
+  requiredEnvironment: string[];
+}
+/** The optional config.json `autonomy` section; omitted fields keep the bounded defaults. */
+export type AutonomyConfig = Partial<
+  Omit<Autonomy, "allowances" | "repairPolicy">
+> & {
+  allowances?: Partial<AllowanceConsumption>;
+  repairPolicy?: { perPath?: Partial<AllowanceConsumption> };
+};
+export const defaultAutonomy: Autonomy = {
+  allowances: {
+    planningRevisions: 1,
+    implementationRepairs: 2,
+    resultRereviews: 1,
+  },
+  repairClasses: [...repairClasses],
+  repairPolicy: {
+    perPath: {
+      planningRevisions: 1,
+      implementationRepairs: 1,
+      resultRereviews: 1,
+    },
+  },
+  requiredEnvironment: [],
+};
+const allowanceKeys = [
+  "planningRevisions",
+  "implementationRepairs",
+  "resultRereviews",
+] as const;
+function onlyKeys(value: object, names: readonly string[], label: string) {
+  for (const key of Object.keys(value))
+    if (!names.includes(key))
+      throw new Error(`Unsupported ${label} field: ${key}`);
+}
+function assertAllowances(value: unknown, label: string): void {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(`${label} must be an object`);
+  onlyKeys(value, allowanceKeys, label);
+  for (const key of allowanceKeys) {
+    const amount = (value as Record<string, unknown>)[key];
+    if (!Number.isSafeInteger(amount) || (amount as number) < 0)
+      throw new Error(`${label}.${key} must be a nonnegative integer`);
+  }
+}
+export function validateAutonomy(value: Autonomy): Autonomy {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("autonomy must be an object");
+  onlyKeys(
+    value,
+    ["allowances", "repairClasses", "repairPolicy", "requiredEnvironment"],
+    "autonomy",
+  );
+  assertAllowances(value.allowances, "autonomy.allowances");
+  if (!value.repairPolicy || typeof value.repairPolicy !== "object")
+    throw new Error("autonomy.repairPolicy must be an object");
+  onlyKeys(value.repairPolicy, ["perPath"], "autonomy.repairPolicy");
+  assertAllowances(value.repairPolicy.perPath, "autonomy.repairPolicy.perPath");
+  if (
+    !Array.isArray(value.repairClasses) ||
+    value.repairClasses.some((kind) => !repairClasses.includes(kind))
+  )
+    throw new Error("autonomy.repairClasses has unsupported repair classes");
+  if (
+    !Array.isArray(value.requiredEnvironment) ||
+    value.requiredEnvironment.some(
+      (name) =>
+        typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name),
+    )
+  )
+    throw new Error("autonomy.requiredEnvironment must list variable names");
+  return value;
+}
+/** Fill omitted fields of the config section with the bounded defaults. */
+export function resolveAutonomy(section: AutonomyConfig = {}): Autonomy {
+  if (!section || typeof section !== "object" || Array.isArray(section))
+    throw new Error("autonomy must be an object");
+  return validateAutonomy({
+    ...section,
+    allowances: { ...defaultAutonomy.allowances, ...section.allowances },
+    repairClasses: [
+      ...(section.repairClasses ?? defaultAutonomy.repairClasses),
+    ],
+    repairPolicy: {
+      ...section.repairPolicy,
+      perPath: {
+        ...defaultAutonomy.repairPolicy.perPath,
+        ...section.repairPolicy?.perPath,
+      },
+    },
+    requiredEnvironment: [
+      ...(section.requiredEnvironment ?? defaultAutonomy.requiredEnvironment),
+    ],
+  });
+}
+/** Required worker secrets must be allowed and present before any model is called. */
+export function checkRequiredEnvironment(config: FactoryConfig): void {
+  for (const name of resolveAutonomy(config.autonomy).requiredEnvironment) {
+    if (!config.policy.allowedSecretNames.includes(name))
+      throw new Error(
+        `Required environment ${name} is not in policy.allowedSecretNames`,
+      );
+    if (!process.env[name])
+      throw new Error(
+        `Required environment ${name} is unavailable; provide it before running`,
+      );
+  }
+}
 export interface RepairLedger {
-  admission?: { authority: ExecutionAuthority };
-  authority?: ExecutionAuthority;
+  autonomy: Autonomy;
   allowanceConsumption?: AllowanceConsumption;
   repairConsumption?: Record<string, AllowanceConsumption>;
 }
@@ -72,41 +185,50 @@ export function chargeRepair(
   kind: RepairClass,
   scopes: string[],
 ): void {
-  const authority = state.admission?.authority ?? state.authority;
-  if (!authority?.repairPolicy || !authority.repairClasses.includes(kind))
+  if (!state.autonomy.repairClasses.includes(kind))
     throw new Error(
-      `Repair class ${kind} is not admitted; operator decision required`,
+      `Repair class ${kind} is not enabled; operator decision required`,
     );
   consumeAllowance(state, allowanceKey(kind), scopes);
+}
+/** Whether one more charge fits the Objective and every scope's allowance. */
+export function allowanceAvailable(
+  state: RepairLedger,
+  key: keyof AllowanceConsumption,
+  scopes: string[],
+): boolean {
+  const { allowances, repairPolicy } = state.autonomy;
+  return (
+    (state.allowanceConsumption?.[key] ?? 0) < allowances[key] &&
+    scopes.every(
+      (scope) =>
+        (state.repairConsumption?.[scope]?.[key] ?? 0) <
+        repairPolicy.perPath[key],
+    )
+  );
 }
 export function consumeAllowance(
   state: RepairLedger,
   key: keyof AllowanceConsumption,
   scopes: string[],
 ): void {
-  const authority = state.admission?.authority ?? state.authority;
-  if (!authority)
-    throw new Error("Allowance consumption requires bound authority");
+  const { allowances, repairPolicy } = state.autonomy;
   const total = state.allowanceConsumption ?? emptyConsumption();
   const paths = state.repairConsumption ?? {};
-  if (total[key] >= authority.allowances[key])
+  if (total[key] >= allowances[key])
     throw new Error(`Objective ${key} allowance exhausted`);
   if (!scopes.length || scopes.some((scope) => !scope))
     throw new Error("Repair needs an inherited scope");
   for (const scope of new Set(scopes))
-    if (
-      authority.repairPolicy &&
-      (paths[scope]?.[key] ?? 0) >= authority.repairPolicy.perPath[key]
-    )
+    if ((paths[scope]?.[key] ?? 0) >= repairPolicy.perPath[key])
       throw new Error(`Repair path ${scope} ${key} allowance exhausted`);
   total[key]++;
-  if (authority.repairPolicy)
-    for (const scope of new Set(scopes)) {
-      paths[scope] ??= emptyConsumption();
-      paths[scope][key]++;
-    }
+  for (const scope of new Set(scopes)) {
+    paths[scope] ??= emptyConsumption();
+    paths[scope][key]++;
+  }
   state.allowanceConsumption = total;
-  if (authority.repairPolicy) state.repairConsumption = paths;
+  state.repairConsumption = paths;
 }
 /** Original identities remain the scope even when a parent becomes an aggregate. */
 export function repairScopes(state: FactoryState, id: string): string[] {
@@ -186,31 +308,27 @@ export function assertRepairLedger(
     work?: Record<string, WorkState>;
   },
 ): void {
-  const authority = state.admission?.authority ?? state.authority;
+  const autonomy = validateAutonomy(state.autonomy);
   const validCounts = (value: AllowanceConsumption): boolean =>
     Boolean(
       value &&
-        ["planningRevisions", "implementationRepairs", "resultRereviews"].every(
-          (key) =>
-            Number.isSafeInteger(value[key as keyof AllowanceConsumption]) &&
-            value[key as keyof AllowanceConsumption] >= 0,
+        allowanceKeys.every(
+          (key) => Number.isSafeInteger(value[key]) && value[key] >= 0,
         ),
     );
   if (
     state.allowanceConsumption &&
-    (!authority ||
-      !validCounts(state.allowanceConsumption) ||
+    (!validCounts(state.allowanceConsumption) ||
       Object.keys(state.allowanceConsumption).some(
         (key) =>
-          !Object.hasOwn(authority.allowances, key) ||
+          !Object.hasOwn(autonomy.allowances, key) ||
           state.allowanceConsumption![key as keyof AllowanceConsumption] >
-            authority.allowances[key as keyof AllowanceConsumption],
+            autonomy.allowances[key as keyof AllowanceConsumption],
       ))
   )
     throw new Error("Invalid persisted Objective repair consumption");
   if (state.repairConsumption) {
     if (
-      !authority?.repairPolicy ||
       !state.allowanceConsumption ||
       typeof state.repairConsumption !== "object" ||
       Array.isArray(state.repairConsumption)
@@ -225,7 +343,7 @@ export function assertRepairLedger(
         "resultRereviews",
       ] as const)
         if (
-          counts[key] > authority.repairPolicy.perPath[key] ||
+          counts[key] > autonomy.repairPolicy.perPath[key] ||
           counts[key] > state.allowanceConsumption[key]
         )
           throw new Error("Repair path consumption exceeds bound allowance");

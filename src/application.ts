@@ -21,7 +21,6 @@ import {
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import type { AutonomousAdmission, ExecutionAuthority } from "./admission.js";
 import type { SourceSelector } from "./compiler.js";
 import { ClaudePlanningModel } from "./claude-planning.js";
 import { CodexPlanningModel, type PlanCandidate } from "./compiler.js";
@@ -53,9 +52,7 @@ import { profileBinding } from "./execution-profiles.js";
 import { RealGitHubGateway } from "./github.js";
 import {
   type ApplicationServices,
-  admitObjective,
   cancelObjective,
-  checkAdmission,
   controlObjective,
   decidePlan,
   decideResult,
@@ -67,11 +64,11 @@ import {
   runObjective,
   selectAssetSet,
 } from "./runner.js";
-import type { FactoryState } from "./state.js";
+import type { ContinuationState, PreparationState } from "./state.js";
 
 export interface FactoryApplication {
   enqueueIntake(
-    authority: ExecutionAuthority,
+    objectives: number[],
     options?: import("./intake.js").IntakeOptions,
   ): Promise<IntakeAuthorization>;
   runIntake(): Promise<IntakeAuthorization>;
@@ -82,34 +79,20 @@ export interface FactoryApplication {
   planObjective(
     objective: number,
     additionalSources?: SourceSelector[],
-    authority?: ExecutionAuthority,
   ): Promise<PlanCandidate>;
-  admitObjective(
-    objective: number,
-    candidate: PlanCandidate,
-    authority: ExecutionAuthority,
-  ): Promise<AutonomousAdmission>;
-  checkAdmission(
-    objective: number,
-    candidate: PlanCandidate,
-    admission: AutonomousAdmission,
-  ): Promise<void>;
   decidePlan(
     objective: number,
-    candidate: PlanCandidate,
     input: {
       actor: string;
       outcome: "accept" | "refuse";
       answer: string;
       reason: string;
     },
-  ): Promise<PlanCandidate>;
+  ): Promise<PreparationState>;
   runObjective(
     objective: number,
-    acceptedPlan?: PlanCandidate,
-    admission?: AutonomousAdmission,
     options?: { deadlineAt?: string },
-  ): Promise<FactoryState>;
+  ): Promise<ContinuationState>;
   cancelObjective(objective: number): Promise<"requested" | "cancelled">;
   retryWorkItem(objective: number, itemId: string): void;
   repairWorkItem(
@@ -184,32 +167,21 @@ export function createApplication(
   services: ApplicationServices,
 ): FactoryApplication {
   return {
-    enqueueIntake: (authority, options) =>
-      enqueueIntake(config, services.github, authority, options),
+    enqueueIntake: (objectives, options) =>
+      enqueueIntake(config, services.github, objectives, options),
     runIntake: () => runIntake(config, services),
-    planObjective: (objective, additionalSources, authority) =>
-      planObjective(config, objective, services, additionalSources, authority),
-    admitObjective: (objective, candidate, authority) =>
-      admitObjective(config, objective, services, candidate, authority),
-    checkAdmission: (objective, candidate, admission) =>
-      checkAdmission(config, objective, services, candidate, admission),
-    decidePlan: (objective, candidate, input) =>
-      decidePlan(config, objective, services, candidate, input),
+    planObjective: (objective, additionalSources) =>
+      planObjective(config, objective, services, additionalSources),
+    decidePlan: (objective, input) =>
+      decidePlan(config, objective, services, input),
     proposeAmendment: (objective, proposal) =>
       controlObjective(config, {
         objective,
         action: "propose-amendment",
         input: proposal as unknown as Record<string, unknown>,
       }),
-    runObjective: (objective, acceptedPlan, admission, options) =>
-      runObjective(
-        config,
-        objective,
-        services,
-        acceptedPlan,
-        admission,
-        options,
-      ),
+    runObjective: (objective, options) =>
+      runObjective(config, objective, services, options),
     cancelObjective: (objective) =>
       cancelObjective(config, objective, services.driver),
     repairWorkItem: (objective, input) =>
@@ -250,8 +222,8 @@ export function composeIntake(
     new NativeStackDelivery(config.repository),
   );
   return {
-    enqueueIntake: (authority, options) =>
-      enqueueIntake(config, github, authority, options),
+    enqueueIntake: (objectives, options) =>
+      enqueueIntake(config, github, objectives, options),
   };
 }
 
@@ -275,10 +247,7 @@ function composePlanningModel(config: FactoryConfig): PlanningModel {
 export function composePlanning(
   config: FactoryConfig,
   options: LocalHarnessCompositionOptions = {},
-): Pick<
-  FactoryApplication,
-  "planObjective" | "decidePlan" | "admitObjective" | "checkAdmission"
-> {
+): Pick<FactoryApplication, "planObjective" | "decidePlan"> {
   validateTarget(config.repository, config.checkout);
   const services = {
     planningModel: options.planningModel ?? composePlanningModel(config),
@@ -290,14 +259,10 @@ export function composePlanning(
       ),
   };
   return {
-    planObjective: (objective, additionalSources, authority) =>
-      planObjective(config, objective, services, additionalSources, authority),
-    admitObjective: (objective, candidate, authority) =>
-      admitObjective(config, objective, services, candidate, authority),
-    checkAdmission: (objective, candidate, admission) =>
-      checkAdmission(config, objective, services, candidate, admission),
-    decidePlan: (objective, candidate, input) =>
-      decidePlan(config, objective, services, candidate, input),
+    planObjective: (objective, additionalSources) =>
+      planObjective(config, objective, services, additionalSources),
+    decidePlan: (objective, input) =>
+      decidePlan(config, objective, services, input),
   };
 }
 

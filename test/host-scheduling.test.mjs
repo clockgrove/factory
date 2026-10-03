@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { availableParallelism, tmpdir, totalmem } from "node:os";
+import { join, resolve } from "node:path";
 import test from "node:test";
-import { hostSchedulingDefaults } from "../dist/config.js";
+import {
+  factoryConfigDigest,
+  hostSchedulingDefaults,
+  validateConfig,
+} from "../dist/config.js";
+import { defaultAutonomy, resolveAutonomy } from "../dist/index.js";
+import {
+  bindTarget,
+  createTarget,
+  factoryConfig,
+} from "./support/integration-fixture.mjs";
 
 const GiB = 1024 ** 3;
 const light = { cpu: 0.5, memoryMiB: 512 };
@@ -81,4 +95,119 @@ test("memory, not CPU, bounds workers on a CPU-rich host", () => {
   assert.equal(scheduling.memoryMiB, 12288);
   assert.equal(concurrency, 6);
   assert.equal(scheduling.validationConcurrency, 3);
+});
+
+test("omitted concurrency is sized from this host whenever the configuration is read", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-host-sized-"));
+  try {
+    const target = createTarget(root);
+    const { execution, ...rest } = factoryConfig(
+      target.checkout,
+      "example/host-sized",
+    );
+    const { concurrency: _explicit, ...sizedExecution } = execution;
+    const host = hostSchedulingDefaults({
+      cpus: availableParallelism(),
+      memoryBytes: totalmem(),
+    });
+    const sized = validateConfig({ ...rest, execution: sizedExecution });
+    assert.equal(sized.execution.concurrency, host.concurrency);
+    assert.deepEqual(sized.scheduling, host.scheduling);
+    const explicit = validateConfig({
+      ...rest,
+      execution: { ...sizedExecution, concurrency: 3 },
+    });
+    assert.equal(explicit.execution.concurrency, 3);
+    assert.equal(explicit.scheduling, undefined);
+    assert.throws(
+      () =>
+        validateConfig({
+          ...rest,
+          execution: { ...sizedExecution, concurrency: 0 },
+        }),
+      /positive integer, or omitted/,
+    );
+    // Autonomy limits do not bind plans or runs; every other choice does.
+    assert.equal(
+      factoryConfigDigest(
+        validateConfig({
+          ...rest,
+          execution: { ...sizedExecution, concurrency: 3 },
+          autonomy: { allowances: { implementationRepairs: 5 } },
+        }),
+      ),
+      factoryConfigDigest(explicit),
+    );
+    assert.notEqual(factoryConfigDigest(sized), factoryConfigDigest(explicit));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("install writes concurrency only when the operator passes --concurrency", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-host-install-"));
+  try {
+    const target = createTarget(root);
+    bindTarget(target.checkout, "example/host-install");
+    const install = (name, ...extra) => {
+      const configPath = join(root, name, "factory.json");
+      const output = execFileSync(
+        process.execPath,
+        [
+          resolve(import.meta.dirname, "../dist/cli.js"),
+          "install",
+          "--repository",
+          "example/host-install",
+          "--checkout",
+          target.checkout,
+          ...extra,
+          "--config",
+          configPath,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, XDG_STATE_HOME: join(root, name, "state") },
+        },
+      );
+      return { output, config: JSON.parse(readFileSync(configPath, "utf8")) };
+    };
+    const sized = install("sized");
+    assert.equal(sized.config.execution.concurrency, undefined);
+    assert.equal(sized.config.scheduling, undefined);
+    assert.match(sized.output, /sized from the host at run time/);
+    const explicit = install("explicit", "--concurrency", "2");
+    assert.equal(explicit.config.execution.concurrency, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("autonomy defaults are bounded and on; the config section overrides them field by field", () => {
+  assert.deepEqual(resolveAutonomy(), defaultAutonomy);
+  assert.deepEqual(defaultAutonomy.allowances, {
+    planningRevisions: 1,
+    implementationRepairs: 2,
+    resultRereviews: 1,
+  });
+  const custom = resolveAutonomy({
+    allowances: { implementationRepairs: 4 },
+    repairClasses: ["implementation"],
+    requiredEnvironment: ["FIXTURE_TOKEN"],
+  });
+  assert.deepEqual(custom.allowances, {
+    planningRevisions: 1,
+    implementationRepairs: 4,
+    resultRereviews: 1,
+  });
+  assert.deepEqual(custom.repairClasses, ["implementation"]);
+  assert.deepEqual(custom.repairPolicy, defaultAutonomy.repairPolicy);
+  assert.throws(
+    () => resolveAutonomy({ allowances: { implementationRepairs: -1 } }),
+    /nonnegative integer/,
+  );
+  assert.throws(() => resolveAutonomy({ actor: "x" }), /Unsupported autonomy/);
+  assert.throws(
+    () => resolveAutonomy({ repairClasses: ["anything"] }),
+    /unsupported repair classes/,
+  );
 });

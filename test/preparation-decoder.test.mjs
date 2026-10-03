@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { factoryConfigDigest } from "../dist/config.js";
+import { defaultAutonomy } from "../dist/index.js";
 import { readContinuation, saveState, statePath } from "../dist/state-store.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 
@@ -27,6 +28,7 @@ for (const invalid of ["unknown-item", "duplicate", "map-without-plan"])
         configDigest: factoryConfigDigest(config),
         baseSha: target.baseSha,
         objectiveBodyDigest: createHash("sha256").update("body").digest("hex"),
+        autonomy: structuredClone(defaultAutonomy),
         issueByItemId: { result: 2 },
         plan: {
           graph: {

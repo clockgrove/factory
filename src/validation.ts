@@ -1,6 +1,5 @@
 import { objectiveCandidate } from "./qa.js";
 import { installedControllerCapabilities } from "./controller-capabilities.js";
-import { assertAdmissionBinding } from "./admission.js";
 import { assertGraphRevisions } from "./graph-amendments.js";
 import {
   allowanceKey,
@@ -1448,31 +1447,15 @@ function retainedRepairProof(
     );
   }
   const key = allowanceKey(correction.kind);
-  const admission = state.admission;
-  const authority = admission?.authority;
   const consumed = state.allowanceConsumption?.[key];
   const scopes = repairScopes(state, item.id);
   if (
-    !admission ||
-    !authority?.repairPolicy ||
-    !authority.repairClasses.includes(correction.kind) ||
+    !state.autonomy.repairClasses.includes(correction.kind) ||
     !consumed ||
     scopes.some((scope) => !state.repairConsumption?.[scope]?.[key])
   )
     throw new Error(
-      `Work Item ${item.id} correction lacks admitted consumption`,
-    );
-  assertAdmissionBinding(admission);
-  if (
-    admission.repository !== state.repository ||
-    admission.objective !== state.objective ||
-    admission.baseSha !== state.baseSha ||
-    admission.bodyDigest !== state.objectiveBodyDigest ||
-    admission.configDigest !== state.configDigest ||
-    !authority.objectives.includes(state.objective)
-  )
-    throw new Error(
-      `Work Item ${item.id} correction admission differs from its Objective`,
+      `Work Item ${item.id} correction lacks charged consumption`,
     );
   let candidatePreservation;
   if (correction.kind === "validation-environment") {
@@ -1580,21 +1563,14 @@ function retainedRepairProof(
       currentResultCommitSha: current.changeRef ?? null,
       currentResultTreeSha: current.treeSha ?? null,
       ...(candidatePreservation && { candidatePreservation }),
-      admittedAuthority: {
-        admissionDigest: admission.digest,
-        objective: admission.objective,
-        actor: authority.actor,
-        reason: authority.reason,
-        executionConsent: authority.executionConsent,
-        repairClass: correction.kind,
-      },
+      repairClass: correction.kind,
       snapshotConsumption: {
         allowance: key,
-        objective: { consumed, limit: authority.allowances[key] },
+        objective: { consumed, limit: state.autonomy.allowances[key] },
         paths: scopes.map((scope) => ({
           scope,
           consumed: state.repairConsumption![scope]![key],
-          limit: authority.repairPolicy!.perPath[key],
+          limit: state.autonomy.repairPolicy.perPath[key],
         })),
       },
     },

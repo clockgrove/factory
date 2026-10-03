@@ -43,11 +43,7 @@ export function phaseAdmission(
       throw new Error(
         "Driver availableSlots must be a nonnegative integer or unknown",
       );
-    const operator = Math.min(
-      config.execution.concurrency,
-      state.admission?.authority.resources.maxConcurrency ??
-        config.execution.concurrency,
-    );
+    const operator = config.execution.concurrency;
     // Driver reports remaining slots, not total capacity. Subtract owned coding only from the operator ceiling.
     return Math.max(
       0,
@@ -66,11 +62,7 @@ export function phaseAdmission(
       .filter(([other, work]) => other !== id && work.phaseReservation);
     const ceiling =
       phase === "coding"
-        ? Math.min(
-            config.execution.concurrency,
-            state.admission?.authority.resources.maxConcurrency ??
-              config.execution.concurrency,
-          )
+        ? config.execution.concurrency
         : phase === "review"
           ? (config.scheduling?.reviewConcurrency ??
             config.execution.concurrency)

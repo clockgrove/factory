@@ -4,7 +4,9 @@ import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { availableParallelism, totalmem } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { type AutonomyConfig, resolveAutonomy } from "./repair-policy.js";
 
 export type CodexReasoningEffort =
   | "minimal"
@@ -164,8 +166,9 @@ export interface SchedulingConfig {
 }
 
 /**
- * Install-time defaults sized from the host (`os.availableParallelism()`, `os.totalmem()`).
- * Keep 2 CPUs and 4 GiB for the OS and controller and share the rest. A coding worker reserves
+ * Defaults sized from the host (`os.availableParallelism()`, `os.totalmem()`) whenever
+ * `execution.concurrency` is omitted, recomputed each time the configuration is read so they
+ * follow the host. Keep 2 CPUs and 4 GiB for the OS and controller and share the rest. A coding worker reserves
  * 2 CPUs and 2 GiB; validation (builds and tests) 4 CPUs and 4 GiB; review and delivery mostly
  * wait on remote APIs, so 0.5 CPU and 512 MiB. Each reservation is capped at the totals, and a
  * phase ceiling is how many of its reservations fit. Review allows two per coding worker.
@@ -206,6 +209,8 @@ export function hostSchedulingDefaults(host: {
 
 export interface FactoryConfig {
   scheduling?: SchedulingConfig;
+  /** Limits on unattended repair and amendment; omitted fields use bounded defaults. */
+  autonomy?: AutonomyConfig;
   /** Explicit local sensitive-content opt-in; absent remains disabled. */
   capture?: { enabled: boolean; maxBytesPerInvocation: number };
   schemaVersion: 1;
@@ -650,11 +655,12 @@ export function validateConfig(value: unknown): FactoryConfig {
     );
   }
   if (
-    !Number.isSafeInteger(value.execution.concurrency) ||
-    (value.execution.concurrency as number) <= 0
+    value.execution.concurrency !== undefined &&
+    (!Number.isSafeInteger(value.execution.concurrency) ||
+      (value.execution.concurrency as number) <= 0)
   ) {
     throw new Error(
-      "execution.concurrency must be a positive operator-selected integer",
+      "execution.concurrency must be a positive integer, or omitted to size from this host",
     );
   }
   if (value.execution.kind === "sandbox") {
@@ -841,13 +847,30 @@ export function validateConfig(value: unknown): FactoryConfig {
         "capture requires enabled boolean and positive maxBytesPerInvocation",
       );
   }
-  return value as unknown as FactoryConfig;
+  if (value.autonomy !== undefined)
+    resolveAutonomy(value.autonomy as AutonomyConfig);
+  if (value.execution.concurrency !== undefined)
+    return value as unknown as FactoryConfig;
+  // Omitted concurrency follows the host this configuration is read on.
+  const host = hostSchedulingDefaults({
+    cpus: availableParallelism(),
+    memoryBytes: totalmem(),
+  });
+  return {
+    ...value,
+    execution: { ...value.execution, concurrency: host.concurrency },
+    scheduling: value.scheduling ?? host.scheduling,
+  } as unknown as FactoryConfig;
 }
 
-/** Digest of every validated installation choice, including adapter config. */
+/**
+ * Digest of every validated installation choice, including adapter config and the resolved
+ * concurrency. Autonomy limits are excluded: each Objective snapshots them when it starts.
+ */
 export function factoryConfigDigest(config: FactoryConfig): string {
-  assertJsonValue(config, "configuration");
-  return createHash("sha256").update(JSON.stringify(config)).digest("hex");
+  const { autonomy: _autonomy, ...bound } = config;
+  assertJsonValue(bound, "configuration");
+  return createHash("sha256").update(JSON.stringify(bound)).digest("hex");
 }
 
 export function configPath(): string {

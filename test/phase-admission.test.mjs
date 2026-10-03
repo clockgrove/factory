@@ -79,10 +79,10 @@ test("unknown reservations and exhausted ceilings fail closed; cancellation rele
   assert.equal(state.work.c.phaseReservation, undefined);
 });
 
-test("restart consumes persisted reservations and admission worker ceilings", async () => {
+test("restart consumes persisted reservations and the configured worker ceiling", async () => {
   const { config, state } = fixture(3);
   state.work.a.phaseReservation = "coding";
-  state.admission = { authority: { resources: { maxConcurrency: 1 } } };
+  config.execution.concurrency = 1;
   const restarted = phaseAdmission(
     config,
     state,

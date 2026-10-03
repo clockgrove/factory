@@ -31,6 +31,16 @@ import {
 } from "./support/integration-fixture.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
 
+async function until(check, timeout = 60_000) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const value = check();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error("Timed out waiting for state");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 function work(id, dependencies = []) {
   return {
     id,
@@ -412,7 +422,7 @@ for (const delivery of ["regular", "native"])
       };
       const plan = await application.planObjective(1);
       assert.equal(plan.review.status, "clean");
-      const state = await application.runObjective(1, plan);
+      const state = await application.runObjective(1);
       assert.equal(state.finalValidation.passed, true);
       assert.equal(state.work.qa.status, "done");
       assert.equal(state.work.qa.pullRequest, undefined);
@@ -491,9 +501,13 @@ for (const failure of ["missing", "pending", "failure", "stale", "unrelated"])
               conclusion: failure === "failure" ? "failure" : "success",
               detailsUrl: "https://github.com/example/check/72",
             };
-      const plan = await application.planObjective(1);
       if (["missing", "pending"].includes(failure)) {
-        const waiting = await application.runObjective(1, plan);
+        // The run stays alive through the readiness wait and polls again.
+        const running = application.runObjective(1);
+        const waiting = await until(() => {
+          const state = readState(`example/qa-${failure}`, 1);
+          return state?.work.qa.waitingReason ? state : undefined;
+        });
         assert.equal(waiting.work.qa.status, "running");
         assert.equal(waiting.error, undefined);
         assert.equal(waiting.work.qa.pendingEffect, undefined);
@@ -507,13 +521,13 @@ for (const failure of ["missing", "pending", "failure", "stale", "unrelated"])
           conclusion: "success",
           detailsUrl: "https://github.com/example/check/72",
         });
-        const completed = await application.runObjective(1, plan);
+        const completed = await running;
         assert.equal(completed.work.qa.attempt, attempt);
         assert.equal(completed.work.qa.status, "done");
         assert.equal(completed.finalValidation.passed, true);
       } else {
         await assert.rejects(
-          application.runObjective(1, plan),
+          application.runObjective(1),
           /Required named CI check/,
         );
         const state = readState(`example/qa-${failure}`, 1);
@@ -552,8 +566,11 @@ for (const delivery of ["regular", "native-stack"])
             },
           });
         github.namedCheck = async () => undefined;
-        const plan = await application.planObjective(1);
-        const waiting = await application.runObjective(1, plan);
+        const running = application.runObjective(1);
+        const waiting = await until(() => {
+          const state = readState(config.repository, 1);
+          return state?.work.qa.waitingReason ? state : undefined;
+        });
         assert.equal(waiting.work.qa.status, "running");
         const attempt = waiting.work.qa.attempt;
         const before = readEvents(planningPath).filter(
@@ -573,7 +590,18 @@ for (const delivery of ["regular", "native-stack"])
           acknowledged = true;
           return completedCheck(headSha, name);
         };
-        const paused = await application.runObjective(1, plan);
+        // A pause keeps the owner alive and idle; a handoff releases it.
+        if (action === "handoff")
+          await assert.rejects(
+            running,
+            (error) => error.constructor.name === "CoordinatorHandoff",
+          );
+        const paused = await until(() => {
+          const state = readState(config.repository, 1);
+          return acknowledged && state?.coordinator.phase === "waiting"
+            ? state
+            : undefined;
+        });
         assert.equal(acknowledged, true);
         assert.equal(
           paused.coordinator.mode,
@@ -593,7 +621,10 @@ for (const delivery of ["regular", "native-stack"])
         github.namedCheck = async (headSha, name) =>
           completedCheck(headSha, name);
         await controlObjective(config, { objective: 1, action: "resume" });
-        const completed = await application.runObjective(1, plan);
+        const completed =
+          action === "pause"
+            ? await running
+            : await application.runObjective(1);
         assert.equal(completed.work.qa.attempt, attempt);
         assert.equal(completed.work.qa.status, "done");
         assert.equal(completed.finalValidation.passed, true);
@@ -708,8 +739,10 @@ test("unavailable real environment stops before a worker starts", async () =>
       fakeRoot: join(root, "fake"),
       actions: {},
     });
-    const plan = await application.planObjective(1);
-    await assert.rejects(application.runObjective(1, plan));
+    // The failed probe stops the item for an operator decision; no worker starts.
+    const stopped = await application.runObjective(1);
+    assert.equal(stopped.work.unit.status, "failed");
+    assert.match(stopped.coordinator.waitReason, /operator decision/);
     assert.equal(
       readEvents(eventsPath).filter((event) => event.type === "start").length,
       0,
@@ -749,8 +782,7 @@ test("authorized prerequisite creates the real environment before late QA probes
       conclusion: "success",
       detailsUrl: "https://github.com/example/check/91",
     });
-    const plan = await application.planObjective(1);
-    const state = await application.runObjective(1, plan);
+    const state = await application.runObjective(1);
     assert.equal(state.work.qa.status, "done");
   }));
 
@@ -809,9 +841,8 @@ test("a dependency-version mismatch passes real local validation but failed CI b
         detailsUrl: "https://github.com/example/check/92",
       };
     };
-    const plan = await application.planObjective(1);
     await assert.rejects(
-      application.runObjective(1, plan),
+      application.runObjective(1),
       /Required named CI check/,
     );
     const state = readState("example/qa-ci-version-mismatch", 1);
@@ -872,8 +903,7 @@ test("native preparation integrates before its worker consumer readiness probe",
       conclusion: "success",
       detailsUrl: "https://github.com/example/check/93",
     });
-    const plan = await application.planObjective(1);
-    const state = await application.runObjective(1, plan);
+    const state = await application.runObjective(1);
     assert.equal(state.work.integration.status, "done");
     const started = readEvents(eventsPath).filter(
       (event) => event.type === "start",
@@ -991,27 +1021,26 @@ for (const delivery of ["regular", "native"])
           conclusion: "success",
           detailsUrl: "https://github.com/example/check/94",
         });
-        const plan = await application.planObjective(1);
         if (outcome === "unknown") {
           // A lost review response is an interruption: asked again in the
           // same run, without a retry.
-          const completed = await application.runObjective(1, plan);
+          const completed = await application.runObjective(1);
           assert.equal(completed.finalValidation.passed, true);
           assert.equal(submissions, 2);
           return;
         }
         await assert.rejects(
-          application.runObjective(1, plan),
+          application.runObjective(1),
           /criterion disproved/,
         );
         const state = readState(repository, 1);
         assert.equal(state.work.qa.status, "failed");
-        await assert.rejects(application.runObjective(1, plan));
+        await assert.rejects(application.runObjective(1));
         assert.equal(submissions, 1);
         // A refusal is a real failure: an explicit retry reviews once more.
         assert.equal(state.work.qa.execution, undefined);
         application.retryWorkItem(1, "qa");
-        const completed = await application.runObjective(1, plan);
+        const completed = await application.runObjective(1);
         assert.equal(completed.finalValidation.passed, true);
         assert.equal(submissions, 2);
       }));
@@ -1073,11 +1102,7 @@ test(
           detailsUrl: "https://github.com/example/check/95",
         };
       };
-      const plan = await application.planObjective(1);
-      const rejected = assert.rejects(
-        application.runObjective(1, plan),
-        /cancel/i,
-      );
+      const rejected = assert.rejects(application.runObjective(1), /cancel/i);
       await entered.promise;
       try {
         await application.cancelObjective(1);

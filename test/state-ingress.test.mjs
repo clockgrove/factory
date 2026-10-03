@@ -10,6 +10,7 @@ import { readState, statePath } from "../dist/state-store.js";
 import { workItemReviewObservations } from "../dist/validation.js";
 import { assetSelectionDigest } from "../dist/media.js";
 import { CONTROLLER_CAPABILITIES_DIGEST } from "../dist/controller-capabilities.js";
+import { defaultAutonomy } from "../dist/index.js";
 
 const repository = "example/disposable";
 const objective = 42;
@@ -22,6 +23,7 @@ function state() {
     objective,
     runId: "run-1",
     configDigest: "b".repeat(64),
+    autonomy: structuredClone(defaultAutonomy),
     baseSha: sha,
     graph: {
       objective,

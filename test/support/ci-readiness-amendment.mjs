@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { readContinuation, readState } from "../../dist/state-store.js";
 import { controlObjective } from "../../dist/runner.js";
 import { compilerCitationChoices } from "../../dist/compiler.js";
-import { graphDigest } from "../../dist/graph-amendments.js";
 import {
   createTarget,
   factoryConfig,
@@ -55,22 +54,6 @@ const config = factoryConfig(
   "regular",
   1,
 );
-const authority = {
-  schemaVersion: 1,
-  actor: "fixture",
-  reason: "Bounded discovered QA and CI wait",
-  executionConsent: true,
-  serviceConsent: true,
-  objectives: [1],
-  allowances: {
-    planningRevisions: 1,
-    implementationRepairs: 0,
-    resultRereviews: 0,
-  },
-  repairClasses: [],
-  resources: { maxConcurrency: 1 },
-  requiredEnvironment: [],
-};
 let graph,
   generations = 0;
 const model = {
@@ -153,9 +136,7 @@ setup.github.publish = async (request) => {
   });
   return published;
 };
-const plan = await setup.application.planObjective(1, [], authority);
-const admission = await setup.application.admitObjective(1, plan, authority);
-const running = setup.application.runObjective(1, plan, admission);
+const running = setup.application.runObjective(1);
 void running.catch(() => {});
 while (!readContinuation(config.repository, 1)?.work?.result?.waitingReason)
   await new Promise((resolve) => setTimeout(resolve, 10));
@@ -184,7 +165,10 @@ assert.equal(completed.work.result.changeRef, waiting.work.result.changeRef);
 assert.equal(completed.work.result.discoveryDisposition, "accepted");
 assert.equal(completed.work.qa.status, "done");
 assert.equal(completed.graphRevisions.length, 2);
-assert.equal(completed.admission.graphDigest, graphDigest(plan.graph));
+assert.deepEqual(
+  completed.graphRevisions[0].graph.items.map(({ id }) => id),
+  ["result"],
+);
 assert.equal(generations, 2);
 assert.equal(
   readEvents(setup.eventsPath).filter((event) => event.type === "start").length,

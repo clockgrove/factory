@@ -9,7 +9,6 @@ import {
   assertFinalAcceptance,
 } from "../dist/completion.js";
 import { submitAmendment, graphDigest } from "../dist/graph-amendments.js";
-import { controlObjective } from "../dist/runner.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
 import { supervise } from "../dist/supervision.js";
 import { statusDocument } from "../dist/diagnostics.js";
@@ -28,22 +27,6 @@ const discovery = {
   ownership: ["result.txt"],
   acceptance: ["result.txt exists at integrated head"],
   dependencies: ["result"],
-};
-const authority = {
-  schemaVersion: 1,
-  actor: "fixture",
-  reason: "Bounded amendment regression",
-  executionConsent: true,
-  serviceConsent: false,
-  objectives: [1],
-  allowances: {
-    planningRevisions: 1,
-    implementationRepairs: 0,
-    resultRereviews: 0,
-  },
-  repairClasses: [],
-  resources: { maxConcurrency: 2 },
-  requiredEnvironment: [],
 };
 const body =
   "## Acceptance\n- result.txt exists\n\n## Commands\n- test -s result.txt\n\n## Final validation\n- test -s result.txt\n";
@@ -104,15 +87,9 @@ function setupFixture({ config, initial, root }, resultReviewer) {
   });
 }
 
-test("sealed closure reconciles lost acknowledgement without model replay and retains the admitted owner", async () => {
+test("sealed closure reconciles a lost acknowledgement on rerun without model replay", async () => {
   await fixture("closure", async (args) => {
     const setup = setupFixture(args);
-    const plan = await setup.application.planObjective(1);
-    const admission = await setup.application.admitObjective(
-      1,
-      plan,
-      authority,
-    );
     const close = setup.github.closeIssue.bind(setup.github);
     let calls = 0;
     setup.github.closeIssue = async (...parameters) => {
@@ -125,7 +102,7 @@ test("sealed closure reconciles lost acknowledgement without model replay and re
           setup.application.proposeAmendment(1, {
             ...discovery,
             actor: "operator",
-            expectedGraphDigest: graphDigest(plan.graph),
+            expectedGraphDigest: graphDigest(pending.graph),
           }),
           /busy|reconciliation/,
         );
@@ -140,26 +117,19 @@ test("sealed closure reconciles lost acknowledgement without model replay and re
       }
       return close(...parameters);
     };
-    const running = setup.application.runObjective(1, plan, admission);
-    for (let i = 0; i < 300; i++) {
-      const state = readState(args.config.repository, 1);
-      if (
-        state?.objectiveClosure === "pending" &&
-        state.coordinator.mode === "paused"
-      )
-        break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    await assert.rejects(
+      setup.application.runObjective(1),
+      /Acknowledgement lost after remote closure/,
+    );
     const pending = readState(args.config.repository, 1);
-    assert.equal(pending.coordinator.mode, "paused");
+    assert.equal(pending.objectiveClosure, "pending");
     assert.equal(
       statusDocument(pending, args.config.repository, 1, "regular").state,
       "active",
     );
     const sealed = structuredClone(pending.finalAcceptance);
     const before = readEvents(setup.planningPath).length;
-    await controlObjective(args.config, { objective: 1, action: "resume" });
-    const state = await running;
+    const state = await setup.application.runObjective(1);
     assert.equal(objectiveComplete(state), true);
     assert.deepEqual(state.finalAcceptance, sealed);
     assert.equal(readEvents(setup.planningPath).length, before);
@@ -288,12 +258,7 @@ test("remote default advancement during final review cannot seal acceptance or c
 test("supervisor owner verification distinguishes pending closure from completed acceptance", async () => {
   await fixture("service-closure", async (args) => {
     const setup = setupFixture(args);
-    const plan = await setup.application.planObjective(1);
-    const admission = await setup.application.admitObjective(1, plan, {
-      ...authority,
-      serviceConsent: true,
-    });
-    const completed = await setup.application.runObjective(1, plan, admission);
+    const completed = await setup.application.runObjective(1);
     const previousPath = process.env.PATH;
     const previousConfig = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = join(args.root, "user-config");

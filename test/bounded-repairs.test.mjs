@@ -27,7 +27,6 @@ import {
   SettledAttemptFailure,
   prepareEvidenceRecovery,
 } from "../dist/work-repair.js";
-import { validateAuthority } from "../dist/admission.js";
 import {
   compilePlan,
   objectiveCriteria,
@@ -53,13 +52,7 @@ import {
   resultFindings,
 } from "./support/review-protocol.mjs";
 
-const authority = () => ({
-  schemaVersion: 1,
-  actor: "fixture",
-  reason: "Bounded diagnosed recovery",
-  executionConsent: true,
-  serviceConsent: false,
-  objectives: [1],
+const autonomy = () => ({
   allowances: {
     planningRevisions: 2,
     implementationRepairs: 2,
@@ -80,7 +73,6 @@ const authority = () => ({
       resultRereviews: 1,
     },
   },
-  resources: { maxConcurrency: 2 },
   requiredEnvironment: [],
 });
 const item = (id = "result", dependencies = []) => ({
@@ -149,15 +141,14 @@ function model(
   };
 }
 
-test("old admissions gain no repair policy and inherited scopes cannot reset caps", () => {
-  const old = authority();
-  delete old.repairPolicy;
-  validateAuthority(old);
+test("disabled repair classes are refused and inherited scopes cannot reset caps", () => {
+  const disabled = autonomy();
+  disabled.repairClasses = [];
   assert.throws(
-    () => chargeRepair({ authority: old }, "implementation", ["parent"]),
-    /not admitted/,
+    () => chargeRepair({ autonomy: disabled }, "implementation", ["parent"]),
+    /not enabled/,
   );
-  const ledger = { authority: authority() };
+  const ledger = { autonomy: autonomy() };
   chargeRepair(ledger, "implementation", ["parent"]);
   const restored = JSON.parse(JSON.stringify(ledger));
   assertRepairLedger(restored);
@@ -190,7 +181,7 @@ test("exact candidate recovery retains failure and rejects ambiguity and unchang
     treeSha: "c".repeat(40),
   };
   const state = {
-    admission: { authority: authority() },
+    autonomy: autonomy(),
     graph: { items: [item()] },
     work: { result: work },
   };
@@ -245,7 +236,7 @@ test("settled failures ignore sibling processes while correction still requires 
     [new SettledAttemptFailure("worker stopped"), "interruption"],
   ]) {
     const state = {
-      admission: { authority: authority() },
+      autonomy: autonomy(),
       graph: { items: [item()] },
       coordinator: {
         processes: [{ pid: 123, identity: "sibling collection" }],
@@ -305,7 +296,7 @@ test("settled failures ignore sibling processes while correction still requires 
 
 test("transport recovery never accepts semantic findings or invents accounting", () => {
   const state = {
-    admission: { authority: authority() },
+    autonomy: autonomy(),
     graph: { items: [item()] },
     work: {
       result: {
@@ -344,6 +335,7 @@ for (const delivery of ["regular", "native-stack"])
         delivery,
         2,
       );
+      config.autonomy = autonomy();
       const graph = { objective: 1, baseSha: target.baseSha, items: [item()] };
       const fixture = makeApplication({
         config,
@@ -358,13 +350,7 @@ for (const delivery of ["regular", "native-stack"])
         },
         planningModel: model(graph),
       });
-      const plan = await fixture.application.planObjective(1);
-      const admitted = await fixture.application.admitObjective(
-        1,
-        plan,
-        authority(),
-      );
-      const state = await fixture.application.runObjective(1, plan, admitted);
+      const state = await fixture.application.runObjective(1);
       assert.equal(state.finalValidation.passed, true);
       assert.equal(state.allowanceConsumption.implementationRepairs, 1);
       const work = state.work.result;
@@ -430,7 +416,7 @@ for (const kind of [
       let generates = 0,
         reviews = 0;
       const snapshots = [];
-      const state = { authority: authority() };
+      const state = { autonomy: autonomy() };
       const planningBody = `${body}\n## Worker material\nRetain the exact literal RELEASE_TOKEN in the worker brief. Representation is delegated to the developer. Security destination policy requires the security owner decision.\n`;
       const planner = {
         generateStructured: async (request) => {
@@ -519,7 +505,7 @@ test("planning allowance survives restart and stops before a new model call", as
   try {
     const target = createTarget(root);
     const state = {
-      authority: authority(),
+      autonomy: autonomy(),
       allowanceConsumption: { ...emptyConsumption(), planningRevisions: 2 },
     };
     let calls = 0;
@@ -546,7 +532,7 @@ test("planning allowance survives restart and stops before a new model call", as
         [],
         { state, save: () => {} },
       ),
-      /allowance exhausted/,
+      /allowance is exhausted/,
     );
     assert.equal(calls, 1);
     await assert.rejects(
@@ -562,7 +548,7 @@ test("planning allowance survives restart and stops before a new model call", as
         [],
         { state: JSON.parse(JSON.stringify(state)), save: () => {} },
       ),
-      /allowance exhausted/,
+      /recovery stopped/,
     );
     assert.equal(calls, 1);
   } finally {
@@ -603,7 +589,7 @@ for (const delivery of ["regular", "native-stack"])
         planningModel: model(graph),
       });
       const plan = await fixture.application.planObjective(1);
-      const policy = authority();
+      const policy = autonomy();
       policy.repairPolicy.perPath.implementationRepairs = 0;
       const projection = await fixture.github.projectGraph({
         graph: plan.graph,
@@ -617,7 +603,7 @@ for (const delivery of ["regular", "native-stack"])
         configDigest: "d".repeat(64),
         baseSha: target.baseSha,
         graph: plan.graph,
-        admission: { authority: policy },
+        autonomy: policy,
         issueByItemId: projection.issueByItemId,
         work: Object.fromEntries(
           graph.items.map((item) => [item.id, { status: "pending" }]),
@@ -665,7 +651,7 @@ for (const delivery of ["regular", "native-stack"])
     }
   });
 
-test("durable plan --authority carries consumed planning allowance into exact activation", async () => {
+test("run's durable planning carries consumed planning allowance into activation", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-durable-plan-"));
   const previous = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = join(root, "state");
@@ -673,6 +659,7 @@ test("durable plan --authority carries consumed planning allowance into exact ac
     const target = createTarget(root);
     const config = factoryConfig(target.checkout, "example/durable-plan");
     config.capture = { enabled: false, maxBytesPerInvocation: 1024 };
+    config.autonomy = autonomy();
     const graph = { objective: 1, baseSha: target.baseSha, items: [item()] };
     let calls = 0;
     const planner = model(graph, () => ({
@@ -707,18 +694,8 @@ test("durable plan --authority carries consumed planning allowance into exact ac
       },
       planningModel: planner,
     });
-    const plan = await fixture.application.planObjective(1, [], authority());
-    assert.equal(plan.review.status, "clean");
+    const state = await fixture.application.runObjective(1);
     assert.equal(calls, 2);
-    const same = await fixture.application.planObjective(1, [], authority());
-    assert.deepEqual(same, plan);
-    assert.equal(calls, 2);
-    const admitted = await fixture.application.admitObjective(
-      1,
-      plan,
-      authority(),
-    );
-    const state = await fixture.application.runObjective(1, plan, admitted);
     assert.equal(state.finalValidation.passed, true);
     assert.equal(state.allowanceConsumption.planningRevisions, 1);
     const reloaded = JSON.parse(JSON.stringify(state));
@@ -750,7 +727,7 @@ test("durable plan --authority carries consumed planning allowance into exact ac
 });
 
 for (const delivery of ["regular", "native-stack"])
-  test(`${delivery}: compound: persisted repair survives controller handoff and restart without resetting allowance`, async () => {
+  test(`${delivery}: compound: persisted repair survives restart without resetting allowance`, async () => {
     const root = mkdtempSync(join(tmpdir(), "factory-env-control-"));
     const previous = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = join(root, "state");
@@ -832,35 +809,17 @@ for (const delivery of ["regular", "native-stack"])
         },
         planningModel: planner,
       };
-      const fixture = makeApplication(descriptor);
-      const policy = authority();
+      const policy = autonomy();
       policy.repairClasses = ["validation-environment"];
       policy.allowances.implementationRepairs = 0;
-      const plan = await fixture.application.planObjective(1);
-      const admitted = await fixture.application.admitObjective(
-        1,
-        plan,
-        policy,
-      );
-      const { readState, statePath } = await import("../dist/state-store.js");
-      const { requestControl } = await import("../dist/coordinator-control.js");
-      const running = fixture.application.runObjective(1, plan, admitted);
-      const failed = await waitForFile(
-        () => {
-          const state = readState(config.repository, 1);
-          return state?.work.result.status === "failed" ? state : undefined;
-        },
-        statePath(config.repository, 1),
-        "preserved validation candidate",
-      );
+      config.autonomy = policy;
+      const fixture = makeApplication(descriptor);
+      const { readState } = await import("../dist/state-store.js");
+      // The failure needs an operator's diagnosis, so the run stops for it.
+      const failed = await fixture.application.runObjective(1);
+      assert.equal(failed.work.result.status, "failed");
       writeFileSync(gate, "ready\n");
       const work = failed.work.result;
-      const drained = assert.rejects(running, /drained and released ownership/);
-      await requestControl(config.repository, {
-        objective: 1,
-        action: "handoff",
-      });
-      await drained;
       fixture.application.repairWorkItem(1, {
         item: "result",
         treeSha: work.treeSha,
@@ -876,8 +835,6 @@ for (const delivery of ["regular", "native-stack"])
       const charged = readState(config.repository, 1);
       assert.equal(charged.allowanceConsumption.resultRereviews, 1);
       assert.equal(charged.work.result.attempt, work.attempt);
-      const { controlObjective } = await import("../dist/runner.js");
-      await controlObjective(config, { objective: 1, action: "resume" });
       const restarted = makeApplication(descriptor);
       const done = await restarted.application.runObjective(1);
       assert.equal(done.runId, charged.runId);
@@ -938,14 +895,10 @@ for (const delivery of ["regular", "native-stack"])
       );
       assert.equal(repair.controllerFacts.failedAttempt.phase, "validate");
       assert.equal(repair.controllerFacts.currentAttemptId, work.attempt);
-      assert.deepEqual(repair.controllerFacts.admittedAuthority, {
-        admissionDigest: done.admission.digest,
-        objective: 1,
-        actor: policy.actor,
-        reason: policy.reason,
-        executionConsent: true,
-        repairClass: "validation-environment",
-      });
+      assert.equal(
+        repair.controllerFacts.repairClass,
+        "validation-environment",
+      );
       const preservation = repair.controllerFacts.candidatePreservation;
       assert.equal(preservation.preserved, true);
       assert.equal(preservation.sameAttempt, true);
@@ -992,8 +945,7 @@ for (const delivery of ["regular", "native-stack"])
         "candidate",
         "candidate-base",
         "consumption",
-        "admission",
-        "source-binding",
+        "autonomy",
       ]) {
         const broken = structuredClone(done);
         if (corruption === "history") broken.work.result.recovery.history = [];
@@ -1003,10 +955,8 @@ for (const delivery of ["regular", "native-stack"])
           delete broken.work.result.recovery.history[0].work.executionBaseSha;
         if (corruption === "consumption")
           broken.repairConsumption.result.resultRereviews = 0;
-        if (corruption === "admission")
-          broken.admission.authority.reason = "Unbound authority";
-        if (corruption === "source-binding")
-          broken.objectiveBodyDigest = "0".repeat(64);
+        if (corruption === "autonomy")
+          broken.autonomy.repairClasses = ["implementation"];
         assert.throws(
           () =>
             workItemReviewEvidence({
@@ -1015,7 +965,7 @@ for (const delivery of ["regular", "native-stack"])
               checkout: config.checkout,
               delivery,
             }),
-          /retained failure|tree|admitted consumption|preservation bindings|Admission binding|admission differs/,
+          /retained failure|tree|charged consumption|preservation bindings/,
         );
         assert.throws(
           () =>
@@ -1029,7 +979,7 @@ for (const delivery of ["regular", "native-stack"])
                 `${broken.integratedSha}^{tree}`,
               ),
             }),
-          /retained failure|tree|admitted consumption|preservation bindings|Admission binding|admission differs/,
+          /retained failure|tree|charged consumption|preservation bindings/,
         );
       }
       for (const corruption of ["attempt", "execution-base"]) {
@@ -1184,35 +1134,20 @@ test("regular: diagnosed read-only QA repair retains its selected commit through
       },
       planningModel: planner,
     };
-    const fixture = makeApplication(descriptor);
-    const policy = authority();
+    const policy = autonomy();
     policy.repairClasses = ["validation-environment"];
     policy.allowances.implementationRepairs = 0;
-    const plan = await fixture.application.planObjective(1);
-    const admitted = await fixture.application.admitObjective(1, plan, policy);
-    const { readState, statePath } = await import("../dist/state-store.js");
-    const { requestControl } = await import("../dist/coordinator-control.js");
-    const running = fixture.application.runObjective(1, plan, admitted);
-    const failed = await waitForFile(
-      () => {
-        const state = readState(config.repository, 1);
-        return state?.work.qa.status === "failed" ? state : undefined;
-      },
-      statePath(config.repository, 1),
-      "preserved read-only QA candidate",
-    );
+    config.autonomy = policy;
+    const fixture = makeApplication(descriptor);
+    // The failure needs an operator's diagnosis, so the run stops for it.
+    const failed = await fixture.application.runObjective(1);
+    assert.equal(failed.work.qa.status, "failed");
     const work = failed.work.qa;
     assert.equal(failed.work.result.status, "done");
     assert.equal(work.baseSha, work.changeRef);
     assert.equal(work.executionBaseSha, work.changeRef);
     assert.equal(work.execution, undefined);
     assert.equal(work.pullRequest, undefined);
-    const drained = assert.rejects(running, /drained and released ownership/);
-    await requestControl(config.repository, {
-      objective: 1,
-      action: "handoff",
-    });
-    await drained;
     writeFileSync(gate, "ready\n");
     fixture.application.repairWorkItem(1, {
       item: "qa",
@@ -1226,8 +1161,6 @@ test("regular: diagnosed read-only QA repair retains its selected commit through
           "The same prerequisite is provisioned; revalidate the selected integrated commit",
       },
     });
-    const { controlObjective } = await import("../dist/runner.js");
-    await controlObjective(config, { objective: 1, action: "resume" });
     const done = await makeApplication(descriptor).application.runObjective(1);
     assert.equal(done.finalValidation.passed, true);
     assert.equal(done.work.qa.status, "done");
@@ -1266,14 +1199,7 @@ test("regular: diagnosed read-only QA repair retains its selected commit through
     assert.equal(repair.controllerFacts.currentAttemptId, work.attempt);
     assert.equal(repair.controllerFacts.currentResultCommitSha, work.changeRef);
     assert.equal(repair.controllerFacts.candidatePreservation, undefined);
-    assert.equal(
-      repair.controllerFacts.admittedAuthority.admissionDigest,
-      done.admission.digest,
-    );
-    assert.equal(
-      repair.controllerFacts.admittedAuthority.repairClass,
-      "validation-environment",
-    );
+    assert.equal(repair.controllerFacts.repairClass, "validation-environment");
     assert.deepEqual(repair.controllerFacts.snapshotConsumption.paths, [
       { scope: "aggregate", consumed: 1, limit: 1 },
       { scope: "qa", consumed: 1, limit: 1 },
@@ -1329,6 +1255,7 @@ for (const delivery of ["regular", "native-stack"])
         `example/evidence-repair-${delivery}`,
         delivery,
       );
+      config.autonomy = autonomy();
       const graph = { objective: 1, baseSha: target.baseSha, items: [item()] };
       const planner = model(graph);
       let calls = 0;
@@ -1363,13 +1290,7 @@ for (const delivery of ["regular", "native-stack"])
         },
         planningModel: planner,
       });
-      const plan = await fixture.application.planObjective(1);
-      const admitted = await fixture.application.admitObjective(
-        1,
-        plan,
-        authority(),
-      );
-      const done = await fixture.application.runObjective(1, plan, admitted);
+      const done = await fixture.application.runObjective(1);
       assert.equal(done.finalValidation.passed, true);
       assert.equal(done.allowanceConsumption.resultRereviews, 1);
       assert.equal(calls, 2);
@@ -1403,7 +1324,7 @@ test("a lost diagnosis is reissued once charged; ambiguous publication never aut
     treeSha: "c".repeat(40),
   };
   const state = {
-    admission: { authority: authority() },
+    autonomy: autonomy(),
     graph: { items: [item()] },
     work: { result: work },
     baseSha: "a".repeat(40),
@@ -1524,6 +1445,7 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
   try {
     const target = createTarget(root);
     const config = factoryConfig(target.checkout, "example/human-plan");
+    config.autonomy = autonomy();
     const graph = { objective: 1, baseSha: target.baseSha, items: [item()] };
     let calls = 0;
     const planner = model(graph, () => ({
@@ -1555,21 +1477,17 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
       },
       planningModel: planner,
     });
-    const plan = await fixture.application.planObjective(1, [], authority());
-    assert.equal(plan.review.status, "needs-human");
-    const answered = await fixture.application.decidePlan(1, plan, {
+    const waiting = await fixture.application.runObjective(1);
+    assert.equal(waiting.schemaVersion, 5);
+    assert.equal(waiting.plan.review.status, "needs-human");
+    await fixture.application.decidePlan(1, {
       actor: "fixture-owner",
       outcome: "accept",
       reason: "Answer applies to this exact reviewed packet",
       answer: "Use the existing declared target policy",
     });
-    const admitted = await fixture.application.admitObjective(
-      1,
-      answered,
-      authority(),
-    );
     const before = calls;
-    const done = await fixture.application.runObjective(1, answered, admitted);
+    const done = await fixture.application.runObjective(1);
     assert.equal(done.finalValidation.passed, true);
     assert.equal(calls, before);
     assert.equal(done.allowanceConsumption.planningRevisions, 1);
@@ -1580,15 +1498,14 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
   }
 });
 
-test("pause after known planning response preserves compilation for resume without repair authority or extra charge", async () => {
+test("pause after known planning response preserves compilation for resume with repair disabled and no extra charge", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-planning-pause-"));
   try {
     const target = createTarget(root);
     const graph = { objective: 1, baseSha: target.baseSha, items: [item()] };
-    const policy = authority();
-    delete policy.repairPolicy;
+    const policy = autonomy();
     policy.repairClasses = [];
-    const state = { authority: policy };
+    const state = { autonomy: policy };
     let paused = false,
       generations = 0,
       reviews = 0;
@@ -1747,16 +1664,14 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
       },
       planningModel: planner,
     };
-    fixture = makeApplication(descriptor);
-    const policy = authority();
+    const policy = autonomy();
     policy.repairClasses = ["validation-environment"];
     policy.allowances.implementationRepairs = 0;
     policy.repairPolicy.perPath.implementationRepairs = 0;
-    const plan = await fixture.application.planObjective(1);
-    const admitted = await fixture.application.admitObjective(1, plan, policy);
+    config.autonomy = policy;
+    fixture = makeApplication(descriptor);
     const { readState, statePath } = await import("../dist/state-store.js");
-    const { requestControl } = await import("../dist/coordinator-control.js");
-    running = fixture.application.runObjective(1, plan, admitted);
+    running = fixture.application.runObjective(1);
     outcome = running.then(
       (state) => ({ state }),
       (error) => ({ error }),
@@ -1810,12 +1725,10 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
     );
     assert.equal(settled.error, undefined);
     assert.equal(settled.coordinator.cancelError, undefined);
-    const drained = assert.rejects(running, /drained and released ownership/);
-    await requestControl(config.repository, {
-      objective: 1,
-      action: "handoff",
-    });
-    await drained;
+    // The failure needs an operator's diagnosis, so the run stops once settled.
+    const stopped = await outcome;
+    assert.equal(stopped.error, undefined);
+    assert.equal(stopped.state.work.beta.status, "failed");
     ownershipReleased = true;
     writeFileSync(prerequisite, "ready");
     const original = settled.work.beta;
@@ -1830,8 +1743,6 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
     assert.equal(repaired.work.beta.changeRef, original.changeRef);
     assert.equal(repaired.allowanceConsumption.implementationRepairs, 0);
     assert.equal(repaired.allowanceConsumption.resultRereviews, 1);
-    const { controlObjective } = await import("../dist/runner.js");
-    await controlObjective(config, { objective: 1, action: "resume" });
     const done = await makeApplication(descriptor).application.runObjective(1);
     assert.equal(done.finalValidation.passed, true);
     assert.equal(done.work.beta.attempt, original.attempt);
@@ -1888,14 +1799,7 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
       failedBlob.newObject,
       git(config.checkout, "rev-parse", `${done.work.beta.changeRef}:beta.txt`),
     );
-    assert.equal(
-      repair.controllerFacts.admittedAuthority.repairClass,
-      "validation-environment",
-    );
-    assert.equal(
-      repair.controllerFacts.admittedAuthority.admissionDigest,
-      done.admission.digest,
-    );
+    assert.equal(repair.controllerFacts.repairClass, "validation-environment");
     assert.deepEqual(
       JSON.parse(finalPacket.observations).work.find(
         (entry) => entry.id === "beta",

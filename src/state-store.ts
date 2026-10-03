@@ -1,5 +1,4 @@
 import { assertRepairLedger } from "./repair-policy.js";
-import { validateAuthority } from "./admission.js";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -100,7 +99,6 @@ export function readContinuation(
   )
     throw new Error("Invalid preparation source packet binding");
   assertCoordinator(value.coordinator);
-  if (value.authority) validateAuthority(value.authority);
   assertRepairLedger(value);
   return value as PreparationState;
 }

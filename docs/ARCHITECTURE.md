@@ -101,7 +101,7 @@ One controller owns an Objective at a time, through a lock and a private control
   - a merge first checks whether the PR or stack is already merged at the expected head.
 - **Restart** reattaches to the recorded attempt handle; it does not start a second agent.
 - **Real decisions still stop:** an edited or closed Objective, a PR changed by someone else, failing required checks, or a criterion the reviewer could not decide.
-- **Interruptions repeat; failures stop.** A worker that ends without a result, a lost model or GitHub response, or a GitHub server error interrupts a step rather than failing the work, so the step is repeated in the same run (a dead worker gets a fresh attempt). After two interruptions in one attempt the Work Item stops. A real failure (validation failed, a criterion refused, the worker reported failure) keeps its evidence; a new attempt needs `factory retry` or an admitted repair policy.
+- **Interruptions repeat; failures stop.** A worker that ends without a result, a lost model or GitHub response, or a GitHub server error interrupts a step rather than failing the work, so the step is repeated in the same run (a dead worker gets a fresh attempt). After two interruptions in one attempt the Work Item stops. A real failure (validation failed, a criterion refused, the worker reported failure) keeps its evidence; a new attempt needs `factory retry` or a remaining repair allowance.
 
 Diagnostics (`factory diagnostics`, `logs`, `analyze`) are a private timeline of observations. They never drive lifecycle decisions.
 
@@ -111,14 +111,14 @@ A harness can return several candidate **AssetSets**: groups of files with prove
 
 ## Autonomous operation
 
-Explicit runs (`plan`, `run`, `retry`) are the default. Optional autonomy adds, each by explicit operator choice:
+`factory run --objective N` is the one command: it plans, saves the plan and its review in the Objective's state, and runs a clean or human-accepted plan until the Objective completes, fails or needs a human decision. Running is the consent for that Objective. A rerun resumes from state and never plans an existing plan again. Within each run:
 
-- **Admission**: binds an exact reviewed plan, configuration and limits (planning revisions, repairs, rereviews) before dispatch.
-- **Repair policy**: lets a diagnosed failure use a fixed allowance instead of stopping. Allowances never reset.
+- **Limits**: the optional `autonomy` section of the configuration sets bounded allowances (planning revisions, implementation repairs, result rereviews), per-Work-Item limits, the enabled repair classes and required worker environment. Defaults are on and bounded. Each Objective snapshots its limits when it starts; allowances never reset.
+- **Repair**: a diagnosed failure uses an allowance instead of stopping.
 - **Graph amendments**: a worker can propose missing work; it is compiled, independently reviewed, and added without restarting running items.
-- **Intake and supervision**: a `systemd` user service runs explicitly authorized Objectives one at a time and keeps running after the terminal closes. It can watch GitHub for new candidate Objectives, but each still needs explicit authorization before any model is called.
+- **Intake and supervision**: a `systemd` user service runs explicitly selected Objectives one at a time and keeps running after the terminal closes. It can watch GitHub for new candidate Objectives, but each still needs explicit selection before any model is called.
 
-None of these grants spending, retry or target authority by itself; the operator's admission does.
+An exhausted allowance or an undelegated decision stops for the operator.
 
 ## Extension points
 
@@ -143,7 +143,7 @@ The runner, scheduler, validator, state store and Git model are deliberately con
 3. **Commands need authority.** A validation command must be observed in the base repository or declared in a pinned source. _Because_ the model must not invent what counts as passing.
 4. **Owned paths are enforced.** A result that changes files outside its ownership is rejected. _Because_ parallel items must not overwrite each other.
 5. **Every effect is safe to repeat.** Issues, PRs and merges are found by stable identities before they are created, and model calls have no side effects. _Because_ recovery is then just "re-read and continue", an interrupted run never needs manual reconciliation.
-6. **Failures stop; retries are explicit or pre-admitted.** _Because_ the operator controls rework and spending.
+6. **Failures stop; retries are explicit or within configured limits.** _Because_ the operator controls rework and spending.
 7. **Acceptance is proven, not assumed.** Every criterion needs supplied evidence, and the Objective closes only after final validation on the integrated head. _Because_ closed child issues do not prove the outcome.
 8. **The target repository is the authority** for requirements, commands, branch protection and acceptance. Factory does not change the target's protection rules.
 9. **One active Objective per installation**, one execution mode, and no state migration between incompatible versions. _Because_ these keep recovery simple.

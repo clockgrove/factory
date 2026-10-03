@@ -67,23 +67,23 @@ Rates show a 95% interval clustered by case (by fixture in review-only mode), be
 - mean(B − A), with a paired-bootstrap 95% interval;
 - an exact sign-flip p-value, and its floor (the smallest p-value that number of units can reach).
 
-Primary metrics are reported unadjusted: production clean, judge pass per judge, review recall and review false positives. All other metrics are Holm-adjusted. A metric with fewer than 5 paired units is marked insufficient and gets no interval or p-value. An interval that contains 0 is no evidence of a change.
+One metric is primary and reported unadjusted: production clean in plan mode, review recall and false positives in review-only mode. All other metrics are Holm-adjusted, including each judge's pass rate. A metric with fewer than 5 paired units is marked insufficient and gets no interval or p-value. An interval that contains 0 is no evidence of a change.
 
-| Number                           | Meaning                                                                                                                                                      |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Production review clean          | The plan ended clean, with no review findings or questions.                                                                                                  |
-| Judge pass                       | A frozen judge passed all seven dimensions. Shown per judge, separately from the production review.                                                          |
-| Judges agree                     | How often two judges gave the same verdict, Cohen's kappa, and both-pass, both-fail and one-fails counts.                                                    |
-| Case expectation met             | The case's `expect` held: outcome (`plan` or `question`), required checks, size, critical path, read-only.                                                   |
-| First try                        | How the first compile ended: `accepted`, `review-findings`, `review-invalid`, `parse`, `semantic:<field>`, `provider`.                                       |
-| Final review for command         | Criteria whose trimmed text is exactly one source-declared command line, outside Final validation, proved by final review. Should be 0.                      |
-| Proof kinds, final-review proofs | Coverage proofs per kind (result command, semantic, QA, CI, final review).                                                                                   |
-| Ungrounded CI                    | Named CI checks that no workflow job produces (job `name`, or job id). Should be 0.                                                                          |
-| Critical path, items, revisions  | Longest dependency chain, Work Items, planning revisions.                                                                                                    |
-| Tokens, wall                     | Planning tokens (judge tokens are separate) and planning wall time.                                                                                          |
-| Recall (review-only)             | The reviewer returned a finding for a plan with that defect. Structural hit: a finding names the mutated item, command or check identifier as a whole token. |
-| False positive (review-only)     | The reviewer returned a finding for a known-good plan. Compared separately from recall. Invalid reviews count in neither.                                    |
-| Caught by compile validation     | A seeded defect that deterministic validation already refuses; it never reaches review.                                                                      |
+| Number                           | Meaning                                                                                                                                                                |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production review clean          | The plan ended clean, with no review findings or questions.                                                                                                            |
+| Judge pass                       | A frozen judge passed all seven dimensions. Shown per judge, separately from the production review.                                                                    |
+| Judges agree                     | How often two judges gave the same verdict, Cohen's kappa, and both-pass, both-fail and one-fails counts.                                                              |
+| Case expectation met             | The case's `expect` held: outcome (`plan` or `question`), required checks, size, critical path, read-only.                                                             |
+| First try                        | How the first compile ended: `accepted`, `review-findings`, `review-invalid`, `parse`, `semantic:<field>`, `provider`.                                                 |
+| Final review for command         | Criteria whose text is exactly one code span (the rule Final validation uses for a command line), not a Final validation command, proved by final review. Should be 0. |
+| Proof kinds, final-review proofs | Coverage proofs per kind (result command, semantic, QA, CI, final review).                                                                                             |
+| Ungrounded CI                    | Named CI checks that no workflow job produces (job `name`, or job id). Should be 0.                                                                                    |
+| Critical path, items, revisions  | Longest dependency chain, Work Items, planning revisions.                                                                                                              |
+| Tokens, wall                     | Planning tokens (judge tokens are separate) and planning wall time.                                                                                                    |
+| Recall (review-only)             | The reviewer returned a finding for a plan with that defect. Recall counts the review status only; findings carry no structured pointer to items yet.                  |
+| False positive (review-only)     | The reviewer returned a finding for a known-good plan. Compared separately from recall. Invalid reviews count in neither.                                              |
+| Caught by compile validation     | A seeded defect that deterministic validation already refuses; it never reaches review.                                                                                |
 
 Each seeded defect breaks exactly one rule:
 
@@ -101,7 +101,16 @@ Judge-free metrics count structured fields only: proofs, commands, workflow jobs
 
 A judge in `evals/judges/` is a JSON spec: provider, model, effort, prompt file and prompt SHA-256. Two ship with the same rubric: `strict-rubric-v1-claude` (Claude Agent SDK) and `strict-rubric-v1-codex` (Codex SDK). Neither sees production review findings or the production review status.
 
-Judges run in a separate process, in an empty Git repository, with a `CODEX_HOME` that holds only the operator's `auth.json` (no `config.toml` or `AGENTS.md`). They run without the run's private directories in their environment. In plan mode they grade before the plan is written to disk and after the checkout is removed. In review-only mode they grade after every review, with the checkouts removed. Their scratch directory is deleted afterwards.
+Judges run in a separate process inside a bubblewrap mount namespace (Linux, with unprivileged user namespaces). The namespace holds only:
+
+- the system directories;
+- the Factory code the judge runs;
+- a scratch directory;
+- the provider logins, bound so token refreshes reach the operator.
+
+Everything else does not exist inside, including `/home`, `/tmp`, the eval's output, sibling runs' plans and checkouts. The working directory is an empty Git repository. `HOME` is in the scratch directory. `CODEX_HOME` holds the login and the judge's own `config.toml`, which turns off shell, file, web, app, plugin and agent tools; the operator's `config.toml` and `AGENTS.md` never apply. Only an allowlist of environment variables passes in. Claude judges also run with no tools, MCP servers, agents, plugins or settings.
+
+A Codex judge is refused, with exit 2, when the sandbox is unavailable. A Claude judge then runs in a plain child process. In plan mode, judges grade after the checkout is removed and before the plan reaches disk. In review-only mode, they grade after every review. The scratch directory is deleted afterwards.
 
 - Never edit a frozen judge in a prompt PR, because a judge tuned with the prompt it grades measures nothing. Add a new judge file with a new name instead.
 - A judge is never the production reviewer prompt, because the reviewer cannot grade itself.

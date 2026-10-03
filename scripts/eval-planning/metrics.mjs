@@ -2,6 +2,7 @@
 // structured repository files or diagnostics. None interprets prose; what
 // needs interpretation is a judge rubric dimension instead.
 import { parse } from "yaml";
+import { codeSpanCommand } from "../../dist/compiler.js";
 
 const isWork = (item) => !item.kind || item.kind === "work";
 
@@ -38,45 +39,25 @@ export function proofKinds(graph) {
 }
 
 /**
- * The command a criterion requires, when its trimmed text is exactly one
- * command line (optionally one code span) that a source declares as a bullet
- * and that is not a Final validation command; otherwise null. Final
- * validation runs its commands anyway, so those criteria are exempt.
+ * The command a criterion requires: its text is exactly one code span (the
+ * production rule for a command-line bullet) and Final validation does not
+ * already run it. Otherwise null.
  */
-export function requiredCommandLine(text, commandLines, finalCommands) {
-  const trimmed = text.trim();
-  const command = /^`[^`]+`$/.test(trimmed)
-    ? trimmed.slice(1, -1).trim()
-    : trimmed;
-  return commandLines.has(command) && !finalCommands.includes(command)
-    ? command
-    : null;
-}
-
-/** Commands that pinned sources declare as bullets of exactly one code span. */
-export function sourceCommandLines(sources) {
-  const lines = new Set();
-  for (const source of sources)
-    for (const line of source.content.split("\n")) {
-      const match = /^\s*[-*]\s+`([^`]+)`\s*$/.exec(line);
-      if (match) lines.add(match[1].trim());
-    }
-  return lines;
+export function requiredCommandLine(text, finalCommands) {
+  const command = codeSpanCommand(text);
+  return command?.trim() && !finalCommands.includes(command) ? command : null;
 }
 
 /**
  * Command-line obligations left to final review: criteria that are exactly
- * one source-declared command line, outside Final validation, proved by
- * final review instead of by running the command.
+ * one command line, outside Final validation, proved by final review instead
+ * of by running the command.
  */
 export function finalReviewInsteadOfCommand(plan) {
-  const lines = sourceCommandLines(plan.sources);
   const criteria = plan.graph.coverage
     .filter((entry) => entry.proof.kind === "final-review")
     .map((entry) => entry.source.text)
-    .filter((text) =>
-      requiredCommandLine(text, lines, plan.finalCommands ?? []),
-    );
+    .filter((text) => requiredCommandLine(text, plan.finalCommands ?? []));
   return { count: criteria.length, criteria };
 }
 

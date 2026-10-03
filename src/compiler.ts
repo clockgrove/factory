@@ -1368,15 +1368,26 @@ function commandAuthorizations(
 }
 
 /** Final commands are accepted only as exact lines under the Objective heading. */
+/**
+ * The command a bullet's text holds when it is exactly one code span, such as
+ * `` `npm test` ``. Final validation entries and command-line criteria share
+ * this rule.
+ */
+export function codeSpanCommand(text: string): string | undefined {
+  const match = /^`([^`]+)`$/.exec(text.trim());
+  return match?.[1];
+}
+
 export function finalObjectiveCommands(body: string): string[] {
   const section = objectiveSection(body, ["Final validation"]);
   if (!section && !hasObjectiveSection(body, "Final validation")) return [];
   const commands = markdownLines(section).flatMap(({ text: line, fenced }) => {
     if (!line.trim()) return [];
     const match = !fenced && line.match(/^\s*-\s+(`[^`]+`|[^`]+?)\s*$/);
-    if (!match || !match[1]!.replace(/^`|`$/g, "").trim())
+    const command = match ? (codeSpanCommand(match[1]!) ?? match[1]!) : "";
+    if (!command.trim())
       throw new Error(`Invalid Final validation entry: ${line.trim()}`);
-    return [match[1]!.replace(/^`|`$/g, "")];
+    return [command];
   });
   if (!commands.length)
     throw new Error("Final validation requires at least one command");

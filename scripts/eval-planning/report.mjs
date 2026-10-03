@@ -18,7 +18,7 @@ import {
 export const MIN_COMPARE_UNITS = 5;
 /** Decision metrics, tested without multiplicity adjustment. */
 export const PRIMARY_METRICS = {
-  plan: [/^productionClean$/, /^judgePass:/],
+  plan: [/^productionClean$/],
   review: [/^recall$/, /^falsePositive$/],
 };
 
@@ -98,7 +98,6 @@ export function reviewRunMetrics(run) {
   };
   if (scored(run)) {
     metrics[good ? "falsePositive" : "recall"] = bit(run.flagged);
-    if (!good) metrics.structuralHit = bit(run.structuralHit);
   }
   for (const grade of run.judges ?? []) {
     const value = verdict(run, grade.judge);
@@ -287,7 +286,6 @@ export function summarizeReviewRuns(runs, refusals) {
         rule: all[0]?.rule,
         runs: list.length,
         recall: rate(list, (run) => run.flagged),
-        structuralHit: rate(list, (run) => run.structuralHit),
         invalid: all.filter((run) => run.review === "invalid").length,
         judgeRecall: judgeRates(all),
       };
@@ -548,13 +546,13 @@ export function reviewMarkdown(report) {
     "",
     ...header(report, "fixture"),
     "",
-    `Recall: the production reviewer returned at least one finding for a plan with one injected defect. Structural hit: a finding names the mutated item, command or check identifier. Invalid and errored reviews have no verdict and are excluded from recall and false positives.${summary.judges.length ? ` Judge recall lists ${summary.judges.join(" / ")}.` : ""}`,
+    `Recall: the production reviewer returned at least one finding for a plan with one injected defect. Invalid and errored reviews have no verdict and are excluded from recall and false positives.${summary.judges.length ? ` Judge recall lists ${summary.judges.join(" / ")}.` : ""}`,
     "",
-    "| Defect | Reviews | Recall | Structural hit | Invalid reviews | Judge recall |",
-    "| --- | --- | --- | --- | --- | --- |",
+    "| Defect | Reviews | Recall | Invalid reviews | Judge recall |",
+    "| --- | --- | --- | --- | --- |",
     ...summary.defects.map(
       (row) =>
-        `| ${row.defect} | ${row.runs} | ${percent(row.recall)} | ${percent(row.structuralHit)} | ${row.invalid} | ${judgeCell(row.judgeRecall)} |`,
+        `| ${row.defect} | ${row.runs} | ${percent(row.recall)} | ${row.invalid} | ${judgeCell(row.judgeRecall)} |`,
     ),
     "",
     `Known-good plans: ${summary.good.runs} reviews, false-positive rate ${percent(summary.good.falsePositive)}, ${summary.good.invalid} invalid; judge false-positive rate ${judgeCell(summary.good.judgeFalsePositive)}.`,

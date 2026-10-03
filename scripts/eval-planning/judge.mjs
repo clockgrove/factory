@@ -27,6 +27,11 @@ import {
   CodexPlanningModel,
 } from "../../dist/compiler.js";
 import { repositoryFacts } from "./cases.mjs";
+import {
+  sandboxArguments,
+  sandboxBinary,
+  sandboxEnvironment,
+} from "./sandbox.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const worker = join(root, "scripts/eval-planning-judge.mjs");
@@ -89,6 +94,7 @@ export function loadJudge(path) {
     path: file,
     model,
     prompt: promptBytes.toString("utf8"),
+    promptPath: resolve(dirname(file), spec.prompt),
     // Everything that shapes what the judge sees or how it is scored: the
     // spec and prompt, the input, prompt and repository-fact builders, the
     // decoder, the isolation, the resolved provider options (with the output
@@ -101,7 +107,12 @@ export function loadJudge(path) {
         render: judgePrompt.toString(),
         facts: repositoryFacts.toString(),
         decode: decodeJudge.toString(),
-        isolation: [gradeInIsolation.toString(), readFileSync(worker, "utf8")],
+        isolation: [
+          gradeInIsolation.toString(),
+          readFileSync(worker, "utf8"),
+          readFileSync(join(root, "scripts/eval-planning/sandbox.mjs"), "utf8"),
+          CODEX_JUDGE_CONFIG,
+        ],
         provider: providerContext(model),
       }),
     ),
@@ -135,7 +146,7 @@ function lockedVersions(names) {
  * Host paths are placeholders; the Claude worker environment is host data and
  * is left out.
  */
-function providerContext(model) {
+export function providerContext(model) {
   const selection = {
     model: model.model,
     reasoningEffort: model.reasoningEffort,
@@ -332,10 +343,47 @@ export async function runJudge(judge, input, transport) {
 }
 
 /**
- * Grade one plan with every judge in the panel, in a separate process whose
- * working directory is an empty Git repository (Codex runs only in one) and
- * whose CODEX_HOME holds only the operator's auth.json. Nothing about the run
- * is on disk near it, and the temporary directory is removed afterwards.
+ * The judge's own Codex configuration: no shell, file, web, app, plugin or
+ * agent tools. The operator's config.toml and AGENTS.md never apply.
+ */
+export const CODEX_JUDGE_CONFIG = `web_search = "disabled"
+
+[features]
+shell_tool = false
+unified_exec = false
+view_image = false
+multi_agent = false
+apps = false
+plugins = false
+browser_use = false
+computer_use = false
+image_generation = false
+code_mode_host = false
+skill_search = false
+tool_suggest = false
+sleep_tool = false
+memories = false
+hooks = false
+`;
+
+/** Codex judges run only inside the sandbox; refuse them without it. */
+export function assertJudgeIsolation(judges) {
+  if (sandboxBinary()) return;
+  const codex = judges.filter((judge) => judge.model.kind === "codex-sdk");
+  if (codex.length)
+    throw new Error(
+      `Judge ${codex.map((judge) => judge.name).join(", ")} needs the Linux judge sandbox: install bubblewrap (bwrap) with unprivileged user namespaces enabled.`,
+    );
+}
+
+/**
+ * Grade one plan with every judge in the panel, in a separate process. With
+ * bubblewrap (required for Codex judges) that process runs in a mount
+ * namespace that holds only system directories, the Factory code, its
+ * scratch directory and the provider logins; the eval's files do not exist
+ * there. Its working directory is an empty Git repository (Codex runs only in
+ * one), CODEX_HOME holds the login and CODEX_JUDGE_CONFIG, and HOME is a
+ * scratch directory. The scratch directory is removed afterwards.
  */
 export async function gradeInIsolation(judges, input, module) {
   const scratch = mkdtempSync(join(tmpdir(), "factory-plan-judge-"));
@@ -349,16 +397,32 @@ export async function gradeInIsolation(judges, input, module) {
       wallMs: 0,
     }));
   try {
+    assertJudgeIsolation(judges);
     const work = join(scratch, "work");
+    const home = join(scratch, "home");
     const codexHome = join(scratch, "codex-home");
-    mkdirSync(work);
-    mkdirSync(codexHome);
+    for (const directory of [work, join(home, ".claude"), codexHome])
+      mkdirSync(directory, { recursive: true });
     execFileSync("git", ["init", "-q", work], { stdio: "ignore" });
-    const auth = join(
-      process.env.CODEX_HOME ?? join(homedir(), ".codex"),
-      "auth.json",
-    );
-    if (existsSync(auth)) copyFileSync(auth, join(codexHome, "auth.json"));
+    writeFileSync(join(codexHome, "config.toml"), CODEX_JUDGE_CONFIG);
+    // Logins are bound, not copied, so a token refresh reaches the operator.
+    const logins = [
+      [
+        join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "auth.json"),
+        join(codexHome, "auth.json"),
+      ],
+      [
+        join(
+          process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
+          ".credentials.json",
+        ),
+        join(home, ".claude", ".credentials.json"),
+      ],
+    ].filter(([source]) => existsSync(source));
+    for (const [, destination] of logins) writeFileSync(destination, "");
+    const claudeState = join(homedir(), ".claude.json");
+    if (existsSync(claudeState))
+      copyFileSync(claudeState, join(home, ".claude.json"));
     const request = join(scratch, "request.json");
     writeFileSync(
       request,
@@ -368,17 +432,49 @@ export async function gradeInIsolation(judges, input, module) {
         module,
       }),
     );
-    // The run's private XDG directories would point the judge at run files.
-    const {
-      XDG_STATE_HOME: _state,
-      XDG_CONFIG_HOME: _config,
-      ...environment
-    } = process.env;
-    await promisify(execFile)(process.execPath, [worker, request], {
-      cwd: work,
-      env: { ...environment, CODEX_HOME: codexHome },
-      maxBuffer: 16 * 1024 * 1024,
+    const environment = sandboxEnvironment({
+      HOME: home,
+      CODEX_HOME: codexHome,
     });
+    const bwrap = sandboxBinary();
+    if (bwrap)
+      await promisify(execFile)(
+        bwrap,
+        [
+          ...sandboxArguments({
+            scratch,
+            readOnly: [
+              join(root, "package.json"),
+              join(root, "package-lock.json"),
+              join(root, "dist"),
+              join(root, "scripts"),
+              join(root, "node_modules"),
+              ...judges.flatMap((judge) => [judge.path, judge.promptPath]),
+              ...(module ? [module] : []),
+            ],
+            readWrite: logins,
+            cwd: work,
+          }),
+          "--",
+          process.execPath,
+          worker,
+          request,
+        ],
+        { env: environment, maxBuffer: 16 * 1024 * 1024 },
+      );
+    // Claude judges only: they have no tools, so a separate process in an
+    // empty directory is enough, and they keep the operator's own login.
+    else
+      await promisify(execFile)(process.execPath, [worker, request], {
+        cwd: work,
+        env: sandboxEnvironment({
+          HOME: homedir(),
+          ...(process.env.CLAUDE_CONFIG_DIR
+            ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }
+            : {}),
+        }),
+        maxBuffer: 16 * 1024 * 1024,
+      });
     return JSON.parse(readFileSync(join(scratch, "response.json"), "utf8"));
   } catch (error) {
     return failAll(error);

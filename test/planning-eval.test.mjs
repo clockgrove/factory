@@ -12,8 +12,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { materializeFixture } from "../scripts/eval-planning/cases.mjs";
+import { CODEX_JUDGE_CONFIG } from "../scripts/eval-planning/judge.mjs";
+import { sandboxBinary } from "../scripts/eval-planning/sandbox.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const script = join(root, "scripts/eval-planning.mjs");
@@ -347,14 +350,6 @@ test("review-only mode reports recall per seeded defect and the false-positive r
       "missing-dependency": [0, 6],
       "worker-test-only-proof": [4, 4],
     });
-    // The scripted reviewer names the offending item or check, so every
-    // flagged defect is also a structural hit.
-    for (const row of summary.defects)
-      assert.equal(
-        row.structuralHit.successes,
-        row.recall.successes,
-        row.defect,
-      );
     const dependency = summary.defects.find(
       (row) => row.defect === "missing-dependency",
     );
@@ -575,23 +570,76 @@ test("planning that stops for an operator is a question, not an error", () => {
   }
 });
 
-test("judges run isolated: empty Git workdir, auth-only CODEX_HOME, no run paths or plans", () => {
+/**
+ * Write a `--judge-transport` module that records what a judge process can
+ * see: a canary file and the eval output (absolute paths outside its
+ * scratch), its working directory, HOME, CODEX_HOME and environment.
+ */
+function writeProbeJudge(work, canary, output) {
+  const path = join(work, "probe-judge.mjs");
+  writeFileSync(
+    path,
+    `import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { JUDGE_DIMENSIONS } from ${JSON.stringify(pathToFileURL(join(root, "scripts/eval-planning/judge.mjs")).href)};
+const attempt = (read) => { try { return read(); } catch (error) { return error.code ?? "error"; } };
+export function createJudgeTransport({ judge }) {
+  return {
+    async run({ turn }) {
+      const probe = {
+        kind: judge.model.kind,
+        canary: attempt(() => readFileSync(${JSON.stringify(canary)}, "utf8")),
+        output: attempt(() => readdirSync(${JSON.stringify(output)})),
+        cwd: readdirSync(process.cwd()).sort(),
+        codexHome: readdirSync(process.env.CODEX_HOME).sort(),
+        codexConfig: readFileSync(join(process.env.CODEX_HOME, "config.toml"), "utf8"),
+        xdgState: process.env.XDG_STATE_HOME ?? null,
+      };
+      turn.ended = true;
+      turn.response = JSON.stringify({
+        dimensions: JUDGE_DIMENSIONS.map((name) => ({ name, verdict: "pass", evidence: JSON.stringify(probe) })),
+      });
+    },
+  };
+}
+`,
+  );
+  return path;
+}
+
+test("judges run sandboxed: no file outside their scratch, no operator Codex config", () => {
+  assert.ok(
+    sandboxBinary(),
+    "the judge sandbox needs bubblewrap with unprivileged user namespaces",
+  );
   const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-isolation-"));
   try {
+    const canary = join(work, "canary.txt");
+    writeFileSync(canary, "secret");
     const codexHome = join(work, "codex");
     mkdirSync(codexHome);
-    for (const name of ["auth.json", "config.toml", "AGENTS.md"])
-      writeFileSync(join(codexHome, name), "{}");
-    const output = join(work, "out");
-    const env = { CODEX_HOME: codexHome, FACTORY_EVAL_PROBE_ROOT: output };
-    const judges = [
+    writeFileSync(join(codexHome, "auth.json"), "{}");
+    writeFileSync(join(codexHome, "config.toml"), 'model = "operator"\n');
+    writeFileSync(join(codexHome, "AGENTS.md"), "operator instructions");
+    const expected = (kind) => ({
+      kind,
+      canary: "ENOENT",
+      output: "ENOENT",
+      cwd: [".git"],
+      codexHome: ["auth.json", "config.toml"],
+      codexConfig: CODEX_JUDGE_CONFIG,
+      xdgState: null,
+    });
+    const judges = (output) => [
       "--judge",
       join(root, "evals/judges/strict-rubric-v1-claude.json"),
       "--judge",
       join(root, "evals/judges/strict-rubric-v1-codex.json"),
       "--judge-transport",
-      support("eval-probe-judge.mjs"),
+      writeProbeJudge(work, canary, output),
     ];
+    // Plan mode, two runs in parallel, so a sibling run's files are on disk.
+    const output = join(work, "out");
     const plan = runStatus(
       [
         "--config",
@@ -600,46 +648,47 @@ test("judges run isolated: empty Git workdir, auth-only CODEX_HOME, no run paths
         output,
         "--case",
         "native-stack-chain",
+        "--repeat",
+        "2",
         "--parallel",
-        "1",
+        "2",
         "--planning-model",
         support("eval-fixture-planner.mjs"),
-        ...judges,
+        ...judges(output),
       ],
-      env,
+      { CODEX_HOME: codexHome },
     );
     assert.equal(plan.status, 0, plan.stderr);
+    const reviewOutput = join(work, "review");
     const review = runStatus(
       [
         "--review-only",
         "--config",
         writeConfig(work),
         "--output",
-        join(work, "review"),
+        reviewOutput,
         "--case",
         "media-lfs-thumbnail",
         "--parallel",
-        "1",
+        "2",
         "--planning-model",
         support("eval-review-model.mjs"),
-        ...judges,
+        ...judges(reviewOutput),
       ],
-      { ...env, FACTORY_EVAL_PROBE_ROOT: join(work, "review") },
+      { CODEX_HOME: codexHome },
     );
     assert.equal(review.status, 0, review.stderr);
     const grades = [
       ...readReport(output).runs,
-      ...readReport(join(work, "review")).runs,
+      ...readReport(reviewOutput).runs,
     ].flatMap((entry) => entry.judges);
-    assert.ok(grades.length >= 4);
-    for (const grade of grades)
-      assert.deepEqual(JSON.parse(grade.dimensions.coverage.evidence), {
-        cwd: [".git"],
-        codexHome: ["auth.json"],
-        xdgState: null,
-        plans: 0,
-      });
-    // Judge scratch directories are removed.
+    assert.ok(grades.length >= 8);
+    for (const grade of grades) {
+      const probe = JSON.parse(grade.dimensions.coverage.evidence);
+      assert.deepEqual(probe, expected(probe.kind));
+    }
+    // The real login file is bound, not copied, and is untouched.
+    assert.equal(readFileSync(join(codexHome, "auth.json"), "utf8"), "{}");
     assert.deepEqual(
       readdirSync(tmpdir()).filter((name) =>
         name.startsWith("factory-plan-judge-"),

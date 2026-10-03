@@ -41,7 +41,7 @@ export const DEFECTS = [
       if (gate) gate.checkName = name;
       for (const entry of graph.coverage)
         if (entry.proof.checkName === old) entry.proof.checkName = name;
-      return { graph, itemId: null, identifiers: [name] };
+      return { graph, itemId: null };
     },
   },
   {
@@ -60,7 +60,7 @@ export const DEFECTS = [
           ? "The selected files are uploaded to Git LFS, merged into main, and hydrate in a fresh clone."
           : "This item's pull request is merged into main and the main-branch CI run is green.",
       );
-      return { graph, itemId: item.id, identifiers: [item.id] };
+      return { graph, itemId: item.id };
     },
   },
   {
@@ -82,7 +82,7 @@ export const DEFECTS = [
       item.acceptance.push(
         `\`${dependency}\` is merged into main before this item starts, and this item builds on main.`,
       );
-      return { graph, itemId: item.id, identifiers: [item.id] };
+      return { graph, itemId: item.id };
     },
   },
   {
@@ -95,7 +95,6 @@ export const DEFECTS = [
       const entry = graph.coverage.find((candidate) => {
         const command = requiredCommandLine(
           context.criteria?.[candidate.criterion] ?? "",
-          context.commandLines ?? new Set(),
           context.finalCommands ?? [],
         );
         const item = graph.items.find((other) => other.id === candidate.itemId);
@@ -111,12 +110,11 @@ export const DEFECTS = [
       const item = graph.items.find(
         (candidate) => candidate.id === entry.itemId,
       );
-      const removed = dropValidation(graph, item, entry.proof.validationIndex);
+      dropValidation(graph, item, entry.proof.validationIndex);
       entry.proof = { kind: "final-review" };
       return {
         graph,
         itemId: item.id,
-        identifiers: [item.id, removed.command],
       };
     },
   },
@@ -135,7 +133,7 @@ export const DEFECTS = [
           .find((candidate) => item.brief.includes(candidate)) ??
         item.ownedPaths.at(-1);
       item.ownedPaths = item.ownedPaths.filter((owned) => owned !== path);
-      return { graph, itemId: item.id, identifiers: [item.id] };
+      return { graph, itemId: item.id };
     },
   },
   {
@@ -155,7 +153,7 @@ export const DEFECTS = [
         graph.items.some((other) => other.id === id && isWork(other)),
       );
       item.dependencies = item.dependencies.filter((id) => id !== dependency);
-      return { graph, itemId: item.id, identifiers: [item.id, dependency] };
+      return { graph, itemId: item.id };
     },
   },
   {
@@ -191,7 +189,7 @@ export const DEFECTS = [
       entry.proof = { kind: "result-command", validationIndex: index };
       if (!item.ownedPaths.includes(testPath)) item.ownedPaths.push(testPath);
       item.brief += ` Prove the behavior with new unit tests in \`${testPath}\`.`;
-      return { graph, itemId: item.id, identifiers: [item.id] };
+      return { graph, itemId: item.id };
     },
   },
 ];
@@ -214,24 +212,4 @@ export function planVariants(graph, context) {
         : [];
     }),
   ];
-}
-
-/**
- * Whether a finding names one of the mutation's identifiers (an item id, a
- * command or a check name) as a whole token. Identifiers are controller
- * data, so this is an identity match, not prose interpretation.
- */
-export function namesIdentifier(finding, identifiers) {
-  const text = `${finding.detail}\n${finding.question}`;
-  return identifiers.some((identifier) => {
-    let at = text.indexOf(identifier);
-    while (at >= 0) {
-      const before = text[at - 1] ?? " ";
-      const after = text[at + identifier.length] ?? " ";
-      if (!/[A-Za-z0-9_-]/.test(before) && !/[A-Za-z0-9_-]/.test(after))
-        return true;
-      at = text.indexOf(identifier, at + 1);
-    }
-    return false;
-  });
 }

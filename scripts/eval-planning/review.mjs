@@ -5,8 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { CaseError, loadCase } from "./cases.mjs";
-import { sourceCommandLines } from "./metrics.mjs";
-import { namesIdentifier, planVariants } from "./mutations.mjs";
+import { planVariants } from "./mutations.mjs";
 
 const dist = resolve(import.meta.dirname, "../../dist");
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -141,7 +140,6 @@ export async function prepareVariants(fixture, config) {
     sourceText: sources.map((source) => source.content).join("\n"),
     criteria: objectiveCriteria(evalCase.body),
     finalCommands: finalObjectiveCommands(evalCase.body),
-    commandLines: sourceCommandLines(sources),
   });
   for (const variant of variants) {
     try {
@@ -216,12 +214,6 @@ export async function reviewVariant(model, fixture, variant, repeat) {
           ? "findings"
           : "clean",
       flagged: findings.length > 0,
-      // A finding that names the mutated item, command or check.
-      structuralHit: variant.defect
-        ? findings.some((finding) =>
-            namesIdentifier(finding, variant.identifiers),
-          )
-        : null,
       findings,
       ...(review.failure ? { failure: review.failure } : {}),
       tokens,

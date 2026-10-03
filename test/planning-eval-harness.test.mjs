@@ -10,7 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { planningSources } from "../dist/compiler.js";
+import {
+  codeSpanCommand,
+  finalObjectiveCommands,
+  planningSources,
+} from "../dist/compiler.js";
 import { validateConfig } from "../dist/index.js";
 import {
   loadCases,
@@ -18,11 +22,13 @@ import {
   prepareCheckout,
 } from "../scripts/eval-planning/cases.mjs";
 import {
+  CODEX_JUDGE_CONFIG,
   decodeJudge,
   JUDGE_DIMENSIONS,
   judgeInput,
   loadJudge,
   loadJudges,
+  providerContext,
   runJudge,
 } from "../scripts/eval-planning/judge.mjs";
 import {
@@ -32,13 +38,10 @@ import {
   finalReviewInsteadOfCommand,
   firstTry,
   proofKinds,
+  requiredCommandLine,
   workflowCheckNames,
 } from "../scripts/eval-planning/metrics.mjs";
-import {
-  DEFECTS,
-  namesIdentifier,
-  planVariants,
-} from "../scripts/eval-planning/mutations.mjs";
+import { DEFECTS, planVariants } from "../scripts/eval-planning/mutations.mjs";
 import {
   compareReports,
   reviewRunMetrics,
@@ -68,9 +71,9 @@ const root = resolve(import.meta.dirname, "..");
  */
 const FROZEN_JUDGES = {
   "strict-rubric-v1-claude":
-    "e1b7ac2e0b02a086535006ddea051e892ce8c484f8600828df19baef8efc7dab",
+    "67e2905f15a5a41a87ca35de2d91fa813551bc28bf071f4c8fc61677be20c30c",
   "strict-rubric-v1-codex":
-    "ecc1ae1a47074eede9678f84626336af289de8571753fe36874813dd24dd0a1d",
+    "e9388e9240f3517faf890bbedb91643f040b25616703c5fee74aef3a2142d997",
 };
 
 /** Fixture commits are the same on every machine. */
@@ -190,7 +193,6 @@ const context = {
     "`a` throws for a non-integer",
   ],
   finalCommands: ["node check.mjs a", "node check.mjs b"],
-  commandLines: new Set(["node check.mjs a", "node check.mjs b", "npm test"]),
 };
 
 test("each seeded defect changes exactly its rule in the authored plan", () => {
@@ -210,7 +212,6 @@ test("each seeded defect changes exactly its rule in the authored plan", () => {
     by["invented-ci-name"].graph.requiredPreIntegrationChecks[0].checkName,
     "ci / build-and-test",
   );
-  assert.deepEqual(by["invented-ci-name"].identifiers, ["ci / build-and-test"]);
   assert.match(
     by["acceptance-needs-own-merge"].graph.items[0].acceptance.at(-1),
     /merged into main/,
@@ -231,7 +232,6 @@ test("each seeded defect changes exactly its rule in the authored plan", () => {
     kind: "result-command",
     validationIndex: 0,
   });
-  assert.deepEqual(replaced.identifiers, ["a", "npm test"]);
 
   assert.deepEqual(by["missing-ownership"].graph.items[0].ownedPaths, [
     "src/a.mjs",
@@ -291,17 +291,6 @@ test("each seeded defect changes exactly its rule in the authored plan", () => {
   assert.equal(
     crowded.graph.requiredPreIntegrationChecks[0].checkName,
     "ci / build-and-test-2",
-  );
-  // A structural hit names an identifier as a whole token.
-  assert.equal(
-    namesIdentifier({ detail: "Item a skips `npm test`.", question: "" }, [
-      "npm test",
-    ]),
-    true,
-  );
-  assert.equal(
-    namesIdentifier({ detail: "The cli-docs item", question: "" }, ["cli"]),
-    false,
   );
 });
 
@@ -403,12 +392,12 @@ test("judge-free metrics count structured fields only", () => {
         },
         // A Final validation command runs anyway: exempt.
         { proof: { kind: "final-review" }, source: { text: "`npm test`" } },
-        // Prose around a command, or a command no source declares as a
-        // line, is not a command-line criterion.
+        // Prose around a command is not a command-line criterion.
         {
           proof: { kind: "final-review" },
           source: { text: "`node check.mjs a` passes" },
         },
+        // Any criterion that is exactly one code span is a command line.
         {
           proof: { kind: "final-review" },
           source: { text: "`pnpm lint`" },
@@ -426,8 +415,8 @@ test("judge-free metrics count structured fields only", () => {
   };
   assert.equal(criticalPath(plan.graph), 4);
   assert.deepEqual(finalReviewInsteadOfCommand(plan), {
-    count: 1,
-    criteria: ["`node check.mjs a`"],
+    count: 2,
+    criteria: ["`node check.mjs a`", "`pnpm lint`"],
   });
   assert.deepEqual(proofKinds(plan.graph), {
     "final-review": 4,
@@ -856,10 +845,12 @@ test("compare pairs units on identical inputs, tests them exactly and adjusts se
   assert.equal(rows.productionClean.p, 2 / 64);
   assert.equal(rows.productionClean.pFloor, 2 / 64);
   assert.equal(rows.productionClean.pHolm, undefined);
-  assert.equal(rows["judgePass:claude"].primary, true);
+  // productionClean is the one primary; judge pass is adjusted with the rest.
+  assert.equal(rows["judgePass:claude"].primary, false);
+  assert.equal(rows["judgePass:claude"].pHolm, Math.min(1, 3 * (2 / 64)));
   // Secondary metrics are Holm-adjusted; a metric with no change has p = 1.
   assert.equal(rows.planningTokens.primary, false);
-  assert.equal(rows.planningTokens.pHolm, Math.min(1, 2 * (2 / 64)));
+  assert.equal(rows.planningTokens.pHolm, Math.min(1, 3 * (2 / 64)));
   assert.equal(rows.revisions.p, 1);
   assert.throws(
     () => compareReports(a, { ...b, mode: "review" }),
@@ -919,18 +910,11 @@ test("review metrics keep false positives apart from recall and skip invalid rev
   const hit = reviewRunMetrics({
     review: "findings",
     flagged: true,
-    structuralHit: true,
     defect: "missing-dependency",
   });
   assert.deepEqual(
-    [
-      good.falsePositive,
-      good.recall,
-      hit.falsePositive,
-      hit.recall,
-      hit.structuralHit,
-    ],
-    [1, undefined, undefined, 1, 1],
+    [good.falsePositive, good.recall, hit.falsePositive, hit.recall],
+    [1, undefined, undefined, 1],
   );
   // An invalid or errored review has no verdict.
   for (const review of ["invalid", "error"]) {
@@ -966,7 +950,6 @@ test("review metrics keep false positives apart from recall and skip invalid rev
         defect: "missing-dependency",
         review: "findings",
         flagged: true,
-        structuralHit: false,
       },
     ],
     [],
@@ -981,13 +964,8 @@ test("review metrics keep false positives apart from recall and skip invalid rev
   );
   const [row] = summary.defects;
   assert.deepEqual(
-    [
-      row.recall.successes,
-      row.recall.total,
-      row.structuralHit.successes,
-      row.invalid,
-    ],
-    [1, 1, 0, 1],
+    [row.recall.successes, row.recall.total, row.invalid],
+    [1, 1, 1],
   );
 
   // Review compare clusters by fixture: a reviewer that adds false
@@ -1074,4 +1052,67 @@ test("plan summaries exclude infrastructure errors and report each judge and the
   );
   // po = 2/3; claude passes 2/3, codex 1/3; pe = 2/9 + 2/9 = 4/9.
   assert.ok(Math.abs(pair.kappa - (2 / 3 - 4 / 9) / (1 - 4 / 9)) < 1e-12);
+});
+
+test("command-line criteria use the production code-span rule", () => {
+  assert.equal(codeSpanCommand("`npm test`"), "npm test");
+  assert.equal(codeSpanCommand("  `node a.mjs --x`  "), "node a.mjs --x");
+  assert.equal(codeSpanCommand("`npm test` passes"), undefined);
+  assert.equal(codeSpanCommand("npm test"), undefined);
+  assert.equal(requiredCommandLine("`npm test`", []), "npm test");
+  assert.equal(requiredCommandLine("`npm test`", ["npm test"]), null);
+  assert.equal(requiredCommandLine("`  `", []), null);
+  // Final validation parses its entries with the same rule.
+  assert.deepEqual(
+    finalObjectiveCommands(
+      "# O\n\n## Final validation\n\n- `npm test`\n- node a.mjs\n",
+    ),
+    ["npm test", "node a.mjs"],
+  );
+  assert.throws(
+    () => finalObjectiveCommands("# O\n\n## Final validation\n\n- `  `\n"),
+    /Invalid Final validation entry/,
+  );
+});
+
+test("the Claude judge runs with no tools, MCP servers, agents, plugins or settings", () => {
+  const { options } = providerContext({
+    kind: "claude-agent-sdk",
+    model: "claude-opus-5-5",
+    reasoningEffort: "high",
+    maxOutputTokens: 32000,
+  });
+  assert.deepEqual(
+    {
+      tools: options.tools,
+      allowedTools: options.allowedTools,
+      mcpServers: options.mcpServers,
+      strictMcpConfig: options.strictMcpConfig,
+      agents: options.agents,
+      plugins: options.plugins,
+      skills: options.skills,
+      settingSources: options.settingSources,
+      permissionMode: options.permissionMode,
+    },
+    {
+      tools: [],
+      allowedTools: [],
+      mcpServers: {},
+      strictMcpConfig: true,
+      agents: {},
+      plugins: [],
+      skills: [],
+      settingSources: [],
+      permissionMode: "dontAsk",
+    },
+  );
+  // The Codex judge's own configuration turns its tools off.
+  for (const feature of [
+    "shell_tool",
+    "unified_exec",
+    "view_image",
+    "multi_agent",
+  ])
+    assert.match(CODEX_JUDGE_CONFIG, new RegExp(`^${feature} = false$`, "m"));
+  assert.match(CODEX_JUDGE_CONFIG, /^web_search = "disabled"$/m);
 });

@@ -4,7 +4,25 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-v0.1.73 contains the read-only intake status correction (#444 / PR #494), guarded reconciliation of reviewed native hierarchy moves (#495 / PR #496), and typed initial/amendment projection lifecycle and settled-rejection cancellation with GET-only readback (#498 / PR #496), plus complete atomic controller lease publication and accurate retirement observation (#501). The first unpublished installed attempt stopped before external preflights and publication; its failed evidence is preserved while a bounded corrected attempt is prepared. Its [distribution gate](https://github.com/clockgrove/factory/issues/497) records exact source, installed and public verification. The stopped v0.1.72 service scenario remains unaccepted; [#448](https://github.com/clockgrove/factory/issues/448) requires a complete corrected one-artifact public successor before private [#445](https://github.com/clockgrove/factory/issues/445). Historical artifact evidence below remains bound to its original bytes.
+Published [v0.1.73](https://github.com/clockgrove/factory/releases/tag/v0.1.73)
+supplies read-only intake status (#444 / PR #494), controller-derived guarded native
+hierarchy moves (#495 / PR #496), typed initial/amendment projection effects across
+lifecycle consumers (#498 / PR #496), and atomic complete lease publication (#501 / PR #502).
+All 710 tests across 54 whole installed files and four reviewed
+model-free preflights passed without skips, followed by
+[independent public verification and completion](https://github.com/clockgrove/factory/issues/497#issuecomment-5964424472).
+The [immutable artifact record](BUILD-STATUS.md#immutable-v0173-artifact-record)
+binds exact source/tree, archive/tag/protection and acceptance. It preserves the
+failed 703/704 producer, the later 710/710 producer's readiness fixture failure and
+the reviewed separation of durable evidence from owned temporary sandbox scratch.
+Neither failed producer is accepted; published predecessors remain unchanged.
+
+Distribution acceptance does not dispose the historical ambiguous projection.
+[#499](https://github.com/clockgrove/factory/issues/499) remains a separate pending
+product decision. Actual #444/#447 live outcomes remain with the complete corrected
+one-artifact [public gate #448](https://github.com/clockgrove/factory/issues/448),
+which must be accepted before [private #445](https://github.com/clockgrove/factory/issues/445)
+on the same artifact and demonstrated scope.
 
 Published [v0.1.72](https://github.com/clockgrove/factory/releases/tag/v0.1.72) supplies truthful controller-derived aggregate joins (#483) and original-archive/complete installation integrity (#486) in [PR #484](https://github.com/clockgrove/factory/pull/484). All 514 tests across 50 whole installed files and seven reviewed model-free preflights passed without skips, followed by [independent public verification and release completion](https://github.com/clockgrove/factory/issues/485#issuecomment-5953125869). The seventh preserves the complete 49-file original evidence and semantic rejection; it supplies no new review or live acceptance. The first producer and restricted-host diagnostic failures, reviewed context correction and unchanged archive bytes are recorded in the [immutable artifact record](BUILD-STATUS.md#immutable-v0172-artifact-record). Actual #448/#445 remain unaccepted. The operator subsequently [approved the named #448 v0.1.71-to-v0.1.72 continuation](https://github.com/clockgrove/factory/issues/448#issuecomment-5957494560); see its [exact scope and event bounds](BUILD-STATUS.md#approved-448-current-runtime-qualification). The earlier one-artifact attempt remains failed/unaccepted, authentic phases retain their real artifact identities, and fresh independent whole-gate acceptance is required. This exception changes no other artifact gate: public #448 acceptance must precede private #445 on the same v0.1.72 artifact and demonstrated scope.
 

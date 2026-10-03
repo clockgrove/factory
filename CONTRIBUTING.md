@@ -17,7 +17,7 @@ npm run build
 
 Keep optional dependencies enabled for source development: TypeScript and notice checks inspect the optional harness SDKs.
 
-Read [AGENTS.md](AGENTS.md) for contributor rules and the [implementation plan](docs/IMPLEMENTATION-PLAN.md) for architectural boundaries. Factory must never execute an Objective against its own source repository.
+Read [AGENTS.md](AGENTS.md) for contributor rules and the [architecture](docs/ARCHITECTURE.md) for how Factory works and its safety invariants. Factory must never execute an Objective against its own source repository.
 
 ## Checks
 
@@ -51,7 +51,6 @@ Preserve these boundaries:
 
 - Keep Factory configuration, credentials, attempts, and snapshots outside target repositories.
 - Preserve exact commit, tree, and GitHub head checks at publication and Objective completion.
-- Keep archived code as reference only. Record reimplemented behavior in [the provenance ledger](docs/SOURCE-PROVENANCE.md); do not copy archived runtime files or tests.
 - Target repositories own their product requirements, validation commands, access controls, and acceptance.
 
 ## Contributing versus using Factory

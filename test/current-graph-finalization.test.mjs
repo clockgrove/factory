@@ -209,7 +209,9 @@ test("sealed closure reconciles lost acknowledgement without model replay and re
         s.work.result.githubClosure = "pending";
       },
       (s) => {
-        s.work.result.pendingEffect = "merge";
+        // An interrupted delivery repeats its step; it is never terminal.
+        s.work.result.status = "running";
+        s.work.result.step = "deliver";
       },
       (s) => {
         s.coordinator.processes = [{ pid: 999, startTime: "1" }];

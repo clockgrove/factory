@@ -94,8 +94,13 @@ Each Objective has one atomic JSON snapshot at `$XDG_STATE_HOME/clockgrove-facto
 
 One controller owns an Objective at a time, through a lock and a private control socket. Other CLI commands (`status`, `pause`, `cancel`) talk to that owner.
 
+- **Every step is safe to repeat.** Factory never needs to know whether an interrupted call succeeded, _because_ every effect has a stable identity. A restart re-reads its snapshot and GitHub and repeats the current step:
+  - model calls (planning, reviews, diagnosis) have no side effects, so they are asked again;
+  - issues are found by their `factory:` marker before any is created;
+  - a PR is found by its deterministic branch before one is opened;
+  - a merge first checks whether the PR or stack is already merged at the expected head.
 - **Restart** reattaches to the recorded attempt handle; it does not start a second agent.
-- **Before an external effect** (publish, merge, review submission, issue projection), Factory records that the effect is pending. If the result is lost, the effect is **unknown** and that work stops until it is reconciled from GitHub or the operator decides. _Because_ replaying could create duplicate PRs or spend twice, Factory stops rather than guesses.
+- **Real decisions still stop:** an edited or closed Objective, a PR changed by someone else, failing required checks, or a criterion the reviewer could not decide.
 - **Failures stop.** A failed Work Item keeps its evidence. A new attempt needs `factory retry` or an admitted repair policy.
 
 Diagnostics (`factory diagnostics`, `logs`, `analyze`) are a private timeline of observations. They never drive lifecycle decisions.
@@ -137,7 +142,7 @@ The runner, scheduler, validator, state store and Git model are deliberately con
 2. **Validation uses the exact tree.** Every receipt names the tree it ran on, and delivery checks the PR head matches. _Because_ "tests passed" means nothing for a different commit.
 3. **Commands need authority.** A validation command must be observed in the base repository or declared in a pinned source. _Because_ the model must not invent what counts as passing.
 4. **Owned paths are enforced.** A result that changes files outside its ownership is rejected. _Because_ parallel items must not overwrite each other.
-5. **Uncertain effects are never replayed.** _Because_ duplicates and double spending are worse than stopping.
+5. **Every effect is safe to repeat.** Issues, PRs and merges are found by stable identities before they are created, and model calls have no side effects. _Because_ recovery is then just "re-read and continue", an interrupted run never needs manual reconciliation.
 6. **Failures stop; retries are explicit or pre-admitted.** _Because_ the operator controls rework and spending.
 7. **Acceptance is proven, not assumed.** Every criterion needs supplied evidence, and the Objective closes only after final validation on the integrated head. _Because_ closed child issues do not prove the outcome.
 8. **The target repository is the authority** for requirements, commands, branch protection and acceptance. Factory does not change the target's protection rules.

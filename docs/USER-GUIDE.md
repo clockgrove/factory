@@ -386,9 +386,7 @@ For an ordinary failed or cancelled unpublished item without an admitted repair 
 factory retry --objective ISSUE_NUMBER --item WORK_ITEM_ID
 ```
 
-An ordinary restart may reattach to an identifiable worker or continue a supported validation or decision pause. It does not guarantee recovery from every controller interruption.
-
-If a regular Work Item remains `running` at `deliver`, `run` refuses the ambiguous active state even if a branch or PR exists. There is no supported automatic continuation for that publication window. Preserve the original snapshot, plan/configuration identities, attempt, validated commit/tree, review evidence, and remote branch/PR heads. Use status and read-only GitHub inspection; do not edit state, republish, replay a worker, or use `retry` or `decide-result` to bypass the refusal. Manual target disposition requires explicit operator direction and does not complete the original Objective. See [support](../SUPPORT.md) for reporting a redacted reproduction.
+If the controller stops for any reason, run the Objective again. Factory re-reads its state and GitHub and repeats the step it was on: planning and reviews are asked again, issues and PRs are found by their markers and branches instead of being created twice, and a merge that already happened is confirmed rather than repeated. A running worker is reattached by its recorded handle.
 
 ## Allow diagnosed repairs
 

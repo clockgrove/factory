@@ -225,7 +225,7 @@ test("exact candidate recovery retains failure and rejects ambiguity and unchang
     () => applyWorkCorrection(state, "result", correction),
     /Unchanged/,
   );
-  work.pendingEffect = "publication";
+  work.pullRequest = 1;
   assert.throws(
     () => applyWorkCorrection(state, "result", correction),
     /unsettled/,
@@ -278,7 +278,6 @@ test("settled failures ignore sibling processes while correction still requires 
     );
     assert.equal(state.allowanceConsumption, undefined);
     for (const guard of [
-      { work: { pendingEffect: "publication" } },
       { work: { pullRequest: 1 } },
       { coordinator: { cancelError: "owned cancellation unresolved" } },
     ]) {
@@ -1430,7 +1429,6 @@ test("a lost diagnosis is reissued once charged; ambiguous publication never aut
     }),
     /unknown/,
   );
-  assert.equal(work.pendingEffect, undefined);
   assert.equal(work.recovery.phase, "diagnosing");
   const charged = state.allowanceConsumption.implementationRepairs;
   // A restart asks again; the diagnosis was already charged when first sent.
@@ -1447,7 +1445,7 @@ test("a lost diagnosis is reissued once charged; ambiguous publication never aut
   );
   assert.equal(calls, 2);
   assert.equal(restarted.allowanceConsumption.implementationRepairs, charged);
-  work.pendingEffect = "publication";
+  work.pullRequest = 1;
   recordWorkFailure(state, "result", new Error("publication response lost"));
   assert.equal(work.recovery.failure.classification, "uncertain");
   assert.equal(

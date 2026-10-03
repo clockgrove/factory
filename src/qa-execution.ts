@@ -98,10 +98,6 @@ export async function runQaItem(args: {
   };
   try {
     const candidate = objectiveCandidate(state);
-    if (work.pendingEffect)
-      throw new Error(
-        `QA ${item.id} submitted ${work.pendingEffect} has unknown outcome; operator direction required`,
-      );
     if (
       (item.kind !== "qa" && item.kind !== "aggregate") ||
       !item.dependencies.every(
@@ -259,7 +255,6 @@ export async function runQaItem(args: {
         },
       ],
     });
-    delete work.pendingEffect;
     if (args.cancelled()) throw new Error("Objective cancelled");
     delete work.acceptancePending;
     if (candidate.basis === "current-graph-integration")
@@ -271,10 +266,7 @@ export async function runQaItem(args: {
     args.phases?.release(item.id);
     await closeWorkItem(state, item.id, args.github, save, false);
   } catch (error) {
-    if (error instanceof CompletedModelInvocationError)
-      delete work.pendingEffect;
     if (error instanceof AcceptanceDecisionRequired) {
-      delete work.pendingEffect;
       args.phases?.release(item.id);
       work.status = "waiting";
       work.step = "approve-result";
@@ -282,7 +274,7 @@ export async function runQaItem(args: {
       save();
       return;
     }
-    if (!work.pendingEffect) args.phases?.release(item.id);
+    args.phases?.release(item.id);
     if (work.status !== "done") work.status = "failed";
     work.error = error instanceof Error ? error.message : String(error);
     save();

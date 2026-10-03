@@ -56,7 +56,6 @@ export function assertTerminalEligibility(state: FactoryState): void {
   for (const work of Object.values(state.work)) {
     if (
       work.status === "running" ||
-      work.pendingEffect ||
       (work.discovery?.scope === "in-scope" &&
         work.discoveryDisposition !== "accepted")
     )

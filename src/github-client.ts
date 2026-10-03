@@ -266,3 +266,32 @@ export class GitHubClient {
 }
 
 export const sharedGitHubClient = new GitHubClient();
+
+/**
+ * The merge commit of a merged pull request, read from its issue timeline.
+ * PR responses in the pinned API version omit `merge_commit_sha`.
+ */
+export async function timelineMergeCommit(
+  client: GitHubClient,
+  repository: string,
+  pullRequest: number,
+): Promise<string> {
+  const events = await client.paginate<{ event?: string; commit_id?: unknown }>(
+    `repos/${repository}/issues/${pullRequest}/timeline`,
+  );
+  const commits = new Set<string>();
+  for (const event of events) {
+    if (event?.event !== "merged") continue;
+    if (
+      typeof event.commit_id !== "string" ||
+      !/^[a-f0-9]{40}$/.test(event.commit_id)
+    )
+      throw new Error(`PR #${pullRequest} has malformed merge evidence`);
+    commits.add(event.commit_id);
+  }
+  if (commits.size !== 1)
+    throw new Error(
+      `PR #${pullRequest} has missing or conflicting merge evidence`,
+    );
+  return [...commits][0]!;
+}

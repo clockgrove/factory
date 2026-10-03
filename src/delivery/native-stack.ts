@@ -1,4 +1,8 @@
-import { GitHubClient, sharedGitHubClient } from "../github-client.js";
+import {
+  GitHubClient,
+  sharedGitHubClient,
+  timelineMergeCommit,
+} from "../github-client.js";
 
 type Pull = {
   number: number;
@@ -49,27 +53,7 @@ export class NativeStackDelivery {
       throw new Error(
         `Native stack PR #${layer.pullRequest} has no matching integrated head`,
       );
-    const events = await this.client.paginate<{
-      event?: string;
-      commit_id?: unknown;
-    }>(`repos/${this.repository}/issues/${layer.pullRequest}/timeline`);
-    const commits = new Set<string>();
-    for (const event of events) {
-      if (event?.event !== "merged") continue;
-      if (
-        typeof event.commit_id !== "string" ||
-        !/^[a-f0-9]{40}$/.test(event.commit_id)
-      )
-        throw new Error(
-          `Native stack PR #${layer.pullRequest} has malformed merge evidence`,
-        );
-      commits.add(event.commit_id);
-    }
-    if (commits.size !== 1)
-      throw new Error(
-        `Native stack PR #${layer.pullRequest} has missing or conflicting merge evidence`,
-      );
-    return [...commits][0]!;
+    return timelineMergeCommit(this.client, this.repository, layer.pullRequest);
   }
 
   private async assertLayers(

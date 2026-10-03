@@ -79,19 +79,6 @@ export async function runRegularGraph(args: {
   const phases = phaseAdmission(config, state, save, args.cancelled);
   const graph = state.graph;
   const baseSha = state.baseSha;
-  // Refuse the whole restart before any resumable peer can perform work.
-  for (const item of graph.items) {
-    const work = state.work[item.id]!;
-    if (work.pendingEffect)
-      throw new Error(
-        `Work Item ${item.id} submitted ${work.pendingEffect} has unknown outcome; operator direction required`,
-      );
-    if (work.status === "running" && work.step === "deliver") {
-      throw new Error(
-        `Work Item ${item.id} has ambiguous active state at deliver; operator direction required; interrupted regular delivery cannot be resumed automatically. Preserve the original snapshot and exact remote branch/PR evidence; do not retry, edit state, or use a result decision to bypass this refusal`,
-      );
-    }
-  }
   let failure: unknown;
   let mergeTail: Promise<void> = Promise.resolve();
   const integratePublished = async (
@@ -119,23 +106,30 @@ export async function runRegularGraph(args: {
             throw new DeliveryReadinessPending();
           work.preIntegrationChecks = observation.namedChecks ?? [];
           delete work.waitingReason;
-          work.pendingEffect = "merge";
           save();
         });
-        delete work.pendingEffect;
         await gitAsync(
           config.checkout,
           "fetch",
           "origin",
           await github.defaultBranch(),
         );
-        const observedHead = git(config.checkout, "rev-parse", "FETCH_HEAD");
-        if (observedHead !== merged.integratedSha) {
+        // Other work may have merged since; the merge commit only needs to
+        // be part of the default branch.
+        try {
+          git(
+            config.checkout,
+            "merge-base",
+            "--is-ancestor",
+            merged.integratedSha,
+            "FETCH_HEAD",
+          );
+        } catch {
           throw new Error(
-            `Default branch moved after PR #${published.pullRequest} merged; expected ${merged.integratedSha}, observed ${observedHead}`,
+            `Default branch does not contain the merge of PR #${published.pullRequest} (${merged.integratedSha})`,
           );
         }
-        return observedHead;
+        return merged.integratedSha;
       };
       const observedHead = args.diagnostics
         ? await args.diagnostics.span(
@@ -169,6 +163,50 @@ export async function runRegularGraph(args: {
     phases.release(item.id);
     await closeWorkItem(state, item.id, github, save, false);
   };
+  // Publication finds an existing open PR for the deterministic branch
+  // before creating one, so a restart at "deliver" simply runs this again.
+  const deliverReviewed = async (
+    item: WorkItem,
+    itemBase: string,
+  ): Promise<void> => {
+    const work = state.work[item.id]!;
+    await phases.reserve(item.id, "delivery");
+    work.step = "deliver";
+    save();
+    const branch = `factory/objective-${objective}/${item.id}`;
+    const publish = () =>
+      delivery.publish({
+        item,
+        baseSha: itemBase,
+        treeSha: work.treeSha!,
+        changeRef: work.changeRef!,
+        branch,
+        lfs: Boolean(work.selectedAssetSet),
+      });
+    await args.reconcile?.();
+    const published = args.diagnostics
+      ? await args.diagnostics.span(
+          {
+            runId: state.runId,
+            itemId: item.id,
+            attemptId: work.attempt,
+            operation: "github-publication",
+            metadata: {
+              baseSha: itemBase,
+              treeSha: work.treeSha!,
+              headSha: work.changeRef!,
+            },
+          },
+          publish,
+          (result) => ({ pullRequest: result.pullRequest }),
+        )
+      : await publish();
+    work.pullRequest = published.pullRequest;
+    work.status = "published";
+    delete work.step;
+    save();
+    await integratePublished(item, published);
+  };
   const execute = async (
     item: WorkItem,
     itemBase: string,
@@ -201,6 +239,10 @@ export async function runRegularGraph(args: {
           paused: args.paused,
           phases,
         });
+        return;
+      }
+      if (work.step === "deliver" && work.validation) {
+        await deliverReviewed(item, itemBase);
         return;
       }
       if (!existingHandle && work.step === "execute") {
@@ -448,49 +490,9 @@ export async function runRegularGraph(args: {
                 : "failed",
           )
         : await reviewResult();
-      delete work.pendingEffect;
       delete work.acceptancePending;
       if (args.cancelled()) throw new Error("Objective cancelled");
-      await phases.reserve(item.id, "delivery");
-      work.step = "deliver";
-      save();
-      const branch = `factory/objective-${objective}/${item.id}`;
-      const publish = () =>
-        delivery.publish({
-          item,
-          baseSha: itemBase,
-          treeSha: work.treeSha!,
-          changeRef: work.changeRef!,
-          branch,
-          lfs: Boolean(work.selectedAssetSet),
-        });
-      await args.reconcile?.();
-      work.pendingEffect = "publication";
-      save();
-      const published = args.diagnostics
-        ? await args.diagnostics.span(
-            {
-              runId: state.runId,
-              itemId: item.id,
-              attemptId: work.attempt,
-              operation: "github-publication",
-              metadata: {
-                baseSha: itemBase,
-                treeSha: work.treeSha!,
-                headSha: work.changeRef!,
-              },
-            },
-            publish,
-            (result) => ({ pullRequest: result.pullRequest }),
-          )
-        : await publish();
-      work.pullRequest = published.pullRequest;
-      delete work.pendingEffect;
-      save();
-      work.status = "published";
-      delete work.step;
-      save();
-      await integratePublished(item, published);
+      await deliverReviewed(item, itemBase);
     } catch (error) {
       if (error instanceof DeliveryReadinessPending) {
         work.waitingReason = error.message;
@@ -498,10 +500,7 @@ export async function runRegularGraph(args: {
         save();
         return;
       }
-      if (error instanceof CompletedModelInvocationError)
-        delete work.pendingEffect;
       if (error instanceof AcceptanceDecisionRequired) {
-        delete work.pendingEffect;
         phases.release(item.id);
         work.status = "waiting";
         work.step = "approve-result";
@@ -519,8 +518,7 @@ export async function runRegularGraph(args: {
       )
         work.authentication = error.authentication;
       else delete work.authentication;
-      if (!work.pendingEffect && work.phaseReservation !== "coding")
-        phases.release(item.id);
+      if (work.phaseReservation !== "coding") phases.release(item.id);
       const isolated = recordWorkFailure(state, item.id, error);
       if (
         isolated &&
@@ -578,7 +576,7 @@ export async function runRegularGraph(args: {
       continue;
     }
     if (
-      work.step === "validate" &&
+      (work.step === "validate" || work.step === "deliver") &&
       work.baseSha &&
       work.changeRef &&
       work.treeSha

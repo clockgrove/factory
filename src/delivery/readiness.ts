@@ -103,7 +103,6 @@ export function isReadinessWait(state: FactoryState, id: string): boolean {
   const work = state.work[id];
   return Boolean(
     work &&
-      !work.pendingEffect &&
       work.waitingReason &&
       (work.status === "published" ||
         (work.status === "running" &&

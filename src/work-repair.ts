@@ -38,7 +38,6 @@ export function recordWorkFailure(
   const work = state.work[id]!;
   const detail = error instanceof Error ? error.message : String(error);
   const isolated =
-    !work.pendingEffect &&
     !work.pullRequest &&
     !state.coordinator?.cancelError &&
     (error instanceof SettledAttemptFailure ||
@@ -84,7 +83,6 @@ export function applyWorkCorrection(
   const work = state.work[id];
   if (
     !work ||
-    work.pendingEffect ||
     work.pullRequest ||
     work.integratedSha ||
     state.cancelRequested ||

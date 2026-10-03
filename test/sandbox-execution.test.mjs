@@ -18,7 +18,6 @@ import { sandboxFiles } from "../dist/execution/sandbox-files.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { executionContext } from "../dist/execution/checkpoint.js";
 import { SettledAttemptFailure } from "../dist/work-repair.js";
-import { Interruption } from "../dist/contracts.js";
 import {
   FixtureSandboxProvider,
   writeSandboxInvoker,
@@ -166,10 +165,8 @@ test("lost create acknowledgement adopts the tagged sandbox and completes", asyn
   const f = fixture(t);
   f.provider.createUnknown = true;
   f.provider.autoRelease = true;
-  await assert.rejects(
-    f.driver.start(f.request, f.context),
-    (error) => error instanceof Interruption,
-  );
+  // The lost response leaves a recorded phase for collection to resolve.
+  await f.driver.start(f.request, f.context);
   assert.equal(f.work.execution.data.phase, "creating");
   const result = await new SandboxExecutionDriver(f.options).collect(
     JSON.parse(JSON.stringify(f.work.execution)),
@@ -180,41 +177,49 @@ test("lost create acknowledgement adopts the tagged sandbox and completes", asyn
   assert.equal(f.provider.maxActive, 1);
   assert.equal(f.provider.resources.size, 0);
 });
-test("lost harness start destroys the sandbox and interrupts the attempt without another start", async (t) => {
+test("lost harness start destroys the sandbox and interrupts the attempt directly", async (t) => {
   const f = fixture(t);
   f.provider.executeUnknown = true;
+  // Harness start cannot repeat in one sandbox, so no step interruption is spent first.
   await assert.rejects(
     f.driver.start(f.request, f.context),
-    (error) => error instanceof Interruption,
-  );
-  const starts = f.provider.starts;
-  const restored = JSON.parse(JSON.stringify(f.work.execution));
-  const observed = await new SandboxExecutionDriver(f.options).observe(
-    restored,
-    f.context,
-  );
-  assert.equal(observed.interrupted, true);
-  await assert.rejects(
-    new SandboxExecutionDriver(f.options).collect(restored, f.context),
     (error) =>
       error instanceof SettledAttemptFailure &&
       error.classification === "interruption",
   );
-  assert.equal(f.provider.starts, starts);
   assert.equal(f.provider.resources.size, 0);
   assert.equal(f.work.execution.data.phase, "destroyed");
+  const observed = await new SandboxExecutionDriver(f.options).observe(
+    JSON.parse(JSON.stringify(f.work.execution)),
+    f.context,
+  );
+  assert.equal(observed.interrupted, true);
 });
-test("cancellation after a lost create adopts and destroys the tagged sandbox", async (t) => {
+test("cancellation after a lost create finds and destroys the tagged sandbox without creating one", async (t) => {
   const f = fixture(t);
   f.provider.createUnknown = true;
-  await assert.rejects(f.driver.start(f.request, f.context), /lost/);
+  await f.driver.start(f.request, f.context);
   assert.equal(f.provider.resources.size, 1);
+  const creates = f.provider.creates;
   await new SandboxExecutionDriver(f.options).cancel(
     JSON.parse(JSON.stringify(f.work.execution)),
     f.context,
   );
   assert.equal(f.provider.resources.size, 0);
   assert.equal(f.work.execution.data.terminal, "cancelled");
+  // With nothing tagged, cancellation still never creates a sandbox.
+  const other = fixture(t);
+  other.provider.createUnknown = true;
+  other.provider.create = async () => {
+    throw Object.assign(Error("create never arrived"), { status: 503 });
+  };
+  await other.driver.start(other.request, other.context);
+  await new SandboxExecutionDriver(other.options).cancel(
+    JSON.parse(JSON.stringify(other.work.execution)),
+    other.context,
+  );
+  assert.equal(other.provider.resources.size, 0);
+  assert.equal(f.provider.creates, creates);
 });
 test("wrong reply digest, identity and unsafe result path fail closed and settle the sandbox; cleanup failure remains visible", async (t) => {
   for (const variant of [

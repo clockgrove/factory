@@ -14,9 +14,9 @@ import { Interruption } from "../contracts.js";
 import {
   SettledAttemptFailure,
   failAttempt,
+  retryTransient,
   transientRequestFailure,
 } from "../work-repair.js";
-import { submitted } from "./checkpoint.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import { collectWorktreeResult } from "./local.js";
 import {
@@ -265,6 +265,13 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     interrupted: boolean,
   ): Promise<never> {
     const data = this.active(handle);
+    // This API surface cannot find sessions by tag, so a create whose
+    // response was lost may have left a session holding the input archive.
+    if (!data.stopped && !data.sessionId)
+      context.observeOrphan?.({
+        resource: "session",
+        detail: `Session create for attempt ${handle.identity} has an unknown outcome at ${new Date().toISOString()}; a session with metadata factory_attempt=${handle.identity} may hold the input archive`,
+      });
     data.stopped ??= { detail, interrupted };
     this.save(handle, context);
     try {
@@ -354,49 +361,47 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     });
     try {
       const session = object(
-        await submitted(
-          this.request(data, "POST", "/agents/sessions", {
-            agent: {
-              model: this.args.config.model,
-              reasoning: { effort: this.args.config.reasoningEffort },
-              multi_agent: { enabled: false },
-              tools: [],
-              instructions:
-                "Perform only the supplied Work Item in /workspace/repo. Preserve HEAD. Export the finished work by running python3 /workspace/factory-export.py before finishing.",
-            },
-            environment: {
-              type: "openai_hosted",
-              container_size: this.args.config.containerSize,
-              network: { access: "disabled" },
-              files: [
-                {
-                  type: "inline",
-                  path: "/workspace/input.tar",
-                  data: prepared.archive.toString("base64"),
-                },
-                {
-                  type: "inline",
-                  path: "/workspace/factory-binding.json",
-                  data: Buffer.from(binding).toString("base64"),
-                },
-                {
-                  type: "inline",
-                  path: "/workspace/factory-export.py",
-                  data: Buffer.from(openAIExportScript).toString("base64"),
-                },
-              ],
-              setup_commands: [
-                {
-                  command: `echo '${data.inputDigest}  /workspace/input.tar' | sha256sum -c - && tar -xf /workspace/input.tar -C /workspace && test "$(git -C /workspace/repo rev-parse HEAD)" = '${input.baseSha}'`,
-                },
-              ],
-            },
-            metadata: {
-              factory_attempt: attemptId,
-              factory_input: data.inputDigest,
-            },
-          }),
-        ),
+        await this.request(data, "POST", "/agents/sessions", {
+          agent: {
+            model: this.args.config.model,
+            reasoning: { effort: this.args.config.reasoningEffort },
+            multi_agent: { enabled: false },
+            tools: [],
+            instructions:
+              "Perform only the supplied Work Item in /workspace/repo. Preserve HEAD. Export the finished work by running python3 /workspace/factory-export.py before finishing.",
+          },
+          environment: {
+            type: "openai_hosted",
+            container_size: this.args.config.containerSize,
+            network: { access: "disabled" },
+            files: [
+              {
+                type: "inline",
+                path: "/workspace/input.tar",
+                data: prepared.archive.toString("base64"),
+              },
+              {
+                type: "inline",
+                path: "/workspace/factory-binding.json",
+                data: Buffer.from(binding).toString("base64"),
+              },
+              {
+                type: "inline",
+                path: "/workspace/factory-export.py",
+                data: Buffer.from(openAIExportScript).toString("base64"),
+              },
+            ],
+            setup_commands: [
+              {
+                command: `echo '${data.inputDigest}  /workspace/input.tar' | sha256sum -c - && tar -xf /workspace/input.tar -C /workspace && test "$(git -C /workspace/repo rev-parse HEAD)" = '${input.baseSha}'`,
+              },
+            ],
+          },
+          metadata: {
+            factory_attempt: attemptId,
+            factory_input: data.inputDigest,
+          },
+        }),
       );
       data.sessionId = id(session.id);
       data.environmentId = id(object(session.environment).id);
@@ -404,6 +409,22 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       this.save(handle, context);
       await this.submitInput(handle, context);
     } catch (error) {
+      if (
+        !context.cancelled() &&
+        !this.expired(data) &&
+        transientRequestFailure(error)
+      ) {
+        // A known session's recorded phase is resolved by collection. A lost
+        // create cannot be found, so the attempt ends here without spending
+        // a step interruption first.
+        if (data.sessionId) return handle;
+        await this.settle(
+          handle,
+          context,
+          "Managed session creation outcome is unknown; repeating with a fresh attempt",
+          true,
+        );
+      }
       await this.fail(error, handle, context);
     }
     return handle;
@@ -432,8 +453,11 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     this.remaining(data);
     data.phase = "input-submitted";
     this.save(handle, context);
-    await submitted(
-      this.request(data, "POST", `/agents/sessions/${data.sessionId}/events`, {
+    await this.request(
+      data,
+      "POST",
+      `/agents/sessions/${data.sessionId}/events`,
+      {
         events: [
           {
             type: "agent.session.input.message",
@@ -453,7 +477,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
             ],
           },
         ],
-      }),
+      },
     );
     data.phase = "input-accepted";
     this.save(handle, context);
@@ -488,9 +512,15 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       };
     if (data.phase === "prepared")
       return { state: "running", detail: "Preparing the managed session" };
-    const session = object(
-      await this.request(data, "GET", `/agents/sessions/${data.sessionId}`),
+    const current = await this.request(
+      data,
+      "GET",
+      `/agents/sessions/${data.sessionId}`,
     );
+    // A session that no longer exists has ended; its attempt is settled.
+    if (current === null)
+      return { state: "failed", detail: "Managed session no longer exists" };
+    const session = object(current);
     const turns = await this.pages(
       data,
       `/agents/sessions/${data.sessionId}/turns`,
@@ -610,6 +640,9 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
   ): Promise<void> {
     const data = this.active(handle);
     if (data.phase === "disposed") return;
+    // Each cleanup gets a fresh window, so cleanup resumed after an outage
+    // longer than the window still runs.
+    data.cleanupStartedAt = Date.now();
     if (!data.sessionId || data.phase === "prepared" || data.terminal) {
       data.terminal ??= terminal;
       await this.dispose(handle, context);
@@ -619,15 +652,21 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       data.phase !== "cancel-submitted" &&
       data.phase !== "delete-submitted"
     ) {
-      data.cleanupStartedAt ??= Date.now();
       data.phase = "cancel-submitted";
       this.save(handle, context);
-      await this.request(
-        data,
-        "POST",
-        `/agents/sessions/${data.sessionId}/events`,
-        { events: [{ type: "agent.session.input.cancel" }] },
-      );
+      try {
+        await this.request(
+          data,
+          "POST",
+          `/agents/sessions/${data.sessionId}/events`,
+          { events: [{ type: "agent.session.input.cancel" }] },
+        );
+      } catch (error) {
+        // A session that no longer exists has nothing left to cancel.
+        if (!(error instanceof AgentsApiError && error.status === 404))
+          throw error;
+        data.phase = "delete-submitted";
+      }
     }
     while (data.phase !== "delete-submitted") {
       const observed = await this.observe(handle, context);
@@ -677,9 +716,13 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     context: ExecutionContext,
   ): Promise<ExecutionResult> {
     const data = this.active(handle);
-    if (data.phase === "prepared") await this.submitInput(handle, context);
     while (true) {
-      const observed = await this.observe(handle, context);
+      // Each pass resolves the recorded phase first, so a transient failure
+      // is retried in place; a lost input is resolved from the turn list.
+      const observed = await retryTransient(async () => {
+        if (data.phase === "prepared") await this.submitInput(handle, context);
+        return this.observe(handle, context);
+      }, transientRequestFailure);
       if (observed.state === "complete") break;
       if (observed.state !== "running")
         await this.settle(

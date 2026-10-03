@@ -51,21 +51,22 @@ object is never transported. Each invocation uses durable serialized harness ide
 the harness remains responsible for its declared restart-safe semantics and containment.
 
 Factory checkpoints its resource/process identities in the existing atomic Work Item
-snapshot before external mutations. A lost response interrupts the step, and the
-repeated step resolves it:
+snapshot before external mutations. A response lost in transit (network error, timeout,
+HTTP 408, 429 or 5xx) is resolved without spending a step interruption:
 
-- **Create:** `create` tags the sandbox with the attempt and adopts an existing tagged
-  sandbox, so repeating it never makes a second one.
+- **Create:** `create` tags the sandbox with the attempt and adopts the sandbox `find`
+  returns, so repeating it never makes a second one. Cancellation uses `find` only and
+  never creates a sandbox.
 - **Preparation or harness start:** neither can repeat inside one sandbox, so Factory
-  destroys the sandbox and repeats the Work Item with a fresh attempt.
+  destroys the sandbox at once and repeats the Work Item with a fresh attempt.
 - **Observe or collect invocation:** these only read the harness, so Factory invokes
   them again.
 
-A restarted controller observes, cancels or collects the same resource. A provider request
-that fails in transit (network error, timeout, HTTP 404, 408, 429 or 5xx) interrupts the
-step, which reattaches to the same sandbox. Any other failure, including a harness that ends
-without a complete result or a rejected result, destroys the sandbox before the attempt
-ends, so a repeated attempt never runs beside it. No provider retry policy, second scheduler,
+A restarted controller observes, cancels or collects the same resource. Collection retries
+transient failures in place for up to two minutes before it interrupts the step, which
+then reattaches to the same sandbox. Any other failure destroys the sandbox before the
+attempt ends, so a repeated attempt never runs beside it. This includes a harness that ends
+without a complete result, a rejected result and a sandbox that no longer exists. No provider retry policy, second scheduler,
 registry, service installer or operational journal is added. Existing explicit authority
 and retry limits still apply.
 

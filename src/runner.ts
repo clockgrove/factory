@@ -2121,14 +2121,16 @@ async function runObjectivePass(
         )
           continue;
         try {
-          if (
-            (
-              await driver.observe(
-                structuredClone(work.execution),
-                executionContext(work, () => saveState(path, current)),
-              )
-            ).state === "running"
-          )
+          // Anything short of a complete result may still hold a live remote
+          // worker (an interrupted or unresolved attempt reports "failed"),
+          // so cancel it; cancelling a settled handle is a no-op.
+          const observed = await driver
+            .observe(
+              structuredClone(work.execution),
+              executionContext(work, () => saveState(path, current)),
+            )
+            .catch(() => undefined);
+          if (observed?.state !== "complete")
             await driver.cancel(
               structuredClone(work.execution),
               executionContext(work, () => saveState(path, current)),

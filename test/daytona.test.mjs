@@ -258,6 +258,9 @@ test("Daytona create adopts the sandbox tagged with its attempt instead of creat
   assert.deepEqual(h.data, { owner });
   assert.equal(f.calls.filter((c) => c[0] === "create").length, 1);
   await f.provider.destroy(h);
+  // Lookup alone never creates a sandbox.
+  assert.equal(await f.provider.find({ attemptId: "attempt" }), undefined);
+  assert.equal(f.calls.filter((c) => c[0] === "create").length, 1);
   assert.equal(f.calls.filter((c) => c[0] === "delete").length, 1);
 });
 

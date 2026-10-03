@@ -82,27 +82,33 @@ continuation snapshot. A stopped stream and an idle session do not establish
 success. Restart reads current session and paginated turn/artifact history.
 Unexpected additional turns stop the attempt.
 
-A lost response interrupts the step, and the repeated step resolves it:
+A response lost in transit (network error, timeout, HTTP 408, 429 or 5xx) is
+resolved without spending a step interruption:
 
 - **Session create:** the API used here cannot list sessions by attempt tag, so
-  Factory repeats the Work Item with a fresh attempt. A session the lost request
-  created never receives input.
+  the attempt ends at once as an interruption and the Work Item repeats with a
+  fresh attempt. A session the lost request created never receives input, but
+  it holds the input archive; see operator cleanup below.
 - **Work Item input:** a recorded turn means the input was accepted, and the
   attempt continues. Without one, Factory cancels and deletes the session and
   repeats the Work Item with a fresh attempt.
 - **Restart during hosted setup:** Factory waits for setup and submits the input.
 
-A read that fails in transit (network error, timeout, HTTP 404, 408, 429 or
-5xx) interrupts the step, which reattaches to the same session. Any other
-failure, including a failed turn, a rejected result or a passed attempt
-deadline, deletes the session and fails the attempt as an implementation
-failure, so a repeated attempt never runs beside it.
+Collection retries transient reads in place for up to two minutes before it
+interrupts the step, which then reattaches to the same session. Any other
+failure deletes the session and fails the attempt as an implementation failure,
+so a repeated attempt never runs beside it. This includes a refused request, a
+session that no longer exists (HTTP 404), a failed turn, a rejected result and a
+passed attempt deadline.
 
 The configured `timeoutSeconds` bounds the whole attempt, including setup and
-artifact retrieval; each request uses only the remaining time. Cancellation and
-resource deletion receive a separate window of the same duration, recorded in the
-continuation snapshot so restart cannot reset it. Thus attempt and cleanup can
-together take up to twice the configured duration.
+artifact retrieval; each request uses only the remaining time. Each cleanup
+receives a fresh window of the same duration, so cleanup resumed after an outage
+still runs.
+
+**Operator cleanup:** a lost create is recorded as a `possible-orphan`
+diagnostic with the attempt identity and time (see `factory diagnostics`).
+Delete any session with metadata `factory_attempt` equal to that attempt.
 
 Cancellation requests a stop and then confirms owned environment disposition.
 Successful collection retains its result, artifact identities and best-effort

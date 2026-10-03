@@ -196,9 +196,9 @@ for (const delivery of ["regular", "native-stack"])
 test("provider request failures in transit are transient; refusals are not", async () => {
   const { transientRequestFailure } = await import("../dist/work-repair.js");
   const status = (code) => Object.assign(new Error("http"), { status: code });
-  for (const code of [404, 408, 429, 500, 503])
+  for (const code of [408, 429, 500, 503])
     assert.equal(transientRequestFailure(status(code)), true, String(code));
-  for (const code of [400, 401, 403, 409, 422])
+  for (const code of [400, 401, 403, 404, 409, 422])
     assert.equal(transientRequestFailure(status(code)), false, String(code));
   assert.equal(
     transientRequestFailure(
@@ -220,4 +220,54 @@ test("provider request failures in transit are transient; refusals are not", asy
   );
   assert.equal(transientRequestFailure(new TypeError("x is undefined")), false);
   assert.equal(transientRequestFailure(new Error("invalid result")), false);
+});
+
+test("transient failures are retried in place until the budget, then surface", async () => {
+  const { retryTransient, transientRequestFailure } = await import(
+    "../dist/work-repair.js"
+  );
+  const unavailable = () =>
+    Object.assign(new Error("unavailable"), { status: 503 });
+  let calls = 0;
+  assert.equal(
+    await retryTransient(
+      async () => {
+        if (++calls < 3) throw unavailable();
+        return "read";
+      },
+      transientRequestFailure,
+      1_000,
+      1,
+    ),
+    "read",
+  );
+  assert.equal(calls, 3);
+  calls = 0;
+  await assert.rejects(
+    retryTransient(
+      async () => {
+        calls++;
+        throw unavailable();
+      },
+      transientRequestFailure,
+      30,
+      5,
+    ),
+    /unavailable/,
+  );
+  assert.ok(calls >= 2 && calls < 10);
+  calls = 0;
+  await assert.rejects(
+    retryTransient(
+      async () => {
+        calls++;
+        throw Object.assign(new Error("forbidden"), { status: 403 });
+      },
+      transientRequestFailure,
+      1_000,
+      1,
+    ),
+    /forbidden/,
+  );
+  assert.equal(calls, 1);
 });

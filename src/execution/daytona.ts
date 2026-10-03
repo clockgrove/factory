@@ -172,27 +172,38 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       throw new Error("Daytona sandbox ownership mismatch");
     return s;
   }
-  async create({ attemptId }: SandboxRequest): Promise<SandboxHandle> {
+  /** Lists sandboxes labeled with the attempt, keeps one and deletes any extras. */
+  async find({
+    attemptId,
+  }: SandboxRequest): Promise<SandboxHandle | undefined> {
     if (!/^[a-zA-Z0-9_-]+$/.test(attemptId))
       throw new Error("Invalid Daytona attempt");
-    const handle = (s: Sandbox, owner: string): SandboxHandle => ({
-      identity: s.id,
-      attemptId,
-      workspace: `/tmp/factory/${attemptId}`,
-      data: { owner },
-    });
-    // Adopt a sandbox an earlier call created before its response was lost.
     const tagged: Sandbox[] = [];
     for await (const s of (await this.client()).list({
       labels: { "factory-attempt": attemptId },
     }))
       if (s.state !== "destroyed" && s.state !== "destroying") tagged.push(s);
-    const adopted = tagged.find((s) =>
+    const found = tagged.find((s) =>
       /^[a-f0-9-]{36}$/.test(s.labels["factory-owner"] ?? ""),
     );
     for (const s of tagged)
-      if (s !== adopted) await s.delete(this.config.timeoutSeconds, true);
-    if (adopted) return handle(adopted, adopted.labels["factory-owner"]!);
+      if (s !== found) await s.delete(this.config.timeoutSeconds, true);
+    return (
+      found && this.handle(found, attemptId, found.labels["factory-owner"]!)
+    );
+  }
+  private handle(s: Sandbox, attemptId: string, owner: string): SandboxHandle {
+    return {
+      identity: s.id,
+      attemptId,
+      workspace: `/tmp/factory/${attemptId}`,
+      data: { owner },
+    };
+  }
+  async create({ attemptId }: SandboxRequest): Promise<SandboxHandle> {
+    // Adopt a sandbox an earlier call created before its response was lost.
+    const found = await this.find({ attemptId });
+    if (found) return found;
     const created = randomUUID();
     const s = await (await this.client()).create(
       {
@@ -205,7 +216,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       },
       { timeout: this.config.timeoutSeconds },
     );
-    return handle(s, created);
+    return this.handle(s, attemptId, created);
   }
   async prepareRepository(
     h: SandboxHandle,

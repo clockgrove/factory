@@ -20,8 +20,11 @@ import type {
 } from "../contracts.js";
 import { Interruption } from "../contracts.js";
 import { pinnedGitAsync } from "../process.js";
-import { SettledAttemptFailure, failAttempt } from "../work-repair.js";
-import { submitted } from "./checkpoint.js";
+import {
+  SettledAttemptFailure,
+  failAttempt,
+  retryTransient,
+} from "../work-repair.js";
 import { collectWorktreeResult } from "./local.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import {
@@ -397,7 +400,9 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     try {
       await this.advance(handle, context);
     } catch (error) {
-      await this.fail(error, handle, context);
+      // A transient failure leaves a recorded phase that collection resolves.
+      if (context.cancelled() || this.expired(data) || !claudeTransient(error))
+        await this.fail(error, handle, context);
     }
     return handle;
   }
@@ -413,10 +418,18 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
         if (data.files.some((file) => file.name === name)) continue;
         if (context.cancelled())
           throw new Error("Claude preparation cancelled before upload");
-        // An upload whose response was lost leaves only an unreferenced file.
-        const file = await submitted(
-          this.client.upload(join(data.root, name), this.remaining(data)),
-        );
+        // An upload whose response was lost may leave an unreferenced file
+        // that cannot be found; it is recorded for operator cleanup.
+        const file = await this.client
+          .upload(join(data.root, name), this.remaining(data))
+          .catch((error: unknown) => {
+            if (claudeTransient(error))
+              context.observeOrphan?.({
+                resource: "file",
+                detail: `Upload of ${name} for attempt ${handle.identity} lost its response at ${new Date().toISOString()}; the provider may hold an unreferenced copy`,
+              });
+            throw error;
+          });
         if (!file.id) throw new Error("Claude upload returned no identity");
         data.files.push({ id: file.id, name });
         this.save(handle, context);
@@ -432,8 +445,10 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
           file_id: file.id,
           mount_path: `${uploads}/${file.name}`,
         }));
-      const session = await submitted(
-        this.client.create(handle.identity, resources, this.remaining(data)),
+      const session = await this.client.create(
+        handle.identity,
+        resources,
+        this.remaining(data),
       );
       data.sessionId = session.id;
       data.phase = "created";
@@ -467,15 +482,13 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       throw new Error("Claude input cancelled before bootstrap");
     data.phase = "bootstrap-submitted";
     this.save(handle, context);
-    const sent = await submitted(
-      this.client.send(
-        session.id,
-        {
-          type: "user.message",
-          content: [{ type: "text", text: this.bootstrapText(data) }],
-        },
-        this.remaining(data),
-      ),
+    const sent = await this.client.send(
+      session.id,
+      {
+        type: "user.message",
+        content: [{ type: "text", text: this.bootstrapText(data) }],
+      },
+      this.remaining(data),
     );
     const event = sent.data?.[0];
     if (sent.data?.length !== 1 || event?.type !== "user.message")
@@ -707,12 +720,10 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       throw new Error("Claude implementation cancelled before submission");
     data.phase = "implementation-submitted";
     this.save(handle, context);
-    const sent = await submitted(
-      this.client.send(
-        data.sessionId,
-        { type: "user.message", content: [{ type: "text", text }] },
-        this.remaining(data),
-      ),
+    const sent = await this.client.send(
+      data.sessionId,
+      { type: "user.message", content: [{ type: "text", text }] },
+      this.remaining(data),
     );
     const event = sent.data?.[0];
     if (sent.data?.length !== 1 || event?.type !== "user.message")
@@ -829,7 +840,9 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
   ): Promise<void> {
     const data = this.active(handle);
     if (data.phase === "disposed") return;
-    data.cleanupStartedAt ??= Date.now();
+    // Each cleanup gets a fresh window, so cleanup resumed after an outage
+    // longer than the window still runs.
+    data.cleanupStartedAt = Date.now();
     const session = data.sessionId
       ? await this.client.present(data.sessionId, this.remaining(data))
       : undefined;
@@ -891,8 +904,15 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     const data = this.active(handle);
     while (true) {
       if (context.cancelled()) throw new Error("Claude collection cancelled");
-      await this.advance(handle, context);
-      const observation = await this.observe(handle, context);
+      // Each pass resolves the recorded phase first, so a transient failure
+      // is retried in place without repeating a submission blindly.
+      const observation = await retryTransient(async () => {
+        await this.advance(handle, context);
+        const observed = await this.observe(handle, context);
+        if (observed.state === "running" && data.phase === "bootstrap-verified")
+          await this.submitImplementation(handle, context);
+        return observed;
+      }, claudeTransient);
       if (observation.state === "complete") break;
       if (observation.state !== "running")
         await this.settle(
@@ -901,9 +921,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
           observation.detail ?? `Claude execution ${observation.state}`,
           observation.interrupted === true,
         );
-      if (data.phase === "bootstrap-verified")
-        await this.submitImplementation(handle, context);
-      else if (data.phase !== "prepared" && data.phase !== "created")
+      if (data.phase !== "prepared" && data.phase !== "created")
         await this.wait(data);
     }
     const bytes = readFileSync(join(data.root, "result.json"));

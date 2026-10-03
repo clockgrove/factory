@@ -1,6 +1,6 @@
 import { assertDeliveryReady } from "./readiness.js";
 import { DeliveryReadinessPending } from "./readiness.js";
-import { executionContext } from "../execution/checkpoint.js";
+import { workerContext } from "../execution/checkpoint.js";
 import {
   recordWorkFailure,
   diagnoseWorkRepair,
@@ -257,10 +257,12 @@ export async function runRegularGraph(args: {
         baseSha: itemBase,
       });
     }
-    await phases.reserve(
-      item.id,
-      work.step === "execute" ? "coding" : "validation",
-    );
+    // A reattached worker keeps the coding slot it holds while it runs remotely.
+    if (work.step !== "execute" || work.phaseReservation !== "coding")
+      await phases.reserve(
+        item.id,
+        work.step === "execute" ? "coding" : "validation",
+      );
     if (work.step === "approve-asset") {
       const selected = work.assets?.find(
         (set) => set.id === work.selectedAssetSet,
@@ -311,16 +313,10 @@ export async function runRegularGraph(args: {
             objectiveBody: args.objectiveBody,
             selectedAssets: selectedInputsForItem(state, item),
           },
-          executionContext(work, save, args.cancelled, (workerUsage) =>
-            args.diagnostics?.emit({
-              runId: state.runId,
-              itemId: item.id,
-              attemptId: work.attempt,
-              operation: "worker-usage",
-              outcome: "observed",
-              workerUsage,
-            }),
-          ),
+          workerContext(work, save, args.cancelled, args.diagnostics, {
+            runId: state.runId,
+            itemId: item.id,
+          }),
         ));
       if (!existingHandle) {
         work.execution = structuredClone(handle);
@@ -329,31 +325,19 @@ export async function runRegularGraph(args: {
       if (args.cancelled()) {
         await driver.cancel(
           handle,
-          executionContext(work, save, args.cancelled, (workerUsage) =>
-            args.diagnostics?.emit({
-              runId: state.runId,
-              itemId: item.id,
-              attemptId: work.attempt,
-              operation: "worker-usage",
-              outcome: "observed",
-              workerUsage,
-            }),
-          ),
+          workerContext(work, save, args.cancelled, args.diagnostics, {
+            runId: state.runId,
+            itemId: item.id,
+          }),
         );
         throw new Error("Objective cancelled");
       }
       const result = await driver.collect(
         handle,
-        executionContext(work, save, args.cancelled, (workerUsage) =>
-          args.diagnostics?.emit({
-            runId: state.runId,
-            itemId: item.id,
-            attemptId: work.attempt,
-            operation: "worker-usage",
-            outcome: "observed",
-            workerUsage,
-          }),
-        ),
+        workerContext(work, save, args.cancelled, args.diagnostics, {
+          runId: state.runId,
+          itemId: item.id,
+        }),
       );
       phases.release(item.id);
       recordWorkerDiscovery(state, item.id, result.discovery);

@@ -27,10 +27,15 @@ export class FixtureSandboxProvider {
     assert.equal(h.workspace, this.resources.get(h.identity)?.workspace);
     return h;
   }
-  async create({ attemptId }) {
-    this.creates = (this.creates ?? 0) + 1;
+  async find({ attemptId }) {
     for (const owned of this.resources.values())
       if (owned.attemptId === attemptId) return structuredClone(owned);
+    return undefined;
+  }
+  async create({ attemptId }) {
+    this.creates = (this.creates ?? 0) + 1;
+    const found = await this.find({ attemptId });
+    if (found) return found;
     const h = {
       identity: randomUUID(),
       attemptId,
@@ -41,7 +46,9 @@ export class FixtureSandboxProvider {
     this.maxActive = Math.max(this.maxActive, this.resources.size);
     if (this.createUnknown) {
       this.createUnknown = false;
-      throw Error("create acknowledgement lost");
+      throw Object.assign(Error("create acknowledgement lost"), {
+        status: 503,
+      });
     }
     return structuredClone(h);
   }
@@ -135,7 +142,9 @@ export class FixtureSandboxProvider {
     this.processes.set(p.identity, state);
     if (this.executeUnknown) {
       this.executeUnknown = false;
-      throw Error("execute acknowledgement lost");
+      throw Object.assign(Error("execute acknowledgement lost"), {
+        status: 503,
+      });
     }
     return p;
   }

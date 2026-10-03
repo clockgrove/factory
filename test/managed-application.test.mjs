@@ -19,6 +19,7 @@ import {
 import { OpenAIManagedExecutionDriver } from "../dist/execution/openai-managed.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { readState } from "../dist/state-store.js";
+import { Interruption } from "../dist/contracts.js";
 
 for (const delivery of ["regular", "native-stack"])
   for (const outcome of ["complete", "lost-input"])
@@ -118,7 +119,10 @@ for (const delivery of ["regular", "native-stack"])
               );
               // The provider accepted the input but its response was lost.
               if (outcome === "lost-input")
-                throw new Error("Managed input acknowledgement was lost");
+                throw Object.assign(
+                  new Error("Managed input acknowledgement was lost"),
+                  { status: 503 },
+                );
               return {};
             }
             if (method === "DELETE") {
@@ -193,3 +197,109 @@ for (const delivery of ["regular", "native-stack"])
         rmSync(root, { recursive: true, force: true });
       }
     });
+
+for (const delivery of ["regular", "native-stack"])
+  test(`${delivery} reattach keeps the coding slot and failure cleanup cancels an unsettled worker`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "factory-managed-sweep-"));
+    const old = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = join(root, "state");
+    try {
+      const target = createTarget(root);
+      const repository = `example/managed-sweep-${delivery}`;
+      const cfg = factoryConfig(target.checkout, repository, delivery, 1);
+      cfg.execution = {
+        kind: "managed-agent",
+        provider: "openai-agents",
+        concurrency: 1,
+        config: {
+          model: "explicit-fixture-model",
+          reasoningEffort: "low",
+          containerSize: "small",
+          apiKeyEnv: "FACTORY_UNUSED_TEST_KEY",
+          timeoutSeconds: 10,
+        },
+      };
+      cfg.policy.network = "off";
+      cfg.policy.allowedSecretNames = [];
+      const command = "test -s managed.txt";
+      const item = {
+        id: "managed",
+        title: "Managed work",
+        goal: "Write managed.txt",
+        acceptance: ["managed.txt has the result"],
+        nonGoals: ["No deployment"],
+        citations: [{ path: "OBJECTIVE", heading: "Acceptance" }],
+        dependencies: [],
+        resources: [],
+        ownedPaths: ["managed.txt"],
+        validation: [
+          { command, provenance: "source-declared", source: "OBJECTIVE" },
+        ],
+        brief: "Write managed.txt",
+        sourceAssets: [],
+        expectedOutputRoles: [],
+        minimumAssetSets: 0,
+        requiredLfsRoles: [],
+      };
+      const calls = [];
+      const reservations = [];
+      // A remote worker whose outcome stays unresolved: it reports "failed"
+      // with interrupted set, but its resources are still live.
+      const driver = {
+        async availableSlots() {
+          return "unknown";
+        },
+        async start(request, context) {
+          calls.push("start");
+          const handle = {
+            provider: "stub",
+            identity: request.attemptId,
+            data: { live: true },
+          };
+          context.checkpoint(handle);
+          return handle;
+        },
+        async observe() {
+          calls.push("observe");
+          return { state: "failed", interrupted: true, detail: "unresolved" };
+        },
+        async cancel() {
+          calls.push("cancel");
+        },
+        async collect() {
+          calls.push("collect");
+          const work = readState(repository, 1).work.managed;
+          reservations.push([work.phaseReservation, work.requestedPhase]);
+          if (reservations.length === 1)
+            throw new Interruption("provider response lost");
+          throw new Error("remote worker failed");
+        },
+      };
+      const { application } = makeApplication({
+        config: cfg,
+        graph: { objective: 1, baseSha: target.baseSha, items: [item] },
+        objectiveBody: `## Acceptance\n- \`${command}\`\n\n## Final validation\n- \`${command}\`\n`,
+        fakeRoot: join(root, "github"),
+        actions: {},
+        driver,
+      });
+      await assert.rejects(application.runObjective(1), /remote worker failed/);
+      // The interrupted step reattached instead of starting a second worker,
+      // and held its coding slot while the remote worker ran.
+      assert.equal(calls.filter((c) => c === "start").length, 1);
+      assert.deepEqual(reservations, [
+        ["coding", undefined],
+        ["coding", undefined],
+      ]);
+      // The failed run's cleanup cancelled the unsettled worker.
+      assert.ok(calls.includes("cancel"));
+      assert.equal(
+        readState(repository, 1).coordinator?.cancelError,
+        undefined,
+      );
+    } finally {
+      if (old === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = old;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });

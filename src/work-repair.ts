@@ -53,8 +53,8 @@ const transientCodes = new Set([
 ]);
 /**
  * Whether a provider request failed in transit rather than being refused:
- * a network error or timeout, or HTTP 404, 408, 429 or 5xx. Other 4xx
- * responses are real failures.
+ * a network error or timeout, or HTTP 408, 429 or 5xx. Other 4xx responses
+ * are real failures; a 404 means the resource is gone.
  */
 export function transientRequestFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -65,13 +65,39 @@ export function transientRequestFailure(error: unknown): boolean {
   };
   const http = typeof status === "number" ? status : statusCode;
   if (typeof http === "number")
-    return http >= 500 || http === 404 || http === 408 || http === 429;
+    return http >= 500 || http === 408 || http === 429;
   return (
     error.message === "fetch failed" ||
     /Connection|Timeout/.test(error.name) ||
     (typeof code === "string" && transientCodes.has(code)) ||
     transientRequestFailure(error.cause)
   );
+}
+
+/** Consecutive transient failures a polling step absorbs before it is interrupted. */
+export const TRANSIENT_RETRY_MS = 120_000;
+
+/**
+ * Run a repeatable step, retrying transient provider failures in place with
+ * bounded backoff, so a brief outage does not spend a step interruption.
+ * After `budgetMs` of consecutive failures the last error is thrown.
+ */
+export async function retryTransient<T>(
+  step: () => Promise<T>,
+  transient: (error: unknown) => boolean,
+  budgetMs = TRANSIENT_RETRY_MS,
+  firstDelayMs = 250,
+): Promise<T> {
+  const started = Date.now();
+  for (let wait = firstDelayMs; ; wait = Math.min(wait * 2, 10_000)) {
+    try {
+      return await step();
+    } catch (error) {
+      if (!transient(error) || Date.now() - started + wait > budgetMs)
+        throw error;
+      await delay(wait);
+    }
+  }
 }
 
 /**

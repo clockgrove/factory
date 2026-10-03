@@ -21,9 +21,10 @@ import type { JsonValue } from "../config.js";
 import {
   SettledAttemptFailure,
   failAttempt,
+  retryTransient,
   transientRequestFailure,
 } from "../work-repair.js";
-import { assertDurableValue, submitted } from "./checkpoint.js";
+import { assertDurableValue } from "./checkpoint.js";
 import { collectWorktreeResult } from "./local.js";
 import { prepareManagedBase } from "./managed-base.js";
 import {
@@ -146,17 +147,15 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       delete a.process;
       this.save(handle, context);
       a.process = sandboxJsonValue(
-        await submitted(
-          this.options.provider.execute(a.sandbox!, {
-            argv: [
-              ...this.options.argv,
-              a.sandbox!.workspace,
-              operation,
-              a.output,
-            ],
-            cwd: a.sandbox!.workspace,
-          }),
-        ),
+        await this.options.provider.execute(a.sandbox!, {
+          argv: [
+            ...this.options.argv,
+            a.sandbox!.workspace,
+            operation,
+            a.output,
+          ],
+          cwd: a.sandbox!.workspace,
+        }),
       ) as RemoteProcess;
       a.phase = "invoked";
       this.save(handle, context);
@@ -227,9 +226,22 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     try {
       await this.launch(handle, context);
     } catch (error) {
-      await this.fail(error, handle, context);
+      // A transient failure in a resumable phase is resolved by collection.
+      if (
+        context?.cancelled() ||
+        !transientRequestFailure(error) ||
+        !this.resumable(this.active(handle))
+      )
+        await this.fail(error, handle, context);
     }
     return handle;
+  }
+  /** Preparation and harness start cannot repeat inside one sandbox. */
+  private resumable(a: Active): boolean {
+    return !(
+      a.phase === "preparing" ||
+      (a.phase === "submitting" && a.operation === "start")
+    );
   }
   /** Ends the attempt for a failed step; see failAttempt. */
   private async fail(
@@ -237,6 +249,19 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<never> {
+    // A transient failure where the launch cannot resume ends the attempt
+    // as an interruption directly, without spending a step interruption.
+    if (
+      !context?.cancelled() &&
+      transientRequestFailure(error) &&
+      !this.resumable(this.active(handle))
+    )
+      return this.settle(
+        handle,
+        `Sandbox launch was interrupted; repeating with a fresh attempt: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+        context,
+      );
     return failAttempt(error, {
       transient: transientRequestFailure,
       expired: false,
@@ -255,10 +280,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
   ): Promise<void> {
     const a = this.active(handle);
     if (a.phase === "creating") await this.prepare(handle, context);
-    else if (
-      a.phase === "preparing" ||
-      (a.phase === "submitting" && a.operation === "start")
-    )
+    else if (!this.resumable(a))
       await this.settle(
         handle,
         `Sandbox ${a.phase === "preparing" ? "preparation" : "harness start"} was interrupted; repeating with a fresh attempt`,
@@ -275,7 +297,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     const identity = handle.identity;
     const request = a.request;
     a.sandbox = sandboxJsonValue(
-      await submitted(this.options.provider.create({ attemptId: identity })),
+      await this.options.provider.create({ attemptId: identity }),
     ) as SandboxHandle;
     a.phase = "preparing";
     this.save(handle, context);
@@ -396,17 +418,19 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     const a = this.active(handle);
     if (a.phase !== "destroyed") {
       if (!a.sandbox) {
-        // A create whose response was lost may have left a tagged sandbox;
-        // adopting it is the only way to destroy it.
-        a.sandbox = sandboxJsonValue(
-          await this.options.provider.create({ attemptId: handle.identity }),
-        ) as SandboxHandle;
-        this.save(handle, context);
+        // A create whose response was lost may have left a tagged sandbox.
+        const found = await this.options.provider.find({
+          attemptId: handle.identity,
+        });
+        if (found) {
+          a.sandbox = sandboxJsonValue(found) as SandboxHandle;
+          this.save(handle, context);
+        }
       }
       a.phase = "destroying";
       a.terminal = terminal;
       this.save(handle, context);
-      await this.options.provider.destroy(a.sandbox);
+      if (a.sandbox) await this.options.provider.destroy(a.sandbox);
       a.phase = "destroyed";
       this.save(handle, context);
     }
@@ -483,16 +507,22 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<ExecutionResult> {
     const a = this.active(handle);
+    // Launch and observe resume from the recorded phase, so a transient
+    // failure is retried in place.
+    const step = <T>(run: () => Promise<T>) =>
+      retryTransient(run, transientRequestFailure);
     if (a.operation !== "collect") {
-      if (!a.harnessStarted) await this.launch(handle, context);
-      let observed = await this.observe(handle, context);
+      let observed = await step(async () => {
+        if (!a.harnessStarted) await this.launch(handle, context);
+        return this.observe(handle, context);
+      });
       while (observed.state === "running") {
         if (context?.cancelled())
           throw new Error(
             "Sandbox collection interrupted; owned attempt retained",
           );
         await new Promise((resolve) => setTimeout(resolve, 25));
-        observed = await this.observe(handle, context);
+        observed = await step(() => this.observe(handle, context));
       }
       if (observed.state !== "complete" && observed.authentication)
         throw new AuthenticationRequiredError(
@@ -507,7 +537,9 @@ export class SandboxExecutionDriver implements ExecutionDriver {
           context,
         );
     }
-    const value = (await this.invoke(handle, "collect", context)) as {
+    const value = (await step(() =>
+      this.invoke(handle, "collect", context),
+    )) as {
       files: SandboxFile[];
       result: HarnessResult;
       archive: { path: string; digest: string; bytes: number };

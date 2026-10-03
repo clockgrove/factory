@@ -69,8 +69,13 @@ function fixture(t) {
     step: "execute",
   };
   const saved = [];
-  const context = executionContext(work, () =>
-    saved.push(structuredClone(work.execution)),
+  const orphans = [];
+  const context = executionContext(
+    work,
+    () => saved.push(structuredClone(work.execution)),
+    () => false,
+    undefined,
+    (orphan) => orphans.push(orphan),
   );
   const state = {
     phase: "completed",
@@ -94,7 +99,8 @@ function fixture(t) {
         state.binding = JSON.parse(
           Buffer.from(body.environment.files[1].data, "base64"),
         );
-        if (state.createFailure) throw new Error("lost create acknowledgement");
+        if (state.createFailure)
+          throw new AgentsApiError("lost create acknowledgement", 503);
         return { id: "session_one", environment: { id: "environment_one" } };
       }
       if (path === "/agents/environments/environment_one")
@@ -107,7 +113,8 @@ function fixture(t) {
         assert.equal(saved.at(-1).data.phase, "input-submitted");
         assert.equal(saved.at(-1).data.sessionId, "session_one");
         assert.equal(body.events[0].input[0].role, "user");
-        if (state.inputFailure) throw new Error("lost input acknowledgement");
+        if (state.inputFailure)
+          throw new AgentsApiError("lost input acknowledgement", 503);
         const repo = join(root, "work", "attempt-one", "repo");
         writeFileSync(join(repo, "keep.txt"), "changed\n");
         rmSync(join(repo, "old.txt"));
@@ -139,7 +146,8 @@ function fixture(t) {
         );
         state.artifact = readFileSync(archive);
         state.inputs++;
-        if (state.inputLost) throw new Error("input acknowledgement lost");
+        if (state.inputLost)
+          throw new AgentsApiError("input acknowledgement lost", 503);
         return {};
       }
       if (method === "DELETE") {
@@ -189,7 +197,18 @@ function fixture(t) {
     config,
     transport,
   });
-  return { root, checkout, git, request, work, saved, context, state, driver };
+  return {
+    root,
+    checkout,
+    git,
+    request,
+    work,
+    saved,
+    orphans,
+    context,
+    state,
+    driver,
+  };
 }
 
 test("managed complete result round-trips binary bytes, deletion, executable mode and null usage through real Git", async (t) => {
@@ -219,36 +238,30 @@ const settled = (classification) => (error) =>
   error instanceof SettledAttemptFailure &&
   error.classification === classification;
 
-test("lost create acknowledgement interrupts the attempt without another create", async (t) => {
+test("lost create ends the attempt directly as an interruption and records the possible orphan", async (t) => {
   const f = fixture(t);
   f.state.createFailure = true;
+  // The create cannot be found by tag here, so no step interruption is spent first.
   await assert.rejects(
     f.driver.start(f.request, f.context),
-    (error) => error instanceof Interruption,
-  );
-  const checkpoint = structuredClone(f.work.execution);
-  assert.equal(checkpoint.data.phase, "create-submitted");
-  const observed = await f.driver.observe(checkpoint, f.context);
-  assert.equal(observed.state, "failed");
-  assert.equal(observed.interrupted, true);
-  await assert.rejects(
-    f.driver.collect(checkpoint, f.context),
     settled("interruption"),
   );
   assert.equal(f.state.calls.filter((c) => c.method === "POST").length, 1);
   assert.equal(f.work.execution.data.phase, "disposed");
+  assert.equal(f.orphans.length, 1);
+  assert.equal(f.orphans[0].resource, "session");
+  assert.match(f.orphans[0].detail, /factory_attempt=attempt-one/);
+  const observed = await f.driver.observe(f.work.execution, f.context);
+  assert.equal(observed.interrupted, true);
 });
 
 test("lost input acknowledgement continues when the turn was recorded", async (t) => {
   const f = fixture(t);
   f.state.inputLost = true;
-  await assert.rejects(
-    f.driver.start(f.request, f.context),
-    (error) => error instanceof Interruption,
-  );
-  const checkpoint = structuredClone(f.work.execution);
-  assert.equal(checkpoint.data.phase, "input-submitted");
-  const result = await f.driver.collect(checkpoint, f.context);
+  // The lost response leaves a recorded phase for collection to resolve.
+  const handle = await f.driver.start(f.request, f.context);
+  assert.equal(f.work.execution.data.phase, "input-submitted");
+  const result = await f.driver.collect(handle, f.context);
   assert.equal(f.git("show", `${result.changeRef}:keep.txt`), "changed");
   assert.equal(f.state.inputs, 1);
   assert.equal(f.state.deleted, true);
@@ -257,14 +270,10 @@ test("lost input acknowledgement continues when the turn was recorded", async (t
 test("input with no recorded turn settles the session and interrupts the attempt", async (t) => {
   const f = fixture(t);
   f.state.inputFailure = true;
+  const handle = await f.driver.start(f.request, f.context);
+  assert.equal(f.work.execution.data.sessionId, "session_one");
   await assert.rejects(
-    f.driver.start(f.request, f.context),
-    (error) => error instanceof Interruption,
-  );
-  const checkpoint = structuredClone(f.work.execution);
-  assert.equal(checkpoint.data.sessionId, "session_one");
-  await assert.rejects(
-    f.driver.collect(checkpoint, f.context),
+    f.driver.collect(handle, f.context),
     settled("interruption"),
   );
   assert.equal(f.state.inputs, 0);
@@ -429,8 +438,8 @@ test("result import refuses corrupted bytes, wrong binding and unsafe entries be
   }
 });
 
-test("transient reads interrupt the step; refused reads settle the attempt", async (t) => {
-  for (const status of [503, 429, 404, 408, 403]) {
+test("transient reads are retried in place; refused or gone reads settle the attempt", async (t) => {
+  for (const status of [503, 429, 408, 404, 403]) {
     const f = fixture(t);
     const handle = await f.driver.start(f.request, f.context);
     const transport = f.driver.args.transport;
@@ -441,18 +450,16 @@ test("transient reads interrupt the step; refused reads settle the attempt", asy
         throw new AgentsApiError(`Agents API GET failed (${status})`, status);
       return original(method, path, body);
     };
-    const transient = status !== 403;
-    await assert.rejects(f.driver.collect(handle, f.context), (error) =>
-      transient
-        ? error instanceof Interruption
-        : error instanceof SettledAttemptFailure &&
-          error.classification === "implementation",
-    );
-    assert.equal(f.state.deleted, !transient, String(status));
-    if (transient) {
-      await f.driver.collect(structuredClone(f.work.execution), f.context);
-      assert.equal(f.state.inputs, 1);
-    }
+    if (status === 503 || status === 429 || status === 408) {
+      // One collection absorbs the failure without a step interruption.
+      await f.driver.collect(handle, f.context);
+      assert.equal(f.state.inputs, 1, String(status));
+    } else
+      await assert.rejects(
+        f.driver.collect(handle, f.context),
+        settled("implementation"),
+      );
+    assert.equal(f.state.deleted, true, String(status));
   }
 });
 

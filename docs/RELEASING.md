@@ -51,6 +51,11 @@ The attestation verification is the independent check: it proves that the bytes 
 
 Deterministic tests run on every release. A live qualification, a real Objective against a disposable public target with real models and GitHub delivery, is required for **minor** versions (`X.Y.0`) and optional for patches. Use the [autonomous target](../test/fixtures/autonomous-target/) with its [first](../test/fixtures/objectives/autonomy-first.md) and [second](../test/fixtures/objectives/autonomy-second.md) Objectives ([#448](https://github.com/clockgrove/factory/issues/448) simplifies this), and link the result from the release notes. A failed qualification is fixed in a patch release and rerun.
 
+1. Before creating the target, run `npm run build && node test/autonomy-fixture-preflight.mjs`. It checks the fixture's commands and sources without model calls.
+2. Install the packed artifact in a new public target copied from the fixture, then run both Objectives through the supervisor in intake mode.
+3. Keep the `factory-fixture-prerequisite` condition unavailable so that beta's validation fails. Then restore the condition and submit a repair proposal. This proves a diagnosed repair.
+4. After a worker starts, restart the supervisor once. The same run, attempt and issue/PR identities must continue with no duplicate submission.
+
 ## Version numbers
 
 Factory is pre-1.0. Patch versions carry fixes and small improvements. Minor versions mark a qualified baseline or an incompatible change to configuration, state or the CLI. Factory does not migrate state between incompatible versions; the changelog says when an upgrade requires finishing or cancelling active Objectives first.

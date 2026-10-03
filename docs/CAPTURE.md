@@ -25,13 +25,13 @@ Or set it in the installation config, beside `repository` and `execution`:
 - **Workers:** the prompt and settings Factory supplied, plus the messages, tool inputs and tool results the Codex, Claude and Copilot SDKs expose.
 - **Never:** credentials, environment, client options, hidden reasoning or provider system prompts.
 
-Each metadata record ([`InteractionMetadata`](../src/capture.ts)) carries its identities (record, invocation, provider attempt, Objective, run, item, attempt), configured and reported model, and source, config, prompt and schema digests. Content status is `captured`, `capture-disabled`, `not-exposed` or `unavailable`; `redacted` and `truncated` are separate flags.
+Each metadata record ([`InteractionMetadata`](https://github.com/clockgrove/factory/blob/main/src/capture.ts)) carries its identities (record, invocation, provider attempt, Objective, run, item, attempt), configured and reported model, and source, config, prompt and schema digests. Content status is `captured`, `capture-disabled`, `not-exposed` or `unavailable`; `redacted` and `truncated` are separate flags.
 
 Usage records keep allowlisted token counters. Missing counters stay unknown, never zero. Use the latest cumulative snapshot per attempt; provider-call and model-breakdown records are alternate views, not extra totals. Claude's USD figure is a provider estimate, not a bill.
 
 ## Privacy and retention
 
-- Content lives under the private state root's `captures/` directory, outside the target checkout, as NDJSON files with mode `0600` in `0700` directories. Readers reject anything that is not a private regular file.
+- Metadata lives in the private Objective diagnostics. Content lives under the private state root's `captures/` directory, outside the target checkout, as NDJSON files with mode `0600` in `0700` directories. Readers reject anything that is not a private regular file.
 - Configured secrets and known token patterns are redacted best-effort. Redaction does not make private source safe to publish; share sanitized summaries in public issues.
 - Nothing is pruned automatically. You own retention; deleting capture files never changes a run.
 - A capture failure shows in diagnostics. It never accepts, rejects or retries work.
@@ -44,7 +44,7 @@ factory captures --objective 123 --content RECORD_ID  # one content record
 factory diagnostics --objective 123 --summary         # usage, no transcripts
 ```
 
-A truncated content record can be incomplete JSON. The package root exports the same reads: `readInteractionMetadata`, `readInteractionContent`, `readDiagnosticMetadata`.
+A truncated content record can be incomplete JSON. The package root exports the same reads as `readInteractionMetadata` and `readInteractionContent`.
 
 ## Analyze
 
@@ -67,7 +67,7 @@ Reading the report:
 - Concurrent intervals overlap. Elapsed time is the observed envelope, not a sum of durations.
 - Provider completion is not review acceptance.
 
-Save a report with `--output /absolute/new-file`: a new file outside the target checkout, with no symlinked parents, created with mode `0600`. Keep reports private.
+Save a report with `--output /absolute/new-file`: a new file in an existing directory outside the target checkout, with no symlinked parents, created with mode `0600`. Keep reports private.
 
 To compare across Objectives, call the exported `analyzeInteractions`.
 
@@ -89,26 +89,11 @@ factory analyze --objective 123 --filter runId=RUN_ID --gantt \
 
 ## Export to OpenTelemetry
 
-`factory export-captures` sends selected captures as OTLP/HTTP traces to an endpoint you choose. Nothing is exported in the background. Pick a destination your data policy allows; metadata can be sensitive too.
+`factory export-captures` sends selected captures as OTLP/HTTP traces to an HTTPS `--endpoint` you choose. Request headers, such as credentials, come from `OTEL_EXPORTER_OTLP_HEADERS` or `OTEL_EXPORTER_OTLP_TRACES_HEADERS` in the controller environment. The exporter's final flags are still changing; `factory --help` shows the current form. Nothing is exported in the background. Pick a destination your data policy allows; metadata can be sensitive too.
 
-Preview first, then send exactly what you previewed:
-
-```sh
-factory export-captures --objective 123 --endpoint https://otel.example.com \
-  --content metadata
-factory export-captures --objective 123 --endpoint https://otel.example.com \
-  --content metadata --send --authorize PREVIEW_DIGEST
-```
-
+- Run the command without `--send` to get a preview. Then send exactly what you previewed with `--send --authorize PREVIEW_DIGEST`. Any change to the selection, endpoint or payload invalidates the digest.
 - `--content metadata` reads no captured text. `retained` adds the already-redacted text.
-- `--run ID` and `--invocation ID` narrow the selection. Both repeat, and they intersect. An empty selection is refused.
-- The preview shows endpoint, identities, content status and payload size, never content or credentials. Any change invalidates the digest.
-- Keep endpoint credentials in the controller environment, never in arguments or the target repository.
-- The endpoint must be plain HTTPS: no credentials, query or fragment.
-
-What the destination receives:
-
-- Each invocation attempt becomes one root span with stable IDs; incomplete attempts stay marked incomplete.
-- Usage and cost estimates are span metadata, not billing fields.
-
-One send is one HTTP request with a 30-second timeout, no redirects and no retries. The receipt status is `accepted`, `partial-or-warning`, `rejected-or-unknown` or `unknown`; anything but `accepted` exits non-zero. Response text is discarded because it can echo secrets. A repeat reuses the same span IDs and the destination may duplicate them, so check it before resending.
+- `--run ID` and `--invocation ID` narrow the selection. Both can repeat, and they intersect. An unknown ID or an empty selection is refused.
+- Each invocation attempt becomes one root span with stable IDs. Usage and cost estimates are span metadata, not billing fields.
+- One send is one HTTP request: 30-second timeout, no redirects, no retries, 4 MiB response cap. Anything other than an `accepted` receipt exits non-zero. Factory discards the response text because it can echo secrets.
+- A repeat reuses the same span IDs and the destination may duplicate them. Check the destination before you resend.

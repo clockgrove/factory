@@ -1,59 +1,56 @@
 # Remote execution
 
-Remote execution runs a Work Item's implementation away from the controller host. Planning, review, validation, media selection and GitHub delivery stay on the controller.
-
-There are two kinds:
+Remote execution runs a Work Item's implementation away from the controller host. Planning, review, validation and delivery stay on the controller. There are two kinds:
 
 - **Managed agent** (`execution.kind: "managed-agent"`): a provider-hosted agent session does the work. Providers: `claude-managed-agents` and `openai-agents`.
-- **Sandbox** (`execution.kind: "sandbox"`): Factory runs your registered harness inside a provider sandbox. Provider: the built-in `daytona`, or your own `SandboxProvider`.
+- **Sandbox** (`execution.kind: "sandbox"`): Factory runs your registered harness inside a provider sandbox. Provider: the built-in `daytona`, or your own `SandboxProvider`. The installed `factory` CLI wires only Daytona; a custom provider needs your own controller built with `composeWithSandbox`.
 
-All are development candidates: credential-free tests cover them, live runs are not yet qualified ([#259](https://github.com/clockgrove/factory/issues/259) Claude, [#258](https://github.com/clockgrove/factory/issues/258) OpenAI, [#9](https://github.com/clockgrove/factory/issues/9) Daytona).
+All are development candidates. Credential-free tests cover them, but no live run has qualified them yet.
 
 ## Before you start
 
-Installing Factory keeps local execution and grants no provider or spending authority. First approve the source that leaves the host (the pinned base plus declared and selected assets), the provider account and model, and the spending limit. Then edit the `execution` object in your installation config and use the normal `factory` commands.
+Installing Factory grants no provider or spending authority. First approve the source that leaves the host (the pinned base plus declared and selected assets), the provider account, model, data handling and spending limit. Then edit the `execution` object in your installation config and use the normal `factory` commands.
 
 ## What every provider shares
 
-- **Input:** the exact base commit as a shallow snapshot, without history or local Git config. Only regular files and executable bits are supported; symlinks and submodules are rejected before anything is created.
-- **Output:** an archive of file bytes with a path, mode, size and SHA-256 inventory. Factory rejects unsafe paths and mismatches, then runs the same ownership, secret scan, asset capture, validation, LFS, review and delivery as local work. A provider saying "done" is not acceptance.
+- **Managed input:** Factory sends the exact base commit as a shallow snapshot, without history or local Git config. Only regular files and executable bits are supported. Symlinks and submodules are rejected before a session is created.
+- **Sandbox input:** the provider creates the sandbox, then fetches the published base commit inside it. Private inputs and selected assets travel in a verified archive.
+- **Output:** file bytes with a path, mode, size and SHA-256 inventory. Claude returns a JSON snapshot with base64 file bodies; OpenAI returns a tar artifact; sandboxes return a binary archive. Factory rejects unsafe paths and mismatches, then applies the same checks, review and delivery as local work.
 - **Worker policy:** managed agents need `policy.network: "off"` and an empty `policy.allowedSecretNames`. The controller still needs network access to the provider and GitHub.
-- **Concurrency:** `execution.concurrency` is Factory's limit, not a claim of provider capacity.
-- **Usage:** missing usage is unknown, never zero.
+- **Concurrency:** `execution.concurrency` is Factory's limit, not provider capacity.
+- **Usage:** missing usage is unknown, never zero. Token counts are not a bill.
 
 ## Lifecycle and recovery
 
-Factory checkpoints each step in the Work Item snapshot before calling the provider, and tags every remote resource with the attempt ID, so a restarted controller finds it instead of creating another.
-
-When a response is lost in transit (network error, timeout, HTTP 408, 429 or 5xx), Factory reads the provider's record for the recorded step:
+Factory checkpoints each step in the Work Item snapshot before calling the provider, and attaches the attempt ID where the provider allows it. When a response is lost in transit (network error, timeout, HTTP 408, 429 or 5xx), Factory checks the recorded step against the provider:
 
 - if the step happened, continue;
 - if it never happened, send it again;
 - otherwise end the attempt and repeat the Work Item with a fresh attempt.
 
-| Lost response | Claude                                                                                                                             | OpenAI                                                                                                                                       | Sandbox                                                                                 |
-| ------------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Create        | List the agent's sessions tagged with the attempt since submission; adopt it or create one.                                        | Sessions cannot be listed by tag, so end the attempt and start fresh. Records a `possible-orphan`.                                           | `create` adopts the sandbox `find` returns for the attempt.                             |
-| Input         | Read session history: continue if the exact message is there, resend if the session is idle with no new message, else start fresh. | A recorded turn means accepted, so continue. No turn: delete the session and start fresh. A restart during hosted setup waits, then submits. | Preparation and harness start cannot repeat in one sandbox: destroy it and start fresh. |
-| Other         | File upload: upload again. Records a `possible-orphan`.                                                                            | —                                                                                                                                            | Observe and collect only read, so invoke again.                                         |
+|                   | Claude                                                                                           | OpenAI                                                                                                               | Sandbox                                                                |
+| ----------------- | ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Attempt tag       | Session metadata `factory_attempt`, listable. Uploads are untagged.                              | Session metadata `factory_attempt`, not listable.                                                                    | Provider `create` and `find` use it; Daytona labels `factory-attempt`. |
+| Create lost       | Adopt the tagged session created since submission, or create one.                                | End the attempt and start fresh.                                                                                     | `create` adopts the sandbox `find` returns.                            |
+| Input lost        | Continue if history has the exact message; resend if idle with no new message; else start fresh. | Continue if a turn is recorded; else delete the session and start fresh. A restart during setup waits, then submits. | Preparation and harness start cannot repeat: destroy and start fresh.  |
+| Other lost        | Upload: upload again.                                                                            | —                                                                                                                    | Observe and collect only read: invoke again.                           |
+| Cleanup           | Every tagged session (which removes its sandbox), then the uploads.                              | The session, then confirm the environment is gone.                                                                   | The sandbox.                                                           |
+| `possible-orphan` | Lost upload: delete uploaded files from that time that no session references.                    | Lost create: delete sessions with `factory_attempt=<attempt ID>`; they hold the input archive.                       | —                                                                      |
 
 Collection retries transient failures in place for up to two minutes, then interrupts the step; the next pass reattaches to the same resource.
 
 Any other failure stops the remote resource first, then fails the attempt as an implementation failure, so it gets a fresh attempt or a repair. This covers a refused request, a resource that no longer exists, a rejected result, a harness that ends without a result, and a passed deadline. A repeated attempt never runs beside the old one.
 
-**Deadline:** the managed `timeoutSeconds` bounds the whole attempt. Each cleanup gets a fresh window of the same length, so cleanup still runs after an outage.
-
-**Cancel:** stops the remote work, deletes the owned resources and confirms they are gone. A failed or unconfirmed deletion stays visible and is retried on restart.
-
-**Possible orphans:** a lost response that may have left an untraceable resource is recorded as a `possible-orphan` diagnostic with the attempt ID and time. Find it in `factory diagnostics` and delete the resource by hand.
+- **Deadline:** the managed `timeoutSeconds` bounds the whole attempt. Each cleanup gets a fresh window of the same length, so cleanup still runs after an outage.
+- **Cleanup** runs after success and on cancel, and confirms each deletion. A failed or unconfirmed deletion stays visible and is retried on restart.
+- **Possible orphans** are recorded in `factory diagnostics` with the attempt ID and time; delete them by hand as the table says.
 
 ## Controller credentials
 
-Each provider config names an environment variable that holds the controller's API key. The key never enters the config, model input or sandbox. Local Claude, Codex or Copilot logins do not supply it.
+Each provider config names an environment variable holding the controller's API key. The key never enters the config, model input or sandbox, and local CLI logins do not supply it.
 
-- **Foreground:** set the variable in the controller shell. `factory readiness --config /absolute/config.json` checks it is present; it does not call the provider.
-- **Background service:** put only the key in an owner-private file (mode `0600`) outside the target checkout, then install with `factory supervisor install ... --credential-file NAME=/absolute/private/file`, where `NAME` is the configured variable. Bind one file per credential. Factory uses systemd `LoadCredential`, so the host needs a Linux user systemd; otherwise run in the foreground.
-- The service reads the key at start. Rotate it by restarting the service. A missing key stops execution; Factory never falls back to ambient variables.
+- **Foreground:** set the variable in the controller shell. `factory readiness --config /absolute/config.json` checks that it is present. It makes no provider call, so it does not verify account access, billing or hosted support.
+- **Background service:** put only the key in a `0600` file outside the target checkout and install with `factory supervisor install ... --credential-file NAME=/absolute/private/file`, one per credential. This uses systemd `LoadCredential`, so it needs a Linux user systemd. The key is read at service start; restart to rotate it. A missing key stops execution, with no fallback to ambient variables.
 
 ## Claude Managed Agents
 
@@ -89,9 +86,9 @@ Runs the Work Item in an Anthropic Managed Agents session (`@anthropic-ai/sdk` 0
 - Pin `agentVersion`. The `agent` snapshot must match it: no MCP servers, skills or subagents; the default toolset disabled; only `bash`, `read`, `write`, `edit`, `glob` and `grep` enabled. `bash` is required.
 - The environment must deny outbound networking and install no packages.
 - `timeoutSeconds` defaults to 900. Optional `budgetCents` (positive integer string) sets a session cost threshold; a request can cross it, so it is not a hard cap.
-- A bootstrap turn runs a Factory-supplied script that unpacks the input, so binary and LFS bytes are never model-written. Factory checks the full tool history and input receipt before sending the implementation prompt, and rejects any other activity. This assumes Factory owns the session exclusively.
+- A bootstrap turn runs a Factory script that unpacks the input, so the model never writes binary bytes. Factory verifies the tool history and input receipt before sending the implementation prompt. This assumes Factory owns the session exclusively.
 - The result must match the attempt, base and file digests.
-- Deleting a session removes its sandbox. Factory never deletes the reusable agent or environment.
+- Factory never deletes the reusable agent or environment.
 
 ## OpenAI Agents API
 
@@ -114,13 +111,11 @@ Runs the Work Item in an OpenAI-hosted environment over REST (`OpenAI-Beta: agen
 
 - All five fields are required. `reasoningEffort` is `low`, `medium` or `high`; `containerSize` is `small`, `medium` or `large`.
 - The worker gets no network, GitHub credentials, extra tools, plugins, vaults or subagents.
-- The input archive must fit the provider's 5 MiB file limit; larger inputs need another execution mode. The output archive must fit 200 MiB.
+- The input archive must fit 5 MiB and the output 200 MiB (provider file limits).
 - A setup command checks the archive digest and base commit before Factory submits the Work Item.
 - More than one turn, or any subagent turn, stops the attempt.
 
 ## Sandbox providers
-
-The sandbox driver creates a provider workspace, prepares the repository there, and runs your registered harness through an installed entrypoint.
 
 ```json
 {
@@ -136,12 +131,12 @@ The sandbox driver creates a provider workspace, prepares the repository there, 
 }
 ```
 
-- **Controller:** call the package-root `composeWithSandbox(config, { identity, provider })` with a `SandboxProvider` (see [`src/contracts.ts`](../src/contracts.ts)).
+- **Controller:** call the package-root `composeWithSandbox(config, { identity, provider })` with a [`SandboxProvider`](https://github.com/clockgrove/factory/blob/main/src/contracts.ts).
 - **Sandbox image:** must already contain Node, Git, the same installed Factory package and the harness dependencies. Factory installs nothing remotely.
 - **Entrypoint:** constructs the `LocalHarnessRegistration` and passes it to the package-root `runSandboxHarness(registration)`. The harness runs its ordinary start, observe, cancel and collect inside the sandbox; see [agent harnesses](AGENT-HARNESSES.md).
-- **Repository:** `prepareRepository` fetches the exact base commit from the published remote into `workspace/repo`, plus declared LFS objects into `workspace/lfs/<index>`. It must remove every usable GitHub credential, credential helper and auth-bearing remote before returning, or refuse. A hidden token the worker can still use does not count.
-- **Inputs:** private inputs and selected assets travel in a verified `.factory-inputs` archive.
-- **Cleanup:** `destroy` must confirm the sandbox and its processes are gone, or throw.
+- **Repository:** `prepareRepository` fetches the exact base commit into `workspace/repo` and declared LFS objects into `workspace/lfs/<index>`. Before returning it must remove every usable GitHub credential, credential helper and auth-bearing remote, or refuse.
+- **Cleanup:** `destroy` must confirm that the sandbox and its processes are gone, or throw. Factory does not clean up external jobs that a harness creates.
+- **Boundary:** the controller's environment never reaches the harness. Model authentication belongs to the harness and is separate from repository preparation.
 
 ### Daytona
 
@@ -170,7 +165,7 @@ The built-in `daytona` provider supports anonymous public `github.com` repositor
 
 - Install `@daytonaio/sdk@0.220.0` next to Factory. Without it Factory reports `DAYTONA_SDK_UNAVAILABLE`.
 - `timeoutSeconds` bounds each SDK call.
-- Use a trusted snapshot with Node 22+, Git, Git LFS, the same Factory version, the entrypoint and the harness dependencies, and no GitHub credentials. Preparation checks the tools and Factory version before starting the harness.
+- Use a trusted snapshot with Node 22+, Git, Git LFS, the same Factory version, the entrypoint and harness dependencies, and no GitHub credentials. Preparation checks the tools and version.
 - Auto-stop, pause and delete are disabled, so Factory owns the sandbox lifecycle.
 - Private repositories are unsupported: Daytona secret removal is asynchronous and placeholders keep outbound auth, so the worker could still authenticate.
-- If a `.env` file is present, set `DAYTONA_OTEL_ENABLED=false` and `DAYTONA_EXPERIMENTAL_OTEL_ENABLED=false` in the controller environment. Factory refuses SDK tracing.
+- If `.env` or `.env.local` exists, set `DAYTONA_OTEL_ENABLED=false` and `DAYTONA_EXPERIMENTAL_OTEL_ENABLED=false` in the controller environment. Factory refuses to start if either variable is `true`.

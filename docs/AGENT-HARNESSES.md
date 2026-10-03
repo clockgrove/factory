@@ -1,15 +1,17 @@
 # Agent harnesses
 
-A harness runs one Work Item attempt inside a worktree Factory owns. Factory owns everything else: planning, scheduling, validation, review and GitHub delivery. Planning and review use the separate `planning` provider, so choosing a harness changes only Work Item execution.
+A harness runs one Work Item attempt inside a worktree Factory owns. Factory owns everything else: planning, scheduling, validation, review and GitHub delivery. Planning and review use the separate `--planning` provider (`codex-sdk` or `claude-agent-sdk`), so choosing a harness changes only Work Item execution.
 
-Factory ships three harnesses and a seam for your own:
+Factory ships three harnesses, plus a `registered` seam for your own adapter:
 
-| Harness               | Package                                           | Login it reuses                                   |
-| --------------------- | ------------------------------------------------- | ------------------------------------------------- |
-| `codex-sdk` (default) | bundled `@openai/codex-sdk@0.156.0`               | Codex local login                                 |
-| `claude-agent-sdk`    | optional `@anthropic-ai/claude-agent-sdk@0.3.281` | Claude local profile or Claude auth environment   |
-| `github-copilot-sdk`  | optional `@github/copilot-sdk@1.0.13`             | Copilot local profile or Copilot auth environment |
-| `registered`          | your adapter package                              | whatever the adapter declares                     |
+|                      | `codex-sdk` (default)                                                     | `claude-agent-sdk`                                                                                                                                                | `github-copilot-sdk`                                                                                                  |
+| -------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Package              | bundled `@openai/codex-sdk@0.156.0`                                       | optional `@anthropic-ai/claude-agent-sdk@0.3.281`                                                                                                                 | optional `@github/copilot-sdk@1.0.13`                                                                                 |
+| Required flags       | none                                                                      | `--worker-model`, `--claude-max-turns`                                                                                                                            | `--worker-model`, `--copilot-timeout-seconds`                                                                         |
+| `--network`          | `host` or `off`                                                           | `host` only                                                                                                                                                       | `host` only                                                                                                           |
+| `--worker-reasoning` | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `persistent` | `low`, `medium`, `high`, `xhigh`, `max`                                                                                                                           | `low`, `medium`, `high`, `xhigh`, `max`                                                                               |
+| Other flags          | —                                                                         | `--claude-permission acceptEdits\|dontAsk` (default `acceptEdits`), `--claude-tool`, `--claude-allow-tool`, `--claude-setting-source`                             | `--copilot-tool`                                                                                                      |
+| Login                | Codex local login                                                         | Claude local profile, or `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_PROFILE`, `ANTHROPIC_CONFIG_DIR`, `CLAUDE_CONFIG_DIR` | Copilot local profile, or `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_API_URL`, `COPILOT_PROVIDER_*` |
 
 To run a harness in a remote sandbox instead of locally, see [remote execution](REMOTE-EXECUTION.md).
 
@@ -29,10 +31,9 @@ factory install --repository OWNER/REPO --checkout /absolute/target \
 
 - **Optional packages:** a normal `npm install` includes the Claude and Copilot SDKs. With `--omit=optional`, only Codex and registered adapters work.
 - **Node:** Factory needs Node 22+. The Copilot SDK needs Node 22.12+ and fails before starting on older versions.
-- **Reasoning:** every built-in takes `reasoningEffort`; Claude maps it to its own `effort` option.
-- **Default tools:** Claude gets `Read`, `Edit`, `Write`, `Glob`, `Grep`. Copilot gets `view`, `create`, `edit`, `apply_patch`, `grep`, `glob`. Repeat `--claude-tool`, `--claude-allow-tool` or `--copilot-tool` to set them explicitly.
+- **Default tools:** Claude gets `Read`, `Edit`, `Write`, `Glob`, `Grep`. Copilot gets `view`, `create`, `edit`, `apply_patch`, `grep`, `glob`. The tool flags replace these lists.
 - **Copilot editing:** some models, such as `gpt-5.6-luna`, edit only through `apply_patch`, so keep it in the tool list.
-- **Claude settings:** no settings files are loaded by default. Add each source with a repeated `--claude-setting-source`. A selected source's settings and hooks run as trusted local code.
+- **Claude settings:** no settings files are loaded by default. A source added with `--claude-setting-source` runs its settings and hooks as trusted local code.
 
 Factory never falls back to another harness. A missing adapter, identity mismatch or config change during a run stops the work.
 
@@ -42,9 +43,9 @@ Built-in harnesses reuse your local login. Factory stores no tokens in its confi
 
 - The worker environment drops controller publication variables such as `GH_TOKEN` and `GITHUB_TOKEN`, and gets an empty `GH_CONFIG_DIR`, so a worker cannot use the controller's `gh` login.
 - Copilot runs with `useLoggedInUser: true` in `empty` mode, which disables keytar; a system-keychain login is not used.
-- Codex keeps your `CODEX_HOME` and optional `CODEX_SQLITE_HOME`. A supervisor service captures them at install; reinstall the service to change them.
+- Codex keeps your `CODEX_HOME` and `CODEX_SQLITE_HOME`; a supervisor service captures them at install.
 - On WSL2, log in inside the distribution and user that runs the controller; a Windows desktop login does not count.
-- Claude planning (`--planning claude-agent-sdk`) uses the same SDK and login; `ANTHROPIC_API_KEY` is optional. Settings files are not loaded, so Bedrock, Vertex and `apiKeyHelper` are not supported yet.
+- Claude planning uses the same SDK and login, or `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. It loads no settings files, so Bedrock, Vertex and `apiKeyHelper` are unsupported.
 
 If a login is missing or expired, the attempt fails and `factory status` shows the provider and login command (`codex login`, `claude auth login` or `copilot`). Log in, then start a fresh attempt:
 
@@ -53,12 +54,11 @@ factory retry --objective ISSUE_NUMBER --item WORK_ITEM_ID
 factory run --objective ISSUE_NUMBER
 ```
 
-Factory never prompts for credentials inside a worker or stores them in run state.
-
 ## Security boundary
 
 Harnesses are local processes running as your OS user. Path checks, permission callbacks, filtered environments and disabled extensions reduce accidental authority; they are not an OS sandbox for hostile code.
 
+- **Codex:** `workspace-write` sandbox, `approvalPolicy: "never"`, and network access only when `policy.network` is `host`.
 - **Claude:** skills, subagents, session persistence, auto-memory, synced plugins and personal or project instruction files are off. Bundled and administrator-managed components are trusted runtime.
 - **Copilot:** shell, task, web, GitHub, MCP, memory, skills, plugins, host Git, remote sessions and config discovery are off.
 
@@ -66,11 +66,7 @@ Workers never commit, push or touch issues and pull requests. Publication stays 
 
 ## Usage
 
-Each worker records token usage tied to the attempt. Missing counters stay unknown, never zero, and no harness derives a cost.
-
-- **Codex:** one completed-turn snapshot.
-- **Claude:** the final result's `modelUsage` across models. Error results that may hold SDK-reset zeroes leave usage unknown.
-- **Copilot:** per-call `assistant.usage` input and output, deduplicated and summed.
+Each worker records token usage tied to the attempt: Codex's completed-turn snapshot, Claude's final `modelUsage`, or Copilot's per-call `assistant.usage`, deduplicated and summed. Missing counters stay unknown, never zero, and no harness derives a cost.
 
 ## Execution profiles
 
@@ -91,18 +87,27 @@ Profiles let the compiler assign different harness configs to different Work Ite
         "reasoningEffort": "medium"
       }
     },
-    "deep": {
+    "claude": {
       "description": "Complex changes needing more reasoning.",
       "harness": {
-        "kind": "codex-sdk",
-        "model": "gpt-5.6-sol",
-        "reasoningEffort": "high"
+        "kind": "claude-agent-sdk",
+        "adapter": "@anthropic-ai/claude-agent-sdk@0.3.281",
+        "model": "CLAUDE_MODEL",
+        "reasoningEffort": "high",
+        "permissionMode": "acceptEdits",
+        "session": "new-per-attempt",
+        "settingSources": [],
+        "tools": ["Read", "Edit", "Write", "Glob", "Grep"],
+        "allowedTools": ["Read", "Edit", "Write", "Glob", "Grep"],
+        "maxTurns": 12,
+        "authentication": "local"
       }
     }
   }
 }
 ```
 
+- Claude and Copilot profiles need `policy.network: "host"`. Copy a built-in harness object from the config `factory install` writes.
 - Listing a profile approves its provider to read the whole worktree and its inputs. Owned paths limit writes, not reads.
 - Descriptions and hints go to the compiler and reviewer, so keep credentials and private paths out of them. Hints grant no tools or permissions.
 - The compiler honors explicit assignments, then requirements and preferences, and uses the default only when it fits. Each Work Item records its profile and reason; editing the issue cannot change it.

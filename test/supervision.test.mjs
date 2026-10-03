@@ -68,7 +68,7 @@ esac
   const configPath = join(root, "factory.json");
   writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
   const state = {
-    schemaVersion: 5,
+    schemaVersion: 7,
     kind: "preparing",
     repository: config.repository,
     objective: 1,
@@ -77,6 +77,7 @@ esac
     baseSha: "a".repeat(40),
     objectiveBodyDigest: "b".repeat(64),
     autonomy: defaultAutonomy,
+    capacity: { concurrency: 1 },
     issueByItemId: {},
     coordinator: {
       mode: "paused",

@@ -68,6 +68,8 @@ test("accepted reprioritization changes pending order without resetting running 
       baseSha: target.baseSha,
       graph,
       runId: "priority-fixture",
+      capacity: { concurrency: 3 },
+      planGraphDigest: graphDigest(graph),
       issueByItemId: { first: 2, second: 3, legacy: 4 },
       work: {
         first: { status: "pending" },
@@ -111,7 +113,7 @@ test("accepted reprioritization changes pending order without resetting running 
         async reviewGraph(request) {
           reviews++;
           assert.deepEqual(request.executionBounds, {
-            configuredConcurrency: config.execution.concurrency,
+            configuredConcurrency: state.capacity.concurrency,
           });
           return {
             packetId: request.reviewPacket.id,

@@ -43,7 +43,7 @@ export function phaseAdmission(
       throw new Error(
         "Driver availableSlots must be a nonnegative integer or unknown",
       );
-    const operator = config.execution.concurrency;
+    const operator = state.capacity.concurrency;
     // Driver reports remaining slots, not total capacity. Subtract owned coding only from the operator ceiling.
     return Math.max(
       0,
@@ -62,13 +62,13 @@ export function phaseAdmission(
       .filter(([other, work]) => other !== id && work.phaseReservation);
     const ceiling =
       phase === "coding"
-        ? config.execution.concurrency
+        ? state.capacity.concurrency
         : phase === "review"
-          ? (config.scheduling?.reviewConcurrency ??
-            config.execution.concurrency)
+          ? (state.capacity.scheduling?.reviewConcurrency ??
+            state.capacity.concurrency)
           : phase === "validation"
-            ? (config.scheduling?.validationConcurrency ??
-              config.execution.concurrency)
+            ? (state.capacity.scheduling?.validationConcurrency ??
+              state.capacity.concurrency)
             : undefined;
     if (
       ceiling !== undefined &&
@@ -76,9 +76,9 @@ export function phaseAdmission(
         .length >= ceiling
     )
       return `${phase} concurrency ceiling`;
-    const declaration = config.scheduling?.phases?.[phase];
+    const declaration = state.capacity.scheduling?.phases?.[phase];
     for (const resource of ["cpu", "memoryMiB"] as const) {
-      const limit = config.scheduling?.[resource];
+      const limit = state.capacity.scheduling?.[resource];
       if (limit === undefined) continue;
       const requested = declaration?.[resource];
       if (requested === undefined)
@@ -88,7 +88,9 @@ export function phaseAdmission(
       let total = requested;
       for (const [, work] of reservations) {
         const amount =
-          config.scheduling?.phases?.[work.phaseReservation!]?.[resource];
+          state.capacity.scheduling?.phases?.[work.phaseReservation!]?.[
+            resource
+          ];
         if (amount === undefined)
           return `unknown active ${resource} reservation`;
         total += amount;

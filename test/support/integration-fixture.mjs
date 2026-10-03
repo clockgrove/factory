@@ -17,7 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { createApplication } from "../../dist/application.js";
-import { stateRoot } from "../../dist/config.js";
+import { resolveCapacity, stateRoot } from "../../dist/config.js";
 import { LocalContentStore } from "../../dist/content/local.js";
 import { RegularDelivery } from "../../dist/delivery/regular.js";
 import { LocalExecutionDriver } from "../../dist/execution/local.js";
@@ -934,7 +934,7 @@ export function makeApplication(descriptor) {
       descriptor.config.checkout,
       join(root, "worktrees"),
       harness,
-      descriptor.config.execution.concurrency,
+      resolveCapacity(descriptor.config).concurrency,
       contentStore,
       "scripted-test@1",
     );

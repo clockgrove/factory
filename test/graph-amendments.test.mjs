@@ -474,6 +474,8 @@ test("amendment validation preserves cycles, stable/completed identity, command 
       issueByItemId: { result: 2 },
       work: { result: { status: "pending" } },
       autonomy,
+      capacity: { concurrency: config.execution.concurrency },
+      planGraphDigest: graphDigest(graph),
     };
     const proposal = {
       ...discovery,
@@ -778,6 +780,8 @@ test("operator amendment source inputs are hydrated from pinned citations before
       issueByItemId: { result: 2 },
       work: { result: { status: "done", attempt: "preserved" } },
       autonomy,
+      capacity: { concurrency: config.execution.concurrency },
+      planGraphDigest: graphDigest(graph),
       coordinator: { mode: "running" },
     };
     const candidate = qaGraph(graph);
@@ -885,6 +889,8 @@ async function assertProjectionRepeats(name, lostError, pattern) {
         issueByItemId: { result: 2 },
         work: { result: { status: "done", attempt: "preserved" } },
         autonomy,
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: graphDigest(graph),
         coordinator: { mode: "running" },
       };
       submitAmendment(state, {
@@ -999,6 +1005,8 @@ test("interrupted amendment compile is repeated and charged once", async () => {
             ...autonomyConfig,
             allowances: { ...autonomyConfig.allowances, planningRevisions: 2 },
           }),
+          capacity: { concurrency: config.execution.concurrency },
+          planGraphDigest: graphDigest(graph),
           coordinator: { mode: "running" },
         };
         submitAmendment(state, {
@@ -1359,6 +1367,8 @@ test("native amendments cannot repartition a started published stack", async () 
           second: { status: "pending" },
         },
         autonomy,
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: graphDigest(graph),
       };
       const candidate = structuredClone(graph);
       candidate.items.push(item("fork", ["result"]));
@@ -1402,6 +1412,8 @@ test("planning consumption survives acceptance and cannot reset for a second rev
       issueByItemId: { result: 2 },
       work: { result: { status: "done", attempt: "original" } },
       autonomy,
+      capacity: { concurrency: config.execution.concurrency },
+      planGraphDigest: graphDigest(graph),
     };
     const args = {
       state,
@@ -1722,6 +1734,8 @@ for (const mode of ["paused", "draining"])
             },
           },
           autonomy,
+          capacity: { concurrency: config.execution.concurrency },
+          planGraphDigest: graphDigest(graph),
           coordinator: { mode: "running" },
         };
         const admittedBytes = JSON.stringify(graph);
@@ -2382,6 +2396,8 @@ test("actual review provider/protocol failures cannot authorize amendment replac
         issueByItemId: { result: 2 },
         work: { result: { status: "done", attempt: "retained" } },
         autonomy: resolveAutonomy(replacementAutonomy),
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: graphDigest(graph),
         coordinator: { mode: "running" },
       };
       submitAmendment(state, {
@@ -2542,6 +2558,8 @@ test("completed-rejection preserves projection history without replay", async ()
         issueByItemId: { result: 2 },
         work: { result: { status: "done", attempt: "preserved" } },
         autonomy,
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: graphDigest(graph),
         coordinator: { mode: "running" },
       };
       submitAmendment(state, {
@@ -2611,6 +2629,8 @@ test("completed-auth-rejection preserves projection history without replay", asy
         issueByItemId: { result: 2 },
         work: { result: { status: "done", attempt: "preserved" } },
         autonomy,
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: graphDigest(graph),
         coordinator: { mode: "running" },
       };
       submitAmendment(state, {

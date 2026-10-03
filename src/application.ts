@@ -21,13 +21,13 @@ import {
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import type { SourceSelector } from "./compiler.js";
 import { ClaudePlanningModel } from "./claude-planning.js";
 import { CodexPlanningModel, type PlanCandidate } from "./compiler.js";
 import type { FactoryConfig, JsonValue, LocalHarnessConfig } from "./config.js";
 import {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   factoryConfigDigest,
+  resolveCapacity,
   GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
   stateRoot,
   validateConfig,
@@ -76,13 +76,11 @@ export interface FactoryApplication {
     objective: number,
     proposal: import("./graph-amendments.js").AmendmentProposal,
   ): Promise<unknown>;
-  planObjective(
-    objective: number,
-    additionalSources?: SourceSelector[],
-  ): Promise<PlanCandidate>;
+  planObjective(objective: number): Promise<PlanCandidate>;
   decidePlan(
     objective: number,
     input: {
+      plan?: string;
       actor: string;
       outcome: "accept" | "refuse";
       answer: string;
@@ -170,8 +168,7 @@ export function createApplication(
     enqueueIntake: (objectives, options) =>
       enqueueIntake(config, services.github, objectives, options),
     runIntake: () => runIntake(config, services),
-    planObjective: (objective, additionalSources) =>
-      planObjective(config, objective, services, additionalSources),
+    planObjective: (objective) => planObjective(config, objective, services),
     decidePlan: (objective, input) =>
       decidePlan(config, objective, services, input),
     proposeAmendment: (objective, proposal) =>
@@ -259,8 +256,7 @@ export function composePlanning(
       ),
   };
   return {
-    planObjective: (objective, additionalSources) =>
-      planObjective(config, objective, services, additionalSources),
+    planObjective: (objective) => planObjective(config, objective, services),
     decidePlan: (objective, input) =>
       decidePlan(config, objective, services, input),
   };
@@ -331,7 +327,7 @@ function composeLocal(
     config.checkout,
     join(root, "worktrees"),
     harness,
-    config.execution.concurrency,
+    resolveCapacity(config).concurrency,
     contentStore,
     adapterIdentity,
     profiles,
@@ -596,7 +592,7 @@ export function composeWithSandbox(
         config: config.execution.harness.config,
       },
       argv: config.execution.argv,
-      concurrency: config.execution.concurrency,
+      concurrency: resolveCapacity(config).concurrency,
     }),
     github,
     delivery: new RegularDelivery(config.checkout, github),

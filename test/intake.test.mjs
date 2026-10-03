@@ -988,12 +988,13 @@ for (const disposition of ["failed", "cancelled"])
     fixture(async (f) => {
       await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
       saveState(statePath(f.config.repository, 1), {
-        schemaVersion: 5,
+        schemaVersion: 7,
         kind: "preparing",
         repository: f.config.repository,
         objective: 1,
         runId: "failed-preparation",
         autonomy: resolveAutonomy(limits),
+        capacity: { concurrency: f.config.execution.concurrency },
         configDigest: factoryConfigDigest(f.config),
         baseSha: f.target.baseSha,
         objectiveBodyDigest: createHash("sha256").update(body(1)).digest("hex"),
@@ -1223,7 +1224,7 @@ test("consented continuous intake stays model-free while idle and refills throug
     await waitFor(() => {
       const state = readContinuation(f.config.repository, 1);
       return (
-        state?.schemaVersion === 4 &&
+        state?.schemaVersion === 6 &&
         objectiveComplete(state) &&
         readIntake(f.config).observation?.idleReason ===
           "awaiting-approved-work"
@@ -1240,7 +1241,7 @@ test("consented continuous intake stays model-free while idle and refills throug
     await waitFor(() => {
       const state = readContinuation(f.config.repository, 2);
       return (
-        state?.schemaVersion === 4 &&
+        state?.schemaVersion === 6 &&
         objectiveComplete(state) &&
         readIntake(f.config).observation?.idleReason ===
           "awaiting-approved-work"
@@ -1321,13 +1322,14 @@ test("watch and refill preserve failed nonterminal fences and require real servi
     );
     await watchIntake(f.config, watcherConsent);
     const failed = {
-      schemaVersion: 5,
+      schemaVersion: 7,
       kind: "preparing",
       repository: f.config.repository,
       objective: 1,
       configDigest: factoryConfigDigest(f.config),
       runId: "preserved-failure",
       autonomy: resolveAutonomy(limits),
+      capacity: { concurrency: f.config.execution.concurrency },
       baseSha: "a".repeat(40),
       objectiveBodyDigest: "b".repeat(64),
       coordinator: {

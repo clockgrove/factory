@@ -139,7 +139,7 @@ export function assertGraphRevisions(state: FactoryState): void {
       rejected.phase !== "rejected" ||
       !rejected.error ||
       ![
-        graphDigest(state.graph),
+        state.planGraphDigest,
         ...(state.graphRevisions ?? []).map((revision) => revision.digest),
       ].includes(rejected.proposal.expectedGraphDigest)
     )
@@ -152,8 +152,8 @@ export function assertGraphRevisions(state: FactoryState): void {
   }
   const revisions = state.graphRevisions;
   if (revisions) {
-    if (!revisions.length)
-      throw new Error("Graph revisions lack their initial graph");
+    if (!revisions.length || revisions[0]!.digest !== state.planGraphDigest)
+      throw new Error("Graph revisions do not descend from the accepted plan");
     for (const [index, revision] of revisions.entries()) {
       if (
         revision.digest !== graphDigest(revision.graph) ||
@@ -175,7 +175,8 @@ export function assertGraphRevisions(state: FactoryState): void {
     }
     if (revisions.at(-1)!.digest !== graphDigest(state.graph))
       throw new Error("Current graph differs from accepted revision");
-  }
+  } else if (graphDigest(state.graph) !== state.planGraphDigest)
+    throw new Error("Current graph differs from the accepted plan");
   if (state.allowanceConsumption) {
     for (const key of [
       "planningRevisions",
@@ -508,12 +509,7 @@ export function validateAmendment(
   const pending = state.pendingAmendment!;
   if (pending.proposal.expectedGraphDigest !== graphDigest(state.graph))
     throw new Error("Stale amendment candidate");
-  const sources = planningSources(
-    body,
-    state.baseSha,
-    config.checkout,
-    state.additionalSources,
-  );
+  const sources = planningSources(body, state.baseSha, config.checkout);
   validateGraph(
     graph,
     state.objective,
@@ -658,12 +654,7 @@ async function advanceAmendment(args: {
       args.body,
       state.baseSha,
     );
-    const sources = planningSources(
-      args.body,
-      state.baseSha,
-      config.checkout,
-      state.additionalSources,
-    );
+    const sources = planningSources(args.body, state.baseSha, config.checkout);
     const prerequisites = await planningPrerequisites(
       config,
       args.github,
@@ -697,12 +688,7 @@ async function advanceAmendment(args: {
         for (const item of pending.graph.items) delete item.executionBinding;
         hydrateWorkerInputSources(
           pending.graph,
-          planningSources(
-            args.body,
-            state.baseSha,
-            config.checkout,
-            state.additionalSources,
-          ),
+          planningSources(args.body, state.baseSha, config.checkout),
         );
         normalizeExecutionProfiles(pending.graph, choices);
       } else {
@@ -732,7 +718,6 @@ async function advanceAmendment(args: {
             }),
           },
           choices,
-          state.additionalSources,
           {
             currentGraph: state.graph,
             discovery: pending.proposal,
@@ -743,7 +728,7 @@ async function advanceAmendment(args: {
           },
           prerequisites,
           localExecutables,
-          { configuredConcurrency: config.execution.concurrency },
+          { configuredConcurrency: state.capacity.concurrency },
         );
       }
       calling = undefined;
@@ -768,7 +753,7 @@ async function advanceAmendment(args: {
         choices,
         prerequisites,
         localExecutables,
-        { configuredConcurrency: config.execution.concurrency },
+        { configuredConcurrency: state.capacity.concurrency },
       );
       packet.amendment = {
         previousGraph: state.graph,

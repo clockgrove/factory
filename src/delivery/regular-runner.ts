@@ -430,7 +430,6 @@ export async function runRegularGraph(args: {
           args.objectiveBody,
           state.baseSha,
           config.checkout,
-          state.additionalSources,
         ),
         decisions: work.acceptanceDecisions,
         evidenceSources: workItemReviewEvidence({
@@ -529,7 +528,6 @@ export async function runRegularGraph(args: {
               args.objectiveBody,
               state.baseSha,
               config.checkout,
-              state.additionalSources,
             ),
             save,
             stopped: () =>
@@ -612,7 +610,7 @@ export async function runRegularGraph(args: {
       outcome: "observed",
       metadata: {
         driverAvailableSlots: reported,
-        operatorCeiling: config.execution.concurrency,
+        operatorCeiling: state.capacity.concurrency,
         codingReservations: phases.codingCount(),
       },
     });

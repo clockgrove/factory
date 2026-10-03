@@ -510,13 +510,14 @@ for (const fault of ["refill", "foreign"]) {
       } else {
         const { factoryConfigDigest } = await import("../dist/config.js");
         const snapshot = {
-          schemaVersion: 5,
+          schemaVersion: 7,
           kind: "preparing",
           repository: config.repository,
           objective: 2,
           configDigest: factoryConfigDigest(config),
           runId: "retained-foreign-nonterminal",
           autonomy: defaultAutonomy,
+          capacity: { concurrency: 1 },
           baseSha: "a".repeat(40),
           objectiveBodyDigest: "b".repeat(64),
           coordinator: {
@@ -564,16 +565,18 @@ test("guided setup leaves omitted concurrency to host sizing at run time and rep
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     assert.equal(config.execution.concurrency, undefined);
     assert.equal(config.scheduling, undefined);
-    assert.deepEqual(configured.document.capacity, {
+    const sized = {
       ...expected,
       sizedFromHost: {
         cpus: availableParallelism(),
         memoryMiB: Math.floor(totalmem() / 1024 ** 2),
       },
-    });
+    };
+    assert.deepEqual(configured.document.capacity, sized);
+    // The configuration still omits concurrency, so a repeat reports the same host sizing.
     const repeated = run(["setup", "--config-only"]);
     assert.equal(repeated.status, 0, repeated.stdout + repeated.stderr);
-    assert.deepEqual(repeated.document.capacity, expected);
+    assert.deepEqual(repeated.document.capacity, sized);
   }));
 
 test("guided setup keeps an explicit concurrency as the whole capacity choice", () =>
@@ -639,7 +642,7 @@ test("setup reuses an identical Objective selection and refuses replacing it whi
       const { factoryConfigDigest } = await import("../dist/config.js");
       const path = statePath(config.repository, 1);
       saveState(path, {
-        schemaVersion: 5,
+        schemaVersion: 7,
         kind: "preparing",
         repository: config.repository,
         objective: 1,
@@ -648,6 +651,7 @@ test("setup reuses an identical Objective selection and refuses replacing it whi
         baseSha: "a".repeat(40),
         objectiveBodyDigest: "b".repeat(64),
         autonomy: defaultAutonomy,
+        capacity: { concurrency: 1 },
         issueByItemId: {},
         coordinator: {
           mode: "paused",
@@ -671,7 +675,7 @@ test("setup reuses an identical Objective selection and refuses replacing it whi
       assert.equal(changed.status, 1, changed.stdout + changed.stderr);
       assert.match(
         changed.document.blocked.detail,
-        /active Objective prevents replacing intake authority/,
+        /active Objective prevents replacing the intake selection/,
       );
       assert.deepEqual(readIntake(config), intakeBefore);
       assert.equal(readFileSync(path, "utf8"), before);

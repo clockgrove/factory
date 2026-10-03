@@ -11,6 +11,7 @@ import { workItemReviewObservations } from "../dist/validation.js";
 import { assetSelectionDigest } from "../dist/media.js";
 import { CONTROLLER_CAPABILITIES_DIGEST } from "../dist/controller-capabilities.js";
 import { defaultAutonomy } from "../dist/index.js";
+import { graphDigest } from "../dist/graph-amendments.js";
 
 const repository = "example/disposable";
 const objective = 42;
@@ -18,12 +19,17 @@ const sha = "a".repeat(40);
 
 function state() {
   return {
-    schemaVersion: 4,
+    schemaVersion: 6,
     repository,
     objective,
     runId: "run-1",
     configDigest: "b".repeat(64),
     autonomy: structuredClone(defaultAutonomy),
+    capacity: { concurrency: 1 },
+    // These fixtures edit the graph freely; the accepted plan is whatever it now is.
+    get planGraphDigest() {
+      return graphDigest(this.graph);
+    },
     baseSha: sha,
     graph: {
       objective,
@@ -392,7 +398,10 @@ test("selected LFS item and final receipts must match selected required members"
         delete invalid.work.asset.selectionDigest;
         delete invalid.work.asset.selection;
         if (scope === "final") delete invalid.finalValidation.hydrationReceipt;
-      } else invalid.graph.items[0].requiredLfsRoles = [];
+      } else {
+        invalid.graph.items[0].requiredLfsRoles = [];
+        invalid.planGraphDigest = graphDigest(invalid.graph);
+      }
       assert.throws(
         () => parseFactoryState(invalid, repository, objective),
         /Selected LFS validation evidence.*selected member/,

@@ -111,7 +111,7 @@ const admission = {
     .digest("hex"),
 };
 const state = {
-  schemaVersion: 5,
+  schemaVersion: 7,
   kind: "preparing",
   repository: config.repository,
   objective: 1,

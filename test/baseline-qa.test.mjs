@@ -372,7 +372,7 @@ test("baseline graph does not grant authority to omit source-required implementa
     "regular",
     async ({ application, eventsPath }) => {
       const waiting = await application.runObjective(1);
-      assert.equal(waiting.schemaVersion, 5);
+      assert.equal(waiting.schemaVersion, 7);
       assert.equal(waiting.plan.review.status, "needs-human");
       assert.deepEqual(waiting.issueByItemId, {});
       assert.deepEqual(readEvents(eventsPath), []);

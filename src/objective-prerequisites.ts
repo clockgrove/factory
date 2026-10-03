@@ -26,7 +26,7 @@ export async function planningPrerequisites(
   for (const predecessor of [...predecessors].sort((a, b) => a - b)) {
     const previous = readContinuation(config.repository, predecessor);
     if (
-      previous?.schemaVersion !== 4 ||
+      previous?.schemaVersion !== 6 ||
       !objectiveComplete(previous) ||
       !previous.finalAcceptance
     )

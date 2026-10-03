@@ -71,6 +71,8 @@ export interface IntakeAuthorization {
     at: string;
     reasons: Record<string, string>;
     error?: string;
+    /** The Objective that stopped the queue for a human decision. */
+    needsDecision?: number;
     idleReason?: "awaiting-approved-work" | "waiting-for-eligible-work";
     unapproved?: number[];
   };
@@ -119,7 +121,7 @@ export function readIntake(
     value.pollSeconds <= 0
   )
     throw new Error(
-      "Intake authority differs from this installation or is invalid",
+      "Intake record differs from this installation or is invalid",
     );
   for (const key of Object.keys(value))
     if (
@@ -139,7 +141,7 @@ export function readIntake(
       ].includes(key)
     )
       throw new Error(
-        `Unsupported intake authorization field ${key}; compatibility refused`,
+        `Unsupported intake record field ${key}; compatibility refused`,
       );
   if (value.watch !== undefined && value.watch !== true)
     throw new Error("Invalid continuous intake selection");
@@ -159,7 +161,7 @@ export function readIntake(
     if (!/^[a-f0-9]{64}$/.test(value.bodyDigests[objective] ?? ""))
       throw new Error("Intake issue body binding is missing");
   if (value.dequeued.some((id) => !value.objectives.includes(id)))
-    throw new Error("Invalid revoked Objective authorization");
+    throw new Error("Dequeued Objective is outside the intake selection");
   return value;
 }
 function validateObjectives(objectives: number[]): void {
@@ -182,7 +184,7 @@ function continuations(config: FactoryConfig): ContinuationState[] {
 function terminal(state: ContinuationState): boolean {
   return (
     !!state.cancelledAt ||
-    (state.schemaVersion === 4 && objectiveComplete(state))
+    (state.schemaVersion === 6 && objectiveComplete(state))
   );
 }
 export function intakeComplete(
@@ -219,7 +221,9 @@ export function intakeSettled(config: FactoryConfig): boolean {
 }
 function settledRefill(config: FactoryConfig): void {
   if (!intakeSettled(config))
-    throw new Error("An active Objective prevents replacing intake authority");
+    throw new Error(
+      "An active Objective prevents replacing the intake selection",
+    );
 }
 async function bindIntake(
   config: FactoryConfig,
@@ -398,7 +402,7 @@ export async function intakeControl(
     lock = acquireControllerLock(path, 0);
   try {
     const record = readIntake(config);
-    if (!record) throw new Error("No intake authority registered");
+    if (!record) throw new Error("No intake selection registered");
     applyControl(config, record, action, objective);
     if (["pause", "resume", "drain"].includes(action)) {
       for (const current of continuations(config).filter(
@@ -423,7 +427,7 @@ function applyControl(
 ): void {
   if (action === "dequeue") {
     if (!objective || !record.objectives.includes(objective))
-      throw new Error("Objective is outside intake authority");
+      throw new Error("Objective is outside the intake selection");
     const state = readContinuation(config.repository, objective);
     if (state && !terminal(state))
       throw new Error(
@@ -499,7 +503,7 @@ export async function runIntake(
   services: ApplicationServices,
 ): Promise<IntakeAuthorization> {
   const initial = readIntake(config);
-  if (!initial) throw new Error("No intake authority registered");
+  if (!initial) throw new Error("No intake selection registered");
   let record: IntakeAuthorization = initial;
   const lockPath = join(stateRoot(config.repository), "controller.lock");
   const lock = acquireControllerLock(lockPath, 0);
@@ -569,7 +573,7 @@ export async function runIntake(
       )
         return preparing.coordinator;
       if (
-        preparing?.schemaVersion !== 5 ||
+        preparing?.schemaVersion !== 7 ||
         preparing.objective !== request.objective ||
         !record.objectives.includes(request.objective)
       )
@@ -615,7 +619,7 @@ export async function runIntake(
     ) {
       const preparing = continuations(config).find(
         (state): state is PreparationState =>
-          state.schemaVersion === 5 && !terminal(state),
+          state.schemaVersion === 7 && !terminal(state),
       );
       if (preparing) {
         preparing.coordinator.mode = record.mode;
@@ -649,7 +653,7 @@ export async function runIntake(
         );
       const current = existing[0];
       if (current && !record.objectives.includes(current.objective))
-        throw new Error("Active Objective is outside this intake authority");
+        throw new Error("Active Objective is outside this intake selection");
       const reasons: Record<string, string> = {};
       let selected = current?.objective;
       if (record.mode === "running" && !selected && !refilling) {
@@ -693,7 +697,7 @@ export async function runIntake(
               const missing = predecessors.find((before) => {
                 const state = readContinuation(config.repository, before);
                 return (
-                  state?.schemaVersion !== 4 ||
+                  state?.schemaVersion !== 6 ||
                   !objectiveComplete(state) ||
                   !state.finalAcceptance
                 );
@@ -749,7 +753,7 @@ export async function runIntake(
             throw new Error(
               "Current Objective is failed or cancelling; explicit supported recovery is required",
             );
-          if (!state || state.schemaVersion === 5) {
+          if (!state || state.schemaVersion === 7) {
             const issue = await services.github.objective(selected);
             if (
               issue.state !== "open" ||
@@ -764,10 +768,18 @@ export async function runIntake(
               objectiveControl = handler;
             },
           });
-          if (!terminal(result))
-            throw new Error(
-              `Objective #${selected} needs a human decision: ${result.coordinator?.waitReason ?? "inspect its status"}`,
-            );
+          if (!terminal(result)) {
+            // The queue stops on a human decision; C2 redesigns this route.
+            record.mode = "paused";
+            record.observation = {
+              at: new Date().toISOString(),
+              reasons,
+              needsDecision: selected,
+              error: `Objective #${selected} needs a human decision: ${result.coordinator?.waitReason ?? "inspect its status"}`,
+            };
+            saveIntake(config, record);
+            return record;
+          }
         } catch (error) {
           if (record.mode !== "running" || handingOff) {
             if (String(record.mode) === "draining" || handingOff) return record;

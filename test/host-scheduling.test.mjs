@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { availableParallelism, tmpdir, totalmem } from "node:os";
+import { syncBuiltinESMExports } from "node:module";
+import os, { availableParallelism, tmpdir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   factoryConfigDigest,
   hostSchedulingDefaults,
+  resolveCapacity,
   validateConfig,
 } from "../dist/config.js";
 import { defaultAutonomy, resolveAutonomy } from "../dist/index.js";
@@ -97,7 +99,7 @@ test("memory, not CPU, bounds workers on a CPU-rich host", () => {
   assert.equal(scheduling.validationConcurrency, 3);
 });
 
-test("omitted concurrency is sized from this host whenever the configuration is read", () => {
+test("omitted concurrency resolves from the host, and the declared config digest does not follow the host", () => {
   const root = mkdtempSync(join(tmpdir(), "factory-host-sized-"));
   try {
     const target = createTarget(root);
@@ -111,14 +113,30 @@ test("omitted concurrency is sized from this host whenever the configuration is 
       memoryBytes: totalmem(),
     });
     const sized = validateConfig({ ...rest, execution: sizedExecution });
-    assert.equal(sized.execution.concurrency, host.concurrency);
-    assert.deepEqual(sized.scheduling, host.scheduling);
+    assert.equal(sized.execution.concurrency, undefined);
+    assert.deepEqual(resolveCapacity(sized), {
+      concurrency: host.concurrency,
+      scheduling: host.scheduling,
+    });
     const explicit = validateConfig({
       ...rest,
       execution: { ...sizedExecution, concurrency: 3 },
     });
-    assert.equal(explicit.execution.concurrency, 3);
-    assert.equal(explicit.scheduling, undefined);
+    assert.deepEqual(resolveCapacity(explicit), { concurrency: 3 });
+    // A different host changes the resolved capacity, never the declared digest.
+    const digest = factoryConfigDigest(sized);
+    const { availableParallelism: cpus, totalmem: memory } = os;
+    try {
+      os.availableParallelism = () => 4;
+      os.totalmem = () => 8 * GiB;
+      syncBuiltinESMExports();
+      assert.equal(resolveCapacity(sized).concurrency, 1);
+      assert.equal(factoryConfigDigest(sized), digest);
+    } finally {
+      os.availableParallelism = cpus;
+      os.totalmem = memory;
+      syncBuiltinESMExports();
+    }
     assert.throws(
       () =>
         validateConfig({

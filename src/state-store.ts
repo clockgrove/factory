@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import { stateRoot } from "./config.js";
+import { stateRoot, validateCapacity } from "./config.js";
 import { linuxProcessIdentity } from "./process.js";
 import {
   assertCoordinator,
@@ -52,6 +52,15 @@ export function saveState(path: string, state: ContinuationState): void {
   }
 }
 
+/** Pre-release: state from an earlier Factory version is never migrated. */
+function assertCurrentVersion(repository: string, value: unknown): void {
+  const version = (value as { schemaVersion?: unknown } | null)?.schemaVersion;
+  if (version !== 6 && version !== 7)
+    throw new Error(
+      `State from an earlier Factory version; v0.2.0 starts fresh: delete ${stateRoot(repository)} (or finish it with the old version)`,
+    );
+}
+
 export function readContinuation(
   repository: string,
   objective: number,
@@ -59,7 +68,8 @@ export function readContinuation(
   const path = statePath(repository, objective);
   if (!existsSync(path)) return undefined;
   const value = JSON.parse(readFileSync(path, "utf8"));
-  if (value.schemaVersion !== 5) return readState(repository, objective);
+  assertCurrentVersion(repository, value);
+  if (value.schemaVersion !== 7) return readState(repository, objective);
   if (
     value.kind !== "preparing" ||
     value.repository !== repository ||
@@ -99,6 +109,7 @@ export function readContinuation(
   )
     throw new Error("Invalid preparation source packet binding");
   assertCoordinator(value.coordinator);
+  validateCapacity(value.capacity);
   assertRepairLedger(value);
   return value as PreparationState;
 }
@@ -109,12 +120,10 @@ export function readState(
 ): FactoryState | undefined {
   const path = statePath(repository, objective);
   if (!existsSync(path)) return undefined;
+  const value = JSON.parse(readFileSync(path, "utf8"));
+  assertCurrentVersion(repository, value);
   try {
-    const state = parseFactoryState(
-      JSON.parse(readFileSync(path, "utf8")),
-      repository,
-      objective,
-    );
+    const state = parseFactoryState(value, repository, objective);
     const root = resolve(stateRoot(repository));
     for (const [id, work] of Object.entries(state.work)) {
       if (!work.execution) continue;

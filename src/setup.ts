@@ -3,7 +3,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readConfig } from "./config.js";
+import { readConfig, resolveCapacity } from "./config.js";
 import { requestControl } from "./coordinator-control.js";
 import { redactDiagnosticDetail } from "./diagnostics.js";
 import { sharedGitHubClient } from "./github-client.js";
@@ -113,10 +113,8 @@ export async function setupTarget(
     const config = readConfig(configPath);
     result.repository = config.repository;
     result.capacity = {
-      concurrency: config.execution.concurrency,
-      scheduling: config.scheduling,
-      ...(completed.includes("configuration-created") &&
-      option(args, "concurrency") === undefined
+      ...resolveCapacity(config),
+      ...(config.execution.concurrency === undefined
         ? {
             sizedFromHost: {
               cpus: availableParallelism(),

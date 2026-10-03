@@ -805,7 +805,6 @@ test("completed SDK decoder failure enters the admitted bounded planning repair 
     undefined,
     undefined,
     undefined,
-    [],
     { state, save: () => snapshots.push(structuredClone(state)) },
   );
   assert.equal(candidate.review.status, "clean");
@@ -1333,7 +1332,6 @@ test("compileObjective supplies trusted retained identity and keeps pending item
       [],
       undefined,
       undefined,
-      [],
       {
         currentGraph: previous,
         discovery: { reason: "required QA" },
@@ -1712,7 +1710,6 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
     undefined,
     undefined,
     undefined,
-    [],
     { state, save() {} },
     undefined,
     undefined,
@@ -2024,7 +2021,6 @@ test("semantic validation rejection retains the actual decoded graph for bounded
     undefined,
     undefined,
     undefined,
-    [],
     { state, save() {} },
   );
   assert.equal(candidate.review.status, "clean");

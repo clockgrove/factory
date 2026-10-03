@@ -45,6 +45,7 @@ const preparing = (overrides = {}) => ({
   runActive: true,
   coordinator: { mode: "running", phase: "planning" },
   planReview: null,
+  planningStopped: false,
   cancelledAt: null,
   error: null,
   ...overrides,
@@ -85,13 +86,33 @@ test("preparation reports planning, a plan decision, pause and failure", () => {
   );
   const decision = summarizeStatus(
     preparing({
-      planReview: { status: "needs-human", question: "Split the API item?" },
+      planReview: {
+        status: "needs-human",
+        question: "Split the API item?",
+        digest: "0123456789ab",
+      },
     }),
   );
   assert.equal(decision.phase, "needs-plan-decision");
-  assert.match(
+  assert.equal(
     decision.nextAction.command,
-    /^factory decide --objective 7 --outcome accept\|refuse --reason "WHY"$/,
+    'factory decide --objective 7 --plan 0123456789ab --outcome accept|refuse --answer "ANSWER" --reason "WHY"',
+  );
+  // Planning that stopped before producing a plan names the way out.
+  const stopped = summarizeStatus(
+    preparing({
+      planningStopped: true,
+      coordinator: {
+        mode: "running",
+        phase: "waiting",
+        waitReason: "Planning stopped for a decision: owner unstated",
+      },
+    }),
+  );
+  assert.equal(stopped.phase, "needs-plan-decision");
+  assert.equal(
+    stopped.nextAction.command,
+    'factory decide --objective 7 --outcome refuse --reason "WHY"',
   );
   const paused = summarizeStatus(
     preparing({
@@ -379,7 +400,7 @@ test("status documents carry the same phase, summary and next action", () => {
   assert.equal(empty.nextAction.command, "factory run --objective 7");
   const prepared = preparationStatusDocument(
     {
-      schemaVersion: 5,
+      schemaVersion: 7,
       kind: "preparing",
       repository: "example/repo",
       objective: 7,
@@ -389,6 +410,7 @@ test("status documents carry the same phase, summary and next action", () => {
       objectiveBodyDigest: "d".repeat(64),
       issueByItemId: {},
       plan: {
+        reviewDigest: "e".repeat(64),
         review: {
           status: "needs-human",
           revisions: 1,
@@ -406,6 +428,8 @@ test("status documents carry the same phase, summary and next action", () => {
   );
   assert.equal(prepared.phase, "needs-plan-decision");
   assert.equal(prepared.planReview.question, "Keep [REDACTED]?");
+  assert.equal(prepared.planReview.digest, "e".repeat(12));
+  assert.match(prepared.nextAction.command, /--plan eeeeeeeeeeee /);
   const text = renderStatusText(prepared);
   assert.equal(
     text[0],

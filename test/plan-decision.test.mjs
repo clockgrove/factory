@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { planReviewPacket } from "../dist/compiler.js";
 import { readContinuation, saveState, statePath } from "../dist/state-store.js";
+import { shortPlanDigest } from "../dist/status-summary.js";
 import { withCoverage } from "./support/coverage.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
 import {
@@ -128,6 +129,15 @@ async function fixture(name, callback, options = {}) {
   }
 }
 
+/** Decide on the plan currently saved, as the status command names it. */
+function decideSaved(application, config, input) {
+  const plan = readContinuation(config.repository, 1)?.plan;
+  return application.decidePlan(1, {
+    ...(plan ? { plan: shortPlanDigest(plan) } : {}),
+    ...input,
+  });
+}
+
 const accept = {
   actor: "fixture operator",
   outcome: "accept",
@@ -217,11 +227,11 @@ test("run persists a plan that needs a decision and binds the exact human answer
     "human-decision",
     async ({ application, config, github, calls }) => {
       await assert.rejects(
-        application.decidePlan(1, accept),
+        decideSaved(application, config, accept),
         /no persisted plan/,
       );
       const preparing = await application.runObjective(1);
-      assert.equal(preparing.schemaVersion, 5);
+      assert.equal(preparing.schemaVersion, 7);
       assert.equal(preparing.plan.review.status, "needs-human");
       assert.match(
         preparing.coordinator.waitReason,
@@ -230,13 +240,13 @@ test("run persists a plan that needs a decision and binds the exact human answer
       assert.equal(Object.keys(github.state().issues).length, 0);
       const planned = calls.length;
       const again = await application.runObjective(1);
-      assert.equal(again.schemaVersion, 5);
+      assert.equal(again.schemaVersion, 7);
       assert.equal(calls.length, planned, "a rerun never plans again");
       await assert.rejects(
-        application.decidePlan(1, { ...accept, answer: " " }),
+        decideSaved(application, config, { ...accept, answer: " " }),
         /specific answer/,
       );
-      const decided = await application.decidePlan(1, accept);
+      const decided = await decideSaved(application, config, accept);
       const persisted = readContinuation(config.repository, 1);
       assert.deepEqual(persisted.plan, decided.plan);
       assert.equal(persisted.plan.review.status, "human-accepted");
@@ -250,14 +260,14 @@ test("run persists a plan that needs a decision and binds the exact human answer
       );
       assert.equal(persisted.coordinator.waitReason, undefined);
       await assert.rejects(
-        application.decidePlan(1, accept),
+        decideSaved(application, config, accept),
         /no unresolved specific human question/,
       );
       const completed = await application.runObjective(1);
       assert.equal(completed.finalValidation.passed, true);
       assert.equal(calls.length, planned);
       await assert.rejects(
-        application.decidePlan(1, accept),
+        decideSaved(application, config, accept),
         /no persisted plan/,
       );
     },
@@ -331,7 +341,7 @@ test("plan decisions validate required CI shape and pinned authority even with c
         mutate(invalid.plan);
         rehash(invalid.plan, objectiveBody, target);
         saveState(path, invalid);
-        await assert.rejects(application.decidePlan(1, accept), message);
+        await assert.rejects(decideSaved(application, config, accept), message);
         assert.equal(
           readContinuation(config.repository, 1).plan.review.status,
           "needs-human",

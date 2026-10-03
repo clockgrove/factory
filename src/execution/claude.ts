@@ -27,6 +27,7 @@ import {
   sanitizedWorkerEnvironment,
 } from "../process.js";
 import { parseAuthenticationRequest } from "./harness-support.js";
+import { serviceLoginEnvironment } from "../provider-credentials.js";
 
 interface ClaudeWorkerHandleData {
   pid: number;
@@ -69,13 +70,26 @@ export function claudeAuthenticationValues(
     .filter((value): value is string => Boolean(value));
 }
 
+/** Network settings a host may need to reach the Claude API. */
+export const claudeNetworkEnvironment = [
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY",
+  "https_proxy",
+  "http_proxy",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+];
+
 export function claudeWorkerEnvironment(
   credentialDirectory: string,
 ): Record<string, string> {
-  const environment = sanitizedWorkerEnvironment(
-    credentialDirectory,
-    claudeLocalAuthenticationEnvironment,
-  );
+  const environment = sanitizedWorkerEnvironment(credentialDirectory, [
+    ...claudeLocalAuthenticationEnvironment,
+    ...claudeNetworkEnvironment,
+  ]);
+  // A service's bound login reaches Claude SDK children only.
+  Object.assign(environment, serviceLoginEnvironment());
   environment.CLAUDE_AGENT_SDK_CLIENT_APP = `clockgrove-factory/${FACTORY_VERSION}`;
   return environment;
 }

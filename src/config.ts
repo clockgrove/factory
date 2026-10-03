@@ -142,11 +142,12 @@ export type PlanningConfig =
       reviewer: CodexModelSelection;
     }
   | {
-      /** Claude Messages API through the pinned @anthropic-ai/sdk. */
-      kind: "claude-api";
-      /** Controller environment variable holding the Anthropic API key. */
-      credentialEnv: string;
-      /** Messages API max_tokens for every planning and review call. */
+      /**
+       * Claude through the pinned Agent SDK, authenticated by the operator's
+       * Claude login (or CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY).
+       */
+      kind: "claude-agent-sdk";
+      /** Output token ceiling for every planning and review call. */
       maxOutputTokens: number;
       planner: ClaudeModelSelection;
       reviewer: ClaudeModelSelection;
@@ -355,18 +356,13 @@ function validatePlanning(
     assertCodexModelSelection(value.reviewer, "planning.reviewer");
     return;
   }
-  if (value.kind !== "claude-api")
+  if (value.kind !== "claude-agent-sdk")
     throw new Error("Unsupported planning model");
   assertOnlyKeys(
     value,
-    ["kind", "credentialEnv", "maxOutputTokens", "planner", "reviewer"],
+    ["kind", "maxOutputTokens", "planner", "reviewer"],
     "planning",
   );
-  if (
-    typeof value.credentialEnv !== "string" ||
-    !/^[A-Z_][A-Z0-9_]*$/.test(value.credentialEnv)
-  )
-    throw new Error("planning.credentialEnv must name an environment variable");
   if (
     !Number.isSafeInteger(value.maxOutputTokens) ||
     (value.maxOutputTokens as number) <= 0

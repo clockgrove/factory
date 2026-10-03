@@ -1,3 +1,4 @@
+import { serviceLoginSecrets } from "./provider-credentials.js";
 import { hasReadinessWait, isReadinessWait } from "./delivery/readiness.js";
 import { executionContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
@@ -146,9 +147,12 @@ export interface ApplicationServices {
 }
 
 function configuredDiagnosticSecrets(config: FactoryConfig): string[] {
-  return config.policy.allowedSecretNames
-    .map((name) => process.env[name])
-    .filter((value): value is string => Boolean(value));
+  return [
+    ...config.policy.allowedSecretNames
+      .map((name) => process.env[name])
+      .filter((value): value is string => Boolean(value)),
+    ...serviceLoginSecrets(),
+  ];
 }
 
 /** Explicit previews remain read-only; admitted repair or intake planning persists one bound preparation. */

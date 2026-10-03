@@ -386,41 +386,57 @@ test("managed CLI readiness and fresh supervised starts use loaded private crede
     }
   }));
 
-test("a supervised service binds every configured provider credential, including planning", () =>
+test("a supervised Claude planning service keeps the Claude login and may bind a token", () =>
   fixture(async ({ root, config, configPath, state }) => {
     config.planning = {
-      kind: "claude-api",
-      credentialEnv: "FACTORY_PLANNING_TEST_KEY",
+      kind: "claude-agent-sdk",
       maxOutputTokens: 1000,
       planner: { model: "claude-opus-5-5", reasoningEffort: "high" },
       reviewer: { model: "claude-opus-5-5", reasoningEffort: "high" },
     };
     writeFileSync(configPath, JSON.stringify(config));
     await registerIntake(config, state);
-    await assert.rejects(
-      supervise("install", configPath, { intake: true }),
-      /--credential-file FACTORY_PLANNING_TEST_KEY=ABSOLUTE_PRIVATE_FILE/,
+    process.env.CLAUDE_CONFIG_DIR = join(root, "claude-config");
+    process.env.HTTPS_PROXY = "http://proxy.invalid:3128";
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "ambient-token-never-copied";
+    const unitFile = join(
+      process.env.XDG_CONFIG_HOME,
+      "systemd/user",
+      serviceName(config.repository),
     );
-    const key = join(root, "planning-key");
-    writeFileSync(key, "planning-secret", { mode: 0o600 });
+    // No credential is required: the service uses the operator's login.
+    await supervise("install", configPath, { intake: true });
+    let unit = readFileSync(unitFile, "utf8");
+    assert.doesNotMatch(unit, /LoadCredential|--service-credential/);
+    assert.match(
+      unit,
+      new RegExp(`Environment="CLAUDE_CONFIG_DIR=${root}/claude-config"`),
+    );
+    assert.match(unit, /Environment="HTTPS_PROXY=http:\/\/proxy.invalid:3128"/);
+    assert.doesNotMatch(unit, /ambient-token-never-copied/);
+    await supervise("uninstall", configPath);
+
+    // A headless host may bind an OAuth token; unrelated names stay refused.
+    const token = join(root, "claude-token");
+    writeFileSync(token, "bound-oauth-token", { mode: 0o600 });
+    await assert.rejects(
+      supervise("install", configPath, {
+        intake: true,
+        credentialFiles: [`OTHER_KEY=${token}`],
+      }),
+      /OTHER_KEY is not required/,
+    );
     await supervise("install", configPath, {
       intake: true,
-      credentialFiles: [`FACTORY_PLANNING_TEST_KEY=${key}`],
+      credentialFiles: [`CLAUDE_CODE_OAUTH_TOKEN=${token}`],
     });
-    const unit = readFileSync(
-      join(
-        process.env.XDG_CONFIG_HOME,
-        "systemd/user",
-        serviceName(config.repository),
-      ),
-      "utf8",
-    );
-    assert.match(unit, /^LoadCredential="FACTORY_PLANNING_TEST_KEY:\//m);
-    assert.match(unit, /"--service-credential" "FACTORY_PLANNING_TEST_KEY"/);
-    assert.doesNotMatch(unit, /planning-secret/);
+    unit = readFileSync(unitFile, "utf8");
+    assert.match(unit, /^LoadCredential="CLAUDE_CODE_OAUTH_TOKEN:\//m);
+    assert.match(unit, /"--service-credential" "CLAUDE_CODE_OAUTH_TOKEN"/);
+    assert.doesNotMatch(unit, /bound-oauth-token/);
     const status = await supervise("status", configPath);
     assert.deepEqual(status.binding.credentials, [
-      { name: "FACTORY_PLANNING_TEST_KEY", file: key },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", file: token },
     ]);
   }));
 

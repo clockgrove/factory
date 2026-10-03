@@ -56,7 +56,7 @@
     "lint": "biome lint --error-on-warnings . && node scripts/check-ts-directives.mjs",
     "format:check": "biome format . && prettier --check package-lock.json \"**/*.{md,yml,yaml}\"",
     "format": "biome format --write . && prettier --write package-lock.json \"**/*.{md,yml,yaml}\"",
-    "test": "npm run build && node --import ./test/support/isolated-state.mjs --test test/*.test.mjs",
+    "test": "npm run build && node --import ./test/support/isolated-state.mjs --test --test-timeout=300000 test/*.test.mjs",
     "notices": "node scripts/generate-notices.mjs",
     "notices:check": "node scripts/generate-notices.mjs --check"
   },

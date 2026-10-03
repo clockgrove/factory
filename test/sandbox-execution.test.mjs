@@ -208,10 +208,15 @@ test("cancellation after a lost create finds and destroys the tagged sandbox wit
   assert.equal(f.provider.resources.size, 0);
   assert.equal(f.work.execution.data.terminal, "cancelled");
   // With nothing tagged, cancellation still never creates a sandbox.
+  assert.equal(f.provider.creates, creates);
   const other = fixture(t);
-  other.provider.createUnknown = true;
-  other.provider.create = async () => {
-    throw Object.assign(Error("create never arrived"), { status: 503 });
+  // The create request never arrives; every later create is still counted.
+  let createCalls = 0;
+  const create = other.provider.create.bind(other.provider);
+  other.provider.create = async (...args) => {
+    if (++createCalls === 1)
+      throw Object.assign(Error("create never arrived"), { status: 503 });
+    return create(...args);
   };
   await other.driver.start(other.request, other.context);
   await new SandboxExecutionDriver(other.options).cancel(
@@ -219,7 +224,7 @@ test("cancellation after a lost create finds and destroys the tagged sandbox wit
     other.context,
   );
   assert.equal(other.provider.resources.size, 0);
-  assert.equal(f.provider.creates, creates);
+  assert.equal(createCalls, 1);
 });
 test("wrong reply digest, identity and unsafe result path fail closed and settle the sandbox; cleanup failure remains visible", async (t) => {
   for (const variant of [

@@ -28,20 +28,36 @@ const nanos = (at: string) => {
   return (BigInt(ms) * 1_000_000n).toString();
 };
 
-/** Exact destination only; never follow redirects carrying credentials/content. */
+const loopback = (hostname: string) =>
+  hostname === "localhost" ||
+  hostname === "[::1]" ||
+  /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
+
+/**
+ * Exact destination only; never follow redirects carrying credentials/content.
+ * Plain HTTP is allowed only for a loopback collector.
+ */
 export function exportEndpoint(base: string, path: string): string {
   const url = new URL(base);
   if (
-    url.protocol !== "https:" ||
+    !(
+      url.protocol === "https:" ||
+      (url.protocol === "http:" && loopback(url.hostname))
+    ) ||
     url.username ||
     url.password ||
     url.search ||
     url.hash
   )
     throw new Error(
-      "Export endpoint requires HTTPS without credentials, query or fragment",
+      "Export endpoint requires HTTPS (or HTTP to a loopback host) without credentials, query or fragment",
     );
-  url.pathname = `${url.pathname.replace(/\/$/, "")}${path}`;
+  const prefix = url.pathname.replace(/\/$/, "");
+  if (prefix.endsWith(path))
+    throw new Error(
+      `Pass the base URL; Factory appends ${path} to the export endpoint`,
+    );
+  url.pathname = `${prefix}${path}`;
   return url.href;
 }
 
@@ -186,12 +202,17 @@ export function mapOtlpCaptures(selection: SelectedCaptures) {
 }
 
 /** OTLP/HTTP JSON: the base URL gets the standard `/v1/traces` signal path. */
-export function prepareOtlpExport(selection: SelectedCaptures) {
+export function prepareOtlpExport(
+  selection: SelectedCaptures,
+  environment: NodeJS.ProcessEnv = process.env,
+) {
   const endpoint = exportEndpoint(selection.options.endpoint, "/v1/traces");
   const payload = json(mapOtlpCaptures(selection));
+  const headers = otlpHeaders(environment);
   return {
     preview: {
       endpoint,
+      headerNames: Object.keys(headers).sort(),
       repository: selection.repository,
       objective: selection.objective,
       content: selection.options.content,
@@ -217,14 +238,38 @@ export function prepareOtlpExport(selection: SelectedCaptures) {
         "Redaction is best-effort. Metadata can also be sensitive; only authorize a destination and scope permitted by your repository policy.",
       ],
       payloadBytes: Buffer.byteLength(payload),
-      authorizationDigest: hash(
-        json([endpoint, selection.options.content, payload]),
+      authorizationDigest: authorizationDigest(
+        endpoint,
+        selection.options.content,
+        payload,
+        headers,
       ),
     },
     payload,
   };
 }
+
+/** Binds endpoint, content, payload and header names+values (only hashed). */
+function authorizationDigest(
+  endpoint: string,
+  content: string,
+  payload: string,
+  headers: Record<string, string>,
+) {
+  const headerDigest = hash(
+    json(Object.entries(headers).sort(([a], [b]) => (a < b ? -1 : 1))),
+  );
+  return hash(json([endpoint, content, payload, headerDigest]));
+}
 export type OtlpExport = ReturnType<typeof prepareOtlpExport>;
+
+function decodeHeaderValue(text: string) {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Standard OTLP exporter headers: OTEL_EXPORTER_OTLP_TRACES_HEADERS, else
@@ -242,12 +287,18 @@ export function otlpHeaders(
     if (!entry.trim()) continue;
     const at = entry.indexOf("=");
     const key = at > 0 ? entry.slice(0, at).trim() : "";
-    try {
-      if (!key) throw new Error();
-      headers[key] = decodeURIComponent(entry.slice(at + 1).trim());
-    } catch {
+    const value = decodeHeaderValue(entry.slice(at + 1).trim());
+    // RFC 9110 token names; values without control characters.
+    if (
+      !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(key) ||
+      value === undefined ||
+      [...value].some((character) => {
+        const code = character.charCodeAt(0);
+        return (code < 0x20 && code !== 0x09) || code === 0x7f;
+      })
+    )
       throw new Error(`${name} is malformed`);
-    }
+    headers[key] = value;
   }
   return headers;
 }
@@ -255,27 +306,26 @@ export function otlpHeaders(
 /** Returns a sanitized receipt; response prose and transport errors can contain secrets. */
 export async function sendOtlpExport(
   prepared: OtlpExport,
-  authorizationDigest: string,
+  digest: string,
   environment: NodeJS.ProcessEnv = process.env,
   request: typeof fetch = fetch,
 ) {
+  const headers = otlpHeaders(environment);
   if (
-    authorizationDigest !== prepared.preview.authorizationDigest ||
-    hash(
-      json([
-        prepared.preview.endpoint,
-        prepared.preview.content,
-        prepared.payload,
-      ]),
-    ) !== authorizationDigest
+    digest !== prepared.preview.authorizationDigest ||
+    authorizationDigest(
+      prepared.preview.endpoint,
+      prepared.preview.content,
+      prepared.payload,
+      headers,
+    ) !== digest
   )
     throw new Error(
-      "Export changed; preview and authorize this exact destination/content/scope again",
+      "Export changed; preview and authorize this exact destination/headers/content/scope again",
     );
-  const headers = otlpHeaders(environment);
   const receipt = {
     endpoint: prepared.preview.endpoint,
-    authorizationDigest,
+    authorizationDigest: digest,
     observations: prepared.preview.observationCount,
     attemptedSpans: JSON.parse(prepared.payload).resourceSpans[0].scopeSpans[0]
       .spans.length as number,
@@ -330,17 +380,22 @@ export async function sendOtlpExport(
         status: "unknown",
         reason: "invalid-acknowledgement",
       };
-    if (body.partialSuccess) {
-      const rejected = Number(body.partialSuccess.rejectedSpans ?? 0);
+    const { partialSuccess, ...rest } = body;
+    if (partialSuccess) {
+      const rejected = Number(partialSuccess.rejectedSpans ?? 0);
+      const rejectedSpans =
+        Number.isSafeInteger(rejected) && rejected >= 0 ? rejected : null;
+      // Collectors commonly acknowledge full success as `{"partialSuccess":{}}`.
+      if (rejectedSpans === 0 && !partialSuccess.errorMessage)
+        return { ...receipt, status: "accepted" };
       return {
         ...receipt,
         status: "partial-or-warning",
-        rejectedSpans:
-          Number.isSafeInteger(rejected) && rejected >= 0 ? rejected : null,
-        warningPresent: Boolean(body.partialSuccess.errorMessage),
+        rejectedSpans,
+        warningPresent: Boolean(partialSuccess.errorMessage),
       };
     }
-    if (Object.keys(body).length)
+    if (Object.keys(rest).length || partialSuccess !== undefined)
       return {
         ...receipt,
         status: "unknown",

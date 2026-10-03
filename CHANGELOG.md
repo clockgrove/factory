@@ -2,6 +2,10 @@
 
 This file records public releases of Factory. Release artifacts and provenance attestations are on [GitHub Releases](https://github.com/clockgrove/factory/releases); evidence for releases up to v0.1.74 is in the [historical artifact records](https://github.com/clockgrove/factory/blob/3ddcf5c16d5f067853654b520339029da25e1026/docs/history/BUILD-STATUS-2026-10-03.md).
 
+## Unreleased
+
+- `export-captures` sends standard OpenTelemetry (OTLP/HTTP JSON) traces instead of Langfuse- or LangSmith-specific uploads. Pass the OTLP base URL with `--endpoint` (HTTPS, or HTTP to a loopback collector) and authentication through `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or `OTEL_EXPORTER_OTLP_HEADERS`. `--destination`, `--project-id` and `--workspace-id` are removed, along with the `LANGFUSE_*` and `LANGSMITH_API_KEY` variables. Langfuse remains reachable through its OTLP endpoint.
+
 ## 0.1.75 — 2026-10-03
 
 - Publish releases from a tag-triggered GitHub Actions workflow that runs the complete checks and tests, installs the packed tarball offline, and attaches a build provenance attestation alongside the tarball and `SHA256SUMS`. Verify a download with `gh attestation verify clockgrove-factory-0.1.75.tgz --repo clockgrove/factory`.

@@ -306,19 +306,40 @@ test("export CLI requires explicit endpoint/content and exact send authorization
     () => exportEndpoint("https://key:secret@example.test", "/api"),
     /HTTPS/,
   );
-  assert.throws(() => exportEndpoint("http://example.test", "/api"), /HTTPS/);
-  assert.equal(
-    exportEndpoint("https://example.test/base/", "/api"),
-    "https://example.test/base/api",
-  );
+  for (const plain of [
+    "http://example.test",
+    "http://10.0.0.1:4318",
+    "http://localhost.example.test",
+    "http://127.example.test",
+  ])
+    assert.throws(() => exportEndpoint(plain, "/api"), /HTTPS/);
+  for (const [base, expected] of [
+    ["https://example.test/base/", "https://example.test/base/api"],
+    ["http://localhost:4318", "http://localhost:4318/api"],
+    ["http://127.0.0.1:4318/", "http://127.0.0.1:4318/api"],
+    ["http://127.8.9.10", "http://127.8.9.10/api"],
+    ["http://[::1]:4318", "http://[::1]:4318/api"],
+  ])
+    assert.equal(exportEndpoint(base, "/api"), expected);
+  for (const full of [
+    "https://example.test/v1/traces",
+    "https://example.test/otlp/v1/traces/",
+  ])
+    assert.throws(
+      () => exportEndpoint(full, "/v1/traces"),
+      /Pass the base URL; Factory appends \/v1\/traces/,
+    );
 });
 
+const keys = {
+  OTEL_EXPORTER_OTLP_HEADERS:
+    "Authorization=Basic%20test-secret, x-tenant = one",
+};
+
 test("send is one authorized HTTP request with no redirects, retries or incidental secrets", async () => {
-  const prepared = prepareOtlpExport(selected());
-  const keys = {
-    OTEL_EXPORTER_OTLP_HEADERS:
-      "Authorization=Basic%20test-secret, x-tenant = one",
-  };
+  const prepared = prepareOtlpExport(selected(), keys);
+  assert.deepEqual(prepared.preview.headerNames, ["Authorization", "x-tenant"]);
+  assert.ok(!JSON.stringify(prepared.preview).includes("test-secret"));
   let calls = 0;
   const request = async (url, init) => {
     calls++;
@@ -345,6 +366,25 @@ test("send is one authorized HTTP request with no redirects, retries or incident
       ),
     /malformed/,
   );
+  // Changing a header value (here the tenant) after preview invalidates it.
+  for (const changedHeaders of [
+    {
+      OTEL_EXPORTER_OTLP_HEADERS:
+        "Authorization=Basic%20test-secret, x-tenant = two",
+    },
+    { OTEL_EXPORTER_OTLP_HEADERS: "Authorization=Basic%20test-secret" },
+    {},
+  ])
+    await assert.rejects(
+      () =>
+        sendOtlpExport(
+          prepared,
+          prepared.preview.authorizationDigest,
+          changedHeaders,
+          request,
+        ),
+      /changed/,
+    );
   assert.equal(calls, 0);
   const receipt = await sendOtlpExport(
     prepared,
@@ -369,34 +409,42 @@ test("send is one authorized HTTP request with no redirects, retries or incident
   );
 });
 
-test("OTLP partial, HTTP refusal and uncertain acknowledgements are visible without retries or response text", async () => {
-  const prepared = prepareOtlpExport(selected());
-  const keys = {
-    OTEL_EXPORTER_OTLP_HEADERS:
-      "Authorization=Basic%20test-secret, x-tenant = one",
-  };
-  for (const [reply, status] of [
+test("OTLP acknowledgements: empty partialSuccess is success; partial, refusal and uncertain replies stay visible without response text", async () => {
+  const prepared = prepareOtlpExport(selected(), keys);
+  for (const [reply, status, rejectedSpans] of [
+    ['{"partialSuccess":{}}', "accepted"],
+    ['{"partialSuccess":{"rejectedSpans":"0","errorMessage":""}}', "accepted"],
     [
-      new Response(
-        '{"partialSuccess":{"rejectedSpans":"1","errorMessage":"test-secret"}}',
-      ),
+      '{"partialSuccess":{"rejectedSpans":"1","errorMessage":"test-secret"}}',
       "partial-or-warning",
+      1,
     ],
-    [new Response("test-secret", { status: 429 }), "rejected-or-unknown"],
-    [new Response('{"error":"test-secret"}'), "unknown"],
-    [new Response("not JSON"), "unknown"],
+    ['{"partialSuccess":{"rejectedSpans":2}}', "partial-or-warning", 2],
+    [
+      '{"partialSuccess":{"errorMessage":"test-secret warning"}}',
+      "partial-or-warning",
+      0,
+    ],
+    ['{"partialSuccess":{"rejectedSpans":"x"}}', "partial-or-warning", null],
+    [["test-secret", 429], "rejected-or-unknown"],
+    ['{"error":"test-secret"}', "unknown"],
+    ['{"partialSuccess":null}', "unknown"],
+    ["not JSON", "unknown"],
   ]) {
     let calls = 0;
+    const [text, httpStatus] = Array.isArray(reply) ? reply : [reply, 200];
     const receipt = await sendOtlpExport(
       prepared,
       prepared.preview.authorizationDigest,
       keys,
       async () => {
         calls++;
-        return reply;
+        return new Response(text, { status: httpStatus });
       },
     );
-    assert.equal(receipt.status, status);
+    assert.equal(receipt.status, status, text);
+    if (rejectedSpans !== undefined)
+      assert.equal(receipt.rejectedSpans, rejectedSpans, text);
     assert.equal(calls, 1);
     assert.ok(!JSON.stringify(receipt).includes("test-secret"));
   }
@@ -412,7 +460,7 @@ test("OTLP partial, HTTP refusal and uncertain acknowledgements are visible with
   assert.ok(!JSON.stringify(receipt).includes("test-secret"));
 });
 
-test("OTLP headers prefer the traces-specific variable and never echo malformed values", () => {
+test("OTLP headers prefer the traces-specific variable and refuse malformed names or values without echoing them", () => {
   assert.deepEqual(
     otlpHeaders({
       OTEL_EXPORTER_OTLP_HEADERS: "Authorization=generic",
@@ -421,7 +469,14 @@ test("OTLP headers prefer the traces-specific variable and never echo malformed 
     { Authorization: "traces" },
   );
   assert.deepEqual(otlpHeaders({}), {});
-  for (const value of ["=test-secret", "Authorization=%E0%A4%A-test-secret"])
+  for (const value of [
+    "=test-secret",
+    "Authorization=%E0%A4%A-test-secret",
+    "Bad Name=test-secret",
+    "x(test-secret)=1",
+    "x-tenant:test-secret=1",
+    "Authorization=test-secret%0D%0AInjected: 1",
+  ])
     assert.throws(
       () => otlpHeaders({ OTEL_EXPORTER_OTLP_TRACES_HEADERS: value }),
       (error) =>
@@ -430,7 +485,7 @@ test("OTLP headers prefer the traces-specific variable and never echo malformed 
     );
 });
 
-test("a local OTLP/HTTP receiver gets one standard JSON trace request", async () => {
+test("a local OTLP/HTTP collector on loopback gets one standard JSON trace request", async () => {
   const received = [];
   const server = createServer((req, res) => {
     let body = "";
@@ -445,33 +500,29 @@ test("a local OTLP/HTTP receiver gets one standard JSON trace request", async ()
         headers: req.headers,
         body,
       });
+      // The OpenTelemetry Collector acknowledges full success this way.
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end("{}");
+      res.end('{"partialSuccess":{}}');
     });
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const { port } = server.address();
+    const environment = {
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: "authorization=Bearer%20local",
+    };
     const prepared = prepareOtlpExport(
-      selected({ ...options, endpoint: "https://collector.example.test/otlp" }),
+      selected({ ...options, endpoint: `http://127.0.0.1:${port}/otlp` }),
+      environment,
     );
     assert.equal(
       prepared.preview.endpoint,
-      "https://collector.example.test/otlp/v1/traces",
+      `http://127.0.0.1:${port}/otlp/v1/traces`,
     );
-    // The exporter requires HTTPS; route the exact request to a plain local receiver.
     const receipt = await sendOtlpExport(
       prepared,
       prepared.preview.authorizationDigest,
-      { OTEL_EXPORTER_OTLP_TRACES_HEADERS: "authorization=Bearer%20local" },
-      (url, init) =>
-        fetch(
-          url.replace(
-            "https://collector.example.test",
-            `http://127.0.0.1:${port}`,
-          ),
-          init,
-        ),
+      environment,
     );
     assert.equal(receipt.status, "accepted");
     assert.equal(received.length, 1);

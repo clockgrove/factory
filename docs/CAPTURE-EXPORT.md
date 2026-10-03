@@ -4,7 +4,7 @@ Factory exports existing observations explicitly, without model calls or backgro
 
 ## OpenTelemetry
 
-Factory sends standard OTLP/HTTP JSON traces to any collector or backend that accepts them. Pass the OTLP base URL; Factory appends the standard `/v1/traces` path. The endpoint must use HTTPS without credentials, query or fragment. If the destination needs authentication, set `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or `OTEL_EXPORTER_OTLP_HEADERS` (comma-separated, URL-encoded `key=value` pairs, as in the OpenTelemetry specification; the traces-specific variable wins) in your controller shell's secure environment. Factory never prints header values. Keep credentials outside target repositories, command arguments and logs.
+Factory sends standard OTLP/HTTP JSON traces to any collector or backend that accepts them. Pass the OTLP base URL (for example `https://collector.example.com` or `http://localhost:4318`). Factory appends the standard `/v1/traces` path and refuses an endpoint that already ends in it. The endpoint must use HTTPS without credentials, query or fragment; plain HTTP is accepted only for a loopback collector (`localhost`, `127.0.0.0/8` or `[::1]`). If the destination needs authentication, set `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or `OTEL_EXPORTER_OTLP_HEADERS` (comma-separated, URL-encoded `key=value` pairs, as in the OpenTelemetry specification; the traces-specific variable wins) in your controller shell's secure environment. Factory refuses malformed header names or values and never prints header values. Keep credentials outside target repositories, command arguments and logs.
 
 First preview an explicit Objective and content choice:
 
@@ -15,7 +15,7 @@ factory export-captures --objective 123 \
 
 Use `--run RUN_ID` and/or `--invocation INVOCATION_ID` to narrow the selection. Repeat either flag to select multiple identities; the two filters intersect. An unknown identity or empty selection is refused. Repository selection comes from the installed `--config PATH`; run the command separately for another installation or Objective.
 
-`metadata` never reads capture payloads. `retained` includes only already retained, already redacted text. Truncated JSON stays truncated text; missing files are marked unavailable. Preview lists the endpoint, exact identities, content status/redaction/truncation, usage coverage, mapping limitations and payload size. It prints neither retained text nor credentials.
+`metadata` never reads capture payloads. `retained` includes only already retained, already redacted text. Truncated JSON stays truncated text; missing files are marked unavailable. Preview lists the endpoint, header names, exact identities, content status/redaction/truncation, usage coverage, mapping limitations and payload size. It prints neither retained text nor credentials.
 
 Review the preview and authorize its exact digest:
 
@@ -25,7 +25,7 @@ factory export-captures --objective 123 \
   --send --authorize PREVIEW_AUTHORIZATION_DIGEST
 ```
 
-Use the same selection and content flags. A changed selection, endpoint or captured payload invalidates the digest. The explicit send is your export authorization; Factory cannot establish your account's disclosure policy. Synthetic HTTP contract tests do not establish acceptance by any hosted backend.
+Use the same selection, content flags and header environment. A changed selection, endpoint, captured payload or header name or value (for example another tenant) invalidates the digest; the digest covers header values only as a hash. The explicit send is your export authorization; Factory cannot establish your account's disclosure policy. Synthetic HTTP contract tests do not establish acceptance by any hosted backend.
 
 ## What the destination receives
 
@@ -37,6 +37,6 @@ Usage and provider estimates stay in provenance-bearing Factory metadata rather 
 
 ## Responses and repeated exports
 
-One explicit send makes one HTTP request, with a 30-second request timeout, no redirects and no retries. The response reader enforces OTLP's recommended 4 MiB response bound. A valid full acknowledgement produces `accepted`; a partial acknowledgement or warning produces `partial-or-warning`; HTTP refusal produces `rejected-or-unknown`; transport failure or invalid acknowledgement produces `unknown`. Non-accepted receipts exit unsuccessfully. Response prose is withheld because it can echo secrets or private content. Local originals and execution acceptance stay unchanged.
+One explicit send makes one HTTP request, with a 30-second request timeout, no redirects and no retries. The response reader enforces OTLP's recommended 4 MiB response bound. A valid full acknowledgement, including `{"partialSuccess":{}}` with no rejected spans or message, produces `accepted`; rejected spans or a warning message produce `partial-or-warning`; HTTP refusal produces `rejected-or-unknown`; transport failure or invalid acknowledgement produces `unknown`. Non-accepted receipts exit unsuccessfully. Response prose is withheld because it can echo secrets or private content. Local originals and execution acceptance stay unchanged.
 
 Repeated selection produces the same span identities, not another invocation or usage observation. Destination deduplication is not guaranteed: a repeat may update or duplicate records. Inspect the destination after an uncertain/partial upload before deciding whether to resend. Factory neither retries nor reconstructs accepted records from telemetry, and never increments execution accounting for an export.

@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { CaseError, loadCase } from "./cases.mjs";
-import { localized, planVariants } from "./mutations.mjs";
+import { planVariants } from "./mutations.mjs";
 
 const dist = resolve(import.meta.dirname, "../../dist");
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -208,7 +208,6 @@ export async function reviewVariant(model, fixture, variant, repeat) {
           ? "findings"
           : "clean",
       flagged: findings.length > 0,
-      localized: variant.defect ? localized(findings, variant.terms) : null,
       findings,
       ...(review.failure ? { failure: review.failure } : {}),
       tokens,

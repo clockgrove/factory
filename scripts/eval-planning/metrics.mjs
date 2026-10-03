@@ -1,21 +1,11 @@
-// Judge-free planning metrics. Each one is computed from the plan, the pinned
-// sources and diagnostics only, so it cannot drift with any model prompt.
-
-// A command span starts with a runner and an argument; `test/a.mjs` and
-// `go.mod` are paths, not commands.
-const RUNNER =
-  /^(?:npm|pnpm|npx|yarn|node|git|make|cargo|go|python3?|pytest|bash|sh|test|grep)\s+\S/;
-// Acceptance that states the item's own merge, upload, publication or
-// hydration as done. "passes the check before it merges" and "published
-// image" describe other things and do not count.
-const OWN_LIFECYCLE = [
-  /\b(?:is|are|was|were|be|been|gets?|got|has|have)\s+(?:been\s+)?(?:merged|uploaded|hydrated|published|released)\b/i,
-  /\bmerged\s+(?:in)?to\s+(?:main|master|the default branch)\b/i,
-  /\buploaded\s+to\b/i,
-  /\bhydrat\w*\b[^.]*\bclone\b/i,
-];
+// Judge-free planning metrics. Each one counts structured plan fields,
+// structured repository files or diagnostics. None interprets prose; what
+// needs interpretation is a judge rubric dimension instead.
+import { parse } from "yaml";
 
 const isWork = (item) => !item.kind || item.kind === "work";
+/** The controller's error prefix when planning stops for an operator. */
+const UNDELEGATED_DECISION = "Planning needs an undelegated decision";
 
 /** Longest dependency chain, counted in Work Items. */
 export function criticalPath(graph) {
@@ -41,44 +31,53 @@ export function criticalPath(graph) {
   return Math.max(0, ...graph.items.map((item) => depth(item.id)));
 }
 
-function codeSpans(text) {
-  return [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1].trim());
+/** How many coverage proofs of each kind the plan uses. */
+export function proofKinds(graph) {
+  const counts = {};
+  for (const entry of graph.coverage)
+    counts[entry.proof.kind] = (counts[entry.proof.kind] ?? 0) + 1;
+  return counts;
 }
 
 /**
- * Coverage that leaves a command-shaped criterion to final review. Final
- * review cannot replace a source-required command or check.
+ * Command-line obligations left to final review. An obligation is a command
+ * line when its criterion contains, character for character, a command the
+ * plan's own authority receipts authorize. Final review cannot replace a
+ * required command.
  */
 export function finalReviewInsteadOfCommand(plan) {
-  const commands = new Set([
-    ...plan.graph.items.flatMap((item) =>
-      item.validation.map((v) => v.command),
-    ),
-    ...(plan.finalCommands ?? []),
-  ]);
+  const commands = (plan.commands ?? [])
+    .filter((receipt) => receipt.hostExecution === "authorized")
+    .map((receipt) => receipt.command);
   const criteria = plan.graph.coverage
     .filter((entry) => entry.proof.kind === "final-review")
     .map((entry) => entry.source.text)
-    .filter((text) =>
-      codeSpans(text).some((span) => commands.has(span) || RUNNER.test(span)),
-    );
+    .filter((text) => commands.some((command) => text.includes(command)));
   return { count: criteria.length, criteria };
 }
 
-/** Work Item acceptance that needs the item's own merge, upload or hydration. */
-export function ownLifecycleAcceptance(graph) {
-  const found = graph.items
-    .filter(isWork)
-    .flatMap((item) =>
-      item.acceptance
-        .filter((text) => OWN_LIFECYCLE.some((pattern) => pattern.test(text)))
-        .map((text) => ({ item: item.id, text })),
-    );
-  return { count: found.length, acceptance: found };
+/**
+ * Check-run names the repository's workflows can produce: each job's `name`,
+ * or its id when it has none. Matrix and reusable-workflow names are not
+ * expanded.
+ */
+export function workflowCheckNames(workflows) {
+  const names = new Set();
+  for (const workflow of workflows) {
+    let document;
+    try {
+      document = parse(workflow.content);
+    } catch {
+      continue;
+    }
+    for (const [id, job] of Object.entries(document?.jobs ?? {}))
+      names.add(typeof job?.name === "string" ? job.name : id);
+  }
+  return names;
 }
 
-/** Every named CI check in the plan, and whether it appears in any source text. */
-export function ciCheckNames(graph, texts) {
+/** Every named CI check in the plan, and whether a workflow job produces it. */
+export function ciCheckNames(graph, checkNames) {
   const names = [
     ...new Set([
       ...(graph.requiredPreIntegrationChecks ?? []).map(
@@ -89,9 +88,7 @@ export function ciCheckNames(graph, texts) {
       ),
     ]),
   ];
-  const ungrounded = names.filter(
-    (name) => !texts.some((text) => text.includes(name)),
-  );
+  const ungrounded = names.filter((name) => !checkNames.has(name));
   return {
     total: names.length,
     grounded: names.length - ungrounded.length,
@@ -166,31 +163,14 @@ export function expectation(expect, run, graph) {
   if (expect.outcome === "plan" && run.review !== "clean")
     failed.push(`expected a clean plan, got ${run.review ?? "no plan"}`);
   if (expect.outcome === "question") {
-    // An operator stop is a plan waiting for a decision, or planning that
-    // stopped on an undelegated decision before any plan.
-    const stopText = planned
-      ? run.review === "clean"
-        ? null
-        : [
-            run.failure?.detail,
-            run.failure?.question,
-            ...(run.findings ?? []).flatMap((f) => [f.detail, f.question]),
-          ].join("\n")
-      : /undelegated decision|operator (?:decision|direction)|source decision required/i.test(
-            run.error ?? "",
-          )
-        ? run.error
-        : null;
-    if (stopText === null)
+    // A structural stop: a plan waiting for a decision, or planning that
+    // ended with the controller's undelegated-decision refusal.
+    const stopped = planned
+      ? run.review !== "clean"
+      : (run.error ?? "").startsWith(UNDELEGATED_DECISION);
+    if (!stopped)
       failed.push(
-        `expected an operator question, got ${planned ? "a clean plan" : `no plan (${run.error?.split("\n")[0] ?? "no error"})`}`,
-      );
-    else if (
-      expect.questionPattern &&
-      !new RegExp(expect.questionPattern, "i").test(stopText)
-    )
-      failed.push(
-        `the operator question does not mention /${expect.questionPattern}/`,
+        `expected an operator question, got ${planned ? "a clean plan" : "no plan"}`,
       );
   }
   if (planned) {
@@ -214,11 +194,11 @@ export function expectation(expect, run, graph) {
 }
 
 /** All judge-free metrics for one planned run. */
-export function planMetrics(plan, texts) {
+export function planMetrics(plan, facts) {
   return {
     criticalPath: criticalPath(plan.graph),
+    proofKinds: proofKinds(plan.graph),
     finalReviewInsteadOfCommand: finalReviewInsteadOfCommand(plan),
-    ownLifecycleAcceptance: ownLifecycleAcceptance(plan.graph),
-    ciCheckNames: ciCheckNames(plan.graph, texts),
+    ciCheckNames: ciCheckNames(plan.graph, workflowCheckNames(facts.workflows)),
   };
 }

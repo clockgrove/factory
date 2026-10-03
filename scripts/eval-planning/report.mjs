@@ -32,7 +32,9 @@ export function planRunMetrics(run) {
     expectationMet: run.expectation ? bit(run.expectation.met) : null,
     finalReviewInsteadOfCommand:
       run.metrics?.finalReviewInsteadOfCommand.count ?? null,
-    ownLifecycleAcceptance: run.metrics?.ownLifecycleAcceptance.count ?? null,
+    finalReviewProofs: run.metrics
+      ? (run.metrics.proofKinds["final-review"] ?? 0)
+      : null,
     ungroundedCiNames: run.metrics?.ciCheckNames.ungrounded.length ?? null,
     criticalPath: run.metrics?.criticalPath ?? null,
     workItems: run.workItems ?? null,
@@ -60,7 +62,6 @@ export function reviewRunMetrics(run) {
   const metrics = {
     falsePositive: reviewed && good ? bit(run.flagged) : null,
     recall: reviewed && !good ? bit(run.flagged) : null,
-    localized: reviewed && !good ? bit(run.localized) : null,
     reviewTokens: tokenTotal(run.tokens),
     wallSeconds: typeof run.wallMs === "number" ? run.wallMs / 1000 : null,
   };
@@ -176,7 +177,7 @@ export function summarizePlanRuns(runs) {
       means: Object.fromEntries(
         [
           "finalReviewInsteadOfCommand",
-          "ownLifecycleAcceptance",
+          "finalReviewProofs",
           "ungroundedCiNames",
           "criticalPath",
           "workItems",
@@ -233,7 +234,6 @@ export function summarizeReviewRuns(runs, refusals) {
         rule: runs.find((run) => run.defect === defect)?.rule,
         runs: list.length,
         recall: rate(list, (run) => run.flagged),
-        localized: rate(list, (run) => run.localized),
         invalid: list.filter((run) => run.review === "invalid").length,
         judgeRecall: judgeRates(runs.filter((run) => run.defect === defect)),
       };
@@ -358,7 +358,7 @@ export function planMarkdown(report) {
     "",
     `Means across repeats.${judges.length ? ` Judge pass lists ${judges.join(" / ")}.` : ""}`,
     "",
-    "| Case | Runs | Clean | Judge pass | Expectation | First try accepted | Final review for command | Own-lifecycle acceptance | Ungrounded CI | Critical path | Items | Revisions | Tokens (k) | Wall (s) |",
+    "| Case | Runs | Clean | Judge pass | Expectation | First try accepted | Final review for command | Final-review proofs | Ungrounded CI | Critical path | Items | Revisions | Tokens (k) | Wall (s) |",
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ...report.summary.cases.map(
       ({ id, runs, metrics: m }) =>
@@ -372,7 +372,7 @@ export function planMarkdown(report) {
           fixed(m.expectationMet),
           fixed(m.firstTryAccepted),
           fixed(m.finalReviewInsteadOfCommand, 1),
-          fixed(m.ownLifecycleAcceptance, 1),
+          fixed(m.finalReviewProofs, 1),
           fixed(m.ungroundedCiNames, 1),
           fixed(m.criticalPath, 1),
           fixed(m.workItems, 1),
@@ -406,13 +406,13 @@ export function reviewMarkdown(report) {
     "",
     ...header(report, "fixture"),
     "",
-    `Recall: the production reviewer returned at least one finding for a plan with one injected defect. Localized: a finding names the mutated item or a defect term (heuristic).${summary.judges.length ? ` Judge recall lists ${summary.judges.join(" / ")}.` : ""}`,
+    `Recall: the production reviewer returned at least one finding for a plan with one injected defect.${summary.judges.length ? ` Judge recall lists ${summary.judges.join(" / ")}.` : ""}`,
     "",
-    "| Defect | Reviews | Recall | Localized | Invalid reviews | Judge recall |",
-    "| --- | --- | --- | --- | --- | --- |",
+    "| Defect | Reviews | Recall | Invalid reviews | Judge recall |",
+    "| --- | --- | --- | --- | --- |",
     ...summary.defects.map(
       (row) =>
-        `| ${row.defect} | ${row.runs} | ${percent(row.recall)} | ${percent(row.localized)} | ${row.invalid} | ${judgeCell(row.judgeRecall)} |`,
+        `| ${row.defect} | ${row.runs} | ${percent(row.recall)} | ${row.invalid} | ${judgeCell(row.judgeRecall)} |`,
     ),
     "",
     `Known-good plans: ${summary.good.runs} reviews, false-positive rate ${percent(summary.good.falsePositive)}, ${summary.good.invalid} invalid; judge false-positive rate ${judgeCell(summary.good.judgeFalsePositive)}.`,

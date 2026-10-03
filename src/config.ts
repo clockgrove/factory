@@ -139,6 +139,47 @@ export interface SchedulingConfig {
   phases?: Partial<Record<ResourcePhase, { cpu?: number; memoryMiB?: number }>>;
 }
 
+/**
+ * Install-time defaults sized from the host (`os.availableParallelism()`, `os.totalmem()`).
+ * Keep 2 CPUs and 4 GiB for the OS and controller and share the rest. A coding worker reserves
+ * 2 CPUs and 2 GiB; validation (builds and tests) 4 CPUs and 4 GiB; review and delivery mostly
+ * wait on remote APIs, so 0.5 CPU and 512 MiB. Each reservation is capped at the totals, and a
+ * phase ceiling is how many of its reservations fit. Review allows two per coding worker.
+ */
+export function hostSchedulingDefaults(host: {
+  cpus: number;
+  memoryBytes: number;
+}): { concurrency: number; scheduling: Required<SchedulingConfig> } {
+  const cpu = Math.max(1, host.cpus - 2);
+  const memoryMiB = Math.max(
+    1024,
+    Math.floor(host.memoryBytes / 1024 ** 2) - 4096,
+  );
+  const reserve = (cpus: number, mib: number) => ({
+    cpu: Math.min(cpus, cpu),
+    memoryMiB: Math.min(mib, memoryMiB),
+  });
+  const phases = {
+    coding: reserve(2, 2048),
+    validation: reserve(4, 4096),
+    review: reserve(0.5, 512),
+    delivery: reserve(0.5, 512),
+  };
+  const fit = (phase: { cpu: number; memoryMiB: number }) =>
+    Math.floor(Math.min(cpu / phase.cpu, memoryMiB / phase.memoryMiB));
+  const concurrency = fit(phases.coding);
+  return {
+    concurrency,
+    scheduling: {
+      cpu,
+      memoryMiB,
+      reviewConcurrency: 2 * concurrency,
+      validationConcurrency: fit(phases.validation),
+      phases,
+    },
+  };
+}
+
 export interface FactoryConfig {
   scheduling?: SchedulingConfig;
   /** Explicit local sensitive-content opt-in; absent remains disabled. */

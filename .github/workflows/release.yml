@@ -41,7 +41,7 @@ jobs:
       - run: npm run format:check
       - run: npm run notices:check
       - name: Run complete tests
-        run: node --test test/*.test.mjs
+        run: node --import ./test/support/isolated-state.mjs --test test/*.test.mjs
 
       - name: Pack
         run: |

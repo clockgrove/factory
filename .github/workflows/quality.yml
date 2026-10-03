@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - run: git lfs version
-      - run: node --test --test-shard=${{ matrix.shard }}/4 test/*.test.mjs
+      - run: node --import ./test/support/isolated-state.mjs --test --test-shard=${{ matrix.shard }}/4 test/*.test.mjs
 
   # The single required check for main; it passes only when every job above passes.
   package-gate:

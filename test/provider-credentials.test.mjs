@@ -6,12 +6,19 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   credentialFileBindings,
-  exportServiceLoginCredentials,
+  loadServiceLoginCredentials,
   requiredProviderCredentials,
   resolveProviderCredential,
+  serviceLoginSecrets,
   validateCredentialFile,
 } from "../dist/provider-credentials.js";
 import { renderService } from "../dist/supervision.js";
+import { claudePlanningOptions } from "../dist/claude-planning.js";
+import { claudeWorkerEnvironment } from "../dist/execution/claude.js";
+import {
+  pinnedGitEnvironment,
+  sanitizedWorkerEnvironment,
+} from "../dist/process.js";
 const cfg = {
   planning: { kind: "codex-sdk" },
   execution: {
@@ -220,18 +227,50 @@ test("Claude login credentials are optional service bindings, never required", (
       /ANTHROPIC_API_KEY is not required/,
     );
 
-    // A service exports only the optional login credentials systemd loaded.
+    // A service holds the loaded login in memory: Claude SDK children get
+    // it, while process.env, git and other workers never see it.
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
     process.env.CREDENTIALS_DIRECTORY = root;
-    exportServiceLoginCredentials(claudeHarness, ["CLAUDE_CODE_OAUTH_TOKEN"]);
-    assert.equal(
-      process.env.CLAUDE_CODE_OAUTH_TOKEN,
-      "CLAUDE_CODE_OAUTH_TOKEN-value",
-    );
-    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-    exportServiceLoginCredentials(codexOnly, ["CLAUDE_CODE_OAUTH_TOKEN"]);
+    const value = "CLAUDE_CODE_OAUTH_TOKEN-value";
+    loadServiceLoginCredentials(claudeHarness, ["CLAUDE_CODE_OAUTH_TOKEN"]);
     assert.equal(process.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+    const credentialDirectory = join(root, "empty-gh-config");
+    assert.equal(
+      claudeWorkerEnvironment(credentialDirectory).CLAUDE_CODE_OAUTH_TOKEN,
+      value,
+    );
+    const planning = {
+      kind: "claude-agent-sdk",
+      maxOutputTokens: 1000,
+      planner: { model: "claude-model", reasoningEffort: "high" },
+      reviewer: { model: "claude-model", reasoningEffort: "high" },
+    };
+    assert.equal(
+      claudePlanningOptions({
+        config: planning,
+        selection: planning.planner,
+        schema: { type: "object" },
+        cwd: root,
+        credentialDirectory,
+        abortController: new AbortController(),
+      }).env.CLAUDE_CODE_OAUTH_TOKEN,
+      value,
+    );
+    assert.equal(pinnedGitEnvironment().CLAUDE_CODE_OAUTH_TOKEN, undefined);
+    assert.equal(
+      sanitizedWorkerEnvironment(credentialDirectory).CLAUDE_CODE_OAUTH_TOKEN,
+      undefined,
+    );
+    assert.deepEqual(serviceLoginSecrets(), [value]);
+    // A configuration without Claude holds nothing.
+    loadServiceLoginCredentials(codexOnly, ["CLAUDE_CODE_OAUTH_TOKEN"]);
+    assert.deepEqual(serviceLoginSecrets(), []);
+    assert.equal(
+      claudeWorkerEnvironment(credentialDirectory).CLAUDE_CODE_OAUTH_TOKEN,
+      undefined,
+    );
   } finally {
+    loadServiceLoginCredentials(codexOnly, []);
     for (const [name, value] of [
       ["CREDENTIALS_DIRECTORY", saved.directory],
       ["CLAUDE_CODE_OAUTH_TOKEN", saved.token],

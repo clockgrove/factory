@@ -3,7 +3,7 @@ import { objectiveCandidate } from "./qa.js";
 import {
   credentialFileBindings,
   executionCredential,
-  exportServiceLoginCredentials,
+  loadServiceLoginCredentials,
   optionalProviderCredentials,
   requiredProviderCredentials,
   resolveProviderCredential,
@@ -287,7 +287,7 @@ async function main(): Promise<void> {
       const config = readConfig(path);
       // A service reads only the credentials systemd loaded for it.
       const loaded = options(args, "service-credential");
-      exportServiceLoginCredentials(config, loaded);
+      loadServiceLoginCredentials(config, loaded);
       if (input.intake) {
         checkIntakeServiceState(config);
         await compose(config, loaded).runIntake();

@@ -172,21 +172,39 @@ export function resolveProviderCredential(
 }
 
 /**
- * A supervised service exports the optional Claude login credentials systemd
- * loaded, so the Claude SDK processes it starts can authenticate headlessly.
+ * Optional Claude login values a supervised service loaded. They stay in
+ * controller memory, out of `process.env`, so git, Codex and other children
+ * never inherit them; only Claude SDK child environments receive them.
  */
-export function exportServiceLoginCredentials(
+const serviceLoginCredentials = new Map<string, string>();
+
+/** Hold the optional Claude login credentials systemd loaded for a service. */
+export function loadServiceLoginCredentials(
   config: FactoryConfig,
   serviceCredentials: string[],
 ): void {
   const optional = optionalProviderCredentials(config);
   const directory = process.env.CREDENTIALS_DIRECTORY;
+  serviceLoginCredentials.clear();
   for (const name of serviceCredentials) {
     if (!optional.includes(name)) continue;
     if (!directory || !isAbsolute(directory))
       throw new Error(
         `systemd credential directory is unavailable for ${name}; use LoadCredential-capable supervision`,
       );
-    process.env[name] = readCredential(join(directory, name), name);
+    serviceLoginCredentials.set(
+      name,
+      readCredential(join(directory, name), name),
+    );
   }
+}
+
+/** The held login values, for a Claude SDK child environment only. */
+export function serviceLoginEnvironment(): Record<string, string> {
+  return Object.fromEntries(serviceLoginCredentials);
+}
+
+/** Held login values, for redaction wherever the controller may echo them. */
+export function serviceLoginSecrets(): string[] {
+  return [...serviceLoginCredentials.values()];
 }

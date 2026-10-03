@@ -27,6 +27,7 @@ import {
   sanitizedWorkerEnvironment,
 } from "../process.js";
 import { parseAuthenticationRequest } from "./harness-support.js";
+import { serviceLoginEnvironment } from "../provider-credentials.js";
 
 interface ClaudeWorkerHandleData {
   pid: number;
@@ -87,6 +88,8 @@ export function claudeWorkerEnvironment(
     ...claudeLocalAuthenticationEnvironment,
     ...claudeNetworkEnvironment,
   ]);
+  // A service's bound login reaches Claude SDK children only.
+  Object.assign(environment, serviceLoginEnvironment());
   environment.CLAUDE_AGENT_SDK_CLIENT_APP = `clockgrove-factory/${FACTORY_VERSION}`;
   return environment;
 }

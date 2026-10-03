@@ -38,6 +38,7 @@ import {
 } from "./execution/claude-usage.js";
 import { authenticationFailure, redact } from "./execution/harness-support.js";
 import { claudeCaptureEvents } from "./execution/interaction-capture.js";
+import { serviceLoginSecrets } from "./provider-credentials.js";
 import {
   closeProviderEventStream,
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
@@ -354,6 +355,7 @@ class ClaudePlanningTransport implements PlanningTransport {
       ...new Set([
         ...redactionValues,
         ...claudeAuthenticationValues(process.env),
+        ...serviceLoginSecrets(),
       ]),
     ];
   }

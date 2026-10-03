@@ -1,10 +1,12 @@
+> Historical snapshot retained on October 3, 2026, when Factory moved to a tag-triggered release workflow with build provenance attestations. It records releases up to v0.1.74 and the procedure used for them. See the [current release procedure](../RELEASING.md) and the [GitHub Releases](https://github.com/clockgrove/factory/releases) for later versions.
+
 # Public release checklist
 
-Published [v0.1.47](https://github.com/clockgrove/factory/releases/tag/v0.1.47) has verified public download, pinned plugin identity and offline installation; see the [exact artifact record](BUILD-STATUS.md#immutable-v0147-artifact-record). Live workspace qualification remains in [#263](https://github.com/clockgrove/factory/issues/263); full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier artifact and adopter evidence remain bound to their original bytes and scenarios.
+Published [v0.1.47](https://github.com/clockgrove/factory/releases/tag/v0.1.47) has verified public download, pinned plugin identity and offline installation; see the [exact artifact record](BUILD-STATUS-2026-10-03.md#immutable-v0147-artifact-record). Live workspace qualification remains in [#263](https://github.com/clockgrove/factory/issues/263); full autonomous qualification remains [#253](https://github.com/clockgrove/factory/issues/253). Earlier artifact and adopter evidence remain bound to their original bytes and scenarios.
 
 Earlier published artifacts and their evidence remain intact. Distribution checks do not establish live qualification.
 
-Use this checklist for a new release without rebuilding or retagging existing artifacts. The [public release procedure](PUBLIC-RELEASE.md) supplies the commands and operational requirements. Each claim must identify the exact artifact and scenario it proves.
+Use this checklist for a new release without rebuilding or retagging existing artifacts. The [public release procedure](PUBLIC-RELEASE-2026-10-03.md) supplies the commands and operational requirements. Each claim must identify the exact artifact and scenario it proves.
 
 ## Repository and package assets
 
@@ -26,7 +28,7 @@ No required asset is intentionally omitted. MCP is not a first-release requireme
 ## Exact-artifact acceptance
 
 1. Freeze the independently reviewed source and guidance. Reuse passing Quality CI bound to that exact commit; changes invalidate its evidence.
-2. One release owner runs the [sequential contributor command](PUBLIC-RELEASE.md#contributor-release-workflow). Package once, install offline once, compare bundled bytes/versions/notices, run whole installed test files and all required model-free scenario preflights, then publish through exact-tag protection under existing authority. No parallel release stages or separate offline-install owner.
+2. One release owner runs the [sequential contributor command](PUBLIC-RELEASE-2026-10-03.md#contributor-release-workflow). Package once, install offline once, compare bundled bytes/versions/notices, run whole installed test files and all required model-free scenario preflights, then publish through exact-tag protection under existing authority. No parallel release stages or separate offline-install owner.
 3. One independent auditor verifies anonymous public bytes/checksum against the prepublication fingerprint, the protected annotated tag/source/tree, and the enabled pinned plugin. Reuse identical-byte offline and installed evidence.
 4. Retain one immutable acceptance record and separate timing observations. Preserve failed attempts. Report technical completion and end-to-end elapsed time once; publication is not live Objective acceptance.
 5. Run any public or adopter qualification only under its own approved scope, limits and acceptance. Release completion does not resume an explicit hold. Later ledger maintenance is not a qualification-start gate.
@@ -35,4 +37,4 @@ Preserve earlier artifacts, failed runs, accounting and exact scenario boundarie
 
 ## Historical release checkpoints
 
-The [preserved checklist history](history/RELEASE-CHECKLIST-2026-09-28.md) retains earlier artifact identities, gate results and pending-at-the-time statements. The [historical artifact ledger](history/BUILD-STATUS-2026-09-28.md) retains the detailed evidence. Use current issues and the Project for present work status.
+The [preserved checklist history](RELEASE-CHECKLIST-2026-09-28.md) retains earlier artifact identities, gate results and pending-at-the-time statements. The [historical artifact ledger](BUILD-STATUS-2026-09-28.md) retains the detailed evidence. Use current issues and the Project for present work status.

@@ -11,9 +11,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 - **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
 - **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
 
-**Status:** v0.1.74 prepares the unified explicit permanent-abandonment surface for stopped uncertain read-only reviews and synchronous issue-graph projection (#499). It preserves unknown effects, original Work Item acceptance/failure, history and consumed limits; ordinary cancellation and other uncertain effects remain fenced. Its [release gate](https://github.com/clockgrove/factory/issues/505) owns installed and public distribution verification. [v0.1.73 distribution](https://github.com/clockgrove/factory/issues/497#issuecomment-5964424472) is independently accepted. [Live public qualification](https://github.com/clockgrove/factory/issues/448) and [adopter handoff](https://github.com/clockgrove/factory/issues/445) remain separate and unaccepted. A corrected one-artifact public successor must pass the full public gate before private work. Earlier versions retain their [immutable artifact records](docs/BUILD-STATUS.md).
-
-Factory is early software. Supervise initial Objectives and follow the [recovery guidance](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) when work stops. [Release artifact records](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) retain the evidence and limits of earlier versions.
+**Status:** Factory is early, pre-1.0 software. Start with a disposable repository and supervise initial Objectives, and follow the [recovery guidance](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) when work stops. See [Releases](https://github.com/clockgrove/factory/releases) and the [changelog](https://github.com/clockgrove/factory/blob/main/CHANGELOG.md) for what each version contains.
 
 ## Requirements
 
@@ -26,29 +24,32 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same published version. The commands below select v0.1.74. Run them after the [owning release gate](https://github.com/clockgrove/factory/issues/505) records independent public verification. Compare the selected version's exact archive fingerprint before installation. Earlier versions retain their own [artifact records](docs/BUILD-STATUS.md).
+The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same version:
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.74
+VERSION=$(gh release view --repo clockgrove/factory --json tagName --jq .tagName | sed 's/^v//')
+
+codex plugin marketplace add clockgrove/factory --ref "v$VERSION"
 codex plugin add factory@clockgrove
 
-gh release download v0.1.74 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.74.tgz --pattern SHA256SUMS
+gh release download "v$VERSION" --repo clockgrove/factory \
+  --pattern "clockgrove-factory-$VERSION.tgz" --pattern SHA256SUMS
+gh attestation verify "clockgrove-factory-$VERSION.tgz" --repo clockgrove/factory
 sha256sum --check SHA256SUMS
 ```
 
-Before installing, compare the tarball's SHA-256 with the independently recorded prepublication digest for that same version in the [owning release issue](https://github.com/clockgrove/factory/issues/505), or the [release artifact record](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md). A checksum downloaded beside the tarball is not the independent record. The owning release issue records the independent public archive and pinned-plugin verification result.
+`gh attestation verify` proves the tarball was built by this repository's [release workflow](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md) from the tagged source. Do not install a tarball that fails verification. Releases before v0.1.75 predate attestations; their evidence is in the [release history](https://github.com/clockgrove/factory/blob/main/docs/history/BUILD-STATUS-2026-10-03.md).
 
 Choose an absolute installation directory outside your target repository:
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
-  ./clockgrove-factory-0.1.74.tgz
+  "./clockgrove-factory-$VERSION.tgz"
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```
 
-Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your Codex host if needed to load the installed skills. This distribution uses GitHub Release assets; an npm registry install is not the documented release path.
+Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your Codex host if needed to load the installed skills. Factory is distributed through GitHub Releases, not the npm registry.
 
 ## Use the plugin
 
@@ -84,14 +85,14 @@ To add features or fix bugs **in Factory itself**, use a source checkout and fol
 
 ## Documentation and community
 
-| I want to…                                                          | Read                                                                                                                                                                       |
-| ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Configure models, inspect progress, review media, or handle a pause | [User guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md)                                                                                           |
-| Compare local usage, time and outcomes                              | [Local analysis](https://github.com/clockgrove/factory/blob/main/docs/LOCAL-ANALYSIS.md)                                                                                   |
-| Select or implement a local agent harness                           | [Local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md)                                                                                 |
-| Report a bug or ask for help                                        | [Support](https://github.com/clockgrove/factory/blob/main/SUPPORT.md)                                                                                                      |
-| Build from source or contribute                                     | [Contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md)                                                                                            |
-| Understand the architecture and roadmap                             | [Implementation plan](https://github.com/clockgrove/factory/blob/main/docs/IMPLEMENTATION-PLAN.md) · [Project](https://github.com/orgs/clockgrove/projects/2)              |
-| Inspect release changes or qualification                            | [Changelog](https://github.com/clockgrove/factory/blob/main/CHANGELOG.md) · [Release checklist](https://github.com/clockgrove/factory/blob/main/docs/RELEASE-CHECKLIST.md) |
+| I want to…                                                          | Read                                                                                                                                                          |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Configure models, inspect progress, review media, or handle a pause | [User guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md)                                                                              |
+| Compare local usage, time and outcomes                              | [Local analysis](https://github.com/clockgrove/factory/blob/main/docs/LOCAL-ANALYSIS.md)                                                                      |
+| Select or implement a local agent harness                           | [Local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md)                                                                    |
+| Report a bug or ask for help                                        | [Support](https://github.com/clockgrove/factory/blob/main/SUPPORT.md)                                                                                         |
+| Build from source or contribute                                     | [Contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md)                                                                               |
+| Understand the architecture and roadmap                             | [Implementation plan](https://github.com/clockgrove/factory/blob/main/docs/IMPLEMENTATION-PLAN.md) · [Project](https://github.com/orgs/clockgrove/projects/2) |
+| Inspect release changes or the release process                      | [Changelog](https://github.com/clockgrove/factory/blob/main/CHANGELOG.md) · [Releasing](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md)    |
 
 Factory is [MIT licensed](https://github.com/clockgrove/factory/blob/main/LICENSE) and maintained by Clockgrove. Contributions follow the [code of conduct](https://github.com/clockgrove/factory/blob/main/CODE_OF_CONDUCT.md). Report vulnerabilities through the [security policy](https://github.com/clockgrove/factory/blob/main/SECURITY.md).

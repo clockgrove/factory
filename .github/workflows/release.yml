@@ -1,0 +1,69 @@
+name: Release
+
+# Push an annotated vX.Y.Z tag on a main commit to publish that version.
+# Prepare the version first with `node scripts/version.mjs set X.Y.Z`.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Check tag, versions and changelog agree
+        run: node scripts/version.mjs check "$GITHUB_REF_NAME"
+      - name: Require the tagged commit to be on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - run: npm ci
+      - run: git lfs version
+      - run: npm run build
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run notices:check
+      - name: Run complete tests
+        run: node --test test/*.test.mjs
+
+      - name: Pack
+        run: |
+          mkdir artifacts
+          npm pack --pack-destination artifacts
+          cd artifacts && sha256sum ./*.tgz > SHA256SUMS && cat SHA256SUMS
+      - name: Install the packed tarball offline, as the README does
+        run: |
+          prefix="$(mktemp -d)"
+          npm_config_cache="$(mktemp -d)" npm install --offline --prefix "$prefix" ./artifacts/*.tgz
+          "$prefix/node_modules/.bin/factory" help
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: artifacts/*.tgz
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          node scripts/version.mjs notes "$version" > release-notes.md
+          gh release create "$GITHUB_REF_NAME" artifacts/*.tgz artifacts/SHA256SUMS \
+            --verify-tag --title "Factory $version" --notes-file release-notes.md

@@ -41,7 +41,7 @@ npm run build
 node --test test/acceptance.test.mjs
 ```
 
-Add a regression test for a concrete bug. For documentation-only changes, check the relevant commands, links, and formatting. Live acceptance is separate from deterministic testing: changes to GitHub delivery, process lifecycle, or binary content also need installed-package evidence from a disposable target under the [release procedure](docs/PUBLIC-RELEASE.md).
+Add a regression test for a concrete bug. For documentation-only changes, check the relevant commands, links, and formatting. Live acceptance is separate from deterministic testing: changes to GitHub delivery, process lifecycle, or binary content may also need a live run on a disposable target; minor releases are qualified that way under the [release procedure](docs/RELEASING.md).
 
 ## Pull requests
 

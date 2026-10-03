@@ -1,4 +1,4 @@
-> Historical snapshot retained on September 28, 2026. Status and instructions below describe earlier checkpoints, not current work. See the [current release procedure](../PUBLIC-RELEASE.md) and [artifact record](../BUILD-STATUS.md). Do not execute historical preparation or restart preserved runs from this record.
+> Historical snapshot retained on September 28, 2026. Status and instructions below describe earlier checkpoints, not current work. See the [current release procedure](../RELEASING.md) and [later artifact records](BUILD-STATUS-2026-10-03.md). Do not execute historical preparation or restart preserved runs from this record.
 
 # Public release checklist
 

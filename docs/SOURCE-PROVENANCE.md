@@ -12,7 +12,7 @@ The MIT license text is retained from the archived repository. Runtime code does
 shared abandonment boundary, notice generator and contributor Quality corrections
 as `86a5cd9724962ef1835f4a5e9fa01c31e045402b`, tree
 `d5277f4f344be5b110f0471b7128f491de9a541f`. The
-[immutable v0.1.74 record](BUILD-STATUS.md#immutable-v0174-artifact-record) binds
+[immutable v0.1.74 record](history/BUILD-STATUS-2026-10-03.md#immutable-v0174-artifact-record) binds
 722 installed tests across 54 whole files, four reviewed model-free families and
 [independent public acceptance](https://github.com/clockgrove/factory/issues/505#issuecomment-5965539396).
 [#499](https://github.com/clockgrove/factory/issues/499#issuecomment-5965556818) is
@@ -76,7 +76,7 @@ responses and generic historical error prose remain unresolved. Lease acquisitio
 publishes complete synced identity bytes atomically without clobbering an owner;
 reads distinguish actual absence from corrupt or inaccessible ownership.
 
-The [immutable v0.1.73 record](BUILD-STATUS.md#immutable-v0173-artifact-record) binds
+The [immutable v0.1.73 record](history/BUILD-STATUS-2026-10-03.md#immutable-v0173-artifact-record) binds
 source `cf1c201cf727132ffc3dce94a5d7d19f098a7c1c`, tree
 `abc0d79c4d0b08922f1dde8d91db0672bddf7148`, exact-main CI, final installed gates and
 [independent public acceptance](https://github.com/clockgrove/factory/issues/497#issuecomment-5964424472). This documentation
@@ -278,7 +278,7 @@ and internal installation links remain intact. Owner/reader failures and externa
 test corrections remain preserved. No provider call, real qualification lifecycle
 operation or release stage supplied this proof. Existing rejected proposals,
 actual per-release phases and exhausted allowances remain untouched.
-[BUILD-STATUS](BUILD-STATUS.md#qualification-fixture-source-clarification-489)
+[BUILD-STATUS](history/BUILD-STATUS-2026-10-03.md#qualification-fixture-source-clarification-489)
 records source completion separately from actual unaccepted service #448 and
 private #445. No published archive, tag, asset, version, prior receipt or
 historical source packet was replaced.
@@ -307,14 +307,14 @@ or version change supplied this recovery.
 
 [Independent public verification and completion](https://github.com/clockgrove/factory/issues/485#issuecomment-5953125869)
 matched public bytes, sealed acceptance, protected annotated tag and pinned plugin.
-[BUILD-STATUS](BUILD-STATUS.md#immutable-v0172-artifact-record) records their exact
+[BUILD-STATUS](history/BUILD-STATUS-2026-10-03.md#immutable-v0172-artifact-record) records their exact
 identities and failure provenance. Earlier artifacts, scripts and accounting
 remain preserved. Current-main prose changes no published bytes or archived
 guidance. Actual #444/#447/#448 and private #445 remain unaccepted. The later
 [operator-approved #448 continuation](https://github.com/clockgrove/factory/issues/448#issuecomment-5957494560) permits one supported same-Objective
 v0.1.71-to-v0.1.72 transition, preserving original failed/unaccepted one-artifact
 qualification, authentic phase attribution, rejected evidence and accounting.
-The [recorded event map](BUILD-STATUS.md#approved-448-current-runtime-qualification)
+The [recorded event map](history/BUILD-STATUS-2026-10-03.md#approved-448-current-runtime-qualification)
 binds exactly two v0.1.72 activations: a paused cold start with zero model dispatch
 and the sole controlled quiescent restart. Remaining phases require fresh
 validation, independent semantic review and complete mixed-phase acceptance.
@@ -339,7 +339,7 @@ this correction or handoff.
 
 [Independent public verification and completion](https://github.com/clockgrove/factory/issues/480#issuecomment-5950722931)
 matched public archive/checksum bytes, sealed acceptance, protected annotated tag
-and the pinned plugin. [BUILD-STATUS](BUILD-STATUS.md#immutable-v0171-artifact-record)
+and the pinned plugin. [BUILD-STATUS](history/BUILD-STATUS-2026-10-03.md#immutable-v0171-artifact-record)
 records the exact artifact identities. Predecessor scripts, the failed v0.1.69
 attempt, historical preparations and unknown accounting remain preserved.
 Current-main prose changes no published bytes or archived guidance. Actual live
@@ -363,7 +363,7 @@ preflights from source `ef6d09478ce7109d4e00d0117f8397ab84f41b9e`, tree
 `1ca9c93c7b6325bc357cb1edc8507a3ab78c0a0a`.
 [Independent public verification and completion](https://github.com/clockgrove/factory/issues/475#issuecomment-5949114107)
 matched the public bytes, sealed acceptance, protected annotated tag and pinned
-plugin. [BUILD-STATUS](BUILD-STATUS.md#immutable-v0170-artifact-record) records the
+plugin. [BUILD-STATUS](history/BUILD-STATUS-2026-10-03.md#immutable-v0170-artifact-record) records the
 exact artifact identities and four retained plus one actual-harness preflight.
 The older 11 frozen script/fixture inputs and 22 historical evidence files remain
 unchanged. Current-main prose changes no published bytes or archived guidance;
@@ -379,7 +379,7 @@ model-free preflights. The 153617475-byte archive has SHA-256
 `ed479c537b179a60370d49525e00e19c055849592f787569d2e48ee1c8030c40`.
 [Independent public verification and completion](https://github.com/clockgrove/factory/issues/466#issuecomment-5948017279)
 matched the exact public bytes, sealed acceptance, protected annotated tag and
-pinned plugin. [BUILD-STATUS](BUILD-STATUS.md#immutable-v0169-artifact-record)
+pinned plugin. [BUILD-STATUS](history/BUILD-STATUS-2026-10-03.md#immutable-v0169-artifact-record)
 records their immutable identities and the preserved failed 501/502 attempt.
 
 Historical compiler/review responses are preserved as evidence, not migrated into
@@ -651,7 +651,7 @@ The [public Objective #1](https://github.com/clockgrove/factory-profiles-proof-2
 supplies independent installed-artifact acceptance for
 [#162](https://github.com/clockgrove/factory/issues/162) and
 [#164](https://github.com/clockgrove/factory/issues/164), now closed. It used the
-immutable v0.1.36 artifact recorded in [BUILD-STATUS.md](BUILD-STATUS.md), with
+immutable v0.1.36 artifact recorded in [BUILD-STATUS.md](history/BUILD-STATUS-2026-10-03.md), with
 four original mixed Codex/Claude implementation attempts, frozen profile bindings,
 ordinary guarded delivery, all 23 automatic command receipts and automatic
 Objective acceptance. Independent fresh-clone validation passed all seven final
@@ -697,7 +697,7 @@ archived or private adopter material was copied.
 
 Metadata PR #176 published source `dc7097b487701cab94aa1d3f5aa561faa3416998`,
 tree `6f552925f9a6f2e464f9a46af1236a16537305df`, from the accepted corrections
-below. [Build status](BUILD-STATUS.md) records exact artifact and gate identities.
+below. [Build status](history/BUILD-STATUS-2026-10-03.md) records exact artifact and gate identities.
 The merged source reproduced the passing candidate tarball byte-for-byte.
 This documentation handoff changes no runtime, dependency, packaged skill,
 script or license body and does not replace any published bytes. Live acceptance
@@ -729,7 +729,7 @@ remain separate requirements.
 
 Metadata PR #169 published source `7d4e926b99cf2446b0d9a3e53a17e270a820b7fb`,
 tree `bc8acbd547c593782910a26b7a20a4135acfc130`.
-[Build status](BUILD-STATUS.md) records publication and independent installation
+[Build status](history/BUILD-STATUS-2026-10-03.md) records publication and independent installation
 proof, plus the nonqualifying public gate. The failed original final-integration
 attempt and one explicit retry remain preserved; this successor preparation
 does not change the published tag, bytes or evidence.
@@ -757,7 +757,7 @@ supplied the lifecycle correction described below. Metadata PR #161 published
 [v0.1.26](https://github.com/clockgrove/factory-rebuild/releases/tag/v0.1.26) at
 source `b20cc82c8b63ca231b1f120ce25025836ed8d75b`, tree
 `9110da2dcf06361eacae48000f8bf0cb7c3c439f`, without further runtime or dependency
-changes. [Build status](BUILD-STATUS.md) records its tarball digest, full Node22/24
+changes. [Build status](history/BUILD-STATUS-2026-10-03.md) records its tarball digest, full Node22/24
 gates and independent public-download/offline installation checks. This later
 documentation handoff does not change those immutable bytes. Public live
 qualification and actual adopter acceptance remain pending in issue #26;
@@ -844,7 +844,7 @@ and its normal PR4/5 merges supply public installed-gate evidence at final head
 `f5d247803aa6a83599e22c7531d06affdd5900df`.
 Whole-set human selection, unchanged public fixture bytes, automatic final
 review and independent fresh-clone LFS verification are detailed in
-[BUILD-STATUS.md](BUILD-STATUS.md). No private source, paths, logs or issue
+[BUILD-STATUS.md](history/BUILD-STATUS-2026-10-03.md). No private source, paths, logs or issue
 identifiers supplied this public docs-only change. It does not alter the release
 or accept the actual #26 pilot, which remains OPEN and separately owned.
 Published v0.1.23/failure evidence, historical v0.1.21 and frozen #55 remain intact.
@@ -1269,7 +1269,7 @@ byte lineage. New qualification source describes only current media and usage
 note work and supplies complete immutable contents and literal IDs to review.
 No private source, archived implementation, runtime change or new release is
 introduced. Original failed/cancelled runs and accounting remain preserved;
-[build status](BUILD-STATUS.md#public-completion-on-unchanged-v0137) records the
+[build status](history/BUILD-STATUS-2026-10-03.md#public-completion-on-unchanged-v0137) records the
 separate acceptance scope and current result.
 
 ## Packet-bound review evidence and Markdown sections (#232, #233, #234)
@@ -1439,7 +1439,7 @@ The existing public source and committed regression files supplied the frozen
 v0.1.68 distribution. All 317 installed tests across 30 whole files and two
 model-free source/setup preflights passed, followed by
 [independent anonymous archive and pinned-plugin verification](https://github.com/clockgrove/factory/issues/451#issuecomment-5946087196).
-The [immutable artifact record](BUILD-STATUS.md#immutable-v0168-artifact-record)
+The [immutable artifact record](history/BUILD-STATUS-2026-10-03.md#immutable-v0168-artifact-record)
 binds the exact source/tree, bytes, acceptance, public receipt and tag protection.
 The preserved first preflight failure required one independently reviewed external
 assertion correction; no product bytes changed. This later documentation records

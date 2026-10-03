@@ -99,10 +99,12 @@ exec ${quote(realGit)} "$@"
   const origin = transportRoutes[original] ?? original;
   const url = `https://github.com/${repository}.git`;
   transportRoutes[url] = origin;
-  writeFileSync(
-    join(transportRoot, "routes.json"),
-    JSON.stringify(transportRoutes),
-  );
+  // Child processes read this while other tests bind targets: replace it
+  // atomically so a reader never sees a partly written file.
+  const routes = join(transportRoot, "routes.json");
+  const temporary = `${routes}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(temporary, JSON.stringify(transportRoutes));
+  renameSync(temporary, routes);
   git(checkout, "remote", "set-url", "origin", url);
 }
 

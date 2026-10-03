@@ -36,10 +36,6 @@ function evidenceDigest(state: FactoryState): string {
 }
 
 export function assertTerminalEligibility(state: FactoryState): void {
-  if (state.permanentAbandonment)
-    throw new Error(
-      "Objective was permanently abandoned; acceptance is forbidden",
-    );
   const candidate = objectiveCandidate(state);
   if (
     !state.finalValidation?.passed ||

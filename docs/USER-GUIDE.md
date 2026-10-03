@@ -315,70 +315,7 @@ factory cancel --objective ISSUE_NUMBER
 
 Cancellation stops owned local work. Inspect its resulting status before attempting anything else.
 
-Interrupted planning, reviews and initial issue projection resume when you run the
-Objective again, so they never block cancellation. A graph amendment interrupted
-mid-projection still prevents terminal cancellation; an operator may explicitly
-**permanently abandon** such an exact stopped unaccepted run with
-built-in local workers, after verifying that all owned workers, SDK descendants,
-subprocesses and model activity have ceased. Stop the service/controller first.
-An empty controller lock or process list does not prove SDK/model cessation.
-Unknown live resources, unsupported harnesses, sealed final acceptance, unresolved
-planning/model jobs, review outside the selected boundary, publication, merge and
-other effects remain refused. The controller derives the allowed boundary from the
-snapshot; the request cannot choose or override it.
-
-Use `factory status --objective ISSUE_NUMBER --json` to inspect the identities,
-then hash the exact private `objectives/ISSUE_NUMBER/state.json` bytes with
-`sha256sum` while the installation is stopped. The private state directory
-is derived from the repository configuration. Save an explicit JSON request in a
-private file, using the exact observed values:
-
-```json
-{
-  "kind": "abandon-permanently",
-  "repository": "OWNER/REPO",
-  "objective": 123,
-  "runId": "EXACT_RUN_ID",
-  "configDigest": "EXACT_CONFIGURATION_SHA256",
-  "snapshotDigest": "EXACT_STATE_FILE_SHA256",
-  "actor": "OPERATOR_NAME",
-  "reason": "Permanently retire this stopped run without accepting or settling its unknown outcome",
-  "cessation": {
-    "kind": "operator-verified-local-cessation",
-    "verifiedAt": "ACTUAL_VERIFICATION_ISO_TIMESTAMP",
-    "basis": "Actual identity-bound observations of stopped workers, SDK descendants, subprocesses, retained model sessions and service/controller",
-    "workers": "ceased",
-    "subprocesses": "ceased",
-    "models": "ceased",
-    "unknownOwnedResources": false
-  }
-}
-```
-
-```sh
-factory cancel --objective ISSUE_NUMBER --abandon PRIVATE_REQUEST_FILE
-```
-
-The request is trusted operator evidence, not a claim Factory can infer from
-absent diagnostics. Its run/configuration/snapshot binding must still match under
-exclusive stopped ownership. Factory checks the recorded local identities for
-live processes without cancelling, collecting or cleaning resources. The
-operation adds the operator disposition and terminal cancellation to the existing
-atomic snapshot. Every original review marker, error, accepted/failed Work Item,
-evidence, consumed allowance and unknown outcome/accounting stays intact; no
-non-submission or successful cleanup is asserted. Historical submission and
-billing uncertainty need not be resolved to abandon a ceased amendment projection. Projection outcomes stay unknown, including unidentified
-issue creations: no GitHub request, provider call, cancellation, cleanup or replay
-is issued. Every Work Item keeps its original status, including independently accepted
-and failed results; these are historical evidence, not successor acceptance.
-
-An abandoned run is permanently UNACCEPTED and can never run, retry, repair, rereview,
-resume, plan or receive new admission or acceptance again. JSON status reports `abandoned`, the derived effect and
-the retained unknown outcome. A
-separately authorized successor uses normal preflight/admission, its own finite
-limits and the existing installation state root. Original consumption remains
-recorded and unknown usage remains unknown; obtain accounting if needed to enforce
-a binding budget before further calls.
+Cancellation never needs to settle in-flight calls first: every Factory step is safe to repeat, so nothing is left in an unknown state.
 
 For an ordinary failed or cancelled unpublished item without an admitted repair policy, an explicit new-attempt decision can use:
 

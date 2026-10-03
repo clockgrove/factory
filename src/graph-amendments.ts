@@ -28,7 +28,9 @@ import type {
   WorkGraph,
   WorkItem,
 } from "./contracts.js";
-import { CompletedModelInvocationError } from "./contracts.js";
+import { CompletedModelInvocationError, Interruption } from "./contracts.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { MAX_INTERRUPTIONS } from "./work-repair.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import {
   executionProfileChoices,
@@ -52,21 +54,22 @@ export interface AmendmentProposal extends WorkDiscovery {
 export interface PendingAmendment {
   id: string;
   proposal: AmendmentProposal;
+  /** Last completed phase; a restart repeats the next call. */
   phase:
     | "ready"
     | "compiled"
     | "reviewed"
     | "projected"
-    | "compiling"
-    | "reviewing"
-    | "projecting"
     | "rejected"
     | "backlog";
   graph?: WorkGraph;
   reviewDigest?: string;
   issueByItemId: Record<string, number>;
-  projectionPending?: string;
   error?: string;
+  /** The revision allowance was charged; a repeat does not charge again. */
+  charged?: boolean;
+  /** Interrupted repeats of the current call; reset when a call completes. */
+  interruptions?: number;
   rejectionStage?:
     | "compilation"
     | "validation"
@@ -135,7 +138,6 @@ export function assertGraphRevisions(state: FactoryState): void {
       !rejected.id ||
       rejected.phase !== "rejected" ||
       !rejected.error ||
-      rejected.projectionPending ||
       ![
         state.admission?.graphDigest,
         ...(state.graphRevisions ?? []).map((revision) => revision.digest),
@@ -227,9 +229,6 @@ export function assertGraphRevisions(state: FactoryState): void {
         "compiled",
         "reviewed",
         "projected",
-        "compiling",
-        "reviewing",
-        "projecting",
         "rejected",
         "backlog",
       ].includes(pending.phase) ||
@@ -249,13 +248,6 @@ export function assertGraphRevisions(state: FactoryState): void {
         )) ||
       (pending.reviewDigest !== undefined &&
         !/^[a-f0-9]{64}$/.test(pending.reviewDigest)) ||
-      (pending.projectionPending !== undefined &&
-        (typeof pending.projectionPending !== "string" ||
-          !pending.projectionPending ||
-          !pending.graph?.items.some(
-            (item) => item.id === pending.projectionPending,
-          ) ||
-          Object.hasOwn(known, pending.projectionPending))) ||
       (pending.rejectionStage !== undefined &&
         ![
           "compilation",
@@ -263,16 +255,13 @@ export function assertGraphRevisions(state: FactoryState): void {
           "review",
           "review-findings",
           "projection",
-        ].includes(pending.rejectionStage)) ||
-      (pending.phase === "rejected" && pending.projectionPending !== undefined)
+        ].includes(pending.rejectionStage))
     )
       throw new Error(
         "Pending amendment has invalid projection or review identities",
       );
     if (
-      ["compiled", "reviewing", "reviewed", "projecting", "projected"].includes(
-        pending.phase,
-      ) &&
+      ["compiled", "reviewed", "projected"].includes(pending.phase) &&
       !pending.graph
     )
       throw new Error("Pending amendment lacks candidate graph");
@@ -322,24 +311,10 @@ export function assertGraphRevisions(state: FactoryState): void {
     );
 }
 
-export function hasPendingAmendmentEffect(state: FactoryState): boolean {
-  return (
-    !!state.pendingAmendment &&
-    (["compiling", "reviewing", "projecting"].includes(
-      state.pendingAmendment.phase,
-    ) ||
-      !!state.pendingAmendment.projectionPending)
-  );
-}
-
 export function submitAmendment(
   state: FactoryState,
   proposal: AmendmentProposal,
 ): PendingAmendment {
-  if (state.permanentAbandonment)
-    throw new Error(
-      "Objective was permanently abandoned; create a normally admitted successor",
-    );
   if (state.objectiveClosure === "complete")
     throw new Error("Completed Objective discoveries require successor work");
   if (state.finalAcceptance || state.objectiveClosure === "pending")
@@ -416,7 +391,6 @@ function validateAmendmentReplacement(
     !rejected.error ||
     rejected.proposal.graph ||
     proposal.graph ||
-    rejected.projectionPending ||
     rejected.reviewDigest ||
     (rejected.rejectionStage !== undefined
       ? !["compilation", "validation", "review-findings"].includes(
@@ -616,8 +590,29 @@ export function validateAmendment(
   }
 }
 
-/** One bounded compilation/review at a settled boundary. Unknown external effects remain fenced. */
-export async function applyPendingAmendment(args: {
+/** Advance the pending amendment, repeating an interrupted call at most twice. */
+export async function applyPendingAmendment(
+  args: Parameters<typeof advanceAmendment>[0],
+  backoffMs = 1_000,
+): Promise<boolean> {
+  // An operator resume after exhausted repeats starts a fresh budget.
+  const pending = args.state.pendingAmendment;
+  if (pending && (pending.interruptions ?? 0) >= MAX_INTERRUPTIONS)
+    delete pending.interruptions;
+  for (;;) {
+    try {
+      return await advanceAmendment(args);
+    } catch (error) {
+      if (!(error instanceof Interruption)) throw error;
+      await delay(
+        backoffMs * (args.state.pendingAmendment?.interruptions ?? 1),
+      );
+    }
+  }
+}
+
+/** One compile, review and projection pass from the last completed phase. */
+async function advanceAmendment(args: {
   state: FactoryState;
   config: FactoryConfig;
   body: string;
@@ -628,10 +623,6 @@ export async function applyPendingAmendment(args: {
   diagnostics?: DiagnosticEmitter;
 }): Promise<boolean> {
   const { state, config, save } = args;
-  if (state.permanentAbandonment)
-    throw new Error(
-      "Objective was permanently abandoned; create a normally admitted successor",
-    );
   selectWorkerAmendment(state);
   const pending = state.pendingAmendment;
   if (!pending || pending.phase === "backlog") return false;
@@ -655,7 +646,8 @@ export async function applyPendingAmendment(args: {
     resultRereviews: 0,
   };
   const consumption = state.allowanceConsumption;
-  if (pending.phase === "ready") {
+  if (pending.phase === "ready" && !pending.charged) {
+    pending.charged = true;
     if (pending.proposal.replacement)
       chargeRepair(state, pending.proposal.replacement.correction.kind, [
         "$planning",
@@ -666,6 +658,7 @@ export async function applyPendingAmendment(args: {
     { graph: structuredClone(state.graph), digest: graphDigest(state.graph) },
   ];
   let compilationResponseObserved = false;
+  let calling: "compile" | "review" | "projection" | undefined;
   let stage: NonNullable<PendingAmendment["rejectionStage"]> = "compilation";
   try {
     if (args.cancelled()) throw new Error("Objective cancelled");
@@ -733,8 +726,7 @@ export async function applyPendingAmendment(args: {
         );
         normalizeExecutionProfiles(pending.graph, choices);
       } else {
-        pending.phase = "compiling";
-        save();
+        calling = "compile";
         pending.graph = await compileObjective(
           state.objective,
           args.body,
@@ -778,7 +770,9 @@ export async function applyPendingAmendment(args: {
           ),
         );
       }
+      calling = undefined;
       pending.phase = "compiled";
+      delete pending.interruptions;
       save();
     }
     if (args.cancelled()) throw new Error("Objective cancelled");
@@ -822,8 +816,7 @@ export async function applyPendingAmendment(args: {
         ),
       };
       const evidence = reviewPacket([], planningReviewEvidence(packet));
-      pending.phase = "reviewing";
-      save();
+      calling = "review";
       const response = await args.model.reviewGraph({
         ...packet,
         reviewPacket: evidence,
@@ -837,7 +830,7 @@ export async function applyPendingAmendment(args: {
           }),
         },
       });
-      pending.phase = "compiled";
+      calling = undefined;
       const findings = decodeGraphReview(response, evidence);
       if (findings.length) {
         // Only a complete packet-bound decoded finding permits diagnosed correction.
@@ -850,6 +843,7 @@ export async function applyPendingAmendment(args: {
         .update(JSON.stringify({ packet, findings }))
         .digest("hex");
       pending.phase = "reviewed";
+      delete pending.interruptions;
       save();
     }
     if (args.cancelled()) throw new Error("Objective cancelled");
@@ -859,8 +853,8 @@ export async function applyPendingAmendment(args: {
     if (pending.phase === "reviewed") {
       await verifyPrerequisites();
       stage = "projection";
-      pending.phase = "projecting";
-      save();
+      calling = "projection";
+      // Projection finds existing issues by marker, so repeating it is safe.
       const projected = await args.github.projectGraph({
         graph: pending.graph!,
         previousGraph: state.graph,
@@ -869,20 +863,18 @@ export async function applyPendingAmendment(args: {
         completedItems: Object.keys(state.work).filter(
           (id) => state.work[id]!.status === "done",
         ),
-        beforeCreate: (id) => {
+        beforeCreate: () => {
           if (args.cancelled()) throw new Error("Objective cancelled");
-          pending.projectionPending = id;
-          save();
         },
         projected: (id, issue) => {
           pending.issueByItemId[id] = issue;
-          if (pending.projectionPending === id)
-            delete pending.projectionPending;
           save();
         },
       });
+      calling = undefined;
       pending.issueByItemId = projected.issueByItemId;
       pending.phase = "projected";
+      delete pending.interruptions;
       save();
     }
     if (args.cancelled()) throw new Error("Objective cancelled");
@@ -911,21 +903,24 @@ export async function applyPendingAmendment(args: {
     save();
     return true;
   } catch (error) {
-    // The actual transport distinguishes completed HTTP rejection from a lost mutation.
-    // Do not infer this fact from retained error prose.
-    const projectionRejected =
-      pending.phase === "projecting" && isCompletedProjectionRejection(error);
-    if (projectionRejected) delete pending.projectionPending;
-    if (
-      projectionRejected ||
-      !["compiling", "reviewing", "projecting"].includes(pending.phase) ||
-      error instanceof CompletedModelInvocationError ||
-      (pending.phase === "compiling" && compilationResponseObserved)
-    ) {
+    // A call that ended without a completed answer was interrupted: the
+    // amendment stays at its last completed phase and the next run repeats
+    // the call. Anything else is a real rejection.
+    const interrupted =
+      calling !== undefined &&
+      !(error instanceof CompletedModelInvocationError) &&
+      !(calling === "compile" && compilationResponseObserved) &&
+      !(calling === "projection" && isCompletedProjectionRejection(error));
+    if (!interrupted) {
       pending.rejectionStage = stage;
       pending.phase = "rejected";
     }
     pending.error = error instanceof Error ? error.message : String(error);
+    if (interrupted && (pending.interruptions ?? 0) < MAX_INTERRUPTIONS) {
+      pending.interruptions = (pending.interruptions ?? 0) + 1;
+      save();
+      throw new Interruption(error);
+    }
     if (state.coordinator) {
       state.coordinator.mode = "paused";
       state.coordinator.waitReason = pending.error;

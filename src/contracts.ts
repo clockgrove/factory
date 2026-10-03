@@ -803,10 +803,6 @@ export interface GitHubGateway {
     expected: { body?: string; workItem?: { objective: number; id: string } },
   ): Promise<void>;
   projectGraph(request: GraphProjection): Promise<ProjectedGraph>;
-  /** GET-only reconciliation of identified partial projection before stopped cancellation. */
-  reconcileGraphProjection?(
-    request: GraphProjection & { objectiveBodyDigest: string },
-  ): Promise<void>;
   findOpenPullRequest(
     branch: string,
     base: string,

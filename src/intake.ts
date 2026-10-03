@@ -585,10 +585,6 @@ export async function runIntake(
           "Use intake control while discovery owns this installation",
         );
       if (request.action === "status") return preparing.coordinator;
-      if (preparing.permanentAbandonment)
-        throw new Error(
-          "Objective was permanently abandoned; create a normally admitted successor",
-        );
       if (request.action === "cancel") {
         preparing.cancelRequested = true;
         preparing.coordinator.mode = "paused";

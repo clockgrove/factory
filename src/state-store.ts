@@ -19,7 +19,6 @@ import { stateRoot } from "./config.js";
 import { linuxProcessIdentity } from "./process.js";
 import {
   assertCoordinator,
-  assertPermanentAbandonmentBinding,
   type ContinuationState,
   type FactoryState,
   type PreparationState,
@@ -101,7 +100,6 @@ export function readContinuation(
   )
     throw new Error("Invalid preparation source packet binding");
   assertCoordinator(value.coordinator);
-  assertPermanentAbandonmentBinding(value);
   if (value.authority) validateAuthority(value.authority);
   assertRepairLedger(value);
   return value as PreparationState;

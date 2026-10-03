@@ -590,6 +590,8 @@ export interface DeliveryRequest {
   branch: string;
   baseBranch?: string;
   lfs?: boolean;
+  /** Commits earlier attempts of this Work Item produced for this branch. */
+  earlierHeads?: string[];
 }
 export interface DeliveryResult {
   branch: string;

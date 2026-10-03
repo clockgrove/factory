@@ -32,6 +32,7 @@ import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { verifyHydratedAssets } from "../dist/media.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
 import { DaytonaSandboxProvider } from "../dist/execution/daytona.js";
+import { earlierHeads } from "../dist/repair-policy.js";
 import { daytonaFault, executionFault } from "../dist/execution/fault.js";
 import { AgentsApiError } from "../dist/execution/openai-managed.js";
 import {
@@ -658,6 +659,83 @@ test("a rate limit without a reset header waits a minute instead of stopping eve
   assert.equal(calls, 1);
 });
 
+test("projection treats a missing dependency as lag right after creating the issue", async () => {
+  const error = await gateway({
+    [repo]: () => json({ default_branch: "main" }),
+    "GET /repos/a/b/labels": () =>
+      json([{ name: "factory:objective" }, { name: "factory:work-item" }]),
+    "GET /repos/a/b/issues/7": () => json(objectiveIssue),
+    "GET /repos/a/b/issues": () => json([]),
+    "POST /repos/a/b/issues": () =>
+      json(
+        {
+          id: 80,
+          number: 8,
+          title: workItem.title,
+          body: projectedIssueBody(workItem, 7),
+          state: "open",
+          labels: ["factory:work-item"],
+          repository_url: "https://api.github.com/repos/a/b",
+        },
+        201,
+      ),
+    "GET /repos/a/b/issues/8/dependencies/blocked_by": () =>
+      json({ message: "Not Found" }, 404),
+  })
+    .projectGraph({ objectiveIssue: 7, graph: { items: [{ ...workItem }] } })
+    .catch((caught) => caught);
+  assertFault(
+    faultOf(error),
+    { kind: "transient", outcomeUnknown: false },
+    "fresh dependency route",
+  );
+});
+
+test("removing a dependency GitHub already removed counts as done", async () => {
+  const zero = { ...workItem, id: "zero", title: "Zero" };
+  const before = { ...workItem, dependencies: ["zero"] };
+  const after = { ...workItem };
+  const issue = (number, item) => ({
+    id: number * 10,
+    number,
+    title: item.title,
+    body: projectedIssueBody(item, 7),
+    state: "open",
+    labels: ["factory:work-item"],
+    repository_url: "https://api.github.com/repos/a/b",
+  });
+  let body = issue(9, before);
+  let blockers = [issue(8, zero)];
+  const deletes = [];
+  const result = await gateway({
+    "GET /repos/a/b/labels": () =>
+      json([{ name: "factory:objective" }, { name: "factory:work-item" }]),
+    "GET /repos/a/b/issues/7": () => json(objectiveIssue),
+    "GET /repos/a/b/issues/8": () => json(issue(8, zero)),
+    "GET /repos/a/b/issues/9": () => json(body),
+    "PATCH /repos/a/b/issues/9": () => {
+      body = issue(9, after);
+      return json(body);
+    },
+    "GET /repos/a/b/issues/8/dependencies/blocked_by": () => json([]),
+    "GET /repos/a/b/issues/9/dependencies/blocked_by": () => json(blockers),
+    "DELETE /repos/a/b/issues/9/dependencies/blocked_by/80": () => {
+      deletes.push(80);
+      blockers = [];
+      return json({ message: "Not Found" }, 404);
+    },
+    "GET /repos/a/b/issues/7/sub_issues": () =>
+      json([issue(8, zero), issue(9, after)]),
+  }).projectGraph({
+    objectiveIssue: 7,
+    graph: { items: [zero, after] },
+    previousGraph: { items: [zero, before] },
+    knownIssues: { zero: 8, one: 9 },
+  });
+  assert.deepEqual(result.issueByItemId, { zero: 8, one: 9 });
+  assert.deepEqual(deletes, [80]);
+});
+
 test("a GraphQL rate limit gates the next request like REST headers do", async () => {
   let calls = 0;
   const client = new GitHubClient(
@@ -710,12 +788,24 @@ test("a 404 on a Factory object is lag only within two minutes of its creation",
     "stacks?pull_request=1",
     "issues/8/dependencies/blocked_by",
     "issues/8/sub_issues",
-  ])
+  ]) {
     assert.equal(
       gitHubFault(notFound, { method: "GET", path }, now).kind,
       "config",
       path,
     );
+    // Right after Factory created the issue, its feature routes may lag too.
+    if (path.startsWith("issues/"))
+      assert.equal(
+        gitHubFault(
+          notFound,
+          { method: "GET", path, createdAt: now - 10_000 },
+          now,
+        ).kind,
+        "transient",
+        path,
+      );
+  }
 });
 
 // ------------------------------------------------------------------- git
@@ -846,7 +936,7 @@ function pushFixture(t) {
     findOpenPullRequest: async () => undefined,
     publish: async () => assert.fail("publish follows only a successful push"),
   });
-  const publish = (changeRef) =>
+  const publish = (changeRef, earlierHeads) =>
     delivery.publish({
       item: { id: "one", title: "One" },
       baseSha: base,
@@ -854,9 +944,54 @@ function pushFixture(t) {
       changeRef,
       branch: "factory/one",
       baseBranch: "main",
+      ...(earlierHeads && { earlierHeads }),
     });
   return { root, run, checkout, commit, base, publish };
 }
+
+test("a push rejected by an earlier attempt's recorded head is transient", async (t) => {
+  const f = pushFixture(t);
+  const earlier = f.commit("earlier attempt");
+  f.run(
+    f.checkout,
+    "push",
+    "-q",
+    "origin",
+    `${earlier}:refs/heads/factory/one`,
+  );
+  f.run(f.checkout, "reset", "-q", "--hard", f.base);
+  const retry = f.commit("retry");
+  const error = await f.publish(retry, [earlier]).catch((caught) => caught);
+  assert.match(error.message, /\[rejected\]/);
+  assertFault(
+    faultOf(error),
+    { kind: "transient", outcomeUnknown: false },
+    "earlier head",
+  );
+  // Without the record the same head is someone else's, in neutral words.
+  const unknown = await f.publish(retry).catch((caught) => caught);
+  assert.equal(faultOf(unknown).kind, "decision");
+  assert.match(faultOf(unknown).question, /has no record of/);
+});
+
+test("earlier attempt heads come from the archived attempt history", () => {
+  assert.deepEqual(
+    earlierHeads({
+      status: "running",
+      recovery: {
+        history: [
+          { at: "2026-10-03T00:00:00Z", work: { status: "failed" } },
+          {
+            at: "2026-10-03T00:01:00Z",
+            work: { status: "failed", changeRef: "a".repeat(40) },
+          },
+        ],
+      },
+    }),
+    ["a".repeat(40)],
+  );
+  assert.deepEqual(earlierHeads({ status: "pending" }), []);
+});
 
 test("a push rejected by a foreign branch head is a decision", async (t) => {
   const f = pushFixture(t);
@@ -1358,6 +1493,34 @@ const codexCases = [
     { kind: "config" },
   ],
   [
+    "usage limit with a plan-upgrade hint and a reset",
+    codexThread([
+      {
+        type: "turn.failed",
+        error: {
+          message:
+            "You've hit your usage limit. Upgrade to Plus to continue using Codex (https://openai.com/chatgpt/pricing), or try again in 3 hours.",
+        },
+      },
+    ]),
+    {
+      kind: "transient",
+      outcomeUnknown: false,
+      retryIn: [180 * MINUTE - 5_000, 180 * MINUTE],
+    },
+  ],
+  [
+    "connection reset after the turn started",
+    codexThread(
+      [],
+      Object.assign(new Error("read ECONNRESET"), {
+        code: "ECONNRESET",
+        syscall: "read",
+      }),
+    ),
+    { kind: "transient", outcomeUnknown: true },
+  ],
+  [
     "insufficient quota reported as 429",
     codexThread([
       {
@@ -1422,6 +1585,41 @@ for (const [name, startThread, expected] of codexCases)
     );
     assertFault(faultOf(error), expected, name);
   });
+
+test("model faults: only connect-phase failures before a turn started are unpaid", () => {
+  const call = (started) => ({
+    provider: "openai-codex-sdk",
+    ended: false,
+    started,
+    failureClass: "provider",
+  });
+  const refused = Object.assign(new Error("connect ECONNREFUSED 1.2.3.4:443"), {
+    code: "ECONNREFUSED",
+    syscall: "connect",
+  });
+  const reset = Object.assign(new Error("read ECONNRESET"), {
+    code: "ECONNRESET",
+    syscall: "read",
+  });
+  assert.equal(modelFault(refused, call(false)).outcomeUnknown, false);
+  assert.equal(modelFault(refused, call(true)).outcomeUnknown, true);
+  assert.equal(modelFault(reset, call(false)).outcomeUnknown, true);
+  assert.equal(modelFault(reset, call(true)).kind, "transient");
+  // A local filesystem failure is Factory's, not the provider's.
+  const denied = Object.assign(
+    new Error("EACCES: permission denied, mkdtemp"),
+    {
+      code: "EACCES",
+      syscall: "mkdtemp",
+    },
+  );
+  assert.equal(modelFault(denied, call(false)).kind, "defect");
+  // Other syscalls are not presumed local.
+  const odd = Object.assign(new Error("getsockopt failed"), {
+    syscall: "getsockopt",
+  });
+  assert.equal(modelFault(odd, call(true)).kind, "transient");
+});
 
 test("model faults: a Factory programming error is a defect, a missing CLI is configuration", () => {
   const call = {

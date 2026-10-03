@@ -469,8 +469,10 @@ class ClaudePlanningTransport implements PlanningTransport {
           facts.limit = message.rate_limit_info;
         if (message.type === "assistant") {
           if (message.error) facts.assistantError = message.error;
-          if (message.message.model !== SYNTHETIC_MODEL)
+          if (message.message.model !== SYNTHETIC_MODEL) {
             facts.modelResponded = true;
+            state.started = true;
+          }
         }
         const captures = claudeCaptureEvents(
           message,

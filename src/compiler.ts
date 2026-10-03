@@ -168,6 +168,33 @@ function usageReset(detail: string, now: number): string | undefined {
   return total ? new Date(now + total).toISOString() : undefined;
 }
 
+/** Filesystem and process syscalls: their failures are local. */
+const LOCAL_SYSCALL =
+  /^(spawn\b.*|open|close|read|write|mkdir|mkdtemp|rmdir|rm|unlink|rename|stat|lstat|fstat|scandir|readdir|access|chmod|copyfile|symlink|readlink|realpath|utime|ftruncate|fsync)$/;
+
+const CONNECT_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/** The request failed before a connection opened (DNS, refused, unreachable). */
+function connectPhase(error: unknown, detail: string): boolean {
+  for (
+    let current: unknown = error, depth = 0;
+    current instanceof Error && depth < 6;
+    current = current.cause, depth++
+  )
+    if (CONNECT_CODES.has(String((current as NodeJS.ErrnoException).code)))
+      return true;
+  return /can't reach the API|Could not resolve host|Connection refused|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/i.test(
+    detail,
+  );
+}
+
 const BILLING_FIX =
   "Restore the provider plan, credits or billing for the configured login, then `factory run`";
 
@@ -181,6 +208,8 @@ export function modelFault(
   call: {
     provider: string;
     ended: boolean;
+    /** A model turn began; network failures after this may have been paid. */
+    started?: boolean;
     failureClass: string;
     /** The transport's classification from structured provider facts. */
     fault?: Fault;
@@ -190,7 +219,18 @@ export function modelFault(
   if (call.fault) return call.fault;
   const detail = error instanceof Error ? error.message : String(error);
   const codex = call.provider === CODEX_PLANNING_PROVIDER;
-  // Billing first: OpenAI reports exhausted quota as HTTP 429.
+  // A usage limit that names when it resets is a wait, even when the
+  // message also suggests a plan upgrade.
+  if (
+    /usage limit|hit your limit/i.test(detail) &&
+    /try again (in|at)\b|\bresets?\b/i.test(detail)
+  )
+    return transient(
+      `Model provider usage limit: ${detail}`,
+      false,
+      usageReset(detail, now),
+    );
+  // Billing next: OpenAI reports exhausted quota as HTTP 429.
   if (
     /insufficient_quota|exceeded your current quota|quota exceeded|billing|credit balance|credits_required|spend limit|shared budget|usage not included|upgrade to plus/i.test(
       detail,
@@ -256,15 +296,13 @@ export function modelFault(
       detail,
       fix: `Run \`${authentication.authentication.command}\` on the controller host, then \`factory run\``,
     };
-  // The provider was never reached: nothing ran, so nothing was paid.
-  if (
-    !call.ended &&
-    (networkFailure(error) ||
-      /can't reach the API|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|Could not resolve host|error sending request|Connection failed/i.test(
-        detail,
-      ))
-  )
+  // A connection that never opened before the turn started sent nothing,
+  // so nothing was paid. Any other network failure may have been.
+  const connect = connectPhase(error, detail);
+  if (connect && !call.started)
     return transient(`Model provider unreachable: ${detail}`, false);
+  if (connect || networkFailure(error))
+    return transient(`Model connection failed mid-call: ${detail}`, true);
   if (
     (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT" &&
     /^spawn /.test(String((error as NodeJS.ErrnoException).syscall))
@@ -274,12 +312,15 @@ export function modelFault(
       detail,
       fix: "Install the provider CLI on the controller host, then `factory run`",
     };
-  // A programming error in Factory is not provider weather.
+  // A programming error or a local filesystem failure in Factory is not
+  // provider weather.
   if (
     error instanceof TypeError ||
     error instanceof ReferenceError ||
     error instanceof RangeError ||
-    (error as NodeJS.ErrnoException | undefined)?.syscall !== undefined
+    LOCAL_SYSCALL.test(
+      String((error as NodeJS.ErrnoException | undefined)?.syscall ?? ""),
+    )
   )
     return { kind: "defect", detail };
   // A lost session, a dropped stream, a turn that never completed or a
@@ -426,6 +467,8 @@ export interface PlanningTurn {
   failureClass?: string;
   /** Fault from structured provider facts (billing, a limit's reset time). */
   fault?: Fault;
+  /** A model turn began (Codex turn.started, a Claude model message). */
+  started?: boolean;
 }
 
 /**
@@ -522,6 +565,7 @@ class CodexPlanningTransport implements PlanningTransport {
           if (next.done) break;
           const event = next.value;
           turn.progress();
+          if (event.type === "turn.started") state.started = true;
           if (
             event.type === "item.completed" &&
             event.item.type === "agent_message"
@@ -822,6 +866,7 @@ export class StructuredPlanningModel implements PlanningModel {
       const fault = modelFault(error, {
         provider,
         ended: turn.ended,
+        started: turn.started,
         failureClass,
         fault: turn.fault,
       });

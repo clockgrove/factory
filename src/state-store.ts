@@ -5,6 +5,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -170,11 +171,12 @@ export interface ControllerOwner {
 }
 
 export function readControllerOwner(path: string): ControllerOwner | undefined {
-  if (!existsSync(path)) return undefined;
   let value: unknown;
   try {
     value = JSON.parse(readFileSync(path, "utf8"));
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT")
+      return undefined;
     throw new Error(
       "Controller lock is unreadable; operator direction required",
     );
@@ -211,25 +213,33 @@ export function acquireControllerLock(
         throw new Error("A Factory controller already owns this installation");
       rmSync(path);
     }
-    const fd = openSync(path, "wx", 0o600);
     const identity = linuxProcessIdentity(process.pid);
-    if (!identity) {
-      closeSync(fd);
-      rmSync(path, { force: true });
+    if (!identity)
       throw new Error("Cannot establish controller process identity");
-    }
     const token = randomUUID();
-    writeFileSync(
-      fd,
-      JSON.stringify({
-        pid: process.pid,
-        startTime: identity.startTime,
-        token,
-        objective,
-      }),
-    );
-    fsyncSync(fd);
-    return { fd, token };
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    const fd = openSync(temporary, "wx", 0o600);
+    try {
+      writeFileSync(
+        fd,
+        JSON.stringify({
+          pid: process.pid,
+          startTime: identity.startTime,
+          token,
+          objective,
+        }),
+      );
+      fsyncSync(fd);
+      // Publish a complete identity atomically without replacing another owner.
+      // Readers do not take the acquisition guard and must never see this write.
+      linkSync(temporary, path);
+      return { fd, token };
+    } catch (error) {
+      closeSync(fd);
+      throw error;
+    } finally {
+      rmSync(temporary, { force: true });
+    }
   } finally {
     rmdirSync(guard);
   }

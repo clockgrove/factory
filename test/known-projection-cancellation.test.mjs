@@ -301,7 +301,7 @@ for (const mode of [
   "missing-old-parent",
   "duplicate-child",
   "unknown-review",
-  "unknown-publication",
+  "delivering-work",
   "active-work",
   "execution-handle",
   "stale-source",
@@ -390,8 +390,7 @@ for (const mode of [
         if (mode === "duplicate-child") remote.hierarchy.set(4, [2]);
         if (mode === "unknown-review")
           state.coordinator.phase = "objective-review-submitted";
-        if (mode === "unknown-publication")
-          state.work.result.pendingEffect = "publication";
+        if (mode === "delivering-work") state.work.result.step = "deliver";
         if (mode === "active-work") state.work.result.status = "running";
         if (mode === "execution-handle")
           state.work.result.execution = {
@@ -766,7 +765,7 @@ for (const producer of ["amendment"])
                     ]
                   : [
                       (snapshot) => {
-                        snapshot.work.result.pendingEffect = "publication";
+                        snapshot.work.result.step = "deliver";
                       },
                       (snapshot) => {
                         snapshot.coordinator.phase =

@@ -17,6 +17,7 @@ import {
   planObjective,
   admitObjective,
   checkAdmission,
+  decidePlan,
 } from "../dist/runner.js";
 import { readContinuation } from "../dist/state-store.js";
 import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
@@ -832,6 +833,41 @@ for (const producer of ["initial", "amendment"])
                     throw Error("No terminal write");
                   },
                   cancelled: () => false,
+                }),
+                /permanently abandoned/,
+              );
+            }
+            await assert.rejects(
+              planObjective(config, 1, { planningModel: {}, github }),
+              /permanently abandoned/,
+            );
+            if (producer === "initial" && effect === "body") {
+              await assert.rejects(
+                admitObjective(
+                  config,
+                  1,
+                  { github },
+                  observed.plan,
+                  observed.admission.authority,
+                ),
+                /permanently abandoned/,
+              );
+              await assert.rejects(
+                checkAdmission(
+                  config,
+                  1,
+                  { github },
+                  observed.plan,
+                  observed.admission,
+                ),
+                /permanently abandoned/,
+              );
+              await assert.rejects(
+                decidePlan(config, 1, { github }, observed.plan, {
+                  actor: "fixture operator",
+                  outcome: "accept",
+                  answer: "Retain",
+                  reason: "No acceptance on abandoned predecessor",
                 }),
                 /permanently abandoned/,
               );

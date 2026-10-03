@@ -28,7 +28,10 @@ or renewed #448 qualification.
 
 Focused source validation covers 174 tests across the four whole lifecycle,
 transport, intake and supervision files, plus 100 tests across six whole existing
-application, coordinator, diagnostics, graph-amendment and state-ingress files.
+application, coordinator, diagnostics, graph-amendment and state-ingress files,
+and 37 tests across the two whole admission and bounded-repair files (311 unique
+cases across twelve whole files). Planning, admission and human plan-decision
+entrypoints refuse before external observation on an abandoned Objective.
 The complete preserved historical snapshot also passes native CLI abandonment,
 status and run/retry/resume refusals through a separately isolated state copy,
 with zero HTTP, authentication or SDK calls and unchanged original files/checkout.

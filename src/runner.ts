@@ -468,6 +468,7 @@ export async function decidePlan(
     reason: string;
   },
 ): Promise<PlanCandidate> {
+  assertNotAbandoned(config, objective);
   validateTarget(config.repository, config.checkout);
   const diagnostics = new DiagnosticEmitter(
     config.repository,

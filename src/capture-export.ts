@@ -127,7 +127,7 @@ export function invocationObservations(
 }
 
 /** One root span per actual invocation/attempt; no invented cross-invocation parentage. */
-export function mapLangfuseCaptures(selection: SelectedCaptures) {
+export function mapOtlpCaptures(selection: SelectedCaptures) {
   const spans = selection.report.invocations.map((invocation) => {
     const observations = invocationObservations(selection, invocation);
     const start = invocation.interval.startedAt ?? observations[0]!.at;
@@ -143,12 +143,11 @@ export function mapLangfuseCaptures(selection: SelectedCaptures) {
       endTimeUnixNano: nanos(end),
       // Plain spans prevent destination model pricing from inventing Factory billing.
       attributes: [
-        attribute("langfuse.observation.type", "span"),
         attribute(
-          "langfuse.session.id",
+          "session.id",
           `${selection.repository}#${selection.objective}`,
         ),
-        attribute("langfuse.observation.metadata.factory", {
+        attribute("factory.metadata", {
           identity: invocation.identity,
           interval: invocation.interval,
           outcomes: invocation.outcomes,
@@ -162,11 +161,11 @@ export function mapLangfuseCaptures(selection: SelectedCaptures) {
         ...(selection.options.content === "retained"
           ? [
               attribute(
-                "langfuse.observation.input",
+                "factory.input",
                 input.map((record) => record.exportedContent),
               ),
               attribute(
-                "langfuse.observation.output",
+                "factory.output",
                 output.map((record) => record.exportedContent),
               ),
             ]
@@ -186,15 +185,12 @@ export function mapLangfuseCaptures(selection: SelectedCaptures) {
   };
 }
 
-export function prepareLangfuseExport(selection: SelectedCaptures) {
-  const endpoint = exportEndpoint(
-    selection.options.endpoint,
-    "/api/public/otel/v1/traces",
-  );
-  const payload = json(mapLangfuseCaptures(selection));
+/** OTLP/HTTP JSON: the base URL gets the standard `/v1/traces` signal path. */
+export function prepareOtlpExport(selection: SelectedCaptures) {
+  const endpoint = exportEndpoint(selection.options.endpoint, "/v1/traces");
+  const payload = json(mapOtlpCaptures(selection));
   return {
     preview: {
-      destination: "langfuse" as const,
       endpoint,
       repository: selection.repository,
       objective: selection.objective,
@@ -228,11 +224,24 @@ export function prepareLangfuseExport(selection: SelectedCaptures) {
     payload,
   };
 }
-export type LangfuseExport = ReturnType<typeof prepareLangfuseExport>;
+export type OtlpExport = ReturnType<typeof prepareOtlpExport>;
+
+/** Standard OTEL_EXPORTER_OTLP_HEADERS: comma-separated, URL-encoded key=value pairs. */
+export function otlpHeaders(value = ""): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const entry of value.split(",")) {
+    if (!entry.trim()) continue;
+    const at = entry.indexOf("=");
+    const key = at > 0 ? entry.slice(0, at).trim() : "";
+    if (!key) throw new Error("OTEL_EXPORTER_OTLP_HEADERS is malformed");
+    headers[key] = decodeURIComponent(entry.slice(at + 1).trim());
+  }
+  return headers;
+}
 
 /** Returns a sanitized receipt; response prose and transport errors can contain secrets. */
-export async function sendLangfuseExport(
-  prepared: LangfuseExport,
+export async function sendOtlpExport(
+  prepared: OtlpExport,
   authorizationDigest: string,
   environment: NodeJS.ProcessEnv = process.env,
   request: typeof fetch = fetch,
@@ -250,14 +259,8 @@ export async function sendLangfuseExport(
     throw new Error(
       "Export changed; preview and authorize this exact destination/content/scope again",
     );
-  const publicKey = environment.LANGFUSE_PUBLIC_KEY;
-  const secretKey = environment.LANGFUSE_SECRET_KEY;
-  if (!publicKey || !secretKey)
-    throw new Error(
-      "Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY in the controller environment; never in target files",
-    );
+  const headers = otlpHeaders(environment.OTEL_EXPORTER_OTLP_HEADERS);
   const receipt = {
-    destination: prepared.preview.destination,
     endpoint: prepared.preview.endpoint,
     authorizationDigest,
     observations: prepared.preview.observationCount,
@@ -268,11 +271,7 @@ export async function sendLangfuseExport(
   try {
     const response = await request(prepared.preview.endpoint, {
       method: "POST",
-      headers: {
-        Authorization: `Basic ${Buffer.from(`${publicKey}:${secretKey}`).toString("base64")}`,
-        "Content-Type": "application/json",
-        "x-langfuse-ingestion-version": "4",
-      },
+      headers: { ...headers, "Content-Type": "application/json" },
       body: prepared.payload,
       redirect: "error",
       signal: AbortSignal.timeout(30_000),

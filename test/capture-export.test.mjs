@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   exportEndpoint,
-  mapLangfuseCaptures,
-  prepareLangfuseExport,
+  mapOtlpCaptures,
+  prepareOtlpExport,
   selectCaptures,
-  sendLangfuseExport,
+  sendOtlpExport,
 } from "../dist/capture-export.js";
 import { parseCaptureExportOptions } from "../dist/capture-export-cli.js";
 
@@ -104,15 +104,14 @@ function selected(
 
 test("metadata export uses capture identities, concurrency, latest cumulative usage and distinct outcomes without reading content", () => {
   const capture = selected();
-  const prepared = prepareLangfuseExport(capture);
+  const prepared = prepareOtlpExport(capture);
   assert.equal(prepared.preview.observationCount, 7);
   assert.equal(prepared.preview.identities.length, 2);
   assert.equal(prepared.preview.usage.inputTokens.total, 10);
   assert.equal(prepared.preview.usage.outputTokens.total, 5);
   assert.equal(prepared.preview.usage.inputTokens.coverage, "partial");
   assert.equal(prepared.preview.usage.reasoningOutputTokens.total, null);
-  const spans =
-    mapLangfuseCaptures(capture).resourceSpans[0].scopeSpans[0].spans;
+  const spans = mapOtlpCaptures(capture).resourceSpans[0].scopeSpans[0].spans;
   assert.equal(spans.length, 2);
   assert.ok(
     spans.every(
@@ -125,17 +124,15 @@ test("metadata export uses capture identities, concurrency, latest cumulative us
   const full = spans.find(
     (span) =>
       JSON.parse(
-        span.attributes.find((a) => a.key.endsWith("metadata.factory")).value
+        span.attributes.find((a) => a.key === "factory.metadata").value
           .stringValue,
       ).observations.length === 6,
   );
   assert.equal(full.startTimeUnixNano, "1767225601000000000");
   assert.equal(full.endTimeUnixNano, "1767225603000000000");
   assert.equal(full.parentSpanId, undefined);
-  assert.ok(!prepared.payload.includes("langfuse.observation.usage_details"));
   const metadata = JSON.parse(
-    full.attributes.find((a) => a.key.endsWith("metadata.factory")).value
-      .stringValue,
+    full.attributes.find((a) => a.key === "factory.metadata").value.stringValue,
   );
   assert.equal(metadata.identity.model, "configured-model");
   assert.equal(metadata.identity.reportedModel, "reported-model");
@@ -166,8 +163,8 @@ test("selection rejects missing identities and conflicting duplicate capture rec
     () => selected(options, [...records, { ...records[0], phase: "changed" }]),
     /Conflicting capture record/,
   );
-  const one = prepareLangfuseExport(selected());
-  const two = prepareLangfuseExport(
+  const one = prepareOtlpExport(selected());
+  const two = prepareOtlpExport(
     selected(options, [...records].reverse().concat(records[0])),
   );
   assert.equal(one.payload, two.payload);
@@ -175,7 +172,7 @@ test("selection rejects missing identities and conflicting duplicate capture rec
     one.preview.authorizationDigest,
     two.preview.authorizationDigest,
   );
-  const filtered = prepareLangfuseExport(
+  const filtered = prepareOtlpExport(
     selected({ ...options, invocations: ["parallel-invocation"] }),
   );
   assert.equal(filtered.preview.identities.length, 1);
@@ -222,7 +219,7 @@ test("retained export keeps redacted/truncated text, unavailable references and 
       content: { status: "not-exposed", redacted: false, truncated: false },
     }),
   ];
-  const prepared = prepareLangfuseExport(
+  const prepared = prepareOtlpExport(
     selected({ ...options, content: "retained" }, entries, (_repo, ref) => {
       if (ref.recordId === "request") return '{"[REDACTED]';
       throw new Error("missing private file");
@@ -237,8 +234,7 @@ test("retained export keeps redacted/truncated text, unavailable references and 
   const span = JSON.parse(prepared.payload).resourceSpans[0].scopeSpans[0]
     .spans[0];
   const metadata = JSON.parse(
-    span.attributes.find((a) => a.key.endsWith("metadata.factory")).value
-      .stringValue,
+    span.attributes.find((a) => a.key === "factory.metadata").value.stringValue,
   );
   assert.equal(metadata.observations[1].toolCallId, "tool-call");
 });
@@ -269,26 +265,18 @@ test("controller validation/delivery retain recorded scope without becoming mode
   ];
   const capture = selected(options, records, undefined, diagnostics);
   assert.equal(capture.controllerObservations.length, 1);
-  assert.ok(prepareLangfuseExport(capture).payload.includes("validation"));
-  assert.ok(!prepareLangfuseExport(capture).payload.includes("other-item"));
+  assert.ok(prepareOtlpExport(capture).payload.includes("validation"));
+  assert.ok(!prepareOtlpExport(capture).payload.includes("other-item"));
 });
 
-test("export CLI requires explicit destination/content and exact send authorization", () => {
+test("export CLI requires explicit endpoint/content and exact send authorization", () => {
   assert.throws(
-    () =>
-      parseCaptureExportOptions([
-        "--destination",
-        "langfuse",
-        "--endpoint",
-        "https://example.test",
-      ]),
+    () => parseCaptureExportOptions(["--endpoint", "https://example.test"]),
     /content/,
   );
   assert.throws(
     () =>
       parseCaptureExportOptions([
-        "--destination",
-        "langfuse",
         "--endpoint",
         "https://example.test",
         "--content",
@@ -319,39 +307,39 @@ test("export CLI requires explicit destination/content and exact send authorizat
 });
 
 test("send is one authorized HTTP request with no redirects, retries or incidental secrets", async () => {
-  const prepared = prepareLangfuseExport(selected());
+  const prepared = prepareOtlpExport(selected());
   const keys = {
-    LANGFUSE_PUBLIC_KEY: "test-public",
-    LANGFUSE_SECRET_KEY: "test-secret",
+    OTEL_EXPORTER_OTLP_HEADERS:
+      "Authorization=Basic%20test-secret, x-tenant = one",
   };
   let calls = 0;
   const request = async (url, init) => {
     calls++;
-    assert.equal(url, "https://example.test/api/public/otel/v1/traces");
+    assert.equal(url, "https://example.test/v1/traces");
     assert.equal(init.redirect, "error");
-    assert.equal(
-      init.headers.Authorization,
-      `Basic ${Buffer.from("test-public:test-secret").toString("base64")}`,
-    );
-    assert.equal(init.headers["x-langfuse-ingestion-version"], "4");
+    assert.deepEqual(init.headers, {
+      Authorization: "Basic test-secret",
+      "x-tenant": "one",
+      "Content-Type": "application/json",
+    });
     return new Response("{}", { status: 200 });
   };
   await assert.rejects(
-    () => sendLangfuseExport(prepared, "not-authorized", keys, request),
+    () => sendOtlpExport(prepared, "not-authorized", keys, request),
     /preview/,
   );
   await assert.rejects(
     () =>
-      sendLangfuseExport(
+      sendOtlpExport(
         prepared,
         prepared.preview.authorizationDigest,
-        {},
+        { OTEL_EXPORTER_OTLP_HEADERS: "no-separator" },
         request,
       ),
-    /LANGFUSE/,
+    /malformed/,
   );
   assert.equal(calls, 0);
-  const receipt = await sendLangfuseExport(
+  const receipt = await sendOtlpExport(
     prepared,
     prepared.preview.authorizationDigest,
     keys,
@@ -364,7 +352,7 @@ test("send is one authorized HTTP request with no redirects, retries or incident
   const changed = { ...prepared, payload: `${prepared.payload} ` };
   await assert.rejects(
     () =>
-      sendLangfuseExport(
+      sendOtlpExport(
         changed,
         prepared.preview.authorizationDigest,
         keys,
@@ -375,10 +363,10 @@ test("send is one authorized HTTP request with no redirects, retries or incident
 });
 
 test("OTLP partial, HTTP refusal and uncertain acknowledgements are visible without retries or response text", async () => {
-  const prepared = prepareLangfuseExport(selected());
+  const prepared = prepareOtlpExport(selected());
   const keys = {
-    LANGFUSE_PUBLIC_KEY: "test-public",
-    LANGFUSE_SECRET_KEY: "test-secret",
+    OTEL_EXPORTER_OTLP_HEADERS:
+      "Authorization=Basic%20test-secret, x-tenant = one",
   };
   for (const [reply, status] of [
     [
@@ -392,7 +380,7 @@ test("OTLP partial, HTTP refusal and uncertain acknowledgements are visible with
     [new Response("not JSON"), "unknown"],
   ]) {
     let calls = 0;
-    const receipt = await sendLangfuseExport(
+    const receipt = await sendOtlpExport(
       prepared,
       prepared.preview.authorizationDigest,
       keys,
@@ -405,7 +393,7 @@ test("OTLP partial, HTTP refusal and uncertain acknowledgements are visible with
     assert.equal(calls, 1);
     assert.ok(!JSON.stringify(receipt).includes("test-secret"));
   }
-  const receipt = await sendLangfuseExport(
+  const receipt = await sendOtlpExport(
     prepared,
     prepared.preview.authorizationDigest,
     keys,

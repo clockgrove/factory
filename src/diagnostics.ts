@@ -1125,10 +1125,17 @@ export function statusDocument(
       phaseReservation: current.phaseReservation ?? null,
       requestedPhase: current.requestedPhase ?? null,
       priority: item.priority ?? 0,
-      eligible,
+      eligible: state.permanentAbandonment ? false : eligible,
       // Provider capacity is not persisted in the state snapshot.
-      ready: current.status === "pending" && !blockedReason ? null : false,
-      blockedReason: blockedReason ?? null,
+      ready:
+        !state.permanentAbandonment &&
+        current.status === "pending" &&
+        !blockedReason
+          ? null
+          : false,
+      blockedReason: state.permanentAbandonment
+        ? "permanently-abandoned-unaccepted"
+        : (blockedReason ?? null),
       attemptId: current.attempt ?? null,
       ...(item.executionBinding
         ? {
@@ -1180,16 +1187,26 @@ export function statusDocument(
   return {
     repository,
     objective,
-    state: state.cancelledAt
-      ? ("cancelled" as const)
-      : state.error
-        ? ("failed" as const)
-        : state.finalAcceptancePending
-          ? ("waiting" as const)
-          : objectiveComplete(state)
-            ? ("complete" as const)
-            : ("active" as const),
+    state: state.permanentAbandonment
+      ? ("abandoned" as const)
+      : state.cancelledAt
+        ? ("cancelled" as const)
+        : state.error
+          ? ("failed" as const)
+          : state.finalAcceptancePending
+            ? ("waiting" as const)
+            : objectiveComplete(state)
+              ? ("complete" as const)
+              : ("active" as const),
     runId: state.runId,
+    permanentAbandonment: state.permanentAbandonment
+      ? {
+          effect: state.permanentAbandonment.effect,
+          at: state.permanentAbandonment.at,
+          accepted: false,
+          outcome: "unknown",
+        }
+      : null,
     coordinator:
       redactCoordinatorDisposition(state.coordinator, secrets) ?? null,
     graphDigest: graphDigest(state.graph),

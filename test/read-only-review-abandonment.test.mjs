@@ -9,10 +9,12 @@ import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import { controlObjective, cancelObjective } from "../dist/runner.js";
 import { linuxProcessIdentity } from "../dist/process.js";
 import { coverageObligations } from "../dist/qa.js";
+import { checkServiceState } from "../dist/supervision.js";
 import { sealFinalAcceptance } from "../dist/completion.js";
 import {
   acquireControllerLock,
   readState,
+  readContinuation,
   releaseControllerLock,
   saveState,
   statePath,
@@ -177,7 +179,7 @@ async function fixture(callback) {
       driver: forbiddenDriver,
     }).application;
     const request = () => ({
-      kind: "abandon-read-only-review",
+      kind: "abandon-permanently",
       repository: config.repository,
       objective: 1,
       runId: state.runId,
@@ -235,20 +237,18 @@ test("explicit abandonment preserves the entire original snapshot except its ter
     const input = request();
     assert.equal(await application.cancelObjective(1, input), "cancelled");
     const after = readState(config.repository, 1);
-    const {
-      readOnlyReviewAbandonment,
-      cancelRequested,
-      cancelledAt,
-      ...preserved
-    } = after;
+    const { permanentAbandonment, cancelRequested, cancelledAt, ...preserved } =
+      after;
     assert.deepEqual(preserved, state);
-    assert.deepEqual(readOnlyReviewAbandonment, { ...input, at: cancelledAt });
+    assert.deepEqual(permanentAbandonment, {
+      ...input,
+      at: cancelledAt,
+      effect: "read-only-review",
+    });
+    assert.throws(() => checkServiceState(config, 1), /permanently abandoned/);
     assert.equal(cancelRequested, true);
     assert.ok(Number.isFinite(Date.parse(cancelledAt)));
-    assert.equal(
-      readOnlyReviewAbandonment.cessation.unknownOwnedResources,
-      false,
-    );
+    assert.equal(permanentAbandonment.cessation.unknownOwnedResources, false);
     assert.equal(after.work.failed.pendingEffect, "review");
     const before = readFileSync(path);
     await assert.rejects(
@@ -547,21 +547,21 @@ for (const [name, change, pattern] of [
     (c) => {
       c.state.work.failed.status = "running";
     },
-    /Active work/,
+    /mutating/,
   ],
   [
     "delivery",
     (c) => {
       c.state.work.failed.step = "deliver";
     },
-    /mutating delivery/,
+    /mutating/,
   ],
   [
     "GitHub closure",
     (c) => {
       c.state.work.accepted.githubClosure = "pending";
     },
-    /mutating delivery/,
+    /mutating/,
   ],
   [
     "planning submission",
@@ -611,7 +611,7 @@ for (const [name, change, pattern] of [
     (c) => {
       delete c.state.work.failed.pendingEffect;
     },
-    /No uncertain read-only/,
+    /outside permanent abandonment/,
   ],
   [
     "no stopped failure",
@@ -662,7 +662,7 @@ test("ordinary cancellation refuses uncertain review before writing cancellation
     assert.deepEqual(after.work, state.work);
     assert.equal(after.error, state.error);
     assert.equal(after.cancelledAt, undefined);
-    assert.equal(after.readOnlyReviewAbandonment, undefined);
+    assert.equal(after.permanentAbandonment, undefined);
     assert.equal(after.cancelRequested, undefined);
     assert.equal(after.coordinator.cancelError, undefined);
     assert.deepEqual(readFileSync(path), before);
@@ -701,6 +701,7 @@ test("abandoned runs permanently refuse run, retry, repair, re-review and resume
     await application.cancelObjective(1, request());
     const before = readFileSync(path);
     await assert.rejects(application.runObjective(1), /permanently abandoned/);
+    await assert.rejects(application.planObjective(1), /permanently abandoned/);
     assert.deepEqual(readFileSync(path), before);
     assert.throws(
       () => application.retryWorkItem(1, "failed"),
@@ -795,7 +796,7 @@ for (const planning of ["ready", "submitted"])
       const before = readFileSync(context.path);
       await assert.rejects(
         context.application.cancelObjective(1, context.request()),
-        /active-graph stopped result review/,
+        /outside permanent abandonment/,
       );
       assert.deepEqual(readFileSync(context.path), before);
     }));
@@ -822,25 +823,23 @@ test("CLI exact request file permanently abandons the stopped review", () =>
   fixture(async (context) => {
     const requestPath = join(context.root, "exact-abandonment.json");
     writeFileSync(requestPath, JSON.stringify(context.request()));
-    const result = cli(context, ["--abandon-read-only-review", requestPath]);
+    const result = cli(context, ["--abandon", requestPath]);
     assert.equal(result.status, 0, result.stderr);
-    assert.ok(
-      readState(context.config.repository, 1).readOnlyReviewAbandonment,
-    );
+    assert.ok(readState(context.config.repository, 1).permanentAbandonment);
   }));
 
 test("CLI requires an explicit request file and leaves malformed requests unchanged", () =>
   fixture(async (context) => {
     const before = readFileSync(context.path);
-    const missing = cli(context, ["--abandon-read-only-review"]);
+    const missing = cli(context, ["--abandon"]);
     assert.equal(missing.status, 1);
     assert.match(missing.stderr, /explicit JSON request file/);
     assert.deepEqual(readFileSync(context.path), before);
     const requestPath = join(context.root, "malformed-abandonment.json");
     writeFileSync(requestPath, "{}");
-    const malformed = cli(context, ["--abandon-read-only-review", requestPath]);
+    const malformed = cli(context, ["--abandon", requestPath]);
     assert.equal(malformed.status, 1);
-    assert.match(malformed.stderr, /Invalid read-only review abandonment/);
+    assert.match(malformed.stderr, /Invalid permanent abandonment/);
     assert.deepEqual(readFileSync(context.path), before);
   }));
 
@@ -855,7 +854,7 @@ test("CLI explicit abandonment refuses a live controller owner", () =>
     const lock = acquireControllerLock(lockPath, 1);
     const before = readFileSync(context.path);
     try {
-      const result = cli(context, ["--abandon-read-only-review", requestPath]);
+      const result = cli(context, ["--abandon", requestPath]);
       assert.equal(result.status, 1);
       assert.match(
         result.stderr,
@@ -866,3 +865,91 @@ test("CLI explicit abandonment refuses a live controller owner", () =>
     }
     assert.deepEqual(readFileSync(context.path), before);
   }));
+
+for (const schemaVersion of [4, 5])
+  test(`schema ${schemaVersion} refuses unsupported historical abandonment form without changing bytes`, () =>
+    fixture(async (context) => {
+      const state =
+        schemaVersion === 4
+          ? context.state
+          : {
+              schemaVersion: 5,
+              kind: "preparing",
+              repository: context.config.repository,
+              objective: 1,
+              runId: context.state.runId,
+              configDigest: context.state.configDigest,
+              baseSha: context.state.baseSha,
+              objectiveBodyDigest: digest(body),
+              planning: "ready",
+              projection: "ready",
+              issueByItemId: {},
+              coordinator: context.state.coordinator,
+            };
+      state.readOnlyReviewAbandonment = {
+        ...context.request(),
+        kind: "abandon-read-only-review",
+        at: new Date().toISOString(),
+      };
+      saveState(context.path, state);
+      const before = readFileSync(context.path);
+      assert.throws(
+        () => readContinuation(context.config.repository, 1),
+        /Unsupported permanent abandonment snapshot form/,
+      );
+      await assert.rejects(
+        context.application.runObjective(1),
+        /Unsupported permanent abandonment snapshot form/,
+      );
+      await assert.rejects(
+        context.application.cancelObjective(1, context.request()),
+        /Unsupported permanent abandonment snapshot form/,
+      );
+      assert.deepEqual(readFileSync(context.path), before);
+    }));
+
+for (const field of ["effect", "at", "automaticConsent"])
+  test(`request cannot supply controller-owned or extra field ${field}`, () =>
+    fixture(async (context) => {
+      const request = { ...context.request(), [field]: "caller-defined" };
+      const before = readFileSync(context.path);
+      await assert.rejects(
+        context.application.cancelObjective(1, request),
+        /Invalid permanent abandonment disposition field/,
+      );
+      assert.deepEqual(readFileSync(context.path), before);
+    }));
+
+for (const alter of [
+  (state) => {
+    state.permanentAbandonment.effect = "graph-projection";
+  },
+  (state) => {
+    state.permanentAbandonment.at = "not-a-time";
+  },
+  (state) => {
+    state.permanentAbandonment.runId = "foreign";
+  },
+  (state) => {
+    state.cancelledAt = undefined;
+  },
+  (state) => {
+    state.cancelRequested = false;
+  },
+  (state) => {
+    state.work.failed.pendingEffect = "publish";
+  },
+])
+  test("decoded permanent disposition refuses mismatched effect, identity or terminal facts", () =>
+    fixture(async (context) => {
+      await context.application.cancelObjective(1, context.request());
+      const state = readState(context.config.repository, 1);
+      alter(state);
+      saveState(context.path, state);
+      const before = readFileSync(context.path);
+      assert.throws(
+        () => readContinuation(context.config.repository, 1),
+        /Invalid permanent abandonment binding/,
+      );
+      assert.deepEqual(readFileSync(context.path), before);
+    }));

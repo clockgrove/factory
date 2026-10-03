@@ -336,6 +336,10 @@ export function submitAmendment(
   state: FactoryState,
   proposal: AmendmentProposal,
 ): PendingAmendment {
+  if (state.permanentAbandonment)
+    throw new Error(
+      "Objective was permanently abandoned; create a normally admitted successor",
+    );
   if (state.objectiveClosure === "complete")
     throw new Error("Completed Objective discoveries require successor work");
   if (state.finalAcceptance || state.objectiveClosure === "pending")
@@ -627,6 +631,10 @@ export async function applyPendingAmendment(args: {
   diagnostics?: DiagnosticEmitter;
 }): Promise<boolean> {
   const { state, config, save } = args;
+  if (state.permanentAbandonment)
+    throw new Error(
+      "Objective was permanently abandoned; create a normally admitted successor",
+    );
   selectWorkerAmendment(state);
   const pending = state.pendingAmendment;
   if (!pending || pending.phase === "backlog") return false;

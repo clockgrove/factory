@@ -4,6 +4,40 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Permanent UNACCEPTED stopped projection abandonment (#499)
+
+The approved [#499](https://github.com/clockgrove/factory/issues/499) contract extends
+permanent abandonment to a stopped sequential synchronous GitHub graph-projection
+call, using the same explicit request and atomic snapshot as stopped read-only
+review abandonment. `cancel --abandon FILE` binds repository, Objective, run,
+configuration, exact snapshot and verified local cessation. The controller derives
+the eligible effect; the request cannot select or widen it. Every Work Item keeps
+its original status and acceptance/failure evidence. Unknown projection outcomes,
+known issue maps, unidentified creates, reviewed candidate, source, errors and
+accounting remain historical and unaccepted.
+
+The terminal disposition permanently fences execution, replay, resume, retry,
+repair, rereview, planning, admission, amendment and acceptance, including watcher/supervisor restart.
+Other unresolved effects and active/unsupported resources still refuse before
+saving. No GitHub request, provider call, cleanup, state-root replacement or
+automatic worker authority supplies abandonment. A successor requires its own
+normal admission and evidence; old accepted work is not imported as successor
+acceptance. Published v0.1.73 and the original stopped run remain unchanged;
+corrected source review and installed acceptance precede any actual disposition
+or renewed #448 qualification.
+
+Focused source validation covers 174 tests across the four whole lifecycle,
+transport, intake and supervision files, plus 100 tests across six whole existing
+application, coordinator, diagnostics, graph-amendment and state-ingress files,
+and 37 tests across the two whole admission and bounded-repair files (311 unique
+cases across twelve whole files). Planning, admission and human plan-decision
+entrypoints refuse before external observation on an abandoned Objective.
+The complete preserved historical snapshot also passes native CLI abandonment,
+status and run/retry/resume refusals through a separately isolated state copy,
+with zero HTTP, authentication or SDK calls and unchanged original files/checkout.
+Those local source proofs preserve uncertainty and do not claim actual-run
+cessation, installed distribution acceptance or live #448 qualification.
+
 ## Atomic controller lease publication (#501 / #497)
 
 The first unpublished v0.1.73 installed gate stopped during initial watcher setup:
@@ -30,8 +64,8 @@ this correction as `cf1c201cf727132ffc3dce94a5d7d19f098a7c1c`, followed by
 The [immutable v0.1.73 record](#immutable-v0173-artifact-record) binds subsequent
 installed and public distribution acceptance under #497. Both failed unpublished
 producer attempts and published v0.1.72 stay unchanged. The legacy projection remains unresolved;
-[#499](https://github.com/clockgrove/factory/issues/499) separately proposes supported
-permanent unaccepted abandonment and awaits the explicit operator decision. This
+[#499](https://github.com/clockgrove/factory/issues/499) owns approved supported
+permanent unaccepted abandonment, recorded above. This
 source correction grants no target activation or Objective acceptance.
 
 ## Read-only intake status correction (#444)
@@ -113,12 +147,13 @@ then stopped on the separate shared lock publication defect recorded above.
 The original v0.1.72 snapshot retains generic projecting history; no authentic
 completed-response receipt was found in retained transport/scenario evidence.
 It remains unresolved and unaccepted. Installing the new typed producer cannot
-retrospectively manufacture that fact. Any exact-run terminal disposition needs a
-separate explicit operator decision and supported implementation, preserving all
-old evidence and uncertainty. The corrected v0.1.73 distribution is accepted under
+retrospectively manufacture that fact. Terminal disposition requires an
+explicit supported action preserving all old evidence and uncertainty.
+The approved #499 implementation supplies that bounded permanent-abandonment
+surface; source and installed acceptance precede actual use. The corrected v0.1.73 distribution is accepted under
 [#497](https://github.com/clockgrove/factory/issues/497), as recorded below. Live
-execution remains fenced pending the separate [#499](https://github.com/clockgrove/factory/issues/499)
-product decision and supported historical disposition. A subsequent full public
+execution remains fenced pending the supported [#499](https://github.com/clockgrove/factory/issues/499)
+installed correction and supported historical disposition. A subsequent full public
 qualification retains original substantive acceptance and bounded resources;
 predecessor histories and published v0.1.72 bytes remain intact. #444/#447/#448
 stay open for actual public acceptance; private #445 remains gated on that full
@@ -308,7 +343,7 @@ exact protection and the enabled public pinned plugin. Public receipt SHA-256 is
 This later documentation changes no released byte or tag. #444/#447/#448 remain
 open for the full live public outcome, followed by #445 on the same accepted
 artifact and proven scope. The historical v0.1.72 projection remains unresolved
-and unaccepted; #499's separate operator decision and supported disposition are
+and unaccepted; #499's approved supported disposition is
 still pending. Distribution acceptance grants neither old-run settlement nor
 live/private activation or Objective acceptance.
 

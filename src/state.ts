@@ -125,6 +125,7 @@ export interface CoordinatorDisposition {
 
 /** Preparation shares the atomic state path; no executable graph is invented. */
 export interface PreparationState {
+  permanentAbandonment?: PermanentAbandonment;
   sourcePacketDigest?: string;
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
   authority?: import("./admission.js").ExecutionAuthority;
@@ -156,8 +157,8 @@ export interface PreparationState {
 export type ContinuationState = FactoryState | PreparationState;
 
 /** Explicit operator evidence is bound to one immutable stopped snapshot. */
-export interface ReadOnlyReviewAbandonmentRequest {
-  kind: "abandon-read-only-review";
+export interface PermanentAbandonmentRequest {
+  kind: "abandon-permanently";
   repository: string;
   objective: number;
   runId: string;
@@ -178,22 +179,52 @@ export interface ReadOnlyReviewAbandonmentRequest {
   };
 }
 
-export function assertReadOnlyReviewAbandonmentRequest(
+export function assertPermanentAbandonmentRequest(
   value: unknown,
-): asserts value is ReadOnlyReviewAbandonmentRequest {
-  const request = record(value, "Read-only review abandonment");
+  stored = false,
+): asserts value is PermanentAbandonmentRequest {
+  const request = record(value, "Permanent abandonment");
+  const fields = [
+    "kind",
+    "repository",
+    "objective",
+    "runId",
+    "configDigest",
+    "snapshotDigest",
+    "actor",
+    "reason",
+    "cessation",
+    ...(stored ? ["at", "effect"] : []),
+  ];
+  if (Object.keys(request).some((key) => !fields.includes(key)))
+    throw new Error("Invalid permanent abandonment disposition field");
   if (
-    request.kind !== "abandon-read-only-review" ||
+    request.kind !== "abandon-permanently" ||
     !Number.isSafeInteger(request.objective) ||
     Number(request.objective) <= 0
   )
-    throw new Error("Invalid read-only review abandonment disposition");
+    throw new Error("Invalid permanent abandonment disposition");
   for (const key of ["repository", "runId", "actor", "reason"])
     if (!string(request[key], `abandonment.${key}`).trim())
       throw new Error(`abandonment.${key} must be nonempty`);
   sha(request.configDigest, "abandonment.configDigest", 64);
   sha(request.snapshotDigest, "abandonment.snapshotDigest", 64);
   const cessation = record(request.cessation, "abandonment.cessation");
+  if (
+    Object.keys(cessation).some(
+      (key) =>
+        ![
+          "kind",
+          "verifiedAt",
+          "basis",
+          "workers",
+          "subprocesses",
+          "models",
+          "unknownOwnedResources",
+        ].includes(key),
+    )
+  )
+    throw new Error("Invalid permanent abandonment cessation field");
   if (
     cessation.kind !== "operator-verified-local-cessation" ||
     cessation.workers !== "ceased" ||
@@ -209,8 +240,102 @@ export function assertReadOnlyReviewAbandonmentRequest(
     );
 }
 
+export type PermanentAbandonment = PermanentAbandonmentRequest & {
+  at: string;
+  effect: "read-only-review" | "graph-projection";
+};
+
+/** Derive the only two permanently abandonable uncertainty boundaries from the snapshot. */
+export function permanentAbandonmentEffect(
+  state: ContinuationState,
+): PermanentAbandonment["effect"] | undefined {
+  if (state.planningRecovery?.phase === "submitted") return undefined;
+  const projection =
+    state.schemaVersion === 5
+      ? state.planning === "complete" && state.projection === "submitted"
+      : state.pendingAmendment?.phase === "projecting";
+  if (state.schemaVersion === 5)
+    return projection && state.coordinator?.phase === "projection"
+      ? "graph-projection"
+      : undefined;
+  if (
+    Object.keys(state.stackMerges ?? {}).length ||
+    state.finalAcceptancePending ||
+    (state.pendingAmendment &&
+      (["compiling", "reviewing", "projecting"].includes(
+        state.pendingAmendment.phase,
+      ) ||
+        state.pendingAmendment.projectionPending) &&
+      !projection)
+  )
+    return undefined;
+  const review =
+    state.coordinator?.phase === "objective-review-submitted" ||
+    Object.values(state.work).some((work) => work.pendingEffect === "review");
+  if (
+    state.coordinator?.phase.includes("submitted") &&
+    !(
+      review &&
+      !projection &&
+      state.coordinator.phase === "objective-review-submitted"
+    )
+  )
+    return undefined;
+  for (const work of Object.values(state.work)) {
+    if (
+      (work.pendingEffect && (projection || work.pendingEffect !== "review")) ||
+      work.status === "running" ||
+      work.status === "published" ||
+      (work.step === "deliver" && work.status !== "done") ||
+      work.githubClosure === "pending"
+    )
+      return undefined;
+  }
+  return projection
+    ? "graph-projection"
+    : review
+      ? "read-only-review"
+      : undefined;
+}
+
+/** Historical uncertainty remains intact; only this explicit terminal disposition is new. */
+export function assertPermanentAbandonmentBinding(value: unknown): void {
+  const state = record(value, "state");
+  if (Object.hasOwn(state, "readOnlyReviewAbandonment"))
+    throw new Error(
+      "Unsupported permanent abandonment snapshot form; historical bytes must remain unchanged",
+    );
+  if (state.permanentAbandonment === undefined) return;
+  const abandonment = record(
+    state.permanentAbandonment,
+    "permanentAbandonment",
+  );
+  assertPermanentAbandonmentRequest(abandonment, true);
+  if (
+    abandonment.repository !== state.repository ||
+    abandonment.objective !== state.objective ||
+    abandonment.runId !== state.runId ||
+    abandonment.configDigest !== state.configDigest ||
+    typeof abandonment.at !== "string" ||
+    !Number.isFinite(Date.parse(abandonment.at)) ||
+    state.cancelledAt !== abandonment.at ||
+    state.cancelRequested !== true ||
+    state.finalAcceptance ||
+    state.objectiveClosure ||
+    record(state.finalValidation ?? {}, "finalValidation").passed === true ||
+    Date.parse(abandonment.cessation.verifiedAt) >
+      Date.parse(String(abandonment.at)) ||
+    !["read-only-review", "graph-projection"].includes(
+      String(abandonment.effect),
+    ) ||
+    permanentAbandonmentEffect(state as unknown as ContinuationState) !==
+      abandonment.effect
+  )
+    throw new Error("Invalid permanent abandonment binding");
+}
+
 export interface FactoryState {
-  readOnlyReviewAbandonment?: ReadOnlyReviewAbandonmentRequest & { at: string };
+  permanentAbandonment?: PermanentAbandonment;
   finalAcceptance?: import("./completion.js").FinalAcceptance;
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
   repairConsumption?: Record<
@@ -465,25 +590,7 @@ export function parseFactoryState(
 ): FactoryState {
   const state = record(value, "state");
   assertCoordinator(state.coordinator);
-  if (state.readOnlyReviewAbandonment !== undefined) {
-    assertReadOnlyReviewAbandonmentRequest(state.readOnlyReviewAbandonment);
-    const abandonment =
-      state.readOnlyReviewAbandonment as ReadOnlyReviewAbandonmentRequest & {
-        at: string;
-      };
-    if (
-      abandonment.repository !== state.repository ||
-      abandonment.objective !== state.objective ||
-      abandonment.runId !== state.runId ||
-      abandonment.configDigest !== state.configDigest ||
-      !Number.isFinite(Date.parse(abandonment.at)) ||
-      state.cancelledAt !== abandonment.at ||
-      state.cancelRequested !== true ||
-      state.finalAcceptance ||
-      Date.parse(abandonment.cessation.verifiedAt) > Date.parse(abandonment.at)
-    )
-      throw new Error("Invalid permanent read-only review abandonment binding");
-  }
+  assertPermanentAbandonmentBinding(state);
   if (
     state.schemaVersion !== 4 ||
     state.repository !== repository ||

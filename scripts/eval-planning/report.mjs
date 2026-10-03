@@ -1,9 +1,28 @@
 // Planning eval reports: per-case and overall summaries with case-clustered
 // 95% intervals, per-unit metrics for paired comparison, judge-panel
-// agreement, and markdown output.
+// agreement, and markdown output. Infrastructure errors carry no quality
+// metrics: they are counted, never scored.
+import { createHash } from "node:crypto";
 import { DEFECTS } from "./mutations.mjs";
-import { byCluster, clusteredRate, pairedBootstrap, spread } from "./stats.mjs";
+import {
+  byCluster,
+  clusteredRate,
+  cohensKappa,
+  holm,
+  pairedBootstrap,
+  signFlipTest,
+  spread,
+} from "./stats.mjs";
 
+/** Fewer paired units than this cannot support a comparison. */
+export const MIN_COMPARE_UNITS = 5;
+/** Decision metrics, tested without multiplicity adjustment. */
+export const PRIMARY_METRICS = {
+  plan: [/^productionClean$/, /^judgePass:/],
+  review: [/^recall$/, /^falsePositive$/],
+};
+
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const bit = (value) =>
   value === null || value === undefined ? null : value ? 1 : 0;
 const average = (values) => {
@@ -23,11 +42,22 @@ function verdict(run, name) {
 const judgeNames = (runs) => [
   ...new Set(runs.flatMap((run) => (run.judges ?? []).map((g) => g.judge))),
 ];
+const judgeErrors = (runs) =>
+  runs.reduce(
+    (total, run) =>
+      total +
+      (run.judges ?? []).filter((grade) => grade.verdict === "error").length,
+    0,
+  );
 
 /** Per-run numeric metrics, the unit of paired comparison. */
 export function planRunMetrics(run) {
-  const metrics = {
-    productionClean: bit(run.planned ? run.review === "clean" : false),
+  const metrics = {};
+  // An infrastructure error says nothing about the plan.
+  if (run.outcome === "error") return metrics;
+  Object.assign(metrics, {
+    productionClean: bit(run.outcome === "plan"),
+    question: bit(run.outcome === "question"),
     firstTryAccepted: run.firstTry ? bit(run.firstTry === "accepted") : null,
     expectationMet: run.expectation ? bit(run.expectation.met) : null,
     finalReviewInsteadOfCommand:
@@ -41,7 +71,7 @@ export function planRunMetrics(run) {
     revisions: run.revisions ?? null,
     planningTokens: tokenTotal(run.tokens),
     wallSeconds: typeof run.wallMs === "number" ? run.wallMs / 1000 : null,
-  };
+  });
   for (const grade of run.judges ?? []) {
     const value = verdict(run, grade.judge);
     metrics[`judgePass:${grade.judge}`] =
@@ -52,19 +82,24 @@ export function planRunMetrics(run) {
   return metrics;
 }
 
+/** A review that produced a usable verdict: not an error, not invalid. */
+const scored = (run) => run.review === "clean" || run.review === "findings";
+
 /**
  * Review-only metrics. A flag on a known-good plan is a false positive and on
- * a seeded defect is a hit, so the two never share a metric.
+ * a seeded defect is a hit, so the two never share a metric. Invalid and
+ * errored reviews have no verdict and score nothing.
  */
 export function reviewRunMetrics(run) {
-  const reviewed = run.review !== "error";
   const good = !run.defect;
   const metrics = {
-    falsePositive: reviewed && good ? bit(run.flagged) : null,
-    recall: reviewed && !good ? bit(run.flagged) : null,
     reviewTokens: tokenTotal(run.tokens),
     wallSeconds: typeof run.wallMs === "number" ? run.wallMs / 1000 : null,
   };
+  if (scored(run)) {
+    metrics[good ? "falsePositive" : "recall"] = bit(run.flagged);
+    if (!good) metrics.structuralHit = bit(run.structuralHit);
+  }
   for (const grade of run.judges ?? []) {
     const value = verdict(run, grade.judge);
     metrics[`${good ? "judgeFalsePositive" : "judgeRecall"}:${grade.judge}`] =
@@ -73,26 +108,33 @@ export function reviewRunMetrics(run) {
   return metrics;
 }
 
-/** Mean of each metric across a unit's repeats. */
-export function units(runs, key, metrics) {
+/** Mean of each metric across a unit's repeats, with the unit's input digest. */
+export function units(runs, key, metrics, digest) {
   const groups = new Map();
   for (const run of runs) {
     const id = key(run);
     if (!groups.has(id)) groups.set(id, []);
-    groups.get(id).push(metrics(run));
+    groups.get(id).push(run);
   }
-  return [...groups].map(([id, values]) => ({
-    id,
-    runs: values.length,
-    metrics: Object.fromEntries(
-      [...new Set(values.flatMap((value) => Object.keys(value)))].map(
-        (name) => [name, average(values.map((value) => value[name] ?? null))],
+  return [...groups].map(([id, list]) => {
+    const values = list.map(metrics);
+    return {
+      id,
+      digest: digest(list[0]),
+      runs: list.length,
+      errors: list.filter(
+        (run) => run.outcome === "error" || run.review === "error",
+      ).length,
+      metrics: Object.fromEntries(
+        [...new Set(values.flatMap((value) => Object.keys(value)))].map(
+          (name) => [name, average(values.map((value) => value[name] ?? null))],
+        ),
       ),
-    ),
-  }));
+    };
+  });
 }
 
-/** Pairwise verdict agreement between judges on the runs both graded. */
+/** Pairwise verdict agreement and Cohen's kappa on the runs both judges graded. */
 function agreement(runs, names, cluster) {
   const pairs = [];
   for (let i = 0; i < names.length; i += 1)
@@ -114,6 +156,9 @@ function agreement(runs, names, cluster) {
             (run) => verdict(run, a) === verdict(run, b),
           ),
         ),
+        kappa: cohensKappa(
+          both.map((run) => [verdict(run, a), verdict(run, b)]),
+        ),
         bothPass: count("pass", "pass"),
         bothFail: count("fail", "fail"),
         onlyFirstFails: count("fail", "pass"),
@@ -123,25 +168,29 @@ function agreement(runs, names, cluster) {
   return pairs;
 }
 
+/** The inputs a plan-mode unit was run on: Objective body and base commit. */
+export const planUnitDigest = (run) =>
+  sha256(JSON.stringify([run.objectiveDigest ?? null, run.commit ?? null]));
+
 /** Plan-mode summary: per case and overall; intervals cluster by case. */
 export function summarizePlanRuns(runs) {
   const rate = (list, test) =>
     clusteredRate(byCluster(list, (run) => run.case, test));
-  const withFirstTry = runs.filter((run) => run.firstTry);
+  const valid = runs.filter((run) => run.outcome !== "error");
+  const withFirstTry = valid.filter((run) => run.firstTry);
   const types = [...new Set(withFirstTry.map((run) => run.firstTry))].sort();
   const names = judgeNames(runs);
   return {
-    cases: units(runs, (run) => run.case, planRunMetrics),
+    cases: units(runs, (run) => run.case, planRunMetrics, planUnitDigest),
     overall: {
       runs: runs.length,
       cases: new Set(runs.map((run) => run.case)).size,
-      planned: rate(runs, (run) => run.planned),
-      productionClean: rate(
-        runs,
-        (run) => run.planned && run.review === "clean",
-      ),
+      errors: runs.length - valid.length,
+      judgeErrors: judgeErrors(runs),
+      productionClean: rate(valid, (run) => run.outcome === "plan"),
+      question: rate(valid, (run) => run.outcome === "question"),
       expectationMet: rate(
-        runs.filter((run) => run.expectation),
+        valid.filter((run) => run.expectation),
         (run) => run.expectation.met,
       ),
       firstTry: Object.fromEntries(
@@ -186,18 +235,20 @@ export function summarizePlanRuns(runs) {
           "wallSeconds",
         ].map((name) => [
           name,
-          spread(runs.map((run) => planRunMetrics(run)[name])),
+          spread(valid.map((run) => planRunMetrics(run)[name])),
         ]),
       ),
     },
   };
 }
 
-/** Review-only summary: recall per defect and the false-positive rate; intervals cluster by fixture. */
+/**
+ * Review-only summary: recall per defect and the false-positive rate, over
+ * reviews with a usable verdict; intervals cluster by fixture.
+ */
 export function summarizeReviewRuns(runs, refusals) {
   const rate = (list, test) =>
     clusteredRate(byCluster(list, (run) => run.fixture, test));
-  const reviewed = runs.filter((run) => run.review !== "error");
   const order = DEFECTS.map((defect) => defect.id);
   const defects = [
     ...new Set(runs.map((run) => run.defect).filter(Boolean)),
@@ -213,81 +264,167 @@ export function summarizeReviewRuns(runs, refusals) {
         ),
       ]),
     );
-  const good = reviewed.filter((run) => !run.defect);
+  const good = runs.filter((run) => !run.defect);
   return {
     units: units(
       runs,
       (run) => `${run.fixture}/${run.variant}`,
       reviewRunMetrics,
+      (run) => run.unitDigest ?? null,
     ),
     judges: names,
     good: {
       runs: good.length,
-      falsePositive: rate(good, (run) => run.flagged),
+      falsePositive: rate(good.filter(scored), (run) => run.flagged),
       invalid: good.filter((run) => run.review === "invalid").length,
-      judgeFalsePositive: judgeRates(runs.filter((run) => !run.defect)),
+      judgeFalsePositive: judgeRates(good),
     },
     defects: defects.map((defect) => {
-      const list = reviewed.filter((run) => run.defect === defect);
+      const all = runs.filter((run) => run.defect === defect);
+      const list = all.filter(scored);
       return {
         defect,
-        rule: runs.find((run) => run.defect === defect)?.rule,
+        rule: all[0]?.rule,
         runs: list.length,
         recall: rate(list, (run) => run.flagged),
-        invalid: list.filter((run) => run.review === "invalid").length,
-        judgeRecall: judgeRates(runs.filter((run) => run.defect === defect)),
+        structuralHit: rate(list, (run) => run.structuralHit),
+        invalid: all.filter((run) => run.review === "invalid").length,
+        judgeRecall: judgeRates(all),
       };
     }),
     agreement: agreement(runs, names, (run) => run.fixture),
     refusedByCode: refusals,
-    errors: runs.length - reviewed.length,
+    errors: runs.filter((run) => run.review === "error").length,
+    judgeErrors: judgeErrors(runs),
   };
 }
 
-/** Paired comparison of two reports over the units they share. */
+/**
+ * Review units collapse to one per fixture: its variants share a target and
+ * a known-good plan, so they are one cluster of evidence, not several.
+ */
+function fixtureUnits(list) {
+  const groups = new Map();
+  for (const unit of list) {
+    const fixture = unit.id.split("/")[0];
+    if (!groups.has(fixture)) groups.set(fixture, []);
+    groups.get(fixture).push(unit);
+  }
+  return [...groups].map(([id, members]) => ({
+    id,
+    digest: sha256(
+      JSON.stringify(members.map((unit) => [unit.id, unit.digest]).sort()),
+    ),
+    metrics: Object.fromEntries(
+      [...new Set(members.flatMap((unit) => Object.keys(unit.metrics)))].map(
+        (name) => [
+          name,
+          average(members.map((unit) => unit.metrics[name] ?? null)),
+        ],
+      ),
+    ),
+  }));
+}
+
+/**
+ * Paired comparison over units both reports ran on identical inputs. Each
+ * metric gets a paired-bootstrap interval and an exact sign-flip p-value.
+ * Primary metrics are reported as they are; the others are Holm-adjusted.
+ * Metrics with fewer than MIN_COMPARE_UNITS paired units are marked
+ * insufficient and get no interval or p-value.
+ */
 export function compareReports(a, b, options = {}) {
   if (a.mode !== b.mode)
     throw new Error(
       `Cannot compare a ${a.mode} report with a ${b.mode} report`,
     );
-  const left = new Map(a.units.map((unit) => [unit.id, unit.metrics]));
-  const right = new Map(b.units.map((unit) => [unit.id, unit.metrics]));
-  const shared = [...left.keys()].filter((id) => right.has(id));
+  const collapse = a.mode === "review" ? fixtureUnits : (list) => list;
+  const left = new Map(collapse(a.units).map((unit) => [unit.id, unit]));
+  const right = new Map(collapse(b.units).map((unit) => [unit.id, unit]));
+  const common = [...left.keys()].filter((id) => right.has(id));
+  const mismatched = common.filter(
+    (id) => left.get(id).digest !== right.get(id).digest,
+  );
+  const shared = common.filter((id) => !mismatched.includes(id));
   const digests = (report) =>
     new Map((report.judges ?? []).map((judge) => [judge.name, judge.digest]));
   const [da, db] = [digests(a), digests(b)];
   const comparable = (name) => da.has(name) && da.get(name) === db.get(name);
   const names = [
     ...new Set(
-      [...a.units, ...b.units].flatMap((unit) => Object.keys(unit.metrics)),
+      [...left.values(), ...right.values()].flatMap((unit) =>
+        Object.keys(unit.metrics),
+      ),
     ),
   ];
   const skipped = [...new Set([...da.keys(), ...db.keys()])].filter(
     (name) => !comparable(name),
   );
-  const notes = skipped.length
-    ? [
-        `Judge metrics for ${skipped.join(", ")} are not compared: the judge is missing from one report or its digest differs.`,
-      ]
-    : [];
+  const notes = [];
+  if (skipped.length)
+    notes.push(
+      `Judge metrics for ${skipped.join(", ")} are not compared: the judge is missing from one report or its digest differs.`,
+    );
+  if (mismatched.length)
+    notes.push(
+      `Excluded because the Objective, commit or plan inputs differ: ${mismatched.join(", ")}.`,
+    );
+  const primary = PRIMARY_METRICS[a.mode] ?? [];
   const rows = names
     .filter((name) => !name.includes(":") || comparable(name.split(":")[1]))
     .map((name) => {
       const pairs = shared.flatMap((id) => {
-        const x = left.get(id)[name];
-        const y = right.get(id)[name];
+        const x = left.get(id).metrics[name];
+        const y = right.get(id).metrics[name];
         return typeof x === "number" && typeof y === "number"
           ? [{ a: x, b: y }]
           : [];
       });
-      return { metric: name, ...pairedBootstrap(pairs, options) };
+      const isPrimary = primary.some((pattern) => pattern.test(name));
+      if (pairs.length < MIN_COMPARE_UNITS)
+        return {
+          metric: name,
+          primary: isPrimary,
+          n: pairs.length,
+          insufficient: true,
+          ...(pairs.length
+            ? {
+                meanA: average(pairs.map((pair) => pair.a)),
+                meanB: average(pairs.map((pair) => pair.b)),
+                delta: average(pairs.map((pair) => pair.b - pair.a)),
+              }
+            : { meanA: null, meanB: null, delta: null }),
+          low: null,
+          high: null,
+          p: null,
+          pFloor: null,
+        };
+      const test = signFlipTest(
+        pairs.map((pair) => pair.b - pair.a),
+        options,
+      );
+      return {
+        metric: name,
+        primary: isPrimary,
+        insufficient: false,
+        ...pairedBootstrap(pairs, options),
+        p: test.p,
+        pFloor: test.floor,
+        exact: test.exact,
+      };
     })
     .filter((row) => row.n > 0);
+  const secondary = rows.filter((row) => !row.primary);
+  holm(secondary.map((row) => row.p)).forEach((adjusted, index) => {
+    secondary[index].pHolm = adjusted;
+  });
   return {
     mode: a.mode,
+    clusteredBy: a.mode === "review" ? "fixture" : "case",
     units: shared.length,
     onlyInA: [...left.keys()].filter((id) => !right.has(id)),
     onlyInB: [...right.keys()].filter((id) => !left.has(id)),
+    mismatched,
     notes,
     rows,
   };
@@ -316,7 +453,7 @@ function header(report, unit) {
 function agreementLines(pairs) {
   return pairs.map(
     (pair) =>
-      `| Judges agree: ${pair.judges.join(" vs ")} | ${percent(pair.agree)}; both pass ${pair.bothPass}, both fail ${pair.bothFail}, only ${pair.judges[0]} fails ${pair.onlyFirstFails}, only ${pair.judges[1]} fails ${pair.onlySecondFails} |`,
+      `| Judges agree: ${pair.judges.join(" vs ")} | ${percent(pair.agree)}; Cohen's kappa ${fixed(pair.kappa)}; both pass ${pair.bothPass}, both fail ${pair.bothFail}, only ${pair.judges[0]} fails ${pair.onlyFirstFails}, only ${pair.judges[1]} fails ${pair.onlySecondFails} |`,
   );
 }
 
@@ -332,8 +469,9 @@ export function planMarkdown(report) {
     "",
     "| Measure | Value |",
     "| --- | --- |",
-    `| Planned | ${percent(overall.planned)} |`,
+    `| Runs | ${overall.runs} over ${overall.cases} cases; ${overall.errors} infrastructure errors (excluded below); ${overall.judgeErrors} judge errors |`,
     `| Production review clean | ${percent(overall.productionClean)} |`,
+    `| Stopped for an operator | ${percent(overall.question)} |`,
     ...overall.judges.map(
       (judge) =>
         `| Judge pass: ${judge.name} | ${percent(judge.pass)}${judge.errors ? ` (${judge.errors} judge errors)` : ""} |`,
@@ -358,13 +496,14 @@ export function planMarkdown(report) {
     "",
     `Means across repeats.${judges.length ? ` Judge pass lists ${judges.join(" / ")}.` : ""}`,
     "",
-    "| Case | Runs | Clean | Judge pass | Expectation | First try accepted | Final review for command | Final-review proofs | Ungrounded CI | Critical path | Items | Revisions | Tokens (k) | Wall (s) |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| Case | Runs | Errors | Clean | Judge pass | Expectation | First try accepted | Final review for command | Final-review proofs | Ungrounded CI | Critical path | Items | Revisions | Tokens (k) | Wall (s) |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ...report.summary.cases.map(
-      ({ id, runs, metrics: m }) =>
+      ({ id, runs, errors, metrics: m }) =>
         `| ${[
           id,
           runs,
+          errors,
           fixed(m.productionClean),
           judges.length
             ? judges.map((name) => fixed(m[`judgePass:${name}`])).join(" / ")
@@ -377,19 +516,22 @@ export function planMarkdown(report) {
           fixed(m.criticalPath, 1),
           fixed(m.workItems, 1),
           fixed(m.revisions, 1),
-          m.planningTokens === null ? "–" : fixed(m.planningTokens / 1000, 1),
+          typeof m.planningTokens !== "number"
+            ? "–"
+            : fixed(m.planningTokens / 1000, 1),
           fixed(m.wallSeconds, 0),
         ].join(" | ")} |`,
     ),
   ];
-  const errors = report.runs.filter((run) => run.error);
+  const errors = report.runs.filter((run) => run.outcome === "error");
   if (errors.length)
     lines.push(
       "",
-      "## Errors",
+      "## Infrastructure errors",
       "",
       ...errors.map(
-        (run) => `- ${run.case} #${run.repeat}: ${run.error.split("\n")[0]}`,
+        (run) =>
+          `- ${run.case} #${run.repeat}: ${(run.error ?? "unknown").split("\n")[0]}`,
       ),
     );
   return `${lines.join("\n")}\n`;
@@ -406,13 +548,13 @@ export function reviewMarkdown(report) {
     "",
     ...header(report, "fixture"),
     "",
-    `Recall: the production reviewer returned at least one finding for a plan with one injected defect.${summary.judges.length ? ` Judge recall lists ${summary.judges.join(" / ")}.` : ""}`,
+    `Recall: the production reviewer returned at least one finding for a plan with one injected defect. Structural hit: a finding names the mutated item, command or check identifier. Invalid and errored reviews have no verdict and are excluded from recall and false positives.${summary.judges.length ? ` Judge recall lists ${summary.judges.join(" / ")}.` : ""}`,
     "",
-    "| Defect | Reviews | Recall | Invalid reviews | Judge recall |",
-    "| --- | --- | --- | --- | --- |",
+    "| Defect | Reviews | Recall | Structural hit | Invalid reviews | Judge recall |",
+    "| --- | --- | --- | --- | --- | --- |",
     ...summary.defects.map(
       (row) =>
-        `| ${row.defect} | ${row.runs} | ${percent(row.recall)} | ${row.invalid} | ${judgeCell(row.judgeRecall)} |`,
+        `| ${row.defect} | ${row.runs} | ${percent(row.recall)} | ${percent(row.structuralHit)} | ${row.invalid} | ${judgeCell(row.judgeRecall)} |`,
     ),
     "",
     `Known-good plans: ${summary.good.runs} reviews, false-positive rate ${percent(summary.good.falsePositive)}, ${summary.good.invalid} invalid; judge false-positive rate ${judgeCell(summary.good.judgeFalsePositive)}.`,
@@ -434,19 +576,24 @@ export function reviewMarkdown(report) {
           `- ${row.fixture} / ${row.defect}: ${row.reason.split("\n")[0]}`,
       ),
     );
-  if (summary.errors)
-    lines.push("", `${summary.errors} review calls failed; see report.json.`);
+  if (summary.errors || summary.judgeErrors)
+    lines.push(
+      "",
+      `${summary.errors} review calls and ${summary.judgeErrors} judge calls failed; see report.json.`,
+    );
   return `${lines.join("\n")}\n`;
 }
 
 export function compareMarkdown(comparison, a, b) {
+  const p = (value) =>
+    value === null || value === undefined ? "–" : fixed(value, 3);
   return `${[
     "# Planning eval comparison",
     "",
     `A: \`${a}\``,
     `B: \`${b}\``,
     "",
-    `Paired over ${comparison.units} shared units (${comparison.mode} mode). Delta is mean(B − A) per unit, with a paired-bootstrap 95% interval. An interval that contains 0 is no evidence of a difference.`,
+    `Paired over ${comparison.units} shared units, clustered by ${comparison.clusteredBy} (${comparison.mode} mode). Delta is mean(B − A) per unit, with a paired-bootstrap 95% interval and an exact sign-flip p-value. Primary metrics are marked *; the others are Holm-adjusted. A metric with fewer than ${MIN_COMPARE_UNITS} paired units is insufficient and gets no interval or p-value. p floor is the smallest p-value the number of units allows.`,
     ...comparison.notes.map((note) => `\n${note}`),
     ...(comparison.onlyInA.length
       ? [`\nOnly in A (ignored): ${comparison.onlyInA.join(", ")}`]
@@ -455,11 +602,11 @@ export function compareMarkdown(comparison, a, b) {
       ? [`\nOnly in B (ignored): ${comparison.onlyInB.join(", ")}`]
       : []),
     "",
-    "| Metric | Units | A | B | Delta | 95% interval |",
-    "| --- | --- | --- | --- | --- | --- |",
+    "| Metric | Units | A | B | Delta | 95% interval | p | Holm p | p floor |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ...comparison.rows.map(
       (row) =>
-        `| ${row.metric} | ${row.n} | ${fixed(row.meanA, 3)} | ${fixed(row.meanB, 3)} | ${fixed(row.delta, 3)} | [${fixed(row.low, 3)}, ${fixed(row.high, 3)}] |`,
+        `| ${row.metric}${row.primary ? " *" : ""} | ${row.n}${row.insufficient ? " (insufficient)" : ""} | ${fixed(row.meanA, 3)} | ${fixed(row.meanB, 3)} | ${fixed(row.delta, 3)} | ${row.low === null ? "–" : `[${fixed(row.low, 3)}, ${fixed(row.high, 3)}]`} | ${p(row.p)} | ${row.primary ? "–" : p(row.pHolm)} | ${p(row.pFloor)} |`,
     ),
   ].join("\n")}\n`;
 }

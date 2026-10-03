@@ -8,6 +8,7 @@
 // No GitHub issues are created and no workers run. Requires `npm run build`.
 // Usage and case format: docs/PLANNING-EVALS.md.
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -28,7 +29,11 @@ import {
   prepareCheckout,
   repositoryFacts,
 } from "./eval-planning/cases.mjs";
-import { judgeInput, loadJudges, runPanel } from "./eval-planning/judge.mjs";
+import {
+  gradeInIsolation,
+  judgeInput,
+  loadJudges,
+} from "./eval-planning/judge.mjs";
 import {
   compareMarkdown,
   compareReports,
@@ -73,7 +78,7 @@ async function runAll(tasks, parallel, start) {
   const lane = async () => {
     while (next < tasks.length) {
       const index = next++;
-      results[index] = await start(tasks[index]);
+      results[index] = await start(tasks[index], index);
     }
   };
   await Promise.all(Array.from({ length: parallel }, lane));
@@ -125,6 +130,9 @@ function runOne(evalCase, repeat, options) {
         repeat,
         repository: evalCase.repository,
         commit: evalCase.commit,
+        objectiveDigest: createHash("sha256")
+          .update(evalCase.body)
+          .digest("hex"),
         tags: evalCase.tags,
       };
       const log = relative(options.output, join(directory, "worker.log"));
@@ -134,6 +142,7 @@ function runOne(evalCase, repeat, options) {
       } catch (error) {
         // A missing or truncated result is an errored run, not a harness crash.
         result = {
+          outcome: "error",
           planned: false,
           wallMs: Date.now() - started,
           error: existsSync(resultPath)
@@ -146,7 +155,7 @@ function runOne(evalCase, repeat, options) {
         .map((grade) => `, ${grade.judge} ${grade.verdict}`)
         .join("");
       console.error(
-        `${id}: ${result.error ? `error: ${result.error.split("\n")[0]}` : `${result.review ?? "no plan"}${judge}`}`,
+        `${id}: ${result.outcome === "error" ? `error: ${(result.error ?? "unknown").split("\n")[0]}` : `${result.outcome}${judge}`}`,
       );
       done({ ...base, ...result });
     });
@@ -248,9 +257,11 @@ async function planMode(values, common) {
     runs,
   };
   write(common.output, report, planMarkdown(report));
+  const { errors, judgeErrors } = summary.overall;
   console.log(
-    `Planning eval: ${runs.filter((run) => run.planned).length}/${runs.length} runs planned; wrote ${join(common.output, "report.json")} and summary.md`,
+    `Planning eval: ${runs.filter((run) => run.outcome === "plan").length}/${runs.length} clean plans, ${errors} errors, ${judgeErrors} judge errors; wrote ${join(common.output, "report.json")} and summary.md`,
   );
+  return errors + judgeErrors;
 }
 
 async function reviewMode(values, common) {
@@ -324,19 +335,31 @@ async function reviewMode(values, common) {
         repeat,
       );
       if (variant.rule) run.rule = variant.rule;
-      if (common.judges.length)
-        run.judges = await runPanel(
-          common.judges,
-          judgeInput(variantPlan(variant), entry.facts, false),
-          entry.config.checkout,
-          common.judgeTransport,
-        );
+      run.unitDigest = createHash("sha256")
+        .update(
+          JSON.stringify([
+            entry.fixture.case.body,
+            entry.fixture.case.commit,
+            variant.graph,
+          ]),
+        )
+        .digest("hex");
       console.error(
-        `${entry.fixture.name}/${variant.variant} #${repeat}: ${run.review}${(run.judges ?? []).map((grade) => `, ${grade.judge} ${grade.verdict}`).join("")}`,
+        `${entry.fixture.name}/${variant.variant} #${repeat}: ${run.review}`,
       );
       return run;
     },
   );
+  // Judges run after every review, with the review checkouts gone.
+  rmSync(join(common.output, "checkouts"), { recursive: true, force: true });
+  if (common.judges.length)
+    await runAll(tasks, common.parallel, async ({ entry, variant }, index) => {
+      runs[index].judges = await gradeInIsolation(
+        common.judges,
+        judgeInput(variantPlan(variant), entry.facts),
+        common.judgeTransport,
+      );
+    });
   const refusals = prepared.flatMap((entry) =>
     entry.variants
       .filter((variant) => variant.refused)
@@ -363,8 +386,9 @@ async function reviewMode(values, common) {
   };
   write(common.output, report, reviewMarkdown(report));
   console.log(
-    `Review eval: ${runs.length} reviews of ${prepared.length} fixtures; wrote ${join(common.output, "report.json")} and summary.md`,
+    `Review eval: ${runs.length} reviews of ${prepared.length} fixtures, ${summary.errors} errors, ${summary.judgeErrors} judge errors; wrote ${join(common.output, "report.json")} and summary.md`,
   );
+  return summary.errors + summary.judgeErrors;
 }
 
 function compareMode(values, positionals) {
@@ -453,8 +477,11 @@ async function main() {
     parallel: positiveInteger(values.parallel, "parallel"),
   };
   mkdirSync(output, { recursive: true });
-  if (values["review-only"]) await reviewMode(values, common);
-  else await planMode(values, common);
+  const failures = values["review-only"]
+    ? await reviewMode(values, common)
+    : await planMode(values, common);
+  // Exit 1 when any run or judge call failed; the report is still written.
+  if (failures) process.exitCode = 1;
 }
 
 await main();

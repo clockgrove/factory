@@ -12,6 +12,9 @@ three integrate, the `docs-build` CI check from
 - `node scripts/check.mjs cli` passes.
 - `docs/CLI.md` documents every subcommand with one example each.
 - The `docs-build` check passes on the integrated result.
+- `truncate` throws a `RangeError` when `max` is not an integer, such as
+  `2.5`.
+- `npm test`
 
 ## Planning sources
 

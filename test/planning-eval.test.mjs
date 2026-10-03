@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
@@ -58,6 +58,18 @@ const run = (args) =>
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
+/** Run the CLI and return its exit status and output without throwing. */
+const runStatus = (args, env = {}) => {
+  const result = spawnSync(process.execPath, [script, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+  return {
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+};
 const readReport = (output) =>
   JSON.parse(readFileSync(join(output, "report.json"), "utf8"));
 
@@ -66,7 +78,7 @@ test("plan mode plans public cases through planObjective and reports review, jud
   try {
     const config = writeConfig(work);
     const output = join(work, "out");
-    const stdout = run([
+    const { status, stdout } = runStatus([
       "--config",
       config,
       "--output",
@@ -90,7 +102,9 @@ test("plan mode plans public cases through planObjective and reports review, jud
       "--judge-transport",
       support("eval-judge-transport.mjs"),
     ]);
-    assert.match(stdout, /4\/6 runs planned/);
+    // Two runs errored, so the eval exits 1 after writing its report.
+    assert.equal(status, 1);
+    assert.match(stdout, /4\/6 clean plans, 2 errors, 0 judge errors/);
     const report = readReport(output);
     assert.equal(report.schemaVersion, 2);
     assert.equal(report.mode, "plan");
@@ -120,9 +134,13 @@ test("plan mode plans public cases through planObjective and reports review, jud
     for (const entry of report.runs.filter(
       (candidate) => candidate.case === "native-stack-chain",
     )) {
+      assert.equal(entry.outcome, "plan");
       assert.equal(entry.planned, true);
       assert.equal(entry.error, null);
       assert.equal(entry.review, "clean");
+      // Host-dependent planning inputs are recorded.
+      assert.equal(typeof entry.host.capacity.concurrency, "number");
+      assert.ok("localExecutables" in entry.host);
       assert.equal(entry.reviewStatus, "clean");
       assert.equal(entry.firstTry, "accepted");
       assert.deepEqual(entry.expectation, { met: true, failed: [] });
@@ -141,8 +159,9 @@ test("plan mode plans public cases through planObjective and reports review, jud
       });
       assert.equal(entry.metrics.finalReviewInsteadOfCommand.count, 0);
       assert.deepEqual(entry.metrics.proofKinds, {
-        "result-command": 3,
+        "result-command": 4,
         "final-controller": 1,
+        "result-semantic": 1,
       });
       assert.deepEqual(entry.invocations.byPhase, {
         compile: 1,
@@ -164,15 +183,18 @@ test("plan mode plans public cases through planObjective and reports review, jud
     for (const entry of report.runs.filter(
       (candidate) => candidate.case === "single-item",
     )) {
+      assert.equal(entry.outcome, "error");
       assert.equal(entry.planned, false);
       assert.match(entry.error, /No fixture plan for case single-item/);
       assert.equal(entry.judges, undefined);
-      assert.equal(entry.expectation.met, false);
+      assert.equal(entry.expectation, null);
     }
     const { overall } = report.summary;
+    // Infrastructure errors are counted, never scored.
+    assert.equal(overall.errors, 2);
     assert.deepEqual(
-      [overall.planned.successes, overall.planned.total],
-      [4, 6],
+      [overall.productionClean.successes, overall.productionClean.total],
+      [4, 4],
     );
     for (const judge of overall.judges)
       assert.deepEqual([judge.pass.successes, judge.pass.total], [4, 4]);
@@ -180,9 +202,9 @@ test("plan mode plans public cases through planObjective and reports review, jud
       [overall.agreement[0].agree.successes, overall.agreement[0].bothPass],
       [4, 4],
     );
-    // Three cases, so the interval is far wider than six independent runs.
-    assert.equal(overall.planned.clusters, 3);
-    assert.ok(overall.planned.low < 0.2 && overall.planned.high === 1);
+    // Two cases, so the interval is far wider than four independent runs.
+    assert.equal(overall.productionClean.clusters, 2);
+    assert.ok(overall.productionClean.low < 0.4);
     assert.deepEqual(
       report.units.map((unit) => [
         unit.id,
@@ -192,7 +214,7 @@ test("plan mode plans public cases through planObjective and reports review, jud
       [
         ["media-lfs-thumbnail", 2, 1],
         ["native-stack-chain", 2, 1],
-        ["single-item", 2, 0],
+        ["single-item", 2, undefined],
       ],
     );
     const summary = readFileSync(join(output, "summary.md"), "utf8");
@@ -206,9 +228,12 @@ test("plan mode plans public cases through planObjective and reports review, jud
     );
     assert.match(
       summary,
-      /\| native-stack-chain \| 2 \| 1\.00 \| 1\.00 \/ 1\.00 \| 1\.00 \|/,
+      /\| native-stack-chain \| 2 \| 0 \| 1\.00 \| 1\.00 \/ 1\.00 \| 1\.00 \|/,
     );
-    assert.match(summary, /## Errors\n\n- single-item #1: No fixture plan/);
+    assert.match(
+      summary,
+      /## Infrastructure errors\n\n- single-item #1: No fixture plan/,
+    );
 
     // Comparing a report with itself shows no difference on any unit.
     const compared = run([
@@ -218,12 +243,16 @@ test("plan mode plans public cases through planObjective and reports review, jud
       "--output",
       join(work, "cmp"),
     ]);
-    assert.match(compared, /Paired over 3 shared units \(plan mode\)/);
+    assert.match(compared, /Paired over 3 shared units, clustered by case/);
     const comparison = JSON.parse(
       readFileSync(join(work, "cmp", "compare.json"), "utf8"),
     );
     assert.ok(comparison.rows.length > 5);
-    for (const row of comparison.rows) assert.equal(row.delta, 0);
+    for (const row of comparison.rows) {
+      assert.equal(row.delta, 0);
+      // Two scored cases are too few to compare.
+      assert.equal(row.insufficient, true);
+    }
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
@@ -318,6 +347,14 @@ test("review-only mode reports recall per seeded defect and the false-positive r
       "missing-dependency": [0, 6],
       "worker-test-only-proof": [4, 4],
     });
+    // The scripted reviewer names the offending item or check, so every
+    // flagged defect is also a structural hit.
+    for (const row of summary.defects)
+      assert.equal(
+        row.structuralHit.successes,
+        row.recall.successes,
+        row.defect,
+      );
     const dependency = summary.defects.find(
       (row) => row.defect === "missing-dependency",
     );
@@ -347,10 +384,13 @@ test("review-only mode reports recall per seeded defect and the false-positive r
       markdown,
       /false-positive rate 0% \[0–\d+\] \(0\/6, 3 units\)/,
     );
-    assert.equal(
-      report.units.find((unit) => unit.id === "media-lfs-thumbnail/good")
-        .metrics.recall,
-      null,
+    // A known-good plan has a false-positive metric and no recall metric.
+    const good = report.units.find(
+      (unit) => unit.id === "media-lfs-thumbnail/good",
+    ).metrics;
+    assert.deepEqual(
+      ["falsePositive" in good, "recall" in good],
+      [true, false],
     );
   } finally {
     rmSync(work, { recursive: true, force: true });
@@ -449,7 +489,7 @@ test("a run that dies with a truncated result.json is reported as an errored run
   const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-crash-"));
   try {
     const output = join(work, "out");
-    run([
+    const { status } = runStatus([
       "--config",
       writeConfig(work),
       "--output",
@@ -459,12 +499,14 @@ test("a run that dies with a truncated result.json is reported as an errored run
       "--planning-model",
       support("eval-crash-planner.mjs"),
     ]);
+    assert.equal(status, 1);
     const [entry] = readReport(output).runs;
+    assert.equal(entry.outcome, "error");
     assert.equal(entry.planned, false);
     assert.match(entry.error, /Run result is unreadable .*code 3/);
     assert.match(
       readFileSync(join(output, "summary.md"), "utf8"),
-      /- single-item #1: Run result is unreadable/,
+      /## Infrastructure errors\n\n- single-item #1: Run result is unreadable/,
     );
   } finally {
     rmSync(work, { recursive: true, force: true });
@@ -499,6 +541,110 @@ test("a private case with a leftover sources key is refused with a clear message
         /old: case.json `sources` is no longer supported; declare sources in the Objective's `## Planning sources` section/.test(
           error.stderr,
         ),
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("planning that stops for an operator is a question, not an error", () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-question-"));
+  try {
+    const output = join(work, "out");
+    const { status } = runStatus([
+      "--config",
+      writeConfig(work),
+      "--output",
+      output,
+      "--case",
+      "ask-operator-publish",
+      "--planning-model",
+      support("eval-asking-planner.mjs"),
+    ]);
+    assert.equal(status, 0);
+    const report = readReport(output);
+    const [entry] = report.runs;
+    assert.equal(entry.outcome, "question");
+    assert.equal(entry.error, null);
+    assert.match(entry.stop, /^Planning needs an undelegated decision/);
+    assert.deepEqual(entry.expectation, { met: true, failed: [] });
+    assert.equal(report.summary.overall.errors, 0);
+    assert.equal(report.summary.overall.question.successes, 1);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("judges run isolated: empty Git workdir, auth-only CODEX_HOME, no run paths or plans", () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-isolation-"));
+  try {
+    const codexHome = join(work, "codex");
+    mkdirSync(codexHome);
+    for (const name of ["auth.json", "config.toml", "AGENTS.md"])
+      writeFileSync(join(codexHome, name), "{}");
+    const output = join(work, "out");
+    const env = { CODEX_HOME: codexHome, FACTORY_EVAL_PROBE_ROOT: output };
+    const judges = [
+      "--judge",
+      join(root, "evals/judges/strict-rubric-v1-claude.json"),
+      "--judge",
+      join(root, "evals/judges/strict-rubric-v1-codex.json"),
+      "--judge-transport",
+      support("eval-probe-judge.mjs"),
+    ];
+    const plan = runStatus(
+      [
+        "--config",
+        writeConfig(work),
+        "--output",
+        output,
+        "--case",
+        "native-stack-chain",
+        "--parallel",
+        "1",
+        "--planning-model",
+        support("eval-fixture-planner.mjs"),
+        ...judges,
+      ],
+      env,
+    );
+    assert.equal(plan.status, 0, plan.stderr);
+    const review = runStatus(
+      [
+        "--review-only",
+        "--config",
+        writeConfig(work),
+        "--output",
+        join(work, "review"),
+        "--case",
+        "media-lfs-thumbnail",
+        "--parallel",
+        "1",
+        "--planning-model",
+        support("eval-review-model.mjs"),
+        ...judges,
+      ],
+      { ...env, FACTORY_EVAL_PROBE_ROOT: join(work, "review") },
+    );
+    assert.equal(review.status, 0, review.stderr);
+    const grades = [
+      ...readReport(output).runs,
+      ...readReport(join(work, "review")).runs,
+    ].flatMap((entry) => entry.judges);
+    assert.ok(grades.length >= 4);
+    for (const grade of grades)
+      assert.deepEqual(JSON.parse(grade.dimensions.coverage.evidence), {
+        cwd: [".git"],
+        codexHome: ["auth.json"],
+        xdgState: null,
+        plans: 0,
+      });
+    // Judge scratch directories are removed.
+    assert.deepEqual(
+      readdirSync(tmpdir()).filter((name) =>
+        name.startsWith("factory-plan-judge-"),
+      ),
+      [],
     );
   } finally {
     rmSync(work, { recursive: true, force: true });

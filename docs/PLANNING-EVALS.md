@@ -36,46 +36,87 @@ node scripts/eval-planning.mjs --compare out/a/report.json out/b/report.json
 | `--judge FILE`             | Grade each plan with this frozen judge. Repeatable: several judges form a panel.                                             |
 | `--fixtures DIR`           | Review fixtures for `--review-only`. Default `evals/review`.                                                                 |
 | `--planning-model MODULE`  | Module exporting `createPlanningModel({ config, directory })`, replacing the configured planner and reviewer.                |
-| `--judge-transport MODULE` | Testing only: module exporting `createJudgeTransport({ judge, checkout })`. The report records it.                           |
+| `--judge-transport MODULE` | Testing only: module exporting `createJudgeTransport({ judge })`. The report records it.                                     |
 
-Runs use your provider login: the Codex login for `codex-sdk`, the Claude Code login for `claude-agent-sdk`. A failed plan is a result; the script still writes the report and exits 0. An invalid case, judge, config or option exits 2 before any model call and leaves the output directory empty.
+Runs use your provider login: the Codex login for `codex-sdk`, the Claude Code login for `claude-agent-sdk`.
+
+Each plan run ends with one outcome:
+
+- `plan`: a clean plan.
+- `question`: planning stopped for an operator. Either the plan waits for a decision, or the controller refused with `PlanningNeedsDecision` before it had a plan.
+- `error`: a crash, timeout, provider outage or harness failure.
+
+Errors are counted but carry no quality metrics. They are left out of every rate and every comparison.
+
+Exit codes:
+
+- 0: every run and judge call completed, whatever the plans' quality.
+- 1: at least one run or judge call errored. The report is still written.
+- 2: an invalid case, judge, config or option, caught before any model call. The output directory is left empty.
+
+Each run records the host-dependent planning inputs (`host.localExecutables`, `host.capacity`), so runs on different machines can be told apart.
 
 To compare planner or reviewer versions, change one thing per report and compare. A 2×2 of old/new planner × old/new reviewer is four reports.
 
 ## Numbers
 
-Rates show a 95% interval clustered by case (by fixture in review-only mode), because repeats of one case are not independent. The interval is the wider of a case-level bootstrap and a Wilson interval on the number of cases, so more cases narrow it more than more repeats. `--compare` shows mean(B − A) per case with a paired-bootstrap 95% interval. An interval that contains 0 is no evidence of a change.
+Rates show a 95% interval clustered by case (by fixture in review-only mode), because repeats of one case are not independent. The interval is the wider of a case-level bootstrap and a Wilson interval on the number of cases, so more cases narrow it more than more repeats.
 
-| Number                           | Meaning                                                                                                                |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Production review clean          | The plan ended clean, with no review findings or questions.                                                            |
-| Judge pass                       | A frozen judge passed all seven dimensions. Shown per judge, separately from the production review.                    |
-| Judges agree                     | How often two judges gave the same verdict, with both-pass, both-fail and one-fails counts.                            |
-| Case expectation met             | The case's `expect` held: outcome (`plan` or `question`), required checks, size, critical path, read-only.             |
-| First try                        | How the first compile ended: `accepted`, `review-findings`, `review-invalid`, `parse`, `semantic:<field>`, `provider`. |
-| Final review for command         | Obligations whose criterion contains an authorized command line verbatim but whose proof is final review. Should be 0. |
-| Proof kinds, final-review proofs | Coverage proofs per kind (result command, semantic, QA, CI, final review).                                             |
-| Ungrounded CI                    | Named CI checks that no workflow job produces (job `name`, or job id). Should be 0.                                    |
-| Critical path, items, revisions  | Longest dependency chain, Work Items, planning revisions.                                                              |
-| Tokens, wall                     | Planning tokens (judge tokens are separate) and planning wall time.                                                    |
-| Recall (review-only)             | The reviewer returned a finding for a plan with that defect.                                                           |
-| False positive (review-only)     | The reviewer returned a finding for a known-good plan. Compared separately from recall.                                |
-| Caught by compile validation     | A seeded defect that deterministic validation already refuses; it never reaches review.                                |
+`--compare` pairs units that both reports ran on identical inputs: same Objective and commit, and in review mode the same plan variants. Review units are pooled per fixture. For each metric it reports:
 
-The seeded defects are: invented CI check name, acceptance that needs the item's own merge or upload, native-stack dependency assumed merged, final review replacing a required command, missing file ownership, missing dependency, and a worker-written test as the only proof.
+- mean(B − A), with a paired-bootstrap 95% interval;
+- an exact sign-flip p-value, and its floor (the smallest p-value that number of units can reach).
+
+Primary metrics are reported unadjusted: production clean, judge pass per judge, review recall and review false positives. All other metrics are Holm-adjusted. A metric with fewer than 5 paired units is marked insufficient and gets no interval or p-value. An interval that contains 0 is no evidence of a change.
+
+| Number                           | Meaning                                                                                                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Production review clean          | The plan ended clean, with no review findings or questions.                                                                                                  |
+| Judge pass                       | A frozen judge passed all seven dimensions. Shown per judge, separately from the production review.                                                          |
+| Judges agree                     | How often two judges gave the same verdict, Cohen's kappa, and both-pass, both-fail and one-fails counts.                                                    |
+| Case expectation met             | The case's `expect` held: outcome (`plan` or `question`), required checks, size, critical path, read-only.                                                   |
+| First try                        | How the first compile ended: `accepted`, `review-findings`, `review-invalid`, `parse`, `semantic:<field>`, `provider`.                                       |
+| Final review for command         | Criteria whose trimmed text is exactly one source-declared command line, outside Final validation, proved by final review. Should be 0.                      |
+| Proof kinds, final-review proofs | Coverage proofs per kind (result command, semantic, QA, CI, final review).                                                                                   |
+| Ungrounded CI                    | Named CI checks that no workflow job produces (job `name`, or job id). Should be 0.                                                                          |
+| Critical path, items, revisions  | Longest dependency chain, Work Items, planning revisions.                                                                                                    |
+| Tokens, wall                     | Planning tokens (judge tokens are separate) and planning wall time.                                                                                          |
+| Recall (review-only)             | The reviewer returned a finding for a plan with that defect. Structural hit: a finding names the mutated item, command or check identifier as a whole token. |
+| False positive (review-only)     | The reviewer returned a finding for a known-good plan. Compared separately from recall. Invalid reviews count in neither.                                    |
+| Caught by compile validation     | A seeded defect that deterministic validation already refuses; it never reaches review.                                                                      |
+
+Each seeded defect breaks exactly one rule:
+
+- an invented CI check name;
+- acceptance that needs the item's own merge or upload;
+- a native-stack dependency assumed merged;
+- final review replacing a command that an Acceptance bullet consisting of exactly that command line requires (Final validation commands are exempt);
+- missing file ownership;
+- a missing dependency;
+- the item's own new test as the only proof of a source-required behavior that the good plan leaves to independent review. Every command stays in place.
 
 Judge-free metrics count structured fields only: proofs, commands, workflow jobs, dependencies and diagnostics. They never interpret prose. Questions that need interpretation, such as acceptance that depends on the item's own merge, belong to the judges' rubric.
 
 ## Frozen judges
 
-A judge in `evals/judges/` is a JSON spec (provider, model, effort, prompt file, prompt SHA-256). Two ship with the same rubric: `strict-rubric-v1-claude` (Claude Agent SDK) and `strict-rubric-v1-codex` (Codex SDK). Both see only the input, with no tools or repository access.
+A judge in `evals/judges/` is a JSON spec: provider, model, effort, prompt file and prompt SHA-256. Two ship with the same rubric: `strict-rubric-v1-claude` (Claude Agent SDK) and `strict-rubric-v1-codex` (Codex SDK). Neither sees production review findings or the production review status.
+
+Judges run in a separate process, in an empty Git repository, with a `CODEX_HOME` that holds only the operator's `auth.json` (no `config.toml` or `AGENTS.md`). They run without the run's private directories in their environment. In plan mode they grade before the plan is written to disk and after the checkout is removed. In review-only mode they grade after every review, with the checkouts removed. Their scratch directory is deleted afterwards.
 
 - Never edit a frozen judge in a prompt PR, because a judge tuned with the prompt it grades measures nothing. Add a new judge file with a new name instead.
 - A judge is never the production reviewer prompt, because the reviewer cannot grade itself.
 - To compare planners on different providers, use the judge on the other provider, or both, because a judge may favour its own provider's plans. Run both judges by default; their agreement shows how much to trust either.
 - `--compare` compares a judge's numbers only when both reports used that judge with the same digest.
 
-A judge's digest covers its spec and prompt, the output schema, the input and prompt builders, and the provider's fixed system prompt. The test suite pins each digest, so any of those changes fails CI.
+A judge's digest covers:
+
+- its spec and prompt;
+- the input, prompt and repository-fact builders;
+- the decoder and the isolation code;
+- the resolved provider options: Claude's thinking, turns, tools, system prompt and transformed output schema, or Codex's thread options and output schema;
+- the provider SDK versions in `package-lock.json`.
+
+The test suite pins each digest, so a change to any of these fails CI.
 
 ## Cases
 
@@ -97,7 +138,7 @@ Public cases live in `evals/cases/`. Keep private cases outside this repository 
 
 Predecessor cases are text only: the eval serves no predecessor Objectives, so `planningPrerequisites` evidence never reaches the planner. They test how the planner reads an Objective that names a predecessor, not native prerequisite admission.
 
-Review fixtures live in `evals/review/<name>/fixture.json`: the case they plan, a known-good authored graph (coverage names criteria by index), `native` for native-stack delivery, and an optional `workerTest` command. The harness derives each defect from the good graph.
+Review fixtures live in `evals/review/<name>/fixture.json`. Each holds the case it plans, a known-good authored graph (coverage names criteria by index), `native` for native-stack delivery, and an optional `workerTest` command. The harness derives each defect from the good graph. A defect only applies where its rule can hold. For example, final review can replace a command only when an Acceptance bullet is exactly that command line.
 
 ## Report
 

@@ -34,11 +34,16 @@ import {
   proofKinds,
   workflowCheckNames,
 } from "../scripts/eval-planning/metrics.mjs";
-import { DEFECTS, planVariants } from "../scripts/eval-planning/mutations.mjs";
+import {
+  DEFECTS,
+  namesIdentifier,
+  planVariants,
+} from "../scripts/eval-planning/mutations.mjs";
 import {
   compareReports,
   reviewRunMetrics,
   summarizePlanRuns,
+  summarizeReviewRuns,
 } from "../scripts/eval-planning/report.mjs";
 import {
   loadReviewFixtures,
@@ -47,7 +52,10 @@ import {
 import {
   byCluster,
   clusteredRate,
+  cohensKappa,
+  holm,
   pairedBootstrap,
+  signFlipTest,
   wilson,
 } from "../scripts/eval-planning/stats.mjs";
 
@@ -60,9 +68,9 @@ const root = resolve(import.meta.dirname, "..");
  */
 const FROZEN_JUDGES = {
   "strict-rubric-v1-claude":
-    "3655ea73b0c58533305c165f089d62788e83b4ddc7480b8e46d038f1c38f559d",
+    "e1b7ac2e0b02a086535006ddea051e892ce8c484f8600828df19baef8efc7dab",
   "strict-rubric-v1-codex":
-    "0981e23ed039f08541f350c3906ace79c09fd0fe61ff33d8ae00cb3b259307b7",
+    "ecc1ae1a47074eede9678f84626336af289de8571753fe36874813dd24dd0a1d",
 };
 
 /** Fixture commits are the same on every machine. */
@@ -106,7 +114,7 @@ function authored() {
     items: [
       {
         id: "a",
-        acceptance: ["a works"],
+        acceptance: ["a works", "a rejects a non-integer"],
         dependencies: [],
         ownedPaths: ["src/a.mjs", "test/a.test.mjs"],
         validation: [
@@ -154,6 +162,11 @@ function authored() {
         itemId: "b",
         proof: { kind: "result-command", validationIndex: 0 },
       },
+      {
+        criterion: 3,
+        itemId: "a",
+        proof: { kind: "result-semantic", acceptanceIndex: 1 },
+      },
     ],
   };
 }
@@ -165,13 +178,24 @@ const workerTest = {
   directory: "test/",
 };
 
+/** Objective criteria for authored(): criterion 1 is exactly a command line. */
+const context = {
+  native: true,
+  workerTest,
+  sourceText: "unit-tests",
+  criteria: [
+    "`node check.mjs a` passes",
+    "`npm test`",
+    "`node check.mjs b` passes",
+    "`a` throws for a non-integer",
+  ],
+  finalCommands: ["node check.mjs a", "node check.mjs b"],
+  commandLines: new Set(["node check.mjs a", "node check.mjs b", "npm test"]),
+};
+
 test("each seeded defect changes exactly its rule in the authored plan", () => {
   const graph = authored();
-  const variants = planVariants(graph, {
-    native: true,
-    workerTest,
-    sourceText: "unit-tests",
-  });
+  const variants = planVariants(graph, context);
   assert.deepEqual(
     variants.map((variant) => variant.variant),
     ["good", ...DEFECTS.map((defect) => defect.id)],
@@ -186,6 +210,7 @@ test("each seeded defect changes exactly its rule in the authored plan", () => {
     by["invented-ci-name"].graph.requiredPreIntegrationChecks[0].checkName,
     "ci / build-and-test",
   );
+  assert.deepEqual(by["invented-ci-name"].identifiers, ["ci / build-and-test"]);
   assert.match(
     by["acceptance-needs-own-merge"].graph.items[0].acceptance.at(-1),
     /merged into main/,
@@ -194,40 +219,61 @@ test("each seeded defect changes exactly its rule in the authored plan", () => {
   assert.equal(native.itemId, "b");
   assert.match(native.graph.items[1].brief, /after `a` has merged/);
 
-  const replaced = by["final-review-replaces-command"].graph;
+  // Only the criterion that is exactly a command line outside Final
+  // validation loses its command to final review.
+  const replaced = by["final-review-replaces-command"];
   assert.deepEqual(
-    replaced.items[0].validation.map((v) => v.command),
-    ["npm test"],
+    replaced.graph.items[0].validation.map((v) => v.command),
+    ["node check.mjs a"],
   );
-  assert.deepEqual(replaced.coverage[0].proof, { kind: "final-review" });
-  assert.deepEqual(replaced.coverage[1].proof, {
+  assert.deepEqual(replaced.graph.coverage[1].proof, { kind: "final-review" });
+  assert.deepEqual(replaced.graph.coverage[0].proof, {
     kind: "result-command",
     validationIndex: 0,
   });
+  assert.deepEqual(replaced.identifiers, ["a", "npm test"]);
 
   assert.deepEqual(by["missing-ownership"].graph.items[0].ownedPaths, [
     "src/a.mjs",
   ]);
   assert.deepEqual(by["missing-dependency"].graph.items[1].dependencies, []);
 
-  const workerOnly = by["worker-test-only-proof"].graph.items[0];
+  // The worker-test defect keeps every command and only moves the
+  // semantic proof onto the item's own tests.
+  const workerOnly = by["worker-test-only-proof"].graph;
   assert.deepEqual(
-    workerOnly.validation.map((v) => v.command),
-    ["npm test"],
+    workerOnly.items[0].validation,
+    authored().items[0].validation,
   );
-  assert.equal(
-    by["worker-test-only-proof"].graph.coverage[0].proof.validationIndex,
-    0,
+  assert.deepEqual(workerOnly.coverage[3].proof, {
+    kind: "result-command",
+    validationIndex: 1,
+  });
+  assert.deepEqual(
+    workerOnly.coverage.slice(0, 3),
+    authored().coverage.slice(0, 3),
   );
 
   // Defects that need missing context are skipped, not faked.
   const regular = planVariants(graph, { native: false, sourceText: "" });
-  assert.equal(
-    regular.some((variant) =>
-      ["native-dependency-assumed-merged", "worker-test-only-proof"].includes(
-        variant.variant,
+  assert.deepEqual(
+    regular
+      .map((variant) => variant.variant)
+      .filter((id) =>
+        [
+          "native-dependency-assumed-merged",
+          "worker-test-only-proof",
+          "final-review-replaces-command",
+        ].includes(id),
       ),
-    ),
+    [],
+  );
+  // A command line that Final validation runs anyway is exempt.
+  assert.equal(
+    planVariants(graph, {
+      ...context,
+      finalCommands: [...context.finalCommands, "npm test"],
+    }).some((variant) => variant.variant === "final-review-replaces-command"),
     false,
   );
   const plain = authored();
@@ -245,6 +291,17 @@ test("each seeded defect changes exactly its rule in the authored plan", () => {
   assert.equal(
     crowded.graph.requiredPreIntegrationChecks[0].checkName,
     "ci / build-and-test-2",
+  );
+  // A structural hit names an identifier as a whole token.
+  assert.equal(
+    namesIdentifier({ detail: "Item a skips `npm test`.", question: "" }, [
+      "npm test",
+    ]),
+    true,
+  );
+  assert.equal(
+    namesIdentifier({ detail: "The cli-docs item", question: "" }, ["cli"]),
+    false,
   );
 });
 
@@ -315,10 +372,15 @@ test("Wilson intervals and the paired bootstrap match known values", () => {
 
 test("judge-free metrics count structured fields only", () => {
   const plan = {
-    commands: [
-      { command: "node check.mjs a", hostExecution: "authorized" },
-      { command: "pnpm lint", hostExecution: "blocked" },
+    sources: [
+      {
+        path: "OBJECTIVE",
+        content:
+          "## Acceptance\n\n- `node check.mjs a`\n- `npm test`\n- `node check.mjs a` passes\n",
+      },
+      { path: "README.md", content: "Run `pnpm lint` to lint.\n" },
     ],
+    finalCommands: ["npm test"],
     graph: {
       requiredPreIntegrationChecks: [{ checkName: "unit-tests" }],
       items: [
@@ -334,16 +396,23 @@ test("judge-free metrics count structured fields only", () => {
         },
       ],
       coverage: [
+        // Exactly one source-declared command line: counted.
+        {
+          proof: { kind: "final-review" },
+          source: { text: "`node check.mjs a`" },
+        },
+        // A Final validation command runs anyway: exempt.
+        { proof: { kind: "final-review" }, source: { text: "`npm test`" } },
+        // Prose around a command, or a command no source declares as a
+        // line, is not a command-line criterion.
         {
           proof: { kind: "final-review" },
           source: { text: "`node check.mjs a` passes" },
         },
-        // Not an authorized command line, so not a command-line obligation.
         {
           proof: { kind: "final-review" },
-          source: { text: "`pnpm lint` passes" },
+          source: { text: "`pnpm lint`" },
         },
-        { proof: { kind: "final-review" }, source: { text: "Docs read well" } },
         {
           proof: { kind: "result-command", validationIndex: 0 },
           source: { text: "node check.mjs a" },
@@ -358,10 +427,10 @@ test("judge-free metrics count structured fields only", () => {
   assert.equal(criticalPath(plan.graph), 4);
   assert.deepEqual(finalReviewInsteadOfCommand(plan), {
     count: 1,
-    criteria: ["`node check.mjs a` passes"],
+    criteria: ["`node check.mjs a`"],
   });
   assert.deepEqual(proofKinds(plan.graph), {
-    "final-review": 3,
+    "final-review": 4,
     "result-command": 1,
     "integrated-ci": 1,
   });
@@ -454,7 +523,7 @@ test("judge-free metrics count structured fields only", () => {
         requiredChecks: ["unit-tests", "lint"],
         maxCriticalPath: 2,
       },
-      { planned: true, review: "clean" },
+      { outcome: "plan", planned: true },
       plan.graph,
     ),
     {
@@ -465,36 +534,26 @@ test("judge-free metrics count structured fields only", () => {
       ],
     },
   );
-  // A question outcome is a structural stop; whether it asked the right
-  // question is the judges' scope dimension.
+  // Outcomes come from the run's structured stop, never from prose.
   assert.equal(
+    expectation({ outcome: "question" }, { outcome: "question" }, undefined)
+      .met,
+    true,
+  );
+  assert.deepEqual(
     expectation(
       { outcome: "question" },
-      { planned: true, review: "question" },
+      { outcome: "plan", planned: true },
       plan.graph,
-    ).met,
-    true,
+    ).failed,
+    ["expected outcome question, got plan"],
   );
+  // An infrastructure error says nothing about the plan.
   assert.equal(
-    expectation(
-      { outcome: "question" },
-      {
-        planned: false,
-        error: "Planning needs an undelegated decision: no bench script",
-      },
-      undefined,
-    ).met,
-    true,
+    expectation({ outcome: "question" }, { outcome: "error" }, undefined),
+    null,
   );
-  assert.equal(
-    expectation(
-      { outcome: "question" },
-      { planned: false, error: "Provider timed out" },
-      undefined,
-    ).met,
-    false,
-  );
-  assert.equal(expectation(undefined, { planned: true }, plan.graph), null);
+  assert.equal(expectation(undefined, { outcome: "plan" }, plan.graph), null);
 });
 
 test("the frozen judges load only with their pinned prompt and grade all dimensions", async () => {
@@ -588,7 +647,6 @@ test("the frozen judges load only with their pinned prompt and grade all dimensi
       review: { findings: [{ detail: "production finding" }] },
     },
     { files: ["a"], workflows: [] },
-    false,
   );
   assert.equal(input.objective, "# Objective");
   assert.deepEqual(
@@ -748,91 +806,230 @@ test("review fixtures pass compile validation and every defect reaches the revie
   }
 });
 
-test("compare pairs units, compares only identical judges and refuses mixed modes", () => {
-  const report = (judges, values) => ({
-    mode: "plan",
-    judges: Object.entries(judges).map(([name, digest]) => ({ name, digest })),
-    units: Object.entries(values).map(([id, [clean, a, b]]) => ({
-      id,
-      metrics: {
-        productionClean: clean,
-        "judgePass:claude": a,
-        "judgePass:codex": b,
-      },
-    })),
+test("compare pairs units on identical inputs, tests them exactly and adjusts secondary metrics", () => {
+  const unit = (id, digest, clean, claude, codex, tokens) => ({
+    id,
+    digest,
+    metrics: {
+      productionClean: clean,
+      "judgePass:claude": claude,
+      "judgePass:codex": codex,
+      planningTokens: tokens,
+      revisions: 0,
+    },
   });
-  const a = report(
-    { claude: "c1", codex: "x1" },
-    { x: [0, 0, 1], y: [1, 1, 1], z: [0, 1, 1] },
-  );
-  const b = report(
-    { claude: "c1", codex: "x2" },
-    { x: [1, 1, 1], y: [1, 1, 1], w: [1, 1, 1] },
-  );
-  const result = compareReports(a, b, { iterations: 500 });
-  assert.equal(result.units, 2);
-  assert.deepEqual(result.onlyInA, ["z"]);
-  assert.deepEqual(result.onlyInB, ["w"]);
-  assert.deepEqual(
-    result.rows.map((row) => [row.metric, row.delta]),
-    [
-      ["productionClean", 0.5],
-      ["judgePass:claude", 0.5],
+  const ids = ["c1", "c2", "c3", "c4", "c5", "c6"];
+  const a = {
+    mode: "plan",
+    judges: [
+      { name: "claude", digest: "j1" },
+      { name: "codex", digest: "x1" },
     ],
-  );
+    units: [
+      ...ids.map((id) => unit(id, `d-${id}`, 0, 0, 0, 100)),
+      unit("only-a", "d", 0, 0, 0, 100),
+      unit("moved", "old", 0, 0, 0, 100),
+    ],
+  };
+  const b = {
+    mode: "plan",
+    judges: [
+      { name: "claude", digest: "j1" },
+      { name: "codex", digest: "x2" },
+    ],
+    units: [
+      ...ids.map((id) => unit(id, `d-${id}`, 1, 1, 1, 90)),
+      unit("moved", "new", 1, 1, 1, 90),
+    ],
+  };
+  const result = compareReports(a, b, { iterations: 500 });
+  assert.equal(result.units, 6);
+  assert.deepEqual(result.onlyInA, ["only-a"]);
+  // A unit whose Objective or commit changed is not a pair.
+  assert.deepEqual(result.mismatched, ["moved"]);
+  const rows = Object.fromEntries(result.rows.map((row) => [row.metric, row]));
+  assert.equal(rows["judgePass:codex"], undefined);
   assert.match(result.notes[0], /codex are not compared/);
+  // Six identical improvements: exact sign-flip p = 2/2^6.
+  assert.equal(rows.productionClean.primary, true);
+  assert.equal(rows.productionClean.delta, 1);
+  assert.equal(rows.productionClean.p, 2 / 64);
+  assert.equal(rows.productionClean.pFloor, 2 / 64);
+  assert.equal(rows.productionClean.pHolm, undefined);
+  assert.equal(rows["judgePass:claude"].primary, true);
+  // Secondary metrics are Holm-adjusted; a metric with no change has p = 1.
+  assert.equal(rows.planningTokens.primary, false);
+  assert.equal(rows.planningTokens.pHolm, Math.min(1, 2 * (2 / 64)));
+  assert.equal(rows.revisions.p, 1);
   assert.throws(
     () => compareReports(a, { ...b, mode: "review" }),
     /Cannot compare a plan report with a review report/,
   );
+
+  // Fewer than five paired units: no interval and no p-value.
+  const small = compareReports(
+    { ...a, units: a.units.slice(0, 3) },
+    { ...b, units: b.units.slice(0, 3) },
+  );
+  const smallRow = small.rows.find((row) => row.metric === "productionClean");
+  assert.equal(smallRow.insufficient, true);
+  assert.deepEqual(
+    [smallRow.low, smallRow.high, smallRow.p],
+    [null, null, null],
+  );
+  assert.equal(smallRow.delta, 1);
 });
 
-test("review metrics keep false positives apart from recall", () => {
+test("exact sign-flip test, Holm adjustment and Cohen's kappa", () => {
+  assert.deepEqual(signFlipTest([1, 1, 1]), {
+    p: 0.25,
+    floor: 0.25,
+    exact: true,
+  });
+  assert.deepEqual(signFlipTest([0, 0]), { p: 1, floor: 1, exact: true });
+  assert.equal(signFlipTest([1, -1, 1, -1]).p, 1);
+  const large = signFlipTest(Array(25).fill(1), { samples: 2000 });
+  assert.equal(large.exact, false);
+  assert.ok(large.p < 0.01);
+  assert.deepEqual(holm([0.01, 0.04, null, 0.03]), [0.03, 0.06, null, 0.06]);
+  assert.equal(
+    cohensKappa([
+      ["pass", "pass"],
+      ["fail", "fail"],
+      ["pass", "pass"],
+      ["fail", "fail"],
+    ]),
+    1,
+  );
+  assert.equal(
+    cohensKappa([
+      ["pass", "pass"],
+      ["pass", "fail"],
+      ["fail", "pass"],
+      ["fail", "fail"],
+    ]),
+    0,
+  );
+  assert.equal(cohensKappa([["pass", "pass"]]), null);
+  assert.equal(cohensKappa([]), null);
+});
+
+test("review metrics keep false positives apart from recall and skip invalid reviews", () => {
   const good = reviewRunMetrics({ review: "findings", flagged: true });
   const hit = reviewRunMetrics({
     review: "findings",
     flagged: true,
+    structuralHit: true,
     defect: "missing-dependency",
   });
   assert.deepEqual(
-    [good.falsePositive, good.recall, hit.falsePositive, hit.recall],
-    [1, null, null, 1],
+    [
+      good.falsePositive,
+      good.recall,
+      hit.falsePositive,
+      hit.recall,
+      hit.structuralHit,
+    ],
+    [1, undefined, undefined, 1, 1],
   );
-  // A reviewer that adds false positives shows a worse falsePositive row,
-  // never a better recall row.
+  // An invalid or errored review has no verdict.
+  for (const review of ["invalid", "error"]) {
+    const metrics = reviewRunMetrics({ review, flagged: false, defect: "d" });
+    assert.equal("recall" in metrics, false);
+  }
+  const summary = summarizeReviewRuns(
+    [
+      {
+        fixture: "f",
+        variant: "good",
+        defect: null,
+        review: "invalid",
+        flagged: false,
+      },
+      {
+        fixture: "f",
+        variant: "good",
+        defect: null,
+        review: "clean",
+        flagged: false,
+      },
+      {
+        fixture: "f",
+        variant: "d",
+        defect: "missing-dependency",
+        review: "invalid",
+        flagged: false,
+      },
+      {
+        fixture: "f",
+        variant: "d",
+        defect: "missing-dependency",
+        review: "findings",
+        flagged: true,
+        structuralHit: false,
+      },
+    ],
+    [],
+  );
+  assert.deepEqual(
+    [
+      summary.good.falsePositive.successes,
+      summary.good.falsePositive.total,
+      summary.good.invalid,
+    ],
+    [0, 1, 1],
+  );
+  const [row] = summary.defects;
+  assert.deepEqual(
+    [
+      row.recall.successes,
+      row.recall.total,
+      row.structuralHit.successes,
+      row.invalid,
+    ],
+    [1, 1, 0, 1],
+  );
+
+  // Review compare clusters by fixture: a reviewer that adds false
+  // positives shows a worse falsePositive row, never a better recall row.
   const unit = (id, defect, flagged) => ({
     id,
-    metrics: reviewRunMetrics({
-      review: "x",
-      flagged,
-      defect,
-    }),
+    digest: id,
+    metrics: reviewRunMetrics({ review: "findings", flagged, defect }),
   });
+  const fixtures = ["f1", "f2", "f3", "f4", "f5"];
   const before = {
     mode: "review",
     judges: [],
-    units: [unit("f/good", null, false), unit("f/d", "d", true)],
+    units: fixtures.flatMap((f) => [
+      unit(`${f}/good`, null, false),
+      unit(`${f}/d1`, "d1", true),
+      unit(`${f}/d2`, "d2", false),
+    ]),
   };
   const after = {
     mode: "review",
     judges: [],
-    units: [unit("f/good", null, true), unit("f/d", "d", true)],
-  };
-  const rows = Object.fromEntries(
-    compareReports(before, after, { iterations: 100 }).rows.map((row) => [
-      row.metric,
-      row.delta,
+    units: fixtures.flatMap((f) => [
+      unit(`${f}/good`, null, true),
+      unit(`${f}/d1`, "d1", true),
+      unit(`${f}/d2`, "d2", false),
     ]),
-  );
-  assert.equal(rows.falsePositive, 1);
-  assert.equal(rows.recall, 0);
+  };
+  const result = compareReports(before, after, { iterations: 100 });
+  assert.equal(result.clusteredBy, "fixture");
+  assert.equal(result.units, 5);
+  const rows = Object.fromEntries(result.rows.map((row) => [row.metric, row]));
+  assert.equal(rows.falsePositive.delta, 1);
+  assert.equal(rows.recall.delta, 0);
+  assert.equal(rows.recall.meanA, 0.5);
 });
 
-test("plan summaries report each judge separately and their agreement", () => {
+test("plan summaries exclude infrastructure errors and report each judge and their agreement", () => {
   const run = (name, claude, codex) => ({
     case: name,
+    outcome: "plan",
     planned: true,
-    review: "clean",
     judges: [
       { judge: "claude", verdict: claude, passed: 7, failed: [] },
       { judge: "codex", verdict: codex, passed: 6, failed: ["scope"] },
@@ -843,9 +1040,23 @@ test("plan summaries report each judge separately and their agreement", () => {
     run("a", "pass", "fail"),
     run("b", "fail", "fail"),
     run("b", "pass", "error"),
+    { case: "b", outcome: "question", planned: false },
+    { case: "c", outcome: "error", error: "provider outage" },
   ]);
+  const { overall } = summary;
+  assert.equal(overall.errors, 1);
+  assert.equal(overall.judgeErrors, 1);
+  assert.deepEqual(
+    [overall.productionClean.successes, overall.productionClean.total],
+    [4, 5],
+  );
+  assert.deepEqual(
+    [overall.question.successes, overall.question.total],
+    [1, 5],
+  );
+  assert.deepEqual(summary.cases.find((unit) => unit.id === "c").metrics, {});
   const judges = Object.fromEntries(
-    summary.overall.judges.map((judge) => [judge.name, judge]),
+    overall.judges.map((judge) => [judge.name, judge]),
   );
   assert.deepEqual(
     [judges.claude.pass.successes, judges.claude.pass.total],
@@ -855,19 +1066,12 @@ test("plan summaries report each judge separately and their agreement", () => {
     [judges.codex.pass.successes, judges.codex.pass.total, judges.codex.errors],
     [1, 3, 1],
   );
-  const [pair] = summary.overall.agreement;
+  const [pair] = overall.agreement;
   assert.deepEqual(pair.judges, ["claude", "codex"]);
   assert.deepEqual(
     [pair.agree.successes, pair.agree.total, pair.onlySecondFails],
     [2, 3, 1],
   );
-  assert.deepEqual(
-    Object.keys(summary.cases[0].metrics).filter((key) => key.includes(":")),
-    [
-      "judgePass:claude",
-      "judgeScore:claude",
-      "judgePass:codex",
-      "judgeScore:codex",
-    ],
-  );
+  // po = 2/3; claude passes 2/3, codex 1/3; pe = 2/9 + 2/9 = 4/9.
+  assert.ok(Math.abs(pair.kappa - (2 / 3 - 4 / 9) / (1 - 4 / 9)) < 1e-12);
 });

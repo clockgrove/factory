@@ -5,7 +5,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { CaseError, loadCase } from "./cases.mjs";
-import { planVariants } from "./mutations.mjs";
+import { sourceCommandLines } from "./metrics.mjs";
+import { namesIdentifier, planVariants } from "./mutations.mjs";
 
 const dist = resolve(import.meta.dirname, "../../dist");
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -110,9 +111,13 @@ export function fixturePlanningModel(authored) {
  * is recorded because code, not review, caught that defect.
  */
 export async function prepareVariants(fixture, config) {
-  const { compileObjective, planReviewPacket, planningSources } = await import(
-    `${dist}/compiler.js`
-  );
+  const {
+    compileObjective,
+    finalObjectiveCommands,
+    objectiveCriteria,
+    planReviewPacket,
+    planningSources,
+  } = await import(`${dist}/compiler.js`);
   const { executionProfileChoices } = await import(
     `${dist}/execution-profiles.js`
   );
@@ -134,6 +139,9 @@ export async function prepareVariants(fixture, config) {
     native: fixture.native,
     workerTest: fixture.workerTest,
     sourceText: sources.map((source) => source.content).join("\n"),
+    criteria: objectiveCriteria(evalCase.body),
+    finalCommands: finalObjectiveCommands(evalCase.body),
+    commandLines: sourceCommandLines(sources),
   });
   for (const variant of variants) {
     try {
@@ -208,6 +216,12 @@ export async function reviewVariant(model, fixture, variant, repeat) {
           ? "findings"
           : "clean",
       flagged: findings.length > 0,
+      // A finding that names the mutated item, command or check.
+      structuralHit: variant.defect
+        ? findings.some((finding) =>
+            namesIdentifier(finding, variant.identifiers),
+          )
+        : null,
       findings,
       ...(review.failure ? { failure: review.failure } : {}),
       tokens,

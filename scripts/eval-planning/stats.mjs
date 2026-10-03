@@ -126,6 +126,66 @@ export function byCluster(runs, cluster, outcome) {
   return groups;
 }
 
+/**
+ * Two-sided paired sign-flip permutation test of mean(b - a) = 0. Exact for
+ * up to 20 nonzero deltas, otherwise a seeded Monte Carlo estimate. `floor`
+ * is the smallest p-value this many units can ever give, so a floor above
+ * 0.05 means the comparison cannot show a difference at all.
+ */
+export function signFlipTest(deltas, { samples = 20_000, seed = 1 } = {}) {
+  const nonzero = deltas.filter((delta) => delta !== 0);
+  const n = nonzero.length;
+  if (!n) return { p: 1, floor: 1, exact: true };
+  const observed = Math.abs(nonzero.reduce((sum, delta) => sum + delta, 0));
+  const tolerance = 1e-12 * (1 + observed);
+  const floor = Math.min(1, 2 / 2 ** n);
+  if (n <= 20) {
+    let extreme = 0;
+    const total = 2 ** n;
+    for (let mask = 0; mask < total; mask += 1) {
+      let sum = 0;
+      for (let bit = 0; bit < n; bit += 1)
+        sum += mask & (1 << bit) ? -nonzero[bit] : nonzero[bit];
+      if (Math.abs(sum) >= observed - tolerance) extreme += 1;
+    }
+    return { p: extreme / total, floor, exact: true };
+  }
+  const random = seededRandom(seed);
+  let extreme = 0;
+  for (let sample = 0; sample < samples; sample += 1) {
+    let sum = 0;
+    for (const delta of nonzero) sum += random() < 0.5 ? -delta : delta;
+    if (Math.abs(sum) >= observed - tolerance) extreme += 1;
+  }
+  return { p: (extreme + 1) / (samples + 1), floor, exact: false };
+}
+
+/** Holm step-down adjustment; nulls stay null. */
+export function holm(pValues) {
+  const indexed = pValues
+    .map((p, index) => ({ p, index }))
+    .filter((entry) => typeof entry.p === "number")
+    .sort((a, b) => a.p - b.p);
+  const adjusted = pValues.map(() => null);
+  let running = 0;
+  indexed.forEach((entry, rank) => {
+    running = Math.max(running, Math.min(1, (indexed.length - rank) * entry.p));
+    adjusted[entry.index] = running;
+  });
+  return adjusted;
+}
+
+/** Cohen's kappa for two raters' pass/fail verdicts on the same items. */
+export function cohensKappa(pairs) {
+  const n = pairs.length;
+  if (!n) return null;
+  const agree = pairs.filter(([a, b]) => a === b).length / n;
+  const aPass = pairs.filter(([a]) => a === "pass").length / n;
+  const bPass = pairs.filter(([, b]) => b === "pass").length / n;
+  const chance = aPass * bPass + (1 - aPass) * (1 - bPass);
+  return chance === 1 ? null : (agree - chance) / (1 - chance);
+}
+
 /** Mean, min and max of the numeric values; null when there are none. */
 export function spread(values) {
   const numbers = values.filter((value) => typeof value === "number");

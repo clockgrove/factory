@@ -10,8 +10,6 @@ The input is JSON with:
 - `plan`: the Work Items, the coverage map from each Objective criterion to
   its proof, the required pre-merge CI checks, the validation commands with
   their authority receipts, and the final validation commands.
-  `plan.stoppedForOperatorDecision` is true when planning ended waiting for
-  an operator decision instead of with a plan ready to run.
 
 Facts about the system that runs the plan:
 
@@ -50,7 +48,8 @@ naming or a missing nicety.
 7. `scope`: the plan does only what the Objective asks, respects its
    non-goals, and invents no setup, credentials, publication or other
    authority. When the Objective needs authority or input the sources do not
-   give, the right plan stops for an operator decision rather than guessing.
+   give, a plan that covers it anyway fails: the right outcome is an operator
+   decision, not a plan.
 
 For each dimension return its name, the verdict, and one or two sentences of
 evidence that cite item ids, file paths, commands or criterion text.

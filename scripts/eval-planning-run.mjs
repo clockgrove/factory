@@ -2,7 +2,7 @@
 // process with private XDG state. It plans one local Objective body through
 // the same planObjective path `factory run` uses, against an isolated checkout
 // at the pinned commit, computes judge-free metrics, optionally asks the
-// frozen judge panel, and writes result.json.
+// frozen judge panel in isolation, and writes result.json.
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -10,9 +10,16 @@ import {
   readDiagnosticMetadata,
   summarizeModelInvocations,
 } from "../dist/diagnostics.js";
+import { PlanningNeedsDecision } from "../dist/compiler.js";
+import { resolveCapacity } from "../dist/config.js";
 import { composePlanning, validateConfig } from "../dist/index.js";
+import { preflightObjective } from "../dist/local-preflight.js";
 import { prepareCheckout, repositoryFacts } from "./eval-planning/cases.mjs";
-import { judgeInput, loadJudges, runPanel } from "./eval-planning/judge.mjs";
+import {
+  gradeInIsolation,
+  judgeInput,
+  loadJudges,
+} from "./eval-planning/judge.mjs";
 import {
   expectation,
   firstTry,
@@ -59,9 +66,13 @@ function reviewOutcome(review) {
   return review.findings.length ? "findings" : "clean";
 }
 
-const result = { planned: false, wallMs: 0, error: null };
+// outcome: "plan" (clean), "question" (stopped for an operator: a plan
+// waiting for a decision, or the controller's PlanningNeedsDecision), or
+// "error" (crash, timeout, provider or harness failure; no quality metrics).
+const result = { outcome: "error", planned: false, wallMs: 0, error: null };
 let started;
 let plan;
+let facts;
 try {
   prepareCheckout(spec, checkout);
   const config = validateConfig({
@@ -69,6 +80,13 @@ try {
     repository: spec.repository,
     checkout,
   });
+  // Host-dependent planning inputs, recorded so runs on different machines
+  // can be told apart.
+  result.host = {
+    localExecutables:
+      preflightObjective(config, spec.body, spec.commit) ?? null,
+    capacity: resolveCapacity(config),
+  };
   const planningModel = spec.planningModule
     ? await (
         await import(pathToFileURL(spec.planningModule).href)
@@ -81,14 +99,42 @@ try {
   started = performance.now();
   // The production path: the same recoverable planning `factory run` uses,
   // bounded by the configuration's autonomy allowances.
-  plan = await application.planObjective(spec.objective);
+  try {
+    plan = await application.planObjective(spec.objective);
+  } catch (error) {
+    if (!(error instanceof PlanningNeedsDecision)) throw error;
+    result.outcome = "question";
+    result.stop = error.message;
+  }
   result.wallMs = Math.round(performance.now() - started);
-  result.planned = true;
-  result.reviewStatus = plan.review.status;
-  result.review = reviewOutcome(plan.review);
-  result.findingCount = plan.review.findings.length;
-  result.revisions = plan.review.revisions;
-  result.workItems = plan.graph.items.length;
+  if (plan) {
+    result.planned = true;
+    result.outcome = plan.review.status === "clean" ? "plan" : "question";
+    result.reviewStatus = plan.review.status;
+    result.review = reviewOutcome(plan.review);
+    result.findingCount = plan.review.findings.length;
+    result.revisions = plan.review.revisions;
+    result.workItems = plan.graph.items.length;
+    facts = repositoryFacts(checkout, spec.commit);
+    result.metrics = planMetrics(plan, facts);
+  }
+} catch (error) {
+  if (started && !result.wallMs)
+    result.wallMs = Math.round(performance.now() - started);
+  result.outcome = "error";
+  result.error = error instanceof Error ? error.message : String(error);
+} finally {
+  rmSync(checkout, { recursive: true, force: true });
+}
+// Judges run before the plan or production findings reach disk, with the
+// checkout already gone.
+if (plan && spec.judges?.length)
+  result.judges = await gradeInIsolation(
+    loadJudges(spec.judges),
+    judgeInput(plan, facts),
+    spec.judgeTransport,
+  );
+if (plan) {
   result.findings = plan.review.findings.map(({ detail, question }) => ({
     detail,
     question,
@@ -96,23 +142,7 @@ try {
   if (plan.review.failure) result.failure = plan.review.failure;
   result.plan = join(spec.directory, "plan.json");
   writeFileSync(result.plan, `${JSON.stringify(plan, null, 2)}\n`);
-  const facts = repositoryFacts(checkout, spec.commit);
-  result.metrics = planMetrics(plan, facts);
-  if (spec.judges?.length)
-    result.judges = await runPanel(
-      loadJudges(spec.judges),
-      judgeInput(plan, facts, plan.review.status !== "clean"),
-      checkout,
-      spec.judgeTransport,
-    );
-} catch (error) {
-  if (started && !result.wallMs)
-    result.wallMs = Math.round(performance.now() - started);
-  result.error = error instanceof Error ? error.message : String(error);
-} finally {
-  rmSync(checkout, { recursive: true, force: true });
 }
-result.expectation = expectation(spec.expect, result, plan?.graph);
 try {
   const events = readDiagnosticMetadata(spec.repository, spec.objective);
   const usage = summarizeModelInvocations(events);
@@ -129,10 +159,13 @@ try {
     ),
   };
   result.tokens = usage.objective.tokenTotals;
-  result.firstTry = firstTry(events, result.review === "clean");
+  if (result.outcome !== "error")
+    result.firstTry = firstTry(events, result.outcome === "plan");
 } catch (error) {
+  result.outcome = "error";
   result.error ??= `Diagnostics unreadable: ${error instanceof Error ? error.message : String(error)}`;
 }
+result.expectation = expectation(spec.expect, result, plan?.graph);
 writeFileSync(
   join(spec.directory, "result.json"),
   `${JSON.stringify(result, null, 2)}\n`,

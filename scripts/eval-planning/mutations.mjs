@@ -3,21 +3,10 @@
 // Authored plans name coverage criteria by index (`criterion`); see
 // evals/review/*/fixture.json.
 
+import { requiredCommandLine } from "./metrics.mjs";
+
 const isWork = (item) => !item.kind || item.kind === "work";
 const clone = (value) => structuredClone(value);
-
-function sourceCommandCoverage(graph) {
-  return graph.coverage.filter((entry) => {
-    const item = graph.items.find((candidate) => candidate.id === entry.itemId);
-    return (
-      item &&
-      isWork(item) &&
-      entry.proof.kind === "result-command" &&
-      item.validation[entry.proof.validationIndex]?.provenance ===
-        "source-declared"
-    );
-  });
-}
 
 function dropValidation(graph, item, index) {
   const [removed] = item.validation.splice(index, 1);
@@ -52,7 +41,7 @@ export const DEFECTS = [
       if (gate) gate.checkName = name;
       for (const entry of graph.coverage)
         if (entry.proof.checkName === old) entry.proof.checkName = name;
-      return { graph, itemId: null };
+      return { graph, itemId: null, identifiers: [name] };
     },
   },
   {
@@ -71,7 +60,7 @@ export const DEFECTS = [
           ? "The selected files are uploaded to Git LFS, merged into main, and hydrate in a fresh clone."
           : "This item's pull request is merged into main and the main-branch CI run is green.",
       );
-      return { graph, itemId: item.id };
+      return { graph, itemId: item.id, identifiers: [item.id] };
     },
   },
   {
@@ -93,30 +82,41 @@ export const DEFECTS = [
       item.acceptance.push(
         `\`${dependency}\` is merged into main before this item starts, and this item builds on main.`,
       );
-      return { graph, itemId: item.id };
+      return { graph, itemId: item.id, identifiers: [item.id] };
     },
   },
   {
     id: "final-review-replaces-command",
-    rule: "Final review cannot replace a source-required command or check.",
-    apply(input) {
+    rule: "Final review cannot replace a command an Objective criterion requires.",
+    apply(input, context) {
       const graph = clone(input);
-      const candidates = sourceCommandCoverage(graph);
-      const entry =
-        candidates.find(
-          (candidate) =>
-            graph.items.find((item) => item.id === candidate.itemId).validation
-              .length > 1,
-        ) ?? candidates[0];
+      // Only a criterion that is exactly one command line, not a Final
+      // validation command, and proved by running that command.
+      const entry = graph.coverage.find((candidate) => {
+        const command = requiredCommandLine(
+          context.criteria?.[candidate.criterion] ?? "",
+          context.commandLines ?? new Set(),
+          context.finalCommands ?? [],
+        );
+        const item = graph.items.find((other) => other.id === candidate.itemId);
+        return (
+          command &&
+          item &&
+          isWork(item) &&
+          candidate.proof.kind === "result-command" &&
+          item.validation[candidate.proof.validationIndex]?.command === command
+        );
+      });
       if (!entry) return null;
       const item = graph.items.find(
         (candidate) => candidate.id === entry.itemId,
       );
-      dropValidation(graph, item, entry.proof.validationIndex);
+      const removed = dropValidation(graph, item, entry.proof.validationIndex);
       entry.proof = { kind: "final-review" };
       return {
         graph,
         itemId: item.id,
+        identifiers: [item.id, removed.command],
       };
     },
   },
@@ -135,7 +135,7 @@ export const DEFECTS = [
           .find((candidate) => item.brief.includes(candidate)) ??
         item.ownedPaths.at(-1);
       item.ownedPaths = item.ownedPaths.filter((owned) => owned !== path);
-      return { graph, itemId: item.id };
+      return { graph, itemId: item.id, identifiers: [item.id] };
     },
   },
   {
@@ -155,10 +155,7 @@ export const DEFECTS = [
         graph.items.some((other) => other.id === id && isWork(other)),
       );
       item.dependencies = item.dependencies.filter((id) => id !== dependency);
-      return {
-        graph,
-        itemId: item.id,
-      };
+      return { graph, itemId: item.id, identifiers: [item.id, dependency] };
     },
   },
   {
@@ -167,33 +164,34 @@ export const DEFECTS = [
     apply(input, context) {
       if (!context.workerTest) return null;
       const graph = clone(input);
-      const entry = sourceCommandCoverage(graph)[0];
+      // A behavior the good plan leaves to independent result review becomes
+      // proved only by the item's own new tests. Every command stays.
+      const entry = graph.coverage.find((candidate) => {
+        const item = graph.items.find((other) => other.id === candidate.itemId);
+        return (
+          item && isWork(item) && candidate.proof.kind === "result-semantic"
+        );
+      });
       if (!entry) return null;
       const item = graph.items.find(
         (candidate) => candidate.id === entry.itemId,
       );
-      const index = entry.proof.validationIndex;
       const testPath = `${context.workerTest.directory}${item.id}.test.mjs`;
-      const existing = item.validation.findIndex(
+      let index = item.validation.findIndex(
         (check) => check.command === context.workerTest.command,
       );
-      if (existing >= 0) {
-        dropValidation(graph, item, index);
-        entry.proof.validationIndex = item.validation.findIndex(
-          (check) => check.command === context.workerTest.command,
-        );
-      } else
-        item.validation[index] = {
+      if (index < 0) {
+        item.validation.push({
           command: context.workerTest.command,
           provenance: context.workerTest.provenance,
           source: context.workerTest.source,
-        };
+        });
+        index = item.validation.length - 1;
+      }
+      entry.proof = { kind: "result-command", validationIndex: index };
       if (!item.ownedPaths.includes(testPath)) item.ownedPaths.push(testPath);
       item.brief += ` Prove the behavior with new unit tests in \`${testPath}\`.`;
-      return {
-        graph,
-        itemId: item.id,
-      };
+      return { graph, itemId: item.id, identifiers: [item.id] };
     },
   },
 ];
@@ -216,4 +214,24 @@ export function planVariants(graph, context) {
         : [];
     }),
   ];
+}
+
+/**
+ * Whether a finding names one of the mutation's identifiers (an item id, a
+ * command or a check name) as a whole token. Identifiers are controller
+ * data, so this is an identity match, not prose interpretation.
+ */
+export function namesIdentifier(finding, identifiers) {
+  const text = `${finding.detail}\n${finding.question}`;
+  return identifiers.some((identifier) => {
+    let at = text.indexOf(identifier);
+    while (at >= 0) {
+      const before = text[at - 1] ?? " ";
+      const after = text[at + identifier.length] ?? " ";
+      if (!/[A-Za-z0-9_-]/.test(before) && !/[A-Za-z0-9_-]/.test(after))
+        return true;
+      at = text.indexOf(identifier, at + 1);
+    }
+    return false;
+  });
 }

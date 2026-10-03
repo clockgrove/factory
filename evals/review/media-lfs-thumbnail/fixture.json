@@ -11,7 +11,12 @@
           ".gitattributes keeps the assets/*.png rule and adds thumbs/*.png filter=lfs diff=lfs merge=lfs -text."
         ],
         "nonGoals": ["Images, gallery.json and a global binary rule."],
-        "citations": [{ "path": "docs/MEDIA.md", "heading": "Thumbnails" }],
+        "citations": [
+          {
+            "path": "docs/MEDIA.md",
+            "heading": "Thumbnails"
+          }
+        ],
         "dependencies": [],
         "ownedPaths": [".gitattributes"],
         "validation": [
@@ -35,8 +40,14 @@
           "Changing assets/source.png or committing candidate bytes directly."
         ],
         "citations": [
-          { "path": "docs/MEDIA.md", "heading": "Thumbnails" },
-          { "path": "docs/MEDIA.md", "heading": "Gallery manifest" }
+          {
+            "path": "docs/MEDIA.md",
+            "heading": "Thumbnails"
+          },
+          {
+            "path": "docs/MEDIA.md",
+            "heading": "Gallery manifest"
+          }
         ],
         "dependencies": ["lfs-policy"],
         "ownedPaths": [
@@ -61,6 +72,11 @@
             "command": "node scripts/check-gallery.mjs thumbs",
             "provenance": "source-declared",
             "source": "OBJECTIVE"
+          },
+          {
+            "command": "node scripts/check-gallery.mjs manifest",
+            "provenance": "source-declared",
+            "source": "OBJECTIVE"
           }
         ],
         "brief": "Stage two candidate sets under .factory-media/ from the reference asset: a PNG of at most 64x64 for thumbs/source.png and a JSON sidecar thumbs/source.json naming source and generator. Add the thumb field to gallery.json."
@@ -70,22 +86,42 @@
       {
         "criterion": 0,
         "itemId": "lfs-policy",
-        "proof": { "kind": "result-command", "validationIndex": 0 }
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
       },
       {
         "criterion": 1,
         "itemId": "thumbnail",
-        "proof": { "kind": "result-semantic", "acceptanceIndex": 0 }
+        "proof": {
+          "kind": "result-semantic",
+          "acceptanceIndex": 0
+        }
       },
       {
         "criterion": 2,
         "itemId": "thumbnail",
-        "proof": { "kind": "result-semantic", "acceptanceIndex": 1 }
+        "proof": {
+          "kind": "result-semantic",
+          "acceptanceIndex": 1
+        }
       },
       {
         "criterion": 3,
         "itemId": "thumbnail",
-        "proof": { "kind": "result-command", "validationIndex": 0 }
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
+      },
+      {
+        "criterion": 4,
+        "itemId": "thumbnail",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 1
+        }
       }
     ]
   }

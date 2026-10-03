@@ -2,17 +2,34 @@
 // Objective. A judge is never the production reviewer prompt, and a prompt PR
 // never edits one; a changed judge is a new file with a new name. Several
 // judges on different providers form a panel, so no provider grades alone.
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import {
-  CLAUDE_PLANNING_SYSTEM_PROMPT,
+  CLAUDE_PLANNING_ADAPTER,
   ClaudePlanningModel,
+  claudePlanningOptions,
 } from "../../dist/claude-planning.js";
-import { CodexPlanningModel } from "../../dist/compiler.js";
+import {
+  CODEX_PLANNING_ADAPTER,
+  CodexPlanningModel,
+} from "../../dist/compiler.js";
+import { repositoryFacts } from "./cases.mjs";
+
+const root = resolve(import.meta.dirname, "../..");
+const worker = join(root, "scripts/eval-planning-judge.mjs");
 
 export const JUDGE_DIMENSIONS = [
   "coverage",
@@ -72,17 +89,20 @@ export function loadJudge(path) {
     path: file,
     model,
     prompt: promptBytes.toString("utf8"),
-    // Everything that shapes what the judge model sees: the spec, its prompt,
-    // the output schema, the input and prompt builders, and the provider's
-    // fixed system prompt. Changing any of them changes the digest.
+    // Everything that shapes what the judge sees or how it is scored: the
+    // spec and prompt, the input, prompt and repository-fact builders, the
+    // decoder, the isolation, the resolved provider options (with the output
+    // schema as the provider receives it) and the provider SDK versions.
     digest: sha256(
       JSON.stringify({
         spec: bytes.toString("utf8"),
         prompt: promptBytes.toString("utf8"),
-        schema: judgeSchema(),
         input: judgeInput.toString(),
         render: judgePrompt.toString(),
-        provider: providerContext(model.kind),
+        facts: repositoryFacts.toString(),
+        decode: decodeJudge.toString(),
+        isolation: [gradeInIsolation.toString(), readFileSync(worker, "utf8")],
+        provider: providerContext(model),
       }),
     ),
   };
@@ -97,11 +117,67 @@ export function loadJudges(paths) {
   return judges;
 }
 
-/** The fixed provider context a judge runs in, hashed into its digest. */
-function providerContext(kind) {
-  return kind === "claude-agent-sdk"
-    ? { systemPrompt: CLAUDE_PLANNING_SYSTEM_PROMPT, tools: "none" }
-    : { systemPrompt: null, sandbox: "read-only", cwd: "empty Git repository" };
+/** Locked SDK versions, from package-lock.json. */
+function lockedVersions(names) {
+  const lock = JSON.parse(
+    readFileSync(join(root, "package-lock.json"), "utf8"),
+  );
+  return Object.fromEntries(
+    names.map((name) => [
+      name,
+      lock.packages?.[`node_modules/${name}`]?.version,
+    ]),
+  );
+}
+
+/**
+ * The resolved provider options a judge runs with, hashed into its digest.
+ * Host paths are placeholders; the Claude worker environment is host data and
+ * is left out.
+ */
+function providerContext(model) {
+  const selection = {
+    model: model.model,
+    reasoningEffort: model.reasoningEffort,
+  };
+  if (model.kind === "claude-agent-sdk") {
+    const {
+      abortController: _abort,
+      env: _env,
+      ...options
+    } = claudePlanningOptions({
+      config: {
+        kind: "claude-agent-sdk",
+        maxOutputTokens: model.maxOutputTokens,
+        planner: selection,
+        reviewer: selection,
+      },
+      selection,
+      schema: judgeSchema(),
+      cwd: "<empty directory>",
+      credentialDirectory: "<empty credential directory>",
+      abortController: undefined,
+    });
+    return {
+      adapter: CLAUDE_PLANNING_ADAPTER,
+      options,
+      versions: lockedVersions(["@anthropic-ai/claude-agent-sdk"]),
+    };
+  }
+  return {
+    adapter: CODEX_PLANNING_ADAPTER,
+    thread: {
+      ...new CodexPlanningModel(
+        "<empty Git repository>",
+        selection,
+        selection,
+      ).transport.settings("reviewer"),
+      workingDirectory: "<empty Git repository>",
+      codexHome: "<isolated: auth.json only>",
+    },
+    outputSchema: judgeSchema(),
+    versions: lockedVersions(["@openai/codex-sdk", "@openai/codex"]),
+  };
 }
 
 /** Structured output for the judge: one verdict per dimension. */
@@ -132,7 +208,7 @@ export function judgeSchema() {
  * What the judge sees: the Objective, sources, repository facts and the plan.
  * Production review findings are left out so the judge grades independently.
  */
-export function judgeInput(plan, repository, stoppedForOperatorDecision) {
+export function judgeInput(plan, repository) {
   const objective =
     plan.sources.find((source) => source.path === "OBJECTIVE")?.content ?? "";
   return {
@@ -142,7 +218,6 @@ export function judgeInput(plan, repository, stoppedForOperatorDecision) {
       .map(({ path, heading, content }) => ({ path, heading, content })),
     repository,
     plan: {
-      stoppedForOperatorDecision,
       items: plan.graph.items.map(
         ({ inputSources: _inputs, executionBinding: _binding, ...item }) =>
           item,
@@ -199,14 +274,14 @@ export function decodeJudge(response) {
 
 /**
  * The provider transport for the judge's pinned model, reusing Factory's
- * planning transports (and so the operator's provider login). A module
- * exporting `createJudgeTransport({ judge, checkout })` replaces it in tests.
+ * planning transports (and so the operator's provider login), working in
+ * `directory`. A module exporting `createJudgeTransport({ judge })` replaces
+ * it in tests.
  */
-export async function judgeTransport(judge, checkout, module) {
+export async function judgeTransport(judge, directory, module) {
   if (module)
     return (await import(pathToFileURL(module).href)).createJudgeTransport({
       judge,
-      checkout,
     });
   const selection = {
     model: judge.model.model,
@@ -219,12 +294,7 @@ export async function judgeTransport(judge, checkout, module) {
       planner: selection,
       reviewer: selection,
     }).transport;
-  // Codex runs in an empty directory: like the Claude judge, it sees only the
-  // input, never the target's files or instructions.
-  // Codex runs only inside a Git repository, so the directory is an empty one.
-  const empty = mkdtempSync(join(tmpdir(), "factory-codex-judge-"));
-  execFileSync("git", ["init", "-q", empty], { stdio: "ignore" });
-  return new CodexPlanningModel(empty, selection, selection).transport;
+  return new CodexPlanningModel(directory, selection, selection).transport;
 }
 
 /** Run the judge once. Returns the decoded grade, or an error and usage. */
@@ -261,24 +331,58 @@ export async function runJudge(judge, input, transport) {
   }
 }
 
-/** Grade one plan with every judge in the panel, concurrently. */
-export async function runPanel(judges, input, checkout, module) {
-  return Promise.all(
-    judges.map(async (judge) => {
-      let transport;
-      try {
-        transport = await judgeTransport(judge, checkout, module);
-      } catch (error) {
-        return {
-          judge: judge.name,
-          digest: judge.digest,
-          verdict: "error",
-          error: error instanceof Error ? error.message : String(error),
-          tokens: null,
-          wallMs: 0,
-        };
-      }
-      return runJudge(judge, input, transport);
-    }),
-  );
+/**
+ * Grade one plan with every judge in the panel, in a separate process whose
+ * working directory is an empty Git repository (Codex runs only in one) and
+ * whose CODEX_HOME holds only the operator's auth.json. Nothing about the run
+ * is on disk near it, and the temporary directory is removed afterwards.
+ */
+export async function gradeInIsolation(judges, input, module) {
+  const scratch = mkdtempSync(join(tmpdir(), "factory-plan-judge-"));
+  const failAll = (error) =>
+    judges.map((judge) => ({
+      judge: judge.name,
+      digest: judge.digest,
+      verdict: "error",
+      error: error instanceof Error ? error.message : String(error),
+      tokens: null,
+      wallMs: 0,
+    }));
+  try {
+    const work = join(scratch, "work");
+    const codexHome = join(scratch, "codex-home");
+    mkdirSync(work);
+    mkdirSync(codexHome);
+    execFileSync("git", ["init", "-q", work], { stdio: "ignore" });
+    const auth = join(
+      process.env.CODEX_HOME ?? join(homedir(), ".codex"),
+      "auth.json",
+    );
+    if (existsSync(auth)) copyFileSync(auth, join(codexHome, "auth.json"));
+    const request = join(scratch, "request.json");
+    writeFileSync(
+      request,
+      JSON.stringify({
+        judges: judges.map((judge) => judge.path),
+        input,
+        module,
+      }),
+    );
+    // The run's private XDG directories would point the judge at run files.
+    const {
+      XDG_STATE_HOME: _state,
+      XDG_CONFIG_HOME: _config,
+      ...environment
+    } = process.env;
+    await promisify(execFile)(process.execPath, [worker, request], {
+      cwd: work,
+      env: { ...environment, CODEX_HOME: codexHome },
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return JSON.parse(readFileSync(join(scratch, "response.json"), "utf8"));
+  } catch (error) {
+    return failAll(error);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }

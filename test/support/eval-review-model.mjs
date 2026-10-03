@@ -1,8 +1,11 @@
 /**
  * Credential-free `--planning-model` for review-only evals. It flags a plan
- * only when its graph text shows a merge assumption, an invented check name
- * or a worker-written test, so per-defect recall differs by defect.
+ * only when its graph shows a merge assumption, an invented check name or a
+ * worker-written test, so per-defect recall differs by defect. A finding
+ * names the offending item or check when it can, as a reviewer would.
  */
+const FLAG = /merged into main|has merged|build-and-test|new unit tests/;
+
 export function createPlanningModel() {
   return {
     async generateStructured() {
@@ -17,16 +20,24 @@ export function createPlanningModel() {
         usageAvailable: true,
         usage: { inputTokens: 100, outputTokens: 10 },
       });
-      const text = JSON.stringify(request.graph);
-      const flagged =
-        /merged into main|has merged|build-and-test|new unit tests/.test(text);
+      const item = request.graph.items.find((entry) =>
+        FLAG.test(JSON.stringify(entry)),
+      );
+      const gate = (request.graph.requiredPreIntegrationChecks ?? []).find(
+        (entry) => FLAG.test(entry.checkName),
+      );
+      const subject = item
+        ? `Item ${item.id}`
+        : gate
+          ? `Check ${gate.checkName}`
+          : null;
       return {
         packetId: request.reviewPacket.id,
-        findings: flagged
+        findings: subject
           ? [
               {
                 evidenceIndices: [0],
-                detail: "The plan assumes a merge or an unsupported check.",
+                detail: `${subject} assumes a merge or an unsupported check.`,
                 question: "Fix the plan?",
               },
             ]

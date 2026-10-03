@@ -4,8 +4,6 @@
 import { parse } from "yaml";
 
 const isWork = (item) => !item.kind || item.kind === "work";
-/** The controller's error prefix when planning stops for an operator. */
-const UNDELEGATED_DECISION = "Planning needs an undelegated decision";
 
 /** Longest dependency chain, counted in Work Items. */
 export function criticalPath(graph) {
@@ -40,19 +38,45 @@ export function proofKinds(graph) {
 }
 
 /**
- * Command-line obligations left to final review. An obligation is a command
- * line when its criterion contains, character for character, a command the
- * plan's own authority receipts authorize. Final review cannot replace a
- * required command.
+ * The command a criterion requires, when its trimmed text is exactly one
+ * command line (optionally one code span) that a source declares as a bullet
+ * and that is not a Final validation command; otherwise null. Final
+ * validation runs its commands anyway, so those criteria are exempt.
+ */
+export function requiredCommandLine(text, commandLines, finalCommands) {
+  const trimmed = text.trim();
+  const command = /^`[^`]+`$/.test(trimmed)
+    ? trimmed.slice(1, -1).trim()
+    : trimmed;
+  return commandLines.has(command) && !finalCommands.includes(command)
+    ? command
+    : null;
+}
+
+/** Commands that pinned sources declare as bullets of exactly one code span. */
+export function sourceCommandLines(sources) {
+  const lines = new Set();
+  for (const source of sources)
+    for (const line of source.content.split("\n")) {
+      const match = /^\s*[-*]\s+`([^`]+)`\s*$/.exec(line);
+      if (match) lines.add(match[1].trim());
+    }
+  return lines;
+}
+
+/**
+ * Command-line obligations left to final review: criteria that are exactly
+ * one source-declared command line, outside Final validation, proved by
+ * final review instead of by running the command.
  */
 export function finalReviewInsteadOfCommand(plan) {
-  const commands = (plan.commands ?? [])
-    .filter((receipt) => receipt.hostExecution === "authorized")
-    .map((receipt) => receipt.command);
+  const lines = sourceCommandLines(plan.sources);
   const criteria = plan.graph.coverage
     .filter((entry) => entry.proof.kind === "final-review")
     .map((entry) => entry.source.text)
-    .filter((text) => commands.some((command) => text.includes(command)));
+    .filter((text) =>
+      requiredCommandLine(text, lines, plan.finalCommands ?? []),
+    );
   return { count: criteria.length, criteria };
 }
 
@@ -155,24 +179,16 @@ export function firstTry(events, finalReviewClean) {
   return finalReviewClean ? "accepted" : "review-findings";
 }
 
-/** Whether a run met its case's declared expectation; failed lists why not. */
+/**
+ * Whether a run met its case's declared expectation; failed lists why not.
+ * An infrastructure error says nothing about planning quality: null.
+ */
 export function expectation(expect, run, graph) {
-  if (!expect) return null;
+  if (!expect || run.outcome === "error") return null;
   const failed = [];
   const planned = run.planned && graph;
-  if (expect.outcome === "plan" && run.review !== "clean")
-    failed.push(`expected a clean plan, got ${run.review ?? "no plan"}`);
-  if (expect.outcome === "question") {
-    // A structural stop: a plan waiting for a decision, or planning that
-    // ended with the controller's undelegated-decision refusal.
-    const stopped = planned
-      ? run.review !== "clean"
-      : (run.error ?? "").startsWith(UNDELEGATED_DECISION);
-    if (!stopped)
-      failed.push(
-        `expected an operator question, got ${planned ? "a clean plan" : "no plan"}`,
-      );
-  }
+  if (expect.outcome && run.outcome !== expect.outcome)
+    failed.push(`expected outcome ${expect.outcome}, got ${run.outcome}`);
   if (planned) {
     const required = new Set(
       (graph.requiredPreIntegrationChecks ?? []).map((gate) => gate.checkName),

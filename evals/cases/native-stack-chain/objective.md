@@ -18,6 +18,9 @@ but not merged when its dependent starts; it merges with the stack.
   one example each, and `node scripts/check.mjs docs` passes.
 - Every pull request passes the required `unit-tests` check before it
   merges.
+- `truncate` throws a `RangeError` when `max` is not an integer, such as
+  `2.5`.
+- `npm test`
 
 ## Planning sources
 

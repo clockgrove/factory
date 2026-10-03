@@ -17,6 +17,7 @@ specifies, and list it in `gallery.json`.
   requires LFS. A human selects one set.
 - `gallery.json` gives the reference image `"thumb": "thumbs/source.png"`.
 - `node scripts/check-gallery.mjs thumbs` passes.
+- `node scripts/check-gallery.mjs manifest`
 
 ## Planning sources
 

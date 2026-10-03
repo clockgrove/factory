@@ -23,10 +23,16 @@
         "title": "Implement truncate",
         "goal": "Add truncate(text, max) as docs/SPEC.md#Truncate specifies.",
         "acceptance": [
-          "truncate returns text unchanged up to max characters, otherwise the first max - 1 characters followed by …, and throws RangeError when max is not an integer of at least 1."
+          "truncate returns text unchanged up to max characters, otherwise the first max - 1 characters followed by …, and throws RangeError when max is not an integer of at least 1.",
+          "truncate throws RangeError when max is not an integer, such as 2.5."
         ],
         "nonGoals": ["The command line, docs/CLI.md and wrap."],
-        "citations": [{ "path": "docs/SPEC.md", "heading": "Truncate" }],
+        "citations": [
+          {
+            "path": "docs/SPEC.md",
+            "heading": "Truncate"
+          }
+        ],
         "dependencies": [],
         "ownedPaths": ["src/truncate.mjs", "test/truncate.test.mjs"],
         "validation": [
@@ -51,7 +57,12 @@
           "textkit slug and textkit truncate MAX read standard input and print the result; an unknown subcommand prints usage to standard error and exits 2."
         ],
         "nonGoals": ["The wrap subcommand, docs/CLI.md and src/ changes."],
-        "citations": [{ "path": "docs/SPEC.md", "heading": "Command line" }],
+        "citations": [
+          {
+            "path": "docs/SPEC.md",
+            "heading": "Command line"
+          }
+        ],
         "dependencies": ["truncate"],
         "ownedPaths": ["bin/textkit.mjs"],
         "validation": [
@@ -72,8 +83,14 @@
         ],
         "nonGoals": ["Code changes."],
         "citations": [
-          { "path": "docs/SPEC.md", "heading": "Command line" },
-          { "path": "docs/SPEC.md", "heading": "Documentation" }
+          {
+            "path": "docs/SPEC.md",
+            "heading": "Command line"
+          },
+          {
+            "path": "docs/SPEC.md",
+            "heading": "Documentation"
+          }
         ],
         "dependencies": ["cli"],
         "ownedPaths": ["docs/CLI.md"],
@@ -96,7 +113,10 @@
         ],
         "nonGoals": ["Any file change."],
         "citations": [
-          { "path": "CONTRIBUTING.md", "heading": "Required checks" }
+          {
+            "path": "CONTRIBUTING.md",
+            "heading": "Required checks"
+          }
         ],
         "dependencies": ["truncate", "cli", "cli-docs"],
         "ownedPaths": [],
@@ -108,22 +128,50 @@
       {
         "criterion": 0,
         "itemId": "truncate",
-        "proof": { "kind": "result-command", "validationIndex": 0 }
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
       },
       {
         "criterion": 1,
         "itemId": "cli",
-        "proof": { "kind": "result-command", "validationIndex": 0 }
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
       },
       {
         "criterion": 2,
         "itemId": "cli-docs",
-        "proof": { "kind": "result-command", "validationIndex": 0 }
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
       },
       {
         "criterion": 3,
         "itemId": "docs-build-check",
-        "proof": { "kind": "integrated-ci", "checkName": "docs-build" }
+        "proof": {
+          "kind": "integrated-ci",
+          "checkName": "docs-build"
+        }
+      },
+      {
+        "criterion": 4,
+        "itemId": "truncate",
+        "proof": {
+          "kind": "result-semantic",
+          "acceptanceIndex": 1
+        }
+      },
+      {
+        "criterion": 5,
+        "itemId": "truncate",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 1
+        }
       }
     ]
   }

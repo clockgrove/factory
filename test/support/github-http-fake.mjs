@@ -103,7 +103,8 @@ const validation = (message, errors = []) =>
 
 function gitEnvironment() {
   const env = { ...process.env };
-  for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
+  for (const key of Object.keys(env))
+    if (key.startsWith("GIT_")) delete env[key];
   return {
     ...env,
     GIT_CONFIG_GLOBAL: "/dev/null",
@@ -378,7 +379,9 @@ export class GitHubHttpFake {
     }
   }
 
+  /** Every rule counts every request it matches; the first due rule fires. */
   matchRules(entry) {
+    let fired;
     for (const rule of this.rules) {
       const matches =
         typeof rule.match === "function"
@@ -389,14 +392,15 @@ export class GitHubHttpFake {
       if (!matches) continue;
       rule.seen++;
       if (
+        !fired &&
         rule.seen >= rule.occurrence &&
         rule.seen < rule.occurrence + rule.times
       ) {
         rule.fired++;
-        return rule;
+        fired = rule;
       }
     }
-    return undefined;
+    return fired;
   }
 
   /** Respond, close, or crash according to a fired rule. Returns true when done. */
@@ -667,7 +671,10 @@ export class GitHubHttpFake {
   }
 
   page(query, items, path) {
-    const perPage = Math.min(Math.max(Number(query.get("per_page")) || 30, 1), 100);
+    const perPage = Math.min(
+      Math.max(Number(query.get("per_page")) || 30, 1),
+      100,
+    );
     const page = Math.max(Number(query.get("page")) || 1, 1);
     const last = Math.max(Math.ceil(items.length / perPage), 1);
     const link = (target) => {
@@ -677,8 +684,10 @@ export class GitHubHttpFake {
       return `<${API}${path}?${next}>`;
     };
     const links = [];
-    if (page < last) links.push(`${link(page + 1)}; rel="next"`, `${link(last)}; rel="last"`);
-    if (page > 1) links.push(`${link(1)}; rel="first"`, `${link(page - 1)}; rel="prev"`);
+    if (page < last)
+      links.push(`${link(page + 1)}; rel="next"`, `${link(last)}; rel="last"`);
+    if (page > 1)
+      links.push(`${link(1)}; rel="first"`, `${link(page - 1)}; rel="prev"`);
     return {
       data: items.slice((page - 1) * perPage, page * perPage),
       headers: links.length ? { link: links.join(", ") } : {},
@@ -751,7 +760,8 @@ export class GitHubHttpFake {
   /** GitHub follows pushes to an open PR's head branch. */
   async synchronizeHeads() {
     const open = Object.values(this.state.pulls).filter(
-      (pull) => !pull.merged_at && this.state.issues[pull.number].state === "open",
+      (pull) =>
+        !pull.merged_at && this.state.issues[pull.number].state === "open",
     );
     if (!open.length) return;
     const refs = await this.refs();
@@ -772,7 +782,9 @@ export class GitHubHttpFake {
       base,
       head,
     );
-    return result.status === 0 ? { tree: result.stdout.split("\n")[0] } : undefined;
+    return result.status === 0
+      ? { tree: result.stdout.split("\n")[0] }
+      : undefined;
   }
 
   /** Create a merge commit of `headSha` into `baseRef` like GitHub's merge button. */
@@ -837,9 +849,15 @@ export class GitHubHttpFake {
         owner: { login: this.owner, id: 1, type: "User" },
         private: false,
         default_branch: this.defaultBranch,
-        allow_merge_commit: (this.options.mergeMethods ?? ["merge"]).includes("merge"),
-        allow_squash_merge: (this.options.mergeMethods ?? ["merge"]).includes("squash"),
-        allow_rebase_merge: (this.options.mergeMethods ?? ["merge"]).includes("rebase"),
+        allow_merge_commit: (this.options.mergeMethods ?? ["merge"]).includes(
+          "merge",
+        ),
+        allow_squash_merge: (this.options.mergeMethods ?? ["merge"]).includes(
+          "squash",
+        ),
+        allow_rebase_merge: (this.options.mergeMethods ?? ["merge"]).includes(
+          "rebase",
+        ),
       },
     };
   }
@@ -1069,11 +1087,7 @@ export class GitHubHttpFake {
   }
 
   listLabels(s, { query }) {
-    const page = this.page(
-      query,
-      s.labels,
-      `/repos/${this.repository}/labels`,
-    );
+    const page = this.page(query, s.labels, `/repos/${this.repository}/labels`);
     return {
       status: 200,
       data: page.data.map((label) => this.labelJson(s, label.name)),
@@ -1260,7 +1274,9 @@ export class GitHubHttpFake {
       if (s.stacks.some((stack) => stack.pulls.includes(number)))
         throw validation(`Pull request #${number} is already in a stack`);
       if (index && pull.base.ref !== s.pulls[numbers[index - 1]].head.ref)
-        throw validation(`Pull request #${number} does not stack on its predecessor`);
+        throw validation(
+          `Pull request #${number} does not stack on its predecessor`,
+        );
     }
     const stack = {
       number: s.nextStack++,
@@ -1293,7 +1309,9 @@ export class GitHubHttpFake {
     )
       throw new HttpError(405, "A merge is already in progress");
     this.checkMergeable(s, number, body);
-    const stack = s.stacks.find((candidate) => candidate.pulls.includes(number));
+    const stack = s.stacks.find((candidate) =>
+      candidate.pulls.includes(number),
+    );
     if (stack && stack.pulls.at(-1) !== number)
       throw new HttpError(405, "Merge a stack from its top pull request");
     const job = {
@@ -1305,7 +1323,10 @@ export class GitHubHttpFake {
     };
     s.jobs[job.uuid] = job;
     if (job.polls <= 0) await this.applyJob(s, job);
-    return { status: 202, data: { status: "pending", details: { uuid: job.uuid } } };
+    return {
+      status: 202,
+      data: { status: "pending", details: { uuid: job.uuid } },
+    };
   }
 
   async mergeAsyncStatus(s, { params }) {
@@ -1354,7 +1375,8 @@ export class GitHubHttpFake {
       ["error", "failure"].includes(status.state),
     )
       ? "failure"
-      : statuses.length && statuses.every((status) => status.state === "success")
+      : statuses.length &&
+          statuses.every((status) => status.state === "success")
         ? "success"
         : "pending";
     return {
@@ -1384,20 +1406,27 @@ export class GitHubHttpFake {
       };
     const pull = s.pulls[number];
     if (!pull)
-      return { status: 200, data: { data: { repository: { pullRequest: null } } } };
+      return {
+        status: 200,
+        data: { data: { repository: { pullRequest: null } } },
+      };
     // Mergeability is computed lazily: the live counter, not the snapshot.
-    this.state.readinessReads[number] = (this.state.readinessReads[number] ?? 0) + 1;
+    this.state.readinessReads[number] =
+      (this.state.readinessReads[number] ?? 0) + 1;
     let status = this.options.readiness?.(pull, s);
     if (!status) {
       if (
-        this.state.readinessReads[number] <= (this.options.readinessUnknownReads ?? 0)
+        this.state.readinessReads[number] <=
+        (this.options.readinessUnknownReads ?? 0)
       )
         status = "UNKNOWN";
       else {
         const refs = await this.refs();
         const base = refs.get(pull.base.ref);
         status =
-          base && (await this.conflicts(base, pull.head.sha)) ? "CLEAN" : "DIRTY";
+          base && (await this.conflicts(base, pull.head.sha))
+            ? "CLEAN"
+            : "DIRTY";
       }
     }
     return {
@@ -1514,14 +1543,16 @@ export const faults = {
     kind: "status",
     status: 429,
     message: "API rate limit exceeded",
-    headers: () => (retryAfter === undefined ? {} : { "retry-after": String(retryAfter) }),
+    headers: () =>
+      retryAfter === undefined ? {} : { "retry-after": String(retryAfter) },
   }),
   secondaryRateLimit: ({ retryAfter } = {}) => ({
     kind: "status",
     status: 403,
     message:
       "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
-    headers: () => (retryAfter === undefined ? {} : { "retry-after": String(retryAfter) }),
+    headers: () =>
+      retryAfter === undefined ? {} : { "retry-after": String(retryAfter) },
   }),
   primaryRateLimit: ({ resetInSeconds } = {}) => ({
     kind: "status",

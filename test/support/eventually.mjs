@@ -23,7 +23,8 @@ export async function eventually(
     }
     if (Date.now() >= deadline)
       throw (
-        last ?? new Error(`Timed out after ${timeoutMs}ms waiting for ${message}`)
+        last ??
+        new Error(`Timed out after ${timeoutMs}ms waiting for ${message}`)
       );
     await sleep(intervalMs);
   }

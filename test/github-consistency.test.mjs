@@ -122,9 +122,7 @@ const scenarios = [
   {
     name: "429 with retry-after on issue creation",
     deliveries: BOTH,
-    http: [
-      { match: CREATE_ISSUE, ...faults.rateLimited({ retryAfter: 1 }) },
-    ],
+    http: [{ match: CREATE_ISSUE, ...faults.rateLimited({ retryAfter: 1 }) }],
   },
   {
     name: "403 secondary rate limit with retry-after on PR creation",
@@ -187,9 +185,7 @@ const scenarios = [
   {
     name: "another contributor pushes to the default branch after the first merge",
     deliveries: ["regular"],
-    http: [
-      { match: MERGE, kind: "after", run: pushForeign },
-    ],
+    http: [{ match: MERGE, kind: "after", run: pushForeign }],
   },
   {
     name: "another contributor pushes to the default branch after the last merge",

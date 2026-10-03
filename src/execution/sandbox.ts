@@ -16,8 +16,14 @@ import type {
   SandboxProvider,
   WorkGraph,
 } from "../contracts.js";
-import { AuthenticationRequiredError } from "../contracts.js";
+import { AuthenticationRequiredError, Interruption } from "../contracts.js";
 import type { JsonValue } from "../config.js";
+import {
+  SettledAttemptFailure,
+  failAttempt,
+  retryTransient,
+  transientRequestFailure,
+} from "../work-repair.js";
 import { assertDurableValue } from "./checkpoint.js";
 import { collectWorktreeResult } from "./local.js";
 import { prepareManagedBase } from "./managed-base.js";
@@ -37,7 +43,9 @@ import {
 
 interface Active {
   request: ExecutionRequest;
-  terminal?: "complete" | "cancelled";
+  terminal?: "complete" | "failed" | "cancelled";
+  /** Why the attempt was ended; recorded before destroying so a restart finishes it. */
+  stopped?: { detail: string; interrupted: boolean };
   result?: ExecutionResult;
   harnessStarted?: boolean;
   phase:
@@ -124,6 +132,14 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<unknown> {
     const a = this.active(handle);
+    // Observe and collect only read the harness, so an invocation whose
+    // outcome was lost, or that a restart superseded, is simply sent again.
+    if (
+      a.operation !== "start" &&
+      (a.phase === "submitting" ||
+        (a.phase === "invoked" && a.operation !== operation))
+    )
+      a.phase = "ready";
     if (a.phase === "ready") {
       a.operation = operation;
       a.output = `${randomUUID()}.json`;
@@ -145,9 +161,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       this.save(handle, context);
     }
     if (a.phase !== "invoked" || a.operation !== operation || !a.process)
-      throw new Error(
-        "Sandbox external invocation outcome unknown; operator direction required",
-      );
+      throw new Error(`Sandbox ${a.phase} attempt cannot invoke ${operation}`);
     let observed = await this.options.provider.observe(a.sandbox!, a.process);
     while (observed.state === "running") {
       if (context?.cancelled())
@@ -208,8 +222,80 @@ export class SandboxExecutionDriver implements ExecutionDriver {
         phase: "creating",
       } satisfies Active,
     };
-    const a = this.active(handle);
     this.save(handle, context);
+    try {
+      await this.launch(handle, context);
+    } catch (error) {
+      // A transient failure in a resumable phase is resolved by collection.
+      if (
+        context?.cancelled() ||
+        !transientRequestFailure(error) ||
+        !this.resumable(this.active(handle))
+      )
+        await this.fail(error, handle, context);
+    }
+    return handle;
+  }
+  /** Preparation and harness start cannot repeat inside one sandbox. */
+  private resumable(a: Active): boolean {
+    return !(
+      a.phase === "preparing" ||
+      (a.phase === "submitting" && a.operation === "start")
+    );
+  }
+  /** Ends the attempt for a failed step; see failAttempt. */
+  private async fail(
+    error: unknown,
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<never> {
+    // A transient failure where the launch cannot resume ends the attempt
+    // as an interruption directly, without spending a step interruption.
+    if (
+      !context?.cancelled() &&
+      transientRequestFailure(error) &&
+      !this.resumable(this.active(handle))
+    )
+      return this.settle(
+        handle,
+        `Sandbox launch was interrupted; repeating with a fresh attempt: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+        context,
+      );
+    return failAttempt(error, {
+      transient: transientRequestFailure,
+      expired: false,
+      cancelled: context?.cancelled() ?? false,
+      settle: (detail) => this.settle(handle, detail, false, context),
+    });
+  }
+  /**
+   * Creates (or adopts) the sandbox, prepares it and starts the harness,
+   * resuming from the recorded phase. Preparation and harness start cannot
+   * repeat in one sandbox, so a restart during either settles the attempt.
+   */
+  private async launch(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<void> {
+    const a = this.active(handle);
+    if (a.phase === "creating") await this.prepare(handle, context);
+    else if (!this.resumable(a))
+      await this.settle(
+        handle,
+        `Sandbox ${a.phase === "preparing" ? "preparation" : "harness start"} was interrupted; repeating with a fresh attempt`,
+        true,
+        context,
+      );
+    if (!a.harnessStarted) await this.invoke(handle, "start", context);
+  }
+  private async prepare(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<void> {
+    const a = this.active(handle);
+    const identity = handle.identity;
+    const request = a.request;
     a.sandbox = sandboxJsonValue(
       await this.options.provider.create({ attemptId: identity }),
     ) as SandboxHandle;
@@ -287,8 +373,6 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     }
     a.phase = "ready";
     this.save(handle, context);
-    await this.invoke(handle, "start", context);
-    return handle;
   }
   async observe(
     handle: ExecutionHandle,
@@ -296,7 +380,26 @@ export class SandboxExecutionDriver implements ExecutionDriver {
   ): Promise<ExecutionObservation> {
     const a = this.active(handle);
     if (a.result) return { state: "complete" };
-    if (a.phase === "destroyed") return { state: a.terminal! };
+    if (a.phase === "destroyed")
+      return {
+        state: a.terminal!,
+        ...(a.stopped && {
+          detail: a.stopped.detail,
+          ...(a.stopped.interrupted && { interrupted: true }),
+        }),
+      };
+    if (
+      a.phase === "preparing" ||
+      (a.phase === "submitting" && a.operation === "start")
+    )
+      return {
+        state: "failed",
+        interrupted: true,
+        detail:
+          "Sandbox launch was interrupted; repeating with a fresh attempt",
+      };
+    if (!a.harnessStarted && a.operation !== "start")
+      return { state: "running", detail: "Preparing the sandbox" };
     if (a.operation === "start") await this.invoke(handle, "start", context);
     const result = (await this.invoke(
       handle,
@@ -309,15 +412,25 @@ export class SandboxExecutionDriver implements ExecutionDriver {
   }
   private async destroy(
     handle: ExecutionHandle,
-    terminal: "complete" | "cancelled",
+    terminal: NonNullable<Active["terminal"]>,
     context?: ExecutionContext,
   ): Promise<void> {
     const a = this.active(handle);
     if (a.phase !== "destroyed") {
+      if (!a.sandbox) {
+        // A create whose response was lost may have left a tagged sandbox.
+        const found = await this.options.provider.find({
+          attemptId: handle.identity,
+        });
+        if (found) {
+          a.sandbox = sandboxJsonValue(found) as SandboxHandle;
+          this.save(handle, context);
+        }
+      }
       a.phase = "destroying";
       a.terminal = terminal;
       this.save(handle, context);
-      await this.options.provider.destroy(a.sandbox!);
+      if (a.sandbox) await this.options.provider.destroy(a.sandbox);
       a.phase = "destroyed";
       this.save(handle, context);
     }
@@ -326,45 +439,90 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       force: true,
     });
   }
+  /** Records why the attempt ended and destroys its sandbox, so a repeat never runs beside it. */
+  private async settle(
+    handle: ExecutionHandle,
+    detail: string,
+    interrupted: boolean,
+    context?: ExecutionContext,
+  ): Promise<never> {
+    const a = this.active(handle);
+    a.stopped ??= { detail, interrupted };
+    this.save(handle, context);
+    try {
+      await this.destroy(handle, a.terminal ?? "failed", context);
+    } catch (error) {
+      throw transientRequestFailure(error) ? new Interruption(error) : error;
+    }
+    throw new SettledAttemptFailure(
+      new Error(a.stopped.detail),
+      a.stopped.interrupted ? "interruption" : "implementation",
+    );
+  }
   async cancel(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<void> {
-    const a = this.active(handle);
-    if (a.phase === "destroyed") {
-      await this.destroy(handle, a.terminal!, context);
-      return;
-    }
-    if (!a.sandbox)
-      throw new Error(
-        "Sandbox create outcome unknown; operator direction required",
-      );
-    if (a.phase === "submitting")
-      throw new Error(
-        "Sandbox process start outcome unknown; operator direction required",
-      );
     // All supported sandbox-harness execution resources belong to this attempt's
     // sandbox. Confirmed destruction is cancellation; no helper can run afterward.
-    await this.destroy(handle, a.terminal ?? "cancelled", context);
+    await this.destroy(
+      handle,
+      this.active(handle).terminal ?? "cancelled",
+      context,
+    );
   }
+  /**
+   * Any failure either interrupts the step (it reattaches) or destroys the
+   * sandbox first, so a repeated attempt never runs beside it.
+   */
   async collect(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<ExecutionResult> {
     const a = this.active(handle);
-    if (a.result) {
-      await this.destroy(handle, "complete", context);
-      return a.result;
+    if (!a.result) {
+      if (a.stopped)
+        await this.settle(
+          handle,
+          a.stopped.detail,
+          a.stopped.interrupted,
+          context,
+        );
+      try {
+        a.result = await this.produce(handle, context);
+      } catch (error) {
+        await this.fail(error, handle, context);
+      }
+      this.save(handle, context);
     }
+    try {
+      await this.destroy(handle, "complete", context);
+    } catch (error) {
+      throw transientRequestFailure(error) ? new Interruption(error) : error;
+    }
+    return a.result!;
+  }
+  private async produce(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionResult> {
+    const a = this.active(handle);
+    // Launch and observe resume from the recorded phase, so a transient
+    // failure is retried in place.
+    const step = <T>(run: () => Promise<T>) =>
+      retryTransient(run, transientRequestFailure);
     if (a.operation !== "collect") {
-      let observed = await this.observe(handle, context);
+      let observed = await step(async () => {
+        if (!a.harnessStarted) await this.launch(handle, context);
+        return this.observe(handle, context);
+      });
       while (observed.state === "running") {
         if (context?.cancelled())
           throw new Error(
             "Sandbox collection interrupted; owned attempt retained",
           );
         await new Promise((resolve) => setTimeout(resolve, 25));
-        observed = await this.observe(handle, context);
+        observed = await step(() => this.observe(handle, context));
       }
       if (observed.state !== "complete" && observed.authentication)
         throw new AuthenticationRequiredError(
@@ -372,11 +530,16 @@ export class SandboxExecutionDriver implements ExecutionDriver {
           observed.authentication,
         );
       if (observed.state !== "complete")
-        throw new Error(
-          `Sandbox harness ${observed.state}; no complete result`,
+        await this.settle(
+          handle,
+          `Sandbox harness ${observed.state}; no complete result${observed.detail ? `: ${observed.detail}` : ""}`,
+          observed.interrupted === true,
+          context,
         );
     }
-    const value = (await this.invoke(handle, "collect", context)) as {
+    const value = (await step(() =>
+      this.invoke(handle, "collect", context),
+    )) as {
       files: SandboxFile[];
       result: HarnessResult;
       archive: { path: string; digest: string; bytes: number };
@@ -444,9 +607,6 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       result.changeRef,
     );
     delete result.collection;
-    a.result = result;
-    this.save(handle, context);
-    await this.destroy(handle, "complete", context);
     return result;
   }
 }

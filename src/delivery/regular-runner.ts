@@ -1,6 +1,6 @@
 import { assertDeliveryReady } from "./readiness.js";
 import { DeliveryReadinessPending } from "./readiness.js";
-import { executionContext } from "../execution/checkpoint.js";
+import { workerContext } from "../execution/checkpoint.js";
 import {
   recordWorkFailure,
   diagnoseWorkRepair,
@@ -257,10 +257,12 @@ export async function runRegularGraph(args: {
         baseSha: itemBase,
       });
     }
-    await phases.reserve(
-      item.id,
-      work.step === "execute" ? "coding" : "validation",
-    );
+    // A reattached worker keeps the coding slot it holds while it runs remotely.
+    if (work.step !== "execute" || work.phaseReservation !== "coding")
+      await phases.reserve(
+        item.id,
+        work.step === "execute" ? "coding" : "validation",
+      );
     if (work.step === "approve-asset") {
       const selected = work.assets?.find(
         (set) => set.id === work.selectedAssetSet,
@@ -311,16 +313,10 @@ export async function runRegularGraph(args: {
             objectiveBody: args.objectiveBody,
             selectedAssets: selectedInputsForItem(state, item),
           },
-          executionContext(work, save, args.cancelled, (workerUsage) =>
-            args.diagnostics?.emit({
-              runId: state.runId,
-              itemId: item.id,
-              attemptId: work.attempt,
-              operation: "worker-usage",
-              outcome: "observed",
-              workerUsage,
-            }),
-          ),
+          workerContext(work, save, args.cancelled, args.diagnostics, {
+            runId: state.runId,
+            itemId: item.id,
+          }),
         ));
       if (!existingHandle) {
         work.execution = structuredClone(handle);
@@ -329,31 +325,19 @@ export async function runRegularGraph(args: {
       if (args.cancelled()) {
         await driver.cancel(
           handle,
-          executionContext(work, save, args.cancelled, (workerUsage) =>
-            args.diagnostics?.emit({
-              runId: state.runId,
-              itemId: item.id,
-              attemptId: work.attempt,
-              operation: "worker-usage",
-              outcome: "observed",
-              workerUsage,
-            }),
-          ),
+          workerContext(work, save, args.cancelled, args.diagnostics, {
+            runId: state.runId,
+            itemId: item.id,
+          }),
         );
         throw new Error("Objective cancelled");
       }
       const result = await driver.collect(
         handle,
-        executionContext(work, save, args.cancelled, (workerUsage) =>
-          args.diagnostics?.emit({
-            runId: state.runId,
-            itemId: item.id,
-            attemptId: work.attempt,
-            operation: "worker-usage",
-            outcome: "observed",
-            workerUsage,
-          }),
-        ),
+        workerContext(work, save, args.cancelled, args.diagnostics, {
+          runId: state.runId,
+          itemId: item.id,
+        }),
       );
       phases.release(item.id);
       recordWorkerDiscovery(state, item.id, result.discovery);
@@ -492,21 +476,18 @@ export async function runRegularGraph(args: {
     if (args.cancelled()) throw new Error("Objective cancelled");
     await deliverReviewed(item, itemBase);
   };
-  const execute = async (
-    item: WorkItem,
-    itemBase: string,
-    existingHandle?: NonNullable<FactoryState["work"][string]["execution"]>,
-  ): Promise<void> => {
+  const execute = async (item: WorkItem, itemBase: string): Promise<void> => {
     const work = state.work[item.id]!;
-    // A recorded handle is only for the first run; a repeated step after a
-    // dead worker starts a fresh attempt.
-    let handle = existingHandle;
+    // A repeated step reattaches to the recorded attempt. A settled dead
+    // worker's handle was cleared, so it starts a fresh attempt.
     try {
-      await repeatInterrupted(work, save, () => {
-        const resumed = handle;
-        handle = undefined;
-        return runStep(item, itemBase, resumed);
-      });
+      await repeatInterrupted(work, save, () =>
+        runStep(
+          item,
+          itemBase,
+          work.step === "execute" ? work.execution : undefined,
+        ),
+      );
     } catch (error) {
       if (error instanceof DeliveryReadinessPending) {
         work.waitingReason = error.message;
@@ -619,7 +600,7 @@ export async function runRegularGraph(args: {
         `Work Item ${item.id} has ambiguous active state at ${work.step ?? "unknown"}; operator direction required`,
       );
     }
-    const promise = execute(item, work.baseSha, work.execution).finally(() => {
+    const promise = execute(item, work.baseSha).finally(() => {
       active.delete(item.id);
     });
     void promise.catch(() => undefined);

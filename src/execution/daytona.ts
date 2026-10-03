@@ -94,18 +94,18 @@ function missing(error: unknown): boolean {
 }
 /** Provider SDK and API types remain confined to this adapter. No adapter retry loop or repository credentials. */
 export class DaytonaSandboxProvider implements SandboxProvider {
-  private clientPromise?: Promise<Pick<Daytona, "create" | "get">>;
+  private clientPromise?: Promise<Pick<Daytona, "create" | "get" | "list">>;
   readonly config: DaytonaConfig;
   constructor(
     config: unknown,
     private apiKey: string,
-    private suppliedClient?: Pick<Daytona, "create" | "get">,
+    private suppliedClient?: Pick<Daytona, "create" | "get" | "list">,
   ) {
     this.config = validateDaytonaConfig(config);
     if (!apiKey.trim())
       throw new Error("Daytona controller API key is unavailable");
   }
-  private client(): Promise<Pick<Daytona, "create" | "get">> {
+  private client(): Promise<Pick<Daytona, "create" | "get" | "list">> {
     this.clientPromise ??= this.suppliedClient
       ? Promise.resolve(this.suppliedClient)
       : this.loadClient();
@@ -172,14 +172,43 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       throw new Error("Daytona sandbox ownership mismatch");
     return s;
   }
-  async create({ attemptId }: SandboxRequest): Promise<SandboxHandle> {
+  /** Lists sandboxes labeled with the attempt, keeps one and deletes any extras. */
+  async find({
+    attemptId,
+  }: SandboxRequest): Promise<SandboxHandle | undefined> {
     if (!/^[a-zA-Z0-9_-]+$/.test(attemptId))
       throw new Error("Invalid Daytona attempt");
-    const owner = randomUUID();
+    const tagged: Sandbox[] = [];
+    for await (const s of (await this.client()).list({
+      labels: { "factory-attempt": attemptId },
+    }))
+      if (s.state !== "destroyed" && s.state !== "destroying") tagged.push(s);
+    const found = tagged.find((s) =>
+      /^[a-f0-9-]{36}$/.test(s.labels["factory-owner"] ?? ""),
+    );
+    for (const s of tagged)
+      if (s !== found) await s.delete(this.config.timeoutSeconds, true);
+    return (
+      found && this.handle(found, attemptId, found.labels["factory-owner"]!)
+    );
+  }
+  private handle(s: Sandbox, attemptId: string, owner: string): SandboxHandle {
+    return {
+      identity: s.id,
+      attemptId,
+      workspace: `/tmp/factory/${attemptId}`,
+      data: { owner },
+    };
+  }
+  async create({ attemptId }: SandboxRequest): Promise<SandboxHandle> {
+    // Adopt a sandbox an earlier call created before its response was lost.
+    const found = await this.find({ attemptId });
+    if (found) return found;
+    const created = randomUUID();
     const s = await (await this.client()).create(
       {
         snapshot: this.config.snapshot,
-        labels: { "factory-owner": owner, "factory-attempt": attemptId },
+        labels: { "factory-owner": created, "factory-attempt": attemptId },
         public: false,
         autoStopInterval: 0,
         autoPauseInterval: 0,
@@ -187,12 +216,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       },
       { timeout: this.config.timeoutSeconds },
     );
-    return {
-      identity: s.id,
-      attemptId,
-      workspace: `/tmp/factory/${attemptId}`,
-      data: { owner },
-    };
+    return this.handle(s, attemptId, created);
   }
   async prepareRepository(
     h: SandboxHandle,

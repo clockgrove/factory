@@ -13,6 +13,7 @@ import { execFileSync } from "node:child_process";
 import { ClaudeManagedExecutionDriver } from "../dist/execution/claude-managed.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { claudeByteDigest } from "../dist/execution/claude-managed-transfer.js";
+import { SettledAttemptFailure } from "../dist/work-repair.js";
 const config = () => ({
   agentId: "agent_pinned",
   agentVersion: 3,
@@ -68,6 +69,8 @@ const config = () => ({
   },
 });
 
+/** A response lost in transit: the provider may or may not have applied it. */
+const lost = (message) => Object.assign(new Error(message), { status: 503 });
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "factory-claude-driver-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -105,9 +108,13 @@ function fixture(t) {
     deleted: false,
     absence: true,
     sends: 0,
+    creates: 0,
+    strays: [],
   };
   const saved = [];
+  const orphans = [];
   const context = {
+    observeOrphan: (orphan) => orphans.push(orphan),
     cancelled: () => false,
     checkpoint: (h) => saved.push(structuredClone(h)),
   };
@@ -121,38 +128,79 @@ function fixture(t) {
     async verifyEnvironment() {},
     assertSession() {},
     async upload(path) {
-      assert.equal(saved.at(-1).data.phase, "upload-submitted");
+      assert.equal(saved.at(-1).data.phase, "prepared");
       const id = `file_${state.files.length}`;
       state.files.push({ id, path });
+      if (state.loseUpload && path.endsWith(state.loseUpload)) {
+        delete state.loseUpload;
+        throw lost("upload response lost");
+      }
       return { id };
     },
     async create(id, resources) {
       assert.equal(saved.at(-1).data.phase, "create-submitted");
+      assert.ok(saved.at(-1).data.createdAfter);
+      state.creates++;
+      if (state.failCreate) {
+        state.failCreate = false;
+        throw lost("create never arrived");
+      }
       state.session = {
-        id: "sesn_owned",
+        id: `sesn_${state.creates}`,
         status: "idle",
         resources,
         agent: config().agent,
         environment_id: config().environmentId,
+        metadata: { factory_attempt: id },
         budget: null,
       };
+      state.deleted = false;
+      if (state.loseCreate) {
+        state.loseCreate = false;
+        throw lost("create response lost");
+      }
       return structuredClone(state.session);
     },
+    async findSessions(identity) {
+      return state.session && !state.deleted && !state.gone
+        ? [state.session, ...state.strays]
+            .filter((s) => s.metadata.factory_attempt === identity)
+            .map((s) => structuredClone(s))
+        : [];
+    },
     async retrieve() {
+      if (state.gone)
+        throw Object.assign(new Error("session not found"), { status: 404 });
       return structuredClone(state.session);
+    },
+    async present(id) {
+      if (id !== state.session?.id)
+        return state.strays.find((s) => s.id === id);
+      return state.gone || (state.deleted && state.absence)
+        ? undefined
+        : structuredClone(state.session);
     },
     async send(id, input) {
       state.calls.push(input.type);
       state.sends++;
       assert.equal(saved.at(-1).data.sessionId, id);
-      if (state.failSend) throw new Error("lost send");
+      if (state.failSend) {
+        state.failSend = false;
+        state.onFailSend?.();
+        throw lost("lost send");
+      }
       const inputId = `input_${state.sends}`;
+      const lose = () => {
+        if (!state.loseSend) return;
+        state.loseSend = false;
+        throw lost("send response lost");
+      };
       if (input.type === "user.interrupt") {
         state.events.push(event(inputId, input.type));
         state.session.status = "idle";
         return { data: [event(inputId, input.type)] };
       }
-      if (state.sends === 1) {
+      if (saved.at(-1).data.phase === "bootstrap-submitted") {
         assert.equal(saved.at(-1).data.phase, "bootstrap-submitted");
         assert.ok(!input.content[0].text.includes("edit fixture"));
         const data = saved.at(-1).data;
@@ -173,7 +221,7 @@ function fixture(t) {
           ),
         );
         state.events = [
-          event(inputId, "user.message"),
+          event(inputId, "user.message", { content: input.content }),
           event("tool", "agent.tool_use", {
             name: "bash",
             input: { command: input.content[0].text.split("\n").at(-1) },
@@ -190,12 +238,13 @@ function fixture(t) {
         assert.equal(saved.at(-1).data.phase, "implementation-submitted");
         assert.ok(saved.at(-1).data.bootstrap);
         state.events.push(
-          event(inputId, "user.message"),
+          event(inputId, "user.message", { content: input.content }),
           event("end", "session.status_idle", {
             stop_reason: { type: "end_turn" },
           }),
         );
       }
+      lose();
       return { data: [event(inputId, "user.message")] };
     },
     async events() {
@@ -207,29 +256,25 @@ function fixture(t) {
         filename,
         size_bytes: bytes.length,
         downloadable: true,
-        scope: { type: "session", id: "sesn_owned" },
+        scope: { type: "session", id: state.session.id },
       }));
     },
     async download(id) {
       if (state.failDownload) {
         state.failDownload = false;
-        throw new Error("transient output read");
+        throw Object.assign(new Error("transient output read"), {
+          status: state.failDownloadStatus ?? 503,
+        });
       }
       return new Response(state.outputs.get(id));
     },
     async deleteSession(id) {
-      assert.equal(saved.at(-1).data.phase, "delete-submitted");
       state.calls.push(`delete:${id}`);
-      state.deleted = true;
-      return { id, type: "session_deleted" };
-    },
-    async sessionAbsent() {
-      return state.deleted && state.absence;
+      if (id === state.session?.id) state.deleted = true;
+      else state.strays = state.strays.filter((s) => s.id !== id);
     },
     async deleteFile(id) {
-      assert.equal(saved.at(-1).data.deletingFile, id);
       state.calls.push(`delete:${id}`);
-      return { id, type: "file_deleted" };
     },
     async fileAbsent() {
       return true;
@@ -270,6 +315,7 @@ function fixture(t) {
     request,
     context,
     saved,
+    orphans,
     driver,
     output,
     git,
@@ -289,28 +335,113 @@ test("Claude driver verifies bootstrap before implementation and collects exact 
   assert.equal(f.state.calls.filter((c) => c.startsWith("delete:")).length, 5);
   assert.equal(f.saved.at(-1).data.phase, "disposed");
 });
-test("Claude lost bootstrap acknowledgement persists known session and never resubmits", async (t) => {
+const settledInterruption = (error) =>
+  error instanceof SettledAttemptFailure &&
+  error.classification === "interruption";
+test("Claude create lost after submission adopts the tagged session instead of creating another", async (t) => {
   const f = fixture(t);
-  f.state.failSend = true;
-  await assert.rejects(f.driver().start(f.request, f.context), /lost send/);
-  const handle = f.saved.at(-1);
-  assert.equal(handle.data.sessionId, "sesn_owned");
-  await assert.rejects(f.driver().observe(handle, f.context), /unknown/);
-  assert.equal(f.state.sends, 1);
-  await f.driver().cancel(handle, f.context);
-  assert.equal(f.saved.at(-1).data.phase, "disposed");
+  f.state.loseCreate = true;
+  // The lost response leaves a recorded phase for collection; no step interruption is spent.
+  const handle = await f.driver().start(f.request, f.context);
+  assert.equal(f.saved.at(-1).data.phase, "create-submitted");
+  assert.equal(f.saved.at(-1).data.sessionId, undefined);
+  f.output(handle);
+  const result = await f
+    .driver()
+    .collect(structuredClone(f.saved.at(-1)), f.context);
+  assert.equal(f.git("show", `${result.changeRef}:keep.txt`), "changed");
+  assert.equal(f.state.creates, 1);
+  assert.equal(f.state.sends, 2);
+  assert.equal(f.saved.at(-1).data.sessionId, "sesn_1");
 });
-test("Claude deletion acknowledgement alone does not complete cancellation or retry deletion", async (t) => {
+test("Claude create that never arrived creates the session again", async (t) => {
+  const f = fixture(t);
+  f.state.failCreate = true;
+  const handle = await f.driver().start(f.request, f.context);
+  f.output(handle);
+  await f.driver().collect(structuredClone(f.saved.at(-1)), f.context);
+  assert.equal(f.state.creates, 2);
+  assert.equal(f.saved.at(-1).data.sessionId, "sesn_2");
+  assert.equal(f.state.files.length, 4);
+});
+test("Claude upload response lost uploads again and records the possible orphan", async (t) => {
+  const f = fixture(t);
+  f.state.loseUpload = "factory-export.mjs";
+  const handle = await f.driver().start(f.request, f.context);
+  assert.equal(f.saved.at(-1).data.files.length, 2);
+  assert.equal(f.orphans.length, 1);
+  assert.equal(f.orphans[0].resource, "file");
+  assert.match(f.orphans[0].detail, /factory-export\.mjs.*attempt/);
+  f.output(handle);
+  await f.driver().collect(structuredClone(f.saved.at(-1)), f.context);
+  assert.equal(f.state.files.length, 5);
+  assert.equal(f.saved.at(-1).data.files.length, 4);
+});
+test("Claude bootstrap send resolves from history: adopted when received, sent again when not", async (t) => {
+  for (const flag of ["loseSend", "failSend"]) {
+    const f = fixture(t);
+    f.state[flag] = true;
+    const handle = await f.driver().start(f.request, f.context);
+    assert.equal(f.saved.at(-1).data.phase, "bootstrap-submitted");
+    f.output(handle);
+    await f.driver().collect(structuredClone(f.saved.at(-1)), f.context);
+    const bootstraps = flag === "loseSend" ? 1 : 2;
+    assert.equal(f.state.sends, bootstraps + 1, flag);
+    assert.equal(f.state.creates, 1);
+  }
+});
+test("Claude implementation send resolves in place: adopted when received, sent again when not", async (t) => {
+  for (const flag of ["loseSend", "failSend"]) {
+    const f = fixture(t);
+    const handle = await f.driver().start(f.request, f.context);
+    f.state[flag] = true;
+    f.output(handle);
+    // One collection resolves the lost response without a step interruption.
+    const result = await f.driver().collect(handle, f.context);
+    assert.equal(f.git("show", `${result.changeRef}:keep.txt`), "changed");
+    assert.equal(f.state.sends, flag === "loseSend" ? 2 : 3, flag);
+  }
+});
+test("Claude unknown implementation outcome settles the session and interrupts the attempt", async (t) => {
+  const f = fixture(t);
+  const handle = await f.driver().start(f.request, f.context);
+  f.state.failSend = true;
+  // Activity the attempt cannot attribute: neither its input nor an idle session.
+  f.state.onFailSend = () => {
+    f.state.session.status = "running";
+  };
+  await assert.rejects(
+    f.driver().collect(handle, f.context),
+    settledInterruption,
+  );
+  assert.ok(
+    f.state.calls.indexOf("user.interrupt") <
+      f.state.calls.indexOf("delete:sesn_1"),
+  );
+  assert.equal(f.saved.at(-1).data.phase, "disposed");
+  assert.equal(
+    (await f.driver().observe(f.saved.at(-1), f.context)).interrupted,
+    true,
+  );
+});
+test("Claude cancellation deletes a stray tagged session left by a lost create", async (t) => {
+  const f = fixture(t);
+  const handle = await f.driver().start(f.request, f.context);
+  f.state.strays.push({
+    ...structuredClone(f.state.session),
+    id: "sesn_stray",
+  });
+  await f.driver().cancel(handle, f.context);
+  assert.ok(f.state.calls.includes("delete:sesn_stray"));
+  assert.equal(f.state.strays.length, 0);
+});
+test("Claude deletion repeats until absence is confirmed", async (t) => {
   const f = fixture(t);
   const handle = await f.driver().start(f.request, f.context);
   f.state.absence = false;
   await assert.rejects(f.driver().cancel(handle, f.context), /not confirmed/);
-  assert.equal(f.saved.at(-1).data.phase, "delete-submitted");
-  await assert.rejects(f.driver().cancel(handle, f.context), /unresolved/);
-  assert.equal(
-    f.state.calls.filter((c) => c === "delete:sesn_owned").length,
-    1,
-  );
+  await assert.rejects(f.driver().cancel(handle, f.context), /not confirmed/);
+  assert.equal(f.state.calls.filter((c) => c === "delete:sesn_1").length, 2);
   f.state.absence = true;
   await f.driver().cancel(handle, f.context);
   assert.equal(f.saved.at(-1).data.phase, "disposed");
@@ -322,26 +453,12 @@ test("Claude running cancellation records processed interrupt then deletes owned
   await f.driver().cancel(handle, f.context);
   assert.ok(
     f.state.calls.indexOf("user.interrupt") <
-      f.state.calls.indexOf("delete:sesn_owned"),
+      f.state.calls.indexOf("delete:sesn_1"),
   );
   assert.equal(
     (await f.driver().observe(handle, f.context)).state,
     "cancelled",
   );
-});
-
-test("Claude lost implementation send preserves bootstrap proof without replay", async (t) => {
-  const f = fixture(t);
-  const handle = await f.driver().start(f.request, f.context);
-  f.state.failSend = true;
-  await assert.rejects(f.driver().collect(handle, f.context), /lost send/);
-  assert.equal(f.saved.at(-1).data.phase, "implementation-submitted");
-  assert.ok(f.saved.at(-1).data.bootstrap);
-  await assert.rejects(
-    f.driver().observe(structuredClone(handle), f.context),
-    /unknown/,
-  );
-  assert.equal(f.state.sends, 2);
 });
 test("Claude refuses changed resources before implementation and reports budget stops", async (t) => {
   const f = fixture(t);
@@ -411,9 +528,105 @@ test("Claude verifies actual returned selected bytes instead of restoring origin
   );
   await assert.rejects(
     f.driver().collect(handle, f.context),
-    /changed|modified|digest|bytes|immutable/i,
+    (error) =>
+      error instanceof SettledAttemptFailure &&
+      error.classification === "implementation" &&
+      /changed|modified|digest|bytes|immutable/i.test(error.message),
   );
-  assert.equal(f.state.deleted, false);
+  // The rejected attempt's session is deleted so a new attempt never runs beside it.
+  assert.equal(f.state.deleted, true);
+});
+test("Claude refused create is a real failure, not an interruption", async (t) => {
+  const f = fixture(t);
+  const create = f.driver().args.client.create;
+  f.driver().args.client.create = async () => {
+    throw Object.assign(new Error("permission denied"), { status: 403 });
+  };
+  await assert.rejects(
+    f.driver().start(f.request, f.context),
+    (error) =>
+      error instanceof SettledAttemptFailure &&
+      error.classification === "implementation" &&
+      /permission denied/.test(error.message),
+  );
+  f.driver().args.client.create = create;
+  assert.equal(f.saved.at(-1).data.phase, "disposed");
+  assert.equal(f.state.calls.filter((c) => /^delete:file_/.test(c)).length, 4);
+});
+test("Claude refused read settles the attempt; a passed deadline settles it as a timeout", async (t) => {
+  for (const kind of ["refused", "deadline"]) {
+    const f = fixture(t);
+    const handle = await f.driver().start(f.request, f.context);
+    if (kind === "refused") {
+      f.state.failDownload = true;
+      f.state.failDownloadStatus = 403;
+    } else handle.data.startedAt -= 901_000;
+    await assert.rejects(
+      f.driver().collect(handle, f.context),
+      (error) =>
+        error instanceof SettledAttemptFailure &&
+        error.classification === "implementation" &&
+        (kind === "refused"
+          ? /transient output read/
+          : /configured timeout/
+        ).test(error.message),
+    );
+    assert.equal(f.state.deleted, true, kind);
+    assert.equal(f.saved.at(-1).data.phase, "disposed");
+    // A restart finishes the same settlement instead of resuming the work.
+    await assert.rejects(
+      f.driver().collect(structuredClone(f.saved.at(-1)), f.context),
+      (error) => error instanceof SettledAttemptFailure,
+    );
+    assert.equal(f.state.sends, 1);
+  }
+});
+test("Claude transient read is retried in place without spending a step interruption", async (t) => {
+  const f = fixture(t);
+  const handle = await f.driver().start(f.request, f.context);
+  const events = f.driver().args.client.events;
+  let failures = 2;
+  f.driver().args.client.events = async (...args) => {
+    if (failures-- > 0)
+      throw Object.assign(new Error("connection reset"), {
+        code: "ECONNRESET",
+      });
+    return events(...args);
+  };
+  f.output(handle);
+  const result = await f.driver().collect(handle, f.context);
+  assert.equal(f.git("show", `${result.changeRef}:keep.txt`), "changed");
+  assert.equal(f.state.creates, 1);
+  assert.equal(f.state.sends, 2);
+});
+test("Claude session that is gone settles the attempt and still deletes its files", async (t) => {
+  const f = fixture(t);
+  const handle = await f.driver().start(f.request, f.context);
+  f.state.gone = true;
+  await assert.rejects(
+    f.driver().collect(handle, f.context),
+    (error) =>
+      error instanceof SettledAttemptFailure &&
+      error.classification === "implementation",
+  );
+  assert.equal(f.saved.at(-1).data.phase, "disposed");
+  assert.equal(f.state.calls.filter((c) => /^delete:file_/.test(c)).length, 4);
+});
+
+test("failure cleanup observation after a bootstrap read error never submits implementation", async (t) => {
+  const f = fixture(t);
+  const handle = await f.driver().start(f.request, f.context);
+  f.state.failDownload = true;
+  await assert.rejects(
+    f.driver().observe(handle, f.context),
+    /transient output read/,
+  );
+  // Same observe-before-cancel sequence used by runner failure cleanup, even with cancelled() false.
+  assert.equal((await f.driver().observe(handle, f.context)).state, "running");
+  assert.equal(f.state.sends, 1);
+  await f.driver().cancel(handle, f.context);
+  assert.equal(f.state.sends, 1);
+  assert.equal(f.saved.at(-1).data.phase, "disposed");
 });
 test("Claude preserves binary selected bytes through the ordinary collector", async (t) => {
   const f = fixture(t);
@@ -448,20 +661,4 @@ test("Claude preserves binary selected bytes through the ordinary collector", as
       .git("ls-tree", "-r", "--name-only", collected.changeRef)
       .includes(".factory-inputs"),
   );
-});
-
-test("failure cleanup observation after a bootstrap read error never submits implementation", async (t) => {
-  const f = fixture(t);
-  const handle = await f.driver().start(f.request, f.context);
-  f.state.failDownload = true;
-  await assert.rejects(
-    f.driver().collect(handle, f.context),
-    /transient output read/,
-  );
-  // Same observe-before-cancel sequence used by runner failure cleanup, even with cancelled() false.
-  assert.equal((await f.driver().observe(handle, f.context)).state, "running");
-  assert.equal(f.state.sends, 1);
-  await f.driver().cancel(handle, f.context);
-  assert.equal(f.state.sends, 1);
-  assert.equal(f.saved.at(-1).data.phase, "disposed");
 });

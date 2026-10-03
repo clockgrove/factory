@@ -15,12 +15,15 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { create } from "tar";
 import {
+  AgentsApiError,
   OpenAIManagedExecutionDriver,
   OpenAIAgentsClient,
   validateOpenAIManagedConfig,
 } from "../dist/execution/openai-managed.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { executionContext } from "../dist/execution/checkpoint.js";
+import { SettledAttemptFailure } from "../dist/work-repair.js";
+import { Interruption } from "../dist/contracts.js";
 
 const config = {
   model: "explicit-model",
@@ -66,8 +69,13 @@ function fixture(t) {
     step: "execute",
   };
   const saved = [];
-  const context = executionContext(work, () =>
-    saved.push(structuredClone(work.execution)),
+  const orphans = [];
+  const context = executionContext(
+    work,
+    () => saved.push(structuredClone(work.execution)),
+    () => false,
+    undefined,
+    (orphan) => orphans.push(orphan),
   );
   const state = {
     phase: "completed",
@@ -76,6 +84,8 @@ function fixture(t) {
     calls: [],
     createFailure: false,
     inputFailure: false,
+    inputLost: false,
+    inputs: 0,
   };
   const transport = {
     async json(method, path, body) {
@@ -89,7 +99,8 @@ function fixture(t) {
         state.binding = JSON.parse(
           Buffer.from(body.environment.files[1].data, "base64"),
         );
-        if (state.createFailure) throw new Error("lost create acknowledgement");
+        if (state.createFailure)
+          throw new AgentsApiError("lost create acknowledgement", 503);
         return { id: "session_one", environment: { id: "environment_one" } };
       }
       if (path === "/agents/environments/environment_one")
@@ -102,7 +113,8 @@ function fixture(t) {
         assert.equal(saved.at(-1).data.phase, "input-submitted");
         assert.equal(saved.at(-1).data.sessionId, "session_one");
         assert.equal(body.events[0].input[0].role, "user");
-        if (state.inputFailure) throw new Error("lost input acknowledgement");
+        if (state.inputFailure)
+          throw new AgentsApiError("lost input acknowledgement", 503);
         const repo = join(root, "work", "attempt-one", "repo");
         writeFileSync(join(repo, "keep.txt"), "changed\n");
         rmSync(join(repo, "old.txt"));
@@ -133,6 +145,9 @@ function fixture(t) {
           ["keep.txt", "new.bin", "run.sh", ".factory-result.json"],
         );
         state.artifact = readFileSync(archive);
+        state.inputs++;
+        if (state.inputLost)
+          throw new AgentsApiError("input acknowledgement lost", 503);
         return {};
       }
       if (method === "DELETE") {
@@ -140,18 +155,20 @@ function fixture(t) {
         return {};
       }
       if (path.includes("/turns?"))
-        return {
-          data: [
-            {
-              id: "turn_one",
-              session_id: "session_one",
-              status: state.phase,
-              subagent_id: null,
-              usage: null,
-            },
-          ],
-          has_more: false,
-        };
+        return state.inputs === 0
+          ? { data: [], has_more: false }
+          : {
+              data: [
+                {
+                  id: "turn_one",
+                  session_id: "session_one",
+                  status: state.phase,
+                  subagent_id: null,
+                  usage: null,
+                },
+              ],
+              has_more: false,
+            };
       if (path.includes("/artifacts?"))
         return {
           data: [
@@ -180,7 +197,18 @@ function fixture(t) {
     config,
     transport,
   });
-  return { root, checkout, git, request, work, saved, context, state, driver };
+  return {
+    root,
+    checkout,
+    git,
+    request,
+    work,
+    saved,
+    orphans,
+    context,
+    state,
+    driver,
+  };
 }
 
 test("managed complete result round-trips binary bytes, deletion, executable mode and null usage through real Git", async (t) => {
@@ -206,33 +234,97 @@ test("managed complete result round-trips binary bytes, deletion, executable mod
   assert.equal(await f.driver.availableSlots(), "unknown");
 });
 
-test("lost create or input acknowledgement preserves exact disposition and never resubmits", async (t) => {
-  for (const kind of ["createFailure", "inputFailure"]) {
-    const f = fixture(t);
-    f.state[kind] = true;
-    await assert.rejects(f.driver.start(f.request, f.context), /lost/);
-    const checkpoint = structuredClone(f.work.execution);
-    assert.equal(
-      checkpoint.data.phase,
-      kind === "createFailure" ? "create-submitted" : "input-submitted",
-    );
-    if (kind === "inputFailure")
-      assert.equal(checkpoint.data.sessionId, "session_one");
-    const count = f.state.calls.filter((c) => c.method === "POST").length;
-    await assert.rejects(f.driver.observe(checkpoint, f.context), /unresolved/);
-    assert.equal(
-      f.state.calls.filter((c) => c.method === "POST").length,
-      count,
-    );
-  }
+const settled = (classification) => (error) =>
+  error instanceof SettledAttemptFailure &&
+  error.classification === classification;
+
+test("lost create ends the attempt directly as an interruption and records the possible orphan", async (t) => {
+  const f = fixture(t);
+  f.state.createFailure = true;
+  // The create cannot be found by tag here, so no step interruption is spent first.
+  await assert.rejects(
+    f.driver.start(f.request, f.context),
+    settled("interruption"),
+  );
+  assert.equal(f.state.calls.filter((c) => c.method === "POST").length, 1);
+  assert.equal(f.work.execution.data.phase, "disposed");
+  assert.equal(f.orphans.length, 1);
+  assert.equal(f.orphans[0].resource, "session");
+  assert.match(f.orphans[0].detail, /factory_attempt=attempt-one/);
+  const observed = await f.driver.observe(f.work.execution, f.context);
+  assert.equal(observed.interrupted, true);
 });
 
-test("session idle never turns a failed turn into success; cancellation confirms resource disposition", async (t) => {
+test("lost input acknowledgement continues when the turn was recorded", async (t) => {
+  const f = fixture(t);
+  f.state.inputLost = true;
+  // The lost response leaves a recorded phase for collection to resolve.
+  const handle = await f.driver.start(f.request, f.context);
+  assert.equal(f.work.execution.data.phase, "input-submitted");
+  const result = await f.driver.collect(handle, f.context);
+  assert.equal(f.git("show", `${result.changeRef}:keep.txt`), "changed");
+  assert.equal(f.state.inputs, 1);
+  assert.equal(f.state.deleted, true);
+});
+
+test("input with no recorded turn settles the session and interrupts the attempt", async (t) => {
+  const f = fixture(t);
+  f.state.inputFailure = true;
+  const handle = await f.driver.start(f.request, f.context);
+  assert.equal(f.work.execution.data.sessionId, "session_one");
+  await assert.rejects(
+    f.driver.collect(handle, f.context),
+    settled("interruption"),
+  );
+  assert.equal(f.state.inputs, 0);
+  assert.equal(f.state.deleted, true);
+  assert.equal(f.work.execution.data.phase, "disposed");
+  assert.equal(
+    (await f.driver.observe(f.work.execution, f.context)).interrupted,
+    true,
+  );
+});
+
+test("restart during hosted setup submits the input once", async (t) => {
+  const f = fixture(t);
+  let crashed = false;
+  const context = executionContext(f.work, () => {
+    f.saved.push(structuredClone(f.work.execution));
+    if (!crashed && f.work.execution.data.phase === "prepared") {
+      crashed = true;
+      // Stands in for the controller stopping here.
+      throw new Interruption("controller stopped");
+    }
+  });
+  await assert.rejects(f.driver.start(f.request, context), /stopped/);
+  const checkpoint = structuredClone(f.work.execution);
+  assert.equal(checkpoint.data.phase, "prepared");
+  await f.driver.collect(
+    checkpoint,
+    executionContext(f.work, () =>
+      f.saved.push(structuredClone(f.work.execution)),
+    ),
+  );
+  assert.equal(f.state.inputs, 1);
+});
+
+test("session idle never turns a failed turn into success; collection settles the session", async (t) => {
   const f = fixture(t);
   const handle = await f.driver.start(f.request, f.context);
   f.state.phase = "failed";
   assert.equal((await f.driver.observe(handle, f.context)).state, "failed");
-  await assert.rejects(f.driver.collect(handle, f.context), /failed/);
+  await assert.rejects(
+    f.driver.collect(handle, f.context),
+    settled("implementation"),
+  );
+  assert.equal(f.state.deleted, true);
+  assert.equal(f.saved.at(-1).data.terminal, "failed");
+  await f.driver.cancel(handle, f.context);
+});
+
+test("cancellation of a running turn confirms resource disposition", async (t) => {
+  const f = fixture(t);
+  const handle = await f.driver.start(f.request, f.context);
   f.state.phase = "in_progress";
   await f.driver.cancel(handle, f.context);
   assert.equal(f.state.deleted, true);
@@ -336,9 +428,38 @@ test("result import refuses corrupted bytes, wrong binding and unsafe entries be
     }
     await assert.rejects(
       f.driver.collect(handle, f.context),
-      /archive|TAR|binding|different|unsafe|inventory/i,
+      (error) =>
+        error instanceof SettledAttemptFailure &&
+        error.classification === "implementation" &&
+        /archive|TAR|binding|different|unsafe|inventory/i.test(error.message),
     );
-    assert.equal(f.state.deleted, false);
+    // The rejected attempt's session is deleted so a new attempt never runs beside it.
+    assert.equal(f.state.deleted, true);
+  }
+});
+
+test("transient reads are retried in place; refused or gone reads settle the attempt", async (t) => {
+  for (const status of [503, 429, 408, 404, 403]) {
+    const f = fixture(t);
+    const handle = await f.driver.start(f.request, f.context);
+    const transport = f.driver.args.transport;
+    const original = transport.json.bind(transport);
+    let failures = 1;
+    transport.json = async (method, path, body) => {
+      if (path.includes("/turns?") && failures-- > 0)
+        throw new AgentsApiError(`Agents API GET failed (${status})`, status);
+      return original(method, path, body);
+    };
+    if (status === 503 || status === 429 || status === 408) {
+      // One collection absorbs the failure without a step interruption.
+      await f.driver.collect(handle, f.context);
+      assert.equal(f.state.inputs, 1, String(status));
+    } else
+      await assert.rejects(
+        f.driver.collect(handle, f.context),
+        settled("implementation"),
+      );
+    assert.equal(f.state.deleted, true, String(status));
   }
 });
 
@@ -464,17 +585,16 @@ test("connected setup after deadline does not submit work; cleanup receives a se
   };
   await assert.rejects(
     f.driver.start(f.request, f.context),
-    /attempt deadline expired/,
+    (error) =>
+      error instanceof SettledAttemptFailure &&
+      error.classification === "implementation" &&
+      /configured timeout/.test(error.message),
   );
   assert.equal(
     f.state.calls.filter((c) => c.path.endsWith("/events")).length,
     0,
   );
-  assert.equal(f.work.execution.data.phase, "prepared");
-  await f.driver.cancel(
-    structuredClone(f.work.execution),
-    executionContext(f.work, () => {}),
-  );
+  assert.equal(f.state.deleted, true);
   assert.equal(f.work.execution.data.phase, "disposed");
   assert.ok(remaining.every((ms) => ms > 0 && ms <= 10000));
 });
@@ -500,9 +620,22 @@ test("remaining attempt time bounds each request and rejects collection after ex
   assert.deepEqual(limits.slice(0, 3), [10000, 9000, 8000]);
   now += 10000;
   const calls = f.state.calls.length;
+  // A passed deadline (also after a long controller outage) stops the session
+  // and fails the attempt as a timeout; it never submits more work.
   await assert.rejects(
     f.driver.collect(handle, f.context),
-    /attempt deadline expired/,
+    (error) =>
+      error instanceof SettledAttemptFailure &&
+      error.classification === "implementation" &&
+      /configured timeout/.test(error.message),
   );
-  assert.equal(f.state.calls.length, calls);
+  const after = f.state.calls.slice(calls);
+  assert.ok(
+    after.every(
+      (c) =>
+        c.method !== "POST" ||
+        c.body.events[0].type === "agent.session.input.cancel",
+    ),
+  );
+  assert.equal(f.state.deleted, true);
 });

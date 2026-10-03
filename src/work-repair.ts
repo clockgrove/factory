@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { CompletedModelInvocationError, Interruption } from "./contracts.js";
+import {
+  AuthenticationRequiredError,
+  CompletedModelInvocationError,
+  Interruption,
+} from "./contracts.js";
 import { GitHubOutcomeUnknown, GitHubRequestError } from "./github-client.js";
 import {
   ProviderTurnIncompleteError,
@@ -32,6 +36,103 @@ export class SettledAttemptFailure extends Error {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
   }
 }
+const transientCodes = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ECONNABORTED",
+  "ETIMEDOUT",
+  "EPIPE",
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
+/**
+ * Whether a provider request failed in transit rather than being refused:
+ * a network error or timeout, or HTTP 408, 429 or 5xx. Other 4xx responses
+ * are real failures; a 404 means the resource is gone.
+ */
+export function transientRequestFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const { status, statusCode, code } = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    code?: unknown;
+  };
+  const http = typeof status === "number" ? status : statusCode;
+  if (typeof http === "number")
+    return http >= 500 || http === 408 || http === 429;
+  return (
+    error.message === "fetch failed" ||
+    /Connection|Timeout/.test(error.name) ||
+    (typeof code === "string" && transientCodes.has(code)) ||
+    transientRequestFailure(error.cause)
+  );
+}
+
+/** Consecutive transient failures a polling step absorbs before it is interrupted. */
+export const TRANSIENT_RETRY_MS = 120_000;
+
+/**
+ * Run a repeatable step, retrying transient provider failures in place with
+ * bounded backoff, so a brief outage does not spend a step interruption.
+ * After `budgetMs` of consecutive failures the last error is thrown.
+ */
+export async function retryTransient<T>(
+  step: () => Promise<T>,
+  transient: (error: unknown) => boolean,
+  budgetMs = TRANSIENT_RETRY_MS,
+  firstDelayMs = 250,
+): Promise<T> {
+  const started = Date.now();
+  for (let wait = firstDelayMs; ; wait = Math.min(wait * 2, 10_000)) {
+    try {
+      return await step();
+    } catch (error) {
+      if (!transient(error) || Date.now() - started + wait > budgetMs)
+        throw error;
+      await delay(wait);
+    }
+  }
+}
+
+/**
+ * End a remote attempt after a failed step. Interruptions, settled failures
+ * and authentication requests pass through, and a transient provider failure
+ * before the deadline interrupts the step so it reattaches. Anything else,
+ * including a passed deadline, stops the remote worker through `settle`.
+ */
+export async function failAttempt(
+  error: unknown,
+  options: {
+    transient: (error: unknown) => boolean;
+    expired: boolean;
+    cancelled: boolean;
+    settle: (detail: string) => Promise<never>;
+  },
+): Promise<never> {
+  if (
+    options.cancelled ||
+    error instanceof Interruption ||
+    error instanceof SettledAttemptFailure ||
+    error instanceof AuthenticationRequiredError
+  )
+    throw error;
+  if (!options.expired && options.transient(error))
+    throw new Interruption(error);
+  return options.settle(
+    options.expired
+      ? "Attempt exceeded its configured timeout"
+      : error instanceof Error
+        ? error.message
+        : String(error),
+  );
+}
+
 /**
  * Whether an error interrupted a step rather than reporting on the work:
  * a worker that ended without a result, a lost or failed provider or GitHub

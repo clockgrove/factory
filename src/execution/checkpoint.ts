@@ -1,9 +1,43 @@
 import type {
   ExecutionContext,
   ExecutionHandle,
+  ExecutionOrphan,
   WorkerUsageObservation,
 } from "../contracts.js";
+import type { DiagnosticEmitter } from "../diagnostics.js";
 import type { WorkState } from "../state.js";
+
+/** A runner's driver context: checkpoints, plus usage and possible orphans recorded as diagnostics. */
+export function workerContext(
+  work: WorkState,
+  save: () => void,
+  cancelled: () => boolean,
+  diagnostics: DiagnosticEmitter | undefined,
+  ids: { runId?: string; itemId: string },
+): ExecutionContext {
+  return executionContext(
+    work,
+    save,
+    cancelled,
+    (workerUsage) =>
+      diagnostics?.emit({
+        ...ids,
+        attemptId: work.attempt,
+        operation: "worker-usage",
+        outcome: "observed",
+        workerUsage,
+      }),
+    (orphan) =>
+      diagnostics?.emit({
+        ...ids,
+        attemptId: work.attempt,
+        operation: "possible-orphan",
+        outcome: "observed",
+        metadata: { resource: orphan.resource },
+        detail: orphan.detail,
+      }),
+  );
+}
 
 /** Bind asynchronous provider checkpoints to the same owned Work Item attempt. */
 export function executionContext(
@@ -11,12 +45,14 @@ export function executionContext(
   save: () => void,
   cancelled: () => boolean = () => false,
   observeUsage?: (observation: WorkerUsageObservation) => void,
+  observeOrphan?: (orphan: ExecutionOrphan) => void,
 ): ExecutionContext {
   const attempt = work.attempt;
   let previous = JSON.stringify(work.execution);
   return {
     cancelled,
     observeUsage,
+    observeOrphan,
     checkpoint(handle: ExecutionHandle) {
       if (JSON.stringify(work.execution) !== previous)
         throw new Error(

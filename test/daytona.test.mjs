@@ -86,6 +86,14 @@ function fixture(t) {
       calls.push(["get", id]);
       return s;
     },
+    async *list(query) {
+      calls.push(["list", query]);
+      if (
+        s.state !== "destroyed" &&
+        s.labels["factory-attempt"] === query.labels["factory-attempt"]
+      )
+        yield s;
+    },
   };
   const provider = new DaytonaSandboxProvider(
     config,
@@ -115,7 +123,11 @@ test("Daytona configuration and existing credential readiness are explicit", () 
 test("Daytona SDK mapping preserves identities, argv, stream transfers and confirmed deletion", async (t) => {
   const f = fixture(t),
     h = await f.provider.create({ attemptId: "attempt" });
-  const create = f.calls[0];
+  assert.deepEqual(f.calls[0], [
+    "list",
+    { labels: { "factory-attempt": "attempt" } },
+  ]);
+  const create = f.calls[1];
   assert.equal(create[1].snapshot, config.snapshot);
   assert.equal(create[1].public, false);
   assert.equal(create[1].autoDeleteInterval, -1);
@@ -228,6 +240,28 @@ test("Daytona unknown mutations and cleanup errors propagate without replacement
     throw Error("network unavailable");
   };
   await assert.rejects(f.provider.destroy(h), /network unavailable/);
+});
+test("Daytona create adopts the sandbox tagged with its attempt instead of creating another", async (t) => {
+  const f = fixture(t);
+  f.client.create = async (params) => {
+    f.calls.push(["create", params]);
+    f.s.labels = params.labels;
+    throw Error("create response lost");
+  };
+  await assert.rejects(
+    f.provider.create({ attemptId: "attempt" }),
+    /response lost/,
+  );
+  const owner = f.s.labels["factory-owner"];
+  const h = await f.provider.create({ attemptId: "attempt" });
+  assert.equal(h.identity, "resource");
+  assert.deepEqual(h.data, { owner });
+  assert.equal(f.calls.filter((c) => c[0] === "create").length, 1);
+  await f.provider.destroy(h);
+  // Lookup alone never creates a sandbox.
+  assert.equal(await f.provider.find({ attemptId: "attempt" }), undefined);
+  assert.equal(f.calls.filter((c) => c[0] === "create").length, 1);
+  assert.equal(f.calls.filter((c) => c[0] === "delete").length, 1);
 });
 
 test("real pinned SDK construction neither opens a connection nor changes tracing selectors", async () => {

@@ -27,7 +27,15 @@ export class FixtureSandboxProvider {
     assert.equal(h.workspace, this.resources.get(h.identity)?.workspace);
     return h;
   }
+  async find({ attemptId }) {
+    for (const owned of this.resources.values())
+      if (owned.attemptId === attemptId) return structuredClone(owned);
+    return undefined;
+  }
   async create({ attemptId }) {
+    this.creates = (this.creates ?? 0) + 1;
+    const found = await this.find({ attemptId });
+    if (found) return found;
     const h = {
       identity: randomUUID(),
       attemptId,
@@ -36,7 +44,12 @@ export class FixtureSandboxProvider {
     mkdirSync(h.workspace);
     this.resources.set(h.identity, h);
     this.maxActive = Math.max(this.maxActive, this.resources.size);
-    if (this.createUnknown) throw Error("create acknowledgement lost");
+    if (this.createUnknown) {
+      this.createUnknown = false;
+      throw Object.assign(Error("create acknowledgement lost"), {
+        status: 503,
+      });
+    }
     return structuredClone(h);
   }
   async prepareRepository(h, input) {
@@ -127,7 +140,12 @@ export class FixtureSandboxProvider {
         code === 0 ? "complete" : state.cancelled ? "cancelled" : "failed";
     });
     this.processes.set(p.identity, state);
-    if (this.executeUnknown) throw Error("execute acknowledgement lost");
+    if (this.executeUnknown) {
+      this.executeUnknown = false;
+      throw Object.assign(Error("execute acknowledgement lost"), {
+        status: 503,
+      });
+    }
     return p;
   }
   async observe(h, p) {

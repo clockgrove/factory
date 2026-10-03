@@ -241,6 +241,50 @@ test("event and file listings consume SDK pagination and remain session scoped",
     assert.equal(url.searchParams.get("scope_id"), "sesn_owned");
 });
 
+test("session lookup filters by agent and creation time, then matches the attempt tag", async () => {
+  const cfg = validateClaudeManagedConfig(config());
+  const seen = [];
+  const client = new ClaudeManagedClient(cfg, {
+    apiKey: "not-a-real-key",
+    fetch: async (url) => {
+      seen.push(new URL(url));
+      const other = { ...session(cfg), id: "sesn_other", metadata: {} };
+      return json({
+        data: [session(cfg), other],
+        has_more: false,
+        next_page: null,
+      });
+    },
+  });
+  const found = await client.findSessions(
+    "attempt",
+    "2026-10-01T00:00:00.000Z",
+  );
+  assert.deepEqual(
+    found.map((s) => s.id),
+    ["sesn_owned"],
+  );
+  assert.equal(seen[0].pathname, "/v1/sessions");
+  assert.equal(seen[0].searchParams.get("agent_id"), "agent_pinned");
+  assert.equal(
+    seen[0].searchParams.get("created_at[gte]"),
+    "2026-10-01T00:00:00.000Z",
+  );
+});
+test("repeated deletion of an absent session or file is a no-op", async () => {
+  const client = new ClaudeManagedClient(
+    validateClaudeManagedConfig(config()),
+    {
+      apiKey: "not-a-real-key",
+      fetch: async () =>
+        json({ error: { type: "not_found_error", message: "gone" } }, 404),
+    },
+  );
+  await client.deleteSession("sesn_owned");
+  await client.deleteFile("file_input");
+  assert.equal(await client.present("sesn_owned"), undefined);
+});
+
 const { claudeTurnDisposition } = await import(
   "../dist/execution/claude-managed-events.js"
 );

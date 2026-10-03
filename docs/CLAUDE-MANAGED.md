@@ -51,9 +51,9 @@ still apply to the encoded input and result.
 
 A bootstrap-only turn executes the supplied foreground script. Factory checks
 complete provider tool history and the full base/tree/file receipt before sending
-implementation instructions. It rejects intervening activity and unknown send
-outcomes instead of replaying them. This requires exclusive ownership of each
-session; it is not remote attestation against arbitrary outside administrators.
+implementation instructions. It rejects intervening activity. This requires
+exclusive ownership of each session; it is not remote attestation against
+arbitrary outside administrators.
 
 Result acceptance requires the recorded implementation turn, session-scoped output,
 matching attempt/input/base identities, and verified paths, lengths and digests.
@@ -61,18 +61,46 @@ Output publication can lag an idle session. The normal collector checks returned
 immutable asset bytes, owned paths, whole AssetSets and repository LFS policy.
 Provider completion is not product acceptance.
 
-Controller checkpoints preserve known sessions before submissions and cleanup.
-Cancellation waits for interruption where needed, then deletes the owned session
-and verifies absence. Anthropic documents that session deletion removes its
-associated sandbox. Factory preserves result and compact lifecycle/accounting
-receipts first, then deletes its uploaded files separately. It never deletes the
-reusable agent or environment. An acknowledgement or idle status alone does not
-establish cleanup; unresolved effects remain stopped rather than duplicated.
+## Restart and lost responses
 
-Attempt and cleanup each receive one recorded deadline window. SDK mutation
-retries are disabled. Missing usage remains unknown; token counts alone do not
-prove complete charges. Uploaded resources whose creation response is lost remain
-unresolved for operator reconciliation, not silently retried.
+Controller checkpoints record each submission before it is sent, and every
+session carries the attempt identity as `factory_attempt` metadata. A response
+lost in transit (network error, timeout, HTTP 408, 429 or 5xx) leaves the
+recorded phase, and collection resolves it from the provider (see
+[State and recovery](ARCHITECTURE.md#state-and-recovery)):
+
+- **Session create:** Factory lists the agent's sessions created since the
+  recorded submission time. It adopts the session tagged with the attempt, or
+  creates one when none exists.
+- **Bootstrap or implementation message:** Factory reads the session history.
+  It continues when the exact message is recorded and sends it again when the
+  session is idle with no new message. Anything else stops the session and
+  repeats the Work Item with a fresh attempt.
+- **Upload:** Factory uploads the file again. The earlier upload may have left
+  an unreferenced file that cannot be found by identity; see below.
+
+Collection retries transient failures in place for up to two minutes before it
+interrupts the step, which then reattaches to the same session. Any other
+failure stops the session and fails the attempt as an implementation failure,
+so it gets a fresh attempt or a repair. This includes a refused request, a
+session that no longer exists (HTTP 404), a rejected result and a passed
+attempt deadline. The session always stops first, so a repeated attempt never
+runs beside it. Cancellation waits for interruption where needed,
+then deletes every session tagged with the attempt and verifies absence.
+Anthropic documents that session deletion removes its associated sandbox.
+Factory preserves result and compact lifecycle/accounting receipts first, then
+deletes its uploaded files separately. Deletion repeats until absence is
+confirmed. It never deletes the reusable agent or environment.
+
+The attempt receives one recorded deadline window, and each cleanup a fresh one,
+so cleanup resumed after an outage still runs. SDK mutation retries are
+disabled. Missing usage remains unknown; token counts alone do not prove
+complete charges.
+
+**Operator cleanup:** an upload whose response was lost is recorded as a
+`possible-orphan` diagnostic with the attempt identity and time (see
+`factory diagnostics`). Delete any uploaded file from around that time that no
+session references.
 
 ## Building Factory's adapter
 

@@ -18,11 +18,18 @@ import type {
   ExecutionResult,
   ModelInvocationUsage,
 } from "../contracts.js";
+import { Interruption } from "../contracts.js";
 import { pinnedGitAsync } from "../process.js";
+import {
+  SettledAttemptFailure,
+  failAttempt,
+  retryTransient,
+} from "../work-repair.js";
 import { collectWorktreeResult } from "./local.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import {
   ClaudeManagedClient,
+  claudeTransient,
   validateClaudeManagedConfig,
   type ClaudeManagedConfig,
 } from "./claude-managed-client.js";
@@ -49,9 +56,21 @@ export { validateClaudeManagedConfig } from "./claude-managed-client.js";
 const workspace = "/mnt/session/factory-work";
 const uploads = "/mnt/session/uploads";
 const outputs = "/mnt/session/outputs";
+const inputs = [
+  "factory-input.json",
+  "factory-bootstrap.mjs",
+  "factory-export.mjs",
+  "factory-binding.json",
+];
+/** Session lookup starts this far before the local create time to absorb clock skew. */
+const clockSkewMs = 10 * 60_000;
+/**
+ * A "-submitted" phase means the request may or may not have reached the
+ * provider. Observation resolves it from the session list or history: the
+ * work continues, the request is sent again, or the attempt is interrupted.
+ */
 type Phase =
   | "prepared"
-  | "upload-submitted"
   | "create-submitted"
   | "created"
   | "bootstrap-submitted"
@@ -60,10 +79,6 @@ type Phase =
   | "implementation-submitted"
   | "running"
   | "result-ready"
-  | "interrupt-submitted"
-  | "interrupted"
-  | "delete-submitted"
-  | "file-delete-submitted"
   | "disposed";
 interface Active {
   root: string;
@@ -75,7 +90,8 @@ interface Active {
   phase: Phase;
   files: { id: string; name: string }[];
   deletedFiles: string[];
-  deletingFile?: string;
+  /** Lower bound for finding sessions tagged with this attempt. */
+  createdAfter?: string;
   sessionId?: string;
   bootstrapEventId?: string;
   implementationEventId?: string;
@@ -91,12 +107,25 @@ interface Active {
   };
   evidenceDigest?: string;
   terminal?: "complete" | "failed" | "cancelled";
+  /** Why the attempt was ended; recorded before stopping so a restart finishes it. */
+  stopped?: { detail: string; interrupted: boolean };
   result?: ExecutionResult;
 }
 const digest = (value: unknown) =>
   claudeByteDigest(Buffer.from(JSON.stringify(value)));
 const historyDigest = (events: BetaManagedAgentsSessionEvent[]) =>
   digest(events.filter((event) => event.type !== "session.usage"));
+const messageText = (event: BetaManagedAgentsSessionEvent) =>
+  event.type === "user.message"
+    ? event.content
+        .map((block) => (block.type === "text" ? block.text : ""))
+        .join("")
+    : undefined;
+const interrupted = (detail: string): ExecutionObservation => ({
+  state: "failed",
+  interrupted: true,
+  detail: `${detail}; repeating with a fresh attempt`,
+});
 
 /** Provider semantics are implemented here; live proof remains the separate #259 qualification. */
 export class ClaudeManagedExecutionDriver implements ExecutionDriver {
@@ -150,6 +179,46 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       );
     return ms;
   }
+  private expired(data: Active): boolean {
+    return (
+      data.startedAt + (this.args.config.timeoutSeconds ?? 900) * 1000 <=
+      Date.now()
+    );
+  }
+  /** Ends the attempt for a failed step; see failAttempt. */
+  private async fail(
+    error: unknown,
+    handle: ExecutionHandle,
+    context: ExecutionContext,
+  ): Promise<never> {
+    const data = this.active(handle);
+    return failAttempt(error, {
+      transient: claudeTransient,
+      expired: this.expired(data),
+      cancelled: context.cancelled(),
+      settle: (detail) => this.settle(handle, context, detail, false),
+    });
+  }
+  /** Records why the attempt ended, stops its session and reports a settled failure. */
+  private async settle(
+    handle: ExecutionHandle,
+    context: ExecutionContext,
+    detail: string,
+    interrupted: boolean,
+  ): Promise<never> {
+    const data = this.active(handle);
+    data.stopped ??= { detail, interrupted };
+    this.save(handle, context);
+    try {
+      await this.stop(handle, "failed", context);
+    } catch (error) {
+      throw claudeTransient(error) ? new Interruption(error) : error;
+    }
+    throw new SettledAttemptFailure(
+      new Error(data.stopped.detail),
+      data.stopped.interrupted ? "interruption" : "implementation",
+    );
+  }
   private async wait(data: Active): Promise<void> {
     await new Promise((resolve) =>
       setTimeout(resolve, Math.min(250, this.remaining(data))),
@@ -157,6 +226,31 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
   }
   private command(data: Active): string {
     return `node ${uploads}/factory-bootstrap.mjs ${uploads}/factory-input.json ${workspace} ${outputs}/factory-bootstrap.json ${data.inputDigest}`;
+  }
+  private bootstrapText(data: Active): string {
+    return `Prepare the supplied immutable input only. Execute exactly this foreground command once, then stop. Do not run other commands or implement changes.\n${this.command(data)}`;
+  }
+  private implementationText(data: Active): string {
+    const sources = data.request.sourceAssets ?? [];
+    let privateIndex = 0;
+    const prompt = workItemPrompt({
+      ...data.request,
+      worktree: workspace,
+      sourceAssets: sources.map((source) => ({
+        ...source,
+        ...((source.binding.kind === "local" ||
+          source.binding.kind === "github-attachment") && {
+          path: `${workspace}/.factory-inputs/source-${privateIndex++}`,
+        }),
+      })),
+      selectedAssets: (data.request.selectedAssets ?? []).map(
+        (asset, index) => ({
+          ...asset,
+          path: `${workspace}/.factory-inputs/selected-${index}`,
+        }),
+      ),
+    });
+    return `${prompt}\nWork in ${workspace}. When complete, export exact bytes using: cd ${workspace} && node ${uploads}/factory-export.mjs ${uploads}/factory-binding.json ${outputs}/factory-result.json . Do not encode binary bytes in your answer.`;
   }
   private snapshot(data: Active): Pick<
     ClaudePreparedInput,
@@ -286,7 +380,6 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       data,
     };
     this.save(handle, context);
-    await this.client.verifyEnvironment(this.remaining(data));
     writeFileSync(
       join(root, "factory-bootstrap.mjs"),
       CLAUDE_BOOTSTRAP_SCRIPT,
@@ -304,43 +397,68 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       }),
       { mode: 0o600 },
     );
-    for (const name of [
-      "factory-input.json",
-      "factory-bootstrap.mjs",
-      "factory-export.mjs",
-      "factory-binding.json",
-    ]) {
+    try {
+      await this.advance(handle, context);
+    } catch (error) {
+      // A transient failure leaves a recorded phase that collection resolves.
+      if (context.cancelled() || this.expired(data) || !claudeTransient(error))
+        await this.fail(error, handle, context);
+    }
+    return handle;
+  }
+  /** Uploads inputs, creates the session and sends the bootstrap turn, resuming from the recorded phase. */
+  private async advance(
+    handle: ExecutionHandle,
+    context: ExecutionContext,
+  ): Promise<void> {
+    const data = this.active(handle);
+    if (data.phase === "prepared") {
+      await this.client.verifyEnvironment(this.remaining(data));
+      for (const name of inputs) {
+        if (data.files.some((file) => file.name === name)) continue;
+        if (context.cancelled())
+          throw new Error("Claude preparation cancelled before upload");
+        // An upload whose response was lost may leave an unreferenced file
+        // that cannot be found; it is recorded for operator cleanup.
+        const file = await this.client
+          .upload(join(data.root, name), this.remaining(data))
+          .catch((error: unknown) => {
+            if (claudeTransient(error))
+              context.observeOrphan?.({
+                resource: "file",
+                detail: `Upload of ${name} for attempt ${handle.identity} lost its response at ${new Date().toISOString()}; the provider may hold an unreferenced copy`,
+              });
+            throw error;
+          });
+        if (!file.id) throw new Error("Claude upload returned no identity");
+        data.files.push({ id: file.id, name });
+        this.save(handle, context);
+      }
       if (context.cancelled())
-        throw new Error("Claude preparation cancelled before upload");
-      data.phase = "upload-submitted";
+        throw new Error("Claude preparation cancelled before session creation");
+      data.createdAfter ??= new Date(Date.now() - clockSkewMs).toISOString();
+      data.phase = "create-submitted";
       this.save(handle, context);
-      const file = await this.client.upload(
-        join(root, name),
+      const resources: NonNullable<SessionCreateParams["resources"]> =
+        data.files.map((file) => ({
+          type: "file",
+          file_id: file.id,
+          mount_path: `${uploads}/${file.name}`,
+        }));
+      const session = await this.client.create(
+        handle.identity,
+        resources,
         this.remaining(data),
       );
-      if (!file.id) throw new Error("Claude upload returned no identity");
-      data.files.push({ id: file.id, name });
-      data.phase = "prepared";
+      data.sessionId = session.id;
+      data.phase = "created";
       this.save(handle, context);
     }
-    if (context.cancelled())
-      throw new Error("Claude preparation cancelled before session creation");
-    data.phase = "create-submitted";
-    this.save(handle, context);
-    const resources: NonNullable<SessionCreateParams["resources"]> =
-      data.files.map((file) => ({
-        type: "file",
-        file_id: file.id,
-        mount_path: `${uploads}/${file.name}`,
-      }));
-    const session = await this.client.create(
-      attemptId,
-      resources,
+    if (data.phase !== "created") return;
+    const session = await this.client.retrieve(
+      data.sessionId!,
       this.remaining(data),
     );
-    data.sessionId = session.id;
-    data.phase = "created";
-    this.save(handle, context);
     this.assertSession(session, handle);
     if (
       session.status !== "idle" ||
@@ -368,12 +486,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       session.id,
       {
         type: "user.message",
-        content: [
-          {
-            type: "text",
-            text: `Prepare the supplied immutable input only. Execute exactly this foreground command once, then stop. Do not run other commands or implement changes.\n${this.command(data)}`,
-          },
-        ],
+        content: [{ type: "text", text: this.bootstrapText(data) }],
       },
       this.remaining(data),
     );
@@ -385,7 +498,6 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     data.bootstrapEventId = event.id;
     data.phase = "bootstrap-running";
     this.save(handle, context);
-    return handle;
   }
   private async file(
     data: Active,
@@ -427,32 +539,77 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
   ): Promise<ExecutionObservation> {
     const data = this.active(handle);
     if (data.phase === "disposed")
-      return { state: data.terminal ?? "cancelled" };
+      return {
+        state: data.terminal ?? "cancelled",
+        ...(data.stopped && {
+          detail: data.stopped.detail,
+          ...(data.stopped.interrupted && { interrupted: true }),
+        }),
+      };
     if (data.phase === "result-ready") return { state: "complete" };
-    if (
-      !data.sessionId ||
-      [
-        "create-submitted",
-        "upload-submitted",
-        "bootstrap-submitted",
-        "implementation-submitted",
-      ].includes(data.phase)
-    )
-      throw new Error(
-        "Claude submission outcome is unknown; no duplicate work is permitted",
+    if (data.phase === "create-submitted") {
+      const found = await this.client.findSessions(
+        handle.identity,
+        data.createdAfter!,
+        this.remaining(data),
       );
+      if (found.length > 1)
+        return interrupted("Several sessions carry this attempt's tag");
+      if (found[0]) {
+        data.sessionId = found[0].id;
+        data.phase = "created";
+      } else data.phase = "prepared";
+      this.save(handle, context);
+    }
+    if (data.phase === "prepared" || data.phase === "created")
+      return { state: "running", detail: "Preparing the managed session" };
     const session = await this.client.retrieve(
-      data.sessionId,
+      data.sessionId!,
       this.remaining(data),
     );
     this.assertSession(session, handle);
     this.usage(session, handle, context);
     const events = await this.client.events(
-      data.sessionId,
+      data.sessionId!,
       this.remaining(data),
     );
     this.preserve(data, session, events);
     this.save(handle, context);
+    if (data.phase === "bootstrap-submitted") {
+      const sent = events.filter((event) => event.type === "user.message");
+      if (
+        sent.length === 1 &&
+        messageText(sent[0]!) === this.bootstrapText(data)
+      ) {
+        data.bootstrapEventId = sent[0]!.id;
+        data.phase = "bootstrap-running";
+      } else if (!sent.length && session.status === "idle")
+        data.phase = "created";
+      else return interrupted("Bootstrap submission outcome is unknown");
+      this.save(handle, context);
+      if (data.phase === "created") return { state: "running" };
+    }
+    if (data.phase === "implementation-submitted") {
+      const sent = events.filter(
+        (event) =>
+          event.type === "user.message" && event.id !== data.bootstrapEventId,
+      );
+      if (
+        sent.length === 1 &&
+        messageText(sent[0]!) === this.implementationText(data)
+      ) {
+        data.implementationEventId = sent[0]!.id;
+        data.phase = "running";
+      } else if (
+        !sent.length &&
+        session.status === "idle" &&
+        historyDigest(events) === data.bootstrap?.historyDigest
+      )
+        data.phase = "bootstrap-verified";
+      else return interrupted("Implementation submission outcome is unknown");
+      this.save(handle, context);
+      if (data.phase === "bootstrap-verified") return { state: "running" };
+    }
     if (
       data.phase === "bootstrap-running" ||
       data.phase === "bootstrap-verified"
@@ -490,7 +647,8 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       this.save(handle, context);
       return { state: "running" };
     }
-    if (!data.implementationEventId) return { state: "running" };
+    if (!data.implementationEventId)
+      throw new Error("Missing Claude implementation identity");
     const turn = claudeTurnDisposition(events, {
       inputEventId: data.implementationEventId,
       ...(data.interruptEventId && { interruptEventId: data.interruptEventId }),
@@ -557,40 +715,14 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       throw new Error(
         "Claude bootstrap changed before implementation submission",
       );
-    const sources = data.request.sourceAssets ?? [];
-    let privateIndex = 0;
-    const prompt = workItemPrompt({
-      ...data.request,
-      worktree: workspace,
-      sourceAssets: sources.map((source) => ({
-        ...source,
-        ...((source.binding.kind === "local" ||
-          source.binding.kind === "github-attachment") && {
-          path: `${workspace}/.factory-inputs/source-${privateIndex++}`,
-        }),
-      })),
-      selectedAssets: (data.request.selectedAssets ?? []).map(
-        (asset, index) => ({
-          ...asset,
-          path: `${workspace}/.factory-inputs/selected-${index}`,
-        }),
-      ),
-    });
+    const text = this.implementationText(data);
     if (context.cancelled())
       throw new Error("Claude implementation cancelled before submission");
     data.phase = "implementation-submitted";
     this.save(handle, context);
     const sent = await this.client.send(
       data.sessionId,
-      {
-        type: "user.message",
-        content: [
-          {
-            type: "text",
-            text: `${prompt}\nWork in ${workspace}. When complete, export exact bytes using: cd ${workspace} && node ${uploads}/factory-export.mjs ${uploads}/factory-binding.json ${outputs}/factory-result.json . Do not encode binary bytes in your answer.`,
-          },
-        ],
-      },
+      { type: "user.message", content: [{ type: "text", text }] },
       this.remaining(data),
     );
     const event = sent.data?.[0];
@@ -602,123 +734,21 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     data.phase = "running";
     this.save(handle, context);
   }
-  private async dispose(
+  /** Interrupts a running turn. An interrupt whose response was lost is found in the session history. */
+  private async interrupt(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<void> {
     const data = this.active(handle);
-    data.cleanupStartedAt ??= Date.now();
-    if (data.phase === "disposed") return;
-    if (data.sessionId && data.phase !== "file-delete-submitted") {
-      if (data.phase === "delete-submitted") {
-        if (
-          !(await this.client.sessionAbsent(
-            data.sessionId,
-            this.remaining(data),
-          ))
-        )
-          throw new Error(
-            "Claude session deletion is unresolved; it will not be repeated",
-          );
-      } else {
-        const session = await this.client.retrieve(
-          data.sessionId,
-          this.remaining(data),
-        );
-        this.assertSession(session, handle);
-        if (!["idle", "terminated"].includes(session.status))
-          throw new Error("Claude session is still active");
-        const events = await this.client.events(
-          data.sessionId,
-          this.remaining(data),
-        );
-        this.preserve(data, session, events);
-        this.usage(session, handle, context);
-        data.phase = "delete-submitted";
-        this.save(handle, context);
-        // Claude's documented deletion removes this session's associated sandbox, not its reusable environment.
-        const deleted = await this.client.deleteSession(
-          data.sessionId,
-          this.remaining(data),
-        );
-        if (
-          deleted.id !== data.sessionId ||
-          deleted.type !== "session_deleted" ||
-          !(await this.client.sessionAbsent(
-            data.sessionId,
-            this.remaining(data),
-          ))
-        )
-          throw new Error(
-            "Claude owned session/sandbox deletion is not confirmed",
-          );
-      }
-    }
-    for (const file of data.files) {
-      if (data.deletedFiles.includes(file.id)) continue;
-      if (data.deletingFile === file.id) {
-        if (!(await this.client.fileAbsent(file.id, this.remaining(data))))
-          throw new Error("Claude uploaded file deletion is unresolved");
-      } else {
-        data.deletingFile = file.id;
-        data.phase = "file-delete-submitted";
-        this.save(handle, context);
-        const deleted = await this.client.deleteFile(
-          file.id,
-          this.remaining(data),
-        );
-        if (
-          deleted.id !== file.id ||
-          !(await this.client.fileAbsent(file.id, this.remaining(data)))
-        )
-          throw new Error("Claude uploaded file deletion is not confirmed");
-      }
-      data.deletedFiles.push(file.id);
-      delete data.deletingFile;
-      this.save(handle, context);
-    }
-    data.phase = "disposed";
-    this.save(handle, context);
-  }
-  async cancel(
-    handle: ExecutionHandle,
-    context?: ExecutionContext,
-  ): Promise<void> {
-    const data = this.active(handle);
-    if (data.phase === "disposed") return;
-    data.cleanupStartedAt ??= Date.now();
-    if (
-      data.phase === "delete-submitted" ||
-      data.phase === "file-delete-submitted"
-    ) {
-      await this.dispose(handle, context);
-      return;
-    }
-    if (!data.sessionId) {
-      if (data.phase !== "prepared")
-        throw new Error(
-          "Claude resource creation outcome is unknown; cancellation remains unresolved",
-        );
-      data.terminal = "cancelled";
-      await this.dispose(handle, context);
-      return;
-    }
-    let session = await this.client.retrieve(
-      data.sessionId,
-      this.remaining(data),
-    );
-    this.assertSession(session, handle);
-    if (session.status === "running" || session.status === "rescheduling") {
-      if (data.phase === "interrupt-submitted") {
-        if (!data.interruptEventId)
-          throw new Error(
-            "Claude interrupt outcome is unknown; no duplicate interrupt is permitted",
-          );
-      } else {
-        data.phase = "interrupt-submitted";
-        this.save(handle, context);
+    const sessionId = data.sessionId!;
+    if (!data.interruptEventId) {
+      const prior = (await this.client.events(sessionId, this.remaining(data)))
+        .filter((event) => event.type === "user.interrupt")
+        .at(-1);
+      if (prior) data.interruptEventId = prior.id;
+      else {
         const sent = await this.client.send(
-          data.sessionId,
+          sessionId,
           { type: "user.interrupt" },
           this.remaining(data),
         );
@@ -726,53 +756,173 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
         if (sent.data?.length !== 1 || event?.type !== "user.interrupt")
           throw new Error("Claude interrupt acknowledgement is ambiguous");
         data.interruptEventId = event.id;
-        this.save(handle, context);
       }
-      while (true) {
+      this.save(handle, context);
+    }
+    while (true) {
+      const events = await this.client.events(sessionId, this.remaining(data));
+      const applied = events.find(
+        (event) =>
+          event.id === data.interruptEventId &&
+          event.type === "user.interrupt" &&
+          event.processed_at,
+      );
+      const session = await this.client.retrieve(
+        sessionId,
+        this.remaining(data),
+      );
+      this.assertSession(session, handle);
+      this.preserve(data, session, events);
+      this.usage(session, handle, context);
+      if (applied && ["idle", "terminated"].includes(session.status)) return;
+      await this.wait(data);
+    }
+  }
+  /** Deletes every session tagged with this attempt, then the uploaded files. Each deletion is safe to repeat. */
+  private async dispose(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<void> {
+    const data = this.active(handle);
+    data.cleanupStartedAt ??= Date.now();
+    if (data.phase === "disposed") return;
+    const sessions = new Set(data.sessionId ? [data.sessionId] : []);
+    // A create whose response was lost can leave a tagged session the handle never recorded.
+    if (data.createdAfter)
+      for (const session of await this.client.findSessions(
+        handle.identity,
+        data.createdAfter,
+        this.remaining(data),
+      ))
+        sessions.add(session.id);
+    for (const sessionId of sessions) {
+      const session = await this.client.present(
+        sessionId,
+        this.remaining(data),
+      );
+      if (!session) continue;
+      if (sessionId === data.sessionId) this.assertSession(session, handle);
+      else this.client.assertSession(session, handle.identity);
+      if (!["idle", "terminated"].includes(session.status))
+        throw new Error("Claude session is still active");
+      if (sessionId === data.sessionId) {
         const events = await this.client.events(
-          data.sessionId,
+          sessionId,
           this.remaining(data),
         );
-        const applied = events.find(
-          (event) =>
-            event.id === data.interruptEventId &&
-            event.type === "user.interrupt" &&
-            event.processed_at,
-        );
-        session = await this.client.retrieve(
-          data.sessionId,
-          this.remaining(data),
-        );
-        this.assertSession(session, handle);
         this.preserve(data, session, events);
         this.usage(session, handle, context);
-        if (applied && ["idle", "terminated"].includes(session.status)) break;
-        await this.wait(data);
+        this.save(handle, context);
       }
+      // Deleting a session removes its sandbox, not the reusable environment.
+      await this.client.deleteSession(sessionId, this.remaining(data));
+      if (await this.client.present(sessionId, this.remaining(data)))
+        throw new Error(
+          "Claude owned session/sandbox deletion is not confirmed",
+        );
     }
-    data.phase = "interrupted";
-    data.terminal = "cancelled";
+    for (const file of data.files) {
+      if (data.deletedFiles.includes(file.id)) continue;
+      await this.client.deleteFile(file.id, this.remaining(data));
+      if (!(await this.client.fileAbsent(file.id, this.remaining(data))))
+        throw new Error("Claude uploaded file deletion is not confirmed");
+      data.deletedFiles.push(file.id);
+      this.save(handle, context);
+    }
+    data.phase = "disposed";
+    this.save(handle, context);
+  }
+  /** Stops any running turn and disposes the attempt's resources. */
+  private async stop(
+    handle: ExecutionHandle,
+    terminal: "failed" | "cancelled",
+    context?: ExecutionContext,
+  ): Promise<void> {
+    const data = this.active(handle);
+    if (data.phase === "disposed") return;
+    // Each cleanup gets a fresh window, so cleanup resumed after an outage
+    // longer than the window still runs.
+    data.cleanupStartedAt = Date.now();
+    const session = data.sessionId
+      ? await this.client.present(data.sessionId, this.remaining(data))
+      : undefined;
+    if (session) {
+      this.assertSession(session, handle);
+      if (session.status === "running" || session.status === "rescheduling")
+        await this.interrupt(handle, context);
+    }
+    data.terminal ??= terminal;
     this.save(handle, context);
     await this.dispose(handle, context);
   }
+  async cancel(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<void> {
+    await this.stop(handle, "cancelled", context);
+  }
+  /**
+   * Any failure either interrupts the step (it reattaches) or stops the
+   * session first, so a repeated attempt never runs beside it.
+   */
   async collect(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<ExecutionResult> {
     const data = this.active(handle);
-    if (data.result) {
-      await this.dispose(handle, context);
-      return data.result;
+    if (!data.result) {
+      if (!context)
+        throw new Error(
+          "Managed execution requires controller checkpoint authority",
+        );
+      if (data.stopped)
+        await this.settle(
+          handle,
+          context,
+          data.stopped.detail,
+          data.stopped.interrupted,
+        );
+      try {
+        data.result = await this.produce(handle, context);
+      } catch (error) {
+        await this.fail(error, handle, context);
+      }
+      data.terminal = "complete";
+      this.save(handle, context);
     }
+    try {
+      await this.dispose(handle, context);
+    } catch (error) {
+      throw claudeTransient(error) ? new Interruption(error) : error;
+    }
+    return data.result!;
+  }
+  private async produce(
+    handle: ExecutionHandle,
+    context: ExecutionContext,
+  ): Promise<ExecutionResult> {
+    const data = this.active(handle);
     while (true) {
-      if (context?.cancelled()) throw new Error("Claude collection cancelled");
-      const observation = await this.observe(handle, context);
+      if (context.cancelled()) throw new Error("Claude collection cancelled");
+      // Each pass resolves the recorded phase first, so a transient failure
+      // is retried in place without repeating a submission blindly.
+      const observation = await retryTransient(async () => {
+        await this.advance(handle, context);
+        const observed = await this.observe(handle, context);
+        if (observed.state === "running" && data.phase === "bootstrap-verified")
+          await this.submitImplementation(handle, context);
+        return observed;
+      }, claudeTransient);
       if (observation.state === "complete") break;
       if (observation.state !== "running")
-        throw new Error(observation.detail ?? "Claude execution failed");
-      if (data.phase === "bootstrap-verified")
-        await this.submitImplementation(handle, context);
-      else await this.wait(data);
+        await this.settle(
+          handle,
+          context,
+          observation.detail ?? `Claude execution ${observation.state}`,
+          observation.interrupted === true,
+        );
+      if (data.phase !== "prepared" && data.phase !== "created")
+        await this.wait(data);
     }
     const bytes = readFileSync(join(data.root, "result.json"));
     if (
@@ -830,10 +980,6 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
         evidence,
       },
     );
-    data.result = result;
-    data.terminal = "complete";
-    this.save(handle, context);
-    await this.dispose(handle, context);
     return result;
   }
 }

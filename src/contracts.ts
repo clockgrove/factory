@@ -426,8 +426,15 @@ export interface ExecutionResult {
   evidence?: unknown;
 }
 /** Persist before each external mutation; callbacks are controller-owned, never serialized. */
+/** A provider resource a lost response may have created that Factory cannot find to delete. */
+export interface ExecutionOrphan {
+  resource: string;
+  detail: string;
+}
 export interface ExecutionContext {
   observeUsage?(observation: WorkerUsageObservation): void;
+  /** Diagnostic only: records a possible orphan for operator cleanup. */
+  observeOrphan?(orphan: ExecutionOrphan): void;
   cancelled(): boolean;
   checkpoint(handle: ExecutionHandle): void;
 }
@@ -552,6 +559,9 @@ export interface SandboxRepositoryInput {
   lfsSources: { path: string; digest: string; bytes: number }[];
 }
 export interface SandboxProvider {
+  /** This attempt's tagged sandbox, if one exists. Never creates one. */
+  find(request: SandboxRequest): Promise<SandboxHandle | undefined>;
+  /** Return this attempt's sandbox: adopt the one `find` returns, or create one tagged with the attempt, so a call whose response was lost can repeat. */
   create(request: SandboxRequest): Promise<SandboxHandle>;
   /** Trusted preparation, before any harness runs: fetch exact Git objects into workspace/repo and selected LFS objects into workspace/lfs/<index>. Remove all usable GitHub authentication, credential helpers and auth-bearing remotes before returning. Never put credentials in handles, config, argv or returned data. Failure must not start a harness. */
   prepareRepository(

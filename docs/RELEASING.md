@@ -12,7 +12,7 @@ Each version `X.Y.Z` has one annotated tag `vX.Y.Z` on `main` and one [GitHub Re
 
 The Codex plugin marketplace entry pins the same tag, so the plugin's skills and the CLI always come from one version. Factory is not published to the npm registry.
 
-Tags `v*` cannot be moved or deleted. A published version is never rebuilt or replaced; fix problems in a new version.
+A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelease, which the README's latest-release install skips. Tags `v*` cannot be moved or deleted. A published version is never rebuilt or replaced; fix problems in a new version.
 
 ## Publish a version
 

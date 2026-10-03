@@ -65,5 +65,8 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           node scripts/version.mjs notes "$version" > release-notes.md
+          # X.Y.Z-suffix versions are prereleases, so the README's "latest" install skips them.
+          prerelease=()
+          [[ "$version" == *-* ]] && prerelease=(--prerelease)
           gh release create "$GITHUB_REF_NAME" artifacts/*.tgz artifacts/SHA256SUMS \
-            --verify-tag --title "Factory $version" --notes-file release-notes.md
+            --verify-tag --title "Factory $version" --notes-file release-notes.md "${prerelease[@]}"

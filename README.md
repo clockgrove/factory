@@ -20,7 +20,7 @@ Factory is an open-source plugin for Codex and Claude Code, built for developers
 - Your target's build and validation tools; Git LFS for LFS-backed media work.
 - A trusted repository with committed instructions and requirements. Local workers run under your OS account; they are not a security boundary for hostile code.
 
-Planning, review, and workers consume your provider's usage. Factory currently runs one active Objective per installation, with a configured local harness or compile-time assigned local execution profiles. The release includes provider-neutral [sandbox application composition](docs/SANDBOX-EXECUTION.md) and an optional Daytona adapter for public sources. Private-source authentication and live hosted execution remain unqualified. See [local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md) for optional-provider requirements and boundaries.
+Planning, review, and workers consume your provider's usage. Factory currently runs one active Objective per installation, with a configured local harness or compile-time assigned local execution profiles. [Remote execution](https://github.com/clockgrove/factory/blob/main/docs/REMOTE-EXECUTION.md) (Claude and OpenAI managed agents, sandboxes, Daytona) is not yet live-qualified. See [local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md) for optional-provider requirements and boundaries.
 
 ## Install
 
@@ -116,7 +116,7 @@ To add features or fix bugs **in Factory itself**, use a source checkout and fol
 | I want to…                                                          | Read                                                                                                                                                       |
 | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Configure models, inspect progress, review media, or handle a pause | [User guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md)                                                                           |
-| Compare local usage, time and outcomes                              | [Local analysis](https://github.com/clockgrove/factory/blob/main/docs/LOCAL-ANALYSIS.md)                                                                   |
+| Capture, analyze or export model usage                              | [Capture and analysis](https://github.com/clockgrove/factory/blob/main/docs/CAPTURE.md)                                                                    |
 | Select or implement a local agent harness                           | [Local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md)                                                                 |
 | Report a bug or ask for help                                        | [Support](https://github.com/clockgrove/factory/blob/main/SUPPORT.md)                                                                                      |
 | Build from source or contribute                                     | [Contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md)                                                                            |

@@ -47,7 +47,7 @@ If the harness reports a socket directory or permission error, inspect the host 
 
 ## Managed execution development candidate
 
-The [OpenAI managed execution guide](OPENAI-MANAGED.md) describes explicit provider configuration and current qualification limitations. It changes Work Item execution only; installing Factory retains local defaults and grants no additional provider, disclosure or spending authority.
+The [remote execution guide](REMOTE-EXECUTION.md) describes explicit provider configuration and current qualification limitations. It changes Work Item execution only; installing Factory retains local defaults and grants no additional provider, disclosure or spending authority.
 
 ## Guided target setup
 
@@ -143,7 +143,7 @@ Remote execution providers still need an API key. In the foreground Factory read
 
 The default delivery mode is regular pull requests. Add `--delivery native-stack` at installation to choose native linear stacks on a target that supports them. Independent work remains dependency-aware; target branch protection and required checks still govern integration.
 
-The default network policy is `host`; `--network off` selects the supported offline worker policy for the Codex path. GitHub operations and planning still need their own service access. Review the chosen harness's boundaries before selecting a policy. Local work consumes your provider account usage; unavailable usage is never zero. Managed cloud, sandbox execution, mixed execution modes, and automatic provider fallback are not available.
+The default network policy is `host`; `--network off` selects the supported offline worker policy for the Codex path. GitHub operations and planning still need their own service access. Review the chosen harness's boundaries before selecting a policy. Local work consumes your provider account usage; unavailable usage is never zero. Managed agents and sandboxes are configured separately in [remote execution](REMOTE-EXECUTION.md); automatic provider fallback is not available.
 
 ## Admit an exact plan for autonomous work
 
@@ -253,9 +253,9 @@ factory diagnostics --objective ISSUE_NUMBER --summary
 factory logs --objective ISSUE_NUMBER --item WORK_ITEM_ID --follow
 ```
 
-Status describes current continuation state, including blocked work, selection pauses, errors, and final acceptance. Diagnostics provide a private timeline and available usage; logs expose worker output. A quiet timeline means no new provider event was observed. Neither silence nor missing counters proves completion or zero usage. Keep transcripts and private validation output out of public issues. For optional sensitive local request/response capture and metadata-only inspection, see [local model capture](LOCAL-CAPTURE.md).
+Status describes current continuation state, including blocked work, selection pauses, errors, and final acceptance. Diagnostics provide a private timeline and available usage; logs expose worker output. A quiet timeline means no new provider event was observed. Neither silence nor missing counters proves completion or zero usage. Keep transcripts and private validation output out of public issues. For optional sensitive local request/response capture and metadata-only inspection, see [capture and analysis](CAPTURE.md).
 
-For metadata-only comparisons of recorded usage, timing and outcomes, use [`factory analyze`](LOCAL-ANALYSIS.md). Captured content inspection is a separate, explicit operation.
+For metadata-only comparisons of recorded usage, timing and outcomes, use [`factory analyze`](CAPTURE.md#analyze). Captured content inspection is a separate, explicit operation.
 
 ## Review a result decision
 

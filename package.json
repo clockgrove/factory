@@ -36,11 +36,8 @@
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
-    "docs/OPENAI-MANAGED.md",
-    "docs/CLAUDE-MANAGED.md",
-    "docs/SANDBOX-EXECUTION.md",
-    "docs/CAPTURE-EXPORT.md",
-    "docs/LOCAL-ANALYSIS.md"
+    "docs/REMOTE-EXECUTION.md",
+    "docs/CAPTURE.md"
   ],
   "publishConfig": {
     "access": "public"

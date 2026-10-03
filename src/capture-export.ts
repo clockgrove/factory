@@ -252,8 +252,13 @@ function authorizationDigest(
   payload: string,
   headers: Record<string, string>,
 ) {
+  // Header names are case-insensitive; a case-only change keeps the preview.
   const headerDigest = hash(
-    json(Object.entries(headers).sort(([a], [b]) => (a < b ? -1 : 1))),
+    json(
+      Object.entries(headers)
+        .map(([name, value]) => [name.toLowerCase(), value])
+        .sort(([a], [b]) => (a! < b! ? -1 : 1)),
+    ),
   );
   return hash(json([endpoint, content, payload, headerDigest]));
 }
@@ -284,13 +289,21 @@ export function otlpHeaders(
     const at = entry.indexOf("=");
     const key = at > 0 ? entry.slice(0, at).trim() : "";
     const value = decodeHeaderValue(entry.slice(at + 1).trim());
-    // RFC 9110 token names; values without control characters.
+    // RFC 9110: token names, unique ignoring case; values are tab, space,
+    // visible ASCII or Latin-1 (obs-text) only.
     if (
       !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(key) ||
+      Object.keys(headers).some(
+        (other) => other.toLowerCase() === key.toLowerCase(),
+      ) ||
       value === undefined ||
       [...value].some((character) => {
-        const code = character.charCodeAt(0);
-        return (code < 0x20 && code !== 0x09) || code === 0x7f;
+        const code = character.codePointAt(0)!;
+        return (
+          (code < 0x20 && code !== 0x09) ||
+          (code >= 0x7f && code < 0xa0) ||
+          code > 0xff
+        );
       })
     )
       throw new Error(`${name} is malformed`);
@@ -377,6 +390,18 @@ export async function sendOtlpExport(
         reason: "invalid-acknowledgement",
       };
     const { partialSuccess, ...rest } = body;
+    const invalid =
+      partialSuccess === undefined
+        ? Object.keys(rest).length > 0
+        : !partialSuccess ||
+          typeof partialSuccess !== "object" ||
+          Array.isArray(partialSuccess);
+    if (invalid)
+      return {
+        ...receipt,
+        status: "unknown",
+        reason: "invalid-acknowledgement",
+      };
     if (partialSuccess) {
       const rejected = Number(partialSuccess.rejectedSpans ?? 0);
       const rejectedSpans =
@@ -391,12 +416,6 @@ export async function sendOtlpExport(
         warningPresent: Boolean(partialSuccess.errorMessage),
       };
     }
-    if (Object.keys(rest).length || partialSuccess !== undefined)
-      return {
-        ...receipt,
-        status: "unknown",
-        reason: "invalid-acknowledgement",
-      };
     return { ...receipt, status: "accepted" };
   } catch {
     return {

@@ -2,7 +2,7 @@
 
 This contributor procedure supplies the ordinary installed scenario for [#253](https://github.com/clockgrove/factory/issues/253).
 It is not a plugin user tutorial or evidence that the scenario has passed. Follow
-[the public release procedure](PUBLIC-RELEASE.md) for exact artifact gates. The
+[the release procedure](RELEASING.md) for publishing. The
 finite compounded-failure matrix belongs to #254, separately from this scenario.
 
 ## Candidate and run record

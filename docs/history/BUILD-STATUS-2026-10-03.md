@@ -1,3 +1,5 @@
+> Historical snapshot retained on October 3, 2026, when Factory moved to a tag-triggered release workflow with build provenance attestations. It records releases up to v0.1.74 and the procedure used for them. See the [current release procedure](../RELEASING.md) and the [GitHub Releases](https://github.com/clockgrove/factory/releases) for later versions.
+
 # Release artifact records
 
 Current work and acceptance belong to the [Factory Project](https://github.com/orgs/clockgrove/projects/2) and their issues. This document records immutable distribution evidence, not a second work queue.
@@ -1909,15 +1911,15 @@ and adopter status in #26; publication does not establish those outcomes.
 
 ## Historical v0.1.28 publication record
 
-See the [preserved publication record](history/BUILD-STATUS-2026-09-28.md#historical-v0128-publication-record).
+See the [preserved publication record](BUILD-STATUS-2026-09-28.md#historical-v0128-publication-record).
 
 ## Historical candidate preparation
 
-See the [preserved candidate record](history/BUILD-STATUS-2026-09-28.md#historical-candidate-preparation).
+See the [preserved candidate record](BUILD-STATUS-2026-09-28.md#historical-candidate-preparation).
 
 ## Historical preparation and release evidence
 
-The [historical ledger](history/BUILD-STATUS-2026-09-28.md#historical-preparation-and-release-evidence) preserves previous source, artifact, run, accounting and acceptance identities, including failed and superseded candidates. Its pending-work statements are historical; consult the linked issues for current status. [PR #183](https://github.com/clockgrove/factory/pull/183) retains the exact v0.1.29 release record.
+The [historical ledger](BUILD-STATUS-2026-09-28.md#historical-preparation-and-release-evidence) preserves previous source, artifact, run, accounting and acceptance identities, including failed and superseded candidates. Its pending-work statements are historical; consult the linked issues for current status. [PR #183](https://github.com/clockgrove/factory/pull/183) retains the exact v0.1.29 release record.
 
 Earlier success establishes only that artifact's tested scenario. It does not qualify a later artifact or the Clockgrove adopter pilot. Published tags, release assets and terminal runs remain unchanged.
 
@@ -1940,7 +1942,7 @@ The replacement design uses trusted pinned Git/LFS preparation, explicit bound i
 binary result collection; prior PR #307 remains preserved design evidence.
 Credential-free separate-workspace tests and an installed package-root consumer cover its
 transport and lifecycle; they do not qualify Daytona or an arbitrary provider/harness pair.
-See [the sandbox guide](SANDBOX-EXECUTION.md). The start gate rests on accepted foundations,
+See [the sandbox guide](../SANDBOX-EXECUTION.md). The start gate rests on accepted foundations,
 #55 and successor adopter gates #206/#207; historical #26 was retired without acceptance.
 Daytona remains #9 and requires its own adapter and authorized installed live proof.
 

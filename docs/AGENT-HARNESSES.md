@@ -271,7 +271,7 @@ does not establish WSL CLI readiness. Check `claude auth status` using the selec
 runtime; verify Copilot CLI availability and its own local login separately from
 `gh auth status`. Optional native installation warnings are not successful runtime
 qualification. Launch the controller from the ordinary authorized WSL host as
-explained in `docs/PUBLIC-RELEASE.md`; retain the worker's managed sandbox settings.
+explained in [host and worker readiness](USER-GUIDE.md#host-and-worker-readiness); retain the worker's managed sandbox settings.
 An outer chat sandbox failure is not permission to weaken worker safeguards.
 
 If a profile is missing or expired, the attempt fails durably with a specific

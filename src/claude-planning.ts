@@ -21,7 +21,10 @@ import {
   type ClaudeModelSelection,
   type PlanningConfig,
 } from "./config.js";
-import type { ModelInvocationContext } from "./contracts.js";
+import {
+  AuthenticationRequiredError,
+  type ModelInvocationContext,
+} from "./contracts.js";
 import {
   claudeAuthenticationValues,
   claudeWorkerEnvironment,
@@ -32,7 +35,7 @@ import {
   claudeModelUsage,
   claudeRawTokenUsage,
 } from "./execution/claude-usage.js";
-import { redact } from "./execution/harness-support.js";
+import { authenticationFailure, redact } from "./execution/harness-support.js";
 import { claudeCaptureEvents } from "./execution/interaction-capture.js";
 import {
   closeProviderEventStream,
@@ -215,21 +218,25 @@ const authenticationErrors = new Set<SDKAssistantMessageError>([
   "cloud_credential_error",
 ]);
 
+/** The runtime's stand-in for a model message it produced itself. */
+const SYNTHETIC_MODEL = "<synthetic>";
+
+function apiErrorStatus(result: SDKResultMessage): number | undefined {
+  return result.subtype === "success" &&
+    typeof result.api_error_status === "number"
+    ? result.api_error_status
+    : undefined;
+}
+
 function failureClass(
   result: SDKResultMessage,
   assistantError: SDKAssistantMessageError | undefined,
 ): string | undefined {
-  const status =
-    result.subtype === "success" ? result.api_error_status : undefined;
+  const status = apiErrorStatus(result);
   if (status === 529 || assistantError === "overloaded")
     return "provider-capacity";
   if (status === 429 || assistantError === "rate_limit")
     return "provider-rate-limit";
-  if (
-    status === 401 ||
-    (assistantError && authenticationErrors.has(assistantError))
-  )
-    return "provider-authentication";
   if (
     result.subtype === "error_max_turns" ||
     result.stop_reason === "max_tokens" ||
@@ -239,6 +246,13 @@ function failureClass(
   if (result.subtype === "error_max_structured_output_retries")
     return "provider-structured-output";
   return undefined;
+}
+
+interface SessionFacts {
+  initialized: boolean;
+  /** A real model message arrived, not only a runtime-synthesized one. */
+  modelResponded: boolean;
+  assistantError?: SDKAssistantMessageError;
 }
 
 /** One isolated Agent SDK query per attempt, constrained by JSON schema. */
@@ -295,15 +309,15 @@ class ClaudePlanningTransport implements PlanningTransport {
       () => abortController.abort(guard.signal.reason),
       { once: true },
     );
-    // An empty private directory: the session has nothing to read or load.
-    const root = mkdtempSync(join(tmpdir(), "factory-claude-planning-"));
     const usage = new ClaudeUsage(this.secrets);
+    const facts: SessionFacts = { initialized: false, modelResponded: false };
+    let root: string | undefined;
     let events: AsyncIterator<SDKMessage> | undefined;
     let closeStarted = false;
-    let initialized = false;
-    let assistantError: SDKAssistantMessageError | undefined;
     let result: SDKResultMessage | undefined;
     try {
+      // An empty private directory: the session has nothing to read or load.
+      root = mkdtempSync(join(tmpdir(), "factory-claude-planning-"));
       const query = this.query ?? (await guard.race(loadClaudeQuery()));
       const cwd = join(root, "cwd");
       const credentialDirectory = join(root, "empty-gh-config");
@@ -327,8 +341,11 @@ class ClaudePlanningTransport implements PlanningTransport {
         guard.progress();
         if ("session_id" in message && typeof message.session_id === "string")
           state.providerThreadId ??= message.session_id;
-        if (message.type === "assistant" && message.error)
-          assistantError = message.error;
+        if (message.type === "assistant") {
+          if (message.error) facts.assistantError = message.error;
+          if (message.message.model !== SYNTHETIC_MODEL)
+            facts.modelResponded = true;
+        }
         const captures = claudeCaptureEvents(
           message,
           this.secrets,
@@ -350,7 +367,7 @@ class ClaudePlanningTransport implements PlanningTransport {
           });
         if (message.type === "system" && message.subtype === "init") {
           assertPlanningInitialization(message, model);
-          initialized = true;
+          facts.initialized = true;
         }
         if (message.type === "result") {
           result = message;
@@ -373,17 +390,10 @@ class ClaudePlanningTransport implements PlanningTransport {
       if (events && !closeStarted)
         void closeProviderEventStream(events, guard, false);
       guard.finish();
-      rmSync(root, { recursive: true, force: true });
+      if (root) rmSync(root, { recursive: true, force: true });
     }
     requireCompletedProviderTurn(result !== undefined);
-    this.settle(result!, {
-      state,
-      invocation,
-      usage,
-      started,
-      initialized,
-      assistantError,
-    });
+    this.settle(result!, { state, invocation, usage, started, facts });
   }
 
   /** Record terminal usage and outcome, then accept only structured output. */
@@ -394,17 +404,32 @@ class ClaudePlanningTransport implements PlanningTransport {
       invocation: ModelInvocationContext;
       usage: ClaudeUsage;
       started: number;
-      initialized: boolean;
-      assistantError?: SDKAssistantMessageError;
+      facts: SessionFacts;
     },
   ): void {
-    const { state, invocation } = context;
-    state.ended = true;
+    const { state, invocation, facts } = context;
+    const succeeded = result.subtype === "success" && !result.is_error;
+    const status = apiErrorStatus(result);
+    const detail = redact(
+      result.subtype === "success" ? result.result : result.errors.join("; "),
+      this.secrets,
+    );
+    const authentication =
+      !succeeded &&
+      (status === 401 ||
+        (facts.assistantError !== undefined &&
+          authenticationErrors.has(facts.assistantError)) ||
+        authenticationFailure("claude", detail) !== undefined);
+    // Only a model message or an API error status is a provider verdict. The
+    // runtime also reports startup, login and connection failures as results.
+    state.ended =
+      !authentication &&
+      result.subtype !== "error_during_execution" &&
+      (status !== undefined || facts.modelResponded);
     const totals = context.usage.totals();
     state.usage = Object.keys(totals).length ? totals : undefined;
     const models = Object.keys(result.modelUsage ?? {});
     const cost = claudeCost(result.total_cost_usd);
-    const succeeded = result.subtype === "success" && !result.is_error;
     observeModelInvocation(invocation, {
       type: "progress",
       capture: {
@@ -436,6 +461,22 @@ class ClaudePlanningTransport implements PlanningTransport {
         },
       },
     });
+    let failure: string | undefined;
+    if (result.stop_reason === "refusal") {
+      state.failureClass = "provider-refusal";
+      failure = "Claude response ended with stop_reason refusal";
+    } else if (authentication) {
+      state.failureClass = "provider-authentication";
+      failure = `Claude planning is not authenticated (${detail || result.subtype}); run \`claude auth login\` on the controller host, or provide CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, then retry`;
+    } else if (!succeeded) {
+      state.failureClass = failureClass(result, facts.assistantError);
+      failure = `Claude planning ended with ${result.subtype}${result.stop_reason ? ` (stop_reason ${result.stop_reason})` : ""}: ${detail || "no detail"}`;
+    } else if (!facts.initialized)
+      failure = "Claude SDK did not report its initialized session";
+    else if (result.structured_output === undefined) {
+      state.failureClass = "provider-incomplete";
+      failure = "Claude result carried no structured output";
+    }
     observeModelInvocation(invocation, {
       type: "progress",
       capture: {
@@ -443,43 +484,26 @@ class ClaudePlanningTransport implements PlanningTransport {
           kind: "outcome",
           outcome: {
             stage: "provider",
-            status: succeeded
-              ? (result.stop_reason ?? "success")
-              : result.subtype === "success"
-                ? "error"
-                : result.subtype,
+            status: failure === undefined ? "completed" : "failed",
+            ...(failure !== undefined &&
+              state.failureClass && { failureClass: state.failureClass }),
+            ...(result.stop_reason && { stopReason: result.stop_reason }),
           },
           durationMs: Date.now() - context.started,
         },
       },
     });
-    if (result.stop_reason === "refusal") {
-      state.failureClass = "provider-refusal";
-      throw new Error("Claude response ended with stop_reason refusal");
-    }
-    if (!succeeded) {
-      state.failureClass = failureClass(result, context.assistantError);
-      const detail = redact(
-        result.subtype === "success" ? result.result : result.errors.join("; "),
-        this.secrets,
-      );
-      throw new Error(
-        `Claude planning ended with ${result.subtype}${result.stop_reason ? ` (stop_reason ${result.stop_reason})` : ""}: ${detail || "no detail"}${
-          state.failureClass === "provider-authentication"
-            ? "; sign in with `claude auth login`, or set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY for the controller"
-            : ""
-        }`,
-      );
-    }
-    if (!context.initialized)
-      throw new Error("Claude SDK did not report its initialized session");
-    if (result.structured_output === undefined) {
-      state.failureClass = "provider-incomplete";
-      throw new Error("Claude result carried no structured output");
-    }
-    state.response = JSON.stringify(result.structured_output);
+    if (authentication)
+      throw new AuthenticationRequiredError(failure!, {
+        provider: "claude",
+        command: "claude auth login",
+      });
+    if (failure !== undefined) throw new Error(failure);
+    if (result.subtype === "success")
+      state.response = JSON.stringify(result.structured_output);
   }
 }
+
 
 /** Planning and review through the Claude Agent SDK and the operator's login. */
 export class ClaudePlanningModel extends StructuredPlanningModel {

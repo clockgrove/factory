@@ -1,3 +1,5 @@
+> Historical record retained on October 3, 2026. It describes the September 2026 rebuild and is not maintained. See [ARCHITECTURE.md](../ARCHITECTURE.md) for how Factory works now.
+
 # Factory archive-to-rebuild capability review
 
 Status: operator-approved capability audit, September 22, 2026. The accepted pre-pilot trunk closure list is issues #19–#25 and #28, followed by the #26 pilot gate. T03, T11, and T26 were narrowed as noted below. Acceptance does not mean implementation is complete, and no row authorizes copying the archived implementation wholesale.

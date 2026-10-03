@@ -85,14 +85,14 @@ To add features or fix bugs **in Factory itself**, use a source checkout and fol
 
 ## Documentation and community
 
-| I want to…                                                          | Read                                                                                                                                                          |
-| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Configure models, inspect progress, review media, or handle a pause | [User guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md)                                                                              |
-| Compare local usage, time and outcomes                              | [Local analysis](https://github.com/clockgrove/factory/blob/main/docs/LOCAL-ANALYSIS.md)                                                                      |
-| Select or implement a local agent harness                           | [Local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md)                                                                    |
-| Report a bug or ask for help                                        | [Support](https://github.com/clockgrove/factory/blob/main/SUPPORT.md)                                                                                         |
-| Build from source or contribute                                     | [Contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md)                                                                               |
-| Understand the architecture and roadmap                             | [Implementation plan](https://github.com/clockgrove/factory/blob/main/docs/IMPLEMENTATION-PLAN.md) · [Project](https://github.com/orgs/clockgrove/projects/2) |
-| Inspect release changes or the release process                      | [Changelog](https://github.com/clockgrove/factory/blob/main/CHANGELOG.md) · [Releasing](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md)    |
+| I want to…                                                          | Read                                                                                                                                                       |
+| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Configure models, inspect progress, review media, or handle a pause | [User guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md)                                                                           |
+| Compare local usage, time and outcomes                              | [Local analysis](https://github.com/clockgrove/factory/blob/main/docs/LOCAL-ANALYSIS.md)                                                                   |
+| Select or implement a local agent harness                           | [Local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md)                                                                 |
+| Report a bug or ask for help                                        | [Support](https://github.com/clockgrove/factory/blob/main/SUPPORT.md)                                                                                      |
+| Build from source or contribute                                     | [Contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md)                                                                            |
+| Understand the architecture and roadmap                             | [Architecture](https://github.com/clockgrove/factory/blob/main/docs/ARCHITECTURE.md) · [Project](https://github.com/orgs/clockgrove/projects/2)            |
+| Inspect release changes or the release process                      | [Changelog](https://github.com/clockgrove/factory/blob/main/CHANGELOG.md) · [Releasing](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md) |
 
 Factory is [MIT licensed](https://github.com/clockgrove/factory/blob/main/LICENSE) and maintained by Clockgrove. Contributions follow the [code of conduct](https://github.com/clockgrove/factory/blob/main/CODE_OF_CONDUCT.md). Report vulnerabilities through the [security policy](https://github.com/clockgrove/factory/blob/main/SECURITY.md).

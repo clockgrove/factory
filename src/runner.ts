@@ -98,8 +98,9 @@ import type {
   PreparationState,
 } from "./state.js";
 import {
-  assertReadOnlyReviewAbandonmentRequest,
-  type ReadOnlyReviewAbandonmentRequest,
+  assertPermanentAbandonmentRequest,
+  permanentAbandonmentEffect,
+  type PermanentAbandonmentRequest,
 } from "./state.js";
 import {
   acquireControllerLock,
@@ -119,6 +120,29 @@ import {
   validateTree,
 } from "./validation.js";
 
+/** One controller-derived binding for the immutable preparation inputs. */
+function preparationSourceDigest(
+  sources: PlanCandidate["sources"],
+  prerequisites: PlanCandidate["prerequisites"],
+  localExecutables: PlanCandidate["localExecutables"],
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify(
+        localExecutables
+          ? {
+              sources,
+              ...(prerequisites ? { prerequisites } : {}),
+              localExecutables,
+            }
+          : prerequisites
+            ? { sources, prerequisites }
+            : sources,
+      ),
+    )
+    .digest("hex");
+}
+
 export interface ApplicationServices {
   planningModel: PlanningModel;
   driver: ExecutionDriver;
@@ -134,6 +158,13 @@ function configuredDiagnosticSecrets(config: FactoryConfig): string[] {
     .filter((value): value is string => Boolean(value));
 }
 
+function assertNotAbandoned(config: FactoryConfig, objective: number): void {
+  if (readContinuation(config.repository, objective)?.permanentAbandonment)
+    throw new Error(
+      "Objective was permanently abandoned; create a normally admitted successor",
+    );
+}
+
 /** Explicit previews remain read-only; admitted repair or intake planning persists one bound preparation. */
 export async function planObjective(
   config: FactoryConfig,
@@ -147,6 +178,7 @@ export async function planObjective(
     stopped?: () => boolean;
   },
 ): Promise<PlanCandidate> {
+  assertNotAbandoned(config, objective);
   validateTarget(config.repository, config.checkout);
   if (authority) checkAuthority(config, objective, authority);
   const diagnostics = new DiagnosticEmitter(
@@ -187,21 +219,11 @@ export async function planObjective(
       additionalSources,
     );
     const localExecutables = preflightObjective(config, issue.body, baseSha);
-    const sourcePacketDigest = createHash("sha256")
-      .update(
-        JSON.stringify(
-          localExecutables
-            ? {
-                sources,
-                ...(prerequisites ? { prerequisites } : {}),
-                localExecutables,
-              }
-            : prerequisites
-              ? { sources, prerequisites }
-              : sources,
-        ),
-      )
-      .digest("hex");
+    const sourcePacketDigest = preparationSourceDigest(
+      sources,
+      prerequisites,
+      localExecutables,
+    );
     if (authority?.repairPolicy || options?.ownerLock) {
       if (!authority)
         throw new Error("Owned durable planning requires bound authority");
@@ -359,6 +381,10 @@ function checkActiveAdmission(
   admission: AutonomousAdmission,
 ): void {
   const state = readContinuation(config.repository, objective);
+  if (state?.permanentAbandonment)
+    throw new Error(
+      "Objective was permanently abandoned; admission is forbidden",
+    );
   if (
     state &&
     (!state.admission || state.admission.digest !== admission.digest) &&
@@ -394,6 +420,7 @@ export async function admitObjective(
   candidate: PlanCandidate,
   authority: ExecutionAuthority,
 ): Promise<AutonomousAdmission> {
+  assertNotAbandoned(config, objective);
   validateTarget(config.repository, config.checkout);
   const issue = await services.github.objective(objective);
   const admission = bindAdmission(
@@ -415,6 +442,7 @@ export async function checkAdmission(
   candidate: PlanCandidate,
   admission: AutonomousAdmission,
 ): Promise<void> {
+  assertNotAbandoned(config, objective);
   validateTarget(config.repository, config.checkout);
   const issue = await services.github.objective(objective);
   verifyAdmission(
@@ -440,6 +468,7 @@ export async function decidePlan(
     reason: string;
   },
 ): Promise<PlanCandidate> {
+  assertNotAbandoned(config, objective);
   validateTarget(config.repository, config.checkout);
   const diagnostics = new DiagnosticEmitter(
     config.repository,
@@ -525,11 +554,17 @@ function mutationState(
   config: FactoryConfig,
   objective: number,
 ): FactoryState | undefined {
-  const snapshot = owners.get(ownerKey(config, objective))?.snapshot;
+  const snapshot =
+    owners.get(ownerKey(config, objective))?.snapshot ??
+    readContinuation(config.repository, objective);
+  if (snapshot?.permanentAbandonment)
+    throw new Error(
+      "Objective was permanently abandoned; create a normally admitted successor",
+    );
   if (snapshot?.schemaVersion === 5)
     throw new Error("Objective is still preparing");
   const state = snapshot ?? readState(config.repository, objective);
-  if (state?.readOnlyReviewAbandonment)
+  if (state?.permanentAbandonment)
     throw new Error(
       "Objective was permanently abandoned; create a normally admitted successor",
     );
@@ -568,7 +603,7 @@ export async function controlObjective(
     const state = readContinuation(config.repository, request.objective);
     if (!state) throw new Error("Objective has no Factory state");
     if (request.action === "status") return state.coordinator;
-    if (state.schemaVersion === 4 && state.readOnlyReviewAbandonment)
+    if (state.permanentAbandonment)
       throw new Error(
         "Objective was permanently abandoned; create a normally admitted successor",
       );
@@ -740,6 +775,11 @@ export async function runObjective(
   let snapshot: ContinuationState | undefined;
   try {
     snapshot = readContinuation(config.repository, objective);
+    if (snapshot?.permanentAbandonment)
+      throw new Error(
+        "Objective was permanently abandoned; create a normally admitted successor",
+      );
+
     if (
       (snapshot?.schemaVersion === 5 &&
         (snapshot.planning === "submitted" ||
@@ -749,10 +789,6 @@ export async function runObjective(
     )
       throw new Error(
         "Interrupted projection or planning cannot be replayed; operator direction required",
-      );
-    if (snapshot?.schemaVersion === 4 && snapshot.readOnlyReviewAbandonment)
-      throw new Error(
-        "Objective was permanently abandoned; create a normally admitted successor",
       );
   } catch (error) {
     if (!options.ownerLock) releaseControllerLock(lockPath, lock);
@@ -1282,7 +1318,7 @@ async function runObjectivePass(
         )
       : undefined;
     if (state) {
-      if (state.readOnlyReviewAbandonment)
+      if (state.permanentAbandonment)
         throw new Error(
           "Objective was permanently abandoned; create a normally admitted successor",
         );
@@ -1513,21 +1549,11 @@ async function runObjectivePass(
         config.checkout,
         acceptedPlan?.additionalSources ?? preparation?.plan?.additionalSources,
       );
-      const sourcePacketDigest = createHash("sha256")
-        .update(
-          JSON.stringify(
-            localExecutables
-              ? {
-                  sources,
-                  ...(prerequisites ? { prerequisites } : {}),
-                  localExecutables,
-                }
-              : prerequisites
-                ? { sources, prerequisites }
-                : sources,
-          ),
-        )
-        .digest("hex");
+      const sourcePacketDigest = preparationSourceDigest(
+        sources,
+        prerequisites,
+        localExecutables,
+      );
       if (!preparation) {
         preparation = {
           sourcePacketDigest,
@@ -2306,25 +2332,20 @@ async function runObjectivePass(
 }
 
 /** No cancellation, collection, model call or cleanup is inferred by abandonment. */
-function abandonStoppedReadOnlyReview(
+function abandonStoppedRun(
   config: FactoryConfig,
   objective: number,
-  request: ReadOnlyReviewAbandonmentRequest,
+  request: PermanentAbandonmentRequest,
 ): "cancelled" {
-  assertReadOnlyReviewAbandonmentRequest(request);
+  assertPermanentAbandonmentRequest(request);
   if (owners.has(ownerKey(config, objective)))
-    throw new Error(
-      "Read-only review abandonment requires a stopped controller",
-    );
+    throw new Error("Permanent abandonment requires a stopped controller");
   const lockPath = join(stateRoot(config.repository), "controller.lock");
   const lock = acquireControllerLock(lockPath, objective);
   try {
     const path = statePath(config.repository, objective);
     const state = readContinuation(config.repository, objective);
-    if (!state || state.schemaVersion !== 4)
-      throw new Error(
-        "Only an active-graph stopped result review can be abandoned",
-      );
+    if (!state) throw new Error("No stopped run exists to abandon");
     if (
       request.repository !== config.repository ||
       request.objective !== objective ||
@@ -2335,21 +2356,22 @@ function abandonStoppedReadOnlyReview(
         createHash("sha256").update(readFileSync(path)).digest("hex")
     )
       throw new Error(
-        "Read-only review abandonment differs from the exact run, configuration or stopped snapshot",
+        "Permanent abandonment differs from the exact run, configuration or stopped snapshot",
       );
     if (
       state.cancelledAt ||
-      state.readOnlyReviewAbandonment ||
-      state.finalAcceptance ||
-      state.finalValidation?.passed ||
-      state.objectiveClosure
+      state.permanentAbandonment ||
+      (state.schemaVersion === 4 &&
+        (state.finalAcceptance ||
+          state.finalValidation?.passed ||
+          state.objectiveClosure))
     )
       throw new Error(
         "Terminal or sealed final acceptance cannot be abandoned",
       );
     if (config.execution.kind !== "local")
       throw new Error(
-        "Read-only review abandonment supports verified local execution only",
+        "Permanent abandonment supports verified local execution only",
       );
     const harnesses = config.execution.profiles
       ? Object.values(config.execution.profiles).map(
@@ -2358,34 +2380,79 @@ function abandonStoppedReadOnlyReview(
       : [config.execution.harness];
     if (harnesses.some((harness) => !harness || harness.kind === "registered"))
       throw new Error("Configured harness has unsupported cessation identity");
+    const effect = permanentAbandonmentEffect(state);
+    if (!effect)
+      throw new Error(
+        "Planning, projection or mutating effect remains unresolved outside permanent abandonment",
+      );
+    const projection = effect === "graph-projection";
     if (
       !state.coordinator ||
-      (!state.error &&
-        !Object.values(state.work).some((work) => work.status === "failed")) ||
+      (!projection &&
+        !state.error &&
+        !(
+          state.schemaVersion === 4 &&
+          Object.values(state.work).some((work) => work.status === "failed")
+        )) ||
       Date.parse(request.cessation.verifiedAt) > Date.now() ||
       Date.parse(request.cessation.verifiedAt) <
         Date.parse(state.coordinator.phaseStartedAt)
     )
       throw new Error(
-        "Read-only review abandonment requires a stopped failure and current cessation evidence",
+        "Permanent abandonment requires a stopped failure and current cessation evidence",
       );
-    if (
-      hasPendingAmendmentEffect(state) ||
-      state.planningRecovery?.phase === "submitted" ||
-      (state.coordinator.phase.includes("submitted") &&
-        state.coordinator.phase !== "objective-review-submitted") ||
-      Object.keys(state.stackMerges ?? {}).length
-    )
-      throw new Error(
-        "Planning, projection or mutating effect remains unresolved",
+    validateTarget(config.repository, config.checkout);
+    pinnedGit(config.checkout, "cat-file", "-e", `${state.baseSha}^{commit}`);
+    if (projection && state.schemaVersion === 5) {
+      const plan = state.plan!;
+      const objectiveSource = Array.isArray(plan.sources)
+        ? plan.sources.find(
+            (source) => source.path === "OBJECTIVE" && !source.heading,
+          )
+        : undefined;
+      if (
+        !objectiveSource ||
+        state.objectiveBodyDigest !== plan.bodyDigest ||
+        state.sourcePacketDigest !==
+          preparationSourceDigest(
+            plan.sources,
+            plan.prerequisites,
+            plan.localExecutables,
+          )
+      )
+        throw new Error(
+          "Initial projection lost its canonical reviewed source binding",
+        );
+      verifyPlanCandidate(
+        plan,
+        objective,
+        objectiveSource.content,
+        state.baseSha,
+        config.checkout,
+        state.configDigest,
+        false,
+        config.execution.concurrency,
       );
+    } else if (projection && state.schemaVersion === 4) {
+      const pending = state.pendingAmendment!;
+      if (
+        !pending.graph ||
+        !/^[a-f0-9]{64}$/.test(pending.reviewDigest ?? "") ||
+        pending.graph.objective !== objective ||
+        pending.graph.baseSha !== state.baseSha ||
+        Object.entries(state.issueByItemId).some(
+          ([id, issue]) => pending.issueByItemId[id] !== issue,
+        )
+      )
+        throw new Error(
+          "Amended projection lost its reviewed graph or known issue binding",
+        );
+    }
     const knownAdapters = [
       "codex-sdk",
       CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
       GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
     ];
-    let uncertainReview =
-      state.coordinator.phase === "objective-review-submitted";
     for (const process of state.coordinator.processes ?? []) {
       const identity = linuxProcessIdentity(process.pid);
       if (
@@ -2396,17 +2463,9 @@ function abandonStoppedReadOnlyReview(
           "Owned subprocess remains live or its identity is unresolved",
         );
     }
-    for (const work of Object.values(state.work)) {
-      if (work.pendingEffect && work.pendingEffect !== "review")
-        throw new Error("Publication or merge effect remains unresolved");
-      uncertainReview ||= work.pendingEffect === "review";
-      if (
-        work.status === "running" ||
-        work.status === "published" ||
-        (work.step === "deliver" && work.status !== "done") ||
-        work.githubClosure === "pending"
-      )
-        throw new Error("Active work or mutating delivery remains unresolved");
+    for (const work of Object.values(
+      state.schemaVersion === 4 ? state.work : {},
+    )) {
       if (work.execution) {
         const active = work.execution.data as {
           adapterIdentity?: string;
@@ -2441,10 +2500,8 @@ function abandonStoppedReadOnlyReview(
         throw new Error("Owned worker has no stable cessation identity");
       }
     }
-    if (!uncertainReview)
-      throw new Error("No uncertain read-only result review exists to abandon");
     const at = new Date().toISOString();
-    state.readOnlyReviewAbandonment = { ...structuredClone(request), at };
+    state.permanentAbandonment = { ...structuredClone(request), at, effect };
     state.cancelRequested = true;
     state.cancelledAt = at;
     saveState(path, state);
@@ -2547,11 +2604,11 @@ export async function cancelObjective(
   config: FactoryConfig,
   objective: number,
   driver: ExecutionDriver,
-  abandonment?: ReadOnlyReviewAbandonmentRequest,
+  abandonment?: PermanentAbandonmentRequest,
   github?: GitHubGateway,
 ): Promise<"requested" | "cancelled"> {
   if (abandonment !== undefined)
-    return abandonStoppedReadOnlyReview(config, objective, abandonment);
+    return abandonStoppedRun(config, objective, abandonment);
   const root = stateRoot(config.repository);
   const lock = join(root, "controller.lock");
   const control = await requestControl(config.repository, {

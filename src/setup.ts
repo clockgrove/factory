@@ -185,7 +185,12 @@ export async function setupTarget(
         config: string;
         credentials?: { name: string; file: string }[];
       };
+      bindingHealth?: { diagnostics: { code: string; action: string }[] };
     };
+    const legacy = service.bindingHealth?.diagnostics.find(
+      ({ code }) => code === "legacy-credential-binding",
+    );
+    if (legacy) throw new Error(legacy.action);
     if (
       service.registered &&
       (!service.binding?.intake ||

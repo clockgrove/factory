@@ -424,6 +424,47 @@ test("a supervised service binds every configured provider credential, including
     ]);
   }));
 
+test("a retired single-credential binding is refused for reuse and only removable", () =>
+  fixture(async ({ root, config, configPath }) => {
+    await supervise("install", configPath, { objective: 1 });
+    const path = join(
+      process.env.XDG_CONFIG_HOME,
+      "systemd/user",
+      serviceName(config.repository),
+    );
+    const prefix = "# Factory local supervision v1 ";
+    const value = JSON.parse(
+      readFileSync(path, "utf8").split("\n")[0].slice(prefix.length),
+    );
+    value.credential = { name: "KEY", file: join(root, "key") };
+    writeFileSync(path, renderService(value), { mode: 0o600 });
+    const legacy = /retired single `credential` field.*--credential-file NAME=/;
+    await assert.rejects(
+      supervise("upgrade", configPath, { cli: process.argv[1] }),
+      legacy,
+    );
+    await assert.rejects(supervise("start", configPath), legacy);
+    await assert.rejects(
+      supervise("install", configPath, { objective: 1 }),
+      legacy,
+    );
+    assert.match(readFileSync(path, "utf8"), /"credential":/);
+    const status = await supervise("status", configPath);
+    assert.equal(status.binding, undefined);
+    assert.equal(
+      status.bindingHealth.diagnostics[0].code,
+      "legacy-credential-binding",
+    );
+    assert.match(status.bindingHealth.diagnostics[0].action, legacy);
+    assert.deepEqual(await supervise("uninstall", configPath), {
+      stopped: true,
+      evidenceRetained: true,
+    });
+    assert.equal(existsSync(path), false);
+    await supervise("install", configPath, { objective: 1 });
+    assert.doesNotMatch(readFileSync(path, "utf8"), /"credential":/);
+  }));
+
 test("supervised install and upgrade retain the caller's nonsecret SQLite path", () =>
   fixture(async ({ root, config, configPath }) => {
     process.env.CODEX_HOME = join(root, "codex-home");

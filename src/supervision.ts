@@ -187,10 +187,19 @@ function privateFile(path: string): void {
   )
     throw new Error(`Expected an owner-private file: ${path}`);
 }
-function decodeBinding(text: string): ServiceBinding {
+export const LEGACY_CREDENTIAL_BINDING =
+  "This service binding uses the retired single `credential` field; run `factory supervisor uninstall`, then reinstall the service with --credential-file NAME=ABSOLUTE_PRIVATE_FILE";
+
+/**
+ * Only stop, disable and uninstall may act on a retired single-credential
+ * binding, so an operator can remove it; nothing reuses or rewrites it.
+ */
+function decodeBinding(text: string, teardown = false): ServiceBinding {
   if (!text.startsWith(marker))
     throw new Error("Refusing a service not registered by Factory");
   const value = JSON.parse(text.split("\n")[0]!.slice(marker.length));
+  if (!teardown && value && typeof value === "object" && "credential" in value)
+    throw new Error(LEGACY_CREDENTIAL_BINDING);
   const path = (value: unknown) =>
     typeof value === "string" && isAbsolute(value) && !/[\n\r\0]/.test(value);
   if (
@@ -225,8 +234,8 @@ function decodeBinding(text: string): ServiceBinding {
     throw new Error("Malformed Factory service binding");
   return value as ServiceBinding;
 }
-function binding(config: FactoryConfig): ServiceBinding {
-  const value = decodeBinding(readFileSync(unitPath(config), "utf8"));
+function binding(config: FactoryConfig, teardown = false): ServiceBinding {
+  const value = decodeBinding(readFileSync(unitPath(config), "utf8"), teardown);
   if (
     value.stateHome !==
       resolve(
@@ -285,12 +294,19 @@ function inspectBinding(
   let value: ServiceBinding;
   try {
     value = decodeBinding(text);
-  } catch {
-    report(
-      "malformed-binding",
-      "The unit does not contain a valid Factory service binding.",
-      "Inspect the retained unit before any lifecycle operation. Do not delete continuation state or start this binding.",
-    );
+  } catch (error) {
+    if (error instanceof Error && error.message === LEGACY_CREDENTIAL_BINDING)
+      report(
+        "legacy-credential-binding",
+        "The unit uses the retired single-credential binding.",
+        LEGACY_CREDENTIAL_BINDING,
+      );
+    else
+      report(
+        "malformed-binding",
+        "The unit does not contain a valid Factory service binding.",
+        "Inspect the retained unit before any lifecycle operation. Do not delete continuation state or start this binding.",
+      );
     return { bindingHealth: health };
   }
   const available = (path: string, mode: number) => {
@@ -653,7 +669,10 @@ export async function supervise(
   }
   if (!existsSync(path) && ["disable", "uninstall", "stop"].includes(action))
     return { registered: false };
-  const value = binding(config);
+  const value = binding(
+    config,
+    ["stop", "disable", "uninstall"].includes(action),
+  );
   if (action === "start") {
     const required = requiredProviderCredentials(config);
     const bound = (value.credentials ?? []).map(({ name }) => name);

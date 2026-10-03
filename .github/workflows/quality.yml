@@ -22,7 +22,6 @@ jobs:
       - run: npm ci
       - run: git lfs version
       - run: npm run build
-      - run: npm run typecheck
       - name: Run Biome lint and compatibility rules
         run: npm run lint
       - name: Check Biome and fallback formatting
@@ -32,8 +31,7 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: npm run test:pr -- --base "$PR_BASE_SHA"
+        run: node scripts/test-pr.mjs --base "$PR_BASE_SHA"
       - name: Run complete main tests
         if: github.event_name != 'pull_request'
-        run: npm test
-      - run: npm run package
+        run: node --test test/*.test.mjs

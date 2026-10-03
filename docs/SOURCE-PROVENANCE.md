@@ -6,6 +6,20 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Dependency-notice generation without a Factory-version copy (#508)
+
+The existing current `scripts/generate-notices.mjs` owns production dependency
+and installed license extraction. Its redundant `lock.version` header is removed;
+the dependency inventory, license content, known-license refusals and reviewed
+upstream omission handling are unchanged. The focused regression executes the
+actual generator copied into a temporary fixture with current public license
+files. It changes only Factory root versions before separately testing dependency
+and license changes. No archived code, runtime behavior, compatibility format or
+release workflow is introduced. The existing Quality workflow (#509) invokes
+the same strict compiler once and tests its output through the existing PR
+selector or full main suite. Actual packing/installation tests retain package
+coverage; local developer npm commands remain available.
+
 ## Permanent stopped uncertainty abandonment (#499)
 
 The existing #363 exact-snapshot read-only-review disposition supplies the shared

@@ -6,6 +6,37 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Verified v0.1.73 shared-boundary handoff (#495 / #498 / #501 / #497)
+
+The current public gateway, atomic snapshots and shared lease boundary supplied
+these corrections through [PR #496](https://github.com/clockgrove/factory/pull/496)
+and [PR #502](https://github.com/clockgrove/factory/pull/502). Old/new hierarchy facts
+come from reviewed canonical graphs and authenticated native observations. Initial
+and amendment producers persist one typed whole-call external outcome before
+dispatch; decoders, status, supervision, restart, handoff and cancellation consume
+the same contract. Completed rejection can use authenticated readback; lost
+responses and generic historical error prose remain unresolved. Lease acquisition
+publishes complete synced identity bytes atomically without clobbering an owner;
+reads distinguish actual absence from corrupt or inaccessible ownership.
+
+The [immutable v0.1.73 record](BUILD-STATUS.md#immutable-v0173-artifact-record) binds
+source `cf1c201cf727132ffc3dce94a5d7d19f098a7c1c`, tree
+`abc0d79c4d0b08922f1dde8d91db0672bddf7148`, exact-main CI, final installed gates and
+[independent public acceptance](https://github.com/clockgrove/factory/issues/497#issuecomment-5964424472). This documentation
+follows that acceptance and changes no archive, tag or frozen release source.
+The failed 703/704 producer and the later readiness fixture failure remain preserved
+and unaccepted. The fixture correction declares execution purpose and durable
+evidence destinations separately from owned temporary sandbox scratch; real
+home-refused, tmp-allowed and host-denied controls retain their original meaning.
+Whole committed tests own reusable regressions; original22/49 responses and the
+complete stopped-state refusal retain their exact external historical scope.
+
+No archived source, fallback format, new state store, journal, generic framework,
+extra model call or acceptance override supplies these corrections. Live public
+#444/#447/#448 and subsequent private #445 acceptance remain separate. #499 is
+still the pending human-owned historical projection disposition decision;
+publication does not fabricate completed transport provenance or retire that run.
+
 ## Atomic controller lease publication (#501)
 
 The current shared state store and the failed initial watcher setup in the first
@@ -59,8 +90,9 @@ positive readback rehearsals remain preserved as withdrawn evidence, not accepta
 No archived runtime, private prompt publication, compatibility migration, manual
 snapshot repair, operational journal or new state root supplies this correction.
 An authentic completed-response search or separately approved exact-run disposition
-is still required for the historical run. Source evidence does not accept #448 or
-private #445; independent source and installed verification remain required.
+is still required for the historical run. The verified v0.1.73 distribution handoff
+above records later installed/public acceptance; it does not accept live #448 or
+private #445 or settle historical transport uncertainty.
 
 ## Read-only continuous-intake status (#444)
 

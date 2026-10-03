@@ -24,9 +24,12 @@ No consumer retry, sleep, extra lock or alternate state root supplies the correc
 
 [#501](https://github.com/clockgrove/factory/issues/501) records six deterministic
 boundary regressions and 45 passing tests across four whole files, with independent
-source review. Guarded exact-head integration, freshly bound installed inputs and
-one bounded corrected v0.1.73 gate remain required under #497. The failed first gate
-and published v0.1.72 stay unchanged. The legacy projection remains unresolved;
+source review. [PR #502](https://github.com/clockgrove/factory/pull/502) integrated
+this correction as `cf1c201cf727132ffc3dce94a5d7d19f098a7c1c`, followed by
+[exact-main Quality CI](https://github.com/clockgrove/factory/actions/runs/37084633055).
+The [immutable v0.1.73 record](#immutable-v0173-artifact-record) binds subsequent
+installed and public distribution acceptance under #497. Both failed unpublished
+producer attempts and published v0.1.72 stay unchanged. The legacy projection remains unresolved;
 [#499](https://github.com/clockgrove/factory/issues/499) separately proposes supported
 permanent unaccepted abandonment and awaits the explicit operator decision. This
 source correction grants no target activation or Objective acceptance.
@@ -112,13 +115,14 @@ completed-response receipt was found in retained transport/scenario evidence.
 It remains unresolved and unaccepted. Installing the new typed producer cannot
 retrospectively manufacture that fact. Any exact-run terminal disposition needs a
 separate explicit operator decision and supported implementation, preserving all
-old evidence and uncertainty. The next action is guarded integration of the shared lock correction and the
-bounded corrected sequential release gate in
-[#497](https://github.com/clockgrove/factory/issues/497). Live execution remains
-fenced pending supported historical disposition and corrected artifact acceptance. A subsequent full public qualification retains
-original substantive acceptance and bounded resources; predecessor histories and
-published v0.1.72 bytes remain intact. #444/#447/#448 stay open for actual public
-acceptance; private #445 remains gated on that full proof and the corrected artifact.
+old evidence and uncertainty. The corrected v0.1.73 distribution is accepted under
+[#497](https://github.com/clockgrove/factory/issues/497), as recorded below. Live
+execution remains fenced pending the separate [#499](https://github.com/clockgrove/factory/issues/499)
+product decision and supported historical disposition. A subsequent full public
+qualification retains original substantive acceptance and bounded resources;
+predecessor histories and published v0.1.72 bytes remain intact. #444/#447/#448
+stay open for actual public acceptance; private #445 remains gated on that full
+proof and the same corrected artifact.
 
 ## Approved native-replay qualification preparation (#448)
 
@@ -251,6 +255,62 @@ scope. #444/#447 remain open for that live gate. Other artifact gates, worker
 permissions, security, source, provider and spending boundaries are unchanged.
 The approved decision is authority to attempt the bounded continuation, not
 acceptance or private activation.
+
+## Immutable v0.1.73 artifact record
+
+[Release v0.1.73](https://github.com/clockgrove/factory/releases/tag/v0.1.73)
+was published at 2026-10-03 02:05:40 UTC from independently reviewed source
+`cf1c201cf727132ffc3dce94a5d7d19f098a7c1c`, tree
+`abc0d79c4d0b08922f1dde8d91db0672bddf7148`.
+[PR #496](https://github.com/clockgrove/factory/pull/496) integrates guarded native
+hierarchy and typed initial/amendment projection lifecycle; [PR #502](https://github.com/clockgrove/factory/pull/502)
+integrates atomic complete controller lease publication.
+[Exact integrated-main Quality CI](https://github.com/clockgrove/factory/actions/runs/37084633055)
+passed before the accepted producer attempt.
+
+The `clockgrove-factory-0.1.73.tgz` archive is 153623220 bytes,
+SHA-256 `801336d030cb68d62523efb4a3b14a25938ba11e40793cadce6e574e6cfd1103`, recorded in the
+[prepublication fingerprint](https://github.com/clockgrove/factory/issues/497#issuecomment-5964410442).
+The `SHA256SUMS` asset has SHA-256 `77686b9447b15c2f09ca65751e0fcf109107b4f1fbde7c8f311c08473f12cfbe`.
+Annotated tag `4417510fc4c1b2ff93a626e06c0e2bd7b0fc8191` resolves to the source above; active exact-tag
+ruleset `24403396` prohibits updates and deletion without bypasses.
+Offline installation matched 6364 regular archive files
+and 95 bundled lock-addressed dependency roots.
+Original archive/checksum and complete unpacked/installed byte, mode, topology and
+internal-link inventories remained exact through all tests and preflights.
+
+All 710 tests across 54 whole committed installed files passed
+with zero failures, cancellations, skips or todos. Four reviewed model-free gates
+passed: complete original22 continuation replay; actual bundled local Codex
+readiness with home refusal, temporary-parent allowed-write and host-denied controls;
+complete original49 aggregate replay retaining its original semantic rejection;
+and complete legacy-state native CLI refusal before writes or external work.
+Reusable contract/transport assertions run in the committed whole files; historical
+responses and the separately bound external tool closure remain preserved.
+
+The [first unpublished producer](https://github.com/clockgrove/factory/issues/497#issuecomment-5963742769)
+failed after 703/704 installed tests, before external preflights or publication.
+Its shared lease defect was corrected in PR #502 after deterministic reproduction.
+The [second unpublished producer](https://github.com/clockgrove/factory/issues/497#issuecomment-5964112268)
+passed 710/710 installed tests and original22, then refused a hardcoded temporary
+evidence-root check before SDK construction. Independent review separated exact
+durable evidence destinations from owned temporary sandbox scratch, retained all
+negative controls and validated related scripts before writes. Diagnostic replays
+passed without changing source, archive or version bytes; they did not accept the
+failed attempt. The [fresh third producer](https://github.com/clockgrove/factory/issues/497#issuecomment-5964386522)
+supplied its own final canonical acceptance. Both failed histories remain unaccepted.
+
+Acceptance SHA-256 is `2bf06f1188cbec78c966d0c14cf3203bb4059b9e00c2f2c17552dc1d6ed6b931`.
+[Independent public verification and canonical completion](https://github.com/clockgrove/factory/issues/497#issuecomment-5964424472)
+matched anonymous archive/checksum bytes, sealed acceptance, annotated source/tree,
+exact protection and the enabled public pinned plugin. Public receipt SHA-256 is
+`719b2b47b110f3e9a7420214fcc34a84221a82d0ef64b4b5b33e914f7a41dedc`; #497 and its existing Factory Project item are complete.
+This later documentation changes no released byte or tag. #444/#447/#448 remain
+open for the full live public outcome, followed by #445 on the same accepted
+artifact and proven scope. The historical v0.1.72 projection remains unresolved
+and unaccepted; #499's separate operator decision and supported disposition are
+still pending. Distribution acceptance grants neither old-run settlement nor
+live/private activation or Objective acceptance.
 
 ## Immutable v0.1.72 artifact record
 

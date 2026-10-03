@@ -857,15 +857,45 @@ export class StatefulGitHubFake {
   }
 }
 
+/**
+ * Simulate a controller crash at one external-effect boundary. The process
+ * kills itself with SIGKILL either before the call reaches the service or
+ * after the service applied it but before the caller sees the result.
+ */
+function crashing(target, name, crashAt) {
+  if (crashAt?.target !== name) return target;
+  let seen = 0;
+  return new Proxy(target, {
+    get(object, property, receiver) {
+      const value = Reflect.get(object, property, receiver);
+      if (property !== crashAt.method || typeof value !== "function")
+        return value;
+      return async (...args) => {
+        const hit = ++seen === (crashAt.call ?? 1);
+        if (hit && crashAt.when === "before")
+          process.kill(process.pid, "SIGKILL");
+        const result = await value.apply(object, args);
+        if (hit && crashAt.when === "after")
+          process.kill(process.pid, "SIGKILL");
+        return result;
+      };
+    },
+  });
+}
+
 export function makeApplication(descriptor) {
   const root = stateRoot(descriptor.config.repository);
   const eventsPath = join(descriptor.fakeRoot, "harness.ndjson");
   const planningPath = join(descriptor.fakeRoot, "planning.ndjson");
   const contentStore = new LocalContentStore(join(root, "content"));
-  const github = new StatefulGitHubFake(
-    descriptor.fakeRoot,
-    descriptor.config.checkout,
-    descriptor.objectiveBody,
+  const github = crashing(
+    new StatefulGitHubFake(
+      descriptor.fakeRoot,
+      descriptor.config.checkout,
+      descriptor.objectiveBody,
+    ),
+    "github",
+    descriptor.crashAt,
   );
   const harness = new ScriptedHarness(
     join(root, "harness"),
@@ -886,10 +916,14 @@ export function makeApplication(descriptor) {
     application: createApplication(descriptor.config, {
       planningModel:
         descriptor.planningModel ??
-        new ScriptedPlanningModel(
-          descriptor.graph,
-          planningPath,
-          descriptor.resultReviewer,
+        crashing(
+          new ScriptedPlanningModel(
+            descriptor.graph,
+            planningPath,
+            descriptor.resultReviewer,
+          ),
+          "planning",
+          descriptor.crashAt,
         ),
       driver,
       github,

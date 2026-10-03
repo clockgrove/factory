@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -854,6 +860,29 @@ test("install writes explicit Claude planning selections", () => {
       planner: { model: "claude-opus-5-5", reasoningEffort: "high" },
       reviewer: { model: "claude-sonnet-5-5", reasoningEffort: "xhigh" },
     });
+
+    // Readiness asks the pinned runtime, model-free, whether a login exists.
+    const emptyLogin = join(root, "claude-config");
+    mkdirSync(emptyLogin);
+    const readiness = spawnSync(
+      process.execPath,
+      [cli, "readiness", "--config", configPath],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          XDG_STATE_HOME: join(root, "state"),
+          CLAUDE_CONFIG_DIR: emptyLogin,
+          ANTHROPIC_API_KEY: "",
+          CLAUDE_CODE_OAUTH_TOKEN: "",
+        },
+      },
+    );
+    assert.equal(readiness.status, 1, readiness.stderr);
+    const report = JSON.parse(readiness.stdout);
+    assert.equal(report.status, "missing");
+    assert.equal(report.planning.status, "missing");
+    assert.match(report.planning.detail, /claude auth login/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

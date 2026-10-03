@@ -198,7 +198,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
       assert.equal(status.status, 0, status.stderr);
       assert.doesNotMatch(status.stdout, /configured-private-value/);
       assert.match(status.stdout, /\[REDACTED\]/);
-      if (snapshot.schemaVersion === 5 || flags.length) {
+      if (flags.length) {
         const document = JSON.parse(status.stdout);
         for (const field of ["waitReason", "cancelError", "observationError"])
           assert.equal(
@@ -212,10 +212,21 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
             "[REDACTED]",
           ),
         );
+        assert.ok(document.phase && document.summary);
+      } else if (snapshot.schemaVersion === 5) {
+        assert.match(
+          status.stdout,
+          /^Objective #1: failed — planning failed: Preparation failed: \[REDACTED\]\nNext: factory diagnostics --objective 1\n/,
+        );
+        assert.match(status.stdout, /Error: Preparation failed: \[REDACTED\]/);
       } else {
+        assert.match(
+          status.stdout,
+          /^Objective #1: needs decision — cancellation unresolved: Cessation unknown: \[REDACTED\]\nNext: factory cancel --objective 1\n/,
+        );
         assert.match(status.stdout, /GitHub: Closure failed: \[REDACTED\]/);
         if (snapshot.error)
-          assert.match(status.stdout, /error: Execution failed: \[REDACTED\]/);
+          assert.match(status.stdout, /Error: Execution failed: \[REDACTED\]/);
       }
       assert.equal(readFileSync(snapshotPath, "utf8"), beforeStatus);
     }

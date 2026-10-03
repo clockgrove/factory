@@ -31,10 +31,13 @@ import { linearDeliveryUnits } from "./delivery/plan.js";
 import { failureDigest } from "./repair-policy.js";
 import { itemsConflict } from "./scheduler.js";
 import type {
+  ContinuationState,
   CoordinatorDisposition,
   FactoryState,
+  PreparationState,
   WorkState,
 } from "./state.js";
+import { summarizeStatus } from "./status-summary.js";
 import { normalizeTokenUsage, tokenCategories } from "./usage.js";
 
 export interface DiagnosticEvent {
@@ -1043,9 +1046,17 @@ export function statusDocument(
   delivery: "regular" | "native-stack",
   secrets: string[] = [],
   concurrency?: number,
+  runActive: boolean | null = null,
 ) {
-  if (!state)
-    return { repository, objective, state: "not-started" as const, work: [] };
+  if (!state) {
+    const view = {
+      repository,
+      objective,
+      state: "not-started" as const,
+      work: [],
+    };
+    return { ...summarizeStatus(view), ...view };
+  }
   const unitByItem = new Map(
     linearDeliveryUnits(state.graph).flatMap((unit) =>
       unit.items.map((item) => [item.id, unit.id] as const),
@@ -1129,6 +1140,9 @@ export function statusDocument(
       // Provider capacity is not persisted in the state snapshot.
       ready: current.status === "pending" && !blockedReason ? null : false,
       blockedReason: blockedReason ?? null,
+      waitingReason: current.waitingReason
+        ? redactDiagnosticDetail(current.waitingReason, secrets)
+        : null,
       attemptId: current.attempt ?? null,
       ...(item.executionBinding
         ? {
@@ -1158,6 +1172,15 @@ export function statusDocument(
       pullRequest: current.pullRequest ?? null,
       stack: state.stackNumbers?.[unitByItem.get(item.id) ?? ""] ?? null,
       candidateAssetSets: current.assets?.map((set) => set.id) ?? [],
+      assetSets:
+        current.assets?.map((set) => ({
+          id: set.id,
+          members: set.members.map((member) => ({
+            role: member.role,
+            destination: member.destination,
+            digest: member.ref.digest,
+          })),
+        })) ?? [],
       selectedAssetSet: current.selectedAssetSet ?? null,
       acceptancePending: pendingDecision(current.acceptancePending),
       lastError: current.error
@@ -1177,9 +1200,10 @@ export function statusDocument(
         : null,
     };
   });
-  return {
+  const view = {
     repository,
     objective,
+    runActive,
     state: state.cancelledAt
       ? ("cancelled" as const)
       : state.error
@@ -1243,8 +1267,65 @@ export function statusDocument(
             secrets,
           )
         : null,
+    githubClosureError: state.githubClosureError
+      ? redactDiagnosticDetail(state.githubClosureError, secrets)
+      : null,
     work,
   };
+  return { ...summarizeStatus(view), ...view };
+}
+
+/** Status of an Objective still planning; no executable graph exists yet. */
+export function preparationStatusDocument(
+  preparation: PreparationState,
+  secrets: string[] = [],
+  runActive: boolean | null = null,
+) {
+  const redact = (value: string | undefined) =>
+    value ? redactDiagnosticDetail(value, secrets) : null;
+  const review = preparation.plan?.review;
+  const question = review?.failure?.question ?? review?.findings?.[0]?.question;
+  const view = {
+    repository: preparation.repository,
+    objective: preparation.objective,
+    runId: preparation.runId,
+    runActive,
+    state: "preparing" as const,
+    coordinator:
+      redactCoordinatorDisposition(preparation.coordinator, secrets) ?? null,
+    planned: Boolean(preparation.plan),
+    planReview: review?.status
+      ? { status: review.status, question: redact(question) }
+      : null,
+    issueByItemId: preparation.issueByItemId,
+    cancelledAt: preparation.cancelledAt ?? null,
+    error: redact(preparation.error),
+    waitReason: redact(preparation.coordinator.waitReason),
+  };
+  return { ...summarizeStatus(view), ...view };
+}
+
+/** The status document for whichever continuation snapshot exists. */
+export function continuationStatusDocument(
+  continuation: ContinuationState | undefined,
+  repository: string,
+  objective: number,
+  delivery: "regular" | "native-stack",
+  secrets: string[] = [],
+  concurrency?: number,
+  runActive: boolean | null = null,
+) {
+  return continuation?.schemaVersion === 5
+    ? preparationStatusDocument(continuation, secrets, runActive)
+    : statusDocument(
+        continuation,
+        repository,
+        objective,
+        delivery,
+        secrets,
+        concurrency,
+        runActive,
+      );
 }
 
 /** Observe snapshot changes after saving; the snapshot alone controls continuation. */

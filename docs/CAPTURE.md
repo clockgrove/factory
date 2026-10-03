@@ -94,8 +94,8 @@ factory export-captures --objective 123 \
 ```
 
 - **Endpoint:** pass the OTLP base URL; Factory appends `/v1/traces` and refuses a URL that already ends in it. Use HTTPS with no credentials, query or fragment. Plain HTTP is allowed only for a loopback collector (`localhost`, `127.0.0.0/8`, `[::1]`).
-- **Headers:** optional, from `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, else `OTEL_EXPORTER_OTLP_HEADERS` (comma-separated, URL-encoded `key=value`). Names must be RFC 9110 tokens and values must have no control characters; a malformed entry is refused without echo. Values are never printed.
-- **Preview first:** without `--send` the command only previews the endpoint, header names, identities, content status and payload size. `--send` needs `--authorize` with that preview's digest. The digest binds the selection, endpoint, payload and header names and values (values only as a hash), so any change invalidates it.
+- **Headers:** optional, from `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, else `OTEL_EXPORTER_OTLP_HEADERS` (comma-separated, URL-encoded `key=value`). Names must be RFC 9110 tokens, not repeated in any letter case; values may contain only tab, space, visible ASCII and printable Latin-1. A malformed entry is refused without echo. Values are never printed.
+- **Preview first:** without `--send` the command only previews the endpoint, header names, identities, content status and payload size. `--send` needs `--authorize` with that preview's digest. The digest binds the selection, endpoint, payload and header names and values (values only as a hash), so any change invalidates it, except a change only in the letter case of a header name.
 - **Content:** `metadata` reads no captured text. `retained` adds the already-redacted text.
 - **Selection:** `--run ID` and `--invocation ID` repeat and intersect. An unknown ID or empty selection is refused.
 

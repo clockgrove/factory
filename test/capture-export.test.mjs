@@ -386,6 +386,17 @@ test("send is one authorized HTTP request with no redirects, retries or incident
       /changed/,
     );
   assert.equal(calls, 0);
+  // Header names are case-insensitive: a case-only change keeps the preview.
+  const recased = await sendOtlpExport(
+    prepared,
+    prepared.preview.authorizationDigest,
+    {
+      OTEL_EXPORTER_OTLP_HEADERS:
+        "authorization=Basic%20test-secret, X-Tenant = one",
+    },
+    async () => new Response("{}", { status: 200 }),
+  );
+  assert.equal(recased.status, "accepted");
   const receipt = await sendOtlpExport(
     prepared,
     prepared.preview.authorizationDigest,
@@ -429,6 +440,11 @@ test("OTLP acknowledgements: empty partialSuccess is success; partial, refusal a
     [["test-secret", 429], "rejected-or-unknown"],
     ['{"error":"test-secret"}', "unknown"],
     ['{"partialSuccess":null}', "unknown"],
+    ['{"partialSuccess":true}', "unknown"],
+    ['{"partialSuccess":"x"}', "unknown"],
+    ['{"partialSuccess":[]}', "unknown"],
+    ['{"partialSuccess":false}', "unknown"],
+    ['{"partialSuccess":0}', "unknown"],
     ["not JSON", "unknown"],
   ]) {
     let calls = 0;
@@ -443,6 +459,8 @@ test("OTLP acknowledgements: empty partialSuccess is success; partial, refusal a
       },
     );
     assert.equal(receipt.status, status, text);
+    if (status === "unknown" && httpStatus === 200 && text !== "not JSON")
+      assert.equal(receipt.reason, "invalid-acknowledgement", text);
     if (rejectedSpans !== undefined)
       assert.equal(receipt.rejectedSpans, rejectedSpans, text);
     assert.equal(calls, 1);
@@ -469,6 +487,11 @@ test("OTLP headers prefer the traces-specific variable and refuse malformed name
     { Authorization: "traces" },
   );
   assert.deepEqual(otlpHeaders({}), {});
+  // Tab, space, visible ASCII and printable Latin-1 are allowed.
+  assert.deepEqual(
+    otlpHeaders({ OTEL_EXPORTER_OTLP_HEADERS: "x-note=a%09b%20~%C3%A9%C3%BF" }),
+    { "x-note": "a\tb ~éÿ" },
+  );
   for (const value of [
     "=test-secret",
     "Authorization=%E0%A4%A-test-secret",
@@ -476,6 +499,11 @@ test("OTLP headers prefer the traces-specific variable and refuse malformed name
     "x(test-secret)=1",
     "x-tenant:test-secret=1",
     "Authorization=test-secret%0D%0AInjected: 1",
+    "Authorization=test-secret%7F",
+    "Authorization=test-secret%C2%85",
+    "Authorization=test-secret%E2%82%AC",
+    "Authorization=test-secret%F0%9F%94%91",
+    "Authorization=one, authorization=test-secret",
   ])
     assert.throws(
       () => otlpHeaders({ OTEL_EXPORTER_OTLP_TRACES_HEADERS: value }),

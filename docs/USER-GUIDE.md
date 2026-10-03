@@ -128,16 +128,18 @@ factory install --repository OWNER/REPO \
 
 Use one installation command with your chosen options, not both examples. Planning and review use the selected planning provider, independent of the local Work Item harness. See [local harnesses](AGENT-HARNESSES.md) for Claude, Copilot, and custom adapters.
 
-Planning and review support the Codex SDK (`--planning codex-sdk`, the default) and the Claude API (`--planning claude-api`). For the Claude API, choose both models explicitly; reasoning defaults to `high`:
+Planning and review support the Codex SDK (`--planning codex-sdk`, the default) and the Claude Agent SDK (`--planning claude-agent-sdk`). For Claude, choose both models explicitly; reasoning defaults to `high`:
 
 ```sh
 factory install --repository OWNER/REPO \
   --checkout /absolute/path/to/target --concurrency 2 \
-  --planning claude-api \
+  --planning claude-agent-sdk \
   --planning-model claude-opus-5-5 --review-model claude-opus-5-5
 ```
 
-The Claude API key comes from the variable named by `planning.credentialEnv` (`ANTHROPIC_API_KEY` by default), and each call may produce up to `planning.maxOutputTokens` (64000 by default). In the foreground Factory reads every provider credential from the controller environment. A supervised service binds one owner-private file per required credential: `factory supervisor install ... --credential-file NAME=/absolute/private/key`.
+Like Codex planning, Claude planning uses your existing login: the Claude Code login on the controller host (`claude auth login`), or `CLAUDE_CODE_OAUTH_TOKEN`. An `ANTHROPIC_API_KEY` in the controller environment is optional and is used when present. Each call runs without tools in an empty temporary directory and may produce up to `planning.maxOutputTokens` (64000 by default). It needs the optional `@anthropic-ai/claude-agent-sdk` package.
+
+Remote execution providers still need an API key. In the foreground Factory reads it from the controller environment. A supervised service binds one owner-private file per required credential: `factory supervisor install ... --credential-file NAME=/absolute/private/key`.
 
 The default delivery mode is regular pull requests. Add `--delivery native-stack` at installation to choose native linear stacks on a target that supports them. Independent work remains dependency-aware; target branch protection and required checks still govern integration.
 

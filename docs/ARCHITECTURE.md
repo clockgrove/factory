@@ -38,7 +38,7 @@ The model makes semantic choices; code fills in facts. The planner picks, by ind
 
 Every Objective acceptance criterion must be covered by a typed proof: a result or integrated command, a semantic review, a required CI check, or final review. A plan with an uncovered criterion is rejected before it runs.
 
-Every planning provider shares one prompt, schema and decoder per phase; only the transport differs. `StructuredPlanningModel` in `src/compiler.ts` owns prompts, bounded review retries, parsing and observations. A `PlanningTransport` runs one provider attempt: Codex SDK (`src/compiler.ts`) or Claude API (`src/claude-planning.ts`). A transport may adapt a schema to its provider's supported subset; Factory's decoders still enforce the full contract.
+Every planning provider shares one prompt, schema and decoder per phase; only the transport differs. `StructuredPlanningModel` in `src/compiler.ts` owns prompts, bounded review retries, parsing and observations. A `PlanningTransport` runs one provider attempt: Codex SDK (`src/compiler.ts`) or Claude Agent SDK (`src/claude-planning.ts`). A transport may adapt a schema to its provider's supported subset; Factory's decoders still enforce the full contract.
 
 An independent model reviews the complete plan once. A concrete finding allows one evidenced revision; after that, an unresolved question goes to the operator.
 
@@ -126,7 +126,7 @@ Seven interfaces in `src/contracts.ts` are the only planned variation points:
 
 | Interface          | Purpose                                        | Implementations                          |
 | ------------------ | ---------------------------------------------- | ---------------------------------------- |
-| `PlanningModel`    | Compile, review plans and review results       | Codex SDK, Claude API                    |
+| `PlanningModel`    | Compile, review plans and review results       | Codex SDK, Claude Agent SDK              |
 | `ExecutionDriver`  | Run one Work Item attempt                      | Local, managed, sandbox                  |
 | `AgentHarness`     | The coding agent inside a local or sandbox run | Codex, Claude Agent, Copilot, registered |
 | `SandboxProvider`  | Machines for sandbox execution                 | Daytona                                  |
@@ -150,7 +150,7 @@ The runner, scheduler, validator, state store and Git model are deliberately con
 
 ## Known limits
 
-- Planning and review: Codex SDK or Claude API (`planning.kind`).
+- Planning and review: Codex SDK or Claude Agent SDK (`planning.kind`).
 - Linux x64 only; workers run under your OS account and are not a security boundary against hostile code.
 - Managed and sandbox execution are implemented but not yet qualified against live providers.
 

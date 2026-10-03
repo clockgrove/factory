@@ -5,8 +5,12 @@ Item attempt inside the exact worktree supplied by Factory. Codex is the default
 harness; the package also contains adapters for pinned Claude Agent SDK and GitHub
 Copilot SDK adapters and a package-root registration seam for another adapter.
 
-Planning and independent result review remain on the configured Codex SDK
-models. Selecting Claude or GitHub Copilot changes only Work Item execution.
+Planning and independent result review use the configured `planning` provider.
+Selecting a harness changes only Work Item execution. Claude planning
+(`--planning claude-agent-sdk`) uses the same pinned Claude Agent SDK and the
+same local Claude login as the Claude harness; an `ANTHROPIC_API_KEY` is
+optional. Each planning call is one tool-free, schema-constrained query in an
+empty temporary directory.
 
 This guide covers the local harness interface included in published v0.1.39. Its offline tarball bundles Codex; Claude and Copilot require their optional dependencies. Each provider's live evidence applies only to the artifact and scenario actually exercised; see [execution gates](https://github.com/clockgrove/factory/issues/206) and [final acceptance](https://github.com/clockgrove/factory/issues/207).
 

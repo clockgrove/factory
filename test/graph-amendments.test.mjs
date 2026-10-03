@@ -1824,9 +1824,7 @@ for (const mode of ["paused", "draining"])
       });
     });
 
-test("owner handoff after known amendment review resumes without repeating model work", {
-  timeout: 20000,
-}, async () => {
+test("owner handoff after known amendment review resumes without repeating model work", async () => {
   await fixture("amendment-handoff", async ({ root, config, initial }) => {
     let first;
     let generated = 0;

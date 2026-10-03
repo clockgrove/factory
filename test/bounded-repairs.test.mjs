@@ -1557,16 +1557,13 @@ test("native settled validation failure survives real sibling collection and dia
   const previousState = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = join(root, "state");
   const release = join(root, "release-collection");
+  const alphaRelease = join(root, "alpha-release");
   let previousPath;
   let running;
   let outcome;
   let fixture;
   let config;
   let ownershipReleased = false;
-  const timeout = setTimeout(
-    () => writeFileSync(release, "timeout release"),
-    15000,
-  );
   try {
     const target = createTarget(root);
     config = factoryConfig(
@@ -1576,7 +1573,6 @@ test("native settled validation failure survives real sibling collection and dia
       2,
     );
     const collectionStarted = join(root, "collection-started");
-    const alphaRelease = join(root, "alpha-release");
     const prerequisite = join(root, "prerequisite");
     const transportGit = execFileSync("which", ["git"], {
       encoding: "utf8",
@@ -1597,13 +1593,14 @@ exec ${quote(transportGit)} "$@"
     chmodSync(join(shim, "git"), 0o755);
     previousPath = process.env.PATH;
     process.env.PATH = `${shim}:${previousPath}`;
+    // Validation proves it overlaps the sibling's collection. Teardown's
+    // release also ends the wait, so a failed test never strands the run.
     const check = join(root, "check.mjs");
     writeFileSync(
       check,
       `import {existsSync} from 'node:fs';
-const started = Date.now();
 while (!existsSync(${JSON.stringify(collectionStarted)})) {
-  if (Date.now() - started > 10000) throw Error('collection barrier missing');
+  if (existsSync(${JSON.stringify(release)})) throw Error('collection barrier missing');
   await new Promise(resolve => setTimeout(resolve, 10));
 }
 process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
@@ -1847,7 +1844,8 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
       ["alpha", "beta"],
     );
   } finally {
-    clearTimeout(timeout);
+    // Open every sync point so the run settles before ownership is handed off.
+    writeFileSync(alphaRelease, "release cleanup");
     writeFileSync(release, "release cleanup");
     if (running && outcome) {
       if (!ownershipReleased && fixture && config) {

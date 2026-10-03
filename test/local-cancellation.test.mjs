@@ -23,6 +23,7 @@ import { graphDigest } from "../dist/graph-amendments.js";
 import { cancelObjective } from "../dist/runner.js";
 import { coverageObligations } from "../dist/qa.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
+import { eventually } from "./support/eventually.mjs";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 
 const adapters = [
@@ -79,9 +80,9 @@ async function worker(descendant = false) {
     async cleanup() {
       if (processGroupExists(child.pid)) process.kill(-child.pid, "SIGKILL");
       await exited;
-      for (let n = 0; n < 100 && processGroupExists(child.pid); n++)
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      assert.equal(processGroupExists(child.pid), false);
+      await eventually(() => !processGroupExists(child.pid), {
+        message: `process group ${child.pid} to cease`,
+      });
     },
   };
 }
@@ -195,14 +196,21 @@ for (const [name, create, subdirectory] of adapters) {
 
   test(`${name} rejects a leader outside the recorded process group`, async () => {
     const root = mkdtempSync(join(tmpdir(), "factory-cancel-foreign-group-"));
+    // Not detached, so the leader stays in this test's process group.
     const foreign = spawn(
       process.execPath,
-      ["-e", "setInterval(() => {}, 1000)"],
-      { stdio: "ignore" },
+      [
+        "-e",
+        'process.on("message", () => process.send("alive")); process.send("ready");',
+      ],
+      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
     );
-    const exited = once(foreign, "exit");
+    // Listen for "exit" only: events.once would also reject on "error".
+    const exited = new Promise((resolve) =>
+      foreign.once("exit", (...outcome) => resolve(outcome)),
+    );
     try {
-      await once(foreign, "spawn");
+      await once(foreign, "message");
       const current = linuxProcessIdentity(foreign.pid);
       assert.notEqual(current.group, foreign.pid);
       const h = handle(
@@ -212,7 +220,20 @@ for (const [name, create, subdirectory] of adapters) {
       );
       writeFileSync(h.data.resultPath, '{"state":"complete"}\n');
       await assert.rejects(create(root).cancel(h), /identity changed/);
-      assert.deepEqual(linuxProcessIdentity(foreign.pid), current);
+      // Running vs sleeping (R/S) is scheduler noise, not identity. The leader
+      // was never signalled: same group and start time, not dead or stopped,
+      // and it still answers a round trip (exiting first fails the test).
+      const observed = linuxProcessIdentity(foreign.pid);
+      assert.equal(observed?.group, current.group);
+      assert.equal(observed?.startTime, current.startTime);
+      assert.match(observed.state, /^[RSD]$/);
+      const reply = once(foreign, "message");
+      foreign.send("probe");
+      const outcome = await Promise.race([
+        reply.then(([message]) => ({ message })),
+        exited.then(([code, signal]) => ({ exited: code ?? signal })),
+      ]);
+      assert.deepEqual(outcome, { message: "alive" });
     } finally {
       foreign.kill("SIGKILL");
       await exited;

@@ -287,9 +287,7 @@ async function finish(child, message = "release") {
 }
 
 for (const stale of [false, true]) {
-  test(`separate controllers have one owner under ${stale ? "stale-owner" : "first-owner"} contention`, {
-    timeout: 10_000,
-  }, async () => {
+  test(`separate controllers have one owner under ${stale ? "stale-owner" : "first-owner"} contention`, async () => {
     const root = mkdtempSync(join(tmpdir(), "fc-ownership-"));
     const path = join(root, "controller.lock");
     const children = [];
@@ -371,9 +369,7 @@ function rawControl(path, request) {
   });
 }
 
-test("private control socket refuses missing or stale owner tokens before lifecycle handling", {
-  timeout: 10_000,
-}, async () => {
+test("private control socket refuses missing or stale owner tokens before lifecycle handling", async () => {
   const root = mkdtempSync(join(tmpdir(), "fc-control-"));
   const previous = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = root;
@@ -420,9 +416,7 @@ test("private control socket refuses missing or stale owner tokens before lifecy
   }
 });
 
-test("a lost planning reply is reissued on restart under the same run", {
-  timeout: 10_000,
-}, async () => {
+test("a lost planning reply is reissued on restart under the same run", async () => {
   const root = mkdtempSync(join(tmpdir(), "fc-prepare-"));
   const previous = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = join(root, "state");
@@ -539,9 +533,7 @@ test("offline cancellation verifies recorded subprocess cessation and refuses a 
   }
 });
 
-test("persisted drain reattaches an existing worker and leaves its dependent pending after restart", {
-  timeout: 20_000,
-}, async () => {
+test("persisted drain reattaches an existing worker and leaves its dependent pending after restart", async () => {
   const { writeFileSync } = await import("node:fs");
   const { readState } = await import("../dist/state-store.js");
   const { writeDescriptor, waitForFile, readEvents } = await import(

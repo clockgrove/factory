@@ -609,20 +609,20 @@ async function main(): Promise<void> {
             continuation.coordinator,
             secrets,
           ),
-          planning: continuation.planning,
-          projection: continuation.projection,
+          planned: Boolean(continuation.plan),
           issueByItemId: continuation.issueByItemId,
-          projectionPending: continuation.projectionPending,
           error: continuation.error
             ? redactDiagnosticDetail(continuation.error, secrets)
             : continuation.error,
+          waitReason: continuation.coordinator.waitReason
+            ? redactDiagnosticDetail(
+                continuation.coordinator.waitReason,
+                secrets,
+              )
+            : undefined,
           nextAction: continuation.permanentAbandonment
             ? "normally-admitted-successor"
-            : continuation.planning === "submitted" ||
-                ["submitted", "rejected"].includes(continuation.projection) ||
-                continuation.projectionPending
-              ? "operator-direction"
-              : "run",
+            : "run",
         }),
       );
       return;

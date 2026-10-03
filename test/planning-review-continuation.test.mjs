@@ -350,20 +350,19 @@ test("genuinely malformed completed review retains its original packet and remai
   assert.equal(f.emitted.length, calls);
 });
 
-test("submitted unknown review stays fenced before and after a response is present", async (t) => {
+test("an interrupted review is reissued, or its retained response reused", async (t) => {
   const f = await fixture(t);
   for (const responsePresent of [false, true]) {
     const state = structuredClone(f.retained);
     state.planningRecovery.phase = "submitted";
     if (!responsePresent) delete state.planningRecovery.review.response;
-    const before = JSON.stringify(state);
     const calls = f.emitted.length;
-    await assert.rejects(
-      compilePlan(...f.args, { state, save() {} }),
-      /outcome is unknown/,
-    );
-    assert.equal(JSON.stringify(state), before);
-    assert.equal(f.emitted.length, calls);
+    const candidate = await compilePlan(...f.args, { state, save() {} });
+    assert.equal(candidate.review.status, "clean");
+    assert.equal(state.planningRecovery.phase, "complete");
+    // Reviews have no side effects: a lost one is simply asked again.
+    if (responsePresent) assert.equal(f.emitted.length, calls);
+    else assert.ok(f.emitted.length > calls);
   }
 });
 

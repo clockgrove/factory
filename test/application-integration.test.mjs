@@ -2961,7 +2961,7 @@ function dirnameFor(path) {
   return path.slice(0, path.lastIndexOf("/"));
 }
 
-test("partial projection retains evidence and refuses unresolved replay without effects", async () => {
+test("partial projection resumes by marker without replanning or duplicate issues", async () => {
   await fixture("projection-replay", async (root) => {
     const target = createTarget(root);
     const command = "test -s first.txt && test -s second.txt";
@@ -2995,10 +2995,6 @@ test("partial projection retains evidence and refuses unresolved replay without 
     const update = github.update.bind(github);
     github.projectGraph = async (request) => {
       projectionCalls++;
-      assert.equal(
-        readContinuation(descriptor.config.repository, objective).projection,
-        "submitted",
-      );
       return project(request);
     };
     github.update = (change) => {
@@ -3028,40 +3024,28 @@ test("partial projection retains evidence and refuses unresolved replay without 
     assert.ok(Number.isSafeInteger(firstIssue));
     assert.equal(partialRemote.issues.second, undefined);
     assert.deepEqual(partialRemote.dependencies, {});
-    const path = statePath(descriptor.config.repository, objective);
-    const frozen = readFileSync(path);
     const retained = readContinuation(descriptor.config.repository, objective);
-    assert.equal(retained.planning, "complete");
-    assert.equal(retained.projection, "submitted");
-    assert.equal(retained.projectionPending, undefined);
-    assert.deepEqual(
-      partialRemote.projections.first,
-      retained.plan.graph.items[0],
-    );
-    assert.match(retained.error, /partial projection/);
-    // This fixture observes a remote partial create, but supplies no acknowledged
-    // per-item callback. The whole-call fence must retain that uncertainty.
-    assert.deepEqual(retained.issueByItemId, {});
+    assert.ok(retained.plan);
+    assert.match(retained.coordinator.waitReason, /partial projection/);
     const planningEvidence = readEvents(planningPath);
-    assert.ok(planningEvidence.length > 0);
+    assert.ok(planningEvidence.some((event) => event.sources));
     assert.deepEqual(readEvents(eventsPath), []);
-    assert.equal(projectionCalls, 1);
-    assert.equal(mutations, 1);
-    await assert.rejects(
-      application.runObjective(objective),
-      /Interrupted projection or planning cannot be replayed; operator direction required/,
-    );
-    assert.deepEqual(readFileSync(path), frozen);
-    assert.deepEqual(github.state(), partialRemote);
+    // Restart projects again: the marker finds the first issue, the second is
+    // created, and the plan is reused rather than compiled again.
+    const completed = await application.runObjective(objective);
+    assert.equal(completed.finalValidation.passed, true);
+    assert.equal(projectionCalls, 2);
+    assert.equal(github.state().issues.first, firstIssue);
+    assert.ok(Number.isSafeInteger(github.state().issues.second));
+    assert.equal(Object.keys(github.state().issues).length, 2);
     assert.deepEqual(
-      readDiagnostics(descriptor.config.repository, objective),
-      diagnosticEvidence,
+      readEvents(planningPath).slice(0, planningEvidence.length),
+      planningEvidence,
     );
-    assert.deepEqual(readEvents(planningPath), planningEvidence);
-    assert.deepEqual(readEvents(eventsPath), []);
-    assert.equal(projectionCalls, 1);
-    assert.equal(mutations, 1);
-    assert.equal(retained.finalAcceptance, undefined);
+    assert.equal(
+      readEvents(planningPath).filter((event) => event.sources).length,
+      planningEvidence.filter((event) => event.sources).length,
+    );
   });
 });
 

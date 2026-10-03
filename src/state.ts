@@ -144,12 +144,10 @@ export interface PreparationState {
   objectiveBodyDigest: string;
   admission?: AutonomousAdmission;
   coordinator: CoordinatorDisposition;
-  planning: "ready" | "submitted" | "complete";
-  /** Whole gateway-call outcome, independent of planning and display phase. */
-  projection: "ready" | "submitted" | "projected" | "rejected";
+  /** Present once planning completed; preparation then projects it. */
   plan?: import("./compiler.js").PlanCandidate;
+  /** Issues already projected; projection reconciles the rest by marker. */
   issueByItemId: Record<string, number>;
-  projectionPending?: string;
   error?: string;
   cancelRequested?: boolean;
   cancelledAt?: string;
@@ -250,14 +248,8 @@ export function permanentAbandonmentEffect(
   state: ContinuationState,
 ): PermanentAbandonment["effect"] | undefined {
   if (state.planningRecovery?.phase === "submitted") return undefined;
-  const projection =
-    state.schemaVersion === 5
-      ? state.planning === "complete" && state.projection === "submitted"
-      : state.pendingAmendment?.phase === "projecting";
-  if (state.schemaVersion === 5)
-    return projection && state.coordinator?.phase === "projection"
-      ? "graph-projection"
-      : undefined;
+  if (state.schemaVersion === 5) return undefined;
+  const projection = state.pendingAmendment?.phase === "projecting";
   if (
     Object.keys(state.stackMerges ?? {}).length ||
     state.finalAcceptancePending ||

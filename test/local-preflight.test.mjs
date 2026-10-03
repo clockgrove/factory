@@ -210,7 +210,7 @@ test("missing work-item tools stop activation before projection, attempt or targ
     });
     const preparation = readContinuation("example/preflight", 1);
     assert.equal(preparation.schemaVersion, 5);
-    assert.equal(preparation.planning, "complete");
+    assert.ok(preparation.plan);
     assert.deepEqual(preparation.issueByItemId, {});
     assert.match(preparation.coordinator.waitReason, /pnpm/);
     assert.deepEqual(readEvents(setup.eventsPath), []);

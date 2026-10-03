@@ -113,7 +113,6 @@ const admission = {
 const state = {
   schemaVersion: 5,
   kind: "preparing",
-  projection: "ready",
   repository: config.repository,
   objective: 1,
   runId: "installed-systemd-model-free",
@@ -121,7 +120,6 @@ const state = {
   baseSha,
   objectiveBodyDigest: "a".repeat(64),
   admission,
-  planning: "ready",
   issueByItemId: {},
   coordinator: {
     mode: "paused",

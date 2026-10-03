@@ -27,14 +27,12 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
   const preparation = {
     schemaVersion: 5,
     kind: "preparing",
-    projection: "ready",
     repository: config.repository,
     objective: 1,
     runId: "preparing-run",
     configDigest: "b".repeat(64),
     baseSha: target.baseSha,
     objectiveBodyDigest: "c".repeat(64),
-    planning: "complete",
     plan: {},
     issueByItemId: {},
     coordinator: {

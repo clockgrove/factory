@@ -1701,8 +1701,14 @@ async function compileRecoverablePlan(
   const { state, save } = context;
   state.planningRecovery ??= { phase: "ready", history: [] };
   const record = state.planningRecovery;
-  if (record.phase === "submitted")
-    throw new Error("Planning invocation outcome is unknown; do not replay it");
+  // A call was in flight when the controller stopped. Model calls have no
+  // side effects, so issue it again. A diagnosis was charged before it was
+  // sent; its reissue must not charge the allowance a second time.
+  let resumingDiagnosis = false;
+  if (record.phase === "submitted") {
+    resumingDiagnosis = record.invocation?.phase === "diagnosis";
+    record.phase = "ready";
+  }
   if (record.phase === "stopped")
     throw new Error(
       "Planning recovery stopped; inspect the preserved exact decision",
@@ -1914,10 +1920,6 @@ async function compileRecoverablePlan(
         );
       failure = error instanceof Error ? error.message : String(error);
     }
-    if (String(record.phase) === "submitted")
-      throw new Error(
-        "Planning review outcome unknown; inspect original invocation",
-      );
     const identity = failureDigest(failure);
     if (record.history.some((entry) => entry.failure === identity)) {
       record.phase = "stopped";
@@ -1954,7 +1956,8 @@ async function compileRecoverablePlan(
     }
     if (context.stopped?.())
       throw new Error("Planning is paused or cancelled before diagnosis");
-    chargeRepair(state, permitted[0]!, ["$planning"]);
+    if (!resumingDiagnosis) chargeRepair(state, permitted[0]!, ["$planning"]);
+    resumingDiagnosis = false;
     record.phase = "submitted";
     record.invocation = { id: randomUUID(), phase: "diagnosis" };
     record.invocations ??= [];

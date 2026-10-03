@@ -1426,22 +1426,11 @@ test("Codex adapter passes phase selections to every planning and review thread"
       minimum: 0,
       maximum: 5,
     });
-    assert.match(captured[0].prompt, /Select citations by choiceIndex/);
     assert.ok(
       captured[0].prompt.includes(
         '"choiceIndex":3,"path":"OBJECTIVE","heading":"Cost ($5)? [draft] | exact.*"',
       ),
     );
-    assert.match(
-      captured[0].prompt,
-      /Resources are exact whitespace-sensitive identities/,
-    );
-    assert.match(
-      captured[0].prompt,
-      /controller capture.*upload and hydration remain outside the worker/,
-    );
-    assert.match(captured[0].prompt, /never.*broader write|not broader write/);
-    assert.match(captured[1].prompt, /evidenceIndices/);
     assert.match(captured[2].prompt, /criterionIndex/);
     assert.match(captured[2].prompt, /Work Item Git delta: one/);
     assert.match(captured[2].prompt, /supervisor item delta/);

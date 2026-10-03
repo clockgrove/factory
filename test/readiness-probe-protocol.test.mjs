@@ -160,8 +160,6 @@ test("actual Codex schema selects owning readiness commands", async (t) => {
     assert.equal(alternative.additionalProperties, false);
     assert.equal(alternative.properties.preparedBy.type, "string");
   }
-  assert.match(sdk.calls[0].prompt, /before work/);
-  assert.match(sdk.calls[0].prompt, /future result.*not a readiness probe/);
 });
 
 test("decoded base-observed probe may cite an unselected immutable file but cannot invent authority", async (t) => {

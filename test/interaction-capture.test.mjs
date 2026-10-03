@@ -1,4 +1,8 @@
-import { compilerRequest, compilerResponse } from "./support/compiler-wire.mjs";
+import {
+  compilerRequest,
+  compilerResponse,
+  isCompileSchema,
+} from "./support/compiler-wire.mjs";
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import {
@@ -165,7 +169,7 @@ test("all four model phases retain actual request/schema/original evidence IDs a
               item: {
                 id: "message",
                 type: "agent_message",
-                text: prompt.startsWith("Compile this human Objective")
+                text: isCompileSchema(options.outputSchema)
                   ? JSON.stringify(compilerResponse(prompt))
                   : response,
               },

@@ -78,7 +78,7 @@ test("actual diagnosis adapter correlates diagnostic and capture phases through 
   t.mock.method(Codex.prototype, "startThread", () => ({
     async runStreamed(prompt, options) {
       assert.match(prompt, /requested diagnostic JSON/);
-      assert.doesNotMatch(prompt, /Compile this human Objective/);
+      assert.doesNotMatch(prompt, /Compiler choices \(JSON data\)/);
       assert.deepEqual(options.outputSchema, schema);
       return {
         events: (async function* () {

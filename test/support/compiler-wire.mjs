@@ -209,3 +209,12 @@ export function compilerObligations(prompt) {
     choices.obligations.map((entry) => entry.text),
   );
 }
+
+/**
+ * True for a compile request at the provider seam. Keys on the compiler wire
+ * schema (its fixed contextId), not prompt wording, so prompt edits do not
+ * break fakes.
+ */
+export function isCompileSchema(schema) {
+  return Boolean(schema?.properties?.contextId);
+}

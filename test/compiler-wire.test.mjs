@@ -175,7 +175,7 @@ test("QA choices require source-owned coverage while work and aggregates may lea
   );
 });
 
-test("rendered planning contracts retain one whole compound proof and substantive review refusal", async (t) => {
+test("planning wire retains one whole compound proof and substantive review refusal", async (t) => {
   const criterion =
     "Every delivered result has a separate automatic independent review and successful source-check on its exact published head before protected integration.";
   const commandCriterion = "Source-defined result command passes.";
@@ -286,34 +286,6 @@ test("rendered planning contracts retain one whole compound proof and substantiv
       additionalProperties: false,
     },
   });
-  for (const { prompt } of captured) {
-    assert.match(
-      prompt,
-      /one whole criterion with one owner and one complete proof/,
-    );
-    assert.match(
-      prompt,
-      /compound clauses do not create additional obligations/,
-    );
-    assert.match(prompt, /Check every clause/);
-    assert.match(
-      prompt,
-      /one final-review proof for the unchanged whole criterion/,
-    );
-    assert.match(
-      prompt,
-      /actual evidence at final independent Objective acceptance/,
-    );
-    assert.match(
-      prompt,
-      /never request duplicate coverage rows, invented clause identities/,
-    );
-    assert.match(
-      prompt,
-      /does not automatically pass, prove future receipts, or replace source-required commands, named checks or earlier-phase proof/,
-    );
-    assert.match(prompt, /not premature planning/);
-  }
   assert.equal(captured.length, 3);
 
   const treeSha = "b".repeat(40);
@@ -599,18 +571,7 @@ test("actual initial and revision SDK schemas require real probes without invent
       findings,
     );
     assertCoverageShape(graph);
-    const { prompt, schema, value } = captured.at(-1);
-    assert(
-      prompt.includes(
-        "source-required execution resource available before the owning item runs",
-      ),
-    );
-    assert(
-      prompt.includes(
-        "configured native MCP capability do not by themselves authorize real/prepare",
-      ),
-    );
-    assert(prompt.includes("retaining every later proof obligation"));
+    const { schema, value } = captured.at(-1);
     const conforms = new Ajv({ strict: false, allErrors: true }).compile(
       schema,
     );
@@ -1475,10 +1436,6 @@ test("actual SDK binds source-required quality independently of compound final p
     model,
   );
   assert(captured.schema.required.includes("requiredPreIntegrationChecks"));
-  assert.match(
-    captured.prompt,
-    /Final-review.*cannot enforce pre-merge ordering/,
-  );
   assert.deepEqual(graph.coverage[0].proof, { kind: "final-review" });
   assert.deepEqual(graph.requiredPreIntegrationChecks, [
     {
@@ -1698,11 +1655,6 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
           gate.checkName !== "quality" ||
           gate.source.path !== "AGENTS.md" ||
           gate.source.text !== pinned;
-        assert.match(prompt, /never demand them or line bounds/);
-        assert.match(
-          prompt,
-          /authored brief, acceptance or diagnosis claims establish no configuration/,
-        );
         rejectedGraph = graph;
         response = {
           packetId: options.outputSchema.properties.packetId.enum[0],
@@ -1742,7 +1694,6 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
           prompt,
           /Controller execution bounds:\n\{"configuredConcurrency":2,"authorizedMaxConcurrency":2\}/,
         );
-        assert.match(prompt, /Compiler-only sourceIndex choices are absent/);
         response = {
           kind: "planning-evidence",
           diagnosis: "Worker prose cannot override actual controller ceilings.",

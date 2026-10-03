@@ -1,0 +1,20 @@
+{
+  "name": "clockgrove",
+  "description": "Clockgrove plugins for Claude Code.",
+  "owner": {
+    "name": "Clockgrove",
+    "url": "https://github.com/clockgrove"
+  },
+  "plugins": [
+    {
+      "name": "factory",
+      "source": {
+        "source": "github",
+        "repo": "clockgrove/factory",
+        "ref": "v0.1.75"
+      },
+      "description": "Run source-grounded development Objectives in a target repository.",
+      "category": "development"
+    }
+  ]
+}

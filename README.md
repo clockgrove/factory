@@ -4,7 +4,7 @@
 
 Turn a GitHub issue into a reviewed plan, coordinated coding work, and validated pull requests.
 
-Factory is an open-source Codex plugin for developers working with coding agents. It reads your repository's requirements, breaks an Objective into dependency-linked Work Items, runs independent work concurrently, and validates the results before delivering them through GitHub.
+Factory is an open-source plugin for Codex and Claude Code, built for developers working with coding agents. It reads your repository's requirements, breaks an Objective into dependency-linked Work Items, runs independent work concurrently, and validates the results before delivering them through GitHub.
 
 - **Plan from your sources.** Review a plan grounded in committed requirements, owned paths, dependencies, and validation commands.
 - **Run local agents.** Use your existing Codex account and machine, with an explicit concurrency limit. Optional local Claude and Copilot harnesses are available separately.
@@ -16,7 +16,7 @@ Factory is an open-source Codex plugin for developers working with coding agents
 ## Requirements
 
 - Linux x64, including a Linux environment under WSL2; Node.js 22 or later for the published bundled Codex path.
-- Git, authenticated GitHub CLI access to your target repository, and an authenticated Codex environment. The plugin also requires a Codex host with plugin support.
+- Git, authenticated GitHub CLI access to your target repository, and an authenticated Codex environment, because planning and review run on Codex under any host. The plugin requires Codex or Claude Code with plugin support.
 - Your target's build and validation tools; Git LFS for LFS-backed media work.
 - A trusted repository with committed instructions and requirements. Local workers run under your OS account; they are not a security boundary for hostile code.
 
@@ -24,14 +24,42 @@ Planning, review, and workers consume your provider's usage. Factory currently r
 
 ## Install
 
-The Codex plugin supplies the setup and director skills. The matching GitHub Release tarball supplies the CLI and bundled default Codex runtime. Install both from the same version:
+Factory has two parts, and both come from one release:
+
+- **The plugin** gives your agent host the `setup` and `director` skills.
+- **The CLI tarball** gives you `factory` and the bundled default Codex runtime. It works the same under any host.
+
+Pick the latest release:
 
 ```sh
 VERSION=$(gh release view --repo clockgrove/factory --json tagName --jq .tagName | sed 's/^v//')
+```
 
+### Plugin
+
+Install the plugin for your host. Both hosts load the same skills.
+
+**Codex:**
+
+```sh
 codex plugin marketplace add clockgrove/factory --ref "v$VERSION"
 codex plugin add factory@clockgrove
+```
 
+**Claude Code** (releases after v0.1.75):
+
+```sh
+claude plugin marketplace add "clockgrove/factory#v$VERSION"
+claude plugin install factory@clockgrove
+```
+
+In Claude Code the skills appear as `factory:setup` and `factory:director`.
+
+### CLI
+
+Download the tarball and verify it:
+
+```sh
 gh release download "v$VERSION" --repo clockgrove/factory \
   --pattern "clockgrove-factory-$VERSION.tgz" --pattern SHA256SUMS
 gh attestation verify "clockgrove-factory-$VERSION.tgz" --repo clockgrove/factory
@@ -49,11 +77,11 @@ export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```
 
-Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your Codex host if needed to load the installed skills. Factory is distributed through GitHub Releases, not the npm registry.
+Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your agent host if needed to load the installed skills. Factory is distributed through GitHub Releases, not the npm registry.
 
 ## Use the plugin
 
-Open your target repository in Codex after loading the matching plugin, and ask:
+Open your target repository in Codex or Claude Code after loading the matching plugin, and ask:
 
 > Use Factory to set up this repository with a concurrency limit of two. Do not start work.
 

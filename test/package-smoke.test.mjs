@@ -129,6 +129,7 @@ test("fresh packed artifact composes a registered harness through the package ro
     );
     for (const path of [
       ".codex-plugin/plugin.json",
+      ".claude-plugin/plugin.json",
       "skills/director/SKILL.md",
       "skills/setup/SKILL.md",
       "docs/AGENT-HARNESSES.md",

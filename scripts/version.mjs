@@ -1,5 +1,6 @@
-// Keep every published version identity in step: package, lockfile, plugin,
-// marketplace ref and changelog. Used by maintainers and the release workflow.
+// Keep every published version identity in step: package, lockfile, each
+// host's plugin manifest and marketplace ref, and the changelog. Used by
+// maintainers and the release workflow.
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -9,10 +10,16 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const files = {
   package: "package.json",
   lock: "package-lock.json",
-  plugin: ".codex-plugin/plugin.json",
-  marketplace: ".agents/plugins/marketplace.json",
   changelog: "CHANGELOG.md",
 };
+
+// One plugin manifest and one marketplace per agent host. Each marketplace
+// pins the release tag, so a host's skills and the CLI share one version.
+const plugins = [".codex-plugin/plugin.json", ".claude-plugin/plugin.json"];
+const marketplaces = [
+  ".agents/plugins/marketplace.json",
+  ".claude-plugin/marketplace.json",
+];
 
 const readJson = (root, path) =>
   JSON.parse(readFileSync(resolve(root, path), "utf8"));
@@ -28,15 +35,17 @@ function factoryPlugin(marketplace) {
 /** Every version identity, keyed by where it lives. */
 export function versions(root = ".") {
   const lock = readJson(root, files.lock);
-  return {
+  const found = {
     "package.json": readJson(root, files.package).version,
     "package-lock.json": lock.version,
     "package-lock.json packages['']": lock.packages[""].version,
-    ".codex-plugin/plugin.json": readJson(root, files.plugin).version,
-    "marketplace ref": factoryPlugin(
-      readJson(root, files.marketplace),
-    ).source.ref.replace(/^v/, ""),
   };
+  for (const path of plugins) found[path] = readJson(root, path).version;
+  for (const path of marketplaces)
+    found[`${path} ref`] = factoryPlugin(
+      readJson(root, path),
+    ).source.ref.replace(/^v/, "");
+  return found;
 }
 
 /** The CHANGELOG section for a version, without its heading. */
@@ -81,13 +90,17 @@ export function bump(version, root = ".", date = new Date()) {
   lock.packages[""].version = version;
   writeJson(root, files.lock, lock);
 
-  const plugin = readJson(root, files.plugin);
-  plugin.version = version;
-  writeJson(root, files.plugin, plugin);
+  for (const path of plugins) {
+    const plugin = readJson(root, path);
+    plugin.version = version;
+    writeJson(root, path, plugin);
+  }
 
-  const marketplace = readJson(root, files.marketplace);
-  factoryPlugin(marketplace).source.ref = `v${version}`;
-  writeJson(root, files.marketplace, marketplace);
+  for (const path of marketplaces) {
+    const marketplace = readJson(root, path);
+    factoryPlugin(marketplace).source.ref = `v${version}`;
+    writeJson(root, path, marketplace);
+  }
 
   const changelogPath = resolve(root, files.changelog);
   const changelog = readFileSync(changelogPath, "utf8");
@@ -117,7 +130,7 @@ function main(args) {
   ) {
     console.error(
       "Usage: node scripts/version.mjs set|check|notes <version>\n" +
-        "  set    update package, lockfile, plugin, marketplace ref and add a CHANGELOG heading\n" +
+        "  set    update package, lockfile, plugins, marketplace refs and add a CHANGELOG heading\n" +
         "  check  fail unless every identity and a CHANGELOG section match <version>\n" +
         "  notes  print the CHANGELOG section for <version>",
     );

@@ -6,10 +6,10 @@ This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-S
 
 - Keep intake status read-only so an idle status check does not wake observation and race the next authorized refill (#444 / PR #494).
 - Reconcile reviewed native hierarchy changes using authenticated previous and desired parent relationships. Move a child only from its verified previous parent, retain unrelated-parent conflicts, and verify all final parent memberships before graph activation (#495 / PR #496).
-
 - Persist typed whole-call initial and amendment projection outcomes before dispatch. Cancel only completed rejected projections after GET-only authentication of recorded issue subsets and reviewed intermediate relationships; refuse unresolved calls before cancellation intent, preserving original failures and consumed limits (#498 / PR #496).
+- Publish complete synced controller owner records atomically without replacing another owner; treat actual lease removal as absence while retaining malformed and uncertain ownership refusals (#501).
 
-Exact distribution verification is tracked in [#497](https://github.com/clockgrove/factory/issues/497). The failed v0.1.72 public scenario preserves its original results, partial projection identities, accounting and consumed limits. A corrected one-artifact public successor remains [#448](https://github.com/clockgrove/factory/issues/448), followed by separately owned private [#445](https://github.com/clockgrove/factory/issues/445). This correction grants no acceptance or new worker, provider, security or spending authority; earlier releases and failures remain unchanged.
+The first unpublished installed gate passed 703 of 704 tests and stopped during initial service startup, before external preflights or publication. Its evidence remains preserved; the diagnosed shared lock correction requires a fresh bounded gate. Exact distribution verification is tracked in [#497](https://github.com/clockgrove/factory/issues/497). The failed v0.1.72 public scenario preserves its original results, partial projection identities, accounting and consumed limits. A corrected one-artifact public successor remains [#448](https://github.com/clockgrove/factory/issues/448), followed by separately owned private [#445](https://github.com/clockgrove/factory/issues/445). This correction grants no acceptance or new worker, provider, security or spending authority; earlier releases and failures remain unchanged.
 
 ## 0.1.72 — 2026-10-02
 

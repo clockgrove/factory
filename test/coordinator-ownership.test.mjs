@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
+import fs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import { requestControl, serveControl } from "../dist/coordinator-control.js";
+import { linuxProcessIdentity } from "../dist/process.js";
 import {
   acquireControllerLock,
   readContinuation,
@@ -24,6 +27,217 @@ import {
 } from "./support/integration-fixture.mjs";
 
 const storeUrl = new URL("../dist/state-store.js", import.meta.url).href;
+
+for (const stale of [false, true]) {
+  test(`controller identity publication is complete at every filesystem boundary (${stale ? "stale" : "new"} owner)`, () => {
+    const root = mkdtempSync(join(tmpdir(), "fc-publication-"));
+    const path = join(root, "controller.lock");
+    const original = {
+      openSync: fs.openSync,
+      writeFileSync: fs.writeFileSync,
+      fsyncSync: fs.fsyncSync,
+      linkSync: fs.linkSync,
+    };
+    const descriptors = new Set();
+    const observations = [];
+    let lock;
+    if (stale)
+      fs.writeFileSync(
+        path,
+        JSON.stringify({
+          pid: process.pid,
+          startTime: "confirmed-different-process-incarnation",
+          objective: 2,
+          token: "old-owner",
+        }),
+      );
+    const observe = (stage) => {
+      observations.push({ stage, owner: readControllerOwner(path) });
+    };
+    fs.openSync = (...args) => {
+      const fd = original.openSync(...args);
+      if (args[0] === path || String(args[0]).startsWith(`${path}.`))
+        descriptors.add(fd);
+      return fd;
+    };
+    fs.writeFileSync = (fd, ...args) => {
+      if (descriptors.has(fd)) observe("before-owner-write");
+      return original.writeFileSync(fd, ...args);
+    };
+    fs.fsyncSync = (fd) => {
+      if (descriptors.has(fd)) observe("before-owner-sync");
+      return original.fsyncSync(fd);
+    };
+    fs.linkSync = (temporary, target) => {
+      if (target === path) {
+        observe("before-publication");
+        assert.equal(readControllerOwner(temporary).pid, process.pid);
+      }
+      return original.linkSync(temporary, target);
+    };
+    syncBuiltinESMExports();
+    try {
+      lock = acquireControllerLock(path, 1);
+      const owner = readControllerOwner(path);
+      assert.equal(owner.pid, process.pid);
+      assert.equal(
+        owner.startTime,
+        linuxProcessIdentity(process.pid).startTime,
+      );
+      assert.equal(owner.token, lock.token);
+      assert.equal(owner.objective, 1);
+      assert.deepEqual(
+        observations.map(({ stage }) => stage),
+        ["before-owner-write", "before-owner-sync", "before-publication"],
+      );
+      assert.ok(observations.every(({ owner: prior }) => prior === undefined));
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+      assert.deepEqual(fs.readdirSync(root), ["controller.lock"]);
+    } finally {
+      Object.assign(fs, original);
+      syncBuiltinESMExports();
+      if (lock) releaseControllerLock(path, lock);
+      else
+        for (const fd of descriptors) {
+          try {
+            fs.closeSync(fd);
+          } catch {}
+        }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("controller owner retirement during observation is absent while malformed identity remains refused", () => {
+  const root = mkdtempSync(join(tmpdir(), "fc-owner-read-"));
+  const path = join(root, "controller.lock");
+  const original = fs.readFileSync;
+  try {
+    const lock = acquireControllerLock(path, 1);
+    let retiring = true;
+    fs.readFileSync = (target, ...args) => {
+      if (target === path && retiring) {
+        retiring = false;
+        releaseControllerLock(path, lock);
+      }
+      return original(target, ...args);
+    };
+    syncBuiltinESMExports();
+    assert.equal(readControllerOwner(path), undefined);
+    fs.readFileSync = original;
+    syncBuiltinESMExports();
+    for (const value of ["", "{broken", "null", "[]", '{"pid":0}']) {
+      fs.writeFileSync(path, value);
+      assert.throws(
+        () => readControllerOwner(path),
+        /operator direction required/,
+      );
+      assert.throws(
+        () => acquireControllerLock(path, 1),
+        /operator direction required/,
+      );
+      assert.equal(fs.readFileSync(path, "utf8"), value);
+      assert.deepEqual(fs.readdirSync(root), ["controller.lock"]);
+    }
+    fs.rmSync(path);
+    fs.mkdirSync(`${path}.acquire`);
+    assert.throws(() => acquireControllerLock(path, 1), /EEXIST/);
+    assert.equal(existsSync(`${path}.acquire`), true);
+    assert.equal(existsSync(path), false);
+    fs.rmdirSync(`${path}.acquire`);
+    fs.writeFileSync(path, "permission-denied owner");
+    fs.readFileSync = (target, ...args) => {
+      if (target === path) {
+        const error = new Error("fixture owner read denied");
+        error.code = "EACCES";
+        throw error;
+      }
+      return original(target, ...args);
+    };
+    syncBuiltinESMExports();
+    assert.throws(
+      () => readControllerOwner(path),
+      /unreadable; operator direction required/,
+    );
+    assert.throws(
+      () => acquireControllerLock(path, 1),
+      /unreadable; operator direction required/,
+    );
+    assert.equal(original(path, "utf8"), "permission-denied owner");
+  } finally {
+    fs.readFileSync = original;
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const failure of ["write", "sync", "publication"]) {
+  test(`failed controller ${failure} cleans unpublished ownership without replacing a foreign owner`, () => {
+    const root = mkdtempSync(join(tmpdir(), "fc-owner-failure-"));
+    const path = join(root, "controller.lock");
+    const original = {
+      openSync: fs.openSync,
+      writeFileSync: fs.writeFileSync,
+      fsyncSync: fs.fsyncSync,
+      linkSync: fs.linkSync,
+    };
+    const opened = [];
+    const foreign = JSON.stringify({
+      pid: process.pid,
+      startTime: linuxProcessIdentity(process.pid).startTime,
+      token: "foreign-live-owner",
+      objective: 99,
+    });
+    fs.openSync = (...args) => {
+      const fd = original.openSync(...args);
+      if (String(args[0]).startsWith(`${path}.`)) opened.push(fd);
+      return fd;
+    };
+    fs.writeFileSync = (fd, ...args) => {
+      if (failure === "write" && opened.includes(fd)) {
+        const error = new Error("fixture owner write failed");
+        error.code = "EIO";
+        throw error;
+      }
+      return original.writeFileSync(fd, ...args);
+    };
+    fs.linkSync = (temporary, target) => {
+      if (target === path) original.writeFileSync(path, foreign);
+      return original.linkSync(temporary, target);
+    };
+    fs.fsyncSync = (fd) => {
+      if (failure === "sync" && opened.includes(fd)) {
+        const error = new Error("fixture owner sync failed");
+        error.code = "EIO";
+        throw error;
+      }
+      return original.fsyncSync(fd);
+    };
+    syncBuiltinESMExports();
+    try {
+      assert.throws(
+        () => acquireControllerLock(path, 1),
+        failure === "publication" ? /EEXIST/ : /owner (write|sync) failed/,
+      );
+      assert.equal(opened.length, 1);
+      for (const fd of opened) assert.throws(() => fs.fstatSync(fd), /EBADF/);
+      assert.deepEqual(
+        fs.readdirSync(root),
+        failure === "publication" ? ["controller.lock"] : [],
+      );
+      if (failure === "publication") {
+        assert.equal(fs.readFileSync(path, "utf8"), foreign);
+        assert.throws(() => acquireControllerLock(path, 1), /already owns/);
+        assert.equal(fs.readFileSync(path, "utf8"), foreign);
+      }
+    } finally {
+      Object.assign(fs, original);
+      syncBuiltinESMExports();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 const contenderSource = `
   import { acquireControllerLock, releaseControllerLock } from ${JSON.stringify(storeUrl)};
   const path = process.argv[1];

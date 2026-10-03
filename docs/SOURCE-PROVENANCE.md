@@ -6,6 +6,26 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Atomic controller lease publication (#501)
+
+The current shared state store and the failed initial watcher setup in the first
+unpublished v0.1.73 installed gate supply this correction. The transient failure
+bytes were not retained. Independent deterministic boundary interleavings on
+unchanged source reproduce empty public owner publication and normal lease removal
+between presence checking and reading; these are mechanism evidence, not a claim
+that the original transient bytes were captured.
+
+Acquisition now writes and syncs the complete native process identity in a private
+0600 temporary inode, then atomically links it without clobbering a concurrent owner
+under the existing acquisition guard. Shared reads distinguish actual `ENOENT`
+from malformed, invalid or inaccessible owner records. Tokens, descriptor ownership,
+stale/live checks, retargeting, contention and failed-guard refusals remain intact.
+The six deterministic regressions cover publication, retirement, cleanup and refusal;
+45 tests across four existing whole files passed independent source review.
+No archived code, compatibility format, extra lock, retry, sleep, journal or new
+state root supplies this fix. Failed release evidence remains unchanged; exact-head
+integration and installed acceptance precede any live qualification claim.
+
 ## Typed whole-call projection lifecycle (#498)
 
 The current initial preparation, amendment, GitHub transport and lifecycle boundaries

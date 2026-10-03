@@ -235,12 +235,10 @@ export async function assertEndState(result, { foreignIssues = 0 } = {}) {
 
 /** No run stopped for an operator: only injected crashes interrupt it. */
 export function assertNoOperatorStop(result) {
-  assert.deepEqual(
-    result.runs
-      .filter((run) => !["complete", "crashed"].includes(run.outcome))
-      .map((run) => `${run.outcome}: ${run.message ?? run.stderr ?? ""}`),
-    [],
-  );
+  const stops = result.runs
+    .filter((run) => !["complete", "crashed"].includes(run.outcome))
+    .map((run) => `${run.outcome}: ${run.message ?? run.stderr ?? ""}`);
+  assert.deepEqual(stops, [], `operator stops: ${stops.join(" | ")}`);
 }
 
 /**
@@ -345,6 +343,18 @@ export function declareScenario(name, run, options, known) {
       const value = await once();
       assertFaultsFired(value);
       if (!diagnosis) return CHECKS[check].assert(value, context);
+      // A racy known failure reproduces only when Factory's own scheduling
+      // lines up with the fault; it must pass or fail for its named reason.
+      if (typeof diagnosis === "object") {
+        try {
+          await CHECKS[check].assert(value, context);
+        } catch (error) {
+          if (!diagnosis.pattern.test(String(error?.message ?? error)))
+            throw error;
+          t.diagnostic(`racy known failure: ${diagnosis.diagnosis}`);
+        }
+        return;
+      }
       try {
         await CHECKS[check].assert(value, context);
       } catch {

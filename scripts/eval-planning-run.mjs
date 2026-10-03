@@ -81,7 +81,7 @@ try {
   started = performance.now();
   // The production path: the same recoverable planning `factory run` uses,
   // bounded by the configuration's autonomy allowances.
-  plan = await application.planObjective(spec.objective, spec.sources);
+  plan = await application.planObjective(spec.objective);
   result.wallMs = Math.round(performance.now() - started);
   result.planned = true;
   result.reviewStatus = plan.review.status;

@@ -683,12 +683,7 @@ test("public cases are pinned, cover every required scenario and pass source che
     ])
       assert.ok(tags.has(tag), `a public case covers ${tag}`);
     for (const entry of cases) {
-      const sources = planningSources(
-        entry.body,
-        entry.commit,
-        entry.target,
-        entry.sources,
-      );
+      const sources = planningSources(entry.body, entry.commit, entry.target);
       assert.ok(sources.length > 1, entry.name);
     }
     for (const [name, commit] of Object.entries(FIXTURE_COMMITS))

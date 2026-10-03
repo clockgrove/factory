@@ -5,6 +5,7 @@
 // request log rather than from fake state.
 import assert from "node:assert/strict";
 import { availableParallelism } from "node:os";
+import { basename } from "node:path";
 import { describe, test } from "node:test";
 import { faults } from "./github-http-fake.mjs";
 import { branch, marker, OBJECTIVE, runScenario } from "./fault-harness.mjs";
@@ -267,6 +268,7 @@ export function declareScenario(name, run, testCase, known) {
       if (process.env.FACTORY_FAULT_REPORT)
         console.log(
           `FAULT-REPORT ${JSON.stringify({
+            suite: basename(process.argv[1] ?? ""),
             name,
             runs: value.runs,
             crashes: value.crashes,
@@ -294,6 +296,59 @@ export function declareScenario(name, run, testCase, known) {
   );
 }
 
+/**
+ * Diagnoses of the known failures (Factory bugs, not test bugs). References
+ * like (r1 #4) point at the adversarial review behind #515.
+ */
+export const DIAGNOSES = {
+  GIT_PUSH:
+    "git push failures (HTTP 503, or a lost response after the ref moved) are plain Errors, never interruptions: the item fails at deliver with state.error, and a restart refuses the stopped Objective (r1 #2)",
+  GIT_FETCH:
+    "a failing git fetch (regular: right after the PR merged; native: before the stack merge) is a plain Error outside any repeat: the Objective stops with state.error and a restart refuses it (r1 #2, #8)",
+  NATIVE_READS:
+    "native delivery's reads outside a Work Item step (defaultBranch at start; PR, check-run, status and readiness observation before the stack merge) are not repeated: one 5xx or connection reset stops the Objective with state.error and a restart refuses it (r1 #8)",
+  PLAN_RECOMPILE:
+    "a crash or lost response at plan (graph) review compiles the plan again on restart: the compiled candidate is not kept across the review, so the planner is called twice",
+  GRAPH_REVIEW_STOP:
+    "a lost or unavailable plan (graph) review response stops planning as 'Plan needs a specific human source decision before run' instead of repeating the review",
+  PLANNER_STOP:
+    "a lost or unavailable planner response stops the run; planning is not repeated in the run, only a manual restart compiles again",
+  FINAL_REVIEW:
+    "a lost or unavailable final Objective review response sets state.error after every Work Item merged: the final review runs outside any repeat, retry needs a failed item and a restart refuses the stopped Objective (r1 #1)",
+  START_AMBIGUOUS:
+    "regular delivery: a crash before or after driver.start leaves the item running/execute without a handle, which regular-runner refuses as 'ambiguous active state at execute; operator direction required' (r1 #4)",
+  START_REPEAT:
+    "driver.start is repeated with the same attempt id after its response was lost (or, native, after a crash): the local driver's `git worktree add` fails because the attempt's worktree exists, and the item fails (r1 #4)",
+  COLLECT_REPEAT:
+    "driver.collect removes the worktree before the runner records the produced commit: a repeated collect after a lost response or crash fails with 'cannot change to <worktree>' and is recorded as an implementation failure of a worker that succeeded (r1 #5)",
+  PROJECTION_STOP:
+    "graph projection (labels, issues, dependencies, sub-issues, the marker scan) runs outside any repeat: a lost response, 5xx or 429 stops the run ('GitHub mutation outcome unknown' or 'GitHub request failed') and only a manual restart continues it",
+  CLOSURE_PAUSE:
+    "issue closure wraps every error, including a 5xx, 403 rate limit or lost response on the completion comment or close, in GitHubClosureFailure and pauses for 'resume to reconcile' instead of repeating (r1 #9)",
+  READBACK_LAG:
+    "projection reads dependencies and sub-issues back immediately after writing them and throws 'did not reconcile exactly' (a plain Error) when the list lags one read; the run stops until a manual restart",
+  MERGE_READ_LAG:
+    "RealGitHubGateway.merge reads the PR right after PUT merge and throws a plain Error ('has not confirmed the exact integrated commit') when that read lags: the item fails after its PR merged, and a restart refuses (r3 #3)",
+  TIMELINE_LAG:
+    "timelineMergeCommit throws a plain Error ('missing or conflicting merge evidence') when the merged event is not on the timeline yet; it is not an interruption, so the item or Objective stops after a successful merge (r3 #3)",
+  PULL_LIST_LAG:
+    "after a lost POST /pulls, findOpenPullRequest relies on the open-PR list; when the list lags, publish posts again, GitHub answers 422 'A pull request already exists', and the item fails at deliver (r3 #5)",
+  ISSUE_LIST_LAG:
+    "after a lost POST /issues, the marker scan relies on the issue list; when the list lags, projection creates a second issue for the same Work Item (r3 #6)",
+  STACK_MERGE_REPEAT:
+    "a lost merge-async response while the stack merge is still pending is repeated as a second PUT merge-async (GitHub: 405 merge already in progress) instead of observing the pending merge, and the Objective stops (r1 #11)",
+  SECONDARY_403:
+    "a 403 secondary rate limit (even with retry-after) is a GitHubRequestError, not an interruption: PR creation fails the item at deliver and a restart refuses (r1 #7)",
+  PRIMARY_403:
+    "a 403 primary rate limit (x-ratelimit-remaining: 0) is a GitHubRequestError, not an interruption: PR observation fails the item and a restart refuses; without a reset header the client also stops every later request (r1 #7)",
+  BASE_MODIFIED:
+    "PUT merge answered 405 'Base branch was modified' (transient on GitHub when merges race) fails the item as a completed rejection instead of repeating the merge (r3 #4)",
+  PAGE_SHIFT:
+    "the marker scan pages issues?state=all without deduplicating by id: an issue opened between page reads repeats a boundary row, and a Work Item issue on that boundary stops the run as 'Multiple Work Item issues' (r3 #6)",
+  FOREIGN_PUSH:
+    "a push by another contributor to the default branch after the last merge stops the Objective with state.error ('Default branch changed before final validation') instead of validating the new head; a restart refuses (r1 #1)",
+};
+
 /** Expand {diagnosis: [case names]} into {case name: diagnosis}. */
 export function todos(groups) {
   const map = {};
@@ -305,17 +360,22 @@ export function todos(groups) {
   return map;
 }
 
+/** A known failure must name a declared scenario (or its operator-stop test). */
+export function checkKnown(known, scenarios) {
+  const names = new Set(
+    scenarios.flatMap((name) => [name, `${name} ${OPERATOR_STOP}`]),
+  );
+  for (const name of Object.keys(known))
+    if (!names.has(name)) throw new Error(`Unknown scenario: ${name}`);
+}
+
 /** Declare the matrix for one delivery strategy. */
 export function defineMatrix(delivery, known) {
   const cases = matrixCases(delivery);
-  const names = new Set(
-    cases.flatMap((testCase) => [
-      testCase.name,
-      `${testCase.name} ${OPERATOR_STOP}`,
-    ]),
+  checkKnown(
+    known,
+    cases.map((testCase) => testCase.name),
   );
-  for (const name of Object.keys(known))
-    if (!names.has(name)) throw new Error(`Unknown matrix case: ${name}`);
   describe(`fault matrix: ${delivery} delivery`, {
     concurrency: Math.max(2, Math.floor(availableParallelism() / 2)),
   }, () => {

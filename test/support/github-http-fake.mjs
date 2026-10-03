@@ -1479,6 +1479,8 @@ export class GitHubHttpFake {
       child.stderr.resume();
       child.on("error", reject);
       child.on("close", () => resolve(Buffer.concat(chunks)));
+      // http-backend may exit without reading the body (e.g. a ref listing).
+      child.stdin.on("error", () => {});
       child.stdin.end(body);
     });
     let split = output.indexOf("\r\n\r\n");

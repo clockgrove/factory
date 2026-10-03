@@ -10,11 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import {
-  codeSpanCommand,
-  finalObjectiveCommands,
-  planningSources,
-} from "../dist/compiler.js";
+import { planningSources } from "../dist/compiler.js";
 import { validateConfig } from "../dist/index.js";
 import {
   loadCases,
@@ -193,6 +189,8 @@ const context = {
     "`a` throws for a non-integer",
   ],
   finalCommands: ["node check.mjs a", "node check.mjs b"],
+  isCommand: (command) =>
+    ["node check.mjs a", "node check.mjs b", "npm test"].includes(command),
 };
 
 test("each seeded defect changes exactly its rule in the authored plan", () => {
@@ -397,7 +395,7 @@ test("judge-free metrics count structured fields only", () => {
           proof: { kind: "final-review" },
           source: { text: "`node check.mjs a` passes" },
         },
-        // Any criterion that is exactly one code span is a command line.
+        // A code span that production's rule does not treat as a command.
         {
           proof: { kind: "final-review" },
           source: { text: "`pnpm lint`" },
@@ -414,9 +412,11 @@ test("judge-free metrics count structured fields only", () => {
     },
   };
   assert.equal(criticalPath(plan.graph), 4);
-  assert.deepEqual(finalReviewInsteadOfCommand(plan), {
-    count: 2,
-    criteria: ["`node check.mjs a`", "`pnpm lint`"],
+  const isCommand = (command) =>
+    ["node check.mjs a", "npm test"].includes(command);
+  assert.deepEqual(finalReviewInsteadOfCommand(plan, isCommand), {
+    count: 1,
+    criteria: ["`node check.mjs a`"],
   });
   assert.deepEqual(proofKinds(plan.graph), {
     "final-review": 4,
@@ -756,13 +756,13 @@ test("public cases are pinned, cover every required scenario and pass source che
   }
 });
 
-test("review fixtures pass compile validation and every defect reaches the reviewer", async () => {
+test("review fixtures compile; each defect reaches the reviewer or production refuses it", async () => {
   const targets = mkdtempSync(join(tmpdir(), "factory-eval-review-"));
   try {
     const fixtures = loadReviewFixtures(join(root, "evals/review"), [], {
       targets,
     });
-    const reached = new Set();
+    const outcomes = {};
     for (const fixture of fixtures) {
       const checkout = prepareCheckout(
         fixture.case,
@@ -777,19 +777,53 @@ test("review fixtures pass compile validation and every defect reaches the revie
         }),
       );
       for (const variant of variants) {
-        assert.equal(
-          variant.refused,
-          undefined,
-          `${fixture.name}/${variant.variant}`,
+        if (variant.refused === undefined)
+          assert.ok(variant.packet.graph.items.length);
+        if (!variant.defect) {
+          assert.equal(variant.refused, undefined, fixture.name);
+          continue;
+        }
+        outcomes[variant.defect] ??= [];
+        outcomes[variant.defect].push(
+          `${fixture.name}:${variant.refused === undefined ? "review" : "refused"}`,
         );
-        assert.ok(variant.packet.graph.items.length);
-        if (variant.defect) reached.add(variant.defect);
       }
     }
-    assert.deepEqual(
-      [...reached].sort(),
-      DEFECTS.map((defect) => defect.id).sort(),
-    );
+    // Every defect applies somewhere. Production now refuses invented CI
+    // names and command criteria proved by final review, so those never
+    // reach the reviewer; the media command criterion has no command
+    // authority once the plan drops it, so it does.
+    assert.deepEqual(outcomes, {
+      "invented-ci-name": [
+        "native-stack-chain:refused",
+        "required-ci-check-qa:refused",
+      ],
+      "acceptance-needs-own-merge": [
+        "media-lfs-thumbnail:review",
+        "native-stack-chain:review",
+        "required-ci-check-qa:review",
+      ],
+      "native-dependency-assumed-merged": ["native-stack-chain:review"],
+      "final-review-replaces-command": [
+        "media-lfs-thumbnail:review",
+        "native-stack-chain:refused",
+        "required-ci-check-qa:refused",
+      ],
+      "missing-ownership": [
+        "media-lfs-thumbnail:review",
+        "native-stack-chain:review",
+        "required-ci-check-qa:review",
+      ],
+      "missing-dependency": [
+        "media-lfs-thumbnail:review",
+        "native-stack-chain:review",
+        "required-ci-check-qa:review",
+      ],
+      "worker-test-only-proof": [
+        "native-stack-chain:review",
+        "required-ci-check-qa:review",
+      ],
+    });
   } finally {
     rmSync(targets, { recursive: true, force: true });
   }
@@ -1054,25 +1088,18 @@ test("plan summaries exclude infrastructure errors and report each judge and the
   assert.ok(Math.abs(pair.kappa - (2 / 3 - 4 / 9) / (1 - 4 / 9)) < 1e-12);
 });
 
-test("command-line criteria use the production code-span rule", () => {
-  assert.equal(codeSpanCommand("`npm test`"), "npm test");
-  assert.equal(codeSpanCommand("  `node a.mjs --x`  "), "node a.mjs --x");
-  assert.equal(codeSpanCommand("`npm test` passes"), undefined);
-  assert.equal(codeSpanCommand("npm test"), undefined);
-  assert.equal(requiredCommandLine("`npm test`", []), "npm test");
-  assert.equal(requiredCommandLine("`npm test`", ["npm test"]), null);
-  assert.equal(requiredCommandLine("`  `", []), null);
-  // Final validation parses its entries with the same rule.
-  assert.deepEqual(
-    finalObjectiveCommands(
-      "# O\n\n## Final validation\n\n- `npm test`\n- node a.mjs\n",
-    ),
-    ["npm test", "node a.mjs"],
+test("command criteria follow production's commandObligation rule", () => {
+  // Like commandAuthority, which compares normalized commands.
+  const isCommand = (command) =>
+    command.trim().replace(/\s+/g, " ") === "npm test";
+  assert.equal(requiredCommandLine("`npm test`", [], isCommand), "npm test");
+  assert.equal(requiredCommandLine("npm  test", [], isCommand), "npm test");
+  assert.equal(
+    requiredCommandLine("`npm test`", ["npm test"], isCommand),
+    null,
   );
-  assert.throws(
-    () => finalObjectiveCommands("# O\n\n## Final validation\n\n- `  `\n"),
-    /Invalid Final validation entry/,
-  );
+  assert.equal(requiredCommandLine("`npm test` passes", [], isCommand), null);
+  assert.equal(requiredCommandLine("`npm run lint`", [], isCommand), null);
 });
 
 test("the Claude judge runs with no tools, MCP servers, agents, plugins or settings", () => {

@@ -2,7 +2,7 @@
 // structured repository files or diagnostics. None interprets prose; what
 // needs interpretation is a judge rubric dimension instead.
 import { parse } from "yaml";
-import { codeSpanCommand } from "../../dist/compiler.js";
+import { commandObligation, normalizedCommand } from "../../dist/qa.js";
 
 const isWork = (item) => !item.kind || item.kind === "work";
 
@@ -39,25 +39,29 @@ export function proofKinds(graph) {
 }
 
 /**
- * The command a criterion requires: its text is exactly one code span (the
- * production rule for a command-line bullet) and Final validation does not
- * already run it. Otherwise null.
+ * The command a criterion requires, by production's own rule
+ * (`commandObligation` with `commandAuthority`), when Final validation does
+ * not already run it. Otherwise null.
  */
-export function requiredCommandLine(text, finalCommands) {
-  const command = codeSpanCommand(text);
-  return command?.trim() && !finalCommands.includes(command) ? command : null;
+export function requiredCommandLine(text, finalCommands, isCommand) {
+  const command = commandObligation(text, isCommand);
+  return command && !finalCommands.map(normalizedCommand).includes(command)
+    ? command
+    : null;
 }
 
 /**
- * Command-line obligations left to final review: criteria that are exactly
- * one command line, outside Final validation, proved by final review instead
- * of by running the command.
+ * Command obligations left to final review, by production's rule, outside
+ * Final validation. Production now refuses these, so this stays 0 unless a
+ * rule regresses. `isCommand` is production's `commandAuthority` for the plan.
  */
-export function finalReviewInsteadOfCommand(plan) {
+export function finalReviewInsteadOfCommand(plan, isCommand) {
   const criteria = plan.graph.coverage
     .filter((entry) => entry.proof.kind === "final-review")
     .map((entry) => entry.source.text)
-    .filter((text) => requiredCommandLine(text, plan.finalCommands ?? []));
+    .filter((text) =>
+      requiredCommandLine(text, plan.finalCommands ?? [], isCommand),
+    );
   return { count: criteria.length, criteria };
 }
 
@@ -191,11 +195,11 @@ export function expectation(expect, run, graph) {
 }
 
 /** All judge-free metrics for one planned run. */
-export function planMetrics(plan, facts) {
+export function planMetrics(plan, facts, isCommand) {
   return {
     criticalPath: criticalPath(plan.graph),
     proofKinds: proofKinds(plan.graph),
-    finalReviewInsteadOfCommand: finalReviewInsteadOfCommand(plan),
+    finalReviewInsteadOfCommand: finalReviewInsteadOfCommand(plan, isCommand),
     ciCheckNames: ciCheckNames(plan.graph, workflowCheckNames(facts.workflows)),
   };
 }

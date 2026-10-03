@@ -327,7 +327,7 @@ test("review-only mode reports recall per seeded defect and the false-positive r
       "--judge-transport",
       support("eval-judge-transport.mjs"),
     ]);
-    assert.match(stdout, /40 reviews of 3 fixtures/);
+    assert.match(stdout, /32 reviews of 3 fixtures/);
     const report = readReport(output);
     assert.equal(report.mode, "review");
     const { summary } = report;
@@ -341,11 +341,12 @@ test("review-only mode reports recall per seeded defect and the false-positive r
         [row.recall.successes, row.recall.total],
       ]),
     );
+    // Compile validation refuses invented CI names and final review of the
+    // `npm test` criterion, so those variants never reach the reviewer.
     assert.deepEqual(recall, {
-      "invented-ci-name": [4, 4],
       "acceptance-needs-own-merge": [6, 6],
       "native-dependency-assumed-merged": [2, 2],
-      "final-review-replaces-command": [0, 6],
+      "final-review-replaces-command": [0, 2],
       "missing-ownership": [0, 6],
       "missing-dependency": [0, 6],
       "worker-test-only-proof": [4, 4],
@@ -362,14 +363,22 @@ test("review-only mode reports recall per seeded defect and the false-positive r
       summary.good.judgeFalsePositive["strict-rubric-v1-codex"];
     assert.deepEqual([codexFalse.successes, codexFalse.total], [2, 6]);
     assert.equal(summary.agreement.length, 1);
-    assert.deepEqual(summary.refusedByCode, []);
+    assert.deepEqual(
+      summary.refusedByCode.map((row) => `${row.fixture}/${row.defect}`).sort(),
+      [
+        "native-stack-chain/final-review-replaces-command",
+        "native-stack-chain/invented-ci-name",
+        "required-ci-check-qa/final-review-replaces-command",
+        "required-ci-check-qa/invented-ci-name",
+      ],
+    );
     assert.equal(summary.errors, 0);
-    assert.equal(report.units.length, 20);
+    assert.equal(report.units.length, 16);
     const run0 = report.runs.find(
-      (entry) => entry.defect === "invented-ci-name",
+      (entry) => entry.defect === "worker-test-only-proof",
     );
     assert.deepEqual(run0.tokens, { inputTokens: 100, outputTokens: 10 });
-    assert.match(run0.rule, /verbatim/);
+    assert.match(run0.rule, /test the same item writes/);
     const markdown = readFileSync(join(output, "summary.md"), "utf8");
     assert.match(
       markdown,

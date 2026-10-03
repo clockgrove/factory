@@ -93,10 +93,13 @@ export const DEFECTS = [
       // Only a criterion that is exactly one command line, not a Final
       // validation command, and proved by running that command.
       const entry = graph.coverage.find((candidate) => {
-        const command = requiredCommandLine(
-          context.criteria?.[candidate.criterion] ?? "",
-          context.finalCommands ?? [],
-        );
+        const command =
+          context.isCommand &&
+          requiredCommandLine(
+            context.criteria?.[candidate.criterion] ?? "",
+            context.finalCommands ?? [],
+            context.isCommand,
+          );
         const item = graph.items.find((other) => other.id === candidate.itemId);
         return (
           command &&

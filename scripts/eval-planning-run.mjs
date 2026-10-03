@@ -10,7 +10,7 @@ import {
   readDiagnosticMetadata,
   summarizeModelInvocations,
 } from "../dist/diagnostics.js";
-import { PlanningNeedsDecision } from "../dist/compiler.js";
+import { commandAuthority, PlanningNeedsDecision } from "../dist/compiler.js";
 import { resolveCapacity } from "../dist/config.js";
 import { composePlanning, validateConfig } from "../dist/index.js";
 import { preflightObjective } from "../dist/local-preflight.js";
@@ -116,7 +116,17 @@ try {
     result.revisions = plan.review.revisions;
     result.workItems = plan.graph.items.length;
     facts = repositoryFacts(checkout, spec.commit);
-    result.metrics = planMetrics(plan, facts);
+    result.metrics = planMetrics(
+      plan,
+      facts,
+      commandAuthority(
+        plan.graph,
+        plan.sources,
+        spec.body,
+        spec.commit,
+        checkout,
+      ),
+    );
   }
 } catch (error) {
   if (started && !result.wallMs)

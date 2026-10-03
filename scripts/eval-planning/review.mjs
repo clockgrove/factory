@@ -111,6 +111,7 @@ export function fixturePlanningModel(authored) {
  */
 export async function prepareVariants(fixture, config) {
   const {
+    commandAuthority,
     compileObjective,
     finalObjectiveCommands,
     objectiveCriteria,
@@ -134,30 +135,48 @@ export async function prepareVariants(fixture, config) {
     evalCase.commit,
   );
   const sources = planningSources(evalCase.body, evalCase.commit, checkout);
+  const compile = (graph) =>
+    compileObjective(
+      evalCase.objective,
+      evalCase.body,
+      evalCase.commit,
+      checkout,
+      fixturePlanningModel(graph),
+      [],
+      [],
+      undefined,
+      profiles,
+      undefined,
+      undefined,
+      localExecutables,
+      bounds,
+    );
+  let good;
+  try {
+    good = await compile(fixture.graph);
+  } catch (error) {
+    throw new CaseError(
+      `${fixture.name}: the known-good plan fails compile validation: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   const variants = planVariants(fixture.graph, {
     native: fixture.native,
     workerTest: fixture.workerTest,
     sourceText: sources.map((source) => source.content).join("\n"),
     criteria: objectiveCriteria(evalCase.body),
     finalCommands: finalObjectiveCommands(evalCase.body),
+    // Which criteria are commands, by production's rule for the good plan.
+    isCommand: commandAuthority(
+      good,
+      sources,
+      evalCase.body,
+      evalCase.commit,
+      checkout,
+    ),
   });
   for (const variant of variants) {
     try {
-      const graph = await compileObjective(
-        evalCase.objective,
-        evalCase.body,
-        evalCase.commit,
-        checkout,
-        fixturePlanningModel(variant.graph),
-        [],
-        [],
-        undefined,
-        profiles,
-        undefined,
-        undefined,
-        localExecutables,
-        bounds,
-      );
+      const graph = await compile(variant.graph);
       variant.packet = planReviewPacket(
         evalCase.body,
         evalCase.commit,
@@ -173,11 +192,6 @@ export async function prepareVariants(fixture, config) {
       variant.refused = error instanceof Error ? error.message : String(error);
     }
   }
-  const good = variants.find((variant) => variant.variant === "good");
-  if (good.refused)
-    throw new CaseError(
-      `${fixture.name}: the known-good plan fails compile validation: ${good.refused}`,
-    );
   return variants;
 }
 

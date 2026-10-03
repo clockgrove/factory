@@ -69,28 +69,28 @@ Rates show a 95% interval clustered by case (by fixture in review-only mode), be
 
 One metric is primary and reported unadjusted: production clean in plan mode, review recall and false positives in review-only mode. All other metrics are Holm-adjusted, including each judge's pass rate. A metric with fewer than 5 paired units is marked insufficient and gets no interval or p-value. An interval that contains 0 is no evidence of a change.
 
-| Number                           | Meaning                                                                                                                                                                |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Production review clean          | The plan ended clean, with no review findings or questions.                                                                                                            |
-| Judge pass                       | A frozen judge passed all seven dimensions. Shown per judge, separately from the production review.                                                                    |
-| Judges agree                     | How often two judges gave the same verdict, Cohen's kappa, and both-pass, both-fail and one-fails counts.                                                              |
-| Case expectation met             | The case's `expect` held: outcome (`plan` or `question`), required checks, size, critical path, read-only.                                                             |
-| First try                        | How the first compile ended: `accepted`, `review-findings`, `review-invalid`, `parse`, `semantic:<field>`, `provider`.                                                 |
-| Final review for command         | Criteria whose text is exactly one code span (the rule Final validation uses for a command line), not a Final validation command, proved by final review. Should be 0. |
-| Proof kinds, final-review proofs | Coverage proofs per kind (result command, semantic, QA, CI, final review).                                                                                             |
-| Ungrounded CI                    | Named CI checks that no workflow job produces (job `name`, or job id). Should be 0.                                                                                    |
-| Critical path, items, revisions  | Longest dependency chain, Work Items, planning revisions.                                                                                                              |
-| Tokens, wall                     | Planning tokens (judge tokens are separate) and planning wall time.                                                                                                    |
-| Recall (review-only)             | The reviewer returned a finding for a plan with that defect. Recall counts the review status only; findings carry no structured pointer to items yet.                  |
-| False positive (review-only)     | The reviewer returned a finding for a known-good plan. Compared separately from recall. Invalid reviews count in neither.                                              |
-| Caught by compile validation     | A seeded defect that deterministic validation already refuses; it never reaches review.                                                                                |
+| Number                           | Meaning                                                                                                                                                                                            |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production review clean          | The plan ended clean, with no review findings or questions.                                                                                                                                        |
+| Judge pass                       | A frozen judge passed all seven dimensions. Shown per judge, separately from the production review.                                                                                                |
+| Judges agree                     | How often two judges gave the same verdict, Cohen's kappa, and both-pass, both-fail and one-fails counts.                                                                                          |
+| Case expectation met             | The case's `expect` held: outcome (`plan` or `question`), required checks, size, critical path, read-only.                                                                                         |
+| First try                        | How the first compile ended: `accepted`, `review-findings`, `review-invalid`, `parse`, `semantic:<field>`, `provider`.                                                                             |
+| Final review for command         | Command obligations proved by final review, by production's rule (`commandObligation` with `commandAuthority`), outside Final validation. Compile validation refuses these, so this should stay 0. |
+| Proof kinds, final-review proofs | Coverage proofs per kind (result command, semantic, QA, CI, final review).                                                                                                                         |
+| Ungrounded CI                    | Named CI checks that no workflow job produces (job `name`, or job id). Should be 0.                                                                                                                |
+| Critical path, items, revisions  | Longest dependency chain, Work Items, planning revisions.                                                                                                                                          |
+| Tokens, wall                     | Planning tokens (judge tokens are separate) and planning wall time.                                                                                                                                |
+| Recall (review-only)             | The reviewer returned a finding for a plan with that defect. Recall counts the review status only; findings carry no structured pointer to items yet.                                              |
+| False positive (review-only)     | The reviewer returned a finding for a known-good plan. Compared separately from recall. Invalid reviews count in neither.                                                                          |
+| Caught by compile validation     | A seeded defect that deterministic validation already refuses, so it never reaches review. Today that is invented CI names and final review of a command criterion.                                |
 
 Each seeded defect breaks exactly one rule:
 
 - an invented CI check name;
 - acceptance that needs the item's own merge or upload;
 - a native-stack dependency assumed merged;
-- final review replacing a command that an Acceptance bullet consisting of exactly that command line requires (Final validation commands are exempt);
+- final review replacing a command that an Acceptance bullet requires, by production's command-obligation rule (Final validation commands are exempt);
 - missing file ownership;
 - a missing dependency;
 - the item's own new test as the only proof of a source-required behavior that the good plan leaves to independent review. Every command stays in place.

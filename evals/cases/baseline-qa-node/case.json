@@ -1,0 +1,8 @@
+{
+  "fixture": "../../targets/node-lib",
+  "tags": ["read-only", "baseline-qa"],
+  "expect": {
+    "outcome": "plan",
+    "readOnly": true
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "fixture": "../../targets/node-lib",
+  "tags": ["single-item"],
+  "expect": {
+    "outcome": "plan",
+    "maxWorkItems": 1
+  }
+}

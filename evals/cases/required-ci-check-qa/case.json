@@ -1,0 +1,7 @@
+{
+  "fixture": "../../targets/node-lib",
+  "tags": ["required-ci", "qa", "dependencies"],
+  "expect": {
+    "outcome": "plan"
+  }
+}

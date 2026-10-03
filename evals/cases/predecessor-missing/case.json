@@ -1,0 +1,8 @@
+{
+  "fixture": "../../targets/node-lib",
+  "tags": ["predecessor", "ask-operator"],
+  "expect": {
+    "outcome": "question",
+    "questionPattern": "truncate|#14|predecessor"
+  }
+}

@@ -746,7 +746,8 @@ export class StructuredPlanningModel implements PlanningModel {
   private readonly wait: (milliseconds: number) => Promise<void>;
 
   constructor(
-    private readonly transport: PlanningTransport,
+    /** Public so evaluation tools can reuse the configured provider login. */
+    readonly transport: PlanningTransport,
     options: PlanningModelOptions = {},
   ) {
     this.reviewCapacityRetryDelaysMs = [
@@ -2064,7 +2065,8 @@ export function planningReviewEvidence(
   ];
 }
 
-async function checkedPlanReview(
+/** The production plan review: one reviewer call, decoded and bound to its packet. */
+export async function checkedPlanReview(
   model: PlanningModel,
   packet: PlanReviewRequest,
   invocation?: ModelInvocationContext,

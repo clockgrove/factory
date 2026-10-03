@@ -1,0 +1,116 @@
+{
+  "case": "../../cases/native-stack-chain",
+  "native": true,
+  "workerTest": {
+    "command": "npm test",
+    "provenance": "base-observed",
+    "source": "package.json",
+    "directory": "test/"
+  },
+  "graph": {
+    "requiredPreIntegrationChecks": [
+      {
+        "checkName": "unit-tests",
+        "source": {
+          "path": "CONTRIBUTING.md",
+          "text": "Every pull request must pass the `unit-tests` check before it merges."
+        }
+      }
+    ],
+    "items": [
+      {
+        "id": "truncate",
+        "title": "Implement truncate",
+        "goal": "Add truncate(text, max) as docs/SPEC.md#Truncate specifies.",
+        "acceptance": [
+          "truncate returns text unchanged up to max characters, otherwise the first max - 1 characters followed by …, and throws RangeError when max is not an integer of at least 1."
+        ],
+        "nonGoals": ["The command line, docs/CLI.md and wrap."],
+        "citations": [{ "path": "docs/SPEC.md", "heading": "Truncate" }],
+        "dependencies": [],
+        "ownedPaths": ["src/truncate.mjs", "test/truncate.test.mjs"],
+        "validation": [
+          {
+            "command": "node scripts/check.mjs truncate",
+            "provenance": "source-declared",
+            "source": "OBJECTIVE"
+          },
+          {
+            "command": "npm test",
+            "provenance": "base-observed",
+            "source": "package.json"
+          }
+        ],
+        "brief": "Create src/truncate.mjs exporting truncate(text, max) per the cited section, and add unit tests in test/truncate.test.mjs."
+      },
+      {
+        "id": "cli",
+        "title": "Add the textkit command line",
+        "goal": "Add bin/textkit.mjs with the slug and truncate subcommands.",
+        "acceptance": [
+          "textkit slug and textkit truncate MAX read standard input and print the result; an unknown subcommand prints usage to standard error and exits 2."
+        ],
+        "nonGoals": ["The wrap subcommand, docs/CLI.md and src/ changes."],
+        "citations": [{ "path": "docs/SPEC.md", "heading": "Command line" }],
+        "dependencies": ["truncate"],
+        "ownedPaths": ["bin/textkit.mjs"],
+        "validation": [
+          {
+            "command": "node scripts/check.mjs cli",
+            "provenance": "source-declared",
+            "source": "OBJECTIVE"
+          }
+        ],
+        "brief": "Create bin/textkit.mjs. It imports slug from src/slug.mjs and truncate from src/truncate.mjs, which the truncate item provides on its published stack layer."
+      },
+      {
+        "id": "cli-docs",
+        "title": "Document the command line",
+        "goal": "Write docs/CLI.md documenting every subcommand.",
+        "acceptance": [
+          "docs/CLI.md documents textkit slug, textkit wrap (as planned) and textkit truncate with one example each."
+        ],
+        "nonGoals": ["Code changes."],
+        "citations": [
+          { "path": "docs/SPEC.md", "heading": "Command line" },
+          { "path": "docs/SPEC.md", "heading": "Documentation" }
+        ],
+        "dependencies": ["cli"],
+        "ownedPaths": ["docs/CLI.md"],
+        "validation": [
+          {
+            "command": "node scripts/check.mjs docs",
+            "provenance": "source-declared",
+            "source": "OBJECTIVE"
+          }
+        ],
+        "brief": "Write docs/CLI.md from the cited sections and the cli item's bin/textkit.mjs, with one example per subcommand."
+      }
+    ],
+    "coverage": [
+      {
+        "criterion": 0,
+        "itemId": "truncate",
+        "proof": { "kind": "result-command", "validationIndex": 0 }
+      },
+      {
+        "criterion": 1,
+        "itemId": "cli",
+        "proof": { "kind": "result-command", "validationIndex": 0 }
+      },
+      {
+        "criterion": 2,
+        "itemId": "cli-docs",
+        "proof": { "kind": "result-command", "validationIndex": 0 }
+      },
+      {
+        "criterion": 3,
+        "itemId": "truncate",
+        "proof": {
+          "kind": "final-controller",
+          "guaranteeId": "protected-exact-head-integration"
+        }
+      }
+    ]
+  }
+}

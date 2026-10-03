@@ -16,6 +16,7 @@ import { withCoverage } from "./support/coverage.mjs";
 import {
   encodeCompilerWire,
   compilerChoices,
+  isCompileSchema,
 } from "./support/compiler-wire.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
 
@@ -120,7 +121,7 @@ test("ordinary-byte source assertions retain exact standalone command authority"
 
 // The scripted reviewer demonstrates packet transport and the bounded question path,
 // not a live model's ability to recognize an unsupported acceptance claim.
-test("rendered compiler and plan reviewer distinguish current bytes from unsupported history and future hydration", async (t) => {
+test("rendered compiler and plan reviewer carry the source commands and stop unsupported history and future hydration at a question", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-phase-prompts-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const target = createTarget(root, { "assets/source.png": image });
@@ -128,10 +129,11 @@ test("rendered compiler and plan reviewer distinguish current bytes from unsuppo
   const question =
     "What phase-available evidence can establish the claimed untracked history, and should the existing final hydration duty remain at final review?";
   t.mock.method(Codex.prototype, "startThread", () => ({
-    async runStreamed(prompt) {
-      prompts.push(prompt);
+    async runStreamed(prompt, options) {
+      const compile = isCompileSchema(options?.outputSchema);
+      prompts.push({ prompt, compile });
       let response;
-      if (prompt.startsWith("Compile this human Objective")) {
+      if (compile) {
         response = withCoverage(
           {
             coverageObligations: coverageObligations(
@@ -197,25 +199,9 @@ test("rendered compiler and plan reviewer distinguish current bytes from unsuppo
     [size, hash],
   );
   assert.equal(prompts.length, 4);
-  const instructions = prompts.map(
-    (prompt) =>
-      prompt.match(
-        /Map each acceptance claim[\s\S]*?rather than inventing commands or proof\./,
-      )?.[0],
-  );
-  assert.ok(instructions[0]);
-  assert.ok(instructions.every((text) => text === instructions[0]));
-  assert.match(
-    instructions[0],
-    /Equal immutable ordinary Git blob identities can prove preserved committed bytes/,
-  );
-  assert.match(
-    instructions[0],
-    /Do not demand additional size\/hash commands when supplied immutable evidence already proves/,
-  );
   assert.ok(
-    prompts.every((prompt) =>
-      prompt.startsWith("Compile this human Objective")
+    prompts.every(({ prompt, compile }) =>
+      compile
         ? compilerChoices(prompt).sources.some((source) =>
             source.lines.some((line) => line.text.includes(size)),
           )

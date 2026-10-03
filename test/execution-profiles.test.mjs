@@ -504,7 +504,7 @@ for (const strategy of ["regular", "native-stack"])
       );
     }));
 
-test("SDK compile and independent review prompts carry safe routing guidance and retain indexed schema assignments", async () => {
+test("SDK compile and independent review prompts carry profile choices and retain indexed schema assignments", async () => {
   const original = Codex.prototype.startThread;
   const captured = [];
   Codex.prototype.startThread = function () {
@@ -587,18 +587,8 @@ test("SDK compile and independent review prompts carry safe routing guidance and
       commands: [],
       finalCommands: [],
     });
-    for (const { prompt } of captured) {
-      assert.match(prompt, /eligible.*suitable/);
-      assert.match(
-        prompt,
-        /write ownership is not a read boundary|Membership permits reading inputs/,
-      );
+    for (const { prompt } of captured)
       assert.match(prompt, /low latency preference/);
-      assert.match(
-        prompt,
-        /Hints never grant permissions|hints grant no permissions/,
-      );
-    }
     assert.ok(
       captured[0].schema.properties.items.items.anyOf[0].required.includes(
         "executionProfile",

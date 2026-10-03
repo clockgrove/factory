@@ -1514,7 +1514,7 @@ test("real structured adapter uses a diagnosis request rather than a graph-compi
   });
   assert.deepEqual(observed, result);
   assert.match(prompt, /requested diagnostic JSON/);
-  assert.doesNotMatch(prompt, /Compile this human Objective/);
+  assert.doesNotMatch(prompt, /Compiler choices \(JSON data\)/);
 });
 
 test("a real human-owned planning decision resolves the exact persisted plan without repeating models", async () => {

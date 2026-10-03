@@ -9,6 +9,7 @@ import test from "node:test";
 import { composePlanning } from "../dist/application.js";
 import {
   compilePlan,
+  PlanValidationError,
   resolvePlan,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
@@ -952,7 +953,6 @@ test("graph review rejects malformed protocol fields without retaining finding c
         question: "question",
       }),
       (id) => ({ evidenceIndices: [id], detail: " ", question: "question" }),
-      (id) => ({ evidenceIndices: [id], detail: "detail", question: " " }),
       (id) => ({
         evidenceIndices: [id],
         detail: "detail",
@@ -999,6 +999,161 @@ test("graph review rejects malformed protocol fields without retaining finding c
         [{ field: "findings", reason: "invalid", source: undefined }],
       );
     }
+  });
+});
+
+test("graph review accepts a finding without a question and revises from its detail", async () => {
+  await fixture("review-no-question", async (root) => {
+    const target = createTarget(root, {
+      "docs/plan.md": "# Plan\n\n## Wave 0\nCanonical obligation\n",
+    });
+    const requests = [];
+    let reviews = 0;
+    const candidate = await compilePlan(
+      1,
+      body,
+      target.baseSha,
+      target.checkout,
+      {
+        async generateStructured(request) {
+          requests.push(request);
+          return withCoverage(request, graph(target.baseSha));
+        },
+        async reviewGraph(request) {
+          return {
+            packetId: request.reviewPacket.id,
+            findings:
+              reviews++ === 0
+                ? [
+                    {
+                      evidenceIndices: [0],
+                      detail: "Name the missing owner.",
+                      question: " ",
+                    },
+                  ]
+                : [],
+          };
+        },
+      },
+    );
+    assert.equal(candidate.review.status, "clean");
+    assert.equal(candidate.review.revisions, 1);
+    assert.equal(requests.length, 2);
+    assert.match(
+      requests[1].compileContext.instructions,
+      /Name the missing owner\./,
+    );
+    assert.match(
+      requests[1].compileContext.instructions,
+      /How should the plan change to fix this\?/,
+    );
+  });
+});
+
+test("a plan refused by deterministic validation spends the one revision with the error as a finding", async () => {
+  await fixture("validation-revision", async (root) => {
+    const target = createTarget(root, {
+      "docs/plan.md": "# Plan\n\n## Wave 0\nCanonical obligation\n",
+    });
+    const refused = (baseSha) => {
+      const value = graph(baseSha);
+      value.items[0].ownedPaths = ["/absolute/one.txt"];
+      return value;
+    };
+    for (const reviewFinds of [false, true]) {
+      const requests = [];
+      const observations = [];
+      let reviews = 0;
+      const candidate = await compilePlan(
+        1,
+        body,
+        target.baseSha,
+        target.checkout,
+        {
+          async generateStructured(request) {
+            requests.push(request);
+            return withCoverage(
+              request,
+              requests.length === 1
+                ? refused(target.baseSha)
+                : graph(target.baseSha),
+            );
+          },
+          async reviewGraph(request) {
+            reviews++;
+            return {
+              packetId: request.reviewPacket.id,
+              findings: reviewFinds
+                ? [
+                    {
+                      evidenceIndices: [0],
+                      detail: "A material defect remains.",
+                      question: "Which owner is intended?",
+                    },
+                  ]
+                : [],
+            };
+          },
+        },
+        undefined,
+        (event) => observations.push(event),
+      );
+      // The first compile is refused; the second receives the refusal as a
+      // finding and is reviewed once. No second revision follows a finding.
+      assert.equal(requests.length, 2);
+      assert.equal(reviews, 1);
+      assert.equal(requests[0].compileContext.instructions, "");
+      assert.match(
+        requests[1].compileContext.instructions,
+        /Factory refused the compiled plan: .*\/absolute\/one\.txt/,
+      );
+      assert.deepEqual(
+        requests.map((request) => request.invocation.ordinal),
+        [0, 1],
+      );
+      assert.ok(
+        observations.some(
+          (event) =>
+            event.type === "response-invalid" &&
+            event.failureClass === "semantic-validation",
+        ),
+      );
+      assert.equal(candidate.review.revisions, 1);
+      assert.deepEqual(candidate.graph.items[0].ownedPaths, ["one.txt"]);
+      assert.equal(
+        candidate.review.status,
+        reviewFinds ? "needs-human" : "clean",
+      );
+    }
+  });
+});
+
+test("a refused plan revision still fails compilation", async () => {
+  await fixture("validation-revision-refused", async (root) => {
+    const target = createTarget(root, {
+      "docs/plan.md": "# Plan\n\n## Wave 0\nCanonical obligation\n",
+    });
+    let generated = 0;
+    let reviews = 0;
+    await assert.rejects(
+      compilePlan(1, body, target.baseSha, target.checkout, {
+        async generateStructured(request) {
+          generated++;
+          const value = graph(target.baseSha);
+          value.items[0].ownedPaths = ["/absolute/one.txt"];
+          return withCoverage(request, value);
+        },
+        async reviewGraph() {
+          reviews++;
+          throw new Error("A refused plan is never reviewed");
+        },
+      }),
+      (error) =>
+        error instanceof PlanValidationError &&
+        /\/absolute\/one\.txt/.test(error.message),
+    );
+    assert.equal(generated, 2);
+    assert.equal(reviews, 0);
   });
 });
 

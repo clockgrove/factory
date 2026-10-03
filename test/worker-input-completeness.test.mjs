@@ -13,7 +13,11 @@ import {
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import { coverageObligations } from "../dist/qa.js";
 import { withCoverage } from "./support/coverage.mjs";
-import { encodeCompilerWire } from "./support/compiler-wire.mjs";
+import {
+  encodeCompilerWire,
+  isCompileSchema,
+} from "./support/compiler-wire.mjs";
+import { isGraphReviewSchema } from "./support/review-protocol.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
 
 // Scripted SDK responses exercise the real planning/revision/prompt boundary,
@@ -100,9 +104,9 @@ test -s GUIDE.md
   const compilePrompts = [];
   const reviewPrompts = [];
   t.mock.method(Codex.prototype, "startThread", () => ({
-    async runStreamed(prompt) {
+    async runStreamed(prompt, options) {
       let response;
-      if (prompt.startsWith("Compile this human Objective")) {
+      if (isCompileSchema(options?.outputSchema)) {
         compilePrompts.push(prompt);
         if (compilePrompts.length === 2)
           assert.ok(prompt.includes(finding.detail));
@@ -121,11 +125,7 @@ test -s GUIDE.md
         );
         response = encodeCompilerWire(response, prompt);
       } else {
-        assert.ok(
-          prompt.startsWith(
-            "Independently review this complete proposed Factory plan",
-          ),
-        );
+        assert.ok(isGraphReviewSchema(options?.outputSchema));
         reviewPrompts.push(prompt);
         const reviewed = JSON.parse(
           prompt
@@ -189,32 +189,6 @@ test -s GUIDE.md
   assert.equal(candidate.review.revisions, 1);
   assert.equal(compilePrompts.length, 2);
   assert.equal(reviewPrompts.length, 2);
-  for (const prompt of compilePrompts) {
-    assert.match(prompt, /structured worker inputSources with attribution/);
-    assert.match(prompt, /do not recopy those sections/);
-    assert.match(
-      prompt,
-      /Citation selection supplies inputs, not broader write or execution authority/,
-    );
-  }
-  for (const prompt of reviewPrompts) {
-    assert.match(
-      prompt,
-      /Check worker-input completeness separately from complete supervisor-packet coverage/,
-    );
-    assert.match(
-      prompt,
-      /source-backed material finding.*worker-visible item fields/,
-    );
-    assert.match(
-      prompt,
-      /Only the selected source sections in inputSources accompany the item/,
-    );
-    assert.match(
-      prompt,
-      /preserve ownership, dependencies and later-phase validation/,
-    );
-  }
   verifyPlanCandidate(candidate, 1, objective, target.baseSha, target.checkout);
   const accepted = candidate.graph.items[0];
   for (const field of [

@@ -5,7 +5,7 @@ This file records public releases of Factory. Release artifacts and provenance a
 ## 0.1.75 — 2026-10-03
 
 - Publish releases from a tag-triggered GitHub Actions workflow that runs the complete checks and tests, installs the packed tarball offline, and attaches a build provenance attestation alongside the tarball and `SHA256SUMS`. Verify a download with `gh attestation verify clockgrove-factory-0.1.75.tgz --repo clockgrove/factory`.
-- Install instructions now select the latest release and verify its attestation; the maintainer procedure is in [RELEASING.md](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md). Earlier release records moved to `docs/history/`.
+- Install instructions now select the latest release and verify its attestation; the maintainer procedure is in [RELEASING.md](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md). Earlier release records are at [this commit](https://github.com/clockgrove/factory/tree/3ddcf5c16d5f067853654b520339029da25e1026/docs/history).
 - Add `scripts/version.mjs` to keep package, lockfile, plugin and marketplace versions and the changelog in step.
 - No runtime behavior changes from 0.1.74.
 

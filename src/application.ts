@@ -1,7 +1,6 @@
 import { DaytonaSandboxProvider } from "./execution/daytona.js";
 import {
   executionCredential,
-  planningCredential,
   resolveProviderCredential,
 } from "./provider-credentials.js";
 import {
@@ -256,30 +255,19 @@ export function composeIntake(
   };
 }
 
-/** The configured PlanningModel; provider credentials stay in controller memory. */
-function composePlanningModel(
-  config: FactoryConfig,
-  serviceCredentials?: string[],
-): PlanningModel {
-  if (config.planning.kind === "claude-api")
-    return new ClaudePlanningModel(
-      config.planning,
-      resolveProviderCredential(
-        config,
-        planningCredential(config)!,
-        serviceCredentials,
-      ),
-    );
+/** The configured PlanningModel; it authenticates with the operator's provider login. */
+function composePlanningModel(config: FactoryConfig): PlanningModel {
+  const redactionValues = config.policy.allowedSecretNames.flatMap((name) =>
+    process.env[name] ? [process.env[name]!] : [],
+  );
+  if (config.planning.kind === "claude-agent-sdk")
+    return new ClaudePlanningModel(config.planning, { redactionValues });
   return new CodexPlanningModel(
     config.checkout,
     config.planning.planner,
     config.planning.reviewer,
     undefined,
-    {
-      redactionValues: config.policy.allowedSecretNames.flatMap((name) =>
-        process.env[name] ? [process.env[name]!] : [],
-      ),
-    },
+    { redactionValues },
   );
 }
 
@@ -539,7 +527,7 @@ export function compose(
   serviceCredentials?: string[],
 ): FactoryApplication {
   const config = cloneAndValidateConfig(input);
-  const planningModel = composePlanningModel(config, serviceCredentials);
+  const planningModel = composePlanningModel(config);
   const executionKey = () =>
     resolveProviderCredential(
       config,

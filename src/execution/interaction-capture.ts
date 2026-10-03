@@ -20,6 +20,119 @@ import {
 } from "./claude-usage.js";
 import { privateProgress, redact } from "./harness-support.js";
 
+/**
+ * Project one Claude Agent SDK message into capture events. The worker capture
+ * and the Claude planning transport share this projection.
+ */
+export function claudeCaptureEvents(
+  message: SDKMessage,
+  secrets: string[] = [],
+  observedUsage?: Record<string, unknown>,
+): { event: CaptureEvent; content?: () => unknown }[] {
+  const projected: { event: CaptureEvent; content?: () => unknown }[] = [];
+  const record = (event: CaptureEvent, content?: () => unknown) => {
+    projected.push({ event, content });
+  };
+  const base: CaptureEvent = {
+    kind: "interaction",
+    providerEvent: message.type,
+    providerSessionId:
+      "session_id" in message ? message.session_id : undefined,
+    coverage: "sdk-exposed",
+  };
+  if (message.type === "system" && message.subtype === "init") {
+    record({ ...base, reportedModel: message.model });
+  } else if (message.type === "assistant" || message.type === "user") {
+    base.role = message.type;
+    if (message.type === "assistant") {
+      base.providerMessageId = message.message.id;
+      base.reportedModel = message.message.model;
+    } else base.providerMessageId = message.uuid;
+    const content = message.message.content;
+    if (typeof content === "string")
+      record(base, () => ({ text: content }));
+    else
+      for (const block of content) {
+        if (block.type === "text")
+          record(base, () => ({ text: block.text }));
+        else if (block.type === "tool_use")
+          record(
+            { ...base, tool: block.name, toolCallId: block.id },
+            () => ({ arguments: block.input }),
+          );
+        else if (block.type === "tool_result")
+          record(
+            { ...base, role: "tool", toolCallId: block.tool_use_id },
+            () => ({ content: block.content, isError: block.is_error }),
+          );
+        else record(base); // Thinking, signatures and hidden blocks stay unexposed.
+      }
+    if (message.type === "assistant" && observedUsage) {
+      const raw = claudeRawTokenUsage(message.message.usage);
+      const sum = [
+        raw.input_tokens,
+        raw.cache_read_input_tokens,
+        raw.cache_creation_input_tokens,
+      ];
+      const input = sum.every((value) => value !== undefined)
+        ? sum.reduce((total, value) => total + value!, 0)
+        : undefined;
+      record({
+        ...base,
+        kind: "usage",
+        usage: {
+          scope: "provider-call",
+          terminal: false,
+          deduplicationKey: JSON.stringify([
+            message.session_id,
+            message.message.id,
+          ]),
+          completeness: Object.keys(raw).length
+            ? "available-categories"
+            : "unavailable",
+          raw,
+          normalized: normalizeTokenUsage({
+            inputTokens: input,
+            cachedInputTokens: raw.cache_read_input_tokens,
+            cacheWriteInputTokens: raw.cache_creation_input_tokens,
+            outputTokens: raw.output_tokens,
+          }),
+        },
+      });
+    }
+  } else if (message.type === "result") {
+    record(
+      { ...base, kind: "response", role: "assistant" },
+      () =>
+        message.subtype === "success"
+          ? {
+              text: message.result,
+              isError: message.is_error,
+              ...(message.structured_output !== undefined && {
+                structuredOutput: message.structured_output,
+              }),
+            }
+          : { errors: message.errors },
+    );
+    record({
+      ...base,
+      kind: "usage",
+      usage: {
+        scope: "model-breakdown",
+        terminal: false,
+        completeness:
+          message.subtype === "error_during_execution"
+            ? "unavailable"
+            : "available-categories",
+        normalized: {},
+        raw: claudeRawTokenUsage(message.usage),
+        modelBreakdown: claudeModelUsage(message.modelUsage, secrets),
+      },
+    });
+  } else record(base);
+  return projected;
+}
+
 export function codexCaptureEvent(
   event: ThreadEvent,
   sessionId?: string,
@@ -312,74 +425,7 @@ export class WorkerInteractionCapture {
 
   claude(message: SDKMessage, observedUsage?: Record<string, unknown>): void {
     this.safely(() => {
-      const base: CaptureEvent = {
-        kind: "interaction",
-        providerEvent: message.type,
-        providerSessionId:
-          "session_id" in message ? message.session_id : undefined,
-        coverage: "sdk-exposed",
-      };
-      if (message.type === "system" && message.subtype === "init") {
-        this.writer!.record({ ...base, reportedModel: message.model });
-      } else if (message.type === "assistant" || message.type === "user") {
-        base.role = message.type;
-        if (message.type === "assistant") {
-          base.providerMessageId = message.message.id;
-          base.reportedModel = message.message.model;
-        } else base.providerMessageId = message.uuid;
-        const content = message.message.content;
-        if (typeof content === "string")
-          this.writer!.record(base, () => ({ text: content }));
-        else
-          for (const block of content) {
-            if (block.type === "text")
-              this.writer!.record(base, () => ({ text: block.text }));
-            else if (block.type === "tool_use")
-              this.writer!.record(
-                { ...base, tool: block.name, toolCallId: block.id },
-                () => ({ arguments: block.input }),
-              );
-            else if (block.type === "tool_result")
-              this.writer!.record(
-                { ...base, role: "tool", toolCallId: block.tool_use_id },
-                () => ({ content: block.content, isError: block.is_error }),
-              );
-            else this.writer!.record(base); // Thinking, signatures and hidden blocks stay unexposed.
-          }
-        if (message.type === "assistant" && observedUsage) {
-          const raw = claudeRawTokenUsage(message.message.usage);
-          const sum = [
-            raw.input_tokens,
-            raw.cache_read_input_tokens,
-            raw.cache_creation_input_tokens,
-          ];
-          const input = sum.every((value) => value !== undefined)
-            ? sum.reduce((total, value) => total + value!, 0)
-            : undefined;
-          this.writer!.record({
-            ...base,
-            kind: "usage",
-            usage: {
-              scope: "provider-call",
-              terminal: false,
-              deduplicationKey: JSON.stringify([
-                message.session_id,
-                message.message.id,
-              ]),
-              completeness: Object.keys(raw).length
-                ? "available-categories"
-                : "unavailable",
-              raw,
-              normalized: normalizeTokenUsage({
-                inputTokens: input,
-                cachedInputTokens: raw.cache_read_input_tokens,
-                cacheWriteInputTokens: raw.cache_creation_input_tokens,
-                outputTokens: raw.output_tokens,
-              }),
-            },
-          });
-        }
-      } else if (message.type === "result") {
+      if (message.type === "result") {
         const cost = claudeCost(message.total_cost_usd);
         this.terminalCost =
           cost === undefined || message.subtype === "error_during_execution"
@@ -394,29 +440,13 @@ export class WorkerInteractionCapture {
                     : "partial",
                 provenance: "Claude SDK total_cost_usd",
               };
-        this.writer!.record(
-          { ...base, kind: "response", role: "assistant" },
-          () =>
-            message.subtype === "success"
-              ? { text: message.result, isError: message.is_error }
-              : { errors: message.errors },
-        );
-        this.writer!.record({
-          ...base,
-          kind: "usage",
-          usage: {
-            scope: "model-breakdown",
-            terminal: false,
-            completeness:
-              message.subtype === "error_during_execution"
-                ? "unavailable"
-                : "available-categories",
-            normalized: {},
-            raw: claudeRawTokenUsage(message.usage),
-            modelBreakdown: claudeModelUsage(message.modelUsage, this.secrets),
-          },
-        });
-      } else this.writer!.record(base);
+      }
+      for (const { event, content } of claudeCaptureEvents(
+        message,
+        this.secrets,
+        observedUsage,
+      ))
+        this.writer!.record(event, content);
     });
   }
 

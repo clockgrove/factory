@@ -25,22 +25,13 @@ export function executionCredential(config: FactoryConfig): string | undefined {
   return name;
 }
 
-/** The controller credential the configured planning provider needs, if any. */
-export function planningCredential(config: FactoryConfig): string | undefined {
-  return config.planning.kind === "claude-api"
-    ? config.planning.credentialEnv
-    : undefined;
-}
-
-/** Every controller credential the configured providers need, deduplicated. */
+/**
+ * Every controller credential the configured providers need. Planning uses
+ * the operator's own Codex or Claude login, so only remote execution adds one.
+ */
 export function requiredProviderCredentials(config: FactoryConfig): string[] {
-  return [
-    ...new Set(
-      [executionCredential(config), planningCredential(config)].filter(
-        (name): name is string => name !== undefined,
-      ),
-    ),
-  ];
+  const name = executionCredential(config);
+  return name === undefined ? [] : [name];
 }
 
 export function validateCredentialFile(

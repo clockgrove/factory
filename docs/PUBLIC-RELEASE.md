@@ -4,7 +4,8 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
-Candidate v0.1.74 adds the unified explicit permanent-abandonment surface in
+Published [v0.1.74](https://github.com/clockgrove/factory/releases/tag/v0.1.74)
+supplies the unified explicit permanent-abandonment surface in
 [#499](https://github.com/clockgrove/factory/issues/499) for stopped uncertain
 read-only reviews or synchronous initial/amendment GitHub graph projection.
 Controller-derived classification shares one request and stored disposition;
@@ -12,12 +13,18 @@ unknown outcomes, every Work Item’s original status, history, accounting and
 consumed limits remain preserved. Owned cessation, exact identity binding and
 refusals for sealed acceptance, live/unsupported resources and other uncertain
 effects remain required. The disposition submits no provider work, remote
-mutation, cleanup, replay or activation. Its
-[distribution gate #505](https://github.com/clockgrove/factory/issues/505) must pass
-before actual historical disposition and fresh live qualification. It grants no
-automatic worker/adopter recovery authority.
+mutation, cleanup, replay or activation. All 722 installed tests across 54 whole
+files and four reviewed model-free families passed, followed by
+[independent public verification/completion](https://github.com/clockgrove/factory/issues/505#issuecomment-5965539396).
+The [immutable artifact record](BUILD-STATUS.md#immutable-v0174-artifact-record)
+binds exact source/tree/archive/tag/protection and acceptance. Actual historical
+disposition and complete public then Clockgrove qualification remain in the single
+active [closeout #448](https://github.com/clockgrove/factory/issues/448), on this
+same artifact with original bounds and private evidence retained. #445 is superseded
+tracking, with all requirements preserved there. Distribution grants no Objective
+acceptance or automatic worker/adopter recovery authority.
 
-The candidate also removes Factory's redundant release version from the generated
+This release also removes Factory's redundant release version from the generated
 dependency-notice header ([#508](https://github.com/clockgrove/factory/issues/508)).
 A Factory-only version bump leaves those notice bytes unchanged; production
 dependency or license changes still require regeneration and pass the same
@@ -39,12 +46,11 @@ Neither failed producer is accepted; published predecessors remain unchanged.
 
 Distribution acceptance did not dispose the historical ambiguous projection.
 [#499](https://github.com/clockgrove/factory/issues/499) was pending at that
-checkpoint; its subsequently approved supported disposition now requires the
-v0.1.74 implementation and installed proof. Actual #444/#447 live outcomes remain
-with the complete corrected
-one-artifact [public gate #448](https://github.com/clockgrove/factory/issues/448),
-which must be accepted before [private #445](https://github.com/clockgrove/factory/issues/445)
-on the same artifact and demonstrated scope.
+checkpoint; its subsequently approved supported disposition is now independently
+accepted in v0.1.74. Actual #444/#447 live outcomes and the same-artifact Clockgrove
+handoff remain in [#448](https://github.com/clockgrove/factory/issues/448). Its public
+phase must be independently accepted before private work; distribution does not
+supply either acceptance or actual historical cessation.
 
 Published [v0.1.72](https://github.com/clockgrove/factory/releases/tag/v0.1.72) supplies truthful controller-derived aggregate joins (#483) and original-archive/complete installation integrity (#486) in [PR #484](https://github.com/clockgrove/factory/pull/484). All 514 tests across 50 whole installed files and seven reviewed model-free preflights passed without skips, followed by [independent public verification and release completion](https://github.com/clockgrove/factory/issues/485#issuecomment-5953125869). The seventh preserves the complete 49-file original evidence and semantic rejection; it supplies no new review or live acceptance. The first producer and restricted-host diagnostic failures, reviewed context correction and unchanged archive bytes are recorded in the [immutable artifact record](BUILD-STATUS.md#immutable-v0172-artifact-record). Actual #448/#445 remain unaccepted. The operator subsequently [approved the named #448 v0.1.71-to-v0.1.72 continuation](https://github.com/clockgrove/factory/issues/448#issuecomment-5957494560); see its [exact scope and event bounds](BUILD-STATUS.md#approved-448-current-runtime-qualification). The earlier one-artifact attempt remains failed/unaccepted, authentic phases retain their real artifact identities, and fresh independent whole-gate acceptance is required. This exception changes no other artifact gate: public #448 acceptance must precede private #445 on the same v0.1.72 artifact and demonstrated scope.
 

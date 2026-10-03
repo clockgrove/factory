@@ -28,6 +28,7 @@ import { withCoverage } from "./support/coverage.mjs";
 import {
   encodeCompilerWire,
   compilerObligations,
+  isCompileSchema,
 } from "./support/compiler-wire.mjs";
 import {
   createTarget,
@@ -40,6 +41,7 @@ import {
   writeDescriptor,
 } from "./support/integration-fixture.mjs";
 import {
+  isGraphReviewSchema,
   packetFromPrompt,
   resultFindings,
 } from "./support/review-protocol.mjs";
@@ -618,10 +620,10 @@ test("application retries capacity for exact Work Item and final review requests
       const id = `application-capacity-${threadIndex++}`;
       return {
         id,
-        async runStreamed(prompt) {
+        async runStreamed(prompt, options) {
           async function* events() {
             yield { type: "thread.started", thread_id: id };
-            if (prompt.startsWith("Compile this human Objective")) {
+            if (isCompileSchema(options?.outputSchema)) {
               yield {
                 type: "item.completed",
                 item: {
@@ -643,11 +645,7 @@ test("application retries capacity for exact Work Item and final review requests
               yield { type: "turn.completed", usage: null };
               return;
             }
-            if (
-              prompt.startsWith(
-                "Independently review this complete proposed Factory plan",
-              )
-            ) {
+            if (isGraphReviewSchema(options?.outputSchema)) {
               yield {
                 type: "item.completed",
                 item: {
@@ -794,9 +792,9 @@ test("application fails closed once after exhausted result-review capacity witho
       const id = `application-exhausted-${threadIndex++}`;
       return {
         id,
-        async runStreamed(prompt) {
+        async runStreamed(prompt, options) {
           async function* events() {
-            if (prompt.startsWith("Compile this human Objective")) {
+            if (isCompileSchema(options?.outputSchema)) {
               yield {
                 type: "item.completed",
                 item: {
@@ -818,11 +816,7 @@ test("application fails closed once after exhausted result-review capacity witho
               yield { type: "turn.completed", usage: null };
               return;
             }
-            if (
-              prompt.startsWith(
-                "Independently review this complete proposed Factory plan",
-              )
-            ) {
+            if (isGraphReviewSchema(options?.outputSchema)) {
               yield {
                 type: "item.completed",
                 item: {

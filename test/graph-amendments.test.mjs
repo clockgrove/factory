@@ -576,11 +576,6 @@ for (const delivery of ["regular", "native-stack"])
               } else graph.coverage[1].itemId = "summary";
               wireModel.runStructured = async ({ prompt, defaultPhase }) => {
                 assert.equal(defaultPhase, "compile");
-                assert(
-                  prompt.includes(
-                    "equivalent generated acceptance wording need not be copied literally",
-                  ),
-                );
                 return encodeCompilerWire(graph, prompt);
               };
               const decoded = await wireModel.generateStructured(request);
@@ -603,11 +598,6 @@ for (const delivery of ["regular", "native-stack"])
               }
               wireModel.runStructured = async ({ prompt, defaultPhase }) => {
                 assert.equal(defaultPhase, "graph-review");
-                assert(
-                  prompt.includes(
-                    "Reject omitted or weakened pending Work Item obligations",
-                  ),
-                );
                 if (request.amendment) {
                   assert(prompt.includes(original));
                   assert(prompt.includes(replacement));

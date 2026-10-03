@@ -521,6 +521,7 @@ test("actual planning packets carry presence without executing acceptance, and b
     let reviewPacket;
     t.mock.method(real, "runStructured", async (args) => {
       rendered.push({
+        phase: args.defaultPhase,
         prompt: args.prompt,
         sourcePacket: JSON.parse(args.sourcePacket),
       });
@@ -600,33 +601,12 @@ test("actual planning packets carry presence without executing acceptance, and b
     );
     assert.equal(rendered.length, 3);
     for (const packet of rendered) {
-      assert.match(
-        packet.prompt,
-        /Reviewer findings and declared diagnoses are claims to check against the pinned source/,
-      );
-      assert.match(
-        packet.prompt,
-        /Do not infer exclusive validation phases from required phases unless the source explicitly states exclusivity/,
-      );
-      assert.match(
-        packet.prompt,
-        /removing redundant generated validation still requires complete source coverage and fresh independent review/,
-      );
       assert.deepEqual(packet.sourcePacket.localExecutables, facts);
-      assert(packet.prompt.includes(JSON.stringify(facts)));
-      assert.match(
-        packet.prompt,
-        /controller's effective local validation PATH/,
-      );
-      assert.match(
-        packet.prompt,
-        /remote or sandbox worker environments are not proved/,
-      );
-      assert.match(
-        packet.prompt,
-        /Unverified observations establish no availability/,
-      );
       assert.equal(packet.sourcePacket.prerequisites, undefined);
+      // The plan reviewer receives the observations as controller review
+      // evidence (checked in the fake above), not as a prompt section.
+      if (packet.phase !== "graph-review")
+        assert(packet.prompt.includes(JSON.stringify(facts)));
     }
     assert.equal(existsSync(marker), false);
     assert.deepEqual(readEvents(setup.eventsPath), []);

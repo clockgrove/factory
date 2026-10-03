@@ -330,7 +330,10 @@ export function decodeGraphReview(
         false,
       ),
       detail: text(value.detail, "detail"),
-      question: text(value.question, "question"),
+      // A finding without a question is still a finding; the detail says what to change.
+      question:
+        text(value.question, "question", false).trim() ||
+        "How should the plan change to fix this?",
     };
   });
 }

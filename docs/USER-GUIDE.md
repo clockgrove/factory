@@ -173,20 +173,13 @@ When an apparent missing contract already exists elsewhere in the authorized pin
 
 ## Write an Objective
 
-Create the issue in the repository that owns the work. The [copyable issue form](templates/objective.yml) asks for outcome, completion experience, acceptance, boundaries, authority, canonical sources, and known unknowns. Copy it into the target's `.github/ISSUE_TEMPLATE/` only as an ordinary approved repository change.
+Create the issue in the repository that owns the work. Start from the [one-page template](templates/objective.md), or copy the [issue form](templates/objective.yml) into the target's `.github/ISSUE_TEMPLATE/`.
 
-Keep the first Objective small and observable. For example, in a repository where `npm test` already exists, ask for a `healthcheck` script that calls the existing test command. Name the allowed files, require existing tests to pass, and exclude dependency changes or deployment. Supply literal new validation commands when the base does not already define them; a vague instruction to “run the tests” is not command authority.
+- **Acceptance** is what the plan must deliver and what review checks. Write one observable fact per bullet. If a constraint must be verified, such as "the Git tree stays clean", put it here.
+- **Final validation** lists exact commands that must pass on the integrated result. A vague "run the tests" is not a command.
+- **Planning sources** lists files, or `path#Exact Heading` sections, that workers need. Workers receive those sections verbatim and also have the full checkout. Keep the list short: every source costs tokens in planning and review.
 
-To supply additional committed source files or an exact section, finish the issue with:
-
-```markdown
-## Planning sources
-
-- README.md
-- `docs/requirements.md#Exact Heading`
-```
-
-Use paths that actually exist at the pinned base, and exact headings for section selection. A Work Item should have enough source-backed implementation detail to act without access to another item's brief. Required future outputs and checks belong at their appropriate dependency or final-validation phase.
+Keep the first Objective small, for example a `healthcheck` script that calls the existing test command.
 
 ### Add packages to an existing pnpm workspace
 

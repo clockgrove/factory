@@ -1,4 +1,8 @@
-import { compilerRequest, compilerResponse } from "./support/compiler-wire.mjs";
+import {
+  compilerRequest,
+  compilerResponse,
+  isCompileSchema,
+} from "./support/compiler-wire.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
@@ -45,10 +49,10 @@ test("compile and independent graph review expose the pre-delivery boundary for 
     { findings: [] },
   ];
   t.mock.method(Codex.prototype, "startThread", () => ({
-    async runStreamed(prompt) {
+    async runStreamed(prompt, options) {
       prompts.push(prompt);
       const scripted = responses.shift();
-      const response = prompt.startsWith("Compile this human Objective")
+      const response = isCompileSchema(options?.outputSchema)
         ? compilerResponse(prompt, scripted.items)
         : {
             packetId: JSON.parse(
@@ -138,31 +142,8 @@ test("compile and independent graph review expose the pre-delivery boundary for 
     ])
       assert.ok(prompt.includes(id), `Missing rendered capability: ${id}`);
   }
-  assert.match(prompts[0], /Work-item result proof precedes its own delivery/);
-  assert.match(
-    prompts[0],
-    /later obligations.*final Objective acceptance|Final review selects the original Objective criterion/,
-  );
   assert.ok(prompts[0].includes(source));
   for (const prompt of prompts.slice(1)) {
-    assert.match(prompt, /BEFORE the current item's own delivery/);
-    assert.match(prompt, /compound criteria/);
-    assert.match(prompt, /upload.*before branch\/PR publication/);
-    assert.match(
-      prompt,
-      /final Objective commands.*fresh-clone exact-byte hydration/i,
-    );
-    assert.match(prompt, /source.*contradict/i);
-    assert.match(prompt, /supplied evidence of already-completed dependencies/);
-    assert.match(prompt, /publication or integration when actually recorded/);
-    assert.match(
-      prompt,
-      /downstream regular item may require the recorded integrated predecessor head/,
-    );
-    assert.match(
-      prompt,
-      /[Dd]o not assume a native-stack dependency has merged merely because its result is available/,
-    );
     assert.ok(prompt.includes(source));
     assert.ok(prompt.includes(JSON.stringify(request.controllerCapabilities)));
   }

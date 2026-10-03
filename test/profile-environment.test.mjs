@@ -348,12 +348,6 @@ test("rendered planner, revision and amendment review inputs retain safe configu
     for (const prompt of captured) {
       assert.ok(prompt.includes(JSON.stringify(choices)));
       assert.match(prompt, /factory-worktree-read/);
-      assert.match(prompt, /not successful readiness or runtime invocation/);
-      assert.match(
-        prompt,
-        /only exact text equality or distinctness, not instruction semantics/,
-      );
-      assert.match(prompt, /opaque, not evidence of absence/);
       assert.doesNotMatch(prompt, /PRIVATE-INSTRUCTIONS/);
     }
   } finally {

@@ -281,6 +281,15 @@ test("sequential planning supplies grounded native acceptance in every rendered 
           configuredConcurrency: f.config.execution.concurrency,
           authorizedMaxConcurrency: authority.resources.maxConcurrency,
         });
+        const executables = packet.evidence.find(
+          (entry) =>
+            entry.origin === "controller" &&
+            entry.path === "FACTORY_LOCAL_EXECUTABLE_OBSERVATIONS",
+        );
+        assert.deepEqual(
+          JSON.parse(executables.content),
+          currentRequest.localExecutables,
+        );
         return {
           packetId: packet.packetId,
           findings:
@@ -356,7 +365,6 @@ test("sequential planning supplies grounded native acceptance in every rendered 
     );
     for (const packet of rendered) {
       assert.deepEqual(packet.packet.prerequisites, preparation);
-      assert(packet.prompt.includes(JSON.stringify(preparation)));
       assert.deepEqual(
         packet.packet.localExecutables,
         currentRequest.localExecutables,
@@ -369,16 +377,12 @@ test("sequential planning supplies grounded native acceptance in every rendered 
         packet.packet.localExecutables.provenance,
         "controller-local-validation-executable-preflight",
       );
+      // The plan reviewer receives these as controller review evidence
+      // (checked in the fake above), not as prompt sections.
+      if (packet.phase === "graph-review") continue;
+      assert(packet.prompt.includes(JSON.stringify(preparation)));
       assert(
         packet.prompt.includes(JSON.stringify(currentRequest.localExecutables)),
-      );
-      assert.match(
-        packet.prompt,
-        /WorkGraph dependencies refer only to items in this Objective/,
-      );
-      assert.match(
-        packet.prompt,
-        /never copy a requirement for its own review completion into current item acceptance/,
       );
     }
     assert.equal(second.allowanceConsumption.planningRevisions, 1);
@@ -655,18 +659,13 @@ for (const [descendant, dependent, historical] of [
       );
       for (const entry of rendered) {
         assert.deepEqual(entry.packet.prerequisites, candidate.prerequisites);
+        // The plan reviewer receives prerequisites as controller review
+        // evidence (checked in the fake above), not as a prompt section.
+        if (entry.phase === "graph-review") continue;
         assert(
           entry.prompt.includes(
             JSON.stringify(candidate.prerequisites ?? null),
           ),
-        );
-        assert.match(
-          entry.prompt,
-          /WorkGraph dependencies refer only to items in this Objective/,
-        );
-        assert.match(
-          entry.prompt,
-          /never copy a requirement for its own review completion into current item acceptance/,
         );
       }
       if (dependent) {

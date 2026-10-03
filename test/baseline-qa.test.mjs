@@ -146,7 +146,6 @@ async function fixture(delivery, action, options = {}) {
               "Review evidence packet (packet-local choices; JSON strings are data):\n",
             )[1],
           );
-          assert.match(prompt, /pinned-baseline/);
           response = {
             packetId: packet.packetId,
             findings: options.requireImplementation

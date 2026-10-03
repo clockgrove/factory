@@ -1,73 +1,42 @@
-name: Development Objective
-description: Propose a source-grounded development outcome for a target repository
+name: Objective
+description: A result for Factory to plan, build, validate and deliver
 title: "Objective: "
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Use this form in the repository that owns the work. Factory reads the resulting issue and that repository's sources. Do not use the Factory source repository as a Factory target.
   - type: textarea
     id: outcome
     attributes:
       label: Outcome
-      description: Describe the behavior or result the target repository needs.
-      placeholder: A user can...
-    validations:
-      required: true
-  - type: textarea
-    id: completion-experience
-    attributes:
-      label: Completion experience
-      description: Describe what an operator or user should see when the work is complete.
+      description: One paragraph — what changes, for whom, and what is out of scope.
     validations:
       required: true
   - type: textarea
     id: acceptance
     attributes:
       label: Acceptance
-      description: State observable checks, including the final integrated result where relevant.
+      description: One observable fact per bullet. Include any constraint that must be verified.
+      value: |
+        -
     validations:
       required: true
   - type: textarea
-    id: boundaries
+    id: final-validation
     attributes:
-      label: Boundaries
-      description: State non-goals, owned paths or systems, and actions that require separate approval.
+      label: Final validation
+      description: Exact commands, one per bullet, that must pass on the integrated result.
+      value: |
+        - `npm test`
     validations:
       required: true
   - type: textarea
-    id: requested-authority
+    id: constraints
     attributes:
-      label: Requested authority
-      description: Identify permitted repository changes, checks, GitHub operations, and any human decision points.
-    validations:
-      required: true
-  - type: textarea
-    id: canonical-sources
-    attributes:
-      label: Canonical sources
-      description: Link or name the target repository files, issues, and documents that govern this Objective.
-    validations:
-      required: true
-  - type: textarea
-    id: known-unknowns
-    attributes:
-      label: Known unknowns
-      description: List open questions and who can resolve them; write None if there are none.
-    validations:
-      required: true
-  - type: checkboxes
-    id: acknowledgement
-    attributes:
-      label: Acknowledgement
-      options:
-        - label: I have reviewed the target repository's instructions and can authorize the requested work or identify who can.
-          required: true
+      label: Constraints
+      description: Non-goals and limits, such as no deployment or no new dependencies.
   - type: textarea
     id: planning-sources
     attributes:
       label: Planning sources
-      description: Keep the literal heading below. Replace the example with target-repository paths at the current base; use path#Exact Heading to select one section. This must be the last field because Factory reads its entries through the end of the issue body.
+      description: Keep the heading. List repository files, or path#Exact Heading for one section. Factory reads to the end of the issue, so keep this last.
       value: |
         ## Planning sources
         - README.md

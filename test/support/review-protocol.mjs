@@ -35,3 +35,14 @@ export function packetFromPrompt(prompt) {
   assert.ok(at >= 0, "Missing serialized review packet");
   return JSON.parse(prompt.slice(at + marker.length));
 }
+
+/**
+ * True for a plan (graph) review request at the provider seam: a review schema
+ * whose findings carry no criterionIndex. Keys on schema, not prompt wording.
+ */
+export function isGraphReviewSchema(schema) {
+  return Boolean(
+    schema?.properties?.packetId &&
+      !schema.properties.findings?.items?.properties?.criterionIndex,
+  );
+}

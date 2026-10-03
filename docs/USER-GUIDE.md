@@ -360,7 +360,7 @@ is issued. Every Work Item keeps its original status, including independently ac
 and failed results; these are historical evidence, not successor acceptance.
 
 An abandoned run is permanently UNACCEPTED and can never run, retry, repair, rereview,
-resume or be accepted again. JSON status reports `abandoned`, the derived effect and
+resume, plan or receive new admission or acceptance again. JSON status reports `abandoned`, the derived effect and
 the retained unknown outcome. A
 separately authorized successor uses normal preflight/admission, its own finite
 limits and the existing installation state root. Original consumption remains

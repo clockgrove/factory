@@ -11,7 +11,13 @@ import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import { Octokit } from "@octokit/core";
 import { createApplication } from "../dist/application.js";
 import { applyPendingAmendment } from "../dist/graph-amendments.js";
-import { runObjective, controlObjective } from "../dist/runner.js";
+import {
+  runObjective,
+  controlObjective,
+  planObjective,
+  admitObjective,
+  checkAdmission,
+} from "../dist/runner.js";
 import { readContinuation } from "../dist/state-store.js";
 import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { RealGitHubGateway, projectedIssueBody } from "../dist/github.js";
@@ -658,8 +664,19 @@ for (const producer of ["initial", "amendment"])
               delivery: {},
             });
             const plan = await application.planObjective(1);
+            const admission =
+              producer === "initial" && effect === "body" && outcome === "lost"
+                ? await application.admitObjective(
+                    1,
+                    plan,
+                    state.admission.authority,
+                  )
+                : undefined;
             // This is a fresh supported run, not a hand-built completed-rejection snapshot.
-            await assert.rejects(application.runObjective(1, plan), /GitHub/);
+            await assert.rejects(
+              application.runObjective(1, plan, admission),
+              /GitHub/,
+            );
           } else {
             saveState(path, state);
             await assert.rejects(

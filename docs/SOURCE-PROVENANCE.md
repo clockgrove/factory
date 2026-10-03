@@ -20,7 +20,8 @@ without reconstructing absent Objective text or asserting current remote facts.
 
 The supported action leaves every Work Item status and all historical pending
 facts intact. Both snapshot decoders, application/CLI, status, mutation, acceptance,
-intake and supervision consumers retain the permanent terminal fence. Unsupported
+intake and supervision consumers retain the permanent terminal fence, including
+refusal before planning or admission can observe remote/model inputs. Unsupported
 old disposition forms refuse rather than migrate or disappear. Whole committed
 model-free lifecycle/transport/watcher regressions supply reusable evidence; a
 complete preserved historical snapshot supplies only a local isolated-copy CLI

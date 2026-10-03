@@ -158,6 +158,13 @@ function configuredDiagnosticSecrets(config: FactoryConfig): string[] {
     .filter((value): value is string => Boolean(value));
 }
 
+function assertNotAbandoned(config: FactoryConfig, objective: number): void {
+  if (readContinuation(config.repository, objective)?.permanentAbandonment)
+    throw new Error(
+      "Objective was permanently abandoned; create a normally admitted successor",
+    );
+}
+
 /** Explicit previews remain read-only; admitted repair or intake planning persists one bound preparation. */
 export async function planObjective(
   config: FactoryConfig,
@@ -171,6 +178,7 @@ export async function planObjective(
     stopped?: () => boolean;
   },
 ): Promise<PlanCandidate> {
+  assertNotAbandoned(config, objective);
   validateTarget(config.repository, config.checkout);
   if (authority) checkAuthority(config, objective, authority);
   const diagnostics = new DiagnosticEmitter(
@@ -373,6 +381,10 @@ function checkActiveAdmission(
   admission: AutonomousAdmission,
 ): void {
   const state = readContinuation(config.repository, objective);
+  if (state?.permanentAbandonment)
+    throw new Error(
+      "Objective was permanently abandoned; admission is forbidden",
+    );
   if (
     state &&
     (!state.admission || state.admission.digest !== admission.digest) &&
@@ -408,6 +420,7 @@ export async function admitObjective(
   candidate: PlanCandidate,
   authority: ExecutionAuthority,
 ): Promise<AutonomousAdmission> {
+  assertNotAbandoned(config, objective);
   validateTarget(config.repository, config.checkout);
   const issue = await services.github.objective(objective);
   const admission = bindAdmission(
@@ -429,6 +442,7 @@ export async function checkAdmission(
   candidate: PlanCandidate,
   admission: AutonomousAdmission,
 ): Promise<void> {
+  assertNotAbandoned(config, objective);
   validateTarget(config.repository, config.checkout);
   const issue = await services.github.objective(objective);
   verifyAdmission(

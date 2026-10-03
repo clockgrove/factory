@@ -17,7 +17,7 @@ known issue maps, unidentified creates, reviewed candidate, source, errors and
 accounting remain historical and unaccepted.
 
 The terminal disposition permanently fences execution, replay, resume, retry,
-repair, rereview, amendment and acceptance, including watcher/supervisor restart.
+repair, rereview, planning, admission, amendment and acceptance, including watcher/supervisor restart.
 Other unresolved effects and active/unsupported resources still refuse before
 saving. No GitHub request, provider call, cleanup, state-root replacement or
 automatic worker authority supplies abandonment. A successor requires its own

@@ -701,6 +701,7 @@ test("abandoned runs permanently refuse run, retry, repair, re-review and resume
     await application.cancelObjective(1, request());
     const before = readFileSync(path);
     await assert.rejects(application.runObjective(1), /permanently abandoned/);
+    await assert.rejects(application.planObjective(1), /permanently abandoned/);
     assert.deepEqual(readFileSync(path), before);
     assert.throws(
       () => application.retryWorkItem(1, "failed"),

@@ -473,6 +473,23 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       a.stopped.interrupted ? "interruption" : "implementation",
     );
   }
+  /** A sandbox whose handle was never recorded is found by its attempt tag and destroyed. */
+  async cancelUnrecorded(attemptId: string): Promise<void> {
+    await repeatCleanup(async () => {
+      const found = await this.options.provider.find({ attemptId });
+      if (found)
+        await this.options.provider.destroy(found).catch((error) => {
+          throw new CleanupIncomplete(
+            `Sandbox destruction is not confirmed: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        });
+    }, transientRequestFailure);
+    rmSync(join(this.options.workRoot, attemptId), {
+      recursive: true,
+      force: true,
+    });
+  }
   async cancel(
     handle: ExecutionHandle,
     context?: ExecutionContext,

@@ -754,3 +754,14 @@ test("optional normalization does not accept invalid array values or non-JSON va
       /JSON/,
     );
 });
+test("sandbox attempt without a recorded handle is found by its tag and destroyed", async (t) => {
+  const f = fixture(t);
+  await f.provider.create({ attemptId: "unrecorded" });
+  assert.equal(f.provider.resources.size, 1);
+  const creates = f.provider.creates;
+  await f.driver.cancelUnrecorded("unrecorded");
+  assert.equal(f.provider.resources.size, 0);
+  // Nothing tagged means nothing runs, and lookup never creates a sandbox.
+  await f.driver.cancelUnrecorded("unrecorded");
+  assert.equal(f.provider.creates, creates);
+});

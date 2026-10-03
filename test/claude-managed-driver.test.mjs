@@ -666,3 +666,16 @@ test("Claude preserves binary selected bytes through the ordinary collector", as
       .includes(".factory-inputs"),
   );
 });
+test("Claude attempt without a recorded handle is found by its tag, stopped and deleted", async (t) => {
+  const f = fixture(t);
+  await f.driver().start(f.request, f.context);
+  f.state.session.status = "running";
+  await f.driver().cancelUnrecorded("attempt");
+  assert.ok(
+    f.state.calls.indexOf("user.interrupt") <
+      f.state.calls.indexOf("delete:sesn_1"),
+  );
+  assert.equal(await f.driver().args.client.present("sesn_1"), undefined);
+  // Nothing tagged means nothing of the attempt runs.
+  await f.driver().cancelUnrecorded("another-attempt");
+});

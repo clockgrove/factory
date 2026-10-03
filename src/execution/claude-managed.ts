@@ -857,6 +857,36 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     this.save(handle, context);
     await this.dispose(handle, context);
   }
+  /**
+   * The handle is checkpointed before any upload or session create, so an
+   * attempt without one sent nothing; any session tagged with it is still
+   * found and deleted.
+   */
+  async cancelUnrecorded(attemptId: string): Promise<void> {
+    const timeout = (this.args.config.timeoutSeconds ?? 900) * 1000;
+    await repeatCleanup(async () => {
+      for (const session of await this.client.findSessions(
+        attemptId,
+        new Date(0).toISOString(),
+        timeout,
+      )) {
+        this.client.assertSession(session, attemptId);
+        if (session.status === "running" || session.status === "rescheduling") {
+          await this.client.send(
+            session.id,
+            { type: "user.interrupt" },
+            timeout,
+          );
+          throw new CleanupIncomplete("Unrecorded Claude session is stopping");
+        }
+        await this.client.deleteSession(session.id, timeout);
+        if (await this.client.present(session.id, timeout))
+          throw new CleanupIncomplete(
+            "Unrecorded Claude session deletion is not confirmed",
+          );
+      }
+    }, claudeTransient);
+  }
   async cancel(
     handle: ExecutionHandle,
     context?: ExecutionContext,

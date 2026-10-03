@@ -219,10 +219,10 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
   async cancel(handle: HarnessHandle): Promise<void> {
     const data = this.require(handle);
     const current = linuxProcessIdentity(data.pid);
-    if (
-      current &&
-      (current.startTime !== data.startTime || current.group !== data.pid)
-    )
+    // The recorded pid now belongs to another process: ours is gone, and
+    // its group cannot outlive it while the pid is reused.
+    if (current && current.startTime !== data.startTime) return;
+    if (current && current.group !== data.pid)
       throw new Error(
         "GitHub Copilot worker identity changed before cancellation",
       );

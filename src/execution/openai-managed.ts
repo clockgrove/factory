@@ -626,6 +626,10 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     data.phase = "disposed";
     this.save(handle, context);
   }
+  async cancelUnrecorded(): Promise<void> {
+    // The handle is checkpointed before the session create request, so an
+    // attempt without one never reached the provider: nothing to stop.
+  }
   async cancel(
     handle: ExecutionHandle,
     context?: ExecutionContext,

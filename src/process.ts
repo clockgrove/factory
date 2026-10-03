@@ -192,6 +192,30 @@ export async function killProcessGroup(group: number): Promise<void> {
     );
 }
 
+/**
+ * Process groups led by a worker whose arguments name this attempt's
+ * request file (`<attemptId>.request.json`). This finds a worker whose
+ * start never recorded a handle.
+ */
+export function attemptWorkerGroups(attemptId: string): number[] {
+  const suffix = `/${attemptId}.request.json`;
+  const groups: number[] = [];
+  for (const name of readdirSync("/proc")) {
+    if (!/^[1-9]\d*$/.test(name)) continue;
+    let argv: string[];
+    try {
+      argv = readFileSync(`/proc/${name}/cmdline`, "utf8").split("\0");
+    } catch {
+      continue;
+    }
+    if (!argv.some((arg) => arg.endsWith(suffix))) continue;
+    const identity = linuxProcessIdentity(Number(name));
+    if (identity?.group === Number(name) && identity.state !== "Z")
+      groups.push(identity.group);
+  }
+  return groups;
+}
+
 export interface OwnedSubprocess {
   pid: number;
   startTime: string;

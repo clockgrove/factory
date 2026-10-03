@@ -1,5 +1,5 @@
 import { hasReadinessWait, isReadinessWait } from "./delivery/readiness.js";
-import { executionContext } from "./execution/checkpoint.js";
+import { executionContext, workerContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
 import { applyWorkCorrection } from "./work-repair.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
@@ -625,31 +625,41 @@ async function cancelKnownWork(
   state: ContinuationState,
   driver: ExecutionDriver,
   save: () => void,
+  diagnostics?: DiagnosticEmitter,
 ): Promise<void> {
   const errors: string[] = [];
   const tasks: (() => Promise<void>)[] = [];
   if (state.schemaVersion === 4)
-    for (const work of Object.values(state.work)) {
+    for (const [itemId, work] of Object.entries(state.work)) {
       if (
         work.step !== "execute" ||
         work.status === "done" ||
         work.status === "cancelled"
       )
         continue;
-      if (!work.execution) {
-        errors.push(
-          "Active attempt has no stable handle; cessation is unknown",
+      const context = workerContext(work, save, () => true, diagnostics, {
+        runId: state.runId,
+        itemId,
+      });
+      if (work.execution)
+        tasks.push(() =>
+          driver.cancel(structuredClone(work.execution!), context),
         );
-        continue;
+      else if (work.attempt) {
+        // The controller stopped before the start recorded a handle: find
+        // the attempt by its identity instead.
+        const attempt = work.attempt;
+        tasks.push(async () => {
+          if (driver.cancelUnrecorded)
+            await driver.cancelUnrecorded(attempt, context);
+          else
+            context.observeOrphan?.({
+              resource: "worker",
+              detail: `Attempt ${attempt} recorded no handle and this driver cannot look it up`,
+            });
+        });
       }
-      tasks.push(() =>
-        driver.cancel(
-          structuredClone(work.execution!),
-          executionContext(work, save),
-        ),
-      );
     }
-  if (errors.length) throw new Error(errors.join("; "));
   tasks.push(() => cancelRecordedSubprocesses(state));
   for (const result of await Promise.allSettled(tasks.map((task) => task())))
     if (result.status === "rejected") errors.push(String(result.reason));
@@ -768,7 +778,12 @@ export async function runObjective(
       const state = owner.snapshot!;
       let stopped = true;
       try {
-        await cancelKnownWork(state, services.driver, persist);
+        await cancelKnownWork(
+          state,
+          services.driver,
+          persist,
+          new DiagnosticEmitter(config.repository, objective),
+        );
         // The run settles its in-flight effect before recording terminal cancellation.
         state.coordinator!.waitReason =
           "Owned cancellation acknowledged; waiting for in-flight phase to settle";
@@ -2212,8 +2227,11 @@ export async function cancelObjective(
     continuation.cancelRequested = true;
     saveState(statePath(config.repository, objective), continuation);
     try {
-      await cancelKnownWork(continuation, driver, () =>
-        saveState(statePath(config.repository, objective), continuation),
+      await cancelKnownWork(
+        continuation,
+        driver,
+        () => saveState(statePath(config.repository, objective), continuation),
+        new DiagnosticEmitter(config.repository, objective),
       );
     } catch (error) {
       continuation.coordinator ??= {

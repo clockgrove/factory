@@ -12,14 +12,22 @@
 //   409; a disallowed merge method is 405. Pull responses omit
 //   merge_commit_sha (removed in 2026-03-10); the merge commit is only on the
 //   issue timeline's `merged` event.
+// - PUT /pulls/{n}/merge-async (documented for 2026-03-10): 202 pending with
+//   a uuid; 200 merged with details.sha for a merged PR; 400 for a closed or
+//   draft PR; 409 with the pending request's uuid and options while a merge
+//   is pending. A stacked PR merges with every open PR below it. Stacks list
+//   with id, node_id, number, open and base; creating one with a nonexistent
+//   PR is 422.
 // - Lists paginate (per_page default 30, max 100) with Link headers, and the
-//   issues list includes pull requests.
+//   issues list includes pull requests. A 422 carries one errors entry.
+// - Every REST response carries x-ratelimit-* headers.
 // - Unknown routes are 404 and recorded as `unhandled`.
 //
 // Modes: read-after-write lag per endpoint, fault rules on the Nth matching
-// request (5xx/429/403 statuses with or without rate headers, a dropped
-// response after the effect, a reset before it, or a controller crash before
-// or after the effect), and a per-request log for exact effect counts.
+// request (5xx, 429 and 403 rate limits with or without retry-after, a
+// dropped response after the effect, a reset before it, a controller crash
+// before or after the effect, another actor changing the repository), and a
+// per-request log.
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {

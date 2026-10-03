@@ -5,7 +5,7 @@ import {
   type RepairCorrection,
 } from "./repair-policy.js";
 import { isCompletedProjectionRejection } from "./github-client.js";
-import { preflightObjective, planningExecutionBounds } from "./admission.js";
+import { preflightObjective } from "./local-preflight.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -130,7 +130,7 @@ export function assertDiscovery(value: WorkDiscovery): void {
       throw new Error(`Discovery lacks ${field}`);
 }
 
-/** Validate the immutable succession, never rewrite the admitted initial digest. */
+/** Validate the immutable succession, never rewrite the initial graph digest. */
 export function assertGraphRevisions(state: FactoryState): void {
   for (const rejected of state.rejectedAmendments ?? []) {
     assertDiscovery(rejected.proposal);
@@ -139,7 +139,7 @@ export function assertGraphRevisions(state: FactoryState): void {
       rejected.phase !== "rejected" ||
       !rejected.error ||
       ![
-        state.admission?.graphDigest,
+        graphDigest(state.graph),
         ...(state.graphRevisions ?? []).map((revision) => revision.digest),
       ].includes(rejected.proposal.expectedGraphDigest)
     )
@@ -152,12 +152,8 @@ export function assertGraphRevisions(state: FactoryState): void {
   }
   const revisions = state.graphRevisions;
   if (revisions) {
-    if (
-      !revisions.length ||
-      !state.admission ||
-      revisions[0]!.digest !== state.admission.graphDigest
-    )
-      throw new Error("Graph revisions do not descend from admitted authority");
+    if (!revisions.length)
+      throw new Error("Graph revisions lack their initial graph");
     for (const [index, revision] of revisions.entries()) {
       if (
         revision.digest !== graphDigest(revision.graph) ||
@@ -181,8 +177,6 @@ export function assertGraphRevisions(state: FactoryState): void {
       throw new Error("Current graph differs from accepted revision");
   }
   if (state.allowanceConsumption) {
-    if (!state.admission)
-      throw new Error("Allowance consumption lacks admission");
     for (const key of [
       "planningRevisions",
       "implementationRepairs",
@@ -191,8 +185,7 @@ export function assertGraphRevisions(state: FactoryState): void {
       if (
         !Number.isSafeInteger(state.allowanceConsumption[key]) ||
         state.allowanceConsumption[key] < 0 ||
-        state.allowanceConsumption[key] >
-          state.admission.authority.allowances[key]
+        state.allowanceConsumption[key] > state.autonomy.allowances[key]
       )
         throw new Error("Objective allowance consumption is invalid");
     if (
@@ -302,9 +295,8 @@ export function assertGraphRevisions(state: FactoryState): void {
   if (
     knownPlanningCharges >
       (state.allowanceConsumption?.planningRevisions ?? 0) ||
-    (state.admission?.authority.repairPolicy &&
-      knownPlanningCharges >
-        (state.repairConsumption?.$planning?.planningRevisions ?? 0))
+    knownPlanningCharges >
+      (state.repairConsumption?.$planning?.planningRevisions ?? 0)
   )
     throw new Error(
       "Known amendment attempts exceed retained planning consumption",
@@ -330,12 +322,11 @@ export function submitAmendment(
       "Amendment actor or compare-and-set graph identity is invalid",
     );
   if (
-    !state.admission ||
     state.cancelRequested ||
     state.cancelledAt ||
     state.finalValidation?.passed
   )
-    throw new Error("Amendment requires a nonterminal admitted Objective");
+    throw new Error("Amendment requires a nonterminal Objective");
   if (proposal.scope === "backlog") {
     if (proposal.replacement)
       throw new Error("A rejected amendment replacement must remain in scope");
@@ -455,7 +446,7 @@ function validateAmendmentReplacement(
   // Check availability without charging or mutating the authoritative ledger.
   chargeRepair(
     {
-      admission: state.admission,
+      autonomy: state.autonomy,
       allowanceConsumption: structuredClone(state.allowanceConsumption),
       repairConsumption: structuredClone(state.repairConsumption),
     },
@@ -479,7 +470,7 @@ export function recordWorkerDiscovery(
 
 /** Selection is from settled result evidence in the existing snapshot, not another work queue. */
 export function selectWorkerAmendment(state: FactoryState): void {
-  if (state.pendingAmendment || !state.admission) return;
+  if (state.pendingAmendment) return;
   for (const [itemId, work] of Object.entries(state.work)) {
     if (
       !work.discovery ||
@@ -501,11 +492,10 @@ export function selectWorkerAmendment(state: FactoryState): void {
 export function amendmentBlocksDispatch(state: FactoryState): boolean {
   return (
     (!!state.pendingAmendment && state.pendingAmendment.phase !== "backlog") ||
-    (!!state.admission &&
-      Object.values(state.work).some(
-        (work) =>
-          work.discovery?.scope === "in-scope" && !work.discoveryDisposition,
-      ))
+    Object.values(state.work).some(
+      (work) =>
+        work.discovery?.scope === "in-scope" && !work.discoveryDisposition,
+    )
   );
 }
 
@@ -681,33 +671,23 @@ async function advanceAmendment(args: {
       state.baseSha,
     );
     const verifyPrerequisites = async () => {
-      // Reobserve the original sources; retain only a binding in admission,
-      // never a duplicate predecessor projection or historical host observation.
+      // Reobserve the original sources; retain only the activation digest,
+      // never a duplicate predecessor projection.
       const current = await planningPrerequisites(
         config,
         args.github,
         state.objective,
         state.baseSha,
       );
+      const observed = current
+        ? createHash("sha256").update(JSON.stringify(current)).digest("hex")
+        : undefined;
       if (
-        !args.github.objectiveDependencies &&
-        !current &&
-        state.admission!.prerequisitesDigest === undefined
-      )
-        return;
-      if (state.admission!.prerequisitesDigest === undefined)
-        throw new Error(
-          "Amendment native prerequisite binding is unavailable in historical admission",
-        );
-      const nativeDigest = createHash("sha256")
-        .update(JSON.stringify(current ?? null))
-        .digest("hex");
-      if (
-        nativeDigest !== state.admission!.prerequisitesDigest ||
+        observed !== state.prerequisitesDigest ||
         !isDeepStrictEqual(current, prerequisites)
       )
         throw new Error(
-          "Amendment native prerequisites differ from original admission",
+          "Amendment native prerequisites differ from those the plan was made with",
         );
     };
     await verifyPrerequisites();
@@ -763,11 +743,7 @@ async function advanceAmendment(args: {
           },
           prerequisites,
           localExecutables,
-          planningExecutionBounds(
-            config,
-            state.objective,
-            state.admission!.authority,
-          ),
+          { configuredConcurrency: config.execution.concurrency },
         );
       }
       calling = undefined;
@@ -792,11 +768,7 @@ async function advanceAmendment(args: {
         choices,
         prerequisites,
         localExecutables,
-        planningExecutionBounds(
-          config,
-          state.objective,
-          state.admission!.authority,
-        ),
+        { configuredConcurrency: config.execution.concurrency },
       );
       packet.amendment = {
         previousGraph: state.graph,

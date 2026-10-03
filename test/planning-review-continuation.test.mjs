@@ -19,14 +19,8 @@ const Ajv = createRequire(import.meta.url)("ajv");
 const body =
   "# Continuation\n\n## Acceptance\n- result.txt exists\n\n## Validation\n- `test -s result.txt`\n";
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-function authority(limit = 1) {
+function autonomy(limit = 1) {
   return {
-    schemaVersion: 1,
-    actor: "fixture",
-    reason: "One bounded planning correction",
-    executionConsent: true,
-    serviceConsent: false,
-    objectives: [1],
     allowances: {
       planningRevisions: limit,
       implementationRepairs: 0,
@@ -40,7 +34,6 @@ function authority(limit = 1) {
         resultRereviews: 0,
       },
     },
-    resources: { maxConcurrency: 1 },
     requiredEnvironment: [],
   };
 }
@@ -63,7 +56,7 @@ async function fixture(
   let reviews = 0;
   let paused = false;
   let retained;
-  const state = { authority: authority(limit) };
+  const state = { autonomy: autonomy(limit) };
   t.mock.method(Codex.prototype, "startThread", () => ({
     async runStreamed(prompt, options) {
       let response;
@@ -209,7 +202,8 @@ async function fixture(
     undefined,
     executionBounds,
   );
-  if (rejected || malformed || pauseBeforeReview)
+  // With no planning allowance a finding stops before the paused diagnosis.
+  if (pauseBeforeReview || ((rejected || malformed) && limit))
     await assert.rejects(initial, /paused or cancelled/);
   else await initial;
   return {
@@ -333,7 +327,7 @@ test("changed reviewed context, damaged request and old missing binding refuse b
   }
 });
 
-test("genuinely malformed completed review retains its original packet and remains a protocol refusal", async (t) => {
+test("genuinely malformed completed review retains its original packet and stops as a protocol refusal for a human decision", async (t) => {
   const f = await fixture(t, { malformed: true, limit: 0 });
   const state = structuredClone(f.retained);
   const original = structuredClone(state.planningRecovery.review);
@@ -342,10 +336,10 @@ test("genuinely malformed completed review retains its original packet and remai
     /invalid/,
   );
   const calls = f.emitted.length;
-  await assert.rejects(
-    compilePlan(...f.args, { state, save() {} }),
-    /exhausted/,
-  );
+  const candidate = await compilePlan(...f.args, { state, save() {} });
+  assert.equal(candidate.review.status, "needs-human");
+  assert.ok(candidate.review.failure);
+  assert.equal(state.planningRecovery.phase, "stopped");
   assert.deepEqual(state.planningRecovery.review, original);
   assert.equal(f.emitted.length, calls);
 });
@@ -366,7 +360,7 @@ test("an interrupted review is reissued, or its retained response reused", async
   }
 });
 
-test("exhausted and repeated semantic failures remain real findings without identity-induced diagnosis calls", async (t) => {
+test("exhausted allowance and repeated failures keep real findings for a human decision without diagnosis calls", async (t) => {
   const f = await fixture(t, { rejected: true, limit: 0 });
   for (const repeated of [false, true]) {
     const state = structuredClone(f.retained);
@@ -384,10 +378,12 @@ test("exhausted and repeated semantic failures remain real findings without iden
         correction: "Unchanged correction",
       });
     const calls = f.emitted.length;
-    await assert.rejects(
-      compilePlan(...f.args, { state, save() {} }),
-      repeated ? /Unchanged planning failure/ : /exhausted/,
-    );
+    // Both keep the reviewed plan for a human decision.
+    const candidate = await compilePlan(...f.args, { state, save() {} });
+    assert.equal(candidate.review.status, "needs-human");
+    assert.deepEqual(candidate.review.findings, findings);
+    assert.deepEqual(state.plan, candidate);
+    assert.equal(state.planningRecovery.phase, "stopped");
     assert.equal(f.emitted.length, calls);
     assert.equal(state.allowanceConsumption?.planningRevisions ?? 0, 0);
     assert.deepEqual(
@@ -403,7 +399,6 @@ test("exhausted and repeated semantic failures remain real findings without iden
 test("retained clean review binds actual execution ceilings across unchanged and changed continuation", async (t) => {
   const executionBounds = {
     configuredConcurrency: 1,
-    authorizedMaxConcurrency: 1,
   };
   const f = await fixture(t, { limit: 0, executionBounds });
   const state = structuredClone(f.state);
@@ -443,7 +438,7 @@ test("retained clean review binds actual execution ceilings across unchanged and
       },
       undefined,
       undefined,
-      { configuredConcurrency: 1, authorizedMaxConcurrency: null },
+      { configuredConcurrency: 2 },
     ),
     /review (context changed|evidence changed)/,
   );

@@ -91,7 +91,7 @@ test("preparation reports planning, a plan decision, pause and failure", () => {
   assert.equal(decision.phase, "needs-plan-decision");
   assert.match(
     decision.nextAction.command,
-    /^factory decide --objective 7 --plan PLAN_FILE --outcome accept\|refuse /,
+    /^factory decide --objective 7 --outcome accept\|refuse --reason "WHY"$/,
   );
   const paused = summarizeStatus(
     preparing({

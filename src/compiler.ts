@@ -4,6 +4,7 @@ import {
 } from "./delivery/readiness.js";
 import { compilerWire } from "./compiler-wire.js";
 import {
+  allowanceAvailable,
   chargeRepair,
   failureDigest,
   type RepairClass,
@@ -2031,17 +2032,20 @@ async function compileRecoverablePlan(
       failure = error instanceof Error ? error.message : String(error);
     }
     const identity = failureDigest(failure);
-    if (record.history.some((entry) => entry.failure === identity)) {
-      record.phase = "stopped";
-      save();
-      throw new Error("Unchanged planning failure; operator decision required");
-    }
+    const unchanged = record.history.some(
+      (entry) => entry.failure === identity,
+    );
     // A diagnosis is itself part of the consumed planning repair, never an unmetered retry.
-    const authority = state.admission?.authority ?? state.authority;
     const permitted = (
       ["planning-output", "planning-evidence", "planning-choice"] as const
-    ).filter((kind) => authority?.repairClasses.includes(kind));
-    if (!permitted.length || !authority?.repairPolicy) {
+    ).filter((kind) => state.autonomy.repairClasses.includes(kind));
+    if (
+      unchanged ||
+      !permitted.length ||
+      (!resumingDiagnosis &&
+        !allowanceAvailable(state, "planningRevisions", ["$planning"]))
+    ) {
+      // A reviewed graph waits for an operator plan decision; anything else stops planning.
       record.phase = "stopped";
       if (graph && packet && review) {
         const candidate = buildPlanCandidate(
@@ -2062,7 +2066,11 @@ async function compileRecoverablePlan(
         return candidate;
       }
       save();
-      throw new Error("Planning correction is not admitted");
+      throw new Error(
+        unchanged
+          ? "Unchanged planning failure; operator decision required"
+          : "Planning correction is disabled or its allowance is exhausted",
+      );
     }
     if (context.stopped?.())
       throw new Error("Planning is paused or cancelled before diagnosis");

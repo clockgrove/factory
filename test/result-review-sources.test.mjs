@@ -451,7 +451,7 @@ test("actual application Work Item and final review accept later selected headin
     });
     const plan = await application.planObjective(1);
     assert.equal(plan.review.status, "clean");
-    const result = await application.runObjective(1, plan);
+    const result = await application.runObjective(1);
     assert.equal(result.work.one.status, "done");
     assert.equal(result.finalValidation.passed, true);
     assert.equal(result.objectiveClosure, "complete");

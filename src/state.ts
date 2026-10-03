@@ -1,11 +1,7 @@
 import { objectiveCandidate } from "./qa.js";
 import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
 import { assertFinalAcceptance } from "./completion.js";
-import { assertRepairLedger } from "./repair-policy.js";
-import {
-  type AutonomousAdmission,
-  assertAdmissionBinding,
-} from "./admission.js";
+import { assertRepairLedger, type Autonomy } from "./repair-policy.js";
 import type { SourceSelector } from "./compiler.js";
 import type {
   AssetSelectionDecision,
@@ -128,7 +124,8 @@ export interface CoordinatorDisposition {
 export interface PreparationState {
   sourcePacketDigest?: string;
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
-  authority?: import("./admission.js").ExecutionAuthority;
+  /** Limits snapshotted from configuration when the Objective started. */
+  autonomy: Autonomy;
   allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
   repairConsumption?: Record<
     string,
@@ -142,7 +139,6 @@ export interface PreparationState {
   configDigest: string;
   baseSha: string;
   objectiveBodyDigest: string;
-  admission?: AutonomousAdmission;
   coordinator: CoordinatorDisposition;
   /** Present once planning completed; preparation then projects it. */
   plan?: import("./compiler.js").PlanCandidate;
@@ -168,8 +164,11 @@ export interface FactoryState {
   rejectedAmendments?: import("./graph-amendments.js").PendingAmendment[];
   allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
   coordinator?: CoordinatorDisposition;
-  admission?: AutonomousAdmission;
+  /** Limits snapshotted from configuration when the Objective started. */
+  autonomy: Autonomy;
   additionalSources?: SourceSelector[];
+  /** Native predecessor facts the plan was made with; absent when it had none. */
+  prerequisitesDigest?: string;
   schemaVersion: 4;
   repository: string;
   objective: number;
@@ -417,10 +416,10 @@ export function parseFactoryState(
     throw new Error(
       "schema version, repository, or Objective identity differs from the installation",
     );
-  if (state.admission !== undefined)
-    assertAdmissionBinding(state.admission as AutonomousAdmission);
   string(state.runId, "runId");
   sha(state.configDigest, "configDigest", 64);
+  if (state.prerequisitesDigest !== undefined)
+    sha(state.prerequisitesDigest, "prerequisitesDigest", 64);
   sha(state.baseSha, "baseSha");
   const graph = record(state.graph, "graph");
   if (

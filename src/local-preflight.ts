@@ -1,7 +1,17 @@
 import { spawnSync } from "node:child_process";
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
-import { isAbsolute, resolve, sep } from "node:path";
-import type { WorkGraph } from "./contracts.js";
+import {
+  accessSync,
+  constants,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, resolve, sep } from "node:path";
+import { finalObjectiveCommands, planningSources } from "./compiler.js";
+import type { FactoryConfig } from "./config.js";
+import type { PlanningLocalExecutables, WorkGraph } from "./contracts.js";
 import {
   localValidationEnvironment,
   resolveLocalExecutable,
@@ -361,4 +371,42 @@ export function preflightLocalExecutables(input: {
     }
   }
   if (failure) throw new Error(failure);
+}
+
+/** Observe the Objective's final-command executables; no target commands, state or GitHub writes. */
+export function preflightObjective(
+  config: FactoryConfig,
+  body: string,
+  baseSha: string,
+): PlanningLocalExecutables | undefined {
+  planningSources(body, baseSha, config.checkout);
+  const finalCommands = finalObjectiveCommands(body);
+  const observations: PlanningLocalExecutables["observations"] = [];
+  const root = mkdtempSync(join(tmpdir(), "factory-preflight-"));
+  try {
+    preflightLocalExecutables({
+      checkout: config.checkout,
+      baseSha,
+      graph: { objective: 1, baseSha, items: [], coverage: [] },
+      finalCommands,
+      privateRoot: root,
+      credentialDirectory: join(root, "empty-gh-config"),
+      secrets: config.policy.allowedSecretNames.flatMap((name) =>
+        process.env[name] ? [process.env[name]!] : [],
+      ),
+      observe: (entry) => {
+        if (entry.origin === "final") observations.push(entry);
+      },
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  return finalCommands.length
+    ? {
+        provenance: "controller-local-validation-executable-preflight",
+        baseSha,
+        finalCommands,
+        observations,
+      }
+    : undefined;
 }

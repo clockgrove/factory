@@ -16,6 +16,7 @@ import { GitHubClient } from "../dist/github-client.js";
 import { RealGitHubGateway } from "../dist/github.js";
 import { withProcessCancellation } from "../dist/process.js";
 import { stateRoot } from "../dist/config.js";
+import { defaultAutonomy } from "../dist/index.js";
 import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
 import {
@@ -114,7 +115,7 @@ test("owner remains responsive during planning; cancellation succeeds and cannot
     "planning",
     async ({ application, config, github }) => {
       const running = application.runObjective(1);
-      const rejected = assert.rejects(running, /cancellation requested/);
+      const rejected = assert.rejects(running, /cancel/);
       await until(() => calls === 1);
       const snapshot = readContinuation(config.repository, 1);
       assert.equal(snapshot.schemaVersion, 5);
@@ -269,7 +270,7 @@ test("pause and drain persist offline and resume keeps the original deadline", a
     };
     const deadlineAt = new Date(Date.now() + 60_000).toISOString();
     await assert.rejects(
-      application.runObjective(1, undefined, undefined, { deadlineAt }),
+      application.runObjective(1, { deadlineAt }),
       /offline/,
     );
     await controlObjective(config, { objective: 1, action: "drain" });
@@ -278,7 +279,7 @@ test("pause and drain persist offline and resume keeps the original deadline", a
       "draining",
     );
     await assert.rejects(
-      application.runObjective(1, undefined, undefined, {
+      application.runObjective(1, {
         deadlineAt: new Date(Date.now() + 120_000).toISOString(),
       }),
       /cannot be replaced/,
@@ -296,10 +297,10 @@ test("deadline elapsed during a hung planning call preserves unknown disposition
   await fixture(
     "deadline",
     async ({ application, config }) => {
-      const running = application.runObjective(1, undefined, undefined, {
+      const running = application.runObjective(1, {
         deadlineAt: new Date(Date.now() + 300).toISOString(),
       });
-      const rejected = assert.rejects(running, /cancellation requested/);
+      const rejected = assert.rejects(running, /cancel/);
       await until(
         () => readContinuation(config.repository, 1)?.cancelRequested,
       );
@@ -478,27 +479,10 @@ test("failed worker cancellation preserves unresolved ownership and cannot becom
   );
 });
 
-test("admitted drain stays idle under the owner and resumes its pending graph", async () => {
+test("drain stays idle under the owner and resumes its pending graph", async () => {
   await fixture(
-    "admitted-drain",
+    "drain-idle",
     async ({ application, config, github, planningPath }) => {
-      const candidate = await application.planObjective(1);
-      const admission = await application.admitObjective(1, candidate, {
-        schemaVersion: 1,
-        actor: "fixture",
-        reason: "control regression",
-        executionConsent: true,
-        serviceConsent: false,
-        objectives: [1],
-        allowances: {
-          planningRevisions: 1,
-          implementationRepairs: 0,
-          resultRereviews: 0,
-        },
-        repairClasses: [],
-        resources: { maxConcurrency: 2 },
-        requiredEnvironment: [],
-      });
       const original = github.projectGraph.bind(github);
       github.projectGraph = async (request) => {
         const result = await original(request);
@@ -508,7 +492,7 @@ test("admitted drain stays idle under the owner and resumes its pending graph", 
         });
         return result;
       };
-      const run = application.runObjective(1, candidate, admission);
+      const run = application.runObjective(1);
       await until(
         () => readContinuation(config.repository, 1)?.schemaVersion === 4,
       );
@@ -537,43 +521,30 @@ test("admitted drain stays idle under the owner and resumes its pending graph", 
   );
 });
 
-test("resumed preparation retains its admitted policy without requiring command-line authority again", async () => {
+test("resumed preparation keeps its persisted plan and autonomy without planning again", async () => {
   await fixture(
-    "admission-restart",
-    async ({ application, config, driver }) => {
-      const candidate = await application.planObjective(1);
-      const admission = await application.admitObjective(1, candidate, {
-        schemaVersion: 1,
-        actor: "fixture",
-        reason: "restart binding",
-        executionConsent: true,
-        serviceConsent: false,
-        objectives: [1],
-        allowances: {
-          planningRevisions: 1,
-          implementationRepairs: 0,
-          resultRereviews: 0,
-        },
-        repairClasses: [],
-        resources: { maxConcurrency: 2 },
-        requiredEnvironment: [],
-      });
+    "preparation-restart",
+    async ({ application, config, driver, planningPath }) => {
       const original = driver.preflight?.bind(driver);
       driver.preflight = async () => {
         throw new Error("preprojection preflight unavailable");
       };
       await assert.rejects(
-        application.runObjective(1, candidate, admission),
+        application.runObjective(1),
         /preprojection preflight/,
       );
-      assert.equal(
-        readContinuation(config.repository, 1).admission.digest,
-        admission.digest,
-      );
+      const preparation = readContinuation(config.repository, 1);
+      assert.equal(preparation.schemaVersion, 5);
+      assert.ok(preparation.plan);
+      assert.deepEqual(preparation.autonomy, defaultAutonomy);
+      const compiles = () =>
+        readEvents(planningPath).filter((event) => !event.type).length;
+      const planned = compiles();
       driver.preflight = original;
       const completed = await application.runObjective(1);
-      assert.equal(completed.admission.digest, admission.digest);
+      assert.deepEqual(completed.autonomy, preparation.autonomy);
       assert.equal(completed.finalValidation.passed, true);
+      assert.equal(compiles(), planned);
     },
   );
 });
@@ -650,40 +621,62 @@ test("pause acknowledged during exact observation prevents regular and native di
           action: "pause",
         });
         pending.resolve();
-        const paused = await run;
-        assert.equal(paused.work.result.status, "pending");
+        // The owner stays alive while paused and dispatches nothing.
+        await until(() => readState(config.repository, 1)?.work);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.equal(
+          readState(config.repository, 1).work.result.status,
+          "pending",
+        );
         assert.equal(
           readEvents(eventsPath).filter((event) => event.type === "start")
             .length,
           0,
         );
+        await requestControl(config.repository, {
+          objective: 1,
+          action: "resume",
+        });
+        assert.equal((await run).finalValidation.passed, true);
+        assert.equal(
+          readEvents(eventsPath).filter((event) => event.type === "start")
+            .length,
+          1,
+        );
       },
     );
 });
 
-test("pause during planning stops issue projection until resumed or cancelled", async () => {
+test("pause during planning keeps the owner without projection; resume reuses the retained planning response", async () => {
   const pending = deferred();
   let calls = 0;
   await fixture(
     "pause-planning",
     async ({ application, config, github }) => {
       const run = application.runObjective(1);
-      const rejected = assert.rejects(run, /cancel/);
       await until(() => calls === 1);
       await requestControl(config.repository, {
         objective: 1,
         action: "pause",
       });
       pending.resolve();
-      await until(() => Boolean(readContinuation(config.repository, 1)?.plan));
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await until(() =>
+        /paused or cancelled/.test(
+          readContinuation(config.repository, 1)?.coordinator.waitReason ?? "",
+        ),
+      );
+      const paused = readContinuation(config.repository, 1);
+      assert.equal(paused.schemaVersion, 5);
+      assert.equal(paused.coordinator.mode, "paused");
+      assert.equal(paused.plan, undefined);
       assert.equal(Object.keys(github.state().issues).length, 0);
       await requestControl(config.repository, {
         objective: 1,
-        action: "cancel",
+        action: "resume",
       });
-      await rejected;
-      assert.ok(readContinuation(config.repository, 1).cancelledAt);
+      const completed = await run;
+      assert.equal(completed.finalValidation.passed, true);
+      assert.equal(calls, 1);
     },
     (graph) => ({
       async generateStructured(request) {
@@ -695,6 +688,22 @@ test("pause during planning stops issue projection until resumed or cancelled", 
         return {
           packetId: request.reviewPacket.id,
           findings: [],
+        };
+      },
+      async reviewResult(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: resultFindings(
+            request,
+            request.criteria.map((criterion) => ({
+              criterion,
+              verdict: "pass",
+              source: "OBJECTIVE",
+              quote: "## Acceptance",
+              detail: "Exact-tree command passed",
+              question: "",
+            })),
+          ),
         };
       },
     }),
@@ -713,7 +722,7 @@ test("first deadline added to existing preparation persists before a wait and ca
     await assert.rejects(application.runObjective(1), /offline preprojection/);
     await controlObjective(config, { objective: 1, action: "pause" });
     const deadlineAt = new Date(Date.now() + 60_000).toISOString();
-    const run = application.runObjective(1, undefined, undefined, {
+    const run = application.runObjective(1, {
       deadlineAt,
     });
     const rejected = assert.rejects(run, /cancel/);
@@ -729,7 +738,7 @@ test("first deadline added to existing preparation persists before a wait and ca
       deadlineAt,
     );
     await assert.rejects(
-      application.runObjective(1, undefined, undefined, {
+      application.runObjective(1, {
         deadlineAt: new Date(Date.now() + 120_000).toISOString(),
       }),
       /cannot be replaced/,
@@ -910,7 +919,10 @@ test("handoff settles an already running worker and preserves its attempt instea
       );
       mkdirSync(join(root, "barrier"), { recursive: true });
       writeFileSync(barrier, "go");
-      await running;
+      await assert.rejects(
+        running,
+        (error) => error.constructor.name === "CoordinatorHandoff",
+      );
       const state = readState(config.repository, 1);
       assert.equal(state.work.result.attemptId, attempt);
       assert.equal(state.cancelledAt, undefined);
@@ -976,23 +988,6 @@ test("native handoff retains a known published layer and resumes its pending suc
   await fixture(
     "handoff-native-layer",
     async ({ application, config, github, eventsPath }) => {
-      const candidate = await application.planObjective(1);
-      const admission = await application.admitObjective(1, candidate, {
-        schemaVersion: 1,
-        actor: "fixture",
-        reason: "native handoff",
-        executionConsent: true,
-        serviceConsent: true,
-        objectives: [1],
-        allowances: {
-          planningRevisions: 1,
-          implementationRepairs: 0,
-          resultRereviews: 0,
-        },
-        repairClasses: [],
-        resources: { maxConcurrency: 2 },
-        requiredEnvironment: [],
-      });
       const original = github.publish.bind(github);
       let requested = false;
       github.publish = async (request) => {
@@ -1007,7 +1002,7 @@ test("native handoff retains a known published layer and resumes its pending suc
         return published;
       };
       await assert.rejects(
-        application.runObjective(1, candidate, admission),
+        application.runObjective(1),
         (error) => error.constructor.name === "CoordinatorHandoff",
       );
       const paused = readState(config.repository, 1);

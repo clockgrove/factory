@@ -352,19 +352,13 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
         reason: "Inspect the failure before running again",
       },
     };
-  if (view.planReview?.status === "refused")
-    return {
-      phase: "failed",
-      summary: "the plan was refused",
-      nextAction: null,
-    };
   if (view.planReview?.status === "needs-human")
     return {
       phase: "needs-plan-decision",
       summary: "plan review needs a human decision",
       nextAction: {
-        command: `factory decide --objective ${objective} --plan PLAN_FILE --outcome accept|refuse --actor ${ACTOR} --reason ${REASON} --output ABSOLUTE_NEW_FILE`,
-        reason: `Answer the question below; then factory run --objective ${objective} --plan ABSOLUTE_NEW_FILE`,
+        command: `factory decide --objective ${objective} --outcome accept|refuse --reason ${REASON}`,
+        reason: `Answer the question below; then ${run(objective)}`,
       },
     };
   if (view.coordinator?.mode === "paused")

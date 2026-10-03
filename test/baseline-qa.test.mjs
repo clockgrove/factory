@@ -31,21 +31,14 @@ const commands = [
   "git diff --quiet",
 ];
 const body = `## Outcome\nQualify the unchanged pinned baseline. No implementation worker, source change or PR is authorized.\n## Acceptance\n- Existing baseline content is alpha.\n- Final independent acceptance establishes current readiness.\n## Planning sources\n- \`existing.txt\`\n## Final validation\n${commands.map((command) => `- \`${command}\``).join("\n")}\n`;
-const authority = {
-  schemaVersion: 1,
-  actor: "public fixture operator",
-  reason: "Bounded baseline qualification",
-  executionConsent: true,
-  serviceConsent: false,
-  objectives: [1],
+// Baseline qualification runs with no planning revision or repair.
+const autonomy = {
   allowances: {
     planningRevisions: 0,
     implementationRepairs: 0,
     resultRereviews: 0,
   },
   repairClasses: [],
-  resources: { maxConcurrency: 2 },
-  requiredEnvironment: [],
 };
 
 async function fixture(delivery, action, options = {}) {
@@ -60,6 +53,7 @@ async function fixture(delivery, action, options = {}) {
       `example/baseline-${delivery}-${root.split("/").at(-1)}`,
       delivery,
     );
+    config.autonomy = autonomy;
     const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
     const model = new CodexPlanningModel(target.checkout, selection, selection);
     const captures = [];
@@ -304,18 +298,11 @@ function moveDefault(target) {
 }
 
 for (const delivery of ["regular", "native-stack"]) {
-  test(`whole emitted-wire admitted baseline QA/final/closure succeeds without ${delivery} workers or delivery`, async () =>
+  test(`whole emitted-wire baseline QA/final/closure succeeds without ${delivery} workers or delivery`, async () =>
     fixture(
       delivery,
       async ({ application, github, target, config, captures, eventsPath }) => {
-        const candidate = await application.planObjective(1);
-        assert.equal(candidate.review.status, "clean");
-        const admitted = await application.admitObjective(
-          1,
-          candidate,
-          authority,
-        );
-        await application.runObjective(1, candidate, admitted);
+        await application.runObjective(1);
         const state = readState(config.repository, 1);
         assert.ok(objectiveComplete(state));
         assertFinalAcceptance(state);
@@ -384,24 +371,20 @@ test("baseline graph does not grant authority to omit source-required implementa
   fixture(
     "regular",
     async ({ application, eventsPath }) => {
-      const candidate = await application.planObjective(1);
-      assert.equal(candidate.review.status, "needs-human");
-      await assert.rejects(
-        application.admitObjective(1, candidate, authority),
-        /human source decision/,
-      );
+      const waiting = await application.runObjective(1);
+      assert.equal(waiting.schemaVersion, 5);
+      assert.equal(waiting.plan.review.status, "needs-human");
+      assert.deepEqual(waiting.issueByItemId, {});
       assert.deepEqual(readEvents(eventsPath), []);
     },
     { requireImplementation: true },
   ));
 test("moving default branch before baseline QA fails before review or commands", async () =>
   fixture("regular", async ({ application, target, captures, eventsPath }) => {
-    const candidate = await application.planObjective(1);
-    const admitted = await application.admitObjective(1, candidate, authority);
     moveDefault(target);
     git(target.checkout, "checkout", "--detach", target.baseSha);
     await assert.rejects(
-      application.runObjective(1, candidate, admitted),
+      application.runObjective(1),
       /Default branch|base|HEAD/i,
     );
     assert.ok(!captures.some((entry) => entry.phase === "QA"));
@@ -411,14 +394,8 @@ test("moving default branch during final review cannot seal baseline acceptance"
   fixture(
     "regular",
     async ({ application, config, eventsPath }) => {
-      const candidate = await application.planObjective(1);
-      const admitted = await application.admitObjective(
-        1,
-        candidate,
-        authority,
-      );
       await assert.rejects(
-        application.runObjective(1, candidate, admitted),
+        application.runObjective(1),
         /Default branch changed during final review/,
       );
       const state = readState(config.repository, 1);
@@ -439,8 +416,7 @@ test("QA-owned final controller proof stays at independent final acceptance", as
         plan.graph.coverage[1].proof.guaranteeId,
         "reviewed-head-publication",
       );
-      const admission = await application.admitObjective(1, plan, authority);
-      await application.runObjective(1, plan, admission);
+      await application.runObjective(1);
       const state = readState(config.repository, 1);
       assert.ok(objectiveComplete(state));
       assert.equal(state.work["baseline-qa"].validation.criteria.length, 1);

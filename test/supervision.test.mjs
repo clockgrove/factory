@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -14,6 +14,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { enqueueIntake } from "../dist/intake.js";
 import { factoryConfigDigest } from "../dist/config.js";
+import { defaultAutonomy } from "../dist/index.js";
 import { saveState, statePath } from "../dist/state-store.js";
 import {
   checkServiceState,
@@ -66,32 +67,6 @@ esac
   );
   const configPath = join(root, "factory.json");
   writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
-  const raw = {
-    schemaVersion: 1,
-    repository: config.repository,
-    objective: 1,
-    configDigest: factoryConfigDigest(config),
-    authority: {
-      schemaVersion: 1,
-      actor: "fixture",
-      reason: "bounded lifecycle",
-      executionConsent: true,
-      serviceConsent: true,
-      objectives: [1],
-      allowances: {
-        planningRevisions: 0,
-        implementationRepairs: 0,
-        resultRereviews: 0,
-      },
-      repairClasses: [],
-      resources: { maxConcurrency: 1 },
-      requiredEnvironment: [],
-    },
-  };
-  const admission = {
-    ...raw,
-    digest: createHash("sha256").update(JSON.stringify(raw)).digest("hex"),
-  };
   const state = {
     schemaVersion: 5,
     kind: "preparing",
@@ -101,7 +76,7 @@ esac
     configDigest: factoryConfigDigest(config),
     baseSha: "a".repeat(40),
     objectiveBodyDigest: "b".repeat(64),
-    admission,
+    autonomy: defaultAutonomy,
     issueByItemId: {},
     coordinator: {
       mode: "paused",
@@ -150,7 +125,7 @@ test("registers the exact isolated-XDG unit with the manager idempotently withou
     assert.equal(status.registered, true);
   }));
 
-test("disable and uninstall retain identical admission, allowances and continuation", () =>
+test("disable and uninstall retain identical continuation and allowances", () =>
   fixture(async ({ config, configPath }) => {
     const stateFile = statePath(config.repository, 1),
       before = readFileSync(stateFile);
@@ -218,18 +193,20 @@ test("state compatibility refuses future fields without altering state", () =>
     );
   }));
 
-test("service requires private configuration and independent service consent", () =>
+test("service requires private configuration and matching continuation", () =>
   fixture(async ({ config, configPath, state }) => {
-    const { digest, ...raw } = state.admission;
-    raw.authority.serviceConsent = false;
-    state.admission = {
-      ...raw,
-      digest: createHash("sha256").update(JSON.stringify(raw)).digest("hex"),
-    };
+    writeFileSync(configPath, JSON.stringify(config), { mode: 0o644 });
+    chmodSync(configPath, 0o644);
+    await assert.rejects(
+      supervise("install", configPath, { objective: 1 }),
+      /owner-private/,
+    );
+    chmodSync(configPath, 0o600);
+    state.configDigest = "c".repeat(64);
     saveState(statePath(config.repository, 1), state);
     await assert.rejects(
       supervise("install", configPath, { objective: 1 }),
-      /Service consent/,
+      /Continuation configuration differs/,
     );
   }));
 
@@ -266,22 +243,30 @@ test("unit escapes systemd specifiers and command variable expansion", () => {
   );
 });
 
-async function registerIntake(config, state) {
+const github = {
+  objective: async () => ({ body: "Authorized Objective", state: "open" }),
+};
+const consent = {
+  actor: "fixture",
+  reason: "bounded lifecycle",
+  consent: true,
+};
+async function intakePath(config) {
+  const { stateRoot } = await import("../dist/config.js");
+  return join(stateRoot(config.repository), "intake.json");
+}
+/** A finite batch with recorded service consent; no command records both without watch. */
+async function registerIntake(config) {
   rmSync(statePath(config.repository, 1));
-  await enqueueIntake(
-    config,
-    {
-      objective: async () => ({ body: "Authorized Objective", state: "open" }),
-    },
-    {
-      ...state.admission.authority,
-      resources: { maxConcurrency: config.execution.concurrency },
-    },
-  );
+  await enqueueIntake(config, github, [1]);
+  const path = await intakePath(config);
+  const value = JSON.parse(readFileSync(path, "utf8"));
+  value.serviceConsent = consent;
+  writeFileSync(path, JSON.stringify(value));
 }
 test("intake service pins its mode, requires consent and refuses unknown authorization fields", () =>
-  fixture(async ({ config, configPath, state }) => {
-    await registerIntake(config, state);
+  fixture(async ({ config, configPath }) => {
+    await registerIntake(config);
     await supervise("install", configPath, { intake: true });
     const unitPath = join(
       process.env.XDG_CONFIG_HOME,
@@ -291,21 +276,19 @@ test("intake service pins its mode, requires consent and refuses unknown authori
     const unit = readFileSync(unitPath, "utf8");
     assert.match(unit, /"--intake"/);
     assert.doesNotMatch(unit, /"--objective"/);
-    // Use the snapshot's established state root rather than a separate service copy.
-    const { stateRoot } = await import("../dist/config.js");
-    const intakePath = join(stateRoot(config.repository), "intake.json");
-    const value = JSON.parse(readFileSync(intakePath, "utf8"));
-    value.authority.serviceConsent = false;
-    writeFileSync(intakePath, JSON.stringify(value));
+    const path = await intakePath(config);
+    const value = JSON.parse(readFileSync(path, "utf8"));
+    delete value.serviceConsent;
+    writeFileSync(path, JSON.stringify(value));
     assert.throws(() => checkIntakeServiceState(config), /service consent/);
-    value.authority.serviceConsent = true;
+    value.serviceConsent = consent;
     value.futureAuthority = true;
-    writeFileSync(intakePath, JSON.stringify(value));
+    writeFileSync(path, JSON.stringify(value));
     assert.throws(() => checkIntakeServiceState(config), /Unsupported intake/);
   }));
 test("intake service start requires an owner while pending but accepts an exhausted finite batch", () =>
   fixture(async ({ root, config, configPath, state }) => {
-    await registerIntake(config, state);
+    await registerIntake(config);
     await supervise("install", configPath, { intake: true });
     writeFileSync(
       join(root, "bin/systemctl"),
@@ -335,7 +318,7 @@ test("managed CLI readiness and fresh supervised starts use loaded private crede
       },
     };
     writeFileSync(configPath, JSON.stringify(config));
-    await registerIntake(config, state);
+    await registerIntake(config);
     await intakeControl(config, "dequeue", 1);
     const credentials = join(root, "loaded");
     mkdirSync(credentials);
@@ -395,7 +378,7 @@ test("a supervised Claude planning service keeps the Claude login and may bind a
       reviewer: { model: "claude-opus-5-5", reasoningEffort: "high" },
     };
     writeFileSync(configPath, JSON.stringify(config));
-    await registerIntake(config, state);
+    await registerIntake(config);
     process.env.CLAUDE_CONFIG_DIR = join(root, "claude-config");
     process.env.HTTPS_PROXY = "http://proxy.invalid:3128";
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "ambient-token-never-copied";
@@ -722,36 +705,12 @@ test("CLI status preserves local health when the manager is unavailable and keep
     assert.doesNotMatch(JSON.stringify(status), /dummy-secret/);
   }));
 
-test("standalone intake service consent remains valid for exact admitted historical work without changing that admission", () =>
+test("watch service consent covers queued Objectives and leaves their continuation unchanged", () =>
   fixture(async ({ config, state, configPath }) => {
     const { watchIntake } = await import("../dist/intake.js");
     rmSync(statePath(config.repository, 1));
-    await watchIntake(config, {
-      actor: "fixture",
-      reason: "Observe and supervise separately consented work",
-      consent: true,
-    });
-    const authority = {
-      ...state.admission.authority,
-      serviceConsent: false,
-      resources: { maxConcurrency: config.execution.concurrency },
-    };
-    await enqueueIntake(
-      config,
-      {
-        objective: async () => ({
-          body: "Authorized Objective",
-          state: "open",
-        }),
-      },
-      authority,
-    );
-    const { digest: _oldDigest, ...raw } = state.admission;
-    raw.authority = authority;
-    state.admission = {
-      ...raw,
-      digest: createHash("sha256").update(JSON.stringify(raw)).digest("hex"),
-    };
+    await watchIntake(config, consent);
+    await enqueueIntake(config, github, [1]);
     saveState(statePath(config.repository, 1), state);
     const before = readFileSync(statePath(config.repository, 1));
     checkIntakeServiceState(config);
@@ -759,6 +718,6 @@ test("standalone intake service consent remains valid for exact admitted histori
       await supervise("check", configPath, { intake: true }),
       "factory-supervision-compatible-v1",
     );
-    assert.throws(() => checkServiceState(config, 1), /Service consent/);
+    checkServiceState(config, 1);
     assert.deepEqual(readFileSync(statePath(config.repository, 1)), before);
   }));

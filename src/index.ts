@@ -10,7 +10,12 @@ export {
 } from "./analysis.js";
 export type { AnalysisField, AnalysisOptions } from "./analysis.js";
 
-export * from "./admission.js";
+export {
+  type Autonomy,
+  type AutonomyConfig,
+  defaultAutonomy,
+  resolveAutonomy,
+} from "./repair-policy.js";
 
 export { SandboxExecutionDriver } from "./execution/sandbox.js";
 export type { SandboxDriverOptions } from "./execution/sandbox.js";

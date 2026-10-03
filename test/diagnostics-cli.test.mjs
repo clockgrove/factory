@@ -8,6 +8,7 @@ import { DiagnosticEmitter } from "../dist/diagnostics.js";
 import { saveState, statePath } from "../dist/state-store.js";
 import { coverageObligations } from "../dist/qa.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
+import { defaultAutonomy } from "../dist/index.js";
 
 test("diagnostics and status CLI preserve snapshots, unknown usage and coordinator error redaction", (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-diagnostics-cli-"));
@@ -31,6 +32,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
     objective: 1,
     runId: "preparing-run",
     configDigest: "b".repeat(64),
+    autonomy: structuredClone(defaultAutonomy),
     baseSha: target.baseSha,
     objectiveBodyDigest: "c".repeat(64),
     plan: {},
@@ -81,6 +83,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
     objective: 1,
     runId: "execution-run",
     configDigest: preparation.configDigest,
+    autonomy: structuredClone(defaultAutonomy),
     baseSha: target.baseSha,
     graph: {
       objective: 1,

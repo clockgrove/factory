@@ -55,7 +55,7 @@ Define narrow contracts for the named variation points: PlanningModel, Execution
 
 Use one atomic local snapshot for continuation state. Do not add operational event journals, recovery journals, custom state refs, provider ranking or fallback chains. [Diagnostics](docs/ARCHITECTURE.md#state-and-recovery) record correlated local observations but never reconstruct or control lifecycle state. The configured AgentHarness owns model and tool execution; media reenters ordinary validation and delivery.
 
-Do not invent Factory limits beneath dependencies or operator policy. A failed explicit-run Work Item stops with evidence, and a new attempt requires explicit retry or an admitted repair policy. Give every external effect a stable identity and find it by that identity before repeating it. Continue when the record shows it happened, repeat it only when the record shows it never happened, and otherwise discard the attempt and start a fresh one. Contributor authority is not inherited by Factory workers or adopter sessions.
+Do not invent Factory limits beneath dependencies or operator policy. A failed Work Item stops with evidence, and a new attempt requires explicit retry or a remaining configured repair allowance. Give every external effect a stable identity and find it by that identity before repeating it. Continue when the record shows it happened, repeat it only when the record shows it never happened, and otherwise discard the attempt and start a fresh one. Contributor authority is not inherited by Factory workers or adopter sessions.
 
 Prefer deterministic integration tests with real temporary Git repositories, and stub remote services at narrow contracts. Add a regression test for each concrete bug.
 

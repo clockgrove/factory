@@ -23,7 +23,6 @@ function evidenceDigest(state: FactoryState): string {
     .update(
       JSON.stringify({
         objectiveBodyDigest: state.objectiveBodyDigest,
-        admissionDigest: state.admission?.digest,
         finalValidation: state.finalValidation,
         decisions: state.finalAcceptanceDecisions,
         work: state.graph.items.map(({ id }) => ({

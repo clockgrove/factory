@@ -515,11 +515,7 @@ export async function runRegularGraph(args: {
       else delete work.authentication;
       if (work.phaseReservation !== "coding") phases.release(item.id);
       const isolated = recordWorkFailure(state, item.id, error);
-      if (
-        isolated &&
-        state.admission?.authority.repairPolicy &&
-        !args.cancelled()
-      ) {
+      if (isolated && !args.cancelled()) {
         phases.release(item.id);
         save();
         await phases.reserve(item.id, "review");

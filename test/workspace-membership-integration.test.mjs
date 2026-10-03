@@ -119,7 +119,7 @@ for (const strategy of ["regular", "native-stack"]) {
       const { application, github, eventsPath } = makeApplication(descriptor);
       const plan = await application.planObjective(1);
       assert.equal(plan.review.status, "clean");
-      const completed = await application.runObjective(1, plan);
+      const completed = await application.runObjective(1);
       assert.equal(completed.finalValidation.passed, true);
       assert.equal(completed.finalAcceptancePending, undefined);
       for (const id of ["addition", "successor"]) {
@@ -163,7 +163,7 @@ for (const strategy of ["regular", "native-stack"]) {
       const plan = await application.planObjective(1);
       assert.equal(plan.review.status, "clean");
       await assert.rejects(
-        application.runObjective(1, plan),
+        application.runObjective(1),
         /non-membership configuration/i,
       );
       assert.equal(

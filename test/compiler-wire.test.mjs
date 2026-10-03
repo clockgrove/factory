@@ -35,7 +35,6 @@ import {
 import { decodeGraphReview, reviewPacket } from "../dist/review-evidence.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
-import { planningExecutionBounds } from "../dist/admission.js";
 const Ajv = createRequire(import.meta.url)("ajv");
 const body =
   '# Objective\n\n## Acceptance\n- Source-defined result exists.\n\n## Validation\n- `test -d .`\n\n## Worker implementation\nUse node:assert/strict and assert process.versions.node.split(".")[0] equals "24".\n';
@@ -777,13 +776,7 @@ test("completed SDK decoder failure enters the admitted bounded planning repair 
     },
   }));
   const state = {
-    authority: {
-      schemaVersion: 1,
-      actor: "fixture",
-      reason: "One bounded planning-output correction",
-      executionConsent: true,
-      serviceConsent: false,
-      objectives: [17],
+    autonomy: {
       allowances: {
         planningRevisions: 1,
         implementationRepairs: 0,
@@ -797,7 +790,6 @@ test("completed SDK decoder failure enters the admitted bounded planning repair 
           resultRereviews: 0,
         },
       },
-      resources: { maxConcurrency: 1 },
       requiredEnvironment: [],
     },
   };
@@ -1380,7 +1372,7 @@ test("compileObjective supplies trusted retained identity and keeps pending item
   }
 });
 
-test("actual SDK binds source-required quality independently of compound final proof and rejects changed admission authority", async (t) => {
+test("actual SDK binds source-required quality independently of compound final proof and rejects reconstructed source authority", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-source-ci-wire-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const target = createTarget(root);
@@ -1493,10 +1485,7 @@ test("actual SDK binds source-required quality independently of compound final p
 });
 
 test("strict CI choices hydrate complete pinned sources and bind actual execution bounds without model bookkeeping", () => {
-  const executionBounds = {
-    configuredConcurrency: 2,
-    authorizedMaxConcurrency: 2,
-  };
+  const executionBounds = { configuredConcurrency: 2 };
   const input = request({ executionBounds });
   const { wire, value, conforms } = setup(input);
   value.requiredPreIntegrationChecks = [
@@ -1533,7 +1522,7 @@ test("strict CI choices hydrate complete pinned sources and bind actual executio
   const changed = compilerWire(
     {
       ...input,
-      executionBounds: { ...executionBounds, authorizedMaxConcurrency: 3 },
+      executionBounds: { configuredConcurrency: 3 },
     },
     compilerCitationChoices(input.sources),
   );
@@ -1541,7 +1530,7 @@ test("strict CI choices hydrate complete pinned sources and bind actual executio
   assert.throws(() => changed.decode(value), /context identity/);
   for (const bounds of [
     { ...executionBounds, configuredConcurrency: "2" },
-    { ...executionBounds, authorizedMaxConcurrency: 1 },
+    { configuredConcurrency: 0 },
     [2, 2],
     { ...executionBounds, admitted: true },
   ])
@@ -1563,13 +1552,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
   const target = createTarget(root, { "AGENTS.md": pinned });
   const config = factoryConfig(target.checkout, "example/planning-bounds");
   config.execution.concurrency = 2;
-  const authority = {
-    schemaVersion: 1,
-    actor: "fixture",
-    reason: "Bounded planning",
-    executionConsent: true,
-    serviceConsent: false,
-    objectives: [17],
+  const autonomy = {
     allowances: {
       planningRevisions: 1,
       implementationRepairs: 0,
@@ -1583,10 +1566,11 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
         resultRereviews: 0,
       },
     },
-    resources: { maxConcurrency: 2 },
     requiredEnvironment: [],
   };
-  const executionBounds = planningExecutionBounds(config, 17, authority);
+  const executionBounds = {
+    configuredConcurrency: config.execution.concurrency,
+  };
   const captured = [];
   let reviewCalls = 0;
   let rejectedGraph;
@@ -1677,7 +1661,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
                   {
                     evidenceIndices: [boundsIndex],
                     detail:
-                      "Authored prose claims 999 although actual configured and authorized ceilings are two.",
+                      "Authored prose claims 999 although the actual configured ceiling is two.",
                     question: "",
                   },
                 ]
@@ -1692,13 +1676,13 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
         assert.deepEqual(actual, rejectedGraph);
         assert.match(
           prompt,
-          /Controller execution bounds:\n\{"configuredConcurrency":2,"authorizedMaxConcurrency":2\}/,
+          /Controller execution bounds:\n\{"configuredConcurrency":2\}/,
         );
         response = {
           kind: "planning-evidence",
           diagnosis: "Worker prose cannot override actual controller ceilings.",
           correction:
-            "Retain full pinned CI evidence and plan within two configured and authorized slots.",
+            "Retain full pinned CI evidence and plan within two configured slots.",
         };
       }
       return {
@@ -1718,7 +1702,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
   }));
   const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
   const model = new CodexPlanningModel(target.checkout, selection, selection);
-  const state = { authority };
+  const state = { autonomy };
   const candidate = await compilePlan(
     17,
     body,
@@ -2012,13 +1996,7 @@ test("semantic validation rejection retains the actual decoded graph for bounded
     },
   }));
   const state = {
-    authority: {
-      schemaVersion: 1,
-      actor: "fixture",
-      reason: "One planning correction",
-      executionConsent: true,
-      serviceConsent: false,
-      objectives: [17],
+    autonomy: {
       allowances: {
         planningRevisions: 1,
         implementationRepairs: 0,
@@ -2032,7 +2010,6 @@ test("semantic validation rejection retains the actual decoded graph for bounded
           resultRereviews: 0,
         },
       },
-      resources: { maxConcurrency: 1 },
       requiredEnvironment: [],
     },
   };

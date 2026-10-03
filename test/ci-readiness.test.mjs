@@ -52,25 +52,19 @@ const item = {
   minimumAssetSets: 0,
   requiredLfsRoles: [],
 };
-const authority = {
-  schemaVersion: 1,
-  actor: "fixture",
-  reason: "Finite credential-free CI readiness regression",
-  executionConsent: true,
-  serviceConsent: true,
-  objectives: [1],
+// Failed checks stop for the operator instead of using a repair allowance.
+const autonomy = {
   allowances: {
     planningRevisions: 0,
     implementationRepairs: 0,
     resultRereviews: 0,
   },
   repairClasses: [],
-  resources: { maxConcurrency: 1 },
-  requiredEnvironment: [],
 };
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** A live owner re-observes a readiness wait every 5 seconds; allow a few rounds. */
 async function until(check) {
-  for (let n = 0; n < 800; n++) {
+  for (let n = 0; n < 3000; n++) {
     if (check()) return;
     await delay(10);
   }
@@ -83,12 +77,15 @@ async function fixture(route, name, run, chain = false, namedGate = false) {
   let active;
   try {
     const target = createTarget(root);
-    const config = factoryConfig(
-      target.checkout,
-      `example/ci-${route}-${name}`,
-      route,
-      1,
-    );
+    const config = {
+      ...factoryConfig(
+        target.checkout,
+        `example/ci-${route}-${name}`,
+        route,
+        1,
+      ),
+      autonomy,
+    };
     const objectiveBody =
       (chain ? body + "- test -s next.txt\n" : body) +
       (namedGate
@@ -252,11 +249,27 @@ function assertWait(state) {
   assert.equal(state.error, undefined);
   assert.equal(state.finalValidation, undefined);
 }
+/** Start a tracked run and return the exact published wait it reaches. */
+async function startWaiting(
+  f,
+  reached = (state) => state.work.result.waitingReason,
+) {
+  const running = f.track(f.application.runObjective(1));
+  await until(() => {
+    const state = readContinuation(f.config.repository, 1);
+    return state?.work && reached(state);
+  });
+  return { running, waiting: readState(f.config.repository, 1) };
+}
+/** Wait until the live owner has observed GitHub again after this point. */
+async function observedAgain(f) {
+  const before = f.counts().observations;
+  await until(() => f.counts().observations > before);
+}
 for (const route of ["regular", "native-stack"]) {
-  test(`${route}: explicit pending CI returns a resumable exact publication without another worker/review`, async () =>
-    fixture(route, "explicit", async (f) => {
-      const plan = await f.application.planObjective(1);
-      const waiting = await f.application.runObjective(1, plan);
+  test(`${route}: pending CI keeps the run on its exact publication and completes without another worker/review`, async () =>
+    fixture(route, "pending", async (f) => {
+      const { running, waiting } = await startWaiting(f);
       assertWait(waiting);
       assert.equal(f.counts().merges, 0);
       const identity = identityOf(waiting);
@@ -268,7 +281,7 @@ for (const route of ["regular", "native-stack"]) {
       ).length;
       assert.equal(reviews, 1);
       f.ready();
-      const result = await f.application.runObjective(1, plan);
+      const result = await running;
       assert.deepEqual(identityOf(result), identity);
       assert.equal(result.finalValidation.passed, true);
       assert.equal(f.counts().merges, 1);
@@ -284,16 +297,9 @@ for (const route of ["regular", "native-stack"]) {
         reviews + 1,
       ); // final Objective review only
     }));
-  test(`${route}: admitted owner pauses read-only wait and observes success automatically`, async () =>
-    fixture(route, "admitted", async (f) => {
-      const plan = await f.application.planObjective(1, [], authority);
-      const admission = await f.application.admitObjective(1, plan, authority);
-      const running = f.track(f.application.runObjective(1, plan, admission));
-      await until(
-        () =>
-          readContinuation(f.config.repository, 1)?.work?.result?.waitingReason,
-      );
-      const waiting = readState(f.config.repository, 1);
+  test(`${route}: owner pauses read-only wait and observes success automatically`, async () =>
+    fixture(route, "paused", async (f) => {
+      const { running, waiting } = await startWaiting(f);
       assertWait(waiting);
       const identity = identityOf(waiting);
       await controlObjective(f.config, { objective: 1, action: "pause" });
@@ -315,18 +321,12 @@ for (const route of ["regular", "native-stack"]) {
     }));
   test(`${route}: known pending wait can hand off and restart without replay`, async () =>
     fixture(route, "handoff", async (f) => {
-      const plan = await f.application.planObjective(1, [], authority);
-      const admission = await f.application.admitObjective(1, plan, authority);
-      const running = f.track(f.application.runObjective(1, plan, admission));
+      const { running, waiting } = await startWaiting(f);
       const handed = assert.rejects(
         running,
         (error) => error.constructor.name === "CoordinatorHandoff",
       );
-      await until(
-        () =>
-          readContinuation(f.config.repository, 1)?.work?.result?.waitingReason,
-      );
-      const identity = identityOf(readState(f.config.repository, 1));
+      const identity = identityOf(waiting);
       await controlObjective(f.config, { objective: 1, action: "handoff" });
       await handed;
       assert.equal(
@@ -339,9 +339,7 @@ for (const route of ["regular", "native-stack"]) {
       assert.equal(f.counts().merges, 0);
       f.ready();
       await controlObjective(f.config, { objective: 1, action: "resume" });
-      const result = await f.track(
-        f.application.runObjective(1, plan, admission),
-      );
+      const result = await f.track(f.application.runObjective(1));
       assert.deepEqual(identityOf(result), identity);
       assert.equal(result.finalValidation.passed, true);
       assert.equal(
@@ -358,14 +356,8 @@ for (const route of ["regular", "native-stack"]) {
     }));
   test(`${route}: cancellation of known read-only wait submits no merge`, async () =>
     fixture(route, "cancel", async (f) => {
-      const plan = await f.application.planObjective(1, [], authority);
-      const admission = await f.application.admitObjective(1, plan, authority);
-      const running = f.track(f.application.runObjective(1, plan, admission));
+      const { running } = await startWaiting(f);
       const cancelled = assert.rejects(running, /cancellation requested/);
-      await until(
-        () =>
-          readContinuation(f.config.repository, 1)?.work?.result?.waitingReason,
-      );
       await controlObjective(f.config, { objective: 1, action: "cancel" });
       await cancelled;
       const state = readState(f.config.repository, 1);
@@ -386,13 +378,12 @@ for (const route of ["regular", "native-stack"]) {
         checks: "passing",
         mergeReadiness: readiness,
       });
-      const plan = await f.application.planObjective(1);
-      const waiting = await f.application.runObjective(1, plan);
+      const { running, waiting } = await startWaiting(f);
       assertWait(waiting);
       assert.equal(f.counts().merges, 0);
       const identity = identityOf(waiting);
       readiness = "ready";
-      const completed = await f.application.runObjective(1, plan);
+      const completed = await running;
       assert.deepEqual(identityOf(completed), identity);
       assert.equal(completed.finalValidation.passed, true);
       assert.equal(
@@ -403,17 +394,13 @@ for (const route of ["regular", "native-stack"]) {
     }));
   test(`${route}: actual failed checks stop the retained result before merge submission`, async () =>
     fixture(route, "failing", async (f) => {
-      const plan = await f.application.planObjective(1);
-      const waiting = await f.application.runObjective(1, plan);
+      const { running, waiting } = await startWaiting(f);
       const identity = identityOf(waiting);
       f.github.update((state) => {
         for (const pull of Object.values(state.pullRequests))
           pull.checks = "failing";
       });
-      await assert.rejects(
-        f.application.runObjective(1, plan),
-        /not mergeable/,
-      );
+      await assert.rejects(running, /not mergeable/);
       const stopped = readState(f.config.repository, 1);
       assert.deepEqual(identityOf(stopped), identity);
       assert.equal(f.counts().merges, 0);
@@ -431,24 +418,30 @@ for (const route of ["regular", "native-stack"]) {
       route,
       "named",
       async (f) => {
-        const plan = await f.application.planObjective(1);
+        const { running, waiting: first } = await startWaiting(f);
         assert.equal(
-          plan.graph.requiredPreIntegrationChecks[0].checkName,
+          first.graph.requiredPreIntegrationChecks[0].checkName,
           "quality",
         );
-        const first = await f.application.runObjective(1, plan);
         assertWait(first);
         const identity = identityOf(first);
         f.ready();
         for (const mode of ["missing", "pending", "stale", "ambiguous"]) {
           f.setNamedMode(mode);
-          const waiting = await f.application.runObjective(1, plan);
+          await observedAgain(f);
+          // Each pass reserves a phase, clearing the wait; read it once settled.
+          await until(
+            () =>
+              readContinuation(f.config.repository, 1)?.work?.result
+                ?.waitingReason,
+          );
+          const waiting = readState(f.config.repository, 1);
           assertWait(waiting);
           assert.deepEqual(identityOf(waiting), identity);
           assert.equal(f.counts().merges, 0);
         }
         f.setNamedMode("success");
-        const completed = await f.application.runObjective(1, plan);
+        const completed = await running;
         assert.equal(completed.finalValidation.passed, true);
         assert.equal(f.counts().merges, 1);
         assert.deepEqual(identityOf(completed), identity);
@@ -470,14 +463,10 @@ for (const route of ["regular", "native-stack"]) {
       route,
       "named-fail",
       async (f) => {
-        const plan = await f.application.planObjective(1);
-        await f.application.runObjective(1, plan);
-        f.ready();
+        const { running } = await startWaiting(f);
         f.setNamedMode("failed");
-        await assert.rejects(
-          f.application.runObjective(1, plan),
-          /not mergeable/,
-        );
+        f.ready();
+        await assert.rejects(running, /not mergeable/);
         assert.equal(f.counts().merges, 0);
       },
       false,
@@ -500,7 +489,7 @@ test("intake keeps its ordinary pending-CI Objective owned and finishes it when 
       data: page === 1 ? [{ number: 1, state: "open", labels: [] }] : [],
     });
     f.github.objectiveDependencies = async () => [];
-    await f.application.enqueueIntake(authority, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
     const running = f.track(f.application.runIntake());
     await until(
       () =>
@@ -513,7 +502,6 @@ test("intake keeps its ordinary pending-CI Objective owned and finishes it when 
         readContinuation(f.config.repository, 1)?.objectiveClosure ===
         "complete",
     );
-    await intakeControl(f.config, "drain");
     await running;
     assert.equal(
       readState(f.config.repository, 1).finalValidation.passed,
@@ -533,8 +521,13 @@ test("native multi-layer wait preserves every exact published layer and creates 
       const stacks = () =>
         f.github.state().events.filter((event) => event.type === "stack")
           .length;
-      const plan = await f.application.planObjective(1);
-      const waiting = await f.application.runObjective(1, plan);
+      const { running, waiting } = await startWaiting(
+        f,
+        // The stack head carries the wait for the whole unbranched chain.
+        (state) =>
+          state.work.result.status === "published" &&
+          state.work.next?.waitingReason,
+      );
       assert.equal(waiting.work.result.status, "published");
       assert.equal(waiting.work.next.status, "published");
       assert.equal(waiting.error, undefined);
@@ -571,7 +564,7 @@ test("native multi-layer wait preserves every exact published layer and creates 
         return mergeStack(...args);
       };
       f.ready();
-      const completed = await f.application.runObjective(1, plan);
+      const completed = await running;
       assert.equal(completed.finalValidation.passed, true);
       for (const [id, identity] of Object.entries(identities))
         assert.deepEqual(

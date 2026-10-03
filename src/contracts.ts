@@ -244,10 +244,9 @@ export interface PlanningLocalExecutables {
   observations: import("./local-preflight.js").ExecutablePreflightObservation[];
 }
 
-/** Controller configuration and checked finite authority, not capacity or runtime overlap. */
+/** Controller configuration, not driver capacity or runtime overlap. */
 export interface PlanningExecutionBounds {
   configuredConcurrency: number;
-  authorizedMaxConcurrency: number | null;
 }
 
 export function assertPlanningExecutionBounds(
@@ -257,13 +256,9 @@ export function assertPlanningExecutionBounds(
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
-    Object.keys(value).sort().join() !==
-      "authorizedMaxConcurrency,configuredConcurrency" ||
+    Object.keys(value).join() !== "configuredConcurrency" ||
     !Number.isSafeInteger(value.configuredConcurrency) ||
-    value.configuredConcurrency < 1 ||
-    (value.authorizedMaxConcurrency !== null &&
-      (!Number.isSafeInteger(value.authorizedMaxConcurrency) ||
-        value.authorizedMaxConcurrency < value.configuredConcurrency))
+    value.configuredConcurrency < 1
   )
     throw new Error("Invalid controller planning execution bounds");
 }

@@ -18,6 +18,7 @@
       "suspicious": {
         "noEmptyBlockStatements": "error",
         "noImplicitAnyLet": "off",
+        "noUnusedExpressions": "error",
         "noVar": "error"
       }
     }

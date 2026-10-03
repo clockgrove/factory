@@ -3,6 +3,22 @@
  * command. Text and JSON status both use `summarizeStatus`, so they never
  * disagree. It reads only the redacted status document.
  */
+import type { Wait } from "./fault.js";
+
+/** A step repeating after transient faults (src/step.ts `outageOf`). */
+export interface OutageView {
+  step: string;
+  since: string;
+  tries: number;
+  /** Detail of the last fault. */
+  last: string;
+}
+
+/** A structured wait and, for outages, the failing step. */
+export interface WaitView {
+  wait?: Wait | null;
+  outage?: OutageView | null;
+}
 
 export type StatusPhase =
   | "not-started"
@@ -40,7 +56,7 @@ export interface CoordinatorView {
   cancelError?: string;
 }
 
-export interface StatusItemView {
+export interface StatusItemView extends WaitView {
   id: string;
   status: string;
   step: string | null;
@@ -63,7 +79,7 @@ export interface NotStartedStatusView {
   state: "not-started";
 }
 
-export interface PreparingStatusView {
+export interface PreparingStatusView extends WaitView {
   objective: number;
   state: "preparing";
   /** Whether a controller process owns this installation; null when unknown. */
@@ -81,7 +97,7 @@ export interface PreparingStatusView {
   error?: string | null;
 }
 
-export interface ExecutionStatusView {
+export interface ExecutionStatusView extends WaitView {
   objective: number;
   state: "active" | "waiting" | "complete" | "failed" | "cancelled";
   runActive: boolean | null;
@@ -138,15 +154,51 @@ function thenRun(view: { objective: number; runActive: boolean | null }) {
 }
 
 type WaitKind =
+  | "decision"
+  | "outage"
   | "CI check"
   | "worker capacity"
   | "dependency"
   | "external prerequisite";
 
+const WAIT_LABEL: Record<Wait["kind"], WaitKind> = {
+  decision: "decision",
+  outage: "outage",
+  ci: "CI check",
+  capacity: "worker capacity",
+  dependency: "dependency",
+  prerequisite: "external prerequisite",
+};
+
+const when = (time: string) => `${time.slice(0, 16).replace("T", " ")}Z`;
+
+/** "since … (N tries, last: …)" for a step repeating after transient faults. */
+function outageText(outage: OutageView): string {
+  return `since ${when(outage.since)} (${outage.tries} ${outage.tries === 1 ? "try" : "tries"}, last: ${short(outage.last, 60)})`;
+}
+
+/** A structured wait as a display kind and detail. */
+function structuredWait(
+  view: WaitView,
+): { kind: WaitKind; detail: string; fix?: string } | undefined {
+  const wait = view.wait;
+  if (!wait) return undefined;
+  return {
+    kind: WAIT_LABEL[wait.kind],
+    detail:
+      wait.kind === "outage" && view.outage
+        ? outageText(view.outage)
+        : short(wait.detail, 100),
+    ...(wait.fix ? { fix: wait.fix } : {}),
+  };
+}
+
 /** Why an unfinished item is not progressing, or undefined when it is. */
 export function itemWait(
   item: StatusItemView,
-): { kind: WaitKind; detail: string } | undefined {
+): { kind: WaitKind; detail: string; fix?: string } | undefined {
+  const structured = structuredWait(item);
+  if (structured) return structured;
   if (item.authentication)
     return {
       kind: "external prerequisite",
@@ -188,8 +240,64 @@ export function itemWait(
   return undefined;
 }
 
+/** A structured decision wait: retry the item or cancel the Objective. */
+function waitDecision(
+  objective: number,
+  view: WaitView,
+  item?: string,
+): StatusSummary | undefined {
+  if (view.wait?.kind !== "decision") return undefined;
+  const question = short(view.wait.detail, 160);
+  return {
+    phase: "needs-decision",
+    summary: `decision${item ? ` for ${item}` : ""}: ${short(view.wait.detail, 80)}`,
+    nextAction: item
+      ? {
+          command: `factory retry --objective ${objective} --item ${item}`,
+          reason: `${question}; or factory cancel --objective ${objective}`,
+        }
+      : {
+          command: `factory cancel --objective ${objective}`,
+          reason: `${question}; or ${run(objective)} to try again`,
+        },
+  };
+}
+
+/** A structured wait on the Objective itself, other than a decision. */
+function objectiveWait(
+  view: ExecutionStatusView | PreparingStatusView,
+): StatusSummary | undefined {
+  const wait = structuredWait(view);
+  if (!wait || wait.kind === "decision") return undefined;
+  return {
+    phase: "waiting",
+    summary:
+      wait.kind === "outage"
+        ? `outage ${wait.detail}${view.outage ? ` in ${view.outage.step}` : ""}`
+        : `on ${wait.kind}: ${wait.detail}`,
+    nextAction: wait.fix
+      ? {
+          command: run(view.objective),
+          reason: `First: ${short(wait.fix, 160)}`,
+        }
+      : view.runActive === false
+        ? {
+            command: run(view.objective),
+            reason: "No run is active; this resumes it",
+          }
+        : null,
+  };
+}
+
 function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
   const objective = view.objective;
+  const asked = waitDecision(objective, view);
+  if (asked) return asked;
+  for (const item of view.work) {
+    if (["done", "failed", "cancelled"].includes(item.status)) continue;
+    const itemAsked = waitDecision(objective, item, item.id);
+    if (itemAsked) return itemAsked;
+  }
   for (const item of view.work) {
     if (item.status !== "waiting") continue;
     if (item.step === "approve-result" && item.acceptancePending)
@@ -296,6 +404,8 @@ function progress(view: ExecutionStatusView): StatusSummary {
       ? { command: run(objective), reason: "No run is active; this resumes it" }
       : null;
   if (view.work.length && done === view.work.length) {
+    const own = objectiveWait(view);
+    if (own) return { ...own, summary: `${own.summary}; ${counts}` };
     if (!view.finalValidation)
       return {
         phase: "running",
@@ -336,8 +446,12 @@ function progress(view: ExecutionStatusView): StatusSummary {
       nextAction: restart,
     };
   }
+  const own = objectiveWait(view);
+  if (own) return { ...own, summary: `${own.summary}; ${counts}` };
   const order: WaitKind[] = [
+    "decision",
     "external prerequisite",
+    "outage",
     "CI check",
     "worker capacity",
     "dependency",
@@ -348,8 +462,13 @@ function progress(view: ExecutionStatusView): StatusSummary {
   if (first)
     return {
       phase: "waiting",
-      summary: `on ${first.kind} for ${first.item.id}${first.detail === first.kind ? "" : `: ${first.detail}`}; ${counts}`,
-      nextAction: restart,
+      summary:
+        first.kind === "outage"
+          ? `outage ${first.detail} in ${first.item.id}; ${counts}`
+          : `on ${first.kind} for ${first.item.id}${first.detail === first.kind ? "" : `: ${first.detail}`}; ${counts}`,
+      nextAction: first.fix
+        ? { command: run(objective), reason: `First: ${short(first.fix, 160)}` }
+        : restart,
     };
   return {
     phase: "running",
@@ -395,6 +514,8 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
         reason: `Discards the stopped planning; resolve the decision in the Objective, then ${run(objective)} plans again`,
       },
     };
+  const waiting = waitDecision(objective, view) ?? objectiveWait(view);
+  if (waiting) return waiting;
   if (view.coordinator?.mode === "paused")
     return {
       phase: "waiting",

@@ -335,16 +335,21 @@ export const decision = (question: string, ...evidence: string[]): Fault => ({
 
 /**
  * A step's persisted repeat record, keyed `${item}/${attempt}/${step}` or
- * `objective/${step}`. Written only by the step primitive (#515).
+ * `objective/${step}`. Written only by the step primitive (src/step.ts).
  */
 export interface RepeatRecord {
-  /** When the step began failing; any progress inside the step resets it. */
+  /** When the current run of transient faults began. */
   since: string;
-  /** Faults since `since`. */
+  /** Transient faults since `since`; 0 once progress followed them. */
   count: number;
   last: Fault;
   /** Earliest time the step runs again. */
   nextAt: string;
+  /**
+   * Faults of a paid step's paid call that may have been paid for. Progress
+   * does not reset it; only success or clearing the records does.
+   */
+  paid?: number;
 }
 
 export type WaitKind =
@@ -359,6 +364,8 @@ export type WaitKind =
 export interface Wait {
   kind: WaitKind;
   detail: string;
+  /** For a `prerequisite` from a `config` fault: what the operator must fix. */
+  fix?: string;
 }
 
 const WAIT_KINDS = new Set<string>([
@@ -369,8 +376,10 @@ const WAIT_KINDS = new Set<string>([
   "decision",
   "prerequisite",
 ]);
-const STEP_NAME = /^[a-z][a-z-]*$/;
-const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+/** A step name: the last part of a repeat key. */
+export const STEP_NAME = /^[a-z][a-z-]*$/;
+/** A Work Item or attempt identity inside a repeat key. */
+export const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 function plainRecord(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -403,12 +412,18 @@ export function assertRepeats(
     )
       throw new Error(`${label} key ${key} names no known step`);
     const record = plainRecord(raw, `${label}.${key}`);
+    const keys = Object.keys(record).sort().join(",");
+    const atLeast = (value: unknown, least: number) =>
+      Number.isSafeInteger(value) && Number(value) >= least;
     if (
-      Object.keys(record).sort().join(",") !== "count,last,nextAt,since" ||
+      !(
+        (keys === "count,last,nextAt,since" && atLeast(record.count, 1)) ||
+        (keys === "count,last,nextAt,paid,since" &&
+          atLeast(record.count, 0) &&
+          atLeast(record.paid, 1))
+      ) ||
       !iso(record.since) ||
       !iso(record.nextAt) ||
-      !Number.isSafeInteger(record.count) ||
-      Number(record.count) < 1 ||
       !isFault(record.last)
     )
       throw new Error(`${label}.${key} is invalid`);
@@ -418,8 +433,14 @@ export function assertRepeats(
 export function assertWait(value: unknown, label: string): void {
   if (value === undefined) return;
   const wait = plainRecord(value, label);
+  const keys = Object.keys(wait).sort().join(",");
   if (
-    Object.keys(wait).sort().join(",") !== "detail,kind" ||
+    !(
+      keys === "detail,kind" ||
+      (keys === "detail,fix,kind" &&
+        wait.kind === "prerequisite" &&
+        text(wait.fix))
+    ) ||
     !WAIT_KINDS.has(String(wait.kind)) ||
     !text(wait.detail)
   )

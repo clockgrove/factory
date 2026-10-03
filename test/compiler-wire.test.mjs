@@ -6,10 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
-import { compilerWire } from "../dist/compiler-wire.js";
+import { compilerWire, PlannerChoiceError } from "../dist/compiler-wire.js";
 import {
   CodexPlanningModel,
   MalformedPlannerOutput,
+  PlanValidationError,
   compilerCitationChoices,
   compileObjective,
   compilePlan,
@@ -37,7 +38,7 @@ import { workItemPrompt } from "../dist/execution/harness-support.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 const Ajv = createRequire(import.meta.url)("ajv");
 const body =
-  '# Objective\n\n## Acceptance\n- Source-defined result exists.\n\n## Validation\n- `test -d .`\n\n## Worker implementation\nUse node:assert/strict and assert process.versions.node.split(".")[0] equals "24".\n';
+  '# Objective\n\n## Acceptance\n- Source-defined result exists.\n\n## Validation\n- `test -d .`\n\n## Worker implementation\nUse node:assert/strict and assert process.versions.node.split(".")[0] equals "24".\n\n## Required checks\n- required-check\n- quality\n';
 const sources = [{ path: "OBJECTIVE", content: body }];
 function request(extra = {}) {
   return {
@@ -46,6 +47,7 @@ function request(extra = {}) {
     baseSha: "a".repeat(40),
     sources,
     coverageObligations: coverageObligations(body, objectiveCriteria(body)),
+    checkNames: ["required-check", "quality"],
     controllerCapabilities: installedControllerCapabilities(),
     controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
     ...extra,
@@ -361,11 +363,8 @@ test("actual choice schema and decoder admit supported proof forms and refuse ow
     ["work", { kind: "final-controller", guaranteeIndex: 0 }],
     ["qa", { kind: "integrated-command", validationIndex: 0 }],
     ["qa", { kind: "integrated-semantic", acceptanceIndex: 0 }],
-    ["qa", { kind: "integrated-ci", checkName: "required-check" }],
-    [
-      "qa",
-      { kind: "published-ci", checkName: "required-check", dependencyIndex: 0 },
-    ],
+    ["qa", { kind: "integrated-ci", checkIndex: 0 }],
+    ["qa", { kind: "published-ci", checkIndex: 0, dependencyIndex: 0 }],
     ["aggregate", { kind: "result-command", validationIndex: 0 }],
     ["aggregate", { kind: "result-semantic", acceptanceIndex: 0 }],
     ["aggregate", { kind: "integrated-command", validationIndex: 0 }],
@@ -555,7 +554,7 @@ test("actual initial and revision SDK schemas require real probes without invent
     [],
     [
       {
-        category: "coverage",
+        source: "independent review",
         detail: "Preserve final evidence at its proper phase.",
       },
     ],
@@ -611,7 +610,13 @@ test("actual initial and revision SDK schemas require real probes without invent
   assert.equal(captured.length, 2);
   assert(
     captured[1].prompt.includes(
-      "One independent review found these sourced defects",
+      "Revise the complete graph once to fix these findings",
+    ),
+  );
+  // The instructions reach the model inside the JSON choices.
+  assert(
+    captured[1].prompt.includes(
+      JSON.stringify('"source":"independent review"').slice(1, -1),
     ),
   );
 });
@@ -659,6 +664,7 @@ test("actual SDK boundary classifies completed invalid choices and compiled grap
         items: [item({ coverage: [entry()] })],
       };
       if (mode === "invalid") value.items[0].coverage[0].obligationIndex = 999;
+      if (mode === "malformed") value.items[0].coverage[0].unexpected = true;
       return {
         events: (async function* () {
           yield {
@@ -706,12 +712,21 @@ test("actual SDK boundary classifies completed invalid choices and compiled grap
   );
   assert.equal(captured.prompt.split("# Objective").length - 1, 1);
   assert(captured.schema.properties.contextId.enum.length === 1);
+  // A refused choice is revisable; a response of the wrong shape is not.
   mode = "invalid";
   await assert.rejects(
     compileObjective(17, body, target.baseSha, target.checkout, model),
     (error) =>
-      error instanceof MalformedPlannerOutput &&
+      error instanceof PlanValidationError &&
       /obligationIndex/.test(error.message),
+  );
+  mode = "malformed";
+  await assert.rejects(
+    compileObjective(17, body, target.baseSha, target.checkout, model),
+    (error) =>
+      error instanceof MalformedPlannerOutput &&
+      !(error instanceof PlanValidationError) &&
+      /unexpected or missing fields/.test(error.message),
   );
 });
 
@@ -720,11 +735,13 @@ test("completed SDK decoder failure enters the admitted bounded planning repair 
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const target = createTarget(root);
   const calls = { compile: 0, diagnosis: 0, review: 0 };
+  let revisionPrompt;
   t.mock.method(Codex.prototype, "startThread", () => ({
     async runStreamed(prompt, options) {
       let response;
       if (options.outputSchema.properties.contextId) {
         calls.compile++;
+        if (calls.compile === 2) revisionPrompt = prompt;
         const choices = JSON.parse(
           prompt.split("\nCompiler choices (JSON data):\n")[1],
         );
@@ -820,6 +837,15 @@ test("completed SDK decoder failure enters the admitted bounded planning repair 
   assert.equal(state.allowanceConsumption.planningRevisions, 1);
   assert.equal(state.planningRecovery.history.length, 1);
   assert.equal(state.planningRecovery.history[0].kind, "planning-output");
+  // The planner sees the correction as a diagnosis, not an independent review.
+  assert(
+    revisionPrompt.includes(
+      JSON.stringify(
+        '{"source":"diagnosis","detail":"Select the supplied obligationIndex 0',
+      ).slice(1, -1),
+    ),
+  );
+  assert(!revisionPrompt.includes("independent review found"));
   assert(
     state.planningRecovery.history[0].invocations.every(
       (invocation) => invocation.resultDigest,
@@ -1390,7 +1416,7 @@ test("actual SDK binds source-required quality independently of compound final p
         contextId: choices.contextId,
         requiredPreIntegrationChecks: [
           {
-            checkName: "quality",
+            checkIndex: 1,
             sourceIndex: invalid ? 999 : 0,
           },
         ],
@@ -1486,15 +1512,14 @@ test("strict CI choices hydrate complete pinned sources and bind actual executio
   const executionBounds = { configuredConcurrency: 2 };
   const input = request({ executionBounds });
   const { wire, value, conforms } = setup(input);
-  value.requiredPreIntegrationChecks = [
-    { checkName: "quality", sourceIndex: 0 },
-  ];
+  value.requiredPreIntegrationChecks = [{ checkIndex: 1, sourceIndex: 0 }];
   assert(conforms(value), JSON.stringify(conforms.errors));
   assert.deepEqual(
     wire.schema.properties.requiredPreIntegrationChecks.items.required,
-    ["checkName", "sourceIndex"],
+    ["checkIndex", "sourceIndex"],
   );
   const graph = wire.decode(value);
+  assert.equal(graph.requiredPreIntegrationChecks[0].checkName, "quality");
   assert.equal(graph.requiredPreIntegrationChecks[0].source.text, body);
   assert.deepEqual(wire.data.executionBounds, executionBounds);
   for (const mutation of [
@@ -1509,7 +1534,11 @@ test("strict CI choices hydrate complete pinned sources and bind actual executio
       entry.sourceIndex = "0";
     },
     (entry) => {
-      entry.checkName = "";
+      entry.checkIndex = 2;
+    },
+    (entry) => {
+      delete entry.checkIndex;
+      entry.checkName = "quality";
     },
   ]) {
     const invalid = structuredClone(value);
@@ -1540,6 +1569,258 @@ test("strict CI choices hydrate complete pinned sources and bind actual executio
         ),
       /execution bounds/,
     );
+});
+
+test("planner and reviewer state the restored phase, command and test rules", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-restored-rules-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const target = createTarget(root);
+  const prompts = { compile: [], review: [] };
+  t.mock.method(Codex.prototype, "startThread", () => ({
+    async runStreamed(prompt, options) {
+      let response;
+      if (options.outputSchema.properties.contextId) {
+        prompts.compile.push(prompt);
+        const choices = JSON.parse(
+          prompt.split("\nCompiler choices (JSON data):\n")[1],
+        );
+        response = {
+          contextId: choices.contextId,
+          requiredPreIntegrationChecks: [],
+          items: [item({ coverage: [entry()] })],
+        };
+      } else {
+        prompts.review.push(prompt);
+        response = {
+          packetId: options.outputSchema.properties.packetId.enum[0],
+          findings: [],
+        };
+      }
+      return {
+        events: (async function* () {
+          yield {
+            type: "item.completed",
+            item: {
+              id: "scripted",
+              type: "agent_message",
+              text: JSON.stringify(response),
+            },
+          };
+          yield { type: "turn.completed", usage: null };
+        })(),
+      };
+    },
+  }));
+  const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
+  const model = new CodexPlanningModel(target.checkout, selection, selection);
+  await compilePlan(17, body, target.baseSha, target.checkout, model);
+  const [planner] = prompts.compile;
+  const [reviewer] = prompts.review;
+  const phases =
+    "An item's acceptance is judged before its own LFS upload, publication, merge and hydration, and a native-stack dependency is not yet merged when its dependent runs.";
+  for (const prompt of [planner, reviewer]) {
+    assert(prompt.includes(phases));
+    assert(
+      prompt.includes(
+        "requires a command to pass is proved by that exact command, unless it is a Final validation command.",
+      ),
+    );
+  }
+  assert(
+    reviewer.includes(
+      "a test the worker writes is not by itself proof of that control or of a golden or baseline change",
+    ),
+  );
+  // A required check missing from the known names is kept for the operator.
+  assert(
+    planner.includes(
+      "If a source requires a check that is not in checkNames, never drop the requirement: leave it for review to ask the operator to add it under ## Required checks.",
+    ),
+  );
+  assert(
+    reviewer.includes(
+      "A source-required check missing from the known CI check names is an unresolved source decision: ask the operator to add it under ## Required checks.",
+    ),
+  );
+  assert(
+    reviewer.includes(
+      'Known CI check names (jobs in the base\'s workflows and the Objective\'s Required checks):\n["required-check","quality"]',
+    ),
+  );
+});
+
+test("CI checks are chosen by index from known names, so an invented name cannot be expressed", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-check-index-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // The base's workflow defines job "lint"; the Objective lists the rest.
+  const target = createTarget(root, {
+    ".github/workflows/ci.yml":
+      "name: CI\non: pull_request\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n",
+  });
+  let indices = [];
+  const prompts = [];
+  let reviews = 0;
+  t.mock.method(Codex.prototype, "startThread", () => ({
+    async runStreamed(prompt, options) {
+      let response;
+      if (options.outputSchema.properties.contextId) {
+        prompts.push(prompt);
+        const choices = JSON.parse(
+          prompt.split("\nCompiler choices (JSON data):\n")[1],
+        );
+        assert.deepEqual(choices.checkNames, [
+          { checkIndex: 0, name: "required-check" },
+          { checkIndex: 1, name: "quality" },
+          { checkIndex: 2, name: "lint" },
+        ]);
+        const gate =
+          options.outputSchema.properties.requiredPreIntegrationChecks.items;
+        assert.deepEqual(gate.required, ["checkIndex", "sourceIndex"]);
+        assert.equal(gate.properties.checkIndex.maximum, 2);
+        response = {
+          contextId: choices.contextId,
+          requiredPreIntegrationChecks: [
+            { checkIndex: indices.shift(), sourceIndex: 0 },
+          ],
+          items: [item({ coverage: [entry()] })],
+        };
+      } else {
+        reviews++;
+        response = {
+          packetId: options.outputSchema.properties.packetId.enum[0],
+          findings: [],
+        };
+      }
+      return {
+        events: (async function* () {
+          yield {
+            type: "item.completed",
+            item: {
+              id: "scripted",
+              type: "agent_message",
+              text: JSON.stringify(response),
+            },
+          };
+          yield { type: "turn.completed", usage: null };
+        })(),
+      };
+    },
+  }));
+  const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
+  const model = new CodexPlanningModel(target.checkout, selection, selection);
+  // A provider that ignores the schema's bound is refused, and that spends
+  // the revision instead of producing a clean plan.
+  indices = [7, 2];
+  const candidate = await compilePlan(
+    17,
+    body,
+    target.baseSha,
+    target.checkout,
+    model,
+  );
+  assert.equal(prompts.length, 2);
+  assert.equal(reviews, 1);
+  assert.equal(candidate.review.revisions, 1);
+  assert.equal(candidate.review.status, "clean");
+  assert.equal(
+    candidate.graph.requiredPreIntegrationChecks[0].checkName,
+    "lint",
+  );
+  assert(prompts[1].includes(JSON.stringify("Factory check").slice(1, -1)));
+  assert.match(prompts[1], /Planner checkIndex is invalid/);
+  verifyPlanCandidate(candidate, 17, body, target.baseSha, target.checkout);
+
+  // Admission re-checks a canonical graph's names against the same sources.
+  const tampered = structuredClone(candidate);
+  tampered.graph.requiredPreIntegrationChecks[0].checkName = "Lint";
+  const hash = (value) =>
+    createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  tampered.graphDigest = hash(tampered.graph);
+  tampered.packetDigest = hash(
+    planReviewPacket(
+      body,
+      target.baseSha,
+      tampered.sources,
+      tampered.graph,
+      target.checkout,
+    ),
+  );
+  tampered.reviewDigest = hash({
+    packetDigest: tampered.packetDigest,
+    revisions: tampered.review.revisions,
+    findings: tampered.review.findings,
+  });
+  assert.throws(
+    () =>
+      verifyPlanCandidate(
+        tampered,
+        17,
+        body,
+        target.baseSha,
+        target.checkout,
+        undefined,
+        true,
+      ),
+    /"Lint" is not a job/,
+  );
+
+  // Refused twice: the plan fails and is never reviewed.
+  indices = [7, 7];
+  prompts.length = 0;
+  reviews = 0;
+  await assert.rejects(
+    compilePlan(17, body, target.baseSha, target.checkout, model),
+    (error) =>
+      error instanceof PlanValidationError &&
+      /checkIndex is invalid/.test(error.message),
+  );
+  assert.equal(prompts.length, 2);
+  assert.equal(reviews, 0);
+});
+
+test("with no known check names the planner cannot create a gate or CI proof", () => {
+  const input = request({ checkNames: [] });
+  const wire = compilerWire(input, compilerCitationChoices(input.sources));
+  const conforms = new Ajv({ strict: false, allErrors: true }).compile(
+    wire.schema,
+  );
+  assert.equal(wire.schema.properties.requiredPreIntegrationChecks.maxItems, 0);
+  assert.deepEqual(wire.data.checkNames, []);
+  const value = {
+    contextId: wire.data.contextId,
+    requiredPreIntegrationChecks: [{ checkIndex: 0, sourceIndex: 0 }],
+    items: [item({ coverage: [entry()] })],
+  };
+  assert.equal(conforms(value), false);
+  assert.throws(
+    () => wire.decode(value),
+    (error) =>
+      error instanceof PlannerChoiceError &&
+      /checkIndex is invalid/.test(error.message),
+  );
+  const qa = {
+    contextId: wire.data.contextId,
+    requiredPreIntegrationChecks: [],
+    items: [
+      item({ id: "dependency" }),
+      item({
+        kind: "qa",
+        id: "qa",
+        dependencies: ["dependency"],
+        coverage: [entry({ kind: "integrated-ci", checkIndex: 0 })],
+      }),
+    ],
+  };
+  for (const field of [
+    "ownedPaths",
+    "sourceAssets",
+    "expectedOutputRoles",
+    "requiredLfsRoles",
+    "minimumAssetSets",
+  ])
+    delete qa.items[1][field];
+  assert.equal(conforms(qa), false);
+  assert.throws(() => wire.decode(qa), /proof form is not supported/);
 });
 
 test("actual compiler, canonical review and bounded diagnosis receive complete CI evidence and controller ceilings", async (t) => {
@@ -1585,7 +1866,9 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
           contextId: choices.contextId,
           requiredPreIntegrationChecks: [
             {
-              checkName: "quality",
+              checkIndex: choices.checkNames.findIndex(
+                (entry) => entry.name === "quality",
+              ),
               sourceIndex: choices.sources.findIndex(
                 (source) => source.path === "AGENTS.md",
               ),

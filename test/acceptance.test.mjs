@@ -95,7 +95,7 @@ test("preview blocks invented and mismatched commands, and admits exact pinned b
     },
     async (_root, target) => {
       const body =
-        "# Objective\n\n## Acceptance\n- result.txt exists\n- `test -s result.txt`\n\n## Final validation\n- `npm test`\n";
+        "# Objective\n\n## Acceptance\n- result.txt exists\n\n## Validation\n- `test -s result.txt`\n\n## Final validation\n- `npm test`\n";
       let graph = item(target.baseSha, [
         {
           command: "test -s result.txt",

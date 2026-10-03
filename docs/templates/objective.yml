@@ -33,12 +33,16 @@ body:
       label: Constraints
       description: Non-goals and limits, such as no deployment or no new dependencies.
   - type: textarea
+    id: required-checks
+    attributes:
+      label: Required checks
+      description: Optional. Exact CI check names, one per bullet, that are not jobs in the repository's workflows.
+  - type: textarea
     id: planning-sources
     attributes:
       label: Planning sources
-      description: Keep the heading. List repository files, or path#Exact Heading for one section. Factory reads to the end of the issue, so keep this last.
+      description: Repository files, one per bullet, or path#Exact Heading for one section.
       value: |
-        ## Planning sources
         - README.md
     validations:
       required: true

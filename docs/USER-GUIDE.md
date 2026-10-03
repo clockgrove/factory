@@ -189,8 +189,9 @@ When an apparent missing contract already exists elsewhere in the authorized pin
 
 Create the issue in the repository that owns the work. Start from the [one-page template](templates/objective.md), or copy the [issue form](templates/objective.yml) into the target's `.github/ISSUE_TEMPLATE/`.
 
-- **Acceptance** is what the plan must deliver and what review checks. Write one observable fact per bullet. If a constraint must be verified, such as "the Git tree stays clean", put it here.
+- **Acceptance** is what the plan must deliver and what review checks. Write one observable fact per bullet. A bullet that is exactly one command line means that command must pass. If a constraint must be verified, such as "the Git tree stays clean", put it here.
 - **Final validation** lists exact commands that must pass on the integrated result. A vague "run the tests" is not a command.
+- **Required checks** (optional) lists exact CI check names that are not jobs in the target's workflows. A plan can name a CI check only if it is a pull-request workflow job at the base or listed here. Checks reported by external apps, such as codecov, must be listed here.
 - **Planning sources** lists files, or `path#Exact Heading` sections, that workers need. Workers receive those sections verbatim and also have the full checkout. Keep the list short: every source costs tokens in planning and review.
 
 Keep the first Objective small, for example a `healthcheck` script that calls the existing test command.

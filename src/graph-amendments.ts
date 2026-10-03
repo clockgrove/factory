@@ -10,7 +10,9 @@ import { planningPrerequisites } from "./objective-prerequisites.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
+  commandAuthority,
   compileObjective,
+  finalObjectiveCommands,
   hydrateWorkerInputSources,
   objectiveCriteria,
   planningSources,
@@ -524,6 +526,8 @@ export function validateAmendment(
     graph,
     sources,
     coverageObligations(body, objectiveCriteria(body)),
+    finalObjectiveCommands(body),
+    commandAuthority(graph, sources, body, state.baseSha, config.checkout),
   );
   if (!graph.coverage)
     throw new Error("Amendment requires retained acceptance coverage");

@@ -278,6 +278,8 @@ export interface PlanningRequest<T> {
   /** Actual decoded rejected graph; null when no canonical graph was produced. */
   rejectedGraph?: WorkGraph | null;
   coverageObligations?: CoverageObligation[];
+  /** Check names from the base's workflows and the Objective's Required checks. */
+  checkNames?: string[];
   objective: string;
   baseSha: string;
   sources: { path: string; content: string; heading?: string }[];
@@ -313,6 +315,8 @@ export interface PlanReviewRequest {
   graph: WorkGraph;
   commands: PlanCommandAuthorization[];
   finalCommands: string[];
+  /** Check names from the base's workflows and the Objective's Required checks. */
+  checkNames?: string[];
   invocation?: ModelInvocationContext;
 }
 

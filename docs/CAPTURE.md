@@ -1,6 +1,6 @@
 # Capture, analysis and export
 
-Factory records metadata for every model invocation and can also keep the prompts and responses. Everything stays local unless you export it.
+Factory records metadata for every model invocation and can also keep prompts and responses. Everything stays local unless you export it.
 
 ## Turn on content capture
 
@@ -27,12 +27,12 @@ Or set it in the installation config, beside `repository` and `execution`:
 
 Each metadata record ([`InteractionMetadata`](https://github.com/clockgrove/factory/blob/main/src/capture.ts)) carries its identities (record, invocation, provider attempt, Objective, run, item, attempt), configured and reported model, and source, config, prompt and schema digests. Content status is `captured`, `capture-disabled`, `not-exposed` or `unavailable`; `redacted` and `truncated` are separate flags.
 
-Usage records keep allowlisted token counters. Missing counters stay unknown, never zero. Use the latest cumulative snapshot per attempt; provider-call and model-breakdown records are alternate views, not extra totals. Claude's USD figure is a provider estimate, not a bill.
+Usage records keep allowlisted token counters; missing counters stay unknown, never zero. Use the latest cumulative snapshot per attempt; other usage records are alternate views, not extra totals. Claude's USD figure is an estimate, not a bill.
 
 ## Privacy and retention
 
 - Metadata lives in the private Objective diagnostics. Content lives under the private state root's `captures/` directory, outside the target checkout, as NDJSON files with mode `0600` in `0700` directories. Readers reject anything that is not a private regular file.
-- Configured secrets and known token patterns are redacted best-effort. Redaction does not make private source safe to publish; share sanitized summaries in public issues.
+- Secrets and known token patterns are redacted best-effort. That does not make private source safe to publish.
 - Nothing is pruned automatically. You own retention; deleting capture files never changes a run.
 - A capture failure shows in diagnostics. It never accepts, rejects or retries work.
 
@@ -58,7 +58,7 @@ factory analyze --objective 123 --filter phase=implementation --json
 
 - Grouping defaults to `phase`. Repeat `--group-by` to combine fields.
 - `--filter FIELD=VALUE` matches exactly; `reportedModel=null` selects invocations with no reported model.
-- Fields: `repository`, `objective`, `runId`, `itemId`, `attemptId`, `scopeId`, `invocationId`, `providerAttempt`, `phase`, `provider`, `model`, `reportedModel`, `reasoningEffort`, `adapter`, `factoryVersion`, `promptDigest`, `schemaDigest`, `sourceDigest`, `configDigest`.
+- Fields are the metadata identities (`runId`, `itemId`, `invocationId`, `phase`, `provider`, `model`, `reportedModel`, `adapter` and so on) and the four digests. An unknown field is refused with the full list.
 - Planning and repair diagnosis use phase `diagnosis`; graph compilation uses `compile`.
 
 Reading the report:
@@ -81,7 +81,7 @@ factory analyze --objective 123 --filter runId=RUN_ID --gantt \
 `--gantt` needs `--output` and excludes `--json`.
 
 - Rows name their Objective, run, item and attempt; provider rows add phase and invocation.
-- **Blue bars** span one provider invocation from request to terminal outcome; one invocation can hold many model and tool calls. An incomplete invocation shows only its observed points.
+- **Blue bars** span one provider invocation, which can hold many model and tool calls. Incomplete invocations show only observed points.
 - **Amber bars** are controller operations (planning, validation, review, media, GitHub delivery). Their start is derived from the reported duration.
 - Other observations are dots.
 - The axis is elapsed wall-clock seconds. Rows overlap, so never sum them.
@@ -89,11 +89,22 @@ factory analyze --objective 123 --filter runId=RUN_ID --gantt \
 
 ## Export to OpenTelemetry
 
-`factory export-captures` sends selected captures as OTLP/HTTP traces to an HTTPS `--endpoint` you choose. Request headers, such as credentials, come from `OTEL_EXPORTER_OTLP_HEADERS` or `OTEL_EXPORTER_OTLP_TRACES_HEADERS` in the controller environment. The exporter's final flags are still changing; `factory --help` shows the current form. Nothing is exported in the background. Pick a destination your data policy allows; metadata can be sensitive too.
+`factory export-captures` sends selected captures as OTLP/HTTP JSON traces to a collector you choose, never in the background. Pick a destination your data policy allows; metadata is sensitive too.
 
-- Run the command without `--send` to get a preview. Then send exactly what you previewed with `--send --authorize PREVIEW_DIGEST`. Any change to the selection, endpoint or payload invalidates the digest.
-- `--content metadata` reads no captured text. `retained` adds the already-redacted text.
-- `--run ID` and `--invocation ID` narrow the selection. Both can repeat, and they intersect. An unknown ID or an empty selection is refused.
-- Each invocation attempt becomes one root span with stable IDs. Usage and cost estimates are span metadata, not billing fields.
-- One send is one HTTP request: 30-second timeout, no redirects, no retries, 4 MiB response cap. Anything other than an `accepted` receipt exits non-zero. Factory discards the response text because it can echo secrets.
-- A repeat reuses the same span IDs and the destination may duplicate them. Check the destination before you resend.
+```sh
+factory export-captures --objective 123 \
+  --endpoint https://collector.example.com --content metadata
+factory export-captures --objective 123 \
+  --endpoint https://collector.example.com --content metadata \
+  --send --authorize PREVIEW_DIGEST
+```
+
+- **Endpoint:** pass the OTLP base URL; Factory appends `/v1/traces`. It must be HTTPS with no credentials, query or fragment.
+- **Headers:** optional, from `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, else `OTEL_EXPORTER_OTLP_HEADERS` (comma-separated, URL-encoded `key=value`). Factory never prints them and refuses a malformed value without echoing it.
+- **Preview first:** without `--send` the command only previews the endpoint, identities, content status and payload size. `--send` needs `--authorize` with that preview's digest; any change invalidates it.
+- **Content:** `metadata` reads no captured text. `retained` adds the already-redacted text.
+- **Selection:** `--run ID` and `--invocation ID` repeat and intersect. An unknown ID or empty selection is refused.
+
+Each invocation attempt becomes one root span with stable trace and span IDs. Spans share `session.id` (`OWNER/REPO#OBJECTIVE`). `factory.metadata` holds identities, models, outcomes and usage; in `retained` mode, `factory.input` and `factory.output` hold the request and response. Usage and cost estimates stay in metadata, not billing attributes.
+
+One send is one HTTP request: 30-second timeout, no redirects, no retries, 4 MiB response cap. Anything but an `accepted` receipt exits non-zero; response text is discarded because it can echo secrets. A re-send reuses the same IDs, but the destination may still duplicate records, so check it first.

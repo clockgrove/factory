@@ -9,7 +9,7 @@ All are development candidates. Credential-free tests cover them, but no live ru
 
 ## Before you start
 
-Installing Factory grants no provider or spending authority. First approve the source that leaves the host (the pinned base plus declared and selected assets), the provider account, model, data handling and spending limit. Then edit the `execution` object in your installation config and use the normal `factory` commands.
+Installing Factory grants no provider or spending authority. First approve the source that leaves the host (the pinned base plus declared and selected assets), the provider account, model, data handling and spending limit. Then edit the `execution` object in your installation config and, for managed agents and Daytona, use the normal `factory` commands.
 
 ## What every provider shares
 

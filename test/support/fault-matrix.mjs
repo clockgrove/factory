@@ -6,12 +6,29 @@
 // Factory's own state. Nothing here names Factory internals, so the matrix
 // survives the recovery redesign.
 import assert from "node:assert/strict";
-import { appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { availableParallelism } from "node:os";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { describe, test } from "node:test";
 import { faults } from "./github-http-fake.mjs";
 import { OBJECTIVE, branch, marker, runScenario } from "./fault-harness.mjs";
+
+/**
+ * Scenarios run concurrently within one test file: every available core by
+ * default, or FACTORY_FAULT_CONCURRENCY to cap a shared machine.
+ */
+export function scenarioConcurrency() {
+  const configured = Number(process.env.FACTORY_FAULT_CONCURRENCY);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : availableParallelism();
+}
 
 const KINDS = ["crash-before", "crash-after", "lost", "unavailable"];
 const PAID = new Set(["crash-after", "lost"]);
@@ -65,6 +82,8 @@ export function deriveCases(reference) {
       for (const kind of KINDS)
         cases.push({
           name: `${kind} at ${entry.endpoint} #${occurrence}`,
+          group: "mutations",
+          boundaryName: `${entry.endpoint} #${occurrence}`,
           boundary: { kind: "http", endpoint: entry.endpoint, occurrence },
           http: [httpRule(entry.endpoint, occurrence, kind)],
         });
@@ -73,6 +92,8 @@ export function deriveCases(reference) {
       for (const kind of ["unavailable", "reset"])
         cases.push({
           name: `${kind} at ${entry.endpoint} #1`,
+          group: "reads",
+          boundaryName: `${entry.endpoint} #1`,
           boundary: { kind: "http", endpoint: entry.endpoint, occurrence: 1 },
           http: [httpRule(entry.endpoint, 1, kind)],
         });
@@ -86,6 +107,8 @@ export function deriveCases(reference) {
     for (const kind of KINDS)
       cases.push({
         name: `${kind} at ${key} #${occurrence}`,
+        group: "calls",
+        boundaryName: `${key} #${occurrence}`,
         boundary: {
           kind: "call",
           target: call.target,
@@ -235,9 +258,19 @@ export async function assertEndState(result, { foreignIssues = 0 } = {}) {
 
 /** No run stopped for an operator: only injected crashes interrupt it. */
 export function assertNoOperatorStop(result) {
+  // Name each stopped Work Item's recorded failure: a needs-decision summary
+  // alone does not say why the run stopped.
+  const failures = (run) =>
+    Object.entries(run.work ?? {})
+      .filter(([, work]) => work.failure)
+      .map(([id, work]) => ` [${id}: ${work.failure.trim()}]`)
+      .join("");
   const stops = result.runs
     .filter((run) => !["complete", "crashed"].includes(run.outcome))
-    .map((run) => `${run.outcome}: ${run.message ?? run.stderr ?? ""}`);
+    .map(
+      (run) =>
+        `${run.outcome}: ${run.message ?? run.stderr ?? ""}${failures(run)}`,
+    );
   assert.deepEqual(stops, [], `operator stops: ${stops.join(" | ")}`);
 }
 
@@ -325,8 +358,10 @@ function report(name, value) {
 /**
  * Declare one scenario as one test per check over a single run. Every test
  * first requires that each injected fault fired. A known failure is inverted:
- * it passes while the bug reproduces and fails once it is fixed, so its entry
- * must then be removed from the known failures.
+ * it passes only while its check fails with a message matching its
+ * diagnosis pattern, fails naming the reason when the check fails another
+ * way, and fails once the bug is fixed so its entry must be removed. A racy
+ * known failure may also pass.
  */
 export function declareScenario(name, run, options, known) {
   const { checks = ["end", "stop", "budget"], ...context } = options;
@@ -343,26 +378,22 @@ export function declareScenario(name, run, options, known) {
       const value = await once();
       assertFaultsFired(value);
       if (!diagnosis) return CHECKS[check].assert(value, context);
-      // A racy known failure reproduces only when Factory's own scheduling
-      // lines up with the fault; it must pass or fail for its named reason.
-      if (typeof diagnosis === "object") {
-        try {
-          await CHECKS[check].assert(value, context);
-        } catch (error) {
-          if (!diagnosis.pattern.test(String(error?.message ?? error)))
-            throw error;
-          t.diagnostic(`racy known failure: ${diagnosis.diagnosis}`);
-        }
-        return;
-      }
       try {
         await CHECKS[check].assert(value, context);
-      } catch {
-        t.diagnostic(`known failure: ${diagnosis}`);
+      } catch (error) {
+        const message = String(error?.message ?? error);
+        if (!diagnosis.pattern.test(message))
+          assert.fail(
+            `Known failure ${diagnosis.key} failed for another reason (expected ${diagnosis.pattern}): ${message.slice(0, 4000)}`,
+          );
+        t.diagnostic(
+          `${diagnosis.racy ? "racy " : ""}known failure ${diagnosis.key}: ${diagnosis.text}`,
+        );
         return;
       }
+      if (diagnosis.racy) return;
       assert.fail(
-        `Known failure no longer reproduces; remove it from test/support/fault-known.mjs: ${diagnosis}`,
+        `Known failure ${diagnosis.key} no longer reproduces; remove it from test/support/fault-known.mjs: ${diagnosis.text}`,
       );
     });
   }
@@ -374,19 +405,79 @@ const checksFor = (testCase) =>
     ? ["end", "stop", "budget", "plan"]
     : ["end", "stop", "budget"];
 
+const SNAPSHOT = join(import.meta.dirname, "fault-boundaries.json");
+
+/** Derived boundary names by group, sorted so request interleaving cannot reorder them. */
+export function boundarySnapshot(cases) {
+  const groups = { mutations: new Set(), reads: new Set(), calls: new Set() };
+  for (const testCase of cases)
+    groups[testCase.group].add(testCase.boundaryName);
+  return Object.fromEntries(
+    Object.entries(groups).map(([group, names]) => [group, [...names].sort()]),
+  );
+}
+
 /**
- * Declare part `part` of `parts` of the matrix for one delivery strategy
- * (cases alternate between parts so CI shards balance).
+ * Compare the derived boundaries with the committed snapshot. A boundary added
+ * or removed changes what the matrix tests, so it fails until the snapshot is
+ * regenerated deliberately (`npm run test:fault-boundaries`, which sets
+ * FACTORY_UPDATE_FAULT_BOUNDARIES=1).
+ */
+export function checkBoundarySnapshot(delivery, snapshot) {
+  const committed = existsSync(SNAPSHOT)
+    ? JSON.parse(readFileSync(SNAPSHOT, "utf8"))
+    : {};
+  if (process.env.FACTORY_UPDATE_FAULT_BOUNDARIES === "1") {
+    // Read-modify-write per delivery; the update script runs one file at a time.
+    committed[delivery] = snapshot;
+    const ordered = Object.fromEntries(
+      Object.keys(committed)
+        .sort()
+        .map((key) => [key, committed[key]]),
+    );
+    writeFileSync(SNAPSHOT, `${JSON.stringify(ordered, null, 2)}\n`);
+    return;
+  }
+  const expected = committed[delivery] ?? {};
+  const differences = [];
+  for (const group of Object.keys(snapshot)) {
+    const now = new Set(snapshot[group]);
+    const before = new Set(expected[group] ?? []);
+    for (const name of now)
+      if (!before.has(name)) differences.push(`+ ${group}: ${name}`);
+    for (const name of before)
+      if (!now.has(name)) differences.push(`- ${group}: ${name}`);
+  }
+  if (differences.length)
+    throw new Error(
+      `Fault boundaries for ${delivery} delivery differ from test/support/fault-boundaries.json: boundary added or removed; update the snapshot deliberately with \`npm run test:fault-boundaries\` and review the diff.\n${differences.join("\n")}`,
+    );
+}
+
+/** Stable part (1-based) for a case, independent of every other case. */
+export function partOf(caseName, parts) {
+  const hash = createHash("sha256").update(caseName).digest();
+  return (hash.readUInt32BE(0) % parts) + 1;
+}
+
+/**
+ * Declare part `part` of `parts` of the matrix for one delivery strategy.
+ * Each case goes to the part given by a hash of its name, `<kind> at
+ * <boundary>`, so slow cases (crash-after, closure) spread across files and
+ * CI shards, and adding or removing a boundary moves no other case. Hashing
+ * the boundary alone keeps a boundary's kinds together but, with about 45
+ * boundaries, splits 62/90; hashing the case splits about evenly.
  */
 export async function defineMatrix(delivery, known, part = 1, parts = 2) {
   const reference = await referenceRun(delivery);
   const cases = deriveCases(reference);
+  checkBoundarySnapshot(delivery, boundarySnapshot(cases));
   checkKnown(
     known,
     cases.flatMap((testCase) => testNames(testCase.name, checksFor(testCase))),
   );
   describe(`fault matrix: ${delivery} delivery (${part}/${parts})`, {
-    concurrency: availableParallelism(),
+    concurrency: scenarioConcurrency(),
   }, () => {
     if (part === 1)
       declareScenario(
@@ -396,7 +487,7 @@ export async function defineMatrix(delivery, known, part = 1, parts = 2) {
         {},
       );
     for (const [index, testCase] of cases.entries()) {
-      if (index % parts !== part - 1) continue;
+      if (partOf(testCase.name, parts) !== part) continue;
       declareScenario(
         testCase.name,
         () =>
@@ -411,15 +502,4 @@ export async function defineMatrix(delivery, known, part = 1, parts = 2) {
       );
     }
   });
-}
-
-/** Expand {diagnosis: [test names]} into {test name: diagnosis}. */
-export function todos(groups) {
-  const map = {};
-  for (const [diagnosis, names] of Object.entries(groups))
-    for (const name of names) {
-      if (map[name]) throw new Error(`Duplicate known failure: ${name}`);
-      map[name] = diagnosis;
-    }
-  return map;
 }

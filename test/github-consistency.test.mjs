@@ -1,4 +1,3 @@
-import { availableParallelism } from "node:os";
 import { describe } from "node:test";
 import { faults } from "./support/github-http-fake.mjs";
 import { runScenario } from "./support/fault-harness.mjs";
@@ -7,6 +6,7 @@ import {
   checkKnown,
   declareScenario,
   referenceRun,
+  scenarioConcurrency,
   testNames,
 } from "./support/fault-matrix.mjs";
 
@@ -227,7 +227,7 @@ checkKnown(
 await Promise.all(BOTH.map((delivery) => referenceRun(delivery)));
 
 describe("GitHub consistency, rate limits and other actors", {
-  concurrency: availableParallelism(),
+  concurrency: scenarioConcurrency(),
 }, () => {
   for (const [index, scenario] of scenarios.entries())
     for (const delivery of scenario.deliveries)

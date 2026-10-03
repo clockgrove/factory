@@ -4,6 +4,19 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
+Candidate v0.1.74 adds the unified explicit permanent-abandonment surface in
+[#499](https://github.com/clockgrove/factory/issues/499) for stopped uncertain
+read-only reviews or synchronous initial/amendment GitHub graph projection.
+Controller-derived classification shares one request and stored disposition;
+unknown outcomes, every Work Item’s original status, history, accounting and
+consumed limits remain preserved. Owned cessation, exact identity binding and
+refusals for sealed acceptance, live/unsupported resources and other uncertain
+effects remain required. The disposition submits no provider work, remote
+mutation, cleanup, replay or activation. Its
+[distribution gate #505](https://github.com/clockgrove/factory/issues/505) must pass
+before actual historical disposition and fresh live qualification. It grants no
+automatic worker/adopter recovery authority.
+
 Published [v0.1.73](https://github.com/clockgrove/factory/releases/tag/v0.1.73)
 supplies read-only intake status (#444 / PR #494), controller-derived guarded native
 hierarchy moves (#495 / PR #496), typed initial/amendment projection effects across
@@ -17,9 +30,11 @@ failed 703/704 producer, the later 710/710 producer's readiness fixture failure 
 the reviewed separation of durable evidence from owned temporary sandbox scratch.
 Neither failed producer is accepted; published predecessors remain unchanged.
 
-Distribution acceptance does not dispose the historical ambiguous projection.
-[#499](https://github.com/clockgrove/factory/issues/499) remains a separate pending
-product decision. Actual #444/#447 live outcomes remain with the complete corrected
+Distribution acceptance did not dispose the historical ambiguous projection.
+[#499](https://github.com/clockgrove/factory/issues/499) was pending at that
+checkpoint; its subsequently approved supported disposition now requires the
+v0.1.74 implementation and installed proof. Actual #444/#447 live outcomes remain
+with the complete corrected
 one-artifact [public gate #448](https://github.com/clockgrove/factory/issues/448),
 which must be accepted before [private #445](https://github.com/clockgrove/factory/issues/445)
 on the same artifact and demonstrated scope.
@@ -140,16 +155,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select v0.1.73. Run them after the [owning release gate](https://github.com/clockgrove/factory/issues/497) records independent public verification. Compare the tarball digest with the independently recorded prepublication value for that same version in that issue. Earlier published versions and their [exact artifact records](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) retain their historical scope.
+The commands below select v0.1.74. Run them after the [owning release gate](https://github.com/clockgrove/factory/issues/505) records independent public verification. Compare the tarball digest with the independently recorded prepublication value for that same version in that issue. Earlier published versions and their [exact artifact records](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) retain their historical scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.73
+codex plugin marketplace add clockgrove/factory --ref v0.1.74
 codex plugin add factory@clockgrove
-gh release download v0.1.73 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.73.tgz --pattern SHA256SUMS
+gh release download v0.1.74 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.74.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the independently recorded prepublication digest in the owning issue/PR or artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.73.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.74.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

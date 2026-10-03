@@ -2,6 +2,14 @@
 
 This file records public releases of Factory. See [BUILD-STATUS.md](docs/BUILD-STATUS.md) for development acceptance evidence.
 
+## 0.1.74 — 2026-10-02
+
+- Unify explicit permanent abandonment under one request and controller-derived effect classification for stopped uncertain read-only reviews and synchronous initial/amendment GitHub graph projection (#499).
+- Preserve original unknown outcomes, pending graph/review facts, each Work Item’s acceptance or failure status, evidence, accounting and spent allowances. Permanently fence continuation, intake and acceptance of the abandoned unaccepted Objective/run.
+- Retain verified stopped ownership and exact repository/run/configuration/source binding. Refuse live or unsupported resources, sealed acceptance and other uncertain external effects; abandonment submits no provider work, remote mutation, cleanup or replay.
+
+The [v0.1.74 distribution gate](https://github.com/clockgrove/factory/issues/505) owns independent source/guidance review, installed qualification and immutable public artifact verification. Actual historical disposition follows installed acceptance and fresh cessation/action binding; the complete [public service gate](https://github.com/clockgrove/factory/issues/448) must then precede separately owned [private readiness and watcher acceptance](https://github.com/clockgrove/factory/issues/445) on the same artifact. Earlier published artifacts and failed runs retain their original evidence and scope. This adds no automatic worker/adopter abandonment, retry or service authority.
+
 ## 0.1.73 — 2026-10-02
 
 - Keep intake status read-only so an idle status check does not wake observation and race the next authorized refill (#444 / PR #494).

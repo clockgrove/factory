@@ -245,10 +245,7 @@ test("explicit abandonment preserves the entire original snapshot except its ter
       at: cancelledAt,
       effect: "read-only-review",
     });
-    assert.throws(
-      () => checkServiceState(config, 1),
-      /permanently abandoned/,
-    );
+    assert.throws(() => checkServiceState(config, 1), /permanently abandoned/);
     assert.equal(cancelRequested, true);
     assert.ok(Number.isFinite(Date.parse(cancelledAt)));
     assert.equal(permanentAbandonment.cessation.unknownOwnedResources, false);

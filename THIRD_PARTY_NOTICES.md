@@ -49,8 +49,6 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `@koromix/koffi-win32-ia32` | 3.3.1 | MIT | `koffi@3.3.1/LICENSE.txt (same published package family)` |
 | `@koromix/koffi-win32-x64` | 3.3.1 | MIT | `koffi@3.3.1/LICENSE.txt (same published package family)` |
 | `@modelcontextprotocol/sdk` | 1.30.1 | MIT | `node_modules/@modelcontextprotocol/sdk/LICENSE` |
-| `ajv` | 8.20.0 | MIT | `node_modules/@modelcontextprotocol/sdk/node_modules/ajv/LICENSE` |
-| `json-schema-traverse` | 1.0.0 | MIT | `node_modules/@modelcontextprotocol/sdk/node_modules/json-schema-traverse/LICENSE` |
 | `@octokit/auth-token` | 6.0.0 | MIT | `node_modules/@octokit/auth-token/LICENSE` |
 | `@octokit/core` | 7.0.8 | MIT | `node_modules/@octokit/core/LICENSE` |
 | `@octokit/endpoint` | 11.0.5 | MIT | `node_modules/@octokit/endpoint/LICENSE` |
@@ -69,8 +67,6 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `@openai/codex-win32-arm64` | 0.156.0-win32-arm64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
 | `@openai/codex-win32-x64` | 0.156.0-win32-x64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
 | `@secretlint/config-loader` | 13.0.5 | MIT | `node_modules/@secretlint/config-loader/LICENSE` |
-| `ajv` | 8.20.0 | MIT | `node_modules/@secretlint/config-loader/node_modules/ajv/LICENSE` |
-| `json-schema-traverse` | 1.0.0 | MIT | `node_modules/@secretlint/config-loader/node_modules/json-schema-traverse/LICENSE` |
 | `@secretlint/core` | 13.0.5 | MIT | `node_modules/@secretlint/core/LICENSE` |
 | `@secretlint/formatter` | 13.0.5 | MIT | `node_modules/@secretlint/formatter/LICENSE` |
 | `chalk` | 5.6.2 | MIT | `node_modules/@secretlint/formatter/node_modules/chalk/license` |
@@ -90,9 +86,8 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `@textlint/resolver` | 15.8.0 | MIT | `node_modules/@textlint/resolver/LICENSE` |
 | `@textlint/types` | 15.8.0 | MIT | `node_modules/@textlint/types/LICENSE` |
 | `accepts` | 2.0.0 | MIT | `node_modules/accepts/LICENSE` |
+| `ajv` | 8.20.0 | MIT | `node_modules/ajv/LICENSE` |
 | `ajv-formats` | 3.0.1 | MIT | `node_modules/ajv-formats/LICENSE` |
-| `ajv` | 8.20.0 | MIT | `node_modules/ajv-formats/node_modules/ajv/LICENSE` |
-| `json-schema-traverse` | 1.0.0 | MIT | `node_modules/ajv-formats/node_modules/json-schema-traverse/LICENSE` |
 | `ansi-escapes` | 7.3.0 | MIT | `node_modules/ansi-escapes/license` |
 | `ansi-regex` | 6.3.0 | MIT | `node_modules/ansi-regex/license` |
 | `ansi-styles` | 4.3.0 | MIT | `node_modules/ansi-styles/license` |
@@ -157,6 +152,7 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `jose` | 6.2.12 | MIT | `node_modules/jose/LICENSE.md` |
 | `js-yaml` | 4.3.2 | MIT | `node_modules/js-yaml/LICENSE` |
 | `json-schema-to-ts` | 3.1.1 | MIT | `node_modules/json-schema-to-ts/LICENSE` |
+| `json-schema-traverse` | 1.0.0 | MIT | `node_modules/json-schema-traverse/LICENSE` |
 | `json-schema-typed` | 8.0.2 | BSD-2-Clause | `node_modules/json-schema-typed/LICENSE.md` |
 | `json-with-bigint` | 3.5.12 | MIT | `node_modules/json-with-bigint/LICENSE` |
 | `json5` | 2.2.3 | MIT | `node_modules/json5/LICENSE.md` |
@@ -212,9 +208,7 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `has-flag` | 5.0.1 | MIT | `node_modules/supports-hyperlinks/node_modules/has-flag/license` |
 | `supports-color` | 10.2.2 | MIT | `node_modules/supports-hyperlinks/node_modules/supports-color/license` |
 | `table` | 6.9.0 | BSD-3-Clause | `node_modules/table/LICENSE` |
-| `ajv` | 8.20.0 | MIT | `node_modules/table/node_modules/ajv/LICENSE` |
 | `ansi-regex` | 5.0.1 | MIT | `node_modules/table/node_modules/ansi-regex/license` |
-| `json-schema-traverse` | 1.0.0 | MIT | `node_modules/table/node_modules/json-schema-traverse/LICENSE` |
 | `strip-ansi` | 6.0.1 | MIT | `node_modules/table/node_modules/strip-ansi/license` |
 | `tar` | 7.5.22 | BlueOak-1.0.0 | `node_modules/tar/LICENSE.md` |
 | `terminal-link` | 5.0.0 | MIT | `node_modules/terminal-link/license` |
@@ -1283,62 +1277,6 @@ Source: `node_modules/@modelcontextprotocol/sdk/LICENSE`
 MIT License
 
 Copyright (c) 2024 Anthropic, PBC
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-````
-
-### ajv@8.20.0
-
-Source: `node_modules/@modelcontextprotocol/sdk/node_modules/ajv/LICENSE`
-
-````text
-The MIT License (MIT)
-
-Copyright (c) 2015-2021 Evgeny Poberezkin
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-````
-
-### json-schema-traverse@1.0.0
-
-Source: `node_modules/@modelcontextprotocol/sdk/node_modules/json-schema-traverse/LICENSE`
-
-````text
-MIT License
-
-Copyright (c) 2017 Evgeny Poberezkin
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -3274,62 +3212,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ````
 
-### ajv@8.20.0
-
-Source: `node_modules/@secretlint/config-loader/node_modules/ajv/LICENSE`
-
-````text
-The MIT License (MIT)
-
-Copyright (c) 2015-2021 Evgeny Poberezkin
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-````
-
-### json-schema-traverse@1.0.0
-
-Source: `node_modules/@secretlint/config-loader/node_modules/json-schema-traverse/LICENSE`
-
-````text
-MIT License
-
-Copyright (c) 2017 Evgeny Poberezkin
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-````
-
 ### @secretlint/core@13.0.5
 
 Source: `node_modules/@secretlint/core/LICENSE`
@@ -3808,37 +3690,9 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ````
 
-### ajv-formats@3.0.1
-
-Source: `node_modules/ajv-formats/LICENSE`
-
-````text
-MIT License
-
-Copyright (c) 2020 Evgeny Poberezkin
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-````
-
 ### ajv@8.20.0
 
-Source: `node_modules/ajv-formats/node_modules/ajv/LICENSE`
+Source: `node_modules/ajv/LICENSE`
 
 ````text
 The MIT License (MIT)
@@ -3864,14 +3718,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ````
 
-### json-schema-traverse@1.0.0
+### ajv-formats@3.0.1
 
-Source: `node_modules/ajv-formats/node_modules/json-schema-traverse/LICENSE`
+Source: `node_modules/ajv-formats/LICENSE`
 
 ````text
 MIT License
 
-Copyright (c) 2017 Evgeny Poberezkin
+Copyright (c) 2020 Evgeny Poberezkin
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -6388,6 +6242,34 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ````
 
+### json-schema-traverse@1.0.0
+
+Source: `node_modules/json-schema-traverse/LICENSE`
+
+````text
+MIT License
+
+Copyright (c) 2017 Evgeny Poberezkin
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+````
+
 ### json-schema-typed@8.0.2
 
 Source: `node_modules/json-schema-typed/LICENSE.md`
@@ -7927,34 +7809,6 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ````
 
-### ajv@8.20.0
-
-Source: `node_modules/table/node_modules/ajv/LICENSE`
-
-````text
-The MIT License (MIT)
-
-Copyright (c) 2015-2021 Evgeny Poberezkin
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-````
-
 ### ansi-regex@5.0.1
 
 Source: `node_modules/table/node_modules/ansi-regex/license`
@@ -7969,34 +7823,6 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-````
-
-### json-schema-traverse@1.0.0
-
-Source: `node_modules/table/node_modules/json-schema-traverse/LICENSE`
-
-````text
-MIT License
-
-Copyright (c) 2017 Evgeny Poberezkin
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 ````
 
 ### strip-ansi@6.0.1

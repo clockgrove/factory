@@ -59,12 +59,7 @@ import {
   resolveReviewReferences,
   reviewPacket,
 } from "./review-evidence.js";
-import type {
-  AcceptancePending,
-  FactoryState,
-  ReviewRejectionReason,
-  WorkState,
-} from "./state.js";
+import type { AcceptancePending, FactoryState, WorkState } from "./state.js";
 
 export interface CriterionEvidence {
   criterion: string;

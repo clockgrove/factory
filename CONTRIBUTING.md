@@ -24,15 +24,13 @@ Read [AGENTS.md](AGENTS.md) for contributor rules and the [architecture](docs/AR
 Before submitting a code change, run:
 
 ```sh
-npm run typecheck
 npm run lint
 npm run format:check
-npm test
-npm pack --dry-run
 npm run notices:check
+npm test
 ```
 
-`npm test` builds the project and runs deterministic tests, including temporary Git and LFS repositories. These checks do not require provider credentials or a live GitHub target. The [Quality workflow](.github/workflows/quality.yml) runs all of them on every pull request and on `main`. Use `npm run format` to apply formatting; [quality tooling](docs/QUALITY-TOOLING.md) explains the tooling configuration.
+`npm test` type-checks and builds the project with `tsc`, then runs deterministic tests, including temporary Git and LFS repositories. These checks do not require provider credentials or a live GitHub target. The [Quality workflow](.github/workflows/quality.yml) runs the same checks on every pull request and on `main`. `npm run lint` applies Biome's recommended rules plus the deviations in `biome.json`, then `scripts/check-ts-directives.mjs` refuses `@ts-nocheck`, `@ts-ignore`, triple-slash references and `@ts-expect-error` without a reason in `src`; `npm run format` applies formatting.
 
 During development, run an affected test directly after building:
 

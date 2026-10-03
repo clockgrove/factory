@@ -12,10 +12,9 @@ import type {
   PullRequestPublication,
   WorkItem,
 } from "./contracts.js";
-import { createHash } from "node:crypto";
-import { NativeStackDelivery } from "./delivery/native-stack.js";
+import type { NativeStackDelivery } from "./delivery/native-stack.js";
 import {
-  GitHubClient,
+  type GitHubClient,
   GitHubRequestError,
   sharedGitHubClient,
   timelineMergeCommit,

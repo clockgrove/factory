@@ -1,10 +1,6 @@
 import { createHash } from "node:crypto";
 import { analyzeInteractions } from "./analysis.js";
-import {
-  readInteractionContent,
-  readInteractionMetadata,
-  type InteractionMetadata,
-} from "./capture.js";
+import { readInteractionContent, readInteractionMetadata } from "./capture.js";
 import { readDiagnosticMetadata } from "./diagnostics.js";
 
 export interface CaptureExportOptions {

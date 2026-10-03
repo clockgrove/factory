@@ -443,7 +443,7 @@ export class ScriptedPlanningModel {
   }
 }
 
-class ScriptedHarness {
+export class ScriptedHarness {
   capabilities = {
     protocolVersion: 1,
     worktree: "factory-owned-read-write",

@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { eventually } from "./eventually.mjs";
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 /** A stateful credential-free infrastructure provider. Harness runs only in real child processes. */
 export class FixtureSandboxProvider {
@@ -209,17 +210,25 @@ export class FixtureSandboxProvider {
           } catch (error) {
             if (error.code !== "ESRCH") throw error;
           }
-          for (let i = 0; i < 100; i++) {
-            const statPath = `/proc/${harness.data.pid}/stat`;
-            if (
-              !existsSync(statPath) ||
-              /\) Z /.test(readFileSync(statPath, "utf8"))
-            )
-              break;
-            if (i === 99)
-              throw Error("Owned fixture child termination unresolved");
-            await new Promise((r) => setTimeout(r, 10));
-          }
+          // The process may exit between any two reads: a missing stat
+          // file is the same terminal evidence as a zombie.
+          await eventually(
+            () => {
+              try {
+                return /\) Z /.test(
+                  readFileSync(`/proc/${harness.data.pid}/stat`, "utf8"),
+                );
+              } catch (error) {
+                if (error.code === "ENOENT") return true;
+                throw error;
+              }
+            },
+            {
+              timeoutMs: 10_000,
+              intervalMs: 10,
+              message: "owned fixture child termination",
+            },
+          );
         }
       }
     }

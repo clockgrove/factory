@@ -156,4 +156,4 @@ The runner, scheduler, validator, state store and Git model are deliberately con
 
 ## History
 
-Factory was rebuilt in September 2026 from an earlier implementation. The rebuild plan, slice-by-slice acceptance evidence and archived-source provenance are preserved in [docs/history/](history/).
+Factory was rebuilt in September 2026 from an earlier implementation.

@@ -104,7 +104,7 @@ npm install --prefix /tmp/factory-candidate ./clockgrove-factory-0.1.30.tgz
 The current source candidate declares the Claude Agent SDK and GitHub Copilot
 SDK as exact optional package dependencies. A normal online npm installation
 installs them; `--omit=optional` leaves the default Codex path and generic
-package-root registration seam available. See [local agent harnesses](../../docs/AGENT-HARNESSES.md)
+package-root registration seam available. See [local agent harnesses](../AGENT-HARNESSES.md)
 for their exact versions/licenses, configuration shapes, capability/lifecycle
 contract, local-login behavior, security boundary, CLI examples, and
 `composeWithLocalHarness` package-root API. This candidate behavior is not a
@@ -113,7 +113,7 @@ own distribution evidence; earlier #55 Codex/Claude live evidence belongs only
 to that earlier exact artifact. #170's Copilot proof likewise belongs only to its
 separately identified artifact.
 
-The repository's [quality-tooling map](../../docs/QUALITY-TOOLING.md) records the
+The repository's [quality-tooling map](../QUALITY-TOOLING.md) records the
 pinned Biome release and the exact remaining compatibility checks.
 
 The current source requires `origin` to resolve to `OWNER/REPO` for both fetch
@@ -277,6 +277,6 @@ The same gate packs the current working tree, installs the tarball into an isola
 
 ## Project and provenance
 
-The [Factory Rebuild project](https://github.com/orgs/clockgrove/projects/2) tracks one acceptance issue per trunk slice and later capability branches. [The implementation plan](https://github.com/clockgrove/factory/blob/main/docs/IMPLEMENTATION-PLAN.md), [current build status](https://github.com/clockgrove/factory/blob/6d5822e5ffc3efb04570f319a19f0a45ff10e87d/docs/BUILD-STATUS.md), and [source provenance](https://github.com/clockgrove/factory/blob/main/docs/SOURCE-PROVENANCE.md) provide the complete public contributor handoff. The archived source is reference material; this repository is a clean implementation. Generic acceptance uses [public disposable fixtures](https://github.com/clockgrove/factory/tree/main/test/fixtures/disposable-target/) and requires no private adopter documents.
+The [Factory Rebuild project](https://github.com/orgs/clockgrove/projects/2) tracks one acceptance issue per trunk slice and later capability branches. [The implementation plan](https://github.com/clockgrove/factory/blob/56cca48bc1e5d1d48f63c0d18d825b38c4832e08/docs/IMPLEMENTATION-PLAN.md), [current build status](https://github.com/clockgrove/factory/blob/6d5822e5ffc3efb04570f319a19f0a45ff10e87d/docs/BUILD-STATUS.md), and [source provenance](https://github.com/clockgrove/factory/blob/56cca48bc1e5d1d48f63c0d18d825b38c4832e08/docs/SOURCE-PROVENANCE.md) provide the complete public contributor handoff. The archived source is reference material; this repository is a clean implementation. Generic acceptance uses [public disposable fixtures](https://github.com/clockgrove/factory/tree/main/test/fixtures/disposable-target/) and requires no private adopter documents.
 
 Contributions are welcome through focused issues and pull requests. See [CONTRIBUTING.md](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md), [GOVERNANCE.md](https://github.com/clockgrove/factory/blob/main/GOVERNANCE.md), and [SUPPORT.md](https://github.com/clockgrove/factory/blob/main/SUPPORT.md). Security concerns have a [private reporting route](https://github.com/clockgrove/factory/blob/main/SECURITY.md). Releases are recorded in [CHANGELOG.md](https://github.com/clockgrove/factory/blob/main/CHANGELOG.md). Licensed under [MIT](https://github.com/clockgrove/factory/blob/main/LICENSE); production dependency licenses are listed in [THIRD_PARTY_NOTICES.md](https://github.com/clockgrove/factory/blob/main/THIRD_PARTY_NOTICES.md).

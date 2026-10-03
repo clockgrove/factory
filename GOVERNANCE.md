@@ -6,7 +6,7 @@ Factory is maintained by Clockgrove in the open. Maintainers decide project scop
 
 Start with a focused issue or refer to an existing one. Explain the user-visible outcome, relevant boundaries, and how completion can be checked. Follow [CONTRIBUTING.md](CONTRIBUTING.md) when submitting a pull request.
 
-Maintainers review for correctness, scope, security, and alignment with the [implementation plan](docs/IMPLEMENTATION-PLAN.md). They may request revisions, defer work, or decline a proposal with a reason in the public discussion. Releases follow the [release procedure](docs/RELEASING.md).
+Maintainers review for correctness, scope, security, and alignment with the [architecture](docs/ARCHITECTURE.md). They may request revisions, defer work, or decline a proposal with a reason in the public discussion. Releases follow the [release procedure](docs/RELEASING.md).
 
 ## Target repository authority
 

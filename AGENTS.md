@@ -2,7 +2,7 @@
 
 These instructions are for human and agent contributors **building Factory in this repository**. End-user instructions for using the installed plugin belong in the [README](README.md) and packaged `director`/`setup` skills; contributors do not invoke Factory Director to build Factory.
 
-Read [the implementation plan](docs/IMPLEMENTATION-PLAN.md) and the relevant [project](https://github.com/orgs/clockgrove/projects/2) issue before changing code. Public files and issues are the complete contributor handoff; private adopter material is never required. Factory is a plugin for a target repository, not a hosted service. Never install, activate, or qualify it against a Factory source checkout. Use a disposable target built from [the public fixtures](test/fixtures/).
+Read [the architecture](docs/ARCHITECTURE.md) and the relevant [project](https://github.com/orgs/clockgrove/projects/2) issue before changing code. Public files and issues are the complete contributor handoff; private adopter material is never required. Factory is a plugin for a target repository, not a hosted service. Never install, activate, or qualify it against a Factory source checkout. Use a disposable target built from [the public fixtures](test/fixtures/).
 
 ## Priority
 
@@ -53,7 +53,7 @@ Label each issue `trunk`, `branch`, `leaf` or `release-gate` by delivery scope, 
 
 Define narrow contracts for the named variation points: PlanningModel, ExecutionDriver, AgentHarness, SandboxProvider, DeliveryStrategy, ContentStore, and GitHubGateway. Compose only implementations a feature needs. Do not abstract the state store, scheduler, lifecycle, validator, runner, Git model, or controller host.
 
-Use one atomic local snapshot for continuation state. Do not add operational event journals, recovery journals, custom state refs, provider ranking or fallback chains. [Diagnostics](docs/IMPLEMENTATION-PLAN.md#agent-readable-diagnostics) record correlated local observations but never reconstruct or control lifecycle state. The configured AgentHarness owns model and tool execution; media reenters ordinary validation and delivery.
+Use one atomic local snapshot for continuation state. Do not add operational event journals, recovery journals, custom state refs, provider ranking or fallback chains. [Diagnostics](docs/ARCHITECTURE.md#state-and-recovery) record correlated local observations but never reconstruct or control lifecycle state. The configured AgentHarness owns model and tool execution; media reenters ordinary validation and delivery.
 
 Do not invent Factory limits beneath dependencies or operator policy. A failed explicit-run Work Item stops with evidence, and a new attempt requires explicit retry or an admitted repair policy. Ambiguous external effects stay unknown until reconciled; never replay them or treat a later readback as proof of completion. Contributor authority is not inherited by Factory workers or adopter sessions.
 

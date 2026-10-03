@@ -31,7 +31,7 @@ test("PR gate retains every ordinary test for isolated source, tests and contrib
     "src/scheduler.ts",
     "src/analysis.ts",
     "test/analysis.test.mjs",
-    "docs/IMPLEMENTATION-PLAN.md",
+    "docs/ARCHITECTURE.md",
     "CONTRIBUTING.md",
   ])
     assert.deepEqual(selectPrTests([path], tests, packaged), ordinary, path);

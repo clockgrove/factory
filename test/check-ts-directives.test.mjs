@@ -36,6 +36,25 @@ test("directive check flags real comments only", () => {
   ]);
 });
 
+test("directive check matches directives in any letter case, as tsc does", () => {
+  const source = [
+    "// @TS-NOCHECK",
+    "// @Ts-NoCheck",
+    "/* @TS-IGNORE */",
+    "export const a = 1;",
+    "// @Ts-Expect-Error",
+    'export const b: number = "x";',
+    "// @TS-EXPECT-ERROR -- string is checked at runtime",
+    'export const c: number = "x";',
+  ].join("\n");
+  assert.deepEqual(directiveProblems("probe.ts", source), [
+    "1: @ts-nocheck is not allowed",
+    "2: @ts-nocheck is not allowed",
+    "3: @ts-ignore is not allowed",
+    "5: @ts-expect-error needs a reason",
+  ]);
+});
+
 test("directive check passes the repository's src", () => {
   const result = spawnSync(
     process.execPath,

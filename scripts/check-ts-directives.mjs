@@ -35,10 +35,12 @@ export function directiveProblems(fileName, text) {
     const body = comment.replace(/^\/\/+|^\/\*+|\*\/$/g, "");
     for (const part of body.split("\n")) {
       const match =
-        /^[\s*]*@ts-(nocheck|ignore|expect-error)\b[\s:-]*(.*)/.exec(part);
+        /^[\s*]*@ts-(nocheck|ignore|expect-error)\b[\s:-]*(.*)/i.exec(part);
       if (!match) continue;
-      if (match[1] !== "expect-error")
-        problems.push(`${line}: @ts-${match[1]} is not allowed`);
+      // tsc honours these directives in any letter case.
+      const name = match[1].toLowerCase();
+      if (name !== "expect-error")
+        problems.push(`${line}: @ts-${name} is not allowed`);
       else if (match[2].trim().length < 3)
         problems.push(`${line}: @ts-expect-error needs a reason`);
     }

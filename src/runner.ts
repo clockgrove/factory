@@ -511,8 +511,7 @@ function canHandoff(state: ContinuationState): boolean {
       ([id, work]) =>
         (work.status === "running" && !isReadinessWait(state, id)) ||
         (work.status === "published" &&
-          (!work.pullRequest || !work.changeRef || !work.treeSha)) ||
-        work.pendingEffect,
+          (!work.pullRequest || !work.changeRef || !work.treeSha)),
     )
   );
 }
@@ -672,10 +671,6 @@ async function cancelKnownWork(
     );
   if (state.schemaVersion === 4)
     for (const work of Object.values(state.work)) {
-      if (work.pendingEffect)
-        errors.push(
-          `Submitted ${work.pendingEffect} outcome is unknown; operator direction required`,
-        );
       if (
         work.step !== "execute" ||
         work.status === "done" ||
@@ -1137,7 +1132,7 @@ async function runObjectivePass(
         ...new Set(
           Object.values(state.work)
             .filter((work) => work.status === "running")
-            .map((work) => work.pendingEffect ?? work.step ?? "active"),
+            .map((work) => work.step ?? "active"),
         ),
       ];
       const phase = phases.join(",") || "waiting";
@@ -2451,7 +2446,6 @@ async function reconcileStoppedProjection(
     Object.keys(state.stackMerges ?? {}).length ||
     Object.values(state.work).some(
       (work) =>
-        work.pendingEffect ||
         work.execution ||
         work.status === "running" ||
         work.status === "published" ||
@@ -2531,8 +2525,7 @@ export async function cancelObjective(
     // Refuse unknown external effects before saving a cancellation request.
     if (
       continuation.schemaVersion === 4 &&
-      (hasPendingAmendmentEffect(continuation) ||
-        Object.values(continuation.work).some((work) => work.pendingEffect))
+      hasPendingAmendmentEffect(continuation)
     )
       throw new Error(
         "Submitted effect has unknown outcome; operator direction required",
@@ -2614,7 +2607,6 @@ export function retryWorkItem(
     if (!work || (work.status !== "failed" && work.status !== "cancelled"))
       throw new Error("Only a failed or cancelled Work Item can be retried");
     if (
-      work.pendingEffect ||
       (work.step === "execute" &&
         work.execution !== undefined &&
         work.recovery?.failure?.classification === "uncertain")

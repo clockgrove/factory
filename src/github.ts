@@ -34,6 +34,7 @@ type Pull = {
   number: number;
   state: string;
   merged: boolean;
+  merge_commit_sha?: string | null;
   head: { sha: string; ref: string };
   base: { ref: string };
 };
@@ -1017,6 +1018,23 @@ export class RealGitHubGateway implements GitHubGateway {
   ): Promise<MergeResult> {
     if (expectedHead !== identity.headSha)
       throw new Error("Merge expected head differs from PR identity");
+    // A merge whose response was lost has already happened: confirm it
+    // rather than merging again.
+    const current = await this.client.request<Pull>(
+      "GET",
+      this.route(`pulls/${identity.number}`),
+    );
+    if (current.merged) {
+      if (
+        current.head.sha !== expectedHead ||
+        current.head.ref !== identity.branch ||
+        !/^[a-f0-9]{40}$/.test(current.merge_commit_sha ?? "")
+      )
+        throw new Error(
+          `PR #${identity.number} was merged at a different head; operator direction required`,
+        );
+      return { integratedSha: current.merge_commit_sha! };
+    }
     const result = await this.client.request<{ merged: boolean; sha: string }>(
       "PUT",
       this.route(`pulls/${identity.number}/merge`),

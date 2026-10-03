@@ -12,9 +12,9 @@ import {
 } from "./support/integration-fixture.mjs";
 
 // Crash the controller at every external-effect boundary, restart it, and
-// require the same end state as an uninterrupted run: every Work Item issue,
-// one pull request and one merge per item, final validation, Objective closed.
-// A stop is reported with its message so the remaining fences stay visible.
+// require the same end state as an uninterrupted run of the same delivery
+// strategy: every Work Item issue, one PR per item, one merge per merge call,
+// final validation passed and the Objective closed. Nothing may duplicate.
 
 const run = promisify(execFile);
 const controller = join(import.meta.dirname, "support", "crash-controller.mjs");
@@ -50,12 +50,12 @@ function item(id, dependencies = []) {
   };
 }
 
-async function runCase(name, crashAt) {
+async function runCase(name, crashAt, delivery = "regular") {
   const root = mkdtempSync(join(tmpdir(), `factory-crash-${name}-`));
   try {
     const target = createTarget(root);
     const descriptor = {
-      config: factoryConfig(target.checkout, `example/crash-${name}`),
+      config: factoryConfig(target.checkout, `example/crash-${name}`, delivery),
       graph: {
         objective,
         baseSha: target.baseSha,
@@ -98,60 +98,53 @@ async function runCase(name, crashAt) {
   }
 }
 
-const reference = {
-  outcome: "completed",
-  finalValidation: true,
-  objectiveClosed: true,
-  issues: ["alpha", "beta"],
-  pullRequests: 2,
-  merged: 2,
-  mergeEvents: 2,
-  closedIssues: 3,
-};
-
-// Boundaries where a crash still stops for the operator. Phase A (#515)
-// removes these fences one class at a time; each removal deletes its row.
-const fenced = new Map([
-  ["github-publish-before", /submitted publication has unknown outcome/],
-  ["github-publish-after", /submitted publication has unknown outcome/],
-  ["github-merge-before", /submitted merge has unknown outcome/],
-  ["github-merge-after", /submitted merge has unknown outcome/],
-]);
-
-const boundaries = [
+const shared = [
   ["planning", "generateStructured"],
   ["planning", "reviewGraph"],
   ["github", "projectGraph"],
   ["planning", "reviewResult"],
   ["github", "publish"],
-  ["github", "merge"],
-  ["github", "closeIssue"],
-].flatMap(([target, method]) =>
-  ["before", "after"].map((when) => ({ target, method, when })),
-);
+];
+const deliveryCalls = {
+  regular: [["github", "merge"]],
+  "native-stack": [
+    ["github", "ensureNativeStack"],
+    ["github", "mergeNativeStack"],
+  ],
+};
 
-describe("crash recovery", { concurrency: 6 }, () => {
-  test("uninterrupted run is the reference", async () => {
-    assert.deepEqual(await runCase("reference"), reference);
-  });
+for (const delivery of ["regular", "native-stack"])
+  describe(
+    `crash recovery with ${delivery} delivery`,
+    { concurrency: 6 },
+    () => {
+      // An uninterrupted run of the same strategy is the expected end state.
+      const reference = runCase(`${delivery}-reference`, undefined, delivery);
+      test("uninterrupted run completes", async () => {
+        const result = await reference;
+        assert.equal(result.outcome, "completed", JSON.stringify(result));
+        assert.equal(result.finalValidation, true);
+        assert.equal(result.objectiveClosed, true);
+      });
 
-  for (const crashAt of boundaries) {
-    const name = `${crashAt.target}-${crashAt.method}-${crashAt.when}`;
-    test(`crash ${crashAt.when} ${crashAt.target}.${crashAt.method} then restart`, async () => {
-      const result = await runCase(name, crashAt);
-      if (process.env.FACTORY_CRASH_REPORT)
-        console.log(`CRASH-REPORT ${name} ${JSON.stringify(result)}`);
-      const expectedStop = fenced.get(name);
-      if (expectedStop) {
-        assert.equal(
-          result.outcome,
-          "stopped",
-          `${name} now converges; remove its fence row`,
-        );
-        assert.match(result.error, expectedStop);
-      } else {
-        assert.deepEqual(result, reference);
-      }
-    });
-  }
-});
+      const calls = [
+        ...shared,
+        ...deliveryCalls[delivery],
+        ["github", "closeIssue"],
+      ];
+      for (const [target, method] of calls)
+        for (const when of ["before", "after"]) {
+          const name = `${delivery}-${target}-${method}-${when}`;
+          test(`crash ${when} ${target}.${method} then restart`, async () => {
+            const result = await runCase(
+              name,
+              { target, method, when },
+              delivery,
+            );
+            if (process.env.FACTORY_CRASH_REPORT)
+              console.log(`CRASH-REPORT ${name} ${JSON.stringify(result)}`);
+            assert.deepEqual(result, await reference);
+          });
+        }
+    },
+  );

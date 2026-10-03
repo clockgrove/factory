@@ -78,7 +78,6 @@ export interface WorkState {
   graphRevisionDigest?: string;
   discovery?: import("./contracts.js").WorkDiscovery & { attempt: string };
   discoveryDisposition?: "proposed" | "accepted";
-  pendingEffect?: "publication" | "merge";
   qaChecks?: NamedCheckEvidence[];
   /** Exact-head successful named checks observed before submitting integration. */
   preIntegrationChecks?: NamedCheckEvidence[];
@@ -258,7 +257,6 @@ export function permanentAbandonmentEffect(
     return undefined;
   for (const work of Object.values(state.work))
     if (
-      work.pendingEffect ||
       work.status === "running" ||
       work.status === "published" ||
       (work.step === "deliver" && work.status !== "done") ||
@@ -684,11 +682,10 @@ export function parseFactoryState(
     if (!Number.isSafeInteger(projected[id]) || Number(projected[id]) <= 0)
       throw new Error(`Work Item ${id} has no projected Issue identity`);
     const item = record(work[id], `work.${id}`);
-    if (
-      item.pendingEffect !== undefined &&
-      !["publication", "merge"].includes(String(item.pendingEffect))
-    )
-      throw new Error(`Work Item ${id} has invalid pending effect`);
+    if (item.pendingEffect !== undefined)
+      throw new Error(
+        `Work Item ${id} has an unsupported pendingEffect field from an older Factory version`,
+      );
     if (!statuses.has(item.status as WorkStatus))
       throw new Error(`Work Item ${id} has an invalid status`);
     for (const field of ["phaseReservation", "requestedPhase"])

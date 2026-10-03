@@ -438,7 +438,6 @@ function validateAmendmentReplacement(
       (work) =>
         work.status === "running" ||
         work.status === "published" ||
-        work.pendingEffect ||
         (work.execution && work.status !== "done" && work.step === "execute") ||
         work.recovery?.failure?.classification === "uncertain",
     )
@@ -579,8 +578,7 @@ export function validateAmendment(
       (work.status !== "pending" ||
         work.attempt ||
         work.execution ||
-        work.pullRequest ||
-        work.pendingEffect)
+        work.pullRequest)
     )
       throw new Error(
         `Started/completed Work Item ${old.id} is immutable; add explicit successor or revalidation work`,
@@ -641,8 +639,7 @@ export async function applyPendingAmendment(args: {
     Object.values(state.work).some(
       (work) =>
         work.status === "running" ||
-        work.status === "published" ||
-        work.pendingEffect,
+        work.status === "published",
     ) ||
     state.coordinator?.processes?.length
   )

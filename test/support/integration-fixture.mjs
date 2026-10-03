@@ -804,6 +804,9 @@ export class StatefulGitHubFake {
 
   async merge(identity, expectedHead) {
     const pull = this.state().pullRequests[identity.number];
+    // Like the real gateway: an already merged PR at this head is confirmed.
+    if (pull?.state === "merged" && pull.headSha === expectedHead)
+      return { integratedSha: pull.integratedSha };
     if (!pull || pull.headSha !== expectedHead || pull.state !== "open")
       throw new Error("Pull request is not the expected open head");
     const integratedSha = this.integrate(pull.branch);
@@ -838,6 +841,15 @@ export class StatefulGitHubFake {
 
   async mergeNativeStack(layers, baseBranch, expectedStack, options) {
     if (options.cancelled()) throw new Error("Objective cancelled");
+    // Like the real gateway: a stack already merged at these heads is confirmed.
+    const pulls = layers.map((layer) => this.state().pullRequests[layer.pullRequest]);
+    if (
+      pulls.every(
+        (pull, index) =>
+          pull?.state === "merged" && pull.headSha === layers[index].headSha,
+      )
+    )
+      return pulls.at(-1).integratedSha;
     assert.equal(
       await this.ensureNativeStack(layers, baseBranch),
       expectedStack,

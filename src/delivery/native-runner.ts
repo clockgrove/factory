@@ -81,21 +81,6 @@ export async function runNativeGraph(args: {
   const branchFor = (id: string) => `factory/objective-${objective}/${id}`;
   const defaultBranch = await github.defaultBranch();
   const units = linearDeliveryUnits(state.graph);
-  for (const [id, work] of Object.entries(state.work))
-    if (
-      work.pendingEffect &&
-      !(
-        work.pendingEffect === "merge" &&
-        units.some(
-          (unit) =>
-            unit.items.at(-1)?.id === id &&
-            state.stackMerges?.[unit.id]?.expectedHeadSha === work.changeRef,
-        )
-      )
-    )
-      throw new Error(
-        `Work Item ${id} submitted ${work.pendingEffect} has unknown outcome; operator direction required`,
-      );
   let preparationFailure: unknown;
   // Admit independent roots whenever their predecessor units have integrated.
   // Publication stays ordered; a prepared change is replayed and validated
@@ -480,7 +465,8 @@ export async function runNativeGraph(args: {
       if (
         (work.step !== "execute" &&
           work.step !== "approve-asset" &&
-          work.step !== "validate") ||
+          work.step !== "validate" &&
+          work.step !== "deliver") ||
         (work.execution && !work.attempt)
       )
         throw new Error(
@@ -628,137 +614,144 @@ export async function runNativeGraph(args: {
           work.step = "validate";
           save();
         }
-        await phases.reserve(item.id, "validation");
-        if (work.baseSha !== itemBase) {
-          if (!work.changeRef || !work.baseSha || work.assets?.length)
-            throw new Error(
-              `Work Item ${item.id} cannot replay its prepared change`,
-            );
-          const replayed = await transplantIndependentChange(
-            config.checkout,
-            work.baseSha,
-            work.changeRef,
-            itemBase,
-          );
-          work.changeRef = replayed.changeRef;
-          work.treeSha = replayed.treeSha;
-          work.baseSha = itemBase;
-          save();
-        }
-        await phases.reserve(item.id, "validation");
-        work.step = "validate";
-        save();
-        work.validation = await validateWorkItem(
-          config.checkout,
-          join(root, "validation"),
-          item,
-          work.changeRef!,
-          work.treeSha!,
-          state.baseSha,
-          (entry) =>
-            args.diagnostics?.emit({
-              runId: state.runId,
-              itemId: item.id,
-              attemptId: work.attempt,
-              operation: "validation-command",
-              outcome: entry.passed ? "completed" : "failed",
-              durationMs: entry.durationMs,
-              metadata: {
-                commandIndex: entry.index,
-                exitCode: entry.exitCode,
-                treeSha: work.treeSha!,
-              },
-              detail: entry.output,
-            }),
-          (entry) =>
-            args.diagnostics?.emitStream(
-              {
-                runId: state.runId,
-                itemId: item.id,
-                attemptId: work.attempt,
-                operation: "validation-output",
-                outcome: "observed",
-                metadata: { commandIndex: entry.index, stream: entry.stream },
-              },
-              entry.output,
-              entry.final,
-            ),
-          itemBase,
-          validationLfsMembersForItem(
-            state,
-            item,
-            config.checkout,
-            work.changeRef!,
-          ),
-          args.contentStore,
-          workspacePackageAdditions(args.objectiveBody),
-        );
-        await phases.reserve(item.id, "review");
-        const reviewResult = () =>
-          reviewAcceptance({
-            model: args.planningModel,
-            checkout: config.checkout,
-            baseSha: itemBase,
-            commit: work.changeRef!,
-            evidence: work.validation!,
-            criteria: item.acceptance,
-            sources: planningSources(
-              args.objectiveBody,
-              state.baseSha,
+        // A restart after review resumes at publication, unless the change
+        // must be replayed onto a moved base and validated again.
+        const reviewed =
+          work.step === "deliver" &&
+          Boolean(work.validation) &&
+          work.baseSha === itemBase;
+        if (!reviewed) {
+          await phases.reserve(item.id, "validation");
+          if (work.baseSha !== itemBase) {
+            if (!work.changeRef || !work.baseSha || work.assets?.length)
+              throw new Error(
+                `Work Item ${item.id} cannot replay its prepared change`,
+              );
+            const replayed = await transplantIndependentChange(
               config.checkout,
-              state.additionalSources,
-            ),
-            decisions: work.acceptanceDecisions,
-            evidenceSources: workItemReviewEvidence({
-              state,
-              item,
-              checkout: config.checkout,
-              delivery: "native-stack",
-            }),
-            observations: workItemReviewObservations(
-              state,
-              item,
-              {
-                kind: "native-stack",
-                unitId: unit.id,
-                layerNumber: index + 1,
-                layerCount: unit.items.length,
-                predecessorItemId: unit.items[index - 1]?.id ?? null,
-              },
-              work.assets?.find((set) => set.id === work.selectedAssetSet),
-            ),
-            invocation: {
-              invocationId: randomUUID(),
-              phase: "result-review",
-              ordinal: 0,
-              observe: args.diagnostics?.modelObserver({
-                scopeId: work.attempt!,
+              work.baseSha,
+              work.changeRef,
+              itemBase,
+            );
+            work.changeRef = replayed.changeRef;
+            work.treeSha = replayed.treeSha;
+            work.baseSha = itemBase;
+            save();
+          }
+          await phases.reserve(item.id, "validation");
+          work.step = "validate";
+          save();
+          work.validation = await validateWorkItem(
+            config.checkout,
+            join(root, "validation"),
+            item,
+            work.changeRef!,
+            work.treeSha!,
+            state.baseSha,
+            (entry) =>
+              args.diagnostics?.emit({
                 runId: state.runId,
                 itemId: item.id,
                 attemptId: work.attempt,
+                operation: "validation-command",
+                outcome: entry.passed ? "completed" : "failed",
+                durationMs: entry.durationMs,
+                metadata: {
+                  commandIndex: entry.index,
+                  exitCode: entry.exitCode,
+                  treeSha: work.treeSha!,
+                },
+                detail: entry.output,
               }),
-            },
-          });
-        work.validation = args.diagnostics
-          ? await args.diagnostics.span(
-              {
-                runId: state.runId,
-                itemId: item.id,
-                attemptId: work.attempt,
-                operation: "acceptance-review",
-                metadata: { treeSha: work.treeSha! },
+            (entry) =>
+              args.diagnostics?.emitStream(
+                {
+                  runId: state.runId,
+                  itemId: item.id,
+                  attemptId: work.attempt,
+                  operation: "validation-output",
+                  outcome: "observed",
+                  metadata: { commandIndex: entry.index, stream: entry.stream },
+                },
+                entry.output,
+                entry.final,
+              ),
+            itemBase,
+            validationLfsMembersForItem(
+              state,
+              item,
+              config.checkout,
+              work.changeRef!,
+            ),
+            args.contentStore,
+            workspacePackageAdditions(args.objectiveBody),
+          );
+          await phases.reserve(item.id, "review");
+          const reviewResult = () =>
+            reviewAcceptance({
+              model: args.planningModel,
+              checkout: config.checkout,
+              baseSha: itemBase,
+              commit: work.changeRef!,
+              evidence: work.validation!,
+              criteria: item.acceptance,
+              sources: planningSources(
+                args.objectiveBody,
+                state.baseSha,
+                config.checkout,
+                state.additionalSources,
+              ),
+              decisions: work.acceptanceDecisions,
+              evidenceSources: workItemReviewEvidence({
+                state,
+                item,
+                checkout: config.checkout,
+                delivery: "native-stack",
+              }),
+              observations: workItemReviewObservations(
+                state,
+                item,
+                {
+                  kind: "native-stack",
+                  unitId: unit.id,
+                  layerNumber: index + 1,
+                  layerCount: unit.items.length,
+                  predecessorItemId: unit.items[index - 1]?.id ?? null,
+                },
+                work.assets?.find((set) => set.id === work.selectedAssetSet),
+              ),
+              invocation: {
+                invocationId: randomUUID(),
+                phase: "result-review",
+                ordinal: 0,
+                observe: args.diagnostics?.modelObserver({
+                  scopeId: work.attempt!,
+                  runId: state.runId,
+                  itemId: item.id,
+                  attemptId: work.attempt,
+                }),
               },
-              reviewResult,
-              (result) => ({ criteria: result.criteria?.length ?? 0 }),
-              (error) =>
-                error instanceof AcceptanceDecisionRequired
-                  ? "waiting"
-                  : "failed",
-            )
-          : await reviewResult();
-        delete work.pendingEffect;
-        delete work.acceptancePending;
-        if (args.cancelled()) throw new Error("Objective cancelled");
+            });
+          work.validation = args.diagnostics
+            ? await args.diagnostics.span(
+                {
+                  runId: state.runId,
+                  itemId: item.id,
+                  attemptId: work.attempt,
+                  operation: "acceptance-review",
+                  metadata: { treeSha: work.treeSha! },
+                },
+                reviewResult,
+                (result) => ({ criteria: result.criteria?.length ?? 0 }),
+                (error) =>
+                  error instanceof AcceptanceDecisionRequired
+                    ? "waiting"
+                    : "failed",
+              )
+            : await reviewResult();
+          delete work.acceptancePending;
+          if (args.cancelled()) throw new Error("Objective cancelled");
+        }
         await phases.reserve(item.id, "delivery");
         work.step = "deliver";
         save();
@@ -775,8 +768,6 @@ export async function runNativeGraph(args: {
               : defaultBranch,
           });
         await args.reconcile?.();
-        work.pendingEffect = "publication";
-        save();
         const published = args.diagnostics
           ? await args.diagnostics.span(
               {
@@ -795,17 +786,13 @@ export async function runNativeGraph(args: {
             )
           : await publish();
         work.pullRequest = published.pullRequest;
-        delete work.pendingEffect;
         phases.release(item.id);
         work.status = "published";
         delete work.step;
         save();
       };
       const task = perform().catch(async (error: unknown) => {
-        if (error instanceof CompletedModelInvocationError)
-          delete work.pendingEffect;
         if (error instanceof AcceptanceDecisionRequired) {
-          delete work.pendingEffect;
           phases.release(item.id);
           work.status = "waiting";
           work.step = "approve-result";
@@ -856,8 +843,7 @@ export async function runNativeGraph(args: {
           }
           return;
         }
-        if (!work.pendingEffect && work.phaseReservation !== "coding")
-          phases.release(item.id);
+        if (work.phaseReservation !== "coding") phases.release(item.id);
         save();
         throw error;
       });
@@ -961,9 +947,9 @@ export async function runNativeGraph(args: {
       phases.release(unit.items.at(-1)!.id);
       return settlePrepared();
     }
+    // Merging an already merged PR or stack is confirmed by the gateway, so a
+    // restart simply asks again.
     if (layers.length === 1) {
-      topWork.pendingEffect = "merge";
-      save();
       const layer = layers[0]!;
       const merge = async () =>
         (
@@ -983,13 +969,7 @@ export async function runNativeGraph(args: {
         : await merge();
     } else {
       state.stackNumbers ??= {};
-      const ensureStack = async () => {
-        topWork.pendingEffect = "publication";
-        save();
-        const number = await github.ensureNativeStack(layers, defaultBranch);
-        delete topWork.pendingEffect;
-        return number;
-      };
+      const ensureStack = () => github.ensureNativeStack(layers, defaultBranch);
       const stackNumber =
         state.stackNumbers[unit.id] ??
         (args.diagnostics
@@ -1028,8 +1008,6 @@ export async function runNativeGraph(args: {
             if (args.cancelled()) throw new Error("Objective cancelled");
             if (args.paused?.() && readinessWasWaiting)
               throw new DeliveryReadinessPending();
-            topWork.pendingEffect = "merge";
-            save();
           },
           onPending: (uuid) => {
             state.stackMerges ??= {};
@@ -1059,15 +1037,25 @@ export async function runNativeGraph(args: {
       }
     }
     await gitAsync(config.checkout, "fetch", "origin", defaultBranch);
-    const observedAfter = git(config.checkout, "rev-parse", "FETCH_HEAD");
-    if (observedAfter !== integratedSha)
-      throw new Error(
-        `Default branch changed after native unit ${unit.id}; expected ${integratedSha}, observed ${observedAfter}`,
+    // Other work may have merged since; the unit's merge only needs to be on
+    // the default branch.
+    try {
+      git(
+        config.checkout,
+        "merge-base",
+        "--is-ancestor",
+        integratedSha,
+        "FETCH_HEAD",
       );
+    } catch {
+      throw new Error(
+        `Default branch does not contain the merge of native unit ${unit.id} (${integratedSha})`,
+      );
+    }
+    const observedAfter = integratedSha;
     state.integratedSha = observedAfter;
     for (const item of unit.items) {
       const work = state.work[item.id]!;
-      delete work.pendingEffect;
       work.status = "done";
       work.integratedSha = observedAfter;
       work.completedAt = new Date().toISOString();

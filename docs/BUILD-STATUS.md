@@ -4,6 +4,19 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Contributor dependency-notice freshness correction (#508)
+
+[The failed v0.1.74 preparation check](https://github.com/clockgrove/factory/actions/runs/37092979611)
+retained a v0.1.73 dependency-notice header after the Factory version bump. The
+same redundant generator dependency appears in earlier preparation commits.
+[#508](https://github.com/clockgrove/factory/issues/508) removes Factory's own
+release version from that header while retaining production dependency and
+license freshness. The focused actual-generator CLI regression reproduces the
+original failure, then proves version-only byte stability and refusal of changed
+dependency versions, license content and missing license metadata. Required
+candidate CI and [distribution gate #505](https://github.com/clockgrove/factory/issues/505)
+remain pending. Runtime and previous immutable artifacts are unchanged.
+
 ## Permanent UNACCEPTED stopped projection abandonment (#499)
 
 The approved [#499](https://github.com/clockgrove/factory/issues/499) contract extends

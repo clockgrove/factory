@@ -17,6 +17,13 @@ mutation, cleanup, replay or activation. Its
 before actual historical disposition and fresh live qualification. It grants no
 automatic worker/adopter recovery authority.
 
+The candidate also removes Factory's redundant release version from the generated
+dependency-notice header ([#508](https://github.com/clockgrove/factory/issues/508)).
+A Factory-only version bump leaves those notice bytes unchanged; production
+dependency or license changes still require regeneration and pass the same
+strict freshness check. Package, lockfile, plugin, marketplace and archive
+identities retain their exact version alignment.
+
 Published [v0.1.73](https://github.com/clockgrove/factory/releases/tag/v0.1.73)
 supplies read-only intake status (#444 / PR #494), controller-derived guarded native
 hierarchy moves (#495 / PR #496), typed initial/amendment projection effects across

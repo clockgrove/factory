@@ -16,9 +16,13 @@ import type {
   SandboxProvider,
   WorkGraph,
 } from "../contracts.js";
-import { AuthenticationRequiredError } from "../contracts.js";
+import { AuthenticationRequiredError, Interruption } from "../contracts.js";
 import type { JsonValue } from "../config.js";
-import { SettledAttemptFailure } from "../work-repair.js";
+import {
+  SettledAttemptFailure,
+  failAttempt,
+  transientRequestFailure,
+} from "../work-repair.js";
 import { assertDurableValue, submitted } from "./checkpoint.js";
 import { collectWorktreeResult } from "./local.js";
 import { prepareManagedBase } from "./managed-base.js";
@@ -39,8 +43,8 @@ import {
 interface Active {
   request: ExecutionRequest;
   terminal?: "complete" | "failed" | "cancelled";
-  /** The attempt stopped because a step was interrupted, not because the work failed. */
-  interrupted?: boolean;
+  /** Why the attempt was ended; recorded before destroying so a restart finishes it. */
+  stopped?: { detail: string; interrupted: boolean };
   result?: ExecutionResult;
   harnessStarted?: boolean;
   phase:
@@ -220,8 +224,25 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       } satisfies Active,
     };
     this.save(handle, context);
-    await this.launch(handle, context);
+    try {
+      await this.launch(handle, context);
+    } catch (error) {
+      await this.fail(error, handle, context);
+    }
     return handle;
+  }
+  /** Ends the attempt for a failed step; see failAttempt. */
+  private async fail(
+    error: unknown,
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<never> {
+    return failAttempt(error, {
+      transient: transientRequestFailure,
+      expired: false,
+      cancelled: context?.cancelled() ?? false,
+      settle: (detail) => this.settle(handle, detail, false, context),
+    });
   }
   /**
    * Creates (or adopts) the sandbox, prepares it and starts the harness,
@@ -241,7 +262,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       await this.settle(
         handle,
         `Sandbox ${a.phase === "preparing" ? "preparation" : "harness start"} was interrupted; repeating with a fresh attempt`,
-        "interruption",
+        true,
         context,
       );
     if (!a.harnessStarted) await this.invoke(handle, "start", context);
@@ -340,7 +361,10 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     if (a.phase === "destroyed")
       return {
         state: a.terminal!,
-        ...(a.interrupted && { interrupted: true }),
+        ...(a.stopped && {
+          detail: a.stopped.detail,
+          ...(a.stopped.interrupted && { interrupted: true }),
+        }),
       };
     if (
       a.phase === "preparing" ||
@@ -391,17 +415,25 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       force: true,
     });
   }
-  /** Destroys the attempt's sandbox so a repeat never runs beside it. */
+  /** Records why the attempt ended and destroys its sandbox, so a repeat never runs beside it. */
   private async settle(
     handle: ExecutionHandle,
     detail: string,
-    classification: "implementation" | "interruption",
+    interrupted: boolean,
     context?: ExecutionContext,
   ): Promise<never> {
     const a = this.active(handle);
-    if (classification === "interruption") a.interrupted = true;
-    await this.destroy(handle, a.terminal ?? "failed", context);
-    throw new SettledAttemptFailure(new Error(detail), classification);
+    a.stopped ??= { detail, interrupted };
+    this.save(handle, context);
+    try {
+      await this.destroy(handle, a.terminal ?? "failed", context);
+    } catch (error) {
+      throw transientRequestFailure(error) ? new Interruption(error) : error;
+    }
+    throw new SettledAttemptFailure(
+      new Error(a.stopped.detail),
+      a.stopped.interrupted ? "interruption" : "implementation",
+    );
   }
   async cancel(
     handle: ExecutionHandle,
@@ -415,15 +447,42 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       context,
     );
   }
+  /**
+   * Any failure either interrupts the step (it reattaches) or destroys the
+   * sandbox first, so a repeated attempt never runs beside it.
+   */
   async collect(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<ExecutionResult> {
     const a = this.active(handle);
-    if (a.result) {
-      await this.destroy(handle, "complete", context);
-      return a.result;
+    if (!a.result) {
+      if (a.stopped)
+        await this.settle(
+          handle,
+          a.stopped.detail,
+          a.stopped.interrupted,
+          context,
+        );
+      try {
+        a.result = await this.produce(handle, context);
+      } catch (error) {
+        await this.fail(error, handle, context);
+      }
+      this.save(handle, context);
     }
+    try {
+      await this.destroy(handle, "complete", context);
+    } catch (error) {
+      throw transientRequestFailure(error) ? new Interruption(error) : error;
+    }
+    return a.result!;
+  }
+  private async produce(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionResult> {
+    const a = this.active(handle);
     if (a.operation !== "collect") {
       if (!a.harnessStarted) await this.launch(handle, context);
       let observed = await this.observe(handle, context);
@@ -444,7 +503,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
         await this.settle(
           handle,
           `Sandbox harness ${observed.state}; no complete result${observed.detail ? `: ${observed.detail}` : ""}`,
-          observed.interrupted ? "interruption" : "implementation",
+          observed.interrupted === true,
           context,
         );
     }
@@ -516,9 +575,6 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       result.changeRef,
     );
     delete result.collection;
-    a.result = result;
-    this.save(handle, context);
-    await this.destroy(handle, "complete", context);
     return result;
   }
 }

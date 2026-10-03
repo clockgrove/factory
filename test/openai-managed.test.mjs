@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { create } from "tar";
 import {
+  AgentsApiError,
   OpenAIManagedExecutionDriver,
   OpenAIAgentsClient,
   validateOpenAIManagedConfig,
@@ -282,7 +283,8 @@ test("restart during hosted setup submits the input once", async (t) => {
     f.saved.push(structuredClone(f.work.execution));
     if (!crashed && f.work.execution.data.phase === "prepared") {
       crashed = true;
-      throw new Error("controller stopped");
+      // Stands in for the controller stopping here.
+      throw new Interruption("controller stopped");
     }
   });
   await assert.rejects(f.driver.start(f.request, context), /stopped/);
@@ -417,9 +419,40 @@ test("result import refuses corrupted bytes, wrong binding and unsafe entries be
     }
     await assert.rejects(
       f.driver.collect(handle, f.context),
-      /archive|TAR|binding|different|unsafe|inventory/i,
+      (error) =>
+        error instanceof SettledAttemptFailure &&
+        error.classification === "implementation" &&
+        /archive|TAR|binding|different|unsafe|inventory/i.test(error.message),
     );
-    assert.equal(f.state.deleted, false);
+    // The rejected attempt's session is deleted so a new attempt never runs beside it.
+    assert.equal(f.state.deleted, true);
+  }
+});
+
+test("transient reads interrupt the step; refused reads settle the attempt", async (t) => {
+  for (const status of [503, 429, 404, 408, 403]) {
+    const f = fixture(t);
+    const handle = await f.driver.start(f.request, f.context);
+    const transport = f.driver.args.transport;
+    const original = transport.json.bind(transport);
+    let failures = 1;
+    transport.json = async (method, path, body) => {
+      if (path.includes("/turns?") && failures-- > 0)
+        throw new AgentsApiError(`Agents API GET failed (${status})`, status);
+      return original(method, path, body);
+    };
+    const transient = status !== 403;
+    await assert.rejects(f.driver.collect(handle, f.context), (error) =>
+      transient
+        ? error instanceof Interruption
+        : error instanceof SettledAttemptFailure &&
+          error.classification === "implementation",
+    );
+    assert.equal(f.state.deleted, !transient, String(status));
+    if (transient) {
+      await f.driver.collect(structuredClone(f.work.execution), f.context);
+      assert.equal(f.state.inputs, 1);
+    }
   }
 });
 
@@ -545,17 +578,16 @@ test("connected setup after deadline does not submit work; cleanup receives a se
   };
   await assert.rejects(
     f.driver.start(f.request, f.context),
-    /attempt deadline expired/,
+    (error) =>
+      error instanceof SettledAttemptFailure &&
+      error.classification === "implementation" &&
+      /configured timeout/.test(error.message),
   );
   assert.equal(
     f.state.calls.filter((c) => c.path.endsWith("/events")).length,
     0,
   );
-  assert.equal(f.work.execution.data.phase, "prepared");
-  await f.driver.cancel(
-    structuredClone(f.work.execution),
-    executionContext(f.work, () => {}),
-  );
+  assert.equal(f.state.deleted, true);
   assert.equal(f.work.execution.data.phase, "disposed");
   assert.ok(remaining.every((ms) => ms > 0 && ms <= 10000));
 });
@@ -581,9 +613,22 @@ test("remaining attempt time bounds each request and rejects collection after ex
   assert.deepEqual(limits.slice(0, 3), [10000, 9000, 8000]);
   now += 10000;
   const calls = f.state.calls.length;
+  // A passed deadline (also after a long controller outage) stops the session
+  // and fails the attempt as a timeout; it never submits more work.
   await assert.rejects(
     f.driver.collect(handle, f.context),
-    /attempt deadline expired/,
+    (error) =>
+      error instanceof SettledAttemptFailure &&
+      error.classification === "implementation" &&
+      /configured timeout/.test(error.message),
   );
-  assert.equal(f.state.calls.length, calls);
+  const after = f.state.calls.slice(calls);
+  assert.ok(
+    after.every(
+      (c) =>
+        c.method !== "POST" ||
+        c.body.events[0].type === "agent.session.input.cancel",
+    ),
+  );
+  assert.equal(f.state.deleted, true);
 });

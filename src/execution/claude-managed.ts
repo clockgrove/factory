@@ -18,13 +18,15 @@ import type {
   ExecutionResult,
   ModelInvocationUsage,
 } from "../contracts.js";
+import { Interruption } from "../contracts.js";
 import { pinnedGitAsync } from "../process.js";
-import { SettledAttemptFailure } from "../work-repair.js";
+import { SettledAttemptFailure, failAttempt } from "../work-repair.js";
 import { submitted } from "./checkpoint.js";
 import { collectWorktreeResult } from "./local.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import {
   ClaudeManagedClient,
+  claudeTransient,
   validateClaudeManagedConfig,
   type ClaudeManagedConfig,
 } from "./claude-managed-client.js";
@@ -102,8 +104,8 @@ interface Active {
   };
   evidenceDigest?: string;
   terminal?: "complete" | "failed" | "cancelled";
-  /** The attempt stopped because a step was interrupted, not because the work failed. */
-  interrupted?: boolean;
+  /** Why the attempt was ended; recorded before stopping so a restart finishes it. */
+  stopped?: { detail: string; interrupted: boolean };
   result?: ExecutionResult;
 }
 const digest = (value: unknown) =>
@@ -173,6 +175,46 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
         "Claude managed deadline expired; owned resources remain unresolved",
       );
     return ms;
+  }
+  private expired(data: Active): boolean {
+    return (
+      data.startedAt + (this.args.config.timeoutSeconds ?? 900) * 1000 <=
+      Date.now()
+    );
+  }
+  /** Ends the attempt for a failed step; see failAttempt. */
+  private async fail(
+    error: unknown,
+    handle: ExecutionHandle,
+    context: ExecutionContext,
+  ): Promise<never> {
+    const data = this.active(handle);
+    return failAttempt(error, {
+      transient: claudeTransient,
+      expired: this.expired(data),
+      cancelled: context.cancelled(),
+      settle: (detail) => this.settle(handle, context, detail, false),
+    });
+  }
+  /** Records why the attempt ended, stops its session and reports a settled failure. */
+  private async settle(
+    handle: ExecutionHandle,
+    context: ExecutionContext,
+    detail: string,
+    interrupted: boolean,
+  ): Promise<never> {
+    const data = this.active(handle);
+    data.stopped ??= { detail, interrupted };
+    this.save(handle, context);
+    try {
+      await this.stop(handle, "failed", context);
+    } catch (error) {
+      throw claudeTransient(error) ? new Interruption(error) : error;
+    }
+    throw new SettledAttemptFailure(
+      new Error(data.stopped.detail),
+      data.stopped.interrupted ? "interruption" : "implementation",
+    );
   }
   private async wait(data: Active): Promise<void> {
     await new Promise((resolve) =>
@@ -352,7 +394,11 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       }),
       { mode: 0o600 },
     );
-    await this.advance(handle, context);
+    try {
+      await this.advance(handle, context);
+    } catch (error) {
+      await this.fail(error, handle, context);
+    }
     return handle;
   }
   /** Uploads inputs, creates the session and sends the bootstrap turn, resuming from the recorded phase. */
@@ -482,7 +528,10 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     if (data.phase === "disposed")
       return {
         state: data.terminal ?? "cancelled",
-        ...(data.interrupted && { interrupted: true }),
+        ...(data.stopped && {
+          detail: data.stopped.detail,
+          ...(data.stopped.interrupted && { interrupted: true }),
+        }),
       };
     if (data.phase === "result-ready") return { state: "complete" };
     if (data.phase === "create-submitted") {
@@ -799,39 +848,59 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
   ): Promise<void> {
     await this.stop(handle, "cancelled", context);
   }
+  /**
+   * Any failure either interrupts the step (it reattaches) or stops the
+   * session first, so a repeated attempt never runs beside it.
+   */
   async collect(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<ExecutionResult> {
     const data = this.active(handle);
-    if (data.result) {
-      await this.dispose(handle, context);
-      return data.result;
+    if (!data.result) {
+      if (!context)
+        throw new Error(
+          "Managed execution requires controller checkpoint authority",
+        );
+      if (data.stopped)
+        await this.settle(
+          handle,
+          context,
+          data.stopped.detail,
+          data.stopped.interrupted,
+        );
+      try {
+        data.result = await this.produce(handle, context);
+      } catch (error) {
+        await this.fail(error, handle, context);
+      }
+      data.terminal = "complete";
+      this.save(handle, context);
     }
-    if (!context)
-      throw new Error(
-        "Managed execution requires controller checkpoint authority",
-      );
+    try {
+      await this.dispose(handle, context);
+    } catch (error) {
+      throw claudeTransient(error) ? new Interruption(error) : error;
+    }
+    return data.result!;
+  }
+  private async produce(
+    handle: ExecutionHandle,
+    context: ExecutionContext,
+  ): Promise<ExecutionResult> {
+    const data = this.active(handle);
     while (true) {
       if (context.cancelled()) throw new Error("Claude collection cancelled");
       await this.advance(handle, context);
       const observation = await this.observe(handle, context);
       if (observation.state === "complete") break;
-      if (observation.state !== "running") {
-        // Settle the attempt so a repeat never runs beside this session.
-        if (observation.interrupted) data.interrupted = true;
-        await this.stop(
+      if (observation.state !== "running")
+        await this.settle(
           handle,
-          observation.state === "cancelled" ? "cancelled" : "failed",
           context,
+          observation.detail ?? `Claude execution ${observation.state}`,
+          observation.interrupted === true,
         );
-        throw new SettledAttemptFailure(
-          new Error(
-            observation.detail ?? `Claude execution ${observation.state}`,
-          ),
-          observation.interrupted ? "interruption" : "implementation",
-        );
-      }
       if (data.phase === "bootstrap-verified")
         await this.submitImplementation(handle, context);
       else if (data.phase !== "prepared" && data.phase !== "created")
@@ -893,10 +962,6 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
         evidence,
       },
     );
-    data.result = result;
-    data.terminal = "complete";
-    this.save(handle, context);
-    await this.dispose(handle, context);
     return result;
   }
 }

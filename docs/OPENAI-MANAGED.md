@@ -92,8 +92,11 @@ A lost response interrupts the step, and the repeated step resolves it:
   repeats the Work Item with a fresh attempt.
 - **Restart during hosted setup:** Factory waits for setup and submits the input.
 
-A failed or cancelled turn deletes the session before the attempt ends, so a
-repeated attempt never runs beside it.
+A read that fails in transit (network error, timeout, HTTP 404, 408, 429 or
+5xx) interrupts the step, which reattaches to the same session. Any other
+failure, including a failed turn, a rejected result or a passed attempt
+deadline, deletes the session and fails the attempt as an implementation
+failure, so a repeated attempt never runs beside it.
 
 The configured `timeoutSeconds` bounds the whole attempt, including setup and
 artifact retrieval; each request uses only the remaining time. Cancellation and

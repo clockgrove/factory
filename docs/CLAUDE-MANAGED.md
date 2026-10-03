@@ -78,8 +78,12 @@ provider (see [State and recovery](ARCHITECTURE.md#state-and-recovery)):
 - **Upload:** Factory uploads the file again. The orphaned file cannot be
   identified and is left behind.
 
-Cancellation and collection failures stop the session first, so a repeated
-attempt never runs beside it. Cancellation waits for interruption where needed,
+A read that fails in transit (network error, timeout, HTTP 404, 408, 429 or
+5xx) interrupts the step, which reattaches to the same session. Any other
+failure, including a passed attempt deadline, stops the session and fails the
+attempt as an implementation failure, so it gets a fresh attempt or a repair.
+The session always stops first, so a repeated attempt never runs beside it.
+Cancellation waits for interruption where needed,
 then deletes every session tagged with the attempt and verifies absence.
 Anthropic documents that session deletion removes its associated sandbox.
 Factory preserves result and compact lifecycle/accounting receipts first, then

@@ -10,7 +10,12 @@ import type {
   ExecutionRequest,
   ExecutionResult,
 } from "../contracts.js";
-import { SettledAttemptFailure } from "../work-repair.js";
+import { Interruption } from "../contracts.js";
+import {
+  SettledAttemptFailure,
+  failAttempt,
+  transientRequestFailure,
+} from "../work-repair.js";
 import { submitted } from "./checkpoint.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import { collectWorktreeResult } from "./local.js";
@@ -110,8 +115,9 @@ export class OpenAIAgentsClient implements OpenAIManagedTransport {
     if (response.status === 404 && method === "GET") return null;
     if (response.status === 404 && method === "DELETE") return null;
     if (!response.ok)
-      throw new Error(
+      throw new AgentsApiError(
         `Agents API ${method} failed (${response.status}); request ${response.headers.get("x-request-id") ?? "unknown"}; no mutation retried`,
+        response.status,
       );
     const text = await response.text();
     return text.trim() ? JSON.parse(text) : null;
@@ -119,8 +125,20 @@ export class OpenAIAgentsClient implements OpenAIManagedTransport {
   async content(path: string, timeoutMs?: number): Promise<Response> {
     const response = await this.request("GET", path, undefined, timeoutMs);
     if (!response.ok)
-      throw new Error(`Agents artifact download failed (${response.status})`);
+      throw new AgentsApiError(
+        `Agents artifact download failed (${response.status})`,
+        response.status,
+      );
     return response;
+  }
+}
+/** An Agents API response that was not successful; `status` lets callers tell transient failures apart. */
+export class AgentsApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
   }
 }
 function object(value: unknown): Record<string, unknown> {
@@ -152,8 +170,8 @@ interface Active {
   environmentId?: string;
   turnId?: string;
   terminal?: "complete" | "failed" | "cancelled";
-  /** The attempt stopped because a step was interrupted, not because the work failed. */
-  interrupted?: boolean;
+  /** Why the attempt was ended; recorded before stopping so a restart finishes it. */
+  stopped?: { detail: string; interrupted: boolean };
   usage?: unknown;
   result?: ExecutionResult;
   artifact?: { id: string; digest: string; bytes: number; turnId: string };
@@ -220,6 +238,44 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
           : "OpenAI managed attempt deadline expired; cessation must be confirmed",
       );
     return remaining;
+  }
+  private expired(data: Active): boolean {
+    return (
+      data.startedAt + this.args.config.timeoutSeconds * 1000 <= Date.now()
+    );
+  }
+  /** Ends the attempt for a failed step; see failAttempt. */
+  private async fail(
+    error: unknown,
+    handle: ExecutionHandle,
+    context: ExecutionContext,
+  ): Promise<never> {
+    return failAttempt(error, {
+      transient: transientRequestFailure,
+      expired: this.expired(this.active(handle)),
+      cancelled: context.cancelled(),
+      settle: (detail) => this.settle(handle, context, detail, false),
+    });
+  }
+  /** Records why the attempt ended, deletes its session and reports a settled failure. */
+  private async settle(
+    handle: ExecutionHandle,
+    context: ExecutionContext,
+    detail: string,
+    interrupted: boolean,
+  ): Promise<never> {
+    const data = this.active(handle);
+    data.stopped ??= { detail, interrupted };
+    this.save(handle, context);
+    try {
+      await this.stop(handle, "failed", context);
+    } catch (error) {
+      throw transientRequestFailure(error) ? new Interruption(error) : error;
+    }
+    throw new SettledAttemptFailure(
+      new Error(data.stopped.detail),
+      data.stopped.interrupted ? "interruption" : "implementation",
+    );
   }
   private async request(
     data: Active,
@@ -296,56 +352,60 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       attemptId,
       inputDigest: data.inputDigest,
     });
-    const session = object(
-      await submitted(
-        this.request(data, "POST", "/agents/sessions", {
-          agent: {
-            model: this.args.config.model,
-            reasoning: { effort: this.args.config.reasoningEffort },
-            multi_agent: { enabled: false },
-            tools: [],
-            instructions:
-              "Perform only the supplied Work Item in /workspace/repo. Preserve HEAD. Export the finished work by running python3 /workspace/factory-export.py before finishing.",
-          },
-          environment: {
-            type: "openai_hosted",
-            container_size: this.args.config.containerSize,
-            network: { access: "disabled" },
-            files: [
-              {
-                type: "inline",
-                path: "/workspace/input.tar",
-                data: prepared.archive.toString("base64"),
-              },
-              {
-                type: "inline",
-                path: "/workspace/factory-binding.json",
-                data: Buffer.from(binding).toString("base64"),
-              },
-              {
-                type: "inline",
-                path: "/workspace/factory-export.py",
-                data: Buffer.from(openAIExportScript).toString("base64"),
-              },
-            ],
-            setup_commands: [
-              {
-                command: `echo '${data.inputDigest}  /workspace/input.tar' | sha256sum -c - && tar -xf /workspace/input.tar -C /workspace && test "$(git -C /workspace/repo rev-parse HEAD)" = '${input.baseSha}'`,
-              },
-            ],
-          },
-          metadata: {
-            factory_attempt: attemptId,
-            factory_input: data.inputDigest,
-          },
-        }),
-      ),
-    );
-    data.sessionId = id(session.id);
-    data.environmentId = id(object(session.environment).id);
-    data.phase = "prepared";
-    this.save(handle, context);
-    await this.submitInput(handle, context);
+    try {
+      const session = object(
+        await submitted(
+          this.request(data, "POST", "/agents/sessions", {
+            agent: {
+              model: this.args.config.model,
+              reasoning: { effort: this.args.config.reasoningEffort },
+              multi_agent: { enabled: false },
+              tools: [],
+              instructions:
+                "Perform only the supplied Work Item in /workspace/repo. Preserve HEAD. Export the finished work by running python3 /workspace/factory-export.py before finishing.",
+            },
+            environment: {
+              type: "openai_hosted",
+              container_size: this.args.config.containerSize,
+              network: { access: "disabled" },
+              files: [
+                {
+                  type: "inline",
+                  path: "/workspace/input.tar",
+                  data: prepared.archive.toString("base64"),
+                },
+                {
+                  type: "inline",
+                  path: "/workspace/factory-binding.json",
+                  data: Buffer.from(binding).toString("base64"),
+                },
+                {
+                  type: "inline",
+                  path: "/workspace/factory-export.py",
+                  data: Buffer.from(openAIExportScript).toString("base64"),
+                },
+              ],
+              setup_commands: [
+                {
+                  command: `echo '${data.inputDigest}  /workspace/input.tar' | sha256sum -c - && tar -xf /workspace/input.tar -C /workspace && test "$(git -C /workspace/repo rev-parse HEAD)" = '${input.baseSha}'`,
+                },
+              ],
+            },
+            metadata: {
+              factory_attempt: attemptId,
+              factory_input: data.inputDigest,
+            },
+          }),
+        ),
+      );
+      data.sessionId = id(session.id);
+      data.environmentId = id(object(session.environment).id);
+      data.phase = "prepared";
+      this.save(handle, context);
+      await this.submitInput(handle, context);
+    } catch (error) {
+      await this.fail(error, handle, context);
+    }
     return handle;
   }
   /** Waits for hosted setup, then submits the Work Item input once. */
@@ -412,7 +472,10 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     if (data.phase === "disposed")
       return {
         state: data.terminal ?? "failed",
-        ...(data.interrupted && { interrupted: true }),
+        ...(data.stopped && {
+          detail: data.stopped.detail,
+          ...(data.stopped.interrupted && { interrupted: true }),
+        }),
       };
     // This API surface cannot list sessions by attempt tag, so a lost create
     // response cannot be resolved; any session it made never received input.
@@ -574,36 +637,57 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     data.terminal ??= terminal;
     await this.dispose(handle, context);
   }
+  /**
+   * Any failure either interrupts the step (it reattaches) or deletes the
+   * session first, so a repeated attempt never runs beside it.
+   */
   async collect(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<ExecutionResult> {
     const data = this.active(handle);
-    if (data.result) {
-      if (data.phase !== "disposed") await this.dispose(handle, context);
-      return data.result;
+    if (!data.result) {
+      if (!context)
+        throw new Error(
+          "Managed execution requires controller checkpoint authority",
+        );
+      if (data.stopped)
+        await this.settle(
+          handle,
+          context,
+          data.stopped.detail,
+          data.stopped.interrupted,
+        );
+      try {
+        data.result = await this.produce(handle, context);
+      } catch (error) {
+        await this.fail(error, handle, context);
+      }
+      this.save(handle, context);
     }
-    if (!context)
-      throw new Error(
-        "Managed execution requires controller checkpoint authority",
-      );
+    try {
+      if (data.phase !== "disposed") await this.dispose(handle, context);
+    } catch (error) {
+      throw transientRequestFailure(error) ? new Interruption(error) : error;
+    }
+    return data.result!;
+  }
+  private async produce(
+    handle: ExecutionHandle,
+    context: ExecutionContext,
+  ): Promise<ExecutionResult> {
+    const data = this.active(handle);
     if (data.phase === "prepared") await this.submitInput(handle, context);
     while (true) {
       const observed = await this.observe(handle, context);
       if (observed.state === "complete") break;
-      if (observed.state !== "running") {
-        // Settle the attempt so a repeat never runs beside this session.
-        if (observed.interrupted) data.interrupted = true;
-        await this.stop(
+      if (observed.state !== "running")
+        await this.settle(
           handle,
-          observed.state === "cancelled" ? "cancelled" : "failed",
           context,
+          observed.detail ?? `OpenAI managed turn ${observed.state}`,
+          observed.interrupted === true,
         );
-        throw new SettledAttemptFailure(
-          new Error(observed.detail ?? `OpenAI managed turn ${observed.state}`),
-          observed.interrupted ? "interruption" : "implementation",
-        );
-      }
       await this.wait(data);
     }
     const artifacts = await this.pages(
@@ -671,7 +755,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       model: this.args.config.model,
     };
     this.remaining(data);
-    data.result = await collectWorktreeResult(
+    return collectWorktreeResult(
       this.args.checkout,
       worktree,
       data.request,
@@ -681,8 +765,5 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
         evidence,
       },
     );
-    this.save(handle, context);
-    await this.dispose(handle, context);
-    return data.result;
   }
 }

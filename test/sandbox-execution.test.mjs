@@ -216,7 +216,7 @@ test("cancellation after a lost create adopts and destroys the tagged sandbox", 
   assert.equal(f.provider.resources.size, 0);
   assert.equal(f.work.execution.data.terminal, "cancelled");
 });
-test("wrong reply digest, identity and unsafe result path fail closed; cleanup failure remains visible", async (t) => {
+test("wrong reply digest, identity and unsafe result path fail closed and settle the sandbox; cleanup failure remains visible", async (t) => {
   for (const variant of [
     "digest",
     "identity",
@@ -242,18 +242,17 @@ test("wrong reply digest, identity and unsafe result path fail closed; cleanup f
         if (d.operation === "collect") d.value.files[0].digest = "0".repeat(64);
       };
     if (variant === "cleanup") f.provider.destroyFailure = true;
-    await assert.rejects(
-      f.driver.collect(h, f.context),
-      /digest|identity|Unsafe|destruction/,
+    await assert.rejects(f.driver.collect(h, f.context), (error) =>
+      variant === "cleanup"
+        ? /destruction/.test(error.message)
+        : error instanceof SettledAttemptFailure &&
+          error.classification === "implementation" &&
+          /digest|identity|Unsafe/.test(error.message),
     );
-    assert.equal(f.provider.resources.size, 1);
+    assert.equal(f.provider.resources.size, variant === "cleanup" ? 1 : 0);
     assert.equal(
       f.work.execution.data.phase,
-      variant === "cleanup"
-        ? "destroying"
-        : "invoked" === f.work.execution.data.phase
-          ? "invoked"
-          : "ready",
+      variant === "cleanup" ? "destroying" : "destroyed",
     );
   }
 });
@@ -385,21 +384,23 @@ test("tracked file beneath an ignored symlinked parent cannot export outside byt
   );
 });
 
-test("failed input verification can cancel its known resource without a nonexistent harness handle", async (t) => {
+test("failed input verification destroys its known resource without a nonexistent harness handle", async (t) => {
   const f = fixture(t);
   f.provider.corruptInput = true;
   await assert.rejects(
     f.driver.start(f.request, f.context),
-    /input digest mismatch/,
+    (error) =>
+      error instanceof SettledAttemptFailure &&
+      /input digest mismatch/.test(error.message),
   );
+  assert.equal(f.provider.resources.size, 0);
+  assert.equal(f.work.execution.data.terminal, "failed");
   const starts = f.provider.starts;
   await new SandboxExecutionDriver(f.options).cancel(
     JSON.parse(JSON.stringify(f.work.execution)),
     f.context,
   );
   assert.equal(f.provider.starts, starts);
-  assert.equal(f.provider.resources.size, 0);
-  assert.equal(f.work.execution.data.terminal, "cancelled");
 });
 
 test("trusted preparation pulls the published exact base and uploads no repository or authentication", async (t) => {

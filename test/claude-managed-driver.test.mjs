@@ -256,7 +256,9 @@ function fixture(t) {
     async download(id) {
       if (state.failDownload) {
         state.failDownload = false;
-        throw new Error("transient output read");
+        throw Object.assign(new Error("transient output read"), {
+          status: state.failDownloadStatus ?? 503,
+        });
       }
       return new Response(state.outputs.get(id));
     },
@@ -534,9 +536,62 @@ test("Claude verifies actual returned selected bytes instead of restoring origin
   );
   await assert.rejects(
     f.driver().collect(handle, f.context),
-    /changed|modified|digest|bytes|immutable/i,
+    (error) =>
+      error instanceof SettledAttemptFailure &&
+      error.classification === "implementation" &&
+      /changed|modified|digest|bytes|immutable/i.test(error.message),
   );
-  assert.equal(f.state.deleted, false);
+  // The rejected attempt's session is deleted so a new attempt never runs beside it.
+  assert.equal(f.state.deleted, true);
+});
+test("Claude refused read settles the attempt; a passed deadline settles it as a timeout", async (t) => {
+  for (const kind of ["refused", "deadline"]) {
+    const f = fixture(t);
+    const handle = await f.driver().start(f.request, f.context);
+    if (kind === "refused") {
+      f.state.failDownload = true;
+      f.state.failDownloadStatus = 403;
+    } else handle.data.startedAt -= 901_000;
+    await assert.rejects(
+      f.driver().collect(handle, f.context),
+      (error) =>
+        error instanceof SettledAttemptFailure &&
+        error.classification === "implementation" &&
+        (kind === "refused"
+          ? /transient output read/
+          : /configured timeout/
+        ).test(error.message),
+    );
+    assert.equal(f.state.deleted, true, kind);
+    assert.equal(f.saved.at(-1).data.phase, "disposed");
+    // A restart finishes the same settlement instead of resuming the work.
+    await assert.rejects(
+      f.driver().collect(structuredClone(f.saved.at(-1)), f.context),
+      (error) => error instanceof SettledAttemptFailure,
+    );
+    assert.equal(f.state.sends, 1);
+  }
+});
+test("Claude transient read interrupts the step and the repeat resumes the same session", async (t) => {
+  const f = fixture(t);
+  const handle = await f.driver().start(f.request, f.context);
+  const events = f.driver().args.client.events;
+  let failures = 1;
+  f.driver().args.client.events = async (...args) => {
+    if (failures-- > 0)
+      throw Object.assign(new Error("connection reset"), {
+        code: "ECONNRESET",
+      });
+    return events(...args);
+  };
+  await assert.rejects(
+    f.driver().collect(handle, f.context),
+    (error) => error instanceof Interruption,
+  );
+  f.output(handle);
+  await f.driver().collect(structuredClone(f.saved.at(-1)), f.context);
+  assert.equal(f.state.creates, 1);
+  assert.equal(f.state.sends, 2);
 });
 test("Claude preserves binary selected bytes through the ordinary collector", async (t) => {
   const f = fixture(t);
@@ -579,8 +634,11 @@ test("failure cleanup observation after a bootstrap read error never submits imp
   f.state.failDownload = true;
   await assert.rejects(
     f.driver().collect(handle, f.context),
-    /transient output read/,
+    (error) =>
+      error instanceof Interruption &&
+      /transient output read/.test(error.message),
   );
+  assert.equal(f.state.deleted, false);
   // Same observe-before-cancel sequence used by runner failure cleanup, even with cancelled() false.
   assert.equal((await f.driver().observe(handle, f.context)).state, "running");
   assert.equal(f.state.sends, 1);

@@ -61,9 +61,11 @@ repeated step resolves it:
 - **Observe or collect invocation:** these only read the harness, so Factory invokes
   them again.
 
-A restarted controller observes, cancels or collects the same resource. A harness that
-ends without a complete result has its sandbox destroyed before the attempt ends, so a
-repeated attempt never runs beside it. No provider retry policy, second scheduler,
+A restarted controller observes, cancels or collects the same resource. A provider request
+that fails in transit (network error, timeout, HTTP 404, 408, 429 or 5xx) interrupts the
+step, which reattaches to the same sandbox. Any other failure, including a harness that ends
+without a complete result or a rejected result, destroys the sandbox before the attempt
+ends, so a repeated attempt never runs beside it. No provider retry policy, second scheduler,
 registry, service installer or operational journal is added. Existing explicit authority
 and retry limits still apply.
 

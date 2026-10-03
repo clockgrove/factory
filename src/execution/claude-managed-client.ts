@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { BetaCloudConfig } from "@anthropic-ai/sdk/resources/beta/environments/environments";
 import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
+import { transientRequestFailure } from "../work-repair.js";
 import type {
   BetaManagedAgentsSession,
   SessionCreateParams,
@@ -179,6 +180,14 @@ export function validateClaudeManagedConfig(
   if (!names.has("bash"))
     throw new Error("Claude managed execution requires the bash tool");
   return structuredClone(value) as unknown as ClaudeManagedConfig;
+}
+
+/** A request that failed in transit; the SDK's connection errors carry no status. */
+export function claudeTransient(error: unknown): boolean {
+  return (
+    error instanceof Anthropic.APIConnectionError ||
+    transientRequestFailure(error)
+  );
 }
 
 function requestOptions(timeout?: number) {

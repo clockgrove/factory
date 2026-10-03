@@ -192,3 +192,32 @@ for (const delivery of ["regular", "native-stack"])
       );
     });
   });
+
+test("provider request failures in transit are transient; refusals are not", async () => {
+  const { transientRequestFailure } = await import("../dist/work-repair.js");
+  const status = (code) => Object.assign(new Error("http"), { status: code });
+  for (const code of [404, 408, 429, 500, 503])
+    assert.equal(transientRequestFailure(status(code)), true, String(code));
+  for (const code of [400, 401, 403, 409, 422])
+    assert.equal(transientRequestFailure(status(code)), false, String(code));
+  assert.equal(
+    transientRequestFailure(
+      Object.assign(new Error("daytona"), { statusCode: 502 }),
+    ),
+    true,
+  );
+  assert.equal(
+    transientRequestFailure(
+      new TypeError("fetch failed", {
+        cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }),
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    transientRequestFailure(new DOMException("timed out", "TimeoutError")),
+    true,
+  );
+  assert.equal(transientRequestFailure(new TypeError("x is undefined")), false);
+  assert.equal(transientRequestFailure(new Error("invalid result")), false);
+});

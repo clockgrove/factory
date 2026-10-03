@@ -215,7 +215,7 @@ export async function waitForFile(check, path, message, timeout = 10_000) {
   });
 }
 
-class ScriptedPlanningModel {
+export class ScriptedPlanningModel {
   constructor(graph, logPath, resultReviewer) {
     this.graph = graph;
     this.logPath = logPath;

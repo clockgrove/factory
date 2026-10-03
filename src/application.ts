@@ -165,7 +165,7 @@ export interface LocalHarnessRegistration<
 }
 
 export interface LocalHarnessCompositionOptions {
-  /** Optional narrow contract stubs for credential-free conformance tests. */
+  /** Optional narrow contract stubs, e.g. for credential-free tests or planning evals. */
   planningModel?: PlanningModel;
   github?: GitHubGateway;
 }
@@ -295,17 +295,20 @@ function composePlanningModel(
 /** Planning composition never constructs a driver, content store, or run state. */
 export function composePlanning(
   config: FactoryConfig,
+  options: LocalHarnessCompositionOptions = {},
 ): Pick<
   FactoryApplication,
   "planObjective" | "decidePlan" | "admitObjective" | "checkAdmission"
 > {
   validateTarget(config.repository, config.checkout);
   const services = {
-    planningModel: composePlanningModel(config),
-    github: new RealGitHubGateway(
-      config.repository,
-      new NativeStackDelivery(config.repository),
-    ),
+    planningModel: options.planningModel ?? composePlanningModel(config),
+    github:
+      options.github ??
+      new RealGitHubGateway(
+        config.repository,
+        new NativeStackDelivery(config.repository),
+      ),
   };
   return {
     planObjective: (objective, additionalSources, authority) =>

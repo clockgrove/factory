@@ -386,7 +386,7 @@ test("managed CLI readiness and fresh supervised starts use loaded private crede
     }
   }));
 
-test("a supervised Claude planning service binds no API key credential", () =>
+test("a supervised Claude planning service keeps the Claude login and may bind a token", () =>
   fixture(async ({ root, config, configPath, state }) => {
     config.planning = {
       kind: "claude-agent-sdk",
@@ -396,27 +396,48 @@ test("a supervised Claude planning service binds no API key credential", () =>
     };
     writeFileSync(configPath, JSON.stringify(config));
     await registerIntake(config, state);
-    const key = join(root, "planning-key");
-    writeFileSync(key, "planning-secret", { mode: 0o600 });
+    process.env.CLAUDE_CONFIG_DIR = join(root, "claude-config");
+    process.env.HTTPS_PROXY = "http://proxy.invalid:3128";
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "ambient-token-never-copied";
+    const unitFile = join(
+      process.env.XDG_CONFIG_HOME,
+      "systemd/user",
+      serviceName(config.repository),
+    );
+    // No credential is required: the service uses the operator's login.
+    await supervise("install", configPath, { intake: true });
+    let unit = readFileSync(unitFile, "utf8");
+    assert.doesNotMatch(unit, /LoadCredential|--service-credential/);
+    assert.match(
+      unit,
+      new RegExp(`Environment="CLAUDE_CONFIG_DIR=${root}/claude-config"`),
+    );
+    assert.match(unit, /Environment="HTTPS_PROXY=http:\/\/proxy.invalid:3128"/);
+    assert.doesNotMatch(unit, /ambient-token-never-copied/);
+    await supervise("uninstall", configPath);
+
+    // A headless host may bind an OAuth token; unrelated names stay refused.
+    const token = join(root, "claude-token");
+    writeFileSync(token, "bound-oauth-token", { mode: 0o600 });
     await assert.rejects(
       supervise("install", configPath, {
         intake: true,
-        credentialFiles: [`ANTHROPIC_API_KEY=${key}`],
+        credentialFiles: [`OTHER_KEY=${token}`],
       }),
-      /ANTHROPIC_API_KEY is not required/,
+      /OTHER_KEY is not required/,
     );
-    await supervise("install", configPath, { intake: true });
-    const unit = readFileSync(
-      join(
-        process.env.XDG_CONFIG_HOME,
-        "systemd/user",
-        serviceName(config.repository),
-      ),
-      "utf8",
-    );
-    assert.doesNotMatch(unit, /LoadCredential|--service-credential/);
+    await supervise("install", configPath, {
+      intake: true,
+      credentialFiles: [`CLAUDE_CODE_OAUTH_TOKEN=${token}`],
+    });
+    unit = readFileSync(unitFile, "utf8");
+    assert.match(unit, /^LoadCredential="CLAUDE_CODE_OAUTH_TOKEN:\//m);
+    assert.match(unit, /"--service-credential" "CLAUDE_CODE_OAUTH_TOKEN"/);
+    assert.doesNotMatch(unit, /bound-oauth-token/);
     const status = await supervise("status", configPath);
-    assert.deepEqual(status.binding.credentials ?? [], []);
+    assert.deepEqual(status.binding.credentials, [
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", file: token },
+    ]);
   }));
 
 test("a retired single-credential binding is refused for reuse and only removable", () =>

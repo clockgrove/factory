@@ -8,6 +8,7 @@ import { Codex } from "@openai/codex-sdk";
 import {
   ClaudePlanningModel,
   claudeOutputSchema,
+  probeClaudeLogin,
 } from "../dist/claude-planning.js";
 import {
   CodexPlanningModel,
@@ -15,7 +16,10 @@ import {
   planningReviewEvidence,
 } from "../dist/compiler.js";
 import { validateConfig } from "../dist/config.js";
-import { CompletedModelInvocationError } from "../dist/contracts.js";
+import {
+  AuthenticationRequiredError,
+  CompletedModelInvocationError,
+} from "../dist/contracts.js";
 import { composePlanning } from "../dist/index.js";
 import { ProviderTurnTimeoutError } from "../dist/provider-turn.js";
 import { reviewPacket } from "../dist/review-evidence.js";
@@ -95,6 +99,57 @@ function sdkSession(options, structured, result = {}, init = {}) {
       session_id: session,
       uuid: "result",
       ...result,
+    },
+  ];
+}
+
+const zeroUsage = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+};
+
+/**
+ * A failure the runtime reports without a model response, shaped as the
+ * pinned SDK emits it: a `<synthetic>` assistant message, then a `success`
+ * result with `is_error` and `api_error_status` null unless the API answered.
+ */
+function runtimeFailure(options, text, { error, status = null } = {}) {
+  const [init] = sdkSession(options, {});
+  return [
+    init,
+    {
+      type: "assistant",
+      message: {
+        id: "synthetic-message",
+        model: "<synthetic>",
+        role: "assistant",
+        stop_reason: "stop_sequence",
+        content: [{ type: "text", text }],
+        usage: zeroUsage,
+      },
+      parent_tool_use_id: null,
+      session_id: session,
+      uuid: "synthetic",
+      error,
+      is_api_error_message: true,
+    },
+    {
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      api_error_status: status,
+      num_turns: 1,
+      result: text,
+      stop_reason: "stop_sequence",
+      terminal_reason: "api_error",
+      total_cost_usd: 0,
+      usage: zeroUsage,
+      modelUsage: {},
+      permission_denials: [],
+      session_id: session,
+      uuid: "result",
     },
   ];
 }
@@ -253,8 +308,16 @@ test("Claude planning sends the Codex prompts and schemas through a tool-free Ag
     new CodexPlanningModel("/unused", selection, selection),
   );
 
-  const savedToken = process.env.GH_TOKEN;
-  process.env.GH_TOKEN = "github-token-never-forwarded";
+  const hostEnvironment = {
+    GH_TOKEN: "github-token-never-forwarded",
+    HTTPS_PROXY: "http://proxy.invalid:3128",
+    NO_PROXY: "localhost",
+    NODE_EXTRA_CA_CERTS: "/etc/ssl/extra.pem",
+  };
+  const saved = Object.fromEntries(
+    Object.keys(hostEnvironment).map((name) => [name, process.env[name]]),
+  );
+  Object.assign(process.env, hostEnvironment);
   let claudeResults;
   let calls;
   try {
@@ -262,8 +325,9 @@ test("Claude planning sends the Codex prompts and schemas through a tool-free Ag
     calls = claude.calls;
     claudeResults = await runAllPhases(claude.model);
   } finally {
-    if (savedToken === undefined) delete process.env.GH_TOKEN;
-    else process.env.GH_TOKEN = savedToken;
+    for (const [name, value] of Object.entries(saved))
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
   }
 
   assert.deepEqual(claudeResults, codexResults);
@@ -295,6 +359,13 @@ test("Claude planning sends the Codex prompts and schemas through a tool-free Ag
     assert.equal(options.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, "64000");
     assert.equal(options.env.GH_TOKEN, undefined);
     assert.notEqual(options.env.GH_CONFIG_DIR, undefined);
+    // Network settings reach the SDK; the worker harness shares this helper.
+    assert.equal(options.env.HTTPS_PROXY, hostEnvironment.HTTPS_PROXY);
+    assert.equal(options.env.NO_PROXY, hostEnvironment.NO_PROXY);
+    assert.equal(
+      options.env.NODE_EXTRA_CA_CERTS,
+      hostEnvironment.NODE_EXTRA_CA_CERTS,
+    );
     assert.match(
       options.env.CLAUDE_AGENT_SDK_CLIENT_APP,
       /^clockgrove-factory\//,
@@ -402,6 +473,15 @@ test("Claude usage and interactions are observed from the Agent SDK result", asy
     outputTokens: 5,
     reasoningOutputTokens: 4,
   });
+  // `factory analyze` reads completed/failed; the stop reason is separate.
+  const outcome = observations.find(
+    ({ capture }) => capture?.event.outcome?.stage === "provider",
+  );
+  assert.deepEqual(outcome.capture.event.outcome, {
+    stage: "provider",
+    status: "completed",
+    stopReason: "tool_use",
+  });
 });
 
 test("Claude output without structured output or for another request fails closed", async () => {
@@ -437,7 +517,7 @@ test("Claude output without structured output or for another request fails close
   );
 });
 
-test("Claude refusals, limits and login failures are completed invocations, never accepted output", async () => {
+test("Claude refusals and limits are completed invocations, never accepted output", async () => {
   for (const [result, failureClass, detail] of [
     [{ stop_reason: "refusal" }, "provider-refusal", /refusal/],
     [
@@ -458,15 +538,6 @@ test("Claude refusals, limits and login failures are completed invocations, neve
       "provider-structured-output",
       /schema mismatch/,
     ],
-    [
-      {
-        is_error: true,
-        api_error_status: 401,
-        result: "Invalid authentication credentials",
-      },
-      "provider-authentication",
-      /claude auth login/,
-    ],
   ]) {
     const observations = [];
     const { model } = claudeModel((prompt, options) =>
@@ -484,7 +555,135 @@ test("Claude refusals, limits and login failures are completed invocations, neve
     );
     const failed = observations.find(({ type }) => type === "failed");
     assert.equal(failed.failureClass, failureClass);
+    const outcome = observations.find(
+      ({ capture }) => capture?.event.outcome?.stage === "provider",
+    );
+    assert.equal(outcome.capture.event.outcome.status, "failed");
+    assert.equal(outcome.capture.event.outcome.failureClass, failureClass);
   }
+});
+
+test("Claude login and connection failures reported by the runtime are not provider verdicts", async () => {
+  for (const [respond, check, failureClass] of [
+    [
+      // Pinned SDK 0.3.281 with no login: no API call is made.
+      (options) =>
+        runtimeFailure(options, "Not logged in · Please run /login", {
+          error: "authentication_failed",
+        }),
+      (error) =>
+        error instanceof AuthenticationRequiredError &&
+        error.authentication.command === "claude auth login" &&
+        /claude auth login/.test(error.message),
+      "provider-authentication",
+    ],
+    [
+      (options) =>
+        runtimeFailure(
+          options,
+          "Failed to authenticate. API Error: 401 invalid x-api-key",
+          { error: "authentication_failed", status: 401 },
+        ),
+      (error) => error instanceof AuthenticationRequiredError,
+      "provider-authentication",
+    ],
+    [
+      // Offline: the runtime retries, then reports the outage as a result.
+      (options) =>
+        runtimeFailure(options, "Can't reach the API server (EAI_AGAIN)", {
+          error: "unknown",
+        }),
+      (error) => /EAI_AGAIN/.test(error.message),
+      "provider",
+    ],
+    [
+      // A crash after a model reply is still an interrupted attempt.
+      (options) => [
+        ...sdkSession(options, {}).slice(0, 2),
+        {
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          num_turns: 1,
+          stop_reason: null,
+          errors: ["Claude Code process exited unexpectedly"],
+          total_cost_usd: 0,
+          usage: zeroUsage,
+          modelUsage: {},
+          permission_denials: [],
+          session_id: session,
+          uuid: "result",
+        },
+      ],
+      (error) => /exited unexpectedly/.test(error.message),
+      "provider",
+    ],
+  ]) {
+    const observations = [];
+    const { model } = claudeModel((_prompt, options) => respond(options));
+    await assert.rejects(
+      model.reviewResult({
+        ...resultReviewInput(),
+        invocation: invocation("result-review", observations),
+      }),
+      (error) =>
+        !(error instanceof CompletedModelInvocationError) && check(error),
+    );
+    const failed = observations.find(({ type }) => type === "failed");
+    assert.equal(failed.failureClass, failureClass);
+  }
+});
+
+test("Claude login readiness asks the runtime for account info without a prompt", async () => {
+  for (const [account, expected] of [
+    [
+      {
+        email: "x@example.com",
+        subscriptionType: "max",
+        apiProvider: "firstParty",
+      },
+      { status: "present", source: "claude-login" },
+    ],
+    [
+      { tokenSource: "none", apiKeySource: "ANTHROPIC_API_KEY" },
+      { status: "present", source: "ANTHROPIC_API_KEY" },
+    ],
+    [{ tokenSource: "none", apiProvider: "firstParty" }, { status: "missing" }],
+  ]) {
+    const calls = [];
+    const readiness = await probeClaudeLogin(
+      { CLAUDE_CODE_OAUTH_TOKEN: "bound-token" },
+      ({ prompt, options }) => {
+        calls.push({ prompt, options, closed: false });
+        return {
+          accountInfo: async () => account,
+          close: () => {
+            calls[0].closed = true;
+          },
+        };
+      },
+    );
+    assert.equal(readiness.status, expected.status);
+    assert.equal(readiness.source, expected.source);
+    if (expected.status === "missing")
+      assert.match(readiness.detail, /claude auth login/);
+    assert.doesNotMatch(JSON.stringify(readiness), /example\.com/);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].closed, true);
+    assert.equal(typeof calls[0].prompt[Symbol.asyncIterator], "function");
+    assert.deepEqual(calls[0].options.tools, []);
+    assert.deepEqual(calls[0].options.settingSources, []);
+    assert.equal(calls[0].options.env.CLAUDE_CODE_OAUTH_TOKEN, "bound-token");
+    assert.equal(existsSync(calls[0].options.cwd), false);
+  }
+  const failed = await probeClaudeLogin({}, () => ({
+    accountInfo: async () => {
+      throw new Error("runtime unavailable");
+    },
+    close: () => undefined,
+  }));
+  assert.equal(failed.status, "missing");
+  assert.match(failed.detail, /runtime unavailable/);
 });
 
 test("Claude sessions exposing anything beyond structured output fail closed", async () => {
@@ -501,12 +700,11 @@ test("Claude sessions exposing anything beyond structured output fail closed", a
 });
 
 test("Claude overload retries only reviews; a lost session stays ambiguous", async () => {
-  const overloaded = (prompt, options) =>
-    sdkSession(options, answer(prompt), {
-      is_error: true,
-      api_error_status: 529,
-      result: "API Error: 529 Overloaded",
-      structured_output: undefined,
+  // The API answered 529 after the runtime's own retries.
+  const overloaded = (_prompt, options) =>
+    runtimeFailure(options, "API Error: 529 Overloaded", {
+      error: "overloaded",
+      status: 529,
     });
   const observations = [];
   const review = claudeModel((prompt, options, index) =>
@@ -659,4 +857,22 @@ test("install writes explicit Claude planning selections", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a Claude attempt that cannot create its private directory leaves no timer", async () => {
+  const saved = process.env.TMPDIR;
+  const timers = () =>
+    process.getActiveResourcesInfo().filter((name) => name === "Timeout")
+      .length;
+  const before = timers();
+  process.env.TMPDIR = join(tmpdir(), "factory-missing-tmp", "nested");
+  try {
+    const { model, calls } = claudeModel(answered);
+    await assert.rejects(model.reviewGraph(graphReviewInput()), /ENOENT/);
+    assert.equal(calls.length, 0);
+  } finally {
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
+  }
+  assert.equal(timers(), before);
 });

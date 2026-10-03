@@ -137,9 +137,9 @@ factory install --repository OWNER/REPO \
   --planning-model claude-opus-5-5 --review-model claude-opus-5-5
 ```
 
-Like Codex planning, Claude planning uses your existing login: the Claude Code login on the controller host (`claude auth login`), or `CLAUDE_CODE_OAUTH_TOKEN`. An `ANTHROPIC_API_KEY` in the controller environment is optional and is used when present. Each call runs without tools in an empty temporary directory and may produce up to `planning.maxOutputTokens` (64000 by default). It needs the optional `@anthropic-ai/claude-agent-sdk` package.
+Like Codex planning, Claude planning uses your existing login: the Claude Code login on the controller host (`claude auth login`), or `CLAUDE_CODE_OAUTH_TOKEN`. An `ANTHROPIC_API_KEY` in the controller environment is optional and is used when present. Each call runs without tools in an empty temporary directory and may produce up to `planning.maxOutputTokens` (64000 by default). It needs the optional `@anthropic-ai/claude-agent-sdk` package. `factory readiness` checks, without a model call, that the SDK finds a login. Claude settings files are not loaded, so Bedrock, Vertex and `apiKeyHelper` configurations are not supported yet; proxy settings (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`) and `CLAUDE_CONFIG_DIR` pass through.
 
-Remote execution providers still need an API key. In the foreground Factory reads it from the controller environment. A supervised service binds one owner-private file per required credential: `factory supervisor install ... --credential-file NAME=/absolute/private/key`.
+Remote execution providers still need an API key. In the foreground Factory reads it from the controller environment. A supervised service binds one owner-private file per required credential: `factory supervisor install ... --credential-file NAME=/absolute/private/key`. When Claude plans or works, a headless service may also bind `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY` the same way; otherwise it uses the Claude login in its home or `CLAUDE_CONFIG_DIR`.
 
 The default delivery mode is regular pull requests. Add `--delivery native-stack` at installation to choose native linear stacks on a target that supports them. Independent work remains dependency-aware; target branch protection and required checks still govern integration.
 

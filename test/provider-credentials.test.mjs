@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   credentialFileBindings,
+  exportServiceLoginCredentials,
   requiredProviderCredentials,
   resolveProviderCredential,
   validateCredentialFile,
@@ -156,41 +157,87 @@ test("loaded controller key authenticates the actual OpenAI client without envir
   }
 });
 
-test("Claude planning uses the operator's login and adds no service credential", () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-credentials-planning-"));
+test("Claude login credentials are optional service bindings, never required", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-credentials-claude-"));
   const checkout = join(root, "target");
   mkdirSync(checkout);
-  const config = {
+  const local = { kind: "local", concurrency: 1 };
+  const claudePlanning = {
     ...cfg,
     checkout,
     planning: { kind: "claude-agent-sdk" },
   };
+  const claudeHarness = {
+    checkout,
+    planning: { kind: "codex-sdk" },
+    execution: { ...local, harness: { kind: "claude-agent-sdk" } },
+  };
+  const codexOnly = {
+    checkout,
+    planning: { kind: "codex-sdk" },
+    execution: local,
+  };
+  const saved = {
+    directory: process.env.CREDENTIALS_DIRECTORY,
+    token: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+  };
   try {
-    assert.deepEqual(requiredProviderCredentials(config), [
+    for (const name of [
+      "FACTORY_DUMMY_KEY",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "ANTHROPIC_API_KEY",
+    ])
+      writeFileSync(join(root, name), `${name}-value`, { mode: 0o600 });
+    const bind = (name) => `${name}=${join(root, name)}`;
+    assert.deepEqual(requiredProviderCredentials(claudePlanning), [
       "FACTORY_DUMMY_KEY",
     ]);
-    assert.deepEqual(
-      requiredProviderCredentials({
-        ...config,
-        execution: { kind: "local", concurrency: 1 },
-      }),
-      [],
-    );
-    for (const name of ["FACTORY_DUMMY_KEY", "ANTHROPIC_API_KEY"])
-      writeFileSync(join(root, name), `${name}-value`, { mode: 0o600 });
-    const key = `FACTORY_DUMMY_KEY=${join(root, "FACTORY_DUMMY_KEY")}`;
-    assert.deepEqual(credentialFileBindings(config, [key]), [
-      { name: "FACTORY_DUMMY_KEY", file: join(root, "FACTORY_DUMMY_KEY") },
-    ]);
+    assert.deepEqual(requiredProviderCredentials(claudeHarness), []);
+    // The required credential stays required; login credentials may be added.
     assert.throws(
-      () =>
-        credentialFileBindings(config, [
-          key,
-          `ANTHROPIC_API_KEY=${join(root, "ANTHROPIC_API_KEY")}`,
-        ]),
+      () => credentialFileBindings(claudePlanning, [bind("ANTHROPIC_API_KEY")]),
+      /--credential-file FACTORY_DUMMY_KEY=/,
+    );
+    assert.deepEqual(
+      credentialFileBindings(claudePlanning, [
+        bind("ANTHROPIC_API_KEY"),
+        bind("FACTORY_DUMMY_KEY"),
+      ]).map(({ name }) => name),
+      ["FACTORY_DUMMY_KEY", "ANTHROPIC_API_KEY"],
+    );
+    assert.deepEqual(credentialFileBindings(claudeHarness, []), []);
+    assert.deepEqual(
+      credentialFileBindings(claudeHarness, [bind("CLAUDE_CODE_OAUTH_TOKEN")]),
+      [
+        {
+          name: "CLAUDE_CODE_OAUTH_TOKEN",
+          file: join(root, "CLAUDE_CODE_OAUTH_TOKEN"),
+        },
+      ],
+    );
+    assert.throws(
+      () => credentialFileBindings(codexOnly, [bind("ANTHROPIC_API_KEY")]),
       /ANTHROPIC_API_KEY is not required/,
     );
+
+    // A service exports only the optional login credentials systemd loaded.
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.CREDENTIALS_DIRECTORY = root;
+    exportServiceLoginCredentials(claudeHarness, ["CLAUDE_CODE_OAUTH_TOKEN"]);
+    assert.equal(
+      process.env.CLAUDE_CODE_OAUTH_TOKEN,
+      "CLAUDE_CODE_OAUTH_TOKEN-value",
+    );
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    exportServiceLoginCredentials(codexOnly, ["CLAUDE_CODE_OAUTH_TOKEN"]);
+    assert.equal(process.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
   } finally {
+    for (const [name, value] of [
+      ["CREDENTIALS_DIRECTORY", saved.directory],
+      ["CLAUDE_CODE_OAUTH_TOKEN", saved.token],
+    ])
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
     rmSync(root, { recursive: true, force: true });
   }
 });

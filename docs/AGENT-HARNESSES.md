@@ -10,7 +10,9 @@ Selecting a harness changes only Work Item execution. Claude planning
 (`--planning claude-agent-sdk`) uses the same pinned Claude Agent SDK and the
 same local Claude login as the Claude harness; an `ANTHROPIC_API_KEY` is
 optional. Each planning call is one tool-free, schema-constrained query in an
-empty temporary directory.
+empty temporary directory. Both pass proxy settings and `CLAUDE_CONFIG_DIR`
+through; Claude settings files are not loaded, so Bedrock, Vertex and
+`apiKeyHelper` configurations are not supported yet.
 
 This guide covers the local harness interface included in published v0.1.39. Its offline tarball bundles Codex; Claude and Copilot require their optional dependencies. Each provider's live evidence applies only to the artifact and scenario actually exercised; see [execution gates](https://github.com/clockgrove/factory/issues/206) and [final acceptance](https://github.com/clockgrove/factory/issues/207).
 

@@ -1,21 +1,20 @@
-// Runs one Objective in its own process against the strict GitHub HTTP fake,
-// with Factory's real GitHubClient, RealGitHubGateway, NativeStackDelivery and
-// RegularDelivery. In-process effects (model and execution-driver calls) can
-// be faulted on their Nth call: crash (SIGKILL) before or after the call, a
-// lost response (the call happened, the caller sees an error) or an
-// unavailable burst (the call never happened). Prints one JSON line.
+// Runs one Objective in its own process against the strict GitHub HTTP fake.
+// The application comes from Factory's public composition
+// (composeWithLocalHarness) with the real GitHubClient, RealGitHubGateway,
+// NativeStackDelivery and RegularDelivery; only the planning model and the
+// harness are scripted. Model and execution-driver calls can be faulted on
+// their Nth call: crash (SIGKILL) before or after the call, a lost response
+// (the call happened, the caller sees an error) or an unavailable burst (the
+// call never happened). Prints one JSON line.
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Octokit } from "@octokit/core";
-import { createApplication } from "../../dist/application.js";
 import { stateRoot } from "../../dist/config.js";
-import { LocalContentStore } from "../../dist/content/local.js";
-import { Interruption } from "../../dist/contracts.js";
 import { NativeStackDelivery } from "../../dist/delivery/native-stack.js";
-import { RegularDelivery } from "../../dist/delivery/regular.js";
 import { LocalExecutionDriver } from "../../dist/execution/local.js";
 import { GitHubClient } from "../../dist/github-client.js";
 import { RealGitHubGateway } from "../../dist/github.js";
+import { Interruption, composeWithLocalHarness } from "../../dist/index.js";
 import { readState } from "../../dist/state-store.js";
 import { rewritingFetch } from "./github-http-fake.mjs";
 import {
@@ -29,9 +28,20 @@ const FAULTED = {
   driver: ["start", "observe", "collect", "cancel"],
 };
 
-function record(path, value) {
-  mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, `${JSON.stringify(value)}\n`);
+const [descriptorPath] = process.argv.slice(2);
+const descriptor = readDescriptor(descriptorPath);
+const { config } = descriptor;
+const callsPath = join(descriptor.fakeRoot, "calls.ndjson");
+const rules = (descriptor.faults ?? []).map((fault) => ({
+  occurrence: 1,
+  times: 1,
+  seen: 0,
+  ...fault,
+}));
+
+function record(value) {
+  mkdirSync(dirname(callsPath), { recursive: true });
+  appendFileSync(callsPath, `${JSON.stringify(value)}\n`);
 }
 
 /** The error a caller sees when the call never reached its service. */
@@ -50,97 +60,85 @@ function lost(target) {
   return target === "driver" ? new Interruption(cause) : cause;
 }
 
-function faulty(object, target, faults, logPath) {
-  const rules = faults
-    .filter((fault) => fault.target === target)
-    .map((fault) => ({ occurrence: 1, times: 1, seen: 0, ...fault }));
-  return new Proxy(object, {
-    get(subject, property, receiver) {
-      const value = Reflect.get(subject, property, receiver);
-      if (typeof value !== "function" || !FAULTED[target].includes(property))
-        return value;
-      return async (...args) => {
-        const request = args[0] ?? {};
-        let fired;
-        for (const rule of rules) {
-          if (rule.method !== property) continue;
-          rule.seen++;
-          if (
-            rule.seen >= rule.occurrence &&
-            rule.seen < rule.occurrence + rule.times
-          )
-            fired = rule;
-        }
-        record(logPath, {
-          target,
-          method: property,
-          phase: request.reviewPhase ?? request.invocation?.phase,
-          item: request.item?.id,
-          attempt: request.attemptId ?? request.identity,
-          fault: fired?.kind,
-          // Whether the call reached its service (and may have had an effect).
-          reached: !["crash-before", "unavailable"].includes(fired?.kind),
-        });
-        if (fired?.kind === "crash-before")
-          process.kill(process.pid, "SIGKILL");
-        if (fired?.kind === "unavailable") throw unavailable(target);
-        const result = await value.apply(subject, args);
-        if (fired?.kind === "crash-after") process.kill(process.pid, "SIGKILL");
-        if (fired?.kind === "lost") throw lost(target);
-        return result;
-      };
-    },
+/** Log the call, apply a due fault, and run `call` unless the fault prevents it. */
+async function intercept(target, method, request, call) {
+  let fired;
+  for (const rule of rules) {
+    if (rule.target !== target || rule.method !== method) continue;
+    rule.seen++;
+    if (
+      !fired &&
+      rule.seen >= rule.occurrence &&
+      rule.seen < rule.occurrence + rule.times
+    )
+      fired = rule;
+  }
+  record({
+    target,
+    method,
+    phase: request?.reviewPhase ?? request?.invocation?.phase,
+    item: request?.item?.id,
+    attempt: request?.attemptId ?? request?.identity,
+    fault: fired?.kind,
+    // Whether the call reached its service (and may have had an effect).
+    reached: !["crash-before", "unavailable"].includes(fired?.kind),
   });
+  if (fired?.kind === "crash-before") process.kill(process.pid, "SIGKILL");
+  if (fired?.kind === "unavailable") throw unavailable(target);
+  const result = await call();
+  if (fired?.kind === "crash-after") process.kill(process.pid, "SIGKILL");
+  if (fired?.kind === "lost") throw lost(target);
+  return result;
 }
 
-const [descriptorPath] = process.argv.slice(2);
-const descriptor = readDescriptor(descriptorPath);
-const { config } = descriptor;
-const faults = descriptor.faults ?? [];
-const callsPath = join(descriptor.fakeRoot, "calls.ndjson");
-const root = stateRoot(config.repository);
-const contentStore = new LocalContentStore(join(root, "content"));
+// The public composition constructs its own LocalExecutionDriver, so the
+// driver boundary is intercepted on the class.
+for (const method of FAULTED.driver) {
+  const original = LocalExecutionDriver.prototype[method];
+  LocalExecutionDriver.prototype[method] = function (...args) {
+    return intercept("driver", method, args[0], () =>
+      original.apply(this, args),
+    );
+  };
+}
+
+const planner = new ScriptedPlanningModel(
+  descriptor.graph,
+  join(descriptor.fakeRoot, "planning.ndjson"),
+);
+const planningModel = new Proxy(planner, {
+  get(subject, property, receiver) {
+    const value = Reflect.get(subject, property, receiver);
+    if (typeof value !== "function" || !FAULTED.model.includes(property))
+      return value;
+    return (...args) =>
+      intercept("model", property, args[0], () => value.apply(subject, args));
+  },
+});
+
 const client = new GitHubClient(
   new Octokit({ request: { fetch: rewritingFetch(descriptor.apiUrl) } }),
 );
-const github = new RealGitHubGateway(
-  config.repository,
-  new NativeStackDelivery(config.repository, client),
-  client,
-);
-const driver = faulty(
-  new LocalExecutionDriver(
-    config.checkout,
-    join(root, "worktrees"),
-    new ScriptedHarness(
-      join(root, "harness"),
+const application = composeWithLocalHarness(
+  config,
+  {
+    identity: config.execution.harness.adapter,
+    config: config.execution.harness.config,
+    harness: new ScriptedHarness(
+      join(stateRoot(config.repository), "harness"),
       descriptor.actions,
       join(descriptor.fakeRoot, "harness.ndjson"),
     ),
-    config.execution.concurrency,
-    contentStore,
-    "scripted-test@1",
-  ),
-  "driver",
-  faults,
-  callsPath,
+  },
+  {
+    planningModel,
+    github: new RealGitHubGateway(
+      config.repository,
+      new NativeStackDelivery(config.repository, client),
+      client,
+    ),
+  },
 );
-const planningModel = faulty(
-  new ScriptedPlanningModel(
-    descriptor.graph,
-    join(descriptor.fakeRoot, "planning.ndjson"),
-  ),
-  "model",
-  faults,
-  callsPath,
-);
-const application = createApplication(config, {
-  planningModel,
-  driver,
-  github,
-  delivery: new RegularDelivery(config.checkout, github),
-  contentStore,
-});
 
 function summary() {
   try {
@@ -167,11 +165,12 @@ function summary() {
 }
 
 try {
+  // Without admission a pass returns when it finishes or waits; the test
+  // judges completion from GitHub and the repository, not from this state.
   const state = await application.runObjective(descriptor.graph.objective);
   console.log(
     JSON.stringify({
-      // A pass without admission returns while it waits (e.g. for readiness).
-      outcome: state.finalValidation?.passed ? "completed" : "returned",
+      outcome: "returned",
       finalValidation: state.finalValidation?.passed === true,
       ...summary(),
     }),
@@ -185,5 +184,5 @@ try {
     }),
   );
 }
-// A completed Objective may leave idle handles (keep-alive sockets).
+// A finished pass may leave idle handles (keep-alive sockets).
 process.exit(0);

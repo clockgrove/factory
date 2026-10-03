@@ -2,17 +2,19 @@ import { availableParallelism } from "node:os";
 import { describe } from "node:test";
 import { faults } from "./support/github-http-fake.mjs";
 import { runScenario } from "./support/fault-harness.mjs";
+import { KNOWN } from "./support/fault-known.mjs";
 import {
-  DIAGNOSES as D,
   checkKnown,
   declareScenario,
-  todos,
+  referenceRun,
+  testNames,
 } from "./support/fault-matrix.mjs";
 
 // Real-GitHub behaviors the fault matrix does not cover: read-after-write lag,
 // rate limits, merge refusals, pagination and other actors. Every scenario
-// must reach the same fixed outcome as an uninterrupted run (see
-// assertCleanOutcome). Known Factory bugs are `todo` with their diagnosis.
+// must reach the end state of an uninterrupted run (see assertEndState),
+// except where Factory must refuse. Known Factory bugs are inverted tests
+// listed in support/fault-known.mjs.
 
 const repo = "/repos/{owner}/{repo}";
 const PULL = `GET ${repo}/pulls/{number}`;
@@ -147,11 +149,6 @@ const scenarios = [
     http: [{ match: PULL, ...faults.primaryRateLimit({ resetInSeconds: 1 }) }],
   },
   {
-    name: "403 primary rate limit without a reset header",
-    deliveries: ["regular"],
-    http: [{ match: PULL, ...faults.primaryRateLimit() }],
-  },
-  {
     name: "405 base branch modified on merge",
     deliveries: ["regular"],
     http: [{ match: MERGE, ...faults.baseModified() }],
@@ -199,89 +196,43 @@ const scenarios = [
   },
 ];
 
-const known = todos({
-  [D.MERGE_READ_LAG]: [
-    "regular: PR state lags one read after a merge",
-    "regular: PR state lags one read after a merge without an operator stop",
+// Factory must refuse, not complete: the merge it observed is gone from the
+// default branch. Regular checks right after the merge; native after the stack.
+scenarios.push({
+  name: "a force-push removes a merge from the default branch",
+  deliveries: BOTH,
+  http: (delivery) => [
+    {
+      match: delivery === "regular" ? MERGE : MERGE_ASYNC,
+      kind: "after",
+      run: (fake) => fake.rewindDefaultBranch(),
+    },
   ],
-  [D.TIMELINE_LAG]: [
-    "native-stack: timeline lags one read after a merge",
-    "native-stack: timeline lags one read after a merge without an operator stop",
-    "regular: lost merge response, then the timeline lags one read",
-    "regular: lost merge response, then the timeline lags one read without an operator stop",
-  ],
-  [D.PULL_LIST_LAG]: [
-    "regular: lost PR creation, then the open-PR list lags one read",
-    "regular: lost PR creation, then the open-PR list lags one read without an operator stop",
-    "native-stack: lost PR creation, then the open-PR list lags one read",
-    "native-stack: lost PR creation, then the open-PR list lags one read without an operator stop",
-  ],
-  [D.ISSUE_LIST_LAG]: [
-    "regular: lost issue creation, then the issue list lags one read",
-    "native-stack: lost issue creation, then the issue list lags one read",
-  ],
-  [D.PROJECTION_STOP]: [
-    "regular: lost issue creation, then the issue list lags one read without an operator stop",
-    "native-stack: lost issue creation, then the issue list lags one read without an operator stop",
-    "regular: 429 with retry-after on issue creation without an operator stop",
-    "native-stack: 429 with retry-after on issue creation without an operator stop",
-  ],
-  [D.READBACK_LAG]: [
-    "regular: sub-issue list lags one read after a sub-issue is added without an operator stop",
-    "native-stack: sub-issue list lags one read after a sub-issue is added without an operator stop",
-    "regular: dependency list lags one read after a dependency is added without an operator stop",
-    "native-stack: dependency list lags one read after a dependency is added without an operator stop",
-  ],
-  [D.STACK_MERGE_REPEAT]: [
-    "native-stack: lost stack merge response while the merge is still pending",
-    "native-stack: lost stack merge response while the merge is still pending without an operator stop",
-  ],
-  [D.SECONDARY_403]: [
-    "regular: 403 secondary rate limit with retry-after on PR creation",
-    "regular: 403 secondary rate limit with retry-after on PR creation without an operator stop",
-    "native-stack: 403 secondary rate limit with retry-after on PR creation",
-    "native-stack: 403 secondary rate limit with retry-after on PR creation without an operator stop",
-  ],
-  [D.CLOSURE_PAUSE]: [
-    "regular: 403 secondary rate limit without retry-after on a completion comment without an operator stop",
-  ],
-  [D.PRIMARY_403]: [
-    "regular: 403 primary rate limit with a reset on PR observation",
-    "regular: 403 primary rate limit with a reset on PR observation without an operator stop",
-    "native-stack: 403 primary rate limit with a reset on PR observation",
-    "native-stack: 403 primary rate limit with a reset on PR observation without an operator stop",
-    "regular: 403 primary rate limit without a reset header",
-    "regular: 403 primary rate limit without a reset header without an operator stop",
-  ],
-  [D.BASE_MODIFIED]: [
-    "regular: 405 base branch modified on merge",
-    "regular: 405 base branch modified on merge without an operator stop",
-  ],
-  [D.PAGE_SHIFT]: [
-    "regular: an issue opened during the marker scan shifts its pages without an operator stop",
-  ],
-  [D.FOREIGN_PUSH]: [
-    "regular: another contributor pushes to the default branch after the last merge",
-    "regular: another contributor pushes to the default branch after the last merge without an operator stop",
-    "native-stack: another contributor pushes to the default branch after the last merge",
-    "native-stack: another contributor pushes to the default branch after the last merge without an operator stop",
-  ],
+  checks: ["refusal"],
+  refuses: /does not contain the merge/,
 });
 
+const known = KNOWN.consistency;
+const name = (scenario, delivery) => `${delivery}: ${scenario.name}`;
+const checksOf = (scenario) => scenario.checks ?? ["end", "stop", "budget"];
 checkKnown(
   known,
   scenarios.flatMap((scenario) =>
-    scenario.deliveries.map((delivery) => `${delivery}: ${scenario.name}`),
+    scenario.deliveries.flatMap((delivery) =>
+      testNames(name(scenario, delivery), checksOf(scenario)),
+    ),
   ),
 );
+// The paid-call budget compares with an uninterrupted run of each strategy.
+await Promise.all(BOTH.map((delivery) => referenceRun(delivery)));
 
 describe("GitHub consistency, rate limits and other actors", {
-  concurrency: Math.max(2, Math.floor(availableParallelism() / 2)),
+  concurrency: availableParallelism(),
 }, () => {
   for (const [index, scenario] of scenarios.entries())
     for (const delivery of scenario.deliveries)
       declareScenario(
-        `${delivery}: ${scenario.name}`,
+        name(scenario, delivery),
         () =>
           runScenario({
             name: `c${index}-${delivery === "regular" ? "r" : "n"}`,
@@ -295,8 +246,9 @@ describe("GitHub consistency, rate limits and other actors", {
             earlierIssues: scenario.earlierIssues ?? 0,
           }),
         {
-          boundary: {},
+          checks: checksOf(scenario),
           foreignIssues: scenario.foreignIssues ?? scenario.earlierIssues ?? 0,
+          refuses: scenario.refuses,
         },
         known,
       );

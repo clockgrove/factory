@@ -73,8 +73,8 @@ async function setup(t, options = {}) {
   );
   const env = { ...process.env, ...gitTransportEnvironment(fake.gitUrl) };
   /** Commit on a new branch and push it through the fake's Git transport. */
-  const pushBranch = async (branch) => {
-    git(target.checkout, "checkout", "-q", "-b", branch, "main");
+  const pushBranch = async (branch, from = "main") => {
+    git(target.checkout, "checkout", "-q", "-b", branch, from);
     commit(target.checkout, branch);
     const sha = git(target.checkout, "rev-parse", "HEAD");
     // Asynchronous: the fake serving the push runs in this process.
@@ -314,4 +314,111 @@ test("the gateway refuses two open PRs for one branch and an existing PR with an
     gateway.findOpenPullRequest("factory/objective-1/alpha", "main", sha),
     /Multiple open PRs/,
   );
+});
+
+test("stacks: listing fields, a nonexistent PR is 422, and merge-async follows the documented statuses", async (t) => {
+  const { fake, client, pushBranch } = await setup(t, { asyncMergePolls: 2 });
+  const pull = async (head, base) =>
+    client.request("POST", "repos/example/target/pulls", {
+      head,
+      base,
+      title: head,
+    });
+  await pushBranch("one");
+  await pushBranch("two", "one");
+  await pushBranch("three", "two");
+  const one = await pull("one", "main");
+  const two = await pull("two", "one");
+  const three = await pull("three", "two");
+  await assert.rejects(
+    client.request("POST", "repos/example/target/stacks", {
+      pull_requests: [one.number, 999],
+    }),
+    (error) => error instanceof GitHubRequestError && error.status === 422,
+  );
+  const stack = await client.request("POST", "repos/example/target/stacks", {
+    pull_requests: [one.number, two.number, three.number],
+  });
+  const [listed] = await client.request(
+    "GET",
+    `repos/example/target/stacks?pull_request=${two.number}`,
+  );
+  assert.equal(listed.number, stack.number);
+  assert.equal(typeof listed.id, "number");
+  assert.equal(typeof listed.node_id, "string");
+  assert.equal(listed.open, true);
+  // Merging the middle PR includes the PR below it, not the one above.
+  const accepted = await client.request(
+    "PUT",
+    `repos/example/target/pulls/${two.number}/merge-async`,
+    { sha: two.head.sha, merge_method: "merge", merge_action: "default" },
+  );
+  assert.equal(accepted.status, "pending");
+  // A repeated request while pending is 409 with the pending request.
+  const conflict = await fetch(
+    `${fake.apiUrl}/repos/example/target/pulls/${two.number}/merge-async`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ sha: two.head.sha, merge_method: "merge" }),
+    },
+  );
+  assert.equal(conflict.status, 409);
+  assert.equal((await conflict.json()).details.uuid, accepted.details.uuid);
+  let polled;
+  for (let poll = 0; poll < 2; poll++)
+    polled = await client.request(
+      "GET",
+      `repos/example/target/pulls/${two.number}/merge-async/${accepted.details.uuid}`,
+    );
+  assert.equal(polled.status, "merged");
+  assert.ok(fake.state.pulls[one.number].merged_at);
+  assert.ok(fake.state.pulls[two.number].merged_at);
+  assert.equal(fake.state.pulls[three.number].merged_at, undefined);
+  // Already merged: 200 with the merge commit, and no second merge.
+  const again = await client.request(
+    "PUT",
+    `repos/example/target/pulls/${two.number}/merge-async`,
+    { sha: two.head.sha, merge_method: "merge" },
+  );
+  assert.deepEqual(
+    [again.status, again.details.sha],
+    ["merged", polled.details.sha],
+  );
+  assert.equal(fake.state.pulls[two.number].merges, 1);
+  // A closed PR is not ready to merge.
+  await client.request("PATCH", `repos/example/target/issues/${three.number}`, {
+    state: "closed",
+  });
+  await assert.rejects(
+    client.request(
+      "PUT",
+      `repos/example/target/pulls/${three.number}/merge-async`,
+      { sha: three.head.sha, merge_method: "merge" },
+    ),
+    (error) => error instanceof GitHubRequestError && error.status === 400,
+  );
+});
+
+test("every response carries rate-limit headers; a duplicate PR is one 422 error entry", async (t) => {
+  const { fake, client, pushBranch } = await setup(t);
+  await pushBranch("feature");
+  await client.request("POST", "repos/example/target/pulls", {
+    head: "feature",
+    base: "main",
+    title: "Feature",
+  });
+  const duplicate = await fetch(`${fake.apiUrl}/repos/example/target/pulls`, {
+    method: "POST",
+    body: JSON.stringify({ head: "feature", base: "main", title: "Again" }),
+  });
+  assert.equal(duplicate.status, 422);
+  assert.ok(duplicate.headers.get("x-ratelimit-reset"));
+  const body = await duplicate.json();
+  assert.equal(body.errors.length, 1);
+  assert.match(body.errors[0].message, /A pull request already exists/);
+  fake.inject({ match: `GET ${repo}`, ...faults.secondaryRateLimit() });
+  const limited = await fetch(`${fake.apiUrl}/repos/example/target`);
+  assert.equal(limited.status, 403);
+  assert.equal(limited.headers.get("x-ratelimit-remaining"), "4999");
+  assert.ok(limited.headers.get("x-ratelimit-reset"));
 });

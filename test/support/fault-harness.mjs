@@ -1,16 +1,18 @@
 // Runs an Objective end to end in controller child processes against a strict
 // GitHub HTTP fake that lives in the test process (GitHub outlives every
 // controller crash), then restarts the controller after a crash or stop.
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import {
   GitHubHttpFake,
   gitTransportEnvironment,
 } from "./github-http-fake.mjs";
 import { createTarget, git, writeDescriptor } from "./integration-fixture.mjs";
 
+const execFileAsync = promisify(execFile);
 const controller = join(import.meta.dirname, "fault-controller.mjs");
 const fastTimers = join(import.meta.dirname, "fast-timers.mjs");
 const repositoryRoot = join(import.meta.dirname, "..", "..");
@@ -54,14 +56,91 @@ function readLines(path) {
     .map((line) => JSON.parse(line));
 }
 
+// Scenario roots still present (a run interrupted by a test timeout); the
+// process removes them on exit, so no /tmp/factory-fault-* outlives a run.
+const liveRoots = new Set();
+process.on("exit", () => {
+  for (const root of liveRoots) rmSync(root, { recursive: true, force: true });
+});
+
+function runController(env, descriptorPath, runTimeoutMs, started) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    const child = spawn(
+      process.execPath,
+      ["--import", fastTimers, controller, descriptorPath],
+      { env, cwd: repositoryRoot, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    started(child);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, runTimeoutMs);
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      const line = stdout.trim().split("\n").at(-1);
+      let parsed;
+      try {
+        parsed = line ? JSON.parse(line) : undefined;
+      } catch {
+        parsed = undefined;
+      }
+      resolve(
+        timedOut
+          ? { outcome: "hung", stderr: stderr.slice(-2000) }
+          : signal === "SIGKILL"
+            ? { outcome: "crashed" }
+            : (parsed ?? {
+                outcome: "failed",
+                code,
+                stderr: stderr.slice(-2000),
+              }),
+      );
+    });
+  });
+}
+
+/** What the default branch holds once the scenario ends. */
+async function repositorySnapshot(origin, fake, items) {
+  const gitIn = async (...args) => {
+    try {
+      const { stdout } = await execFileAsync("git", ["-C", origin, ...args], {
+        encoding: "utf8",
+      });
+      return { ok: true, out: stdout };
+    } catch {
+      return { ok: false, out: "" };
+    }
+  };
+  const main = (
+    await gitIn("rev-parse", `refs/heads/${fake.defaultBranch}`)
+  ).out.trim();
+  const files = {};
+  for (const item of items) {
+    const shown = await gitIn("show", `${main}:${item.id}.txt`);
+    files[`${item.id}.txt`] = shown.ok ? shown.out : null;
+  }
+  const merges = {};
+  for (const pull of Object.values(fake.state.pulls))
+    if (pull.mergeSha)
+      merges[pull.number] = (
+        await gitIn("merge-base", "--is-ancestor", pull.mergeSha, main)
+      ).ok;
+  return { main, files, merges };
+}
+
 /**
  * Run `items` (alpha → beta by default) with `delivery`. `http` rules are
  * injected into the fake for the whole scenario (each fires once per its
  * `times`); `inProcess` faults apply to the first controller run only.
  * `beforeRun(fake, index)` may change GitHub between controller runs.
  * A run that crashed or stopped is restarted at most `maxRestarts` times; a
- * run that returned while waiting (no admission keeps it alive) is resumed
- * until `maxRuns`.
+ * run that returned before the Objective issue closed (without admission a
+ * pass returns while it waits) is resumed, up to `maxRuns` runs in all.
  */
 export async function runScenario({
   name,
@@ -78,131 +157,109 @@ export async function runScenario({
   timeScale = 0.01,
 }) {
   const root = mkdtempSync(join(tmpdir(), `factory-fault-${name}-`));
-  const target = createTarget(root);
-  const repository = `example/${name}`;
-  git(
-    target.checkout,
-    "remote",
-    "set-url",
-    "origin",
-    `https://github.com/${repository}.git`,
-  );
-  const commands = items.map((item) => item.validation[0].command);
-  const objectiveBody = `# Deterministic Objective\n\n## Acceptance\n${commands.map((c) => `- \`${c}\``).join("\n")}\n\n## Final validation\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`;
-  let child;
-  const crashes = [];
-  const fake = new GitHubHttpFake({
-    repository,
-    origin: target.origin,
-    issues: [
-      { title: "Deterministic Objective", body: objectiveBody },
-      ...Array.from({ length: earlierIssues }, (_, index) => ({
-        title: `Earlier issue ${index}`,
-        body: "Not a Factory issue",
-      })),
-    ],
-    ...fakeOptions,
-    onCrash: (entry) => {
-      crashes.push(entry.endpoint);
-      child?.kill("SIGKILL");
-    },
-  });
-  await fake.start();
-  for (const rule of http) fake.inject(rule);
-  const fakeRoot = join(root, "fake");
-  const descriptorPath = join(root, "descriptor.json");
-  const descriptor = {
-    config: {
-      schemaVersion: 1,
+  liveRoots.add(root);
+  let fake;
+  try {
+    const target = createTarget(root);
+    const repository = `example/${name}`;
+    git(
+      target.checkout,
+      "remote",
+      "set-url",
+      "origin",
+      `https://github.com/${repository}.git`,
+    );
+    const commands = items.map((item) => item.validation[0].command);
+    const objectiveBody = `# Deterministic Objective\n\n## Acceptance\n${commands.map((c) => `- \`${c}\``).join("\n")}\n\n## Final validation\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`;
+    let child;
+    const crashes = [];
+    fake = new GitHubHttpFake({
       repository,
-      checkout: target.checkout,
-      planning: {
-        kind: "codex-sdk",
-        planner: { model: "gpt-5.6-sol", reasoningEffort: "medium" },
-        reviewer: { model: "gpt-5.6-sol", reasoningEffort: "medium" },
+      origin: target.origin,
+      issues: [
+        { title: "Deterministic Objective", body: objectiveBody },
+        ...Array.from({ length: earlierIssues }, (_, index) => ({
+          title: `Earlier issue ${index}`,
+          body: "Not a Factory issue",
+        })),
+      ],
+      ...fakeOptions,
+      onCrash: (entry) => {
+        crashes.push(entry.endpoint);
+        child?.kill("SIGKILL");
       },
-      execution: {
-        kind: "local",
-        concurrency: 2,
-        harness: {
+    });
+    await fake.start();
+    for (const rule of http) fake.inject(rule);
+    const fakeRoot = join(root, "fake");
+    const descriptorPath = join(root, "descriptor.json");
+    const descriptor = {
+      config: {
+        schemaVersion: 1,
+        repository,
+        checkout: target.checkout,
+        planning: {
           kind: "codex-sdk",
-          model: "gpt-5.6-sol",
-          reasoningEffort: "medium",
+          planner: { model: "gpt-5.6-sol", reasoningEffort: "medium" },
+          reviewer: { model: "gpt-5.6-sol", reasoningEffort: "medium" },
+        },
+        execution: {
+          kind: "local",
+          concurrency: 2,
+          harness: {
+            kind: "registered",
+            adapter: "scripted-test@1",
+            config: {},
+          },
+        },
+        delivery: { kind: delivery },
+        contentStore: { kind: "local" },
+        policy: {
+          network: "off",
+          allowedSecretNames: [],
+          deployments: "denied",
         },
       },
-      delivery: { kind: delivery },
-      contentStore: { kind: "local" },
-      policy: {
-        network: "off",
-        allowedSecretNames: [],
-        deployments: "denied",
-      },
-    },
-    graph: { objective: OBJECTIVE, baseSha: target.baseSha, items },
-    objectiveBody,
-    fakeRoot,
-    apiUrl: fake.apiUrl,
-    actions: Object.fromEntries(
-      items.map((item) => [
-        item.id,
-        { files: [{ path: `${item.id}.txt`, text: `${item.id}\n` }] },
-      ]),
-    ),
-  };
-  const env = {
-    ...process.env,
-    ...gitTransportEnvironment(fake.gitUrl),
-    XDG_STATE_HOME: join(root, "state"),
-    FACTORY_TEST_TIME_SCALE: String(timeScale),
-  };
-  const runs = [];
-  try {
+      graph: { objective: OBJECTIVE, baseSha: target.baseSha, items },
+      objectiveBody,
+      fakeRoot,
+      apiUrl: fake.apiUrl,
+      actions: Object.fromEntries(
+        items.map((item) => [
+          item.id,
+          { files: [{ path: `${item.id}.txt`, text: `${item.id}\n` }] },
+        ]),
+      ),
+    };
+    const env = {
+      ...process.env,
+      ...gitTransportEnvironment(fake.gitUrl),
+      XDG_STATE_HOME: join(root, "state"),
+      FACTORY_TEST_TIME_SCALE: String(timeScale),
+    };
+    const runs = [];
     for (let index = 0; index < maxRuns; index++) {
       await beforeRun?.(fake, index);
       writeDescriptor(descriptorPath, {
         ...descriptor,
         faults: index === 0 ? inProcess : [],
       });
-      const result = await new Promise((resolve) => {
-        let stdout = "";
-        let stderr = "";
-        child = spawn(
-          process.execPath,
-          ["--import", fastTimers, controller, descriptorPath],
-          { env, cwd: repositoryRoot, stdio: ["ignore", "pipe", "pipe"] },
-        );
-        let timedOut = false;
-        const timer = setTimeout(() => {
-          timedOut = true;
-          child.kill("SIGKILL");
-        }, runTimeoutMs);
-        child.stdout.on("data", (chunk) => (stdout += chunk));
-        child.stderr.on("data", (chunk) => (stderr += chunk));
-        child.on("close", (code, signal) => {
-          clearTimeout(timer);
-          const line = stdout.trim().split("\n").at(-1);
-          let parsed;
-          try {
-            parsed = line ? JSON.parse(line) : undefined;
-          } catch {
-            parsed = undefined;
-          }
-          resolve(
-            timedOut
-              ? { outcome: "hung", stderr: stderr.slice(-2000) }
-              : signal === "SIGKILL"
-                ? { outcome: "crashed" }
-                : (parsed ?? {
-                    outcome: "failed",
-                    code,
-                    stderr: stderr.slice(-2000),
-                  }),
-          );
-        });
-      });
+      const result = await runController(
+        env,
+        descriptorPath,
+        runTimeoutMs,
+        (started) => {
+          child = started;
+        },
+      );
       child = undefined;
       runs.push(result);
-      if (["completed", "hung", "failed"].includes(result.outcome)) break;
+      if (["hung", "failed"].includes(result.outcome)) break;
+      if (
+        result.outcome === "returned" &&
+        fake.issue(OBJECTIVE).state === "closed"
+      )
+        break;
       if (
         runs.filter((run) => ["crashed", "stopped"].includes(run.outcome))
           .length > maxRestarts
@@ -216,12 +273,14 @@ export async function runScenario({
       fake,
       items,
       delivery,
+      inProcess,
       harness: readLines(join(fakeRoot, "harness.ndjson")),
       calls: readLines(join(fakeRoot, "calls.ndjson")),
-      origin: target.origin,
+      repository: await repositorySnapshot(target.origin, fake, items),
     };
   } finally {
-    await fake.stop();
+    await fake?.stop();
     rmSync(root, { recursive: true, force: true });
+    liveRoots.delete(root);
   }
 }

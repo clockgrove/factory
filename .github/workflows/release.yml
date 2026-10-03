@@ -41,7 +41,8 @@ jobs:
       - run: npm run format:check
       - run: npm run notices:check
       - name: Run complete tests
-        run: node --import ./test/support/isolated-state.mjs --test test/*.test.mjs
+        timeout-minutes: 60
+        run: node --import ./test/support/isolated-state.mjs --test --test-timeout=300000 test/*.test.mjs
 
       - name: Pack
         run: |

@@ -1,91 +1,30 @@
-// The fault matrix: for every effect boundary of an uninterrupted two-item
-// Objective (alpha → beta), inject a crash, a lost response or an unavailable
-// burst at that boundary, restart the controller, and require the same fixed
-// end state as an uninterrupted run, read from the strict GitHub fake's
-// request log rather than from fake state.
+// The fault matrix: run an uninterrupted two-item Objective (alpha → beta)
+// once per delivery strategy, derive every effect boundary from what that
+// run did, then inject a crash, a lost response or an unavailable burst at
+// each boundary, restart the controller, and check invariants of the end
+// state read from GitHub's request log and the repository, not from
+// Factory's own state. Nothing here names Factory internals, so the matrix
+// survives the recovery redesign.
 import assert from "node:assert/strict";
 import { availableParallelism } from "node:os";
 import { basename } from "node:path";
 import { describe, test } from "node:test";
 import { faults } from "./github-http-fake.mjs";
-import { branch, marker, OBJECTIVE, runScenario } from "./fault-harness.mjs";
-
-const repo = "/repos/{owner}/{repo}";
-
-/** Mutations of an uninterrupted run, per endpoint. Every one is a boundary. */
-export const REFERENCE_EFFECTS = {
-  regular: {
-    [`POST ${repo}/labels`]: 2,
-    [`POST ${repo}/issues/{number}/labels`]: 1,
-    [`POST ${repo}/issues`]: 2,
-    [`POST ${repo}/issues/{number}/dependencies/blocked_by`]: 1,
-    [`POST ${repo}/issues/{number}/sub_issues`]: 2,
-    [`POST ${repo}/pulls`]: 2,
-    [`PUT ${repo}/pulls/{number}/merge`]: 2,
-    [`POST ${repo}/issues/{number}/comments`]: 3,
-    [`PATCH ${repo}/issues/{number}`]: 3,
-  },
-  "native-stack": {
-    [`POST ${repo}/labels`]: 2,
-    [`POST ${repo}/issues/{number}/labels`]: 1,
-    [`POST ${repo}/issues`]: 2,
-    [`POST ${repo}/issues/{number}/dependencies/blocked_by`]: 1,
-    [`POST ${repo}/issues/{number}/sub_issues`]: 2,
-    [`POST ${repo}/pulls`]: 2,
-    [`POST ${repo}/stacks`]: 1,
-    [`PUT ${repo}/pulls/{number}/merge-async`]: 1,
-    [`POST ${repo}/issues/{number}/comments`]: 3,
-    [`PATCH ${repo}/issues/{number}`]: 3,
-  },
-};
-
-/** Reads of an uninterrupted run; each is faulted on its first occurrence. */
-export const REFERENCE_READS = {
-  regular: [
-    `GET ${repo}/issues/{number}`,
-    `GET ${repo}/labels`,
-    `GET ${repo}/issues`,
-    `GET ${repo}/issues/{number}/dependencies/blocked_by`,
-    `GET ${repo}/issues/{number}/sub_issues`,
-    `GET ${repo}`,
-    `GET ${repo}/pulls`,
-    `GET ${repo}/pulls/{number}`,
-    `GET ${repo}/commits/{sha}/check-runs`,
-    `GET ${repo}/commits/{sha}/status`,
-    "POST /graphql",
-    `GET ${repo}/issues/{number}/comments`,
-    "GIT fetch-advertise",
-  ],
-  "native-stack": [
-    `GET ${repo}/issues/{number}`,
-    `GET ${repo}/labels`,
-    `GET ${repo}/issues`,
-    `GET ${repo}/issues/{number}/dependencies/blocked_by`,
-    `GET ${repo}/issues/{number}/sub_issues`,
-    `GET ${repo}`,
-    `GET ${repo}/pulls`,
-    `GET ${repo}/pulls/{number}`,
-    `GET ${repo}/commits/{sha}/check-runs`,
-    `GET ${repo}/commits/{sha}/status`,
-    "POST /graphql",
-    `GET ${repo}/stacks`,
-    `GET ${repo}/pulls/{number}/merge-async/{uuid}`,
-    `GET ${repo}/issues/{number}/timeline`,
-    `GET ${repo}/issues/{number}/comments`,
-    "GIT fetch-advertise",
-  ],
-};
-
-/** In-process effects of an uninterrupted run (model and driver calls). */
-export const REFERENCE_CALLS = {
-  "model.generateStructured": 1,
-  "model.reviewGraph": 1,
-  "model.reviewResult": 3,
-  "driver.start": 2,
-  "driver.collect": 2,
-};
+import { OBJECTIVE, branch, marker, runScenario } from "./fault-harness.mjs";
 
 const KINDS = ["crash-before", "crash-after", "lost", "unavailable"];
+const PAID = new Set(["crash-after", "lost"]);
+
+/** The run every case is compared with, once per process and delivery. */
+const references = new Map();
+export function referenceRun(delivery) {
+  if (!references.has(delivery))
+    references.set(
+      delivery,
+      runScenario({ name: `reference-${delivery}`, delivery }),
+    );
+  return references.get(delivery);
+}
 
 function httpRule(endpoint, occurrence, kind) {
   switch (kind) {
@@ -103,69 +42,133 @@ function httpRule(endpoint, occurrence, kind) {
   throw new Error(`Unknown kind ${kind}`);
 }
 
-/** Every case of the matrix for one delivery strategy. */
-export function matrixCases(delivery) {
+const isRead = (entry) =>
+  entry.method === "GET" ||
+  entry.endpoint === "POST /graphql" ||
+  entry.endpoint === "GIT fetch-advertise";
+
+/**
+ * Every boundary of the reference run: each applied mutation (REST or git
+ * push) by its occurrence among requests to its endpoint, the first read of
+ * every read endpoint, and each model and execution-driver call.
+ */
+export function deriveCases(reference) {
   const cases = [];
-  for (const [endpoint, count] of [
-    ...Object.entries(REFERENCE_EFFECTS[delivery]),
-    ["GIT push", 2],
-  ])
-    for (let occurrence = 1; occurrence <= count; occurrence++)
+  const seen = new Map();
+  const firstRead = new Set();
+  for (const entry of reference.fake.log) {
+    if (entry.unhandled) continue;
+    const occurrence = (seen.get(entry.endpoint) ?? 0) + 1;
+    seen.set(entry.endpoint, occurrence);
+    if (entry.effect)
       for (const kind of KINDS)
         cases.push({
-          name: `${kind} at ${endpoint} #${occurrence}`,
-          boundary: { kind: "http", endpoint, occurrence },
-          fault: kind,
-          http: [httpRule(endpoint, occurrence, kind)],
+          name: `${kind} at ${entry.endpoint} #${occurrence}`,
+          boundary: { kind: "http", endpoint: entry.endpoint, occurrence },
+          http: [httpRule(entry.endpoint, occurrence, kind)],
         });
-  for (const endpoint of REFERENCE_READS[delivery])
-    for (const kind of ["unavailable", "reset"])
+    else if (isRead(entry) && !firstRead.has(entry.endpoint)) {
+      firstRead.add(entry.endpoint);
+      for (const kind of ["unavailable", "reset"])
+        cases.push({
+          name: `${kind} at ${entry.endpoint} #1`,
+          boundary: { kind: "http", endpoint: entry.endpoint, occurrence: 1 },
+          http: [httpRule(entry.endpoint, 1, kind)],
+        });
+    }
+  }
+  const calls = new Map();
+  for (const call of reference.calls) {
+    const key = `${call.target}.${call.method}`;
+    const occurrence = (calls.get(key) ?? 0) + 1;
+    calls.set(key, occurrence);
+    for (const kind of KINDS)
       cases.push({
-        name: `${kind} at ${endpoint} #1`,
-        boundary: { kind: "http", endpoint, occurrence: 1 },
-        fault: kind,
-        http: [httpRule(endpoint, 1, kind)],
+        name: `${kind} at ${key} #${occurrence}`,
+        boundary: {
+          kind: "call",
+          target: call.target,
+          method: call.method,
+          occurrence,
+        },
+        inProcess: [
+          {
+            target: call.target,
+            method: call.method,
+            occurrence,
+            kind,
+            ...(kind === "unavailable" ? { times: 2 } : {}),
+          },
+        ],
       });
-  for (const [call, count] of Object.entries(REFERENCE_CALLS)) {
-    const [target, method] = call.split(".");
-    for (let occurrence = 1; occurrence <= count; occurrence++)
-      for (const kind of KINDS)
-        cases.push({
-          name: `${kind} at ${call} #${occurrence}`,
-          boundary: { kind: "call", target, method, occurrence },
-          fault: kind,
-          inProcess: [
-            {
-              target,
-              method,
-              occurrence,
-              kind,
-              ...(kind === "unavailable" ? { times: 2 } : {}),
-            },
-          ],
-        });
   }
   return cases;
 }
 
+/** REST endpoints a run applied mutations to (Git transport aside). */
+const effectEndpoints = (result) =>
+  [
+    ...new Set(
+      result.fake.log
+        .filter((entry) => entry.effect && !entry.endpoint.startsWith("GIT "))
+        .map((entry) => entry.endpoint),
+    ),
+  ].sort();
+
+/** Model calls that reached the provider plus worker starts. */
+const paidCalls = (result) =>
+  result.calls.filter((call) => call.target === "model" && call.reached)
+    .length + result.harness.filter((event) => event.type === "start").length;
+
+const compiles = (result) =>
+  result.calls.filter(
+    (call) => call.method === "generateStructured" && call.reached,
+  ).length;
+
+/** Every injected fault and lag took effect; otherwise the case proves nothing. */
+export function assertFaultsFired(result) {
+  for (const rule of result.fake.rules)
+    assert.ok(rule.fired > 0, `fault never fired: ${String(rule.match)}`);
+  for (const rule of result.fake.lag)
+    assert.ok(rule.served > 0, `lag never served a stale read: ${rule.read}`);
+  for (const fault of result.inProcess)
+    assert.ok(
+      result.calls.some(
+        (call) =>
+          call.target === fault.target &&
+          call.method === fault.method &&
+          call.fault === fault.kind,
+      ),
+      `fault never fired: ${fault.kind} at ${fault.target}.${fault.method} #${fault.occurrence}`,
+    );
+}
+
 /**
- * The fixed outcome every case must reach after restarts: the same GitHub
- * effects as an uninterrupted run, nothing duplicated, nothing refused.
+ * The end state every case must reach after restarts, judged from GitHub and
+ * the repository: one issue per marker, one PR per branch, one applied merge
+ * per PR, a completion comment once, the reference's kinds of mutation and
+ * nothing GitHub refused, the scripted files on the default branch, every
+ * merge commit an ancestor of it, and the reviewed dependency and sub-issue
+ * topology.
  */
-export function assertCleanOutcome(result, testCase) {
-  const { fake, items, delivery, final } = result;
+export async function assertEndState(result, { foreignIssues = 0 } = {}) {
+  const { fake, items, repository } = result;
+  const reference = await referenceRun(result.delivery);
   const context = () =>
     JSON.stringify(
       { runs: result.runs, crashes: result.crashes, counts: fake.counts() },
       null,
       1,
     );
-  assert.equal(final.outcome, "completed", context());
-  assert.equal(final.finalValidation, true, context());
-  // Exact issue count per marker, each closed with one completion comment.
+  assert.equal(result.final.outcome, "returned", context());
+  const objective = fake.issue(OBJECTIVE);
+  assert.equal(objective.state, "closed", `Objective closed\n${context()}`);
+  assert.equal(fake.commentsOn(OBJECTIVE).length, 1, "Objective comments");
+  const issueOf = {};
   for (const item of items) {
     const issues = fake.issuesWithMarker(marker(item.id));
     assert.equal(issues.length, 1, `issues for ${item.id}\n${context()}`);
+    issueOf[item.id] = issues[0].number;
     assert.equal(issues[0].state, "closed", `issue for ${item.id} closed`);
     assert.equal(
       fake.commentsOn(issues[0].number).length,
@@ -173,219 +176,212 @@ export function assertCleanOutcome(result, testCase) {
       `completion comments on ${item.id}`,
     );
   }
-  const objective = fake.issue(OBJECTIVE);
-  assert.equal(objective.state, "closed", `Objective closed\n${context()}`);
-  assert.equal(fake.commentsOn(OBJECTIVE).length, 1, "Objective comments");
-  // Nothing but the Objective, the Work Items, their PRs and issues other
-  // actors opened exists.
   assert.equal(
     Object.keys(fake.state.issues).length,
-    1 + items.length * 2 + (testCase.foreignIssues ?? 0),
+    1 + items.length * 2 + foreignIssues,
     `issue and PR numbers\n${context()}`,
   );
-  // Exactly one PR per branch, merged.
   for (const item of items) {
     const pulls = fake.pullsForBranch(branch(item.id));
     assert.equal(pulls.length, 1, `PRs for ${item.id}\n${context()}`);
-    assert.ok(pulls[0].merged_at, `PR for ${item.id} merged\n${context()}`);
-  }
-  // Exactly the mutations of an uninterrupted run, counted where GitHub
-  // applied them (a dropped response still counts as applied).
-  for (const [endpoint, count] of Object.entries(REFERENCE_EFFECTS[delivery]))
+    assert.equal(pulls[0].merges ?? 0, 1, `merges of ${item.id}'s PR`);
     assert.equal(
-      fake.effects(endpoint).length,
-      count,
-      `${endpoint} applied\n${context()}`,
+      repository.merges[pulls[0].number],
+      true,
+      `${item.id}'s merge commit is on the default branch`,
     );
-  // Factory never sent a request GitHub refused as a duplicate, conflict or
-  // invalid state, and never called an endpoint the fake does not serve.
-  const refused = fake.log.filter(
-    (entry) =>
-      [405, 409, 422].includes(entry.status) || entry.unhandled === true,
+  }
+  assert.deepEqual(
+    effectEndpoints(result),
+    effectEndpoints(reference),
+    "kinds of mutation",
   );
   assert.deepEqual(
-    refused.map((entry) => `${entry.endpoint} → ${entry.status}`),
+    fake.log
+      .filter(
+        (entry) =>
+          [405, 409, 422].includes(entry.status) || entry.unhandled === true,
+      )
+      .map((entry) => `${entry.endpoint} → ${entry.status}`),
     [],
     context(),
   );
-  // One worker start per attempt; a fault on the driver may add one attempt.
+  for (const item of items)
+    assert.equal(
+      repository.files[`${item.id}.txt`],
+      `${item.id}\n`,
+      `${item.id}.txt on the default branch`,
+    );
+  for (const item of items) {
+    assert.deepEqual(
+      [...(fake.state.blockedBy[issueOf[item.id]] ?? [])].sort(),
+      item.dependencies.map((id) => issueOf[id]).sort(),
+      `dependencies of ${item.id}`,
+    );
+    assert.equal(
+      fake.state.parent[issueOf[item.id]],
+      OBJECTIVE,
+      `parent of ${item.id}`,
+    );
+  }
   const starts = result.harness.filter((event) => event.type === "start");
   assert.equal(
     new Set(starts.map((event) => event.attempt)).size,
     starts.length,
     "an attempt started twice",
   );
-  const driverFault = testCase.boundary.target === "driver";
-  for (const item of items) {
-    const count = starts.filter((event) => event.item === item.id).length;
-    assert.ok(
-      count >= 1 && count <= (driverFault ? 2 : 1),
-      `${count} worker starts for ${item.id}`,
-    );
-  }
-  // Model calls that reached the provider stay bounded: at most one more than
-  // an uninterrupted run, and only for the faulted method.
-  for (const [call, count] of Object.entries(REFERENCE_CALLS)) {
-    const [target, method] = call.split(".");
-    if (target !== "model") continue;
-    const reached = result.calls.filter(
-      (entry) =>
-        entry.target === target && entry.method === method && entry.reached,
-    ).length;
-    const faulted =
-      testCase.boundary.target === target &&
-      testCase.boundary.method === method;
-    assert.ok(
-      reached >= count && reached <= count + (faulted ? 1 : 0),
-      `${reached} ${call} calls (uninterrupted: ${count})`,
-    );
-  }
 }
 
 /** No run stopped for an operator: only injected crashes interrupt it. */
 export function assertNoOperatorStop(result) {
   assert.deepEqual(
     result.runs
-      .filter(
-        (run) => !["completed", "crashed", "returned"].includes(run.outcome),
-      )
+      .filter((run) => !["returned", "crashed"].includes(run.outcome))
       .map((run) => `${run.outcome}: ${run.message ?? run.stderr ?? ""}`),
     [],
   );
 }
 
-export const OPERATOR_STOP = "without an operator stop";
+/**
+ * Paid work (model calls that reached the provider, worker starts) stays
+ * within the reference plus one per injected fault that reached a paid call.
+ */
+export async function assertPaidBudget(result) {
+  const reference = await referenceRun(result.delivery);
+  const injected = result.calls.filter((call) => PAID.has(call.fault)).length;
+  assert.ok(
+    paidCalls(result) <= paidCalls(reference) + injected,
+    `${paidCalls(result)} paid calls; uninterrupted ${paidCalls(reference)}, ${injected} injected`,
+  );
+}
+
+/** An interrupted plan review reviews the compiled plan; it does not compile again. */
+export async function assertPlanCompiledOnce(result) {
+  const reference = await referenceRun(result.delivery);
+  assert.equal(compiles(result), compiles(reference), "plan compilations");
+}
 
 /**
- * Declare one scenario as two tests over a single run: the fixed end state,
- * and that no run stopped for an operator on its way there. Known failures
- * are `todo` with their diagnosis: they run and report, but do not fail.
+ * Factory refused to continue past a fact it must not accept: a run stopped
+ * with `refuses`, and neither the Objective nor any Work Item issue was
+ * closed as completed.
  */
-export function declareScenario(name, run, testCase, known) {
+export function assertRefusal(result, { refuses }) {
+  assert.ok(
+    result.runs.some(
+      (run) => run.outcome === "stopped" && refuses.test(run.message ?? ""),
+    ),
+    `no run refused with ${refuses}: ${JSON.stringify(result.runs)}`,
+  );
+  assert.equal(result.fake.issue(OBJECTIVE).state, "open", "Objective open");
+  for (const item of result.items)
+    for (const issue of result.fake.issuesWithMarker(marker(item.id)))
+      assert.equal(issue.state, "open", `issue for ${item.id} open`);
+}
+
+export const CHECKS = {
+  refusal: { suffix: " is refused", assert: assertRefusal },
+  end: { suffix: "", assert: assertEndState },
+  stop: { suffix: " without an operator stop", assert: assertNoOperatorStop },
+  budget: { suffix: " within the paid-call budget", assert: assertPaidBudget },
+  plan: { suffix: " compiles the plan once", assert: assertPlanCompiledOnce },
+};
+
+/** Test names a scenario declares for `checks`. */
+export const testNames = (name, checks) =>
+  checks.map((check) => `${name}${CHECKS[check].suffix}`);
+
+/** A known failure must name a declared test. */
+export function checkKnown(known, names) {
+  const declared = new Set(names);
+  for (const name of Object.keys(known))
+    if (!declared.has(name)) throw new Error(`Unknown scenario test: ${name}`);
+}
+
+function report(name, value) {
+  if (!process.env.FACTORY_FAULT_REPORT) return;
+  console.log(
+    `FAULT-REPORT ${JSON.stringify({
+      suite: basename(process.argv[1] ?? ""),
+      name,
+      runs: value.runs,
+      crashes: value.crashes,
+      refused: value.fake.log
+        .filter(
+          (entry) =>
+            (entry.status >= 400 && entry.status !== 404) || entry.unhandled,
+        )
+        .map(
+          (entry) =>
+            `${entry.endpoint} → ${entry.status}${entry.fault ? ` (${entry.fault})` : ""}`,
+        ),
+    })}`,
+  );
+}
+
+/**
+ * Declare one scenario as one test per check over a single run. Every test
+ * first requires that each injected fault fired. A known failure is inverted:
+ * it passes while the bug reproduces and fails once it is fixed, so its entry
+ * must then be removed from the known failures.
+ */
+export function declareScenario(name, run, options, known) {
+  const { checks = ["end", "stop", "budget"], ...context } = options;
   let result;
   const once = () =>
     (result ??= run().then((value) => {
-      if (process.env.FACTORY_FAULT_REPORT)
-        console.log(
-          `FAULT-REPORT ${JSON.stringify({
-            suite: basename(process.argv[1] ?? ""),
-            name,
-            runs: value.runs,
-            crashes: value.crashes,
-            refused: value.fake.log
-              .filter(
-                (entry) =>
-                  (entry.status >= 400 && entry.status !== 404) ||
-                  entry.unhandled,
-              )
-              .map(
-                (entry) =>
-                  `${entry.endpoint} → ${entry.status}${entry.fault ? ` (${entry.fault})` : ""}`,
-              ),
-          })}`,
-        );
+      report(name, value);
       return value;
     }));
-  const options = (todo) => ({ ...(todo ? { todo } : {}), timeout: 300_000 });
-  test(name, options(known[name]), async () =>
-    assertCleanOutcome(await once(), testCase),
-  );
-  const stop = `${name} ${OPERATOR_STOP}`;
-  test(stop, options(known[stop]), async () =>
-    assertNoOperatorStop(await once()),
-  );
+  for (const check of checks) {
+    const testName = `${name}${CHECKS[check].suffix}`;
+    const diagnosis = known[testName];
+    test(testName, { timeout: 300_000 }, async (t) => {
+      const value = await once();
+      assertFaultsFired(value);
+      if (!diagnosis) return CHECKS[check].assert(value, context);
+      try {
+        await CHECKS[check].assert(value, context);
+      } catch {
+        t.diagnostic(`known failure: ${diagnosis}`);
+        return;
+      }
+      assert.fail(
+        `Known failure no longer reproduces; remove it from test/support/fault-known.mjs: ${diagnosis}`,
+      );
+    });
+  }
 }
+
+const checksFor = (testCase) =>
+  testCase.boundary.kind === "call" &&
+  testCase.boundary.method === "reviewGraph"
+    ? ["end", "stop", "budget", "plan"]
+    : ["end", "stop", "budget"];
 
 /**
- * Diagnoses of the known failures (Factory bugs, not test bugs). References
- * like (r1 #4) point at the adversarial review behind #515.
+ * Declare part `part` of `parts` of the matrix for one delivery strategy
+ * (cases alternate between parts so CI shards balance).
  */
-export const DIAGNOSES = {
-  GIT_PUSH:
-    "git push failures (HTTP 503, or a lost response after the ref moved) are plain Errors, never interruptions: the item fails at deliver with state.error, and a restart refuses the stopped Objective (r1 #2)",
-  GIT_FETCH:
-    "a failing git fetch (regular: right after the PR merged; native: before the stack merge) is a plain Error outside any repeat: the Objective stops with state.error and a restart refuses it (r1 #2, #8)",
-  NATIVE_READS:
-    "native delivery's reads outside a Work Item step (defaultBranch at start; PR, check-run, status and readiness observation before the stack merge) are not repeated: one 5xx or connection reset stops the Objective with state.error and a restart refuses it (r1 #8)",
-  PLAN_RECOMPILE:
-    "a crash or lost response at plan (graph) review compiles the plan again on restart: the compiled candidate is not kept across the review, so the planner is called twice",
-  GRAPH_REVIEW_STOP:
-    "a lost or unavailable plan (graph) review response stops planning as 'Plan needs a specific human source decision before run' instead of repeating the review",
-  PLANNER_STOP:
-    "a lost or unavailable planner response stops the run; planning is not repeated in the run, only a manual restart compiles again",
-  FINAL_REVIEW:
-    "a lost or unavailable final Objective review response sets state.error after every Work Item merged: the final review runs outside any repeat, retry needs a failed item and a restart refuses the stopped Objective (r1 #1)",
-  START_AMBIGUOUS:
-    "regular delivery: a crash before or after driver.start leaves the item running/execute without a handle, which regular-runner refuses as 'ambiguous active state at execute; operator direction required' (r1 #4)",
-  START_REPEAT:
-    "driver.start is repeated with the same attempt id after its response was lost (or, native, after a crash): the local driver's `git worktree add` fails because the attempt's worktree exists, and the item fails (r1 #4)",
-  COLLECT_REPEAT:
-    "driver.collect removes the worktree before the runner records the produced commit: a repeated collect after a lost response or crash fails with 'cannot change to <worktree>' and is recorded as an implementation failure of a worker that succeeded (r1 #5)",
-  PROJECTION_STOP:
-    "graph projection (labels, issues, dependencies, sub-issues, the marker scan) runs outside any repeat: a lost response, 5xx or 429 stops the run ('GitHub mutation outcome unknown' or 'GitHub request failed') and only a manual restart continues it",
-  CLOSURE_PAUSE:
-    "issue closure wraps every error, including a 5xx, 403 rate limit or lost response on the completion comment or close, in GitHubClosureFailure and pauses for 'resume to reconcile' instead of repeating (r1 #9)",
-  READBACK_LAG:
-    "projection reads dependencies and sub-issues back immediately after writing them and throws 'did not reconcile exactly' (a plain Error) when the list lags one read; the run stops until a manual restart",
-  MERGE_READ_LAG:
-    "RealGitHubGateway.merge reads the PR right after PUT merge and throws a plain Error ('has not confirmed the exact integrated commit') when that read lags: the item fails after its PR merged, and a restart refuses (r3 #3)",
-  TIMELINE_LAG:
-    "timelineMergeCommit throws a plain Error ('missing or conflicting merge evidence') when the merged event is not on the timeline yet; it is not an interruption, so the item or Objective stops after a successful merge (r3 #3)",
-  PULL_LIST_LAG:
-    "after a lost POST /pulls, findOpenPullRequest relies on the open-PR list; when the list lags, publish posts again, GitHub answers 422 'A pull request already exists', and the item fails at deliver (r3 #5)",
-  ISSUE_LIST_LAG:
-    "after a lost POST /issues, the marker scan relies on the issue list; when the list lags, projection creates a second issue for the same Work Item (r3 #6)",
-  STACK_MERGE_REPEAT:
-    "a lost merge-async response while the stack merge is still pending is repeated as a second PUT merge-async (GitHub: 405 merge already in progress) instead of observing the pending merge, and the Objective stops (r1 #11)",
-  SECONDARY_403:
-    "a 403 secondary rate limit (even with retry-after) is a GitHubRequestError, not an interruption: PR creation fails the item at deliver and a restart refuses (r1 #7)",
-  PRIMARY_403:
-    "a 403 primary rate limit (x-ratelimit-remaining: 0) is a GitHubRequestError, not an interruption: PR observation fails the item and a restart refuses; without a reset header the client also stops every later request (r1 #7)",
-  BASE_MODIFIED:
-    "PUT merge answered 405 'Base branch was modified' (transient on GitHub when merges race) fails the item as a completed rejection instead of repeating the merge (r3 #4)",
-  PAGE_SHIFT:
-    "the marker scan pages issues?state=all without deduplicating by id: an issue opened between page reads repeats a boundary row, and a Work Item issue on that boundary stops the run as 'Multiple Work Item issues' (r3 #6)",
-  FOREIGN_PUSH:
-    "a push by another contributor to the default branch after the last merge stops the Objective with state.error ('Default branch changed before final validation') instead of validating the new head; a restart refuses (r1 #1)",
-};
-
-/** Expand {diagnosis: [case names]} into {case name: diagnosis}. */
-export function todos(groups) {
-  const map = {};
-  for (const [diagnosis, names] of Object.entries(groups))
-    for (const name of names) {
-      if (map[name]) throw new Error(`Duplicate known failure: ${name}`);
-      map[name] = diagnosis;
-    }
-  return map;
-}
-
-/** A known failure must name a declared scenario (or its operator-stop test). */
-export function checkKnown(known, scenarios) {
-  const names = new Set(
-    scenarios.flatMap((name) => [name, `${name} ${OPERATOR_STOP}`]),
-  );
-  for (const name of Object.keys(known))
-    if (!names.has(name)) throw new Error(`Unknown scenario: ${name}`);
-}
-
-/** Declare the matrix for one delivery strategy. */
-export function defineMatrix(delivery, known) {
-  const cases = matrixCases(delivery);
+export async function defineMatrix(delivery, known, part = 1, parts = 2) {
+  const reference = await referenceRun(delivery);
+  const cases = deriveCases(reference);
   checkKnown(
     known,
-    cases.map((testCase) => testCase.name),
+    cases.flatMap((testCase) => testNames(testCase.name, checksFor(testCase))),
   );
-  describe(`fault matrix: ${delivery} delivery`, {
-    concurrency: Math.max(2, Math.floor(availableParallelism() / 2)),
+  describe(`fault matrix: ${delivery} delivery (${part}/${parts})`, {
+    concurrency: availableParallelism(),
   }, () => {
-    declareScenario(
-      "uninterrupted run",
-      () => runScenario({ name: `reference-${delivery}`, delivery }),
-      { boundary: {} },
-      {},
-    );
-    for (const [index, testCase] of cases.entries())
+    if (part === 1)
+      declareScenario(
+        "uninterrupted run",
+        () => referenceRun(delivery),
+        { checks: ["end", "stop"] },
+        {},
+      );
+    for (const [index, testCase] of cases.entries()) {
+      if (index % parts !== part - 1) continue;
       declareScenario(
         testCase.name,
         () =>
@@ -395,8 +391,20 @@ export function defineMatrix(delivery, known) {
             http: testCase.http ?? [],
             inProcess: testCase.inProcess ?? [],
           }),
-        testCase,
+        { checks: checksFor(testCase) },
         known,
       );
+    }
   });
+}
+
+/** Expand {diagnosis: [test names]} into {test name: diagnosis}. */
+export function todos(groups) {
+  const map = {};
+  for (const [diagnosis, names] of Object.entries(groups))
+    for (const name of names) {
+      if (map[name]) throw new Error(`Duplicate known failure: ${name}`);
+      map[name] = diagnosis;
+    }
+  return map;
 }

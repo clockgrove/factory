@@ -98,8 +98,22 @@ class HttpError extends Error {
   }
 }
 
-const validation = (message, errors = []) =>
-  new HttpError(422, "Validation Failed", { errors: [{ message }, ...errors] });
+/** GitHub sends the primary rate-limit headers on every REST response. */
+function rateHeaders() {
+  return {
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 3600),
+  };
+}
+
+/** GitHub's 422 shape: one errors entry carrying the reason. */
+const validation = (message, fields = {}) =>
+  new HttpError(422, "Validation Failed", {
+    errors: [{ ...fields, message }],
+  });
 
 function gitEnvironment() {
   const env = { ...process.env };
@@ -213,7 +227,7 @@ export class GitHubHttpFake {
     this.origin = options.origin;
     this.defaultBranch = options.defaultBranch ?? "main";
     this.options = options;
-    this.lag = options.lag ?? [];
+    this.lag = (options.lag ?? []).map((rule) => ({ ...rule, served: 0 }));
     this.onCrash = options.onCrash;
     this.rules = [];
     this.log = [];
@@ -345,6 +359,24 @@ export class GitHubHttpFake {
     return commit;
   }
 
+  /** Another actor force-pushes the default branch back to its first parent. */
+  async rewindDefaultBranch() {
+    const head = await git(
+      this.origin,
+      "rev-parse",
+      `refs/heads/${this.defaultBranch}`,
+    );
+    const parent = await git(this.origin, "rev-parse", `${head}^1`);
+    await git(
+      this.origin,
+      "update-ref",
+      `refs/heads/${this.defaultBranch}`,
+      parent,
+      head,
+    );
+    return parent;
+  }
+
   /** Another actor opens an issue. */
   openForeignIssue(title = "Unrelated issue", body = "Not a Factory issue") {
     return this.createIssueRecord(this.state, { title, body });
@@ -411,6 +443,7 @@ export class GitHubHttpFake {
       entry.status = rule.status;
       const headers = {
         "content-type": "application/json",
+        ...rateHeaders(),
         ...(rule.headers?.() ?? {}),
       };
       response.writeHead(rule.status, headers);
@@ -521,7 +554,7 @@ export class GitHubHttpFake {
         },
       };
     }
-    if (!reading && result.status < 300) {
+    if (!reading && result.status < 300 && result.effect !== false) {
       entry.effect = true;
       this.recordWrite(before, route.endpoint);
     }
@@ -537,9 +570,7 @@ export class GitHubHttpFake {
     const headers = {
       "content-type": "application/json; charset=utf-8",
       "x-github-api-version-selected": "2026-03-10",
-      "x-ratelimit-limit": "5000",
-      "x-ratelimit-remaining": "4999",
-      "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 3600),
+      ...rateHeaders(),
       ...(result.headers ?? {}),
     };
     if (method === "GET" && result.status === 200) {
@@ -575,6 +606,11 @@ export class GitHubHttpFake {
     const lagging = this.writes.find((write) =>
       rules.some((index) => write.pending[index] > 0),
     );
+    // Count stale reads per rule so a test can prove its lag took effect.
+    if (lagging)
+      for (const index of rules)
+        if (lagging.pending[index] > 0)
+          this.lag[index].served = (this.lag[index].served ?? 0) + 1;
     for (const write of this.writes)
       for (const index of rules)
         if (write.pending[index] > 0) write.pending[index]--;
@@ -826,6 +862,7 @@ export class GitHubHttpFake {
     const now = this.tick(s);
     pull.merged_at = now;
     pull.mergeSha = sha;
+    pull.merges = (pull.merges ?? 0) + 1;
     issue.state = "closed";
     issue.closed_at = now;
     issue.updated_at = now;
@@ -1170,7 +1207,7 @@ export class GitHubHttpFake {
     )
       throw validation(
         `A pull request already exists for ${this.owner}:${headRef}.`,
-        [{ resource: "PullRequest", code: "custom" }],
+        { resource: "PullRequest", code: "custom" },
       );
     const ahead = await gitStatus(
       this.origin,
@@ -1180,9 +1217,10 @@ export class GitHubHttpFake {
       baseSha,
     );
     if (ahead.status === 0)
-      throw validation(`No commits between ${body.base} and ${headRef}`, [
-        { resource: "PullRequest", code: "custom" },
-      ]);
+      throw validation(`No commits between ${body.base} and ${headRef}`, {
+        resource: "PullRequest",
+        code: "custom",
+      });
     const number = s.nextNumber;
     this.createIssueRecord(
       s,
@@ -1247,19 +1285,27 @@ export class GitHubHttpFake {
 
   stackJson(s, stack) {
     return {
+      id: stack.id,
+      node_id: `ST_${stack.id}`,
       number: stack.number,
+      url: `${API}/repos/${this.repository}/stacks/${stack.number}`,
       base: { ref: stack.base },
+      open: stack.pulls.some((number) => !s.pulls[number].merged_at),
+      created_at: stack.created_at,
       pull_requests: stack.pulls.map((number) => this.pullJson(s, number)),
     };
   }
 
   listStacks(s, { query }) {
     const number = Number(query.get("pull_request"));
+    const stacks = s.stacks.filter(
+      (stack) => !number || stack.pulls.includes(number),
+    );
+    const page = this.page(query, stacks, `/repos/${this.repository}/stacks`);
     return {
       status: 200,
-      data: s.stacks
-        .filter((stack) => !number || stack.pulls.includes(number))
-        .map((stack) => this.stackJson(s, stack)),
+      data: page.data.map((stack) => this.stackJson(s, stack)),
+      headers: page.headers,
     };
   }
 
@@ -1268,7 +1314,8 @@ export class GitHubHttpFake {
     if (!Array.isArray(numbers) || numbers.length < 2)
       throw validation("A stack needs two or more pull requests");
     for (const [index, number] of numbers.entries()) {
-      const pull = this.requirePull(s, number);
+      const pull = s.pulls[Number(number)];
+      if (!pull) throw validation(`Pull request #${number} does not exist`);
       if (s.issues[number].state !== "open")
         throw validation(`Pull request #${number} is not open`);
       if (s.stacks.some((stack) => stack.pulls.includes(number)))
@@ -1279,53 +1326,111 @@ export class GitHubHttpFake {
         );
     }
     const stack = {
+      id: s.nextId++,
       number: s.nextStack++,
       base: s.pulls[numbers[0]].base.ref,
       pulls: [...numbers],
+      created_at: this.tick(s),
     };
     s.stacks.push(stack);
     return { status: 201, data: this.stackJson(s, stack) };
   }
 
+  /**
+   * Land an async merge: the requested PR with every open PR below it in its
+   * stack, as one merge commit of the requested head into the stack's base.
+   * Unverified against GitHub: whether each layer reports that one commit on
+   * its timeline, or a commit of its own.
+   */
   async applyJob(s, job) {
     const top = s.pulls[job.top];
     const base = s.pulls[job.layers[0]].base.ref;
     const sha = await this.mergeCommit(
       base,
       top.head.sha,
-      `Merge stack #${job.top} from ${this.owner}/${top.head.ref}`,
+      `Merge pull request #${job.top} from ${this.owner}/${top.head.ref}`,
     );
     for (const number of job.layers) this.markMerged(s, number, sha);
     job.sha = sha;
     job.applied = true;
   }
 
+  jobDetails(job) {
+    return {
+      uuid: job.uuid,
+      merge_method: job.merge_method,
+      merge_action: job.merge_action,
+      expected_head_sha: job.expected_head_sha,
+      bypass_rules: job.bypass_rules,
+      ...(job.applied ? { sha: job.sha } : {}),
+    };
+  }
+
+  /**
+   * PUT merge-async (API 2026-03-10): 202 pending with a uuid; 200 merged
+   * when the PR already merged; 400 when it is closed or a draft; 409 with
+   * the pending request when a merge is already requested. For a stacked PR
+   * the merge includes every open PR below it.
+   */
   async mergeAsync(s, { params, body }) {
     const number = Number(params.number);
-    if (
-      Object.values(s.jobs).some(
-        (job) => !job.applied && job.layers.includes(number),
-      )
-    )
-      throw new HttpError(405, "A merge is already in progress");
-    this.checkMergeable(s, number, body);
+    const pull = this.requirePull(s, number);
+    if (pull.merged_at)
+      return {
+        status: 200,
+        effect: false,
+        data: {
+          status: "merged",
+          details: {
+            message: "Pull request is already merged",
+            sha: pull.mergeSha,
+          },
+        },
+      };
+    if (s.issues[number].state !== "open" || pull.draft)
+      throw new HttpError(400, "Pull request is not ready to be merged");
+    const pending = Object.values(s.jobs).find(
+      (job) => !job.applied && job.layers.includes(number),
+    );
+    if (pending)
+      throw new HttpError(
+        409,
+        "A merge request is already enqueued for this pull request",
+        { status: "pending", details: this.jobDetails(pending) },
+      );
+    const methods = this.options.mergeMethods ?? ["merge"];
+    const method = body.merge_method ?? "merge";
+    if (!methods.includes(method) || method !== "merge")
+      throw validation(`${method} merges are not allowed on this repository`);
+    if (body.sha !== undefined && body.sha !== pull.head.sha)
+      throw validation("Head sha does not match the pull request head");
     const stack = s.stacks.find((candidate) =>
       candidate.pulls.includes(number),
     );
-    if (stack && stack.pulls.at(-1) !== number)
-      throw new HttpError(405, "Merge a stack from its top pull request");
+    const layers = stack
+      ? stack.pulls
+          .slice(0, stack.pulls.indexOf(number) + 1)
+          .filter((layer) => !s.pulls[layer].merged_at)
+      : [number];
     const job = {
       uuid: randomUUID(),
       top: number,
-      layers: stack ? [...stack.pulls] : [number],
+      layers,
       polls: this.options.asyncMergePolls ?? 0,
       applied: false,
+      merge_method: method,
+      merge_action: body.merge_action ?? "default",
+      expected_head_sha: pull.head.sha,
+      bypass_rules: body.bypass_rules ?? false,
     };
     s.jobs[job.uuid] = job;
     if (job.polls <= 0) await this.applyJob(s, job);
     return {
       status: 202,
-      data: { status: "pending", details: { uuid: job.uuid } },
+      data: {
+        status: "pending",
+        details: this.jobDetails({ ...job, applied: false }),
+      },
     };
   }
 
@@ -1337,9 +1442,10 @@ export class GitHubHttpFake {
     if (!job.applied && --job.polls <= 0) await this.applyJob(this.state, job);
     return {
       status: 200,
-      data: job.applied
-        ? { status: "merged", details: { uuid: job.uuid, sha: job.sha } }
-        : { status: "pending", details: { uuid: job.uuid } },
+      data: {
+        status: job.applied ? "merged" : "pending",
+        details: this.jobDetails(job),
+      },
     };
   }
 
@@ -1554,20 +1660,17 @@ export const faults = {
     headers: () =>
       retryAfter === undefined ? {} : { "retry-after": String(retryAfter) },
   }),
-  primaryRateLimit: ({ resetInSeconds } = {}) => ({
+  // GitHub always sends x-ratelimit-reset with an exhausted primary limit.
+  primaryRateLimit: ({ resetInSeconds = 60 } = {}) => ({
     kind: "status",
     status: 403,
     message: "API rate limit exceeded for user ID 1.",
     headers: () => ({
-      "x-ratelimit-limit": "5000",
       "x-ratelimit-remaining": "0",
-      ...(resetInSeconds === undefined
-        ? {}
-        : {
-            "x-ratelimit-reset": String(
-              Math.ceil(Date.now() / 1000 + resetInSeconds),
-            ),
-          }),
+      "x-ratelimit-used": "5000",
+      "x-ratelimit-reset": String(
+        Math.ceil(Date.now() / 1000 + resetInSeconds),
+      ),
     }),
   }),
   baseModified: () => ({

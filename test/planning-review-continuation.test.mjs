@@ -193,7 +193,6 @@ async function fixture(
     "fixture-config",
     undefined,
     undefined,
-    [],
   ];
   const initial = compilePlan(
     ...args,

@@ -2,7 +2,7 @@ import { objectiveCandidate } from "./qa.js";
 import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
 import { assertFinalAcceptance } from "./completion.js";
 import { assertRepairLedger, type Autonomy } from "./repair-policy.js";
-import type { SourceSelector } from "./compiler.js";
+import { type Capacity, validateCapacity } from "./config.js";
 import type {
   AssetSelectionDecision,
   AuthenticationRequest,
@@ -126,12 +126,14 @@ export interface PreparationState {
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
   /** Limits snapshotted from configuration when the Objective started. */
   autonomy: Autonomy;
+  /** Worker ceiling and scheduling resolved when the Objective started. */
+  capacity: import("./config.js").Capacity;
   allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
   repairConsumption?: Record<
     string,
     import("./graph-amendments.js").AllowanceConsumption
   >;
-  schemaVersion: 5;
+  schemaVersion: 7;
   kind: "preparing";
   repository: string;
   objective: number;
@@ -166,10 +168,13 @@ export interface FactoryState {
   coordinator?: CoordinatorDisposition;
   /** Limits snapshotted from configuration when the Objective started. */
   autonomy: Autonomy;
-  additionalSources?: SourceSelector[];
+  /** Worker ceiling and scheduling resolved when the Objective started. */
+  capacity: import("./config.js").Capacity;
+  /** Digest of the accepted plan's graph; the root of every graph revision. */
+  planGraphDigest: string;
   /** Native predecessor facts the plan was made with; absent when it had none. */
   prerequisitesDigest?: string;
-  schemaVersion: 4;
+  schemaVersion: 6;
   repository: string;
   objective: number;
   runId: string;
@@ -409,7 +414,7 @@ export function parseFactoryState(
   const state = record(value, "state");
   assertCoordinator(state.coordinator);
   if (
-    state.schemaVersion !== 4 ||
+    state.schemaVersion !== 6 ||
     state.repository !== repository ||
     state.objective !== objective
   )
@@ -418,6 +423,8 @@ export function parseFactoryState(
     );
   string(state.runId, "runId");
   sha(state.configDigest, "configDigest", 64);
+  sha(state.planGraphDigest, "planGraphDigest", 64);
+  validateCapacity(state.capacity as Capacity);
   if (state.prerequisitesDigest !== undefined)
     sha(state.prerequisitesDigest, "prerequisitesDigest", 64);
   sha(state.baseSha, "baseSha");

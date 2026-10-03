@@ -73,7 +73,7 @@ After installing the CLI, bind your target:
 factory install --repository OWNER/REPO --checkout /absolute/path/to/target
 ```
 
-Without `--concurrency`, Factory writes no `execution.concurrency` and sizes workers and [scheduling](#resource-limits-in-the-upcoming-autonomous-release) from the host each time it reads the configuration, so the sizing follows the host. It keeps 2 CPUs and 4 GiB for the OS and controller. From the rest, each coding worker reserves 2 CPUs and 2 GiB, each validation job 4 CPUs and 4 GiB, and each review or delivery 0.5 CPU and 512 MiB. A phase's ceiling is how many of its reservations fit; review allows two per coding worker. On a 24-thread, 45 GiB host this gives 11 workers, 5 validation jobs and 22 reviews. Setup reports the result as `capacity`.
+Without `--concurrency`, Factory writes no `execution.concurrency` and sizes workers and [scheduling](#resource-limits-in-the-upcoming-autonomous-release) from the host when an Objective starts; the Objective keeps that sizing until it finishes, even on another host. It keeps 2 CPUs and 4 GiB for the OS and controller. From the rest, each coding worker reserves 2 CPUs and 2 GiB, each validation job 4 CPUs and 4 GiB, and each review or delivery 0.5 CPU and 512 MiB. A phase's ceiling is how many of its reservations fit; review allows two per coding worker. On a 24-thread, 45 GiB host this gives 11 workers, 5 validation jobs and 22 reviews. Setup reports the result as `capacity`.
 
 Pass `--concurrency N` (or set `execution.concurrency`) to choose the worker ceiling yourself. Without `scheduling`, validation and review then share that ceiling. Set `scheduling` in the configuration to override the derived values.
 
@@ -177,13 +177,13 @@ Every run repairs and amends within bounded limits. The optional `autonomy` sect
 }
 ```
 
-`allowances` cap the whole Objective; `repairPolicy.perPath` caps each original Work Item. Zero is valid. Set `repairClasses` to `[]` to stop for an operator decision on every failure. `requiredEnvironment` names worker secrets that must be present before planning; each must also be in `policy.allowedSecretNames`. Each Objective records these limits when it starts, so editing them affects the next Objective, not a running one. Consumption is never reset.
+`allowances` cap the whole Objective; `repairPolicy.perPath` caps each original Work Item. Planning revisions and amendments have one Objective-wide scope, so only `allowances.planningRevisions` limits them. Zero is valid. Set `repairClasses` to `[]` to stop for an operator decision on every failure. `requiredEnvironment` names worker secrets that must be present before planning; each must also be in `policy.allowedSecretNames`. Each Objective records these limits when it starts, so editing them affects the next Objective, not a running one. Consumption is never reset.
 
 ### Resolve source and prerequisite gaps
 
 Planning and activation use the same pinned-source and final-command parsing rules. A declared final-validation section with no recognized commands is an authoring error, not an empty successful check. Fix the Objective declaration before retrying planning. Required facts and host prerequisites must be available in the environment where their phase runs; passing worker diagnostics do not establish controller validation readiness.
 
-When an apparent missing contract already exists elsewhere in the authorized pinned repository, locate that canonical file or section read-only and include it with a repeated `factory plan --source 'path#Exact heading'` option. The corrected packet needs fresh compilation and review; retain the rejected candidate and do not reuse its decision. Uncommitted edits are not pinned source evidence. If the behavior is genuinely unspecified, obtain the exact product or security decision from its owner instead of inventing it. Source lookup does not authorize broader implementation scope.
+When an apparent missing contract already exists elsewhere in the authorized pinned repository, locate that canonical file or section read-only and add it to the Objective's **Planning sources** section as `path#Exact heading`. Editing the Objective invalidates a saved plan: refuse it with `factory decide`, then run again so the corrected packet gets fresh compilation and review. Uncommitted edits are not pinned source evidence. If the behavior is genuinely unspecified, obtain the exact product or security decision from its owner instead of inventing it. Source lookup does not authorize broader implementation scope.
 
 ## Write an Objective
 
@@ -217,15 +217,23 @@ factory run --objective ISSUE_NUMBER
 
 Running is the consent to execute that Objective. `run` compiles and independently reviews a plan, saves the plan and its review in the Objective's state, and executes it when the review is clean. It keeps running until the Objective completes, fails, or needs a human decision, then exits with a message naming the decision and the command to make it. Run the same command again to resume; an existing plan is never planned again.
 
-When plan review leaves a specific question, `run` stops before creating any Work Item issue. Inspect the question with `factory status --objective ISSUE_NUMBER`, then decide:
+`run`, `supervisor serve` and `intake run` exit with:
+
+| Code | Meaning                                                     |
+| ---- | ----------------------------------------------------------- |
+| 0    | The Objective (or the intake selection) completed.          |
+| 2    | An Objective needs a human decision; status names it.       |
+| 1    | A failure or cancellation stopped it; the message says why. |
+
+When plan review leaves a specific question, `run` stops before creating any Work Item issue. Inspect the question and the plan's short digest with `factory status --objective ISSUE_NUMBER`, then decide on exactly that plan:
 
 ```sh
-factory decide --objective ISSUE_NUMBER --outcome accept \
+factory decide --objective ISSUE_NUMBER --plan PLAN_DIGEST --outcome accept \
   --answer "Specific answer" --reason "Evidence and authority for the decision"
 factory run --objective ISSUE_NUMBER
 ```
 
-`--answer` defaults to the reason and `--actor` to your user name. `--outcome refuse` discards the saved plan, so the next `run` plans again. A decision cannot expand scope or override deterministic checks. If the base commit, Objective body, sources or configuration change before the plan is projected, `run` stops; refuse the plan to plan again.
+`--plan` must name the saved plan; a different digest is refused. Accepting requires `--answer`. `--actor` defaults to your user name. `--outcome refuse` discards the saved plan, so the next `run` plans again. When planning itself stopped for a decision before producing a plan, status says so; resolve it in the Objective and refuse (no `--plan` is needed) to plan again. A decision cannot expand scope or override deterministic checks. If the base commit, Objective body, sources or configuration change before the plan is projected, `run` stops; refuse the plan to plan again.
 
 To preview a plan without saving any state, run `factory plan --objective ISSUE_NUMBER [--output /absolute/private/plan.json]`. The output file must be new and outside the target checkout. Inspect owned paths, dependencies, acceptance, non-goals, validation commands, and final integrated-result checks.
 

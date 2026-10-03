@@ -69,7 +69,14 @@ export interface PreparingStatusView {
   /** Whether a controller process owns this installation; null when unknown. */
   runActive: boolean | null;
   coordinator: CoordinatorView | null;
-  planReview: { status: string; question: string | null } | null;
+  /** `digest` is the short review digest `decide --plan` must name. */
+  planReview: {
+    status: string;
+    question: string | null;
+    digest: string;
+  } | null;
+  /** Planning stopped for a decision before producing a reviewable plan. */
+  planningStopped: boolean;
   cancelledAt: string | null;
   error?: string | null;
 }
@@ -97,7 +104,13 @@ export type StatusView =
   | PreparingStatusView
   | ExecutionStatusView;
 
+/** The short identity of the reviewed plan an operator decides on. */
+export function shortPlanDigest(plan: { reviewDigest: string }): string {
+  return plan.reviewDigest.slice(0, 12);
+}
+
 const REASON = '"WHY"';
+const ANSWER = '"ANSWER"';
 const ACTOR = '"$USER"';
 
 function short(text: string, limit = 100): string {
@@ -357,8 +370,17 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
       phase: "needs-plan-decision",
       summary: "plan review needs a human decision",
       nextAction: {
-        command: `factory decide --objective ${objective} --outcome accept|refuse --reason ${REASON}`,
+        command: `factory decide --objective ${objective} --plan ${view.planReview.digest} --outcome accept|refuse --answer ${ANSWER} --reason ${REASON}`,
         reason: `Answer the question below; then ${run(objective)}`,
+      },
+    };
+  if (view.planningStopped)
+    return {
+      phase: "needs-plan-decision",
+      summary: `planning stopped for a decision${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
+      nextAction: {
+        command: `factory decide --objective ${objective} --outcome refuse --reason ${REASON}`,
+        reason: `Discards the stopped planning; resolve the decision in the Objective, then ${run(objective)} plans again`,
       },
     };
   if (view.coordinator?.mode === "paused")

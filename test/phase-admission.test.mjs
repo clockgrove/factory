@@ -4,8 +4,9 @@ import { phaseAdmission } from "../dist/phase-admission.js";
 import { readyItems } from "../dist/scheduler.js";
 
 function fixture(limit = 2) {
-  const config = {
-    execution: { concurrency: 3 },
+  // The run reads its ceilings from the capacity it stored when the Objective started.
+  const capacity = {
+    concurrency: 3,
     scheduling: {
       cpu: limit,
       memoryMiB: limit * 100,
@@ -19,7 +20,9 @@ function fixture(limit = 2) {
       ),
     },
   };
+  const config = { execution: {} };
   const state = {
+    capacity,
     work: Object.fromEntries(
       ["a", "b", "c"].map((id) => [id, { status: "running" }]),
     ),
@@ -32,7 +35,7 @@ function fixture(limit = 2) {
     () => cancelled,
   );
   return {
-    config,
+    capacity,
     state,
     phases,
     cancel: () => {
@@ -67,8 +70,8 @@ test("a waiting completion receives the next suitable grant before more coding",
 });
 
 test("unknown reservations and exhausted ceilings fail closed; cancellation releases no uncertain reservation", async () => {
-  const { config, state, phases, cancel } = fixture(1);
-  delete config.scheduling.phases.review.cpu;
+  const { capacity, state, phases, cancel } = fixture(1);
+  delete capacity.scheduling.phases.review.cpu;
   await assert.rejects(phases.reserve("b", "review"), /unknown/);
   delete state.work.b.requestedPhase;
   await phases.reserve("a", "coding");
@@ -80,11 +83,11 @@ test("unknown reservations and exhausted ceilings fail closed; cancellation rele
 });
 
 test("restart consumes persisted reservations and the configured worker ceiling", async () => {
-  const { config, state } = fixture(3);
+  const { state } = fixture(3);
   state.work.a.phaseReservation = "coding";
-  config.execution.concurrency = 1;
+  state.capacity.concurrency = 1;
   const restarted = phaseAdmission(
-    config,
+    { execution: {} },
     state,
     () => {},
     () => false,
@@ -137,8 +140,8 @@ test("remaining provider slots compose with operator ceilings without subtractin
 });
 
 test("memory is a binding independent resource and deadlines stop waiting admission", async () => {
-  const { config, state, phases } = fixture(3);
-  config.scheduling.memoryMiB = 100;
+  const { capacity, state, phases } = fixture(3);
+  capacity.scheduling.memoryMiB = 100;
   await phases.reserve("a", "coding");
   assert.equal(phases.reason("b", "review"), "memoryMiB ceiling");
   state.coordinator = { deadlineAt: new Date(Date.now() - 1).toISOString() };

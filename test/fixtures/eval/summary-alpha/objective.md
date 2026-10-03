@@ -19,3 +19,7 @@ finite array of numbers, with zero for an empty array. One Work Item owns only
 
 Changing `scripts/check.mjs`, `src/beta.mjs`, the summary join, the README or
 the repository instructions.
+
+## Planning sources
+
+- `scripts/check.mjs`

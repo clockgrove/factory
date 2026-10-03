@@ -39,13 +39,16 @@ test("planning eval plans each case through the plan path and reports usage, rev
     const cases = join(work, "cases");
     cpSync(join(root, "test/fixtures/eval"), cases, { recursive: true });
     mkdirSync(join(cases, "missing-source"));
-    cpSync(
-      join(cases, "summary-alpha", "objective.md"),
+    writeFileSync(
       join(cases, "missing-source", "objective.md"),
+      readFileSync(
+        join(cases, "summary-alpha", "objective.md"),
+        "utf8",
+      ).replace("- `scripts/check.mjs`", "- `docs/MISSING.md#Scope`"),
     );
     writeFileSync(
       join(cases, "missing-source", "case.json"),
-      JSON.stringify({ commit: head, sources: ["docs/MISSING.md#Scope"] }),
+      JSON.stringify({ commit: head }),
     );
     const config = join(work, "factory.json");
     writeFileSync(
@@ -121,7 +124,6 @@ test("planning eval plans each case through the plan path and reports usage, rev
       (entry) => entry.case === "summary-alpha",
     )) {
       assert.equal(run.commit, head);
-      assert.deepEqual(run.sources, [{ path: "scripts/check.mjs" }]);
       assert.equal(run.planned, true);
       assert.equal(run.error, null);
       assert.equal(run.review, "clean");

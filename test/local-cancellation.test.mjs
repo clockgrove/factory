@@ -19,6 +19,7 @@ import { GitHubCopilotSdkHarness } from "../dist/execution/github-copilot.js";
 import { CodexHarness, LocalExecutionDriver } from "../dist/execution/local.js";
 import { linuxProcessIdentity, processGroupExists } from "../dist/process.js";
 import { resolveAutonomy } from "../dist/index.js";
+import { graphDigest } from "../dist/graph-amendments.js";
 import { cancelObjective } from "../dist/runner.js";
 import { coverageObligations } from "../dist/qa.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
@@ -281,7 +282,7 @@ test("supported Objective cancellation retains the ceased worker failure and con
       },
     };
     const state = {
-      schemaVersion: 4,
+      schemaVersion: 6,
       repository: config.repository,
       objective: 1,
       runId: "failed-run",
@@ -307,6 +308,10 @@ test("supported Objective cancellation retains the ceased worker failure and con
         })),
       },
       issueByItemId: { worker: 2 },
+      capacity: { concurrency: 1 },
+      get planGraphDigest() {
+        return graphDigest(this.graph);
+      },
       autonomy: resolveAutonomy({
         allowances: {
           planningRevisions: 1,

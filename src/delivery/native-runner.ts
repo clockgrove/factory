@@ -107,7 +107,7 @@ export async function runNativeGraph(args: {
       outcome: "observed",
       metadata: {
         driverAvailableSlots: reported,
-        operatorCeiling: config.execution.concurrency,
+        operatorCeiling: state.capacity.concurrency,
         codingReservations: phases.codingCount(),
       },
     });
@@ -268,7 +268,6 @@ export async function runNativeGraph(args: {
                   args.objectiveBody,
                   state.baseSha,
                   config.checkout,
-                  state.additionalSources,
                 ),
                 save,
                 stopped: () => args.cancelled() || Boolean(args.paused?.()),
@@ -668,7 +667,6 @@ export async function runNativeGraph(args: {
                 args.objectiveBody,
                 state.baseSha,
                 config.checkout,
-                state.additionalSources,
               ),
               decisions: work.acceptanceDecisions,
               evidenceSources: workItemReviewEvidence({
@@ -802,7 +800,6 @@ export async function runNativeGraph(args: {
                   args.objectiveBody,
                   state.baseSha,
                   config.checkout,
-                  state.additionalSources,
                 ),
                 save,
                 stopped: () => args.cancelled() || Boolean(args.paused?.()),

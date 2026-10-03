@@ -111,20 +111,20 @@ export interface ExecutionProfile {
 export type ExecutionConfig =
   | {
       kind: "local";
-      concurrency: number;
+      concurrency?: number;
       harness?: LocalHarnessConfig;
       defaultProfile?: string;
       profiles?: Record<string, ExecutionProfile>;
     }
   | {
       kind: "managed-agent";
-      concurrency: number;
+      concurrency?: number;
       provider: "openai-agents" | "claude-managed-agents";
       config: { [key: string]: JsonValue };
     }
   | {
       kind: "sandbox";
-      concurrency: number;
+      concurrency?: number;
       provider: string;
       config?: { [key: string]: JsonValue };
       harness: Extract<LocalHarnessConfig, { kind: "registered" }>;
@@ -558,6 +558,82 @@ export function validateTarget(repository: string, checkout: string): void {
   validateLfsRouting(root);
 }
 
+/** Validate declared scheduling reservations; also used for the copy stored in state. */
+export function validateScheduling(
+  scheduling: unknown,
+): asserts scheduling is SchedulingConfig {
+  assertObject(scheduling, "scheduling");
+  assertOnlyKeys(
+    scheduling,
+    [
+      "cpu",
+      "memoryMiB",
+      "reviewConcurrency",
+      "validationConcurrency",
+      "phases",
+    ],
+    "scheduling",
+  );
+  for (const key of [
+    "cpu",
+    "memoryMiB",
+    "reviewConcurrency",
+    "validationConcurrency",
+  ]) {
+    const amount = scheduling[key];
+    if (
+      amount !== undefined &&
+      (typeof amount !== "number" ||
+        !Number.isFinite(amount) ||
+        amount <= 0 ||
+        (key.endsWith("Concurrency") && !Number.isSafeInteger(amount)))
+    )
+      throw new Error(
+        `scheduling.${key} must be a positive finite reservation or integer ceiling`,
+      );
+  }
+  if (scheduling.phases !== undefined) {
+    assertObject(scheduling.phases, "scheduling.phases");
+    assertOnlyKeys(
+      scheduling.phases,
+      ["coding", "validation", "review", "delivery"],
+      "scheduling.phases",
+    );
+    for (const [phase, declaration] of Object.entries(scheduling.phases)) {
+      assertObject(declaration, `scheduling.phases.${phase}`);
+      assertOnlyKeys(
+        declaration,
+        ["cpu", "memoryMiB"],
+        `scheduling.phases.${phase}`,
+      );
+      for (const key of ["cpu", "memoryMiB"])
+        if (
+          declaration[key] !== undefined &&
+          (typeof declaration[key] !== "number" ||
+            !Number.isFinite(declaration[key]) ||
+            Number(declaration[key]) < 0)
+        )
+          throw new Error(
+            `scheduling.phases.${phase}.${key} must be a nonnegative finite reservation`,
+          );
+    }
+  }
+  for (const key of ["cpu", "memoryMiB"]) {
+    if (scheduling[key] === undefined) continue;
+    const phases = scheduling.phases as
+      | Record<string, Record<string, number>>
+      | undefined;
+    for (const phase of ["coding", "validation", "review", "delivery"])
+      if (
+        phases?.[phase]?.[key] === undefined ||
+        phases[phase]![key]! > Number(scheduling[key])
+      )
+        throw new Error(
+          `Binding scheduling.${key} requires a fitting declaration for every phase; missing capacity is unknown`,
+        );
+  }
+}
+
 export function validateConfig(value: unknown): FactoryConfig {
   assertObject(value, "configuration");
   if (value.schemaVersion !== 1)
@@ -570,80 +646,7 @@ export function validateConfig(value: unknown): FactoryConfig {
   }
   validateTarget(value.repository, value.checkout);
   validatePlanning(value.planning);
-  if (value.scheduling !== undefined) {
-    assertObject(value.scheduling, "scheduling");
-    assertOnlyKeys(
-      value.scheduling,
-      [
-        "cpu",
-        "memoryMiB",
-        "reviewConcurrency",
-        "validationConcurrency",
-        "phases",
-      ],
-      "scheduling",
-    );
-    for (const key of [
-      "cpu",
-      "memoryMiB",
-      "reviewConcurrency",
-      "validationConcurrency",
-    ]) {
-      const amount = value.scheduling[key];
-      if (
-        amount !== undefined &&
-        (typeof amount !== "number" ||
-          !Number.isFinite(amount) ||
-          amount <= 0 ||
-          (key.endsWith("Concurrency") && !Number.isSafeInteger(amount)))
-      )
-        throw new Error(
-          `scheduling.${key} must be a positive finite reservation or integer ceiling`,
-        );
-    }
-    if (value.scheduling.phases !== undefined) {
-      assertObject(value.scheduling.phases, "scheduling.phases");
-      assertOnlyKeys(
-        value.scheduling.phases,
-        ["coding", "validation", "review", "delivery"],
-        "scheduling.phases",
-      );
-      for (const [phase, declaration] of Object.entries(
-        value.scheduling.phases,
-      )) {
-        assertObject(declaration, `scheduling.phases.${phase}`);
-        assertOnlyKeys(
-          declaration,
-          ["cpu", "memoryMiB"],
-          `scheduling.phases.${phase}`,
-        );
-        for (const key of ["cpu", "memoryMiB"])
-          if (
-            declaration[key] !== undefined &&
-            (typeof declaration[key] !== "number" ||
-              !Number.isFinite(declaration[key]) ||
-              Number(declaration[key]) < 0)
-          )
-            throw new Error(
-              `scheduling.phases.${phase}.${key} must be a nonnegative finite reservation`,
-            );
-      }
-    }
-    for (const key of ["cpu", "memoryMiB"]) {
-      if (value.scheduling[key] === undefined) continue;
-      const phases = value.scheduling.phases as
-        | Record<string, Record<string, number>>
-        | undefined;
-      for (const phase of ["coding", "validation", "review", "delivery"])
-        if (
-          phases?.[phase]?.[key] === undefined ||
-          phases[phase]![key]! > Number(value.scheduling[key])
-        )
-          throw new Error(
-            `Binding scheduling.${key} requires a fitting declaration for every phase; missing capacity is unknown`,
-          );
-    }
-  }
+  if (value.scheduling !== undefined) validateScheduling(value.scheduling);
   assertObject(value.execution, "execution");
   if (
     value.execution.kind !== "local" &&
@@ -849,23 +852,45 @@ export function validateConfig(value: unknown): FactoryConfig {
   }
   if (value.autonomy !== undefined)
     resolveAutonomy(value.autonomy as AutonomyConfig);
-  if (value.execution.concurrency !== undefined)
-    return value as unknown as FactoryConfig;
-  // Omitted concurrency follows the host this configuration is read on.
+  return value as unknown as FactoryConfig;
+}
+
+/** The worker ceiling and scheduling an Objective runs with; it stores them when it starts. */
+export interface Capacity {
+  concurrency: number;
+  scheduling?: SchedulingConfig;
+}
+
+/** The declared capacity, or this host's defaults when `execution.concurrency` is omitted. */
+export function resolveCapacity(config: FactoryConfig): Capacity {
+  if (config.execution.concurrency !== undefined)
+    return {
+      concurrency: config.execution.concurrency,
+      ...(config.scheduling ? { scheduling: config.scheduling } : {}),
+    };
   const host = hostSchedulingDefaults({
     cpus: availableParallelism(),
     memoryBytes: totalmem(),
   });
   return {
-    ...value,
-    execution: { ...value.execution, concurrency: host.concurrency },
-    scheduling: value.scheduling ?? host.scheduling,
-  } as unknown as FactoryConfig;
+    concurrency: host.concurrency,
+    scheduling: config.scheduling ?? host.scheduling,
+  };
+}
+
+export function validateCapacity(value: Capacity): Capacity {
+  assertObject(value, "capacity");
+  assertOnlyKeys(value, ["concurrency", "scheduling"], "capacity");
+  if (!Number.isSafeInteger(value.concurrency) || value.concurrency <= 0)
+    throw new Error("capacity.concurrency must be a positive integer");
+  if (value.scheduling !== undefined) validateScheduling(value.scheduling);
+  return value;
 }
 
 /**
- * Digest of every validated installation choice, including adapter config and the resolved
- * concurrency. Autonomy limits are excluded: each Objective snapshots them when it starts.
+ * Digest of every declared installation choice, including adapter config; an omitted
+ * concurrency stays omitted, so the digest does not follow the host. Autonomy limits are
+ * excluded: each Objective snapshots them, and its capacity, when it starts.
  */
 export function factoryConfigDigest(config: FactoryConfig): string {
   const { autonomy: _autonomy, ...bound } = config;

@@ -381,7 +381,7 @@ test("regular execution persists authentication requests for status", async () =
     requiredLfsRoles: [],
   };
   const state = {
-    schemaVersion: 4,
+    schemaVersion: 6,
     repository: "example/auth",
     objective: 1,
     runId: "run-auth",
@@ -406,6 +406,7 @@ test("regular execution persists authentication requests for status", async () =
       ],
     },
     issueByItemId: { auth: 2 },
+    capacity: { concurrency: 1 },
     work: { auth: { status: "pending" } },
   };
   const request = { provider: "codex", command: "codex login" };

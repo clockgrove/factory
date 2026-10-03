@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { shortPlanDigest } from "../dist/status-summary.js";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel } from "../dist/compiler.js";
 import {
@@ -1382,20 +1383,23 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
       actions: { alpha: { files: [{ path: "alpha.txt", text: "alpha\n" }] } },
     });
     const preparing = await application.runObjective(objective);
-    assert.equal(preparing.schemaVersion, 5);
+    assert.equal(preparing.schemaVersion, 7);
     assert.equal(preparing.plan.review.status, "needs-human");
     assert.match(preparing.coordinator.waitReason, /^Plan needs a decision: /);
     assert.equal(Object.keys(github.state().issues).length, 0);
     assert.equal(reviewCount, 1);
     // A rerun resumes the persisted plan: no planning call, still waiting.
     const again = await application.runObjective(objective);
-    assert.equal(again.schemaVersion, 5);
+    assert.equal(again.schemaVersion, 7);
     assert.equal(reviewCount, 1);
     assert.equal(Object.keys(github.state().issues).length, 0);
     // The persisted plan stays bound to the configuration it was planned with.
     config.planning.reviewer.reasoningEffort = "high";
     await assert.rejects(
       application.decidePlan(objective, {
+        plan: shortPlanDigest(
+          readContinuation(config.repository, objective).plan,
+        ),
         actor: "test operator",
         outcome: "accept",
         answer: "I inspected the exact graph and accept its sole item",
@@ -1409,6 +1413,9 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
     );
     config.planning.reviewer.reasoningEffort = "medium";
     const decided = await application.decidePlan(objective, {
+      plan: shortPlanDigest(
+        readContinuation(config.repository, objective).plan,
+      ),
       actor: "test operator",
       outcome: "accept",
       answer: "I inspected the exact graph and accept its sole item",
@@ -1503,6 +1510,9 @@ test("preview planning stays read-only and a refused plan is planned again", asy
     assert.equal(preparing.plan.review.status, "needs-human");
     const planned = generationCount;
     await application.decidePlan(objective, {
+      plan: shortPlanDigest(
+        readContinuation(config.repository, objective).plan,
+      ),
       actor: "test operator",
       outcome: "refuse",
       answer: "",
@@ -1566,7 +1576,7 @@ test("application lifecycle reattaches once, cancels owned work, and retries onl
           const state = existsSync(restartStatePath)
             ? readContinuation(descriptor.config.repository, objective)
             : undefined;
-          return state?.schemaVersion === 4 && state.work.restart.execution
+          return state?.schemaVersion === 6 && state.work.restart.execution
             ? state
             : undefined;
         },

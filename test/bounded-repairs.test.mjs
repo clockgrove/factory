@@ -33,6 +33,7 @@ import {
   CodexPlanningModel,
 } from "../dist/compiler.js";
 import { coverageObligations, aggregateAcceptance } from "../dist/qa.js";
+import { shortPlanDigest } from "../dist/status-summary.js";
 import {
   validateTree,
   workItemReviewEvidence,
@@ -481,7 +482,6 @@ for (const kind of [
         undefined,
         undefined,
         undefined,
-        [],
         { state, save: () => snapshots.push(structuredClone(state)) },
       );
       assert.equal(
@@ -529,7 +529,6 @@ test("planning allowance survives restart and stops before a new model call", as
         undefined,
         undefined,
         undefined,
-        [],
         { state, save: () => {} },
       ),
       /allowance is exhausted/,
@@ -545,7 +544,6 @@ test("planning allowance survives restart and stops before a new model call", as
         undefined,
         undefined,
         undefined,
-        [],
         { state: JSON.parse(JSON.stringify(state)), save: () => {} },
       ),
       /recovery stopped/,
@@ -596,7 +594,7 @@ for (const delivery of ["regular", "native-stack"])
         objectiveIssue: 1,
       });
       const state = {
-        schemaVersion: 4,
+        schemaVersion: 6,
         repository: config.repository,
         objective: 1,
         runId: "fixture",
@@ -604,6 +602,8 @@ for (const delivery of ["regular", "native-stack"])
         baseSha: target.baseSha,
         graph: plan.graph,
         autonomy: policy,
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: plan.graphDigest,
         issueByItemId: projection.issueByItemId,
         work: Object.fromEntries(
           graph.items.map((item) => [item.id, { status: "pending" }]),
@@ -1478,9 +1478,10 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
       planningModel: planner,
     });
     const waiting = await fixture.application.runObjective(1);
-    assert.equal(waiting.schemaVersion, 5);
+    assert.equal(waiting.schemaVersion, 7);
     assert.equal(waiting.plan.review.status, "needs-human");
     await fixture.application.decidePlan(1, {
+      plan: shortPlanDigest(waiting.plan),
       actor: "fixture-owner",
       outcome: "accept",
       reason: "Answer applies to this exact reviewed packet",
@@ -1533,7 +1534,6 @@ test("pause after known planning response preserves compilation for resume with 
         undefined,
         undefined,
         undefined,
-        [],
         { state, save: () => {}, stopped: () => paused },
       );
     await assert.rejects(compile(), /paused/);

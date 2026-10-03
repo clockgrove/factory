@@ -19,13 +19,7 @@ import { parseArgs } from "node:util";
 const usage = `Usage: node scripts/eval-planning.mjs --cases DIR --config FACTORY_CONFIG --output NEW_DIR
   [--target CHECKOUT] [--case NAME ...] [--repeat K] [--parallel N] [--planning-model MODULE]`;
 
-const caseKeys = new Set([
-  "commit",
-  "sources",
-  "target",
-  "repository",
-  "objective",
-]);
+const caseKeys = new Set(["commit", "target", "repository", "objective"]);
 
 function fail(message) {
   console.error(`${message}\n${usage}`);
@@ -67,9 +61,6 @@ function loadCases(directory, names, defaultTarget, config) {
     if (unknown.length) fail(`${name}: unknown case.json keys ${unknown}`);
     if (typeof spec.commit !== "string" || !spec.commit)
       fail(`${name}: case.json requires commit`);
-    const sources = spec.sources ?? [];
-    if (!Array.isArray(sources) || sources.some((s) => typeof s !== "string"))
-      fail(`${name}: sources must be an array of PATH#HEADING strings`);
     const objective = spec.objective ?? 1;
     if (!Number.isSafeInteger(objective) || objective <= 0)
       fail(`${name}: objective must be a positive integer`);
@@ -92,12 +83,6 @@ function loadCases(directory, names, defaultTarget, config) {
       objective,
       title: /^#\s+(.+)$/m.exec(body)?.[1]?.trim() ?? name,
       body,
-      sources: sources.map((value) => {
-        const at = value.indexOf("#");
-        return at < 0
-          ? { path: value }
-          : { path: value.slice(0, at), heading: value.slice(at + 1) };
-      }),
     };
   });
 }
@@ -134,7 +119,6 @@ function runOne(evalCase, repeat, options) {
         repeat,
         repository: evalCase.repository,
         commit: evalCase.commit,
-        sources: evalCase.sources,
       };
       const result = existsSync(resultPath)
         ? JSON.parse(readFileSync(resultPath, "utf8"))

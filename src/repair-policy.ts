@@ -116,9 +116,15 @@ export function resolveAutonomy(section: AutonomyConfig = {}): Autonomy {
     ],
   });
 }
-/** Required worker secrets must be allowed and present before any model is called. */
-export function checkRequiredEnvironment(config: FactoryConfig): void {
-  for (const name of resolveAutonomy(config.autonomy).requiredEnvironment) {
+/**
+ * Required worker secrets must be allowed and present before any model is called. A started
+ * Objective names them from its snapshot; presence is always checked live.
+ */
+export function checkRequiredEnvironment(
+  config: FactoryConfig,
+  autonomy: Autonomy = resolveAutonomy(config.autonomy),
+): void {
+  for (const name of autonomy.requiredEnvironment) {
     if (!config.policy.allowedSecretNames.includes(name))
       throw new Error(
         `Required environment ${name} is not in policy.allowedSecretNames`,
@@ -191,19 +197,28 @@ export function chargeRepair(
     );
   consumeAllowance(state, allowanceKey(kind), scopes);
 }
+/** Per-path limits cap Work Item scopes; planning is one Objective-wide scope under its allowance. */
+function scopeLimit(
+  autonomy: Autonomy,
+  scope: string,
+  key: keyof AllowanceConsumption,
+): number {
+  return scope === "$planning"
+    ? autonomy.allowances[key]
+    : autonomy.repairPolicy.perPath[key];
+}
 /** Whether one more charge fits the Objective and every scope's allowance. */
 export function allowanceAvailable(
   state: RepairLedger,
   key: keyof AllowanceConsumption,
   scopes: string[],
 ): boolean {
-  const { allowances, repairPolicy } = state.autonomy;
   return (
-    (state.allowanceConsumption?.[key] ?? 0) < allowances[key] &&
+    (state.allowanceConsumption?.[key] ?? 0) < state.autonomy.allowances[key] &&
     scopes.every(
       (scope) =>
         (state.repairConsumption?.[scope]?.[key] ?? 0) <
-        repairPolicy.perPath[key],
+        scopeLimit(state.autonomy, scope, key),
     )
   );
 }
@@ -212,15 +227,14 @@ export function consumeAllowance(
   key: keyof AllowanceConsumption,
   scopes: string[],
 ): void {
-  const { allowances, repairPolicy } = state.autonomy;
   const total = state.allowanceConsumption ?? emptyConsumption();
   const paths = state.repairConsumption ?? {};
-  if (total[key] >= allowances[key])
+  if (total[key] >= state.autonomy.allowances[key])
     throw new Error(`Objective ${key} allowance exhausted`);
   if (!scopes.length || scopes.some((scope) => !scope))
     throw new Error("Repair needs an inherited scope");
   for (const scope of new Set(scopes))
-    if ((paths[scope]?.[key] ?? 0) >= repairPolicy.perPath[key])
+    if ((paths[scope]?.[key] ?? 0) >= scopeLimit(state.autonomy, scope, key))
       throw new Error(`Repair path ${scope} ${key} allowance exhausted`);
   total[key]++;
   for (const scope of new Set(scopes)) {
@@ -343,7 +357,7 @@ export function assertRepairLedger(
         "resultRereviews",
       ] as const)
         if (
-          counts[key] > autonomy.repairPolicy.perPath[key] ||
+          counts[key] > scopeLimit(autonomy, scope, key) ||
           counts[key] > state.allowanceConsumption[key]
         )
           throw new Error("Repair path consumption exceeds bound allowance");

@@ -118,7 +118,7 @@ test("owner remains responsive during planning; cancellation succeeds and cannot
       const rejected = assert.rejects(running, /cancel/);
       await until(() => calls === 1);
       const snapshot = readContinuation(config.repository, 1);
-      assert.equal(snapshot.schemaVersion, 5);
+      assert.equal(snapshot.schemaVersion, 7);
       assert.equal(snapshot.plan, undefined);
       assert.throws(() => readState(config.repository, 1), /schema version/);
       assert.equal(
@@ -494,7 +494,7 @@ test("drain stays idle under the owner and resumes its pending graph", async () 
       };
       const run = application.runObjective(1);
       await until(
-        () => readContinuation(config.repository, 1)?.schemaVersion === 4,
+        () => readContinuation(config.repository, 1)?.schemaVersion === 6,
       );
       const before = readEvents(planningPath).length;
       await new Promise((resolve) => setTimeout(resolve, 30));
@@ -534,7 +534,7 @@ test("resumed preparation keeps its persisted plan and autonomy without planning
         /preprojection preflight/,
       );
       const preparation = readContinuation(config.repository, 1);
-      assert.equal(preparation.schemaVersion, 5);
+      assert.equal(preparation.schemaVersion, 7);
       assert.ok(preparation.plan);
       assert.deepEqual(preparation.autonomy, defaultAutonomy);
       const compiles = () =>
@@ -666,7 +666,7 @@ test("pause during planning keeps the owner without projection; resume reuses th
         ),
       );
       const paused = readContinuation(config.repository, 1);
-      assert.equal(paused.schemaVersion, 5);
+      assert.equal(paused.schemaVersion, 7);
       assert.equal(paused.coordinator.mode, "paused");
       assert.equal(paused.plan, undefined);
       assert.equal(Object.keys(github.state().issues).length, 0);

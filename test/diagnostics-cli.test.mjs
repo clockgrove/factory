@@ -9,6 +9,7 @@ import { saveState, statePath } from "../dist/state-store.js";
 import { coverageObligations } from "../dist/qa.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 import { defaultAutonomy } from "../dist/index.js";
+import { graphDigest } from "../dist/graph-amendments.js";
 
 test("diagnostics and status CLI preserve snapshots, unknown usage and coordinator error redaction", (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-diagnostics-cli-"));
@@ -26,13 +27,14 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
   writeFileSync(configPath, JSON.stringify(config));
   const snapshotPath = statePath(config.repository, 1);
   const preparation = {
-    schemaVersion: 5,
+    schemaVersion: 7,
     kind: "preparing",
     repository: config.repository,
     objective: 1,
     runId: "preparing-run",
     configDigest: "b".repeat(64),
     autonomy: structuredClone(defaultAutonomy),
+    capacity: { concurrency: 1 },
     baseSha: target.baseSha,
     objectiveBodyDigest: "c".repeat(64),
     plan: {},
@@ -78,12 +80,16 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
     );
   let expected;
   const execution = {
-    schemaVersion: 4,
+    schemaVersion: 6,
     repository: config.repository,
     objective: 1,
     runId: "execution-run",
     configDigest: preparation.configDigest,
     autonomy: structuredClone(defaultAutonomy),
+    capacity: { concurrency: 1 },
+    get planGraphDigest() {
+      return graphDigest(this.graph);
+    },
     baseSha: target.baseSha,
     graph: {
       objective: 1,
@@ -157,7 +163,10 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
         const invalid = cli(...flags);
         assert.notEqual(invalid.status, 0);
         assert.equal(invalid.stdout, "");
-        assert.match(invalid.stderr, /Invalid.*(?:state|snapshot)/);
+        assert.match(
+          invalid.stderr,
+          /Invalid.*(?:state|snapshot)|earlier Factory version; v0.2.0 starts fresh/,
+        );
       }
     }
   }
@@ -216,7 +225,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
           ),
         );
         assert.ok(document.phase && document.summary);
-      } else if (snapshot.schemaVersion === 5) {
+      } else if (snapshot.schemaVersion === 7) {
         assert.match(
           status.stdout,
           /^Objective #1: failed — planning failed: Preparation failed: \[REDACTED\]\nNext: factory diagnostics --objective 1\n/,

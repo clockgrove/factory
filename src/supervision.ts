@@ -417,14 +417,14 @@ export function renderService(value: ServiceBinding): string {
     .map(([key, val]) => `Environment=${quoted(`${key}=${val}`, false)}`)
     .join(
       "\n",
-    )}\n${(value.credentials ?? []).map(({ name, file }) => `LoadCredential=${quoted(`${name}:${file}`, false)}\n`).join("")}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nRestartPreventExitStatus=1\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
+    )}\n${(value.credentials ?? []).map(({ name, file }) => `LoadCredential=${quoted(`${name}:${file}`, false)}\n`).join("")}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nRestartPreventExitStatus=1 2\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
 }
 function checkServiceContinuationFields(state: ContinuationState): void {
   // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
   const fields =
-    state.schemaVersion === 5
-      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest autonomy allowanceConsumption repairConsumption planningRecovery coordinator plan issueByItemId error cancelRequested cancelledAt permanentAbandonment"
-      : "schemaVersion repository objective runId configDigest baseSha autonomy prerequisitesDigest coordinator additionalSources graph graphRevisions pendingAmendment rejectedAmendments allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
+    state.schemaVersion === 7
+      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest autonomy capacity allowanceConsumption repairConsumption planningRecovery coordinator plan issueByItemId error cancelRequested cancelledAt permanentAbandonment"
+      : "schemaVersion repository objective runId configDigest baseSha autonomy capacity planGraphDigest prerequisitesDigest coordinator graph graphRevisions pendingAmendment rejectedAmendments allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
   for (const field of Object.keys(state))
     if (!fields.split(" ").includes(field))
       throw new Error(
@@ -507,7 +507,7 @@ async function verifyServiceOwner(
     const current = readContinuation(config.repository, objective);
     if (
       current?.cancelledAt ||
-      (current?.schemaVersion === 4 && objectiveComplete(current))
+      (current?.schemaVersion === 6 && objectiveComplete(current))
     )
       return;
     if (inspect("is-active", name) === "failed") break;

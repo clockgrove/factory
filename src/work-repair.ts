@@ -411,7 +411,7 @@ export async function diagnoseWorkRepair(args: {
     failureDigest: failure.digest,
     diagnosis: response.diagnosis,
     correction: response.correction,
-    actor: "admitted-controller",
+    actor: "factory-controller",
   };
   try {
     validateCorrection(work, correction);
@@ -462,7 +462,7 @@ export function prepareEvidenceRecovery(
     applyWorkCorrection(state, id, {
       kind: "review-evidence",
       failureDigest: work.recovery.failure!.digest,
-      actor: "admitted-controller",
+      actor: "factory-controller",
       diagnosis: `Review transport rejected ${rejection.field}: ${rejection.reason}`,
       correction:
         "Revalidate the preserved exact candidate and rerun independent review against a fresh complete evidence packet; use only supplied source IDs and the required response schema.",

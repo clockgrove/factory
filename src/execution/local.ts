@@ -51,6 +51,7 @@ import {
   pinnedGit,
   pinnedGitAsync,
   pinnedGitEnvironment,
+  killProcessGroup,
   processGroupExists,
   sanitizedWorkerEnvironment,
   withProcessCancellation,
@@ -213,28 +214,14 @@ export class CodexHarness implements AgentHarness {
   async cancel(handle: HarnessHandle): Promise<void> {
     const data = this.require(handle);
     const current = linuxProcessIdentity(data.pid);
-    if (!current) {
-      if (processGroupExists(data.pid))
-        throw new Error(
-          "Worker cessation remains unresolved; checkout retained",
-        );
-      return;
-    }
-    if (current.startTime !== data.startTime || current.group !== data.pid)
-      throw new Error("Worker identity changed before cancellation");
-    try {
-      process.kill(-data.pid, "SIGKILL");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-    }
-    for (
-      let attempt = 0;
-      attempt < 100 && processGroupExists(data.pid);
-      attempt++
+    if (
+      current &&
+      (current.startTime !== data.startTime || current.group !== data.pid)
     )
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
-    if (processGroupExists(data.pid))
-      throw new Error("Worker cessation remains unresolved; checkout retained");
+      throw new Error("Worker identity changed before cancellation");
+    // With the leader gone, surviving descendants still hold its group.
+    if (current || processGroupExists(data.pid))
+      await killProcessGroup(data.pid);
   }
 
   async collect(handle: HarnessHandle): Promise<HarnessResult> {

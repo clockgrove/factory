@@ -23,7 +23,8 @@ export interface RepairLedger {
 }
 export interface FailureDisposition {
   digest: string;
-  classification: RepairClass | "interruption" | "authority" | "uncertain";
+  /** "unclassified": not attributable to a repair class; never repaired automatically. */
+  classification: RepairClass | "interruption" | "authority" | "unclassified";
   detail: string;
   at: string;
   continuation:

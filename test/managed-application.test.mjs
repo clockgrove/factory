@@ -293,13 +293,107 @@ for (const delivery of ["regular", "native-stack"])
       ]);
       // The failed run's cleanup cancelled the unsettled worker.
       assert.ok(calls.includes("cancel"));
-      assert.equal(
-        readState(repository, 1).coordinator?.cancelError,
-        undefined,
-      );
     } finally {
       if (old === undefined) delete process.env.XDG_STATE_HOME;
       else process.env.XDG_STATE_HOME = old;
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+test("retry repeats a failed cleanup of the recorded worker before a fresh attempt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-managed-retry-"));
+  const old = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  try {
+    const target = createTarget(root);
+    const repository = "example/managed-retry";
+    const cfg = factoryConfig(target.checkout, repository, "regular", 1);
+    cfg.execution = {
+      kind: "managed-agent",
+      provider: "openai-agents",
+      concurrency: 1,
+      config: {
+        model: "explicit-fixture-model",
+        reasoningEffort: "low",
+        containerSize: "small",
+        apiKeyEnv: "FACTORY_UNUSED_TEST_KEY",
+        timeoutSeconds: 10,
+      },
+    };
+    cfg.policy.network = "off";
+    cfg.policy.allowedSecretNames = [];
+    const command = "test -s managed.txt";
+    const item = {
+      id: "managed",
+      title: "Managed work",
+      goal: "Write managed.txt",
+      acceptance: ["managed.txt has the result"],
+      nonGoals: ["No deployment"],
+      citations: [{ path: "OBJECTIVE", heading: "Acceptance" }],
+      dependencies: [],
+      resources: [],
+      ownedPaths: ["managed.txt"],
+      validation: [
+        { command, provenance: "source-declared", source: "OBJECTIVE" },
+      ],
+      brief: "Write managed.txt",
+      sourceAssets: [],
+      expectedOutputRoles: [],
+      minimumAssetSets: 0,
+      requiredLfsRoles: [],
+    };
+    const calls = [];
+    let cancelFailures = 1;
+    const driver = {
+      async availableSlots() {
+        return "unknown";
+      },
+      async start(request, context) {
+        calls.push(`start:${request.attemptId}`);
+        const handle = {
+          provider: "stub",
+          identity: request.attemptId,
+          data: { live: true },
+        };
+        context.checkpoint(handle);
+        return handle;
+      },
+      async observe() {
+        return { state: "failed", interrupted: true, detail: "unresolved" };
+      },
+      async cancel(handle) {
+        calls.push(`cancel:${handle.identity}`);
+        if (cancelFailures-- > 0) throw new Error("cleanup not confirmed");
+      },
+      async collect() {
+        throw new Error("remote worker failed");
+      },
+    };
+    const { application } = makeApplication({
+      config: cfg,
+      graph: { objective: 1, baseSha: target.baseSha, items: [item] },
+      objectiveBody: `## Acceptance\n- \`${command}\`\n\n## Final validation\n- \`${command}\`\n`,
+      fakeRoot: join(root, "github"),
+      actions: {},
+      driver,
+    });
+    await assert.rejects(application.runObjective(1), /remote worker failed/);
+    const failed = readState(repository, 1).work.managed;
+    const first = failed.execution.identity;
+    // The failed cleanup left the handle recorded, with no permanent refusal.
+    assert.equal(failed.recovery.failure.classification, "unclassified");
+    assert.deepEqual(calls, [`start:${first}`, `cancel:${first}`]);
+    application.retryWorkItem(1, "managed");
+    await assert.rejects(application.runObjective(1), /remote worker failed/);
+    const second = readState(repository, 1).work.managed.execution.identity;
+    assert.notEqual(second, first);
+    // The fresh attempt starts only after the earlier worker's cleanup repeats.
+    assert.deepEqual(calls.slice(2, 4), [`cancel:${first}`, `start:${second}`]);
+    const archived = readState(repository, 1).work.managed.recovery.history;
+    assert.equal(archived.at(-1).work.execution, undefined);
+  } finally {
+    if (old === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = old;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

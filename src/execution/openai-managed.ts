@@ -10,10 +10,11 @@ import type {
   ExecutionRequest,
   ExecutionResult,
 } from "../contracts.js";
-import { Interruption } from "../contracts.js";
 import {
   SettledAttemptFailure,
   failAttempt,
+  CleanupIncomplete,
+  repeatCleanup,
   retryTransient,
   transientRequestFailure,
 } from "../work-repair.js";
@@ -232,11 +233,9 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       this.args.config.timeoutSeconds * 1000 -
       Date.now();
     if (remaining <= 0)
-      throw new Error(
-        cleanup
-          ? "OpenAI managed cleanup deadline expired; cessation remains unresolved"
-          : "OpenAI managed attempt deadline expired; cessation must be confirmed",
-      );
+      throw cleanup
+        ? new CleanupIncomplete("OpenAI managed cleanup window expired")
+        : new Error("OpenAI managed attempt deadline expired");
     return remaining;
   }
   private expired(data: Active): boolean {
@@ -274,11 +273,10 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       });
     data.stopped ??= { detail, interrupted };
     this.save(handle, context);
-    try {
-      await this.stop(handle, "failed", context);
-    } catch (error) {
-      throw transientRequestFailure(error) ? new Interruption(error) : error;
-    }
+    await repeatCleanup(
+      () => this.stop(handle, "failed", context),
+      transientRequestFailure,
+    );
     throw new SettledAttemptFailure(
       new Error(data.stopped.detail),
       data.stopped.interrupted ? "interruption" : "implementation",
@@ -621,7 +619,9 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
           `/agents/environments/${data.environmentId}`,
         )
       )
-        throw new Error("Managed environment cessation has not been confirmed");
+        throw new CleanupIncomplete(
+          "Managed environment cessation has not been confirmed",
+        );
     }
     data.phase = "disposed";
     this.save(handle, context);
@@ -630,7 +630,10 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<void> {
-    await this.stop(handle, "cancelled", context);
+    await repeatCleanup(
+      () => this.stop(handle, "cancelled", context),
+      transientRequestFailure,
+    );
   }
   /** Stops the owned turn, if any, and deletes the session. */
   private async stop(
@@ -704,11 +707,11 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       }
       this.save(handle, context);
     }
-    try {
-      if (data.phase !== "disposed") await this.dispose(handle, context);
-    } catch (error) {
-      throw transientRequestFailure(error) ? new Interruption(error) : error;
-    }
+    if (data.phase !== "disposed")
+      await repeatCleanup(
+        () => this.dispose(handle, context),
+        transientRequestFailure,
+      );
     return data.result!;
   }
   private async produce(
@@ -719,10 +722,15 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     while (true) {
       // Each pass resolves the recorded phase first, so a transient failure
       // is retried in place; a lost input is resolved from the turn list.
-      const observed = await retryTransient(async () => {
-        if (data.phase === "prepared") await this.submitInput(handle, context);
-        return this.observe(handle, context);
-      }, transientRequestFailure);
+      const observed = await retryTransient(
+        async () => {
+          if (data.phase === "prepared")
+            await this.submitInput(handle, context);
+          return this.observe(handle, context);
+        },
+        transientRequestFailure,
+        { cancelled: () => context.cancelled() },
+      );
       if (observed.state === "complete") break;
       if (observed.state !== "running")
         await this.settle(

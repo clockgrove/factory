@@ -18,11 +18,12 @@ import type {
   ExecutionResult,
   ModelInvocationUsage,
 } from "../contracts.js";
-import { Interruption } from "../contracts.js";
 import { pinnedGitAsync } from "../process.js";
 import {
   SettledAttemptFailure,
   failAttempt,
+  CleanupIncomplete,
+  repeatCleanup,
   retryTransient,
 } from "../work-repair.js";
 import { collectWorktreeResult } from "./local.js";
@@ -174,9 +175,9 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       (this.args.config.timeoutSeconds ?? 900) * 1000 -
       Date.now();
     if (ms <= 0)
-      throw new Error(
-        "Claude managed deadline expired; owned resources remain unresolved",
-      );
+      throw data.cleanupStartedAt
+        ? new CleanupIncomplete("Claude managed cleanup window expired")
+        : new Error("Claude managed attempt deadline expired");
     return ms;
   }
   private expired(data: Active): boolean {
@@ -209,11 +210,10 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     const data = this.active(handle);
     data.stopped ??= { detail, interrupted };
     this.save(handle, context);
-    try {
-      await this.stop(handle, "failed", context);
-    } catch (error) {
-      throw claudeTransient(error) ? new Interruption(error) : error;
-    }
+    await repeatCleanup(
+      () => this.stop(handle, "failed", context),
+      claudeTransient,
+    );
     throw new SettledAttemptFailure(
       new Error(data.stopped.detail),
       data.stopped.interrupted ? "interruption" : "implementation",
@@ -804,7 +804,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       if (sessionId === data.sessionId) this.assertSession(session, handle);
       else this.client.assertSession(session, handle.identity);
       if (!["idle", "terminated"].includes(session.status))
-        throw new Error("Claude session is still active");
+        throw new CleanupIncomplete("Claude session is still active");
       if (sessionId === data.sessionId) {
         const events = await this.client.events(
           sessionId,
@@ -817,7 +817,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       // Deleting a session removes its sandbox, not the reusable environment.
       await this.client.deleteSession(sessionId, this.remaining(data));
       if (await this.client.present(sessionId, this.remaining(data)))
-        throw new Error(
+        throw new CleanupIncomplete(
           "Claude owned session/sandbox deletion is not confirmed",
         );
     }
@@ -825,7 +825,9 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       if (data.deletedFiles.includes(file.id)) continue;
       await this.client.deleteFile(file.id, this.remaining(data));
       if (!(await this.client.fileAbsent(file.id, this.remaining(data))))
-        throw new Error("Claude uploaded file deletion is not confirmed");
+        throw new CleanupIncomplete(
+          "Claude uploaded file deletion is not confirmed",
+        );
       data.deletedFiles.push(file.id);
       this.save(handle, context);
     }
@@ -859,7 +861,10 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<void> {
-    await this.stop(handle, "cancelled", context);
+    await repeatCleanup(
+      () => this.stop(handle, "cancelled", context),
+      claudeTransient,
+    );
   }
   /**
    * Any failure either interrupts the step (it reattaches) or stops the
@@ -890,11 +895,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       data.terminal = "complete";
       this.save(handle, context);
     }
-    try {
-      await this.dispose(handle, context);
-    } catch (error) {
-      throw claudeTransient(error) ? new Interruption(error) : error;
-    }
+    await repeatCleanup(() => this.dispose(handle, context), claudeTransient);
     return data.result!;
   }
   private async produce(
@@ -906,13 +907,20 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       if (context.cancelled()) throw new Error("Claude collection cancelled");
       // Each pass resolves the recorded phase first, so a transient failure
       // is retried in place without repeating a submission blindly.
-      const observation = await retryTransient(async () => {
-        await this.advance(handle, context);
-        const observed = await this.observe(handle, context);
-        if (observed.state === "running" && data.phase === "bootstrap-verified")
-          await this.submitImplementation(handle, context);
-        return observed;
-      }, claudeTransient);
+      const observation = await retryTransient(
+        async () => {
+          await this.advance(handle, context);
+          const observed = await this.observe(handle, context);
+          if (
+            observed.state === "running" &&
+            data.phase === "bootstrap-verified"
+          )
+            await this.submitImplementation(handle, context);
+          return observed;
+        },
+        claudeTransient,
+        { cancelled: () => context.cancelled() },
+      );
       if (observation.state === "complete") break;
       if (observation.state !== "running")
         await this.settle(

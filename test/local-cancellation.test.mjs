@@ -129,7 +129,7 @@ for (const [name, create, subdirectory] of adapters) {
   });
 
   for (const result of [false, true]) {
-    test(`${name} refuses an absent leader with live descendants (result ${result})`, async () => {
+    test(`${name} kills the live descendants of an absent leader (result ${result})`, async () => {
       const root = mkdtempSync(join(tmpdir(), "factory-cancel-descendant-"));
       const owned = await worker(true);
       try {
@@ -145,11 +145,10 @@ for (const [name, create, subdirectory] of adapters) {
           );
         await owned.exit();
         assert.equal(processGroupExists(h.data.pid), true);
-        await assert.rejects(
-          create(root).cancel(h),
-          /cessation remains unresolved/,
-        );
-        assert.equal(processGroupExists(h.data.pid), true);
+        await create(root).cancel(h);
+        assert.equal(processGroupExists(h.data.pid), false);
+        // Repeating the cancellation is safe.
+        await create(root).cancel(h);
         if (result)
           assert.equal(
             readFileSync(h.data.resultPath, "utf8"),

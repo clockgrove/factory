@@ -244,7 +244,7 @@ test("settled dirty refusals retain structured relative tracked, generated, spec
       assert.equal(recordWorkFailure(state, "result", failure), false);
       assert.equal(
         state.work.result.recovery.failure.classification,
-        "uncertain",
+        "unclassified",
       );
     }
     const evidence = await validate();
@@ -315,7 +315,7 @@ test("unresolved validation descendants remain uncertain and retain the dirty ow
               assert.equal(recordWorkFailure(state, "result", error), false);
               assert.equal(
                 state.work.result.recovery.failure.classification,
-                "uncertain",
+                "unclassified",
               );
               return true;
             },

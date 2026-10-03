@@ -236,8 +236,7 @@ test("transient failures are retried in place until the budget, then surface", a
         return "read";
       },
       transientRequestFailure,
-      1_000,
-      1,
+      { budgetMs: 1_000, firstDelayMs: 1 },
     ),
     "read",
   );
@@ -250,8 +249,7 @@ test("transient failures are retried in place until the budget, then surface", a
         throw unavailable();
       },
       transientRequestFailure,
-      30,
-      5,
+      { budgetMs: 30, firstDelayMs: 5 },
     ),
     /unavailable/,
   );
@@ -264,10 +262,65 @@ test("transient failures are retried in place until the budget, then surface", a
         throw Object.assign(new Error("forbidden"), { status: 403 });
       },
       transientRequestFailure,
-      1_000,
-      1,
+      { budgetMs: 1_000, firstDelayMs: 1 },
     ),
     /forbidden/,
   );
   assert.equal(calls, 1);
+});
+
+test("retries stop when the step is cancelled; incomplete cleanup repeats, then interrupts", async () => {
+  const {
+    retryTransient,
+    transientRequestFailure,
+    repeatCleanup,
+    CleanupIncomplete,
+  } = await import("../dist/work-repair.js");
+  const { Interruption } = await import("../dist/contracts.js");
+  let calls = 0;
+  let cancelled = false;
+  await assert.rejects(
+    retryTransient(
+      async () => {
+        calls++;
+        cancelled = true;
+        throw Object.assign(new Error("unavailable"), { status: 503 });
+      },
+      transientRequestFailure,
+      { budgetMs: 1_000, firstDelayMs: 1, cancelled: () => cancelled },
+    ),
+    /unavailable/,
+  );
+  assert.equal(calls, 1);
+  calls = 0;
+  await repeatCleanup(
+    async () => {
+      if (++calls < 3) throw new CleanupIncomplete("deletion not confirmed");
+    },
+    transientRequestFailure,
+    { budgetMs: 1_000, firstDelayMs: 1 },
+  );
+  assert.equal(calls, 3);
+  await assert.rejects(
+    repeatCleanup(
+      async () => {
+        throw new CleanupIncomplete("deletion not confirmed");
+      },
+      transientRequestFailure,
+      { budgetMs: 20, firstDelayMs: 5 },
+    ),
+    (error) =>
+      error instanceof Interruption && /not confirmed/.test(error.message),
+  );
+  await assert.rejects(
+    repeatCleanup(
+      async () => {
+        throw Object.assign(new Error("forbidden"), { status: 403 });
+      },
+      transientRequestFailure,
+      { budgetMs: 1_000, firstDelayMs: 1 },
+    ),
+    (error) =>
+      !(error instanceof Interruption) && /forbidden/.test(error.message),
+  );
 });

@@ -405,15 +405,13 @@ function validateAmendmentReplacement(
     );
   if (
     state.coordinator?.mode !== "paused" ||
-    state.coordinator.cancelError ||
     state.coordinator.processes?.length ||
     (state.error !== undefined && state.error !== rejected.error) ||
     Object.values(state.work).some(
       (work) =>
         work.status === "running" ||
         work.status === "published" ||
-        (work.execution && work.status !== "done" && work.step === "execute") ||
-        work.recovery?.failure?.classification === "uncertain",
+        (work.execution && work.status !== "done" && work.step === "execute"),
     )
   )
     throw new Error("Amendment replacement requires paused, settled ownership");

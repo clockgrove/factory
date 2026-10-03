@@ -91,14 +91,6 @@ export function redactCoordinatorDisposition(
               ),
             }
           : {}),
-        ...(coordinator.cancelError
-          ? {
-              cancelError: redactDiagnosticDetail(
-                coordinator.cancelError,
-                secrets,
-              ),
-            }
-          : {}),
         ...(coordinator.waitReason
           ? {
               waitReason: redactDiagnosticDetail(
@@ -1214,6 +1206,7 @@ export function statusDocument(
             ? ("complete" as const)
             : ("active" as const),
     runId: state.runId,
+    ...(state.cancelRequested && { cancelRequested: true }),
     coordinator:
       redactCoordinatorDisposition(state.coordinator, secrets) ?? null,
     graphDigest: graphDigest(state.graph),

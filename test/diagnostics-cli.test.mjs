@@ -163,12 +163,12 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
     ...preparation.coordinator,
     mode: "paused",
     waitReason: `Paused: ${privateValue}`,
-    cancelError: `Cessation unknown: ${privateValue}`,
     observationError: `Observation failed: ${privateValue}`,
   };
   preparation.coordinator = coordinator;
   preparation.error = `Preparation failed: ${privateValue}`;
   execution.coordinator = coordinator;
+  execution.cancelRequested = true;
   execution.error = `Execution failed: ${privateValue}`;
   execution.githubClosureError = `Closure failed: ${privateValue}`;
   for (const snapshot of [
@@ -200,7 +200,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
       assert.match(status.stdout, /\[REDACTED\]/);
       if (flags.length) {
         const document = JSON.parse(status.stdout);
-        for (const field of ["waitReason", "cancelError", "observationError"])
+        for (const field of ["waitReason", "observationError"])
           assert.equal(
             document.coordinator[field],
             coordinator[field].replace(privateValue, "[REDACTED]"),
@@ -222,7 +222,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
       } else {
         assert.match(
           status.stdout,
-          /^Objective #1: needs decision — cancellation unresolved: Cessation unknown: \[REDACTED\]\nNext: factory cancel --objective 1\n/,
+          /^Objective #1: needs decision — cancellation incomplete: Paused: \[REDACTED\]\nNext: factory cancel --objective 1\n/,
         );
         assert.match(status.stdout, /GitHub: Closure failed: \[REDACTED\]/);
         if (snapshot.error)

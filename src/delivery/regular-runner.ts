@@ -6,6 +6,7 @@ import {
   diagnoseWorkRepair,
   prepareEvidenceRecovery,
   repeatInterrupted,
+  settleEarlierAttempts,
 } from "../work-repair.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
 import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
@@ -246,6 +247,7 @@ export async function runRegularGraph(args: {
       return;
     }
     if (!existingHandle && work.step === "execute") {
+      await settleEarlierAttempts(work, driver, save);
       await phases.reserve(item.id, "validation");
       await preflightItemEnvironment({
         config,

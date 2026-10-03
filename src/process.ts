@@ -174,6 +174,24 @@ export function processGroupExists(group: number): boolean {
   return false;
 }
 
+/**
+ * SIGKILL a worker's process group and wait for it to go. A group that
+ * survives SIGKILL is a host problem; repeating the kill is always safe.
+ */
+export async function killProcessGroup(group: number): Promise<void> {
+  try {
+    process.kill(-group, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+  for (let poll = 0; poll < 250 && processGroupExists(group); poll++)
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  if (processGroupExists(group))
+    throw new Error(
+      `Worker process group ${group} survived SIGKILL; the host must reap it before the attempt can be repeated`,
+    );
+}
+
 export interface OwnedSubprocess {
   pid: number;
   startTime: string;

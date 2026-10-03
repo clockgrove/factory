@@ -190,19 +190,18 @@ export async function diagnoseWorkRepair(args: {
     !state.admission.authority.repairClasses.includes("implementation")
   )
     return false;
-  if (work.recovery?.phase === "diagnosing")
-    throw new Error(
-      "Repair diagnosis outcome is unknown; inspect preserved attempt",
-    );
-  try {
-    chargeRepair(state, "implementation", repairScopes(state, item.id));
-  } catch (error) {
-    failure.decision = error instanceof Error ? error.message : String(error);
-    save();
-    return false;
+  // A diagnosis interrupted by a restart is issued again. It was charged
+  // before it was first sent, so the reissue is not charged twice.
+  if (work.recovery?.phase !== "diagnosing") {
+    try {
+      chargeRepair(state, "implementation", repairScopes(state, item.id));
+    } catch (error) {
+      failure.decision = error instanceof Error ? error.message : String(error);
+      save();
+      return false;
+    }
   }
   work.recovery!.phase = "diagnosing";
-  work.pendingEffect = "review";
   save();
   let response;
   try {
@@ -232,7 +231,6 @@ export async function diagnoseWorkRepair(args: {
     });
   } catch (error) {
     if (error instanceof CompletedModelInvocationError) {
-      delete work.pendingEffect;
       work.recovery!.phase = "stopped";
       failure.decision = error.message;
       save();
@@ -240,7 +238,6 @@ export async function diagnoseWorkRepair(args: {
     }
     throw error;
   }
-  delete work.pendingEffect;
   work.recovery!.phase = "stopped";
   if (response.decision !== "repair") {
     failure.decision =

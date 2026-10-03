@@ -836,10 +836,6 @@ async function main(): Promise<void> {
         process.once("SIGTERM", stop);
       });
   } else if (command === "cancel") {
-    if (args.includes("--abandon-read-only-review"))
-      throw new Error(
-        "Use cancel --abandon FILE with an explicit permanent abandonment request",
-      );
     const abandonmentFile = option(args, "abandon");
     if (
       args.includes("--abandon") &&

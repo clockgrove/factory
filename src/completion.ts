@@ -50,8 +50,7 @@ export function assertTerminalEligibility(state: FactoryState): void {
     state.finalAcceptancePending ||
     amendmentBlocksDispatch(state) ||
     state.coordinator?.cancelError ||
-    state.coordinator?.processes?.length ||
-    state.coordinator?.phase === "objective-review-submitted"
+    state.coordinator?.processes?.length
   )
     throw new Error("Objective terminal eligibility is unresolved");
   for (const work of Object.values(state.work)) {

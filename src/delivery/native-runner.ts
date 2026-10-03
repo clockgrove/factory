@@ -696,15 +696,6 @@ export async function runNativeGraph(args: {
         await phases.reserve(item.id, "review");
         const reviewResult = () =>
           reviewAcceptance({
-            beforeSubmit: () => {
-              work.pendingEffect = "review";
-              try {
-                save();
-              } catch (error) {
-                delete work.pendingEffect;
-                throw error;
-              }
-            },
             model: args.planningModel,
             checkout: config.checkout,
             baseSha: itemBase,

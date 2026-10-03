@@ -670,10 +670,6 @@ async function cancelKnownWork(
     errors.push(
       "Submitted amendment effect has unknown outcome; operator direction required",
     );
-  if (state.coordinator?.phase === "objective-review-submitted")
-    errors.push(
-      "Submitted Objective review outcome is unknown; operator direction required",
-    );
   if (state.schemaVersion === 4)
     for (const work of Object.values(state.work)) {
       if (work.pendingEffect)
@@ -1286,10 +1282,6 @@ async function runObjectivePass(
       if (state.schemaVersion === 4 && hasPendingAmendmentEffect(state))
         throw new Error(
           "Submitted amendment effect has unknown outcome; operator direction required",
-        );
-      if (state.coordinator?.phase === "objective-review-submitted")
-        throw new Error(
-          "Interrupted Objective review outcome is unknown; operator direction required",
         );
       if (
         admission &&
@@ -2021,15 +2013,6 @@ async function runObjectivePass(
           beforeSubmit: () => {
             if (cancellationRequested())
               throw new Error("Objective cancellation requested");
-            const coordinator = state.coordinator!;
-            const previousPhase = coordinator.phase;
-            coordinator.phase = "objective-review-submitted";
-            try {
-              saveState(path, state);
-            } catch (error) {
-              coordinator.phase = previousPhase;
-              throw error;
-            }
           },
           model: planningModel,
           reviewPhase: "objective-review",
@@ -2547,12 +2530,9 @@ export async function cancelObjective(
     await reconcileStoppedProjection(config, continuation, github);
     // Refuse unknown external effects before saving a cancellation request.
     if (
-      (continuation.schemaVersion === 4 &&
-        (hasPendingAmendmentEffect(continuation) ||
-          Object.values(continuation.work).some(
-            (work) => work.pendingEffect,
-          ))) ||
-      continuation.coordinator?.phase === "objective-review-submitted"
+      continuation.schemaVersion === 4 &&
+      (hasPendingAmendmentEffect(continuation) ||
+        Object.values(continuation.work).some((work) => work.pendingEffect))
     )
       throw new Error(
         "Submitted effect has unknown outcome; operator direction required",
@@ -2637,8 +2617,7 @@ export function retryWorkItem(
       work.pendingEffect ||
       (work.step === "execute" &&
         work.execution !== undefined &&
-        work.recovery?.failure?.classification === "uncertain") ||
-      state.coordinator?.phase === "objective-review-submitted"
+        work.recovery?.failure?.classification === "uncertain")
     )
       throw new Error(
         "Submitted effect outcome is unknown; operator direction required before retry",

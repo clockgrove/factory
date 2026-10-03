@@ -219,15 +219,6 @@ export async function runQaItem(args: {
     if (retainPausedWait()) return;
     delete work.waitingReason;
     work.validation = await reviewAcceptance({
-      beforeSubmit: () => {
-        work.pendingEffect = "review";
-        try {
-          save();
-        } catch (error) {
-          delete work.pendingEffect;
-          throw error;
-        }
-      },
       model: args.model,
       invocation: {
         invocationId: randomUUID(),

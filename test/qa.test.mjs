@@ -960,11 +960,7 @@ for (const delivery of ["regular", "native"])
               )
             ) {
               submissions++;
-              assert.equal(
-                readState(repository, 1).work.qa.pendingEffect,
-                "review",
-              );
-              if (outcome === "unknown")
+              if (outcome === "unknown" && submissions === 1)
                 throw new Error("QA provider response was lost");
             }
             return {
@@ -1003,27 +999,17 @@ for (const delivery of ["regular", "native"])
             : /criterion disproved/,
         );
         const state = readState(repository, 1);
-        assert.equal(
-          state.work.qa.pendingEffect,
-          outcome === "unknown" ? "review" : undefined,
-        );
+        assert.equal(state.work.qa.pendingEffect, undefined);
         assert.equal(state.work.qa.status, "failed");
         await assert.rejects(application.runObjective(1, plan));
         assert.equal(submissions, 1);
-        if (outcome === "unknown") {
-          assert.throws(
-            () => application.retryWorkItem(1, "qa"),
-            /outcome is unknown/,
-          );
-          assert.equal(submissions, 1);
-        }
-        if (outcome === "refused") {
-          assert.equal(state.work.qa.execution, undefined);
-          application.retryWorkItem(1, "qa");
-          const completed = await application.runObjective(1, plan);
-          assert.equal(completed.finalValidation.passed, true);
-          assert.equal(submissions, 2);
-        }
+        // A review has no side effects, so neither a refusal nor a lost
+        // response blocks an explicit retry, which reviews once more.
+        assert.equal(state.work.qa.execution, undefined);
+        application.retryWorkItem(1, "qa");
+        const completed = await application.runObjective(1, plan);
+        assert.equal(completed.finalValidation.passed, true);
+        assert.equal(submissions, 2);
       }));
 
 test(

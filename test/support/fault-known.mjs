@@ -11,10 +11,8 @@ const D = {
     "a failing git fetch (regular: right after the PR merged; native: before the stack merge) is a plain Error outside any repeat: the Objective stops with state.error and a restart refuses it (r1 #2, #8)",
   NATIVE_READS:
     "native delivery's reads outside a Work Item step (defaultBranch at start; PR, check-run, status and readiness observation before the stack merge) are not repeated: one 5xx or connection reset stops the Objective with state.error and a restart refuses it (r1 #8)",
-  PLAN_RECOMPILE:
-    "a crash or lost response at plan (graph) review compiles the plan again on restart: the compiled candidate is not kept across the review, so the planner is called twice",
-  GRAPH_REVIEW_STOP:
-    "a lost or unavailable plan (graph) review response stops planning as 'Plan needs a specific human source decision before run' instead of repeating the review",
+  GRAPH_REVIEW_DECISION:
+    "a lost or unavailable plan (graph) review response is treated as an invalid independent review: the planner compiles a revision, and the persisted plan then waits for a human 'accept despite the invalid independent review' decision on every restart instead of repeating the review",
   PLANNER_STOP:
     "a lost or unavailable planner response stops the run; planning is not repeated in the run, only a manual restart compiles again",
   FINAL_REVIEW:
@@ -127,19 +125,13 @@ export const KNOWN = {
       "lost at model.generateStructured #1 without an operator stop",
       "unavailable at model.generateStructured #1 without an operator stop",
     ],
-    [D.PLAN_RECOMPILE]: [
-      "crash-before at model.reviewGraph #1 within the paid-call budget",
-      "crash-before at model.reviewGraph #1 compiles the plan once",
-      "lost at model.reviewGraph #1 within the paid-call budget",
-      "lost at model.reviewGraph #1 compiles the plan once",
-      "crash-after at model.reviewGraph #1 within the paid-call budget",
-      "crash-after at model.reviewGraph #1 compiles the plan once",
-      "unavailable at model.reviewGraph #1 within the paid-call budget",
-      "unavailable at model.reviewGraph #1 compiles the plan once",
-    ],
-    [D.GRAPH_REVIEW_STOP]: [
+    [D.GRAPH_REVIEW_DECISION]: [
+      "lost at model.reviewGraph #1",
       "lost at model.reviewGraph #1 without an operator stop",
+      "lost at model.reviewGraph #1 compiles the plan once",
+      "unavailable at model.reviewGraph #1",
       "unavailable at model.reviewGraph #1 without an operator stop",
+      "unavailable at model.reviewGraph #1 compiles the plan once",
     ],
     [D.START_AMBIGUOUS]: [
       "crash-before at driver.start #1",
@@ -267,19 +259,13 @@ export const KNOWN = {
       "lost at model.generateStructured #1 without an operator stop",
       "unavailable at model.generateStructured #1 without an operator stop",
     ],
-    [D.PLAN_RECOMPILE]: [
-      "crash-before at model.reviewGraph #1 within the paid-call budget",
-      "crash-before at model.reviewGraph #1 compiles the plan once",
-      "lost at model.reviewGraph #1 within the paid-call budget",
-      "lost at model.reviewGraph #1 compiles the plan once",
-      "crash-after at model.reviewGraph #1 within the paid-call budget",
-      "crash-after at model.reviewGraph #1 compiles the plan once",
-      "unavailable at model.reviewGraph #1 within the paid-call budget",
-      "unavailable at model.reviewGraph #1 compiles the plan once",
-    ],
-    [D.GRAPH_REVIEW_STOP]: [
+    [D.GRAPH_REVIEW_DECISION]: [
+      "lost at model.reviewGraph #1",
       "lost at model.reviewGraph #1 without an operator stop",
+      "lost at model.reviewGraph #1 compiles the plan once",
+      "unavailable at model.reviewGraph #1",
       "unavailable at model.reviewGraph #1 without an operator stop",
+      "unavailable at model.reviewGraph #1 compiles the plan once",
     ],
     [D.START_REPEAT]: [
       "lost at driver.start #1",

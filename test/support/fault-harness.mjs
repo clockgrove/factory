@@ -138,9 +138,8 @@ async function repositorySnapshot(origin, fake, items) {
  * injected into the fake for the whole scenario (each fires once per its
  * `times`); `inProcess` faults apply to the first controller run only.
  * `beforeRun(fake, index)` may change GitHub between controller runs.
- * A run that crashed or stopped is restarted at most `maxRestarts` times; a
- * run that returned before the Objective issue closed (without admission a
- * pass returns while it waits) is resumed, up to `maxRuns` runs in all.
+ * A run that crashed, stopped, failed or ended needing a human decision is
+ * restarted at most `maxRestarts` times; a complete run ends the scenario.
  */
 export async function runScenario({
   name,
@@ -150,7 +149,6 @@ export async function runScenario({
   inProcess = [],
   fake: fakeOptions = {},
   maxRestarts = 2,
-  maxRuns = 8,
   beforeRun,
   earlierIssues = 0,
   runTimeoutMs = 90_000,
@@ -238,7 +236,7 @@ export async function runScenario({
       FACTORY_TEST_TIME_SCALE: String(timeScale),
     };
     const runs = [];
-    for (let index = 0; index < maxRuns; index++) {
+    for (let index = 0; ; index++) {
       await beforeRun?.(fake, index);
       writeDescriptor(descriptorPath, {
         ...descriptor,
@@ -254,17 +252,8 @@ export async function runScenario({
       );
       child = undefined;
       runs.push(result);
-      if (["hung", "failed"].includes(result.outcome)) break;
-      if (
-        result.outcome === "returned" &&
-        fake.issue(OBJECTIVE).state === "closed"
-      )
-        break;
-      if (
-        runs.filter((run) => ["crashed", "stopped"].includes(run.outcome))
-          .length > maxRestarts
-      )
-        break;
+      if (["complete", "hung", "failed"].includes(result.outcome)) break;
+      if (runs.length > maxRestarts) break;
     }
     return {
       runs,

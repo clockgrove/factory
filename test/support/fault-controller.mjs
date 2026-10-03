@@ -15,7 +15,12 @@ import { LocalExecutionDriver } from "../../dist/execution/local.js";
 import { GitHubClient } from "../../dist/github-client.js";
 import { RealGitHubGateway } from "../../dist/github.js";
 import { Interruption, composeWithLocalHarness } from "../../dist/index.js";
-import { readState } from "../../dist/state-store.js";
+import {
+  EXIT_COMPLETE,
+  EXIT_NEEDS_DECISION,
+  runOutcome,
+} from "../../dist/run-outcome.js";
+import { readContinuation } from "../../dist/state-store.js";
 import { rewritingFetch } from "./github-http-fake.mjs";
 import {
   ScriptedHarness,
@@ -142,7 +147,11 @@ const application = composeWithLocalHarness(
 
 function summary() {
   try {
-    const state = readState(config.repository, descriptor.graph.objective);
+    const state = readContinuation(
+      config.repository,
+      descriptor.graph.objective,
+    );
+    if (!state) return {};
     return {
       error: state.error,
       mode: state.coordinator?.mode,
@@ -165,13 +174,20 @@ function summary() {
 }
 
 try {
-  // Without admission a pass returns when it finishes or waits; the test
-  // judges completion from GitHub and the repository, not from this state.
+  // A run stays alive through waits and returns complete, needing a human
+  // decision, or failed (the `factory run` exit codes). The test judges the
+  // end state from GitHub and the repository, not from this outcome.
   const state = await application.runObjective(descriptor.graph.objective);
+  const { code, message } = runOutcome(state);
   console.log(
     JSON.stringify({
-      outcome: "returned",
-      finalValidation: state.finalValidation?.passed === true,
+      outcome:
+        code === EXIT_COMPLETE
+          ? "complete"
+          : code === EXIT_NEEDS_DECISION
+            ? "needs-decision"
+            : "failed-run",
+      message,
       ...summary(),
     }),
   );

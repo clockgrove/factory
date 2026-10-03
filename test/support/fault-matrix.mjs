@@ -6,6 +6,7 @@
 // Factory's own state. Nothing here names Factory internals, so the matrix
 // survives the recovery redesign.
 import assert from "node:assert/strict";
+import { appendFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { basename } from "node:path";
 import { describe, test } from "node:test";
@@ -160,7 +161,7 @@ export async function assertEndState(result, { foreignIssues = 0 } = {}) {
       null,
       1,
     );
-  assert.equal(result.final.outcome, "returned", context());
+  assert.equal(result.final.outcome, "complete", context());
   const objective = fake.issue(OBJECTIVE);
   assert.equal(objective.state, "closed", `Objective closed\n${context()}`);
   assert.equal(fake.commentsOn(OBJECTIVE).length, 1, "Objective comments");
@@ -236,7 +237,7 @@ export async function assertEndState(result, { foreignIssues = 0 } = {}) {
 export function assertNoOperatorStop(result) {
   assert.deepEqual(
     result.runs
-      .filter((run) => !["returned", "crashed"].includes(run.outcome))
+      .filter((run) => !["complete", "crashed"].includes(run.outcome))
       .map((run) => `${run.outcome}: ${run.message ?? run.stderr ?? ""}`),
     [],
   );
@@ -269,7 +270,9 @@ export async function assertPlanCompiledOnce(result) {
 export function assertRefusal(result, { refuses }) {
   assert.ok(
     result.runs.some(
-      (run) => run.outcome === "stopped" && refuses.test(run.message ?? ""),
+      (run) =>
+        !["complete", "crashed"].includes(run.outcome) &&
+        refuses.test(`${run.message ?? ""} ${JSON.stringify(run.work ?? {})}`),
     ),
     `no run refused with ${refuses}: ${JSON.stringify(result.runs)}`,
   );
@@ -298,10 +301,12 @@ export function checkKnown(known, names) {
     if (!declared.has(name)) throw new Error(`Unknown scenario test: ${name}`);
 }
 
+/** With FACTORY_FAULT_REPORT=<file>, append one JSON line per scenario run. */
 function report(name, value) {
   if (!process.env.FACTORY_FAULT_REPORT) return;
-  console.log(
-    `FAULT-REPORT ${JSON.stringify({
+  appendFileSync(
+    process.env.FACTORY_FAULT_REPORT,
+    `${JSON.stringify({
       suite: basename(process.argv[1] ?? ""),
       name,
       runs: value.runs,
@@ -315,7 +320,7 @@ function report(name, value) {
           (entry) =>
             `${entry.endpoint} → ${entry.status}${entry.fault ? ` (${entry.fault})` : ""}`,
         ),
-    })}`,
+    })}\n`,
   );
 }
 

@@ -592,6 +592,7 @@ async function main(): Promise<void> {
             secrets,
           ),
           planning: continuation.planning,
+          projection: continuation.projection,
           issueByItemId: continuation.issueByItemId,
           projectionPending: continuation.projectionPending,
           error: continuation.error
@@ -599,6 +600,7 @@ async function main(): Promise<void> {
             : continuation.error,
           nextAction:
             continuation.planning === "submitted" ||
+            ["submitted", "rejected"].includes(continuation.projection) ||
             continuation.projectionPending
               ? "operator-direction"
               : "run",

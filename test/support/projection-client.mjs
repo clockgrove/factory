@@ -1,7 +1,12 @@
+import { GitHubRequestError } from "../../dist/github-client.js";
 export const roleLabels = ["factory:objective", "factory:work-item"];
 export function projectionClient(repository, initial = []) {
   const issues = new Map(
-    initial.map((issue) => [issue.number, structuredClone(issue)]),
+    initial.map((issue) => {
+      const copy = structuredClone(issue);
+      delete copy.parent_issue_url;
+      return [issue.number, copy];
+    }),
   );
   const hierarchy = new Map();
   const deps = new Map();
@@ -36,7 +41,16 @@ export function projectionClient(repository, initial = []) {
     async request(method, route, body) {
       calls.push({ method, route, body: structuredClone(body) });
       const number = Number(route.match(/issues\/(\d+)/)?.[1]);
-      if (method === "GET") return structuredClone(issues.get(number));
+      if (method === "GET") {
+        if (route.endsWith("/parent")) {
+          const parent = [...hierarchy].find(([, children]) =>
+            children.includes(number),
+          )?.[0];
+          if (parent === undefined) throw new GitHubRequestError(404);
+          return structuredClone(issues.get(parent));
+        }
+        return structuredClone(issues.get(number));
+      }
       if (route.endsWith("/labels") && !route.includes("/issues/")) {
         labels.push({ name: body.name, color: body.color, archived_at: null });
         return structuredClone(labels.at(-1));
@@ -59,13 +73,16 @@ export function projectionClient(repository, initial = []) {
         const child = [...issues.values()].find(
           (entry) => entry.id === body.sub_issue_id,
         );
-        if (
-          body.replace_parent !== false ||
-          [...hierarchy.values()].some((children) =>
-            children.includes(child.number),
-          )
-        )
-          throw new Error("Existing parent cannot be replaced");
+        const parent = [...hierarchy].find(([, children]) =>
+          children.includes(child.number),
+        )?.[0];
+        if (parent !== undefined && body.replace_parent !== true)
+          throw new Error("GitHub request failed (HTTP 422): existing parent");
+        if (parent !== undefined)
+          hierarchy.set(
+            parent,
+            hierarchy.get(parent).filter((n) => n !== child.number),
+          );
         hierarchy.set(number, [...(hierarchy.get(number) ?? []), child.number]);
         return structuredClone(child);
       }

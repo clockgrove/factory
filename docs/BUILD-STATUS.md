@@ -17,10 +17,78 @@ A deterministic temporary-Git regression with deferred GitHub observation and
 a 60-second poll interval reproduced the extra scan on unchanged source. It now
 proves unchanged repeated status, immediate same-owner admission, mutation-triggered
 observation and refusal of enqueue/watch during that outstanding scan, with no
-model calls or timing retries. This candidate remains pending independent source
-review and exact-head Quality CI. Integration and release are held while the
-separately owned installed v0.1.72 qualification continues in #448; published
-bytes and live acceptance remain unchanged. #444 stays open for its live outcome.
+model calls or timing retries. [PR #494](https://github.com/clockgrove/factory/pull/494) passed independent source
+review and [exact-head Quality CI](https://github.com/clockgrove/factory/actions/runs/37070644649),
+then integrated as `ab38f0ea8aa626c6ecc22a5c2337d5e7be3fdbb2` after the installed
+qualification owner ceased. #444 stays open for its live outcome; publication and
+Objective acceptance remain separate.
+
+## Reviewed native hierarchy correction and stopped public gate (#495 / #448)
+
+The real v0.1.72 successor reached two concurrent workers, independently accepted
+alpha integration and beta's preserved environment-condition failure. Its approved
+controlled restart retained the same run and produced a canonically valid,
+independently accepted QA/aggregate amendment. Projection then failed with
+`GitHub request failed (HTTP 422)`: existing alpha/beta/summary issues already
+belonged to the Objective, but the new aggregate attachment refused replacement.
+The independently reviewed successor graph remains pending and unapplied. The
+[public failure checkpoint](https://github.com/clockgrove/factory/issues/448#issuecomment-5962273873)
+records the stopped owner, consumed two activations/one restart and retained history;
+this whole public gate is failed and unaccepted. No environment recovery or manual
+hierarchy edit accepts it, and no further activation is authorized for that attempt.
+
+[Implementation issue #495](https://github.com/clockgrove/factory/issues/495) corrects
+the demonstrated composition gap. The gateway derives old and new parents from
+reviewed graphs, authenticates every affected hierarchy before mutation, replaces
+only an exact verified old-parent to new-parent relation, and reads back all old
+and new parents before accepting projection. Adapter fixtures demonstrate reuse of acknowledged existing
+identities and completed effects; they do not authorize controller replay of an
+unresolved submitted call. Unrelated children, foreign parents, duplicate
+relations and changed issue identities remain refused. A complete preserved
+public graph/body replay exercises the actual versioned Octokit gateway against
+faithful native single-parent semantics; focused real-Git, transport and amendment
+regressions accompany the correction. Source review and guarded integration of
+this correction still precede release.
+
+A separate stopped-projection retirement candidate was prepared for
+[#498](https://github.com/clockgrove/factory/issues/498), but its source acceptance
+was withdrawn before integration or actual cancellation. Its GET-only current
+old/new relationship checks cannot prove that an earlier submitted known-identity
+GitHub mutation has finished. The hierarchy correction does not resolve that
+uncertainty. The held candidate and all model-free proofs remain evidence of their
+original scope; they do not qualify cancellation of an unknown mutation.
+
+The hierarchy/API source batch has 97 passing tests across its four affected whole
+files, with complete preserved public graph/body replay and realistic single-parent
+transport. The separate retirement candidate's 181-case overlapping source suites,
+40-case new file and actual stopped-state/CLI replays remain limited model-free
+observations; they neither terminalize the real predecessor nor prove the missing
+submitted-mutation fence. Counts from overlapping suites are not added together.
+
+The replacement #498 source contract persists initial and amended whole gateway
+calls before dispatch and distinguishes actual completed HTTP rejection from
+unresolved submission. Shared decoders and lifecycle consumers refuse unresolved
+calls before cancellation intent or replay. Settled rejection readback authenticates
+recorded issue subsets, preserves all previous mappings and reviewed common edges,
+and permits reachable partial creation/dependency/parent facts without acceptance.
+Actual versioned producer/persistence tests pair completed rejection with response
+loss for initial and amendment calls, including early role failures and intermediate
+multiple-dependency additions. The complete original stopped snapshot refuses native
+CLI cancellation with no API/provider call and unchanged bytes. These source checks
+remain subject to independent exact-source review and head CI.
+
+The original v0.1.72 snapshot retains generic projecting history; no authentic
+completed-response receipt was found in retained transport/scenario evidence.
+It remains unresolved and unaccepted. Installing the new typed producer cannot
+retrospectively manufacture that fact. Any exact-run terminal disposition needs a
+separate explicit operator decision and supported implementation, preserving all
+old evidence and uncertainty. The next action is final source/guidance review,
+exact-head CI and the sequential release gate in
+[#497](https://github.com/clockgrove/factory/issues/497). Integration, release and live
+execution remain held during review. A subsequent full public qualification retains
+original substantive acceptance and bounded resources; predecessor histories and
+published v0.1.72 bytes remain intact. #444/#447/#448 stay open for actual public
+acceptance; private #445 remains gated on that full proof and the corrected artifact.
 
 ## Approved native-replay qualification preparation (#448)
 
@@ -55,10 +123,8 @@ activations and one controlled restart remain the bounds. Unknown monetary usage
 stays unknown within existing account/provider/spending limits.
 
 Current work remains the release gate in [#448](https://github.com/clockgrove/factory/issues/448),
-which stays open. The next action is supported predecessor terminal disposition,
-authenticated new-target source/authority/native dependency binding and exact main
-protection readback under the approved named-target decision, followed by the live
-public installed scenario and independent acceptance. Public acceptance precedes
+which stays open. The prepared v0.1.72 scenario subsequently ran and stopped unaccepted as recorded
+above; the earlier preparation does not qualify its later projection failure. Public acceptance precedes
 separately owned private #445; source preparation grants no private activation.
 
 ## Qualification fixture source clarification (#489)

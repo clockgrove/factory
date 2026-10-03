@@ -4,6 +4,8 @@ This is the maintainer procedure for preparing, publishing and qualifying a Fact
 
 ## Distribution shape
 
+v0.1.73 contains the read-only intake status correction (#444 / PR #494), guarded reconciliation of reviewed native hierarchy moves (#495 / PR #496), and typed initial/amendment projection lifecycle and settled-rejection cancellation with GET-only readback (#498 / PR #496). Its [distribution gate](https://github.com/clockgrove/factory/issues/497) records exact source, installed and public verification. The stopped v0.1.72 service scenario remains unaccepted; [#448](https://github.com/clockgrove/factory/issues/448) requires a complete corrected one-artifact public successor before private [#445](https://github.com/clockgrove/factory/issues/445). Historical artifact evidence below remains bound to its original bytes.
+
 Published [v0.1.72](https://github.com/clockgrove/factory/releases/tag/v0.1.72) supplies truthful controller-derived aggregate joins (#483) and original-archive/complete installation integrity (#486) in [PR #484](https://github.com/clockgrove/factory/pull/484). All 514 tests across 50 whole installed files and seven reviewed model-free preflights passed without skips, followed by [independent public verification and release completion](https://github.com/clockgrove/factory/issues/485#issuecomment-5953125869). The seventh preserves the complete 49-file original evidence and semantic rejection; it supplies no new review or live acceptance. The first producer and restricted-host diagnostic failures, reviewed context correction and unchanged archive bytes are recorded in the [immutable artifact record](BUILD-STATUS.md#immutable-v0172-artifact-record). Actual #448/#445 remain unaccepted. The operator subsequently [approved the named #448 v0.1.71-to-v0.1.72 continuation](https://github.com/clockgrove/factory/issues/448#issuecomment-5957494560); see its [exact scope and event bounds](BUILD-STATUS.md#approved-448-current-runtime-qualification). The earlier one-artifact attempt remains failed/unaccepted, authentic phases retain their real artifact identities, and fresh independent whole-gate acceptance is required. This exception changes no other artifact gate: public #448 acceptance must precede private #445 on the same v0.1.72 artifact and demonstrated scope.
 
 Published [v0.1.71](https://github.com/clockgrove/factory/releases/tag/v0.1.71) supplies structural execution-authority reuse at the four supported boundaries in [#479](https://github.com/clockgrove/factory/issues/479), preserving ordered arrays, policy values and exact stored admission receipts. All 514 tests across 50 whole installed files and six model-free preflights passed without skips, followed by [independent public verification and release completion](https://github.com/clockgrove/factory/issues/480#issuecomment-5950722931). The active scopes are four unchanged preflights, the strict v0.1.71 actual-harness readiness successor and the focused authority-order preflight with scripted transports. Predecessor scripts and historical evidence remain preserved. See the [immutable artifact record](BUILD-STATUS.md#immutable-v0171-artifact-record). Actual live #448 and private #445 acceptance remain separate.
@@ -120,16 +122,16 @@ export XDG_STATE_HOME="$FACTORY_TRIAL_ROOT/state"
 gh auth status
 ```
 
-The commands below select published v0.1.70 after [independent public verification](https://github.com/clockgrove/factory/issues/475#issuecomment-5949114107). Compare the tarball digest with the independently recorded prepublication value for that same version in that issue. Earlier published versions and their [exact artifact records](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) retain their historical scope.
+The commands below select v0.1.73. Run them after the [owning release gate](https://github.com/clockgrove/factory/issues/497) records independent public verification. Compare the tarball digest with the independently recorded prepublication value for that same version in that issue. Earlier published versions and their [exact artifact records](https://github.com/clockgrove/factory/blob/main/docs/BUILD-STATUS.md) retain their historical scope.
 
 ```sh
-codex plugin marketplace add clockgrove/factory --ref v0.1.70
+codex plugin marketplace add clockgrove/factory --ref v0.1.73
 codex plugin add factory@clockgrove
-gh release download v0.1.70 --repo clockgrove/factory \
-  --pattern clockgrove-factory-0.1.70.tgz --pattern SHA256SUMS
+gh release download v0.1.73 --repo clockgrove/factory \
+  --pattern clockgrove-factory-0.1.73.tgz --pattern SHA256SUMS
 sha256sum --check SHA256SUMS
 # Also compare the independently recorded prepublication digest in the owning issue/PR or artifact record.
-npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.70.tgz
+npm install --offline --prefix /absolute/private/factory-prefix ./clockgrove-factory-0.1.73.tgz
 export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```

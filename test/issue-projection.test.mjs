@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { Octokit } from "@octokit/core";
+import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -36,6 +38,43 @@ function fixture(items = [item("ordinary")]) {
       state.client,
     ),
   };
+}
+
+function versionedProjectionClient(f, beforeRequest = () => {}) {
+  return new GitHubClient(
+    new Octokit({
+      request: {
+        fetch: async (url, options) => {
+          assert.equal(new URL(url).origin, "https://api.github.com");
+          assert.equal(options.headers["x-github-api-version"], "2026-03-10");
+          const path = new URL(url).pathname.slice(1);
+          const body = options.body ? JSON.parse(options.body) : undefined;
+          beforeRequest(options.method, path, body);
+          let data;
+          try {
+            data =
+              options.method === "GET" &&
+              (/\/(labels|sub_issues|blocked_by)$/.test(path) ||
+                path.endsWith("/issues"))
+                ? await f.client.paginate(path)
+                : await f.client.request(options.method, path, body);
+          } catch (error) {
+            assert.ok(error instanceof GitHubRequestError);
+            return new Response(JSON.stringify({ message: "Rejected" }), {
+              status: error.status,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          for (const entry of Array.isArray(data) ? data : [data])
+            assert.ok(!Object.hasOwn(entry, "parent_issue_url"));
+          return new Response(JSON.stringify(data), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      },
+    }),
+  );
 }
 test("initial ordinary work and QA carry role labels and native Objective parents from a real Git baseline", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-projection-"));
@@ -180,8 +219,10 @@ test("projection refuses existing foreign parent and ambiguous authenticated hie
         labels: ["factory:work-item"],
       }),
     );
-    if (mode === "parent") f.hierarchy.set(99, [2]);
-    else f.hierarchy.set(1, mode === "duplicate" ? [2, 2] : [2]);
+    if (mode === "parent") {
+      f.issues.set(99, f.issue(99));
+      f.hierarchy.set(99, [2]);
+    } else f.hierarchy.set(1, mode === "duplicate" ? [2, 2] : [2]);
     if (mode === "database") {
       const paginate = f.client.paginate;
       f.client.paginate = async (route) => {
@@ -358,3 +399,273 @@ test("repository identity follows GitHub canonical owner and repository casing w
     );
   }
 });
+
+function reparentFixture() {
+  const initial = [item("alpha"), item("beta"), item("summary")];
+  const f = fixture(initial);
+  const graph = {
+    ...f.request.graph,
+    items: [
+      ...initial,
+      { ...item("qa", "qa"), dependencies: ["summary"] },
+      {
+        ...item("parent", "aggregate"),
+        children: ["alpha", "beta", "summary", "qa"],
+        dependencies: ["alpha", "beta", "summary", "qa"],
+        ownedPaths: [],
+      },
+    ],
+  };
+  return { f, graph };
+}
+
+test("reviewed amendment moves original Objective children under new aggregate without changing dependencies or completed identity", async () => {
+  const { f, graph } = reparentFixture();
+  const initial = await f.gateway.projectGraph(f.request);
+  f.issues.get(initial.issueByItemId.alpha).state = "closed";
+  const request = {
+    ...f.request,
+    graph,
+    previousGraph: f.request.graph,
+    knownIssues: initial.issueByItemId,
+    completedItems: ["alpha"],
+  };
+  const amended = await f.gateway.projectGraph(request);
+  assert.deepEqual(f.hierarchy.get(1), [6]);
+  assert.deepEqual(f.hierarchy.get(6), [2, 3, 4, 5]);
+  assert.deepEqual(f.deps.get(5), [4]);
+  assert.deepEqual(f.deps.get(6), [2, 3, 4, 5]);
+  assert.equal(f.issues.get(2).state, "closed");
+  const moves = f.calls.filter(
+    (c) =>
+      c.method === "POST" &&
+      c.route.endsWith("/sub_issues") &&
+      c.body.replace_parent,
+  );
+  assert.deepEqual(
+    moves.map((c) => c.body.sub_issue_id),
+    [102, 103, 104],
+  );
+  const mutations = f.calls.filter((c) => c.method !== "GET").length;
+  await f.gateway.projectGraph({
+    ...request,
+    knownIssues: amended.issueByItemId,
+  });
+  assert.equal(f.calls.filter((c) => c.method !== "GET").length, mutations);
+});
+
+test("gateway idempotence under fixture-confirmed hierarchy state does not repeat an already applied move", async () => {
+  const { f, graph } = reparentFixture();
+  const initial = await f.gateway.projectGraph(f.request);
+  const request = {
+    ...f.request,
+    graph,
+    previousGraph: f.request.graph,
+    knownIssues: { ...initial.issueByItemId },
+    projected(id, number) {
+      this.knownIssues[id] = number;
+    },
+  };
+  const call = f.client.request;
+  let interrupted = false;
+  f.client.request = async (...args) => {
+    const result = await call(...args);
+    if (
+      !interrupted &&
+      args[0] === "POST" &&
+      args[1].endsWith("/sub_issues") &&
+      args[2].replace_parent
+    ) {
+      interrupted = true;
+      throw new Error("known effect, interrupted response");
+    }
+    return result;
+  };
+  await assert.rejects(f.gateway.projectGraph(request), /interrupted response/);
+  assert.deepEqual(f.hierarchy.get(1), [3, 4]);
+  // This fixture has established the completed server effect. It tests gateway
+  // idempotence, not controller permission to replay an unknown mutation.
+  await f.gateway.projectGraph(request);
+  assert.deepEqual(f.hierarchy.get(1), [6]);
+  assert.deepEqual(f.hierarchy.get(6), [2, 3, 4, 5]);
+  assert.equal(
+    f.calls.filter((c) => c.method === "POST" && c.route.endsWith("/issues"))
+      .length,
+    5,
+  );
+  assert.equal(
+    f.calls.filter(
+      (c) => c.body?.replace_parent === true && c.body.sub_issue_id === 102,
+    ).length,
+    1,
+  );
+});
+
+for (const mode of [
+  "foreign-parent",
+  "duplicate-parent",
+  "unreviewed-child",
+  "changed-parent-before-move",
+  "wrong-database",
+])
+  test(`reviewed reparent refuses ${mode} without replacing any parent`, async () => {
+    const { f, graph } = reparentFixture();
+    const initial = await f.gateway.projectGraph(f.request);
+    const paginate = f.client.paginate;
+    const call = f.client.request;
+    if (mode === "foreign-parent") {
+      f.hierarchy.set(1, [3, 4]);
+      f.hierarchy.set(99, [2]);
+    }
+    if (mode === "unreviewed-child") {
+      f.issues.set(99, f.issue(99));
+      f.hierarchy.get(1).push(99);
+    }
+    f.client.paginate = async (route) => {
+      const result = await paginate(route);
+      if (route.endsWith("/issues/6/sub_issues") && mode === "duplicate-parent")
+        return [f.issues.get(2)];
+      if (route.endsWith("/issues/1/sub_issues") && mode === "wrong-database")
+        return result.map((i) => ({ ...i, id: 900 }));
+      return result;
+    };
+    f.client.request = async (...args) => {
+      const result = await call(...args);
+      if (
+        mode === "changed-parent-before-move" &&
+        args[0] === "GET" &&
+        args[1].endsWith("/issues/2/parent")
+      )
+        return f.issue(99);
+      return result;
+    };
+    const before = f.calls.length;
+    await assert.rejects(
+      f.gateway.projectGraph({
+        ...f.request,
+        graph,
+        previousGraph: f.request.graph,
+        knownIssues: initial.issueByItemId,
+      }),
+      /hierarchy|authenticated issue identity/,
+    );
+    assert.ok(f.calls.slice(before).every((c) => !c.body?.replace_parent));
+  });
+
+test("complete preserved public 422 projection input replays through the real versioned gateway with native single-parent semantics", async () => {
+  const input = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/projection-reparent.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const f = projectionClient(input.repository, input.issues);
+  f.hierarchy.set(1, [4, 5, 6]);
+  for (const node of input.graph.items)
+    f.deps.set(
+      input.knownIssues[node.id],
+      node.dependencies.map((id) => input.knownIssues[id]),
+    );
+  const client = versionedProjectionClient(f, (method, path, body) => {
+    if (method !== "POST" || !path.endsWith("/sub_issues")) return;
+    const prefix = `repos/${input.repository}`;
+    for (const parent of [1, 9])
+      assert.ok(
+        f.calls.some(
+          (call) =>
+            call.method === "GET" &&
+            call.route === `${prefix}/issues/${parent}/sub_issues`,
+        ),
+        "Every affected parent is observed before the first transfer",
+      );
+    const child = [...f.issues.values()].find(
+      (issue) => issue.id === body.sub_issue_id,
+    );
+    assert.ok(child);
+    assert.deepEqual(
+      f.calls.slice(-2).map(({ method, route }) => ({ method, route })),
+      [
+        { method: "GET", route: `${prefix}/issues/${child.number}` },
+        { method: "GET", route: `${prefix}/issues/${child.number}/parent` },
+      ],
+      "Fresh child and documented parent observations immediately precede attachment",
+    );
+    assert.equal(
+      body.replace_parent,
+      f.hierarchy.get(1).includes(child.number),
+      "Only an existing reviewed parent requires replacement",
+    );
+  });
+  const gateway = new RealGitHubGateway(input.repository, undefined, client);
+  const result = await gateway.projectGraph({ objectiveIssue: 1, ...input });
+  assert.deepEqual(result.issueByItemId, input.knownIssues);
+  assert.deepEqual(f.hierarchy.get(1), [9]);
+  assert.deepEqual(f.hierarchy.get(9), [4, 5, 6, 8]);
+  assert.equal(f.issues.get(4).state, "closed");
+  assert.equal(
+    f.calls.filter((c) => c.method === "POST" && c.route.endsWith("/issues"))
+      .length,
+    0,
+  );
+  assert.deepEqual(
+    f.calls
+      .filter((c) => c.body?.replace_parent === true)
+      .map((c) => c.body.sub_issue_id),
+    [5683921369, 5683921426, 5683921495],
+  );
+  const mutations = f.calls.filter((call) => call.method !== "GET").length;
+  await gateway.projectGraph({ objectiveIssue: 1, ...input });
+  assert.equal(
+    f.calls.filter((call) => call.method !== "GET").length,
+    mutations,
+    "A fully acknowledged projection repeats observations without mutations",
+  );
+});
+
+for (const mode of [
+  "forbidden",
+  "server-error",
+  "malformed",
+  "listed-parent-missing",
+  "wrong-parent-database",
+  "wrong-parent-repository",
+])
+  test(`documented parent observation ${mode} never grants a hierarchy mutation`, async () => {
+    const { f, graph } = reparentFixture();
+    const initial = await f.gateway.projectGraph(f.request);
+    const call = f.client.request;
+    f.client.request = async (...args) => {
+      if (args[0] === "GET" && args[1].endsWith("/issues/2/parent")) {
+        if (mode === "forbidden") throw new GitHubRequestError(403);
+        if (mode === "server-error") throw new GitHubRequestError(500);
+        if (mode === "listed-parent-missing") throw new GitHubRequestError(404);
+        if (mode === "malformed") return {};
+        const observed = await call(...args);
+        if (mode === "wrong-parent-database") observed.id = 999;
+        if (mode === "wrong-parent-repository")
+          observed.repository_url = "https://api.github.com/repos/foreign/repo";
+        return observed;
+      }
+      return call(...args);
+    };
+    f.gateway = new RealGitHubGateway(
+      "example/public-fixture",
+      undefined,
+      versionedProjectionClient(f),
+    );
+    const before = f.calls.length;
+    await assert.rejects(
+      f.gateway.projectGraph({
+        ...f.request,
+        graph,
+        previousGraph: f.request.graph,
+        knownIssues: initial.issueByItemId,
+      }),
+    );
+    assert.ok(
+      f.calls
+        .slice(before)
+        .every((c) => c.method !== "POST" || !c.route.endsWith("/sub_issues")),
+    );
+    assert.deepEqual(f.hierarchy.get(1), [2, 3, 4]);
+  });

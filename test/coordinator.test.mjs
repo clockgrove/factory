@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   existsSync,
   mkdirSync,
+  readFileSync,
   mkdtempSync,
   rmSync,
   statSync,
@@ -170,35 +171,36 @@ test("planning submission persists before provider entry and owner remains respo
   );
 });
 
-test("partial projection saves each known identity and resumes without planning again", async () => {
+test("partial projection saves each known identity and refuses unresolved replay without planning again", async () => {
   await fixture(
     "partial",
     async ({ application, config, github, planningPath }) => {
-      const original = github.projectGraph.bind(github);
-      let once = true;
+      let calls = 0;
       github.projectGraph = async (request) => {
-        if (once) {
-          once = false;
-          await request.beforeCreate("result");
-          request.projected("result", 42);
-          throw new Error("API interruption after known issue");
-        }
-        assert.deepEqual(request.knownIssues, { result: 42 });
-        return original(request);
+        calls++;
+        await request.beforeCreate("result");
+        request.projected("result", 42);
+        throw Error("API interruption after known issue");
       };
       await assert.rejects(application.runObjective(1), /API interruption/);
+      const path = statePath(config.repository, 1);
+      const frozen = readFileSync(path);
       const saved = readContinuation(config.repository, 1);
       assert.equal(saved.planning, "complete");
+      assert.equal(saved.projection, "submitted");
       assert.deepEqual(saved.issueByItemId, { result: 42 });
-      const before = readEvents(planningPath).length;
-      await application.runObjective(1);
-      assert.equal(
-        readEvents(planningPath).filter((e) => e.type !== "result-review")
-          .length,
-        readEvents(planningPath)
-          .slice(0, before)
-          .filter((e) => e.type !== "result-review").length,
+      const before = readEvents(planningPath);
+      await assert.rejects(
+        application.runObjective(1),
+        /Interrupted projection or planning cannot be replayed/,
       );
+      await assert.rejects(
+        controlObjective(config, { objective: 1, action: "resume" }),
+        /cannot be resumed/,
+      );
+      assert.deepEqual(readFileSync(path), frozen);
+      assert.deepEqual(readEvents(planningPath), before);
+      assert.equal(calls, 1);
     },
   );
 });
@@ -247,26 +249,19 @@ test("compound: interrupted projection and rate-limited refresh retain unknown d
       ),
     );
     github.objective = gateway.objective.bind(gateway);
-    const running = application.runObjective(1);
-    const stoppedRun = assert.rejects(
-      running,
-      /preparation stopped|unknown outcome/,
+    const frozen = readFileSync(statePath(config.repository, 1));
+    await assert.rejects(
+      application.runObjective(1),
+      /Interrupted projection or planning cannot be replayed/,
     );
-    await until(
-      () =>
-        readContinuation(config.repository, 1)?.coordinator.observationError,
+    await assert.rejects(
+      controlObjective(config, { objective: 1, action: "resume" }),
+      /cannot be resumed/,
     );
-    const paused = readContinuation(config.repository, 1);
-    assert.equal(paused.coordinator.mode, "paused");
-    assert.match(paused.coordinator.waitReason, /resume to observe again/);
-    assert.equal(paused.projectionPending, original.projectionPending);
-    assert.equal(paused.runId, original.runId);
-    assert.deepEqual(paused.plan, original.plan);
-    assert.deepEqual(
-      paused.allowanceConsumption,
-      original.allowanceConsumption,
-    );
-    assert.equal(creates, 1);
+    assert.deepEqual(readFileSync(statePath(config.repository, 1)), frozen);
+    assert.equal(reads.length, 0);
+    // Independent read-only observations retain the transport rate gate, without lifecycle replay.
+    await assert.rejects(github.objective(1), /HTTP 403/);
     const abort = new AbortController();
     const queued = withProcessCancellation(abort.signal, () =>
       github.objective(1),
@@ -274,10 +269,7 @@ test("compound: interrupted projection and rate-limited refresh retain unknown d
     abort.abort();
     await assert.rejects(queued);
     assert.equal(reads.length, 1);
-    // Supported resume re-observes through the same rate gate, then encounters
-    // the original unknown projection fence rather than creating a replacement.
-    await controlObjective(config, { objective: 1, action: "resume" });
-    await stoppedRun;
+    await github.objective(1);
     assert.equal(reads.length, 2);
     assert.ok(reads[1] - reads[0] >= 90);
     const stopped = readContinuation(config.repository, 1);
@@ -293,8 +285,8 @@ test("compound: interrupted projection and rate-limited refresh retain unknown d
 });
 
 test("pause and drain persist offline and resume keeps the original deadline", async () => {
-  await fixture("modes", async ({ application, config, github }) => {
-    github.projectGraph = async () => {
+  await fixture("modes", async ({ application, config, driver }) => {
+    driver.preflight = async () => {
       throw new Error("offline");
     };
     const deadlineAt = new Date(Date.now() + 60_000).toISOString();
@@ -570,7 +562,7 @@ test("admitted drain stays idle under the owner and resumes its pending graph", 
 test("resumed preparation retains its admitted policy without requiring command-line authority again", async () => {
   await fixture(
     "admission-restart",
-    async ({ application, config, github }) => {
+    async ({ application, config, driver }) => {
       const candidate = await application.planObjective(1);
       const admission = await application.admitObjective(1, candidate, {
         schemaVersion: 1,
@@ -588,19 +580,19 @@ test("resumed preparation retains its admitted policy without requiring command-
         resources: { maxConcurrency: 2 },
         requiredEnvironment: [],
       });
-      const original = github.projectGraph.bind(github);
-      github.projectGraph = async () => {
-        throw new Error("projection observation unavailable");
+      const original = driver.preflight?.bind(driver);
+      driver.preflight = async () => {
+        throw new Error("preprojection preflight unavailable");
       };
       await assert.rejects(
         application.runObjective(1, candidate, admission),
-        /projection observation/,
+        /preprojection preflight/,
       );
       assert.equal(
         readContinuation(config.repository, 1).admission.digest,
         admission.digest,
       );
-      github.projectGraph = original;
+      driver.preflight = original;
       const completed = await application.runObjective(1);
       assert.equal(completed.admission.digest, admission.digest);
       assert.equal(completed.finalValidation.passed, true);
@@ -728,11 +720,15 @@ test("pause during planning stops issue projection until resumed or cancelled", 
 });
 
 test("first deadline added to existing preparation persists before a wait and cannot be extended", async () => {
-  await fixture("deadline-add", async ({ application, config, github }) => {
-    github.projectGraph = async () => {
-      throw new Error("offline projection");
+  await fixture("deadline-add", async ({ application, config, driver }) => {
+    let first = true;
+    driver.preflight = async () => {
+      if (first) {
+        first = false;
+        throw new Error("offline preprojection");
+      }
     };
-    await assert.rejects(application.runObjective(1), /offline projection/);
+    await assert.rejects(application.runObjective(1), /offline preprojection/);
     await controlObjective(config, { objective: 1, action: "pause" });
     const deadlineAt = new Date(Date.now() + 60_000).toISOString();
     const run = application.runObjective(1, undefined, undefined, {

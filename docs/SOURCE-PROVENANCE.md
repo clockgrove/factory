@@ -6,6 +6,42 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Typed whole-call projection lifecycle (#498)
+
+The current initial preparation, amendment, GitHub transport and lifecycle boundaries
+supply this correction. The stopped public v0.1.72 HTTP 422 scenario exposed a
+projecting snapshot with known issue IDs and no create marker. An initial readback
+proposal was withdrawn after an adversarial real boundary counterexample showed
+that a lost known-ID mutation response produces those same fields; current remote
+facts cannot establish that an earlier submitted operation completed.
+
+Initial and amendment producers now persist the whole sequential gateway call as
+unresolved before dispatch and use actual typed HTTP completion for known rejection.
+Decoders, status, supervision, restart, handoff and cancellation consume that same
+contract. Genuine lost responses, crashes, unknown creates and generic failures stay
+fenced. No historical error string or missing field supplies certainty.
+
+Known rejected projection cancellation uses the existing mutation lock and GET-only
+gateway observation to authenticate the recorded candidate subset, all original
+accepted mappings, source/configuration, reviewed bodies/roles, bounded intermediate
+dependencies and consistent documented native parent facts. Early rejection does
+not invent uncreated issues or an unassigned initial Objective role. Refusal precedes
+intent persistence; terminal cancellation preserves the original unaccepted graph,
+review, map, failure, evidence and finite consumption.
+
+Committed synthetic temporary-Git regressions exercise the actual Octokit/GitHubClient
+producer-to-persistence path for initial and amended projection, paired completed
+rejections and lost responses, partial issue creation and intermediate dependencies,
+then cancellation/restart/resume. The complete public graph/body fixture is retained.
+The complete original stopped snapshot and authenticated read-only API captures stay
+local; its unchanged submitted history must refuse through the native CLI. Earlier
+positive readback rehearsals remain preserved as withdrawn evidence, not acceptance.
+No archived runtime, private prompt publication, compatibility migration, manual
+snapshot repair, operational journal or new state root supplies this correction.
+An authentic completed-response search or separately approved exact-run disposition
+is still required for the historical run. Source evidence does not accept #448 or
+private #445; independent source and installed verification remain required.
+
 ## Read-only continuous-intake status (#444)
 
 The current continuous-intake implementation and the public v0.1.72 settled-refill
@@ -21,9 +57,51 @@ at a 60-second polling interval. It fails unchanged source on a second scan star
 by status, then proves pure repeated status and one immediate same-owner refill,
 the enqueue wakeup, observing enqueue/watch refusals and drain cleanup without a
 provider call, sleep or retry loop. No archived runtime, private content, new state,
-transport workaround or relaxed guard supplies the fix. This is source preparation
-under #444, pending independent review and exact-head CI; the active installed
-v0.1.72 #448 scenario and all published artifact bytes remain unchanged.
+transport workaround or relaxed guard supplies the fix. [PR #494](https://github.com/clockgrove/factory/pull/494) passed independent source
+review and [exact-head CI](https://github.com/clockgrove/factory/actions/runs/37070644649),
+then merged as `ab38f0ea8aa626c6ecc22a5c2337d5e7be3fdbb2` after the v0.1.72
+qualification owner ceased. Published bytes and historical acceptance remain
+unchanged; source acceptance does not close #444's live requirement.
+
+## Reviewed single-parent hierarchy reconciliation (#495)
+
+The current gateway from #443 / [PR #470](https://github.com/clockgrove/factory/pull/470),
+the reviewed-amendment contract from #247 / [PR #265](https://github.com/clockgrove/factory/pull/265),
+and the [actual public v0.1.72 projection failure](https://github.com/clockgrove/factory/issues/448#issuecomment-5962273873)
+supply this correction. Initial ordinary Work Items already have native Objective
+parents. The new reviewed aggregate attempted to attach those same authenticated
+issues with `replace_parent: false`, receiving HTTP 422. The pending reviewed
+revision remains unapplied; the predecessor owner has ceased after its two allowed
+activations and sole controlled restart. Failed beta objects, accepted alpha,
+planning consumption, provider captures and unavailable monetary accounting remain
+historical evidence, without whole-gate acceptance.
+
+The existing gateway now derives previous and desired parent relations from those
+verified graph inputs, reads every affected hierarchy before mutation, and uses
+the documented child-parent GET before each pending attachment or move. A typed
+HTTP 404 permits only a new nonreplacing attachment after child authentication;
+other failures remain failures. Replacement requires the authenticated database
+identity of the exact reviewed old parent. Ordinary issue parent fields are not
+required or interpreted. All affected parent lists, including emptied parents, receive exact
+final readback. Current desired relations reconcile without repeated known
+mutations; foreign parents and unreviewed/ambiguous children remain refused.
+Dependencies, role labels and completed issue identities retain their contracts.
+
+The existing HTTP boundary exposes only sanitized numeric rejection status;
+unknown submitted mutations retain their original uncertainty fence. The new public fixture preserves the complete original and pending reviewed graphs
+and relevant public issue bodies from the actual failed target. It supplies the
+real Octokit/GitHubClient `2026-03-10` projection regression with narrow single-parent
+HTTP semantics. Additional cases cover partial moves, unchanged replay, closed
+completed work, changed parent observations, foreign parents, duplicate relationships and
+wrong database identities. These are current public source and collaboration
+facts; no archived code, private adopter source, secrets or raw provider responses
+are copied. No snapshot repair, compatibility fallback, extra model call, journal,
+manual live hierarchy mutation or protection change supplies the correction.
+
+The source correction requires independent review and guarded exact-head integration
+before one corrected immutable artifact and a fresh complete public qualification.
+Published v0.1.72 bytes and failed history remain unchanged. Actual #444/#447/#448
+and subsequent private #445 acceptance retain their full separate gates.
 
 ## Native-replay qualification source and contract handoff (#448)
 

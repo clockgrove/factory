@@ -165,6 +165,36 @@ A concrete finding permits at most one evidenced compiler revision, followed by 
 
 An operator may explicitly request exact-tree Work Item re-review through `rereview`, then `run`, after inspecting a pending result. This schedules existing validation and automatic review without restarting implementation or recording acceptance. The existing final-result continuation remains `run`, which repeats final validation and review. These explicit actions do not expand automatic provider retries or revive terminal results. [Issue #202](https://github.com/clockgrove/factory/issues/202) records this continuation boundary.
 
+Initial preparation and graph amendments persist the outcome of the whole sequential
+GitHub projection call in the existing atomic snapshot (#498). Planning completion
+is not projection completion. The call is submitted before its first read or
+mutation; successful completion records projected, and an actual typed completed
+HTTP 4xx rejection records rejected. A submitted call may have stopped before any
+mutation, but its unresolved outcome remains fenced across restart, handoff and
+stopped cancellation. Lost responses, crashes and generic exceptions cannot be
+replayed or settled by reading current GitHub facts. Retained error prose and
+missing fields never establish a completed rejection.
+
+Stopped cancellation is distinct from uncertain read-only review abandonment (#363).
+For a known rejected initial or amended projection, ordinary `cancel` may retire
+an unaccepted failed run with exclusive stopped mutation ownership, bound original
+configuration/source and independently reviewed graph, settled local work, and no
+other unresolved submission. GET-only readback authenticates the unique recorded
+subset of candidate issues and every accepted previous mapping. Uncreated new nodes
+need no fabricated identities or role labels; an early initial rejection may precede
+the Objective role assignment. Recorded Work Items retain their exact reviewed old
+or new bodies, titles, roles and state. Intermediate dependency sets must stay within
+reviewed old/new intent and preserve common edges. Native parent GETs and lists must
+agree with reviewed old/new parents; old children cannot lose their parent, while a
+new child may remain unattached. Foreign, duplicate, changed or ambiguous facts and
+live resources refuse before cancellation intent is saved. The original rejection,
+graph, review, maps, errors, accepted/failed evidence and consumption remain in the
+terminal unaccepted snapshot. This performs no remote mutation, projection replay,
+provider call, service activation or allowance reset. Historical submitted projections
+without a genuine completed-response fact remain unresolved and require a separate
+explicit operator disposition; this contract does not reinterpret the stopped
+v0.1.72 run or authorize its cancellation.
+
 ### Existing workspace membership authority
 
 The pinned Objective may declare exact relative directories under `## Workspace package additions`. Compilation requires one responsible Work Item to own the existing `pnpm-workspace.yaml` and each new package manifest and carry its directory in the worker-visible brief or pinned source inputs. Runtime validation compares parsed membership against the original accepted base and accepted predecessor, permits only those additions with regular JSON manifests, preserves original entry order and predecessor membership, and keeps every non-membership setting pinned. Ambiguous YAML, aliases, tags and merges fail closed. This uses the existing Objective digest and immutable Git evidence, not a new permission store. Ownership and validation commands alone never grant this authority. The same check runs before commands in Work Item, environment, QA and final validation, including command-less results. Greenfield workspace authority remains unchanged.

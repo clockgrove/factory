@@ -235,6 +235,18 @@ test -s GUIDE.md
   assert.match(prompt, /Final validation/);
   assert.match(prompt, /not a command to run during this item/);
   assert.match(prompt, /Change only the owned paths/);
+  assert.match(
+    prompt,
+    /\.factory-discovery\.json as a private uncommitted proposal/,
+  );
+  assert.match(
+    prompt,
+    /controller independently reviews discoveries under existing Objective authority/,
+  );
+  assert.match(
+    prompt,
+    /Out-of-scope discoveries are backlog proposals, never authority/,
+  );
   assert.ok(
     !prompt
       .split("Controller-run validation constraints")[1]

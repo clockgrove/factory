@@ -1,3 +1,4 @@
+import { isCompletedProjectionRejection } from "./github-client.js";
 import { hasReadinessWait, isReadinessWait } from "./delivery/readiness.js";
 import { executionContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
@@ -9,6 +10,7 @@ import {
   applyPendingAmendment,
   graphDigest,
   hasPendingAmendmentEffect,
+  validateAmendment,
   submitAmendment,
   type AmendmentProposal,
 } from "./graph-amendments.js";
@@ -249,6 +251,7 @@ export async function planObjective(
         sourcePacketDigest,
         authority: structuredClone(authority),
         planning: "ready",
+        projection: "ready",
         issueByItemId: {},
         coordinator: {
           mode: "running",
@@ -487,7 +490,11 @@ function canHandoff(state: ContinuationState): boolean {
   if (state.coordinator?.processes?.length || state.coordinator?.cancelError)
     return false;
   if (state.schemaVersion === 5)
-    return state.planning !== "submitted" && !state.projectionPending;
+    return (
+      state.planning !== "submitted" &&
+      state.projection !== "submitted" &&
+      !state.projectionPending
+    );
   return (
     !state.coordinator?.phase.endsWith("-submitted") &&
     !hasPendingAmendmentEffect(state) &&
@@ -579,6 +586,16 @@ export async function controlObjective(
       saveState(statePath(config.repository, request.objective), state);
       return result;
     }
+    if (
+      request.action === "resume" &&
+      ((state.schemaVersion === 5 &&
+        (state.planning === "submitted" ||
+          ["submitted", "rejected"].includes(state.projection))) ||
+        (state.schemaVersion === 4 && hasPendingAmendmentEffect(state)))
+    )
+      throw new Error(
+        "Interrupted submitted effect cannot be resumed; operator direction required",
+      );
     state.coordinator ??= {
       mode: "running",
       phase: "idle",
@@ -635,10 +652,12 @@ async function cancelKnownWork(
   save: () => void,
 ): Promise<void> {
   const errors: string[] = [];
-  const tasks: Promise<void>[] = [];
+  const tasks: (() => Promise<void>)[] = [];
   if (
     state.schemaVersion === 5 &&
-    (state.planning === "submitted" || state.projectionPending)
+    (state.planning === "submitted" ||
+      state.projection === "submitted" ||
+      state.projectionPending)
   )
     errors.push(
       "Submitted preparation effect has unknown outcome; operator direction required",
@@ -669,15 +688,16 @@ async function cancelKnownWork(
         );
         continue;
       }
-      tasks.push(
+      tasks.push(() =>
         driver.cancel(
-          structuredClone(work.execution),
+          structuredClone(work.execution!),
           executionContext(work, save),
         ),
       );
     }
-  tasks.push(cancelRecordedSubprocesses(state));
-  for (const result of await Promise.allSettled(tasks))
+  if (errors.length) throw new Error(errors.join("; "));
+  tasks.push(() => cancelRecordedSubprocesses(state));
+  for (const result of await Promise.allSettled(tasks.map((task) => task())))
     if (result.status === "rejected") errors.push(String(result.reason));
   if (errors.length) throw new Error(errors.join("; "));
 }
@@ -720,6 +740,16 @@ export async function runObjective(
   let snapshot: ContinuationState | undefined;
   try {
     snapshot = readContinuation(config.repository, objective);
+    if (
+      (snapshot?.schemaVersion === 5 &&
+        (snapshot.planning === "submitted" ||
+          ["submitted", "rejected"].includes(snapshot.projection) ||
+          snapshot.projectionPending)) ||
+      (snapshot?.schemaVersion === 4 && hasPendingAmendmentEffect(snapshot))
+    )
+      throw new Error(
+        "Interrupted projection or planning cannot be replayed; operator direction required",
+      );
     if (snapshot?.schemaVersion === 4 && snapshot.readOnlyReviewAbandonment)
       throw new Error(
         "Objective was permanently abandoned; create a normally admitted successor",
@@ -1230,7 +1260,11 @@ async function runObjectivePass(
       );
     if (preparation?.error)
       throw new Error(`Objective preparation stopped: ${preparation.error}`);
-    if (preparation?.planning === "submitted" || preparation?.projectionPending)
+    if (
+      preparation?.planning === "submitted" ||
+      preparation?.projection === "submitted" ||
+      preparation?.projectionPending
+    )
       throw new Error(
         "Interrupted submitted preparation effect has unknown outcome; operator direction required",
       );
@@ -1509,6 +1543,7 @@ async function runObjectivePass(
             .digest("hex"),
           ...(admission ? { admission } : {}),
           planning: "ready",
+          projection: "ready",
           issueByItemId: {},
           coordinator: {
             mode: owner.handoff ? "draining" : "running",
@@ -1682,30 +1717,49 @@ async function runObjectivePass(
           throw new Error("Objective cancellation requested");
       };
       await waitForAdmission();
-      const projected = await diagnostics.span(
-        {
-          operation: "github-projection",
-          metadata: { itemCount: graph.items.length },
-        },
-        () =>
-          github.projectGraph({
-            graph,
-            objectiveIssue: objective,
-            knownIssues: preparation!.issueByItemId,
-            beforeCreate: async (id) => {
-              await waitForAdmission();
-              if (cancellationRequested())
-                throw new Error("Objective cancellation requested");
-              preparation!.projectionPending = id;
-              saveState(path, preparation!);
-            },
-            projected: (id, number) => {
-              preparation!.issueByItemId[id] = number;
-              delete preparation!.projectionPending;
-              saveState(path, preparation!);
-            },
-          }),
-      );
+      const projected =
+        preparation.projection === "projected"
+          ? { issueByItemId: preparation.issueByItemId }
+          : await diagnostics.span(
+              {
+                operation: "github-projection",
+                metadata: { itemCount: graph.items.length },
+              },
+              async () => {
+                preparation!.projection = "submitted";
+                saveState(path, preparation!);
+                try {
+                  const result = await github.projectGraph({
+                    graph,
+                    objectiveIssue: objective,
+                    knownIssues: preparation!.issueByItemId,
+                    beforeCreate: async (id) => {
+                      await waitForAdmission();
+                      if (cancellationRequested())
+                        throw new Error("Objective cancellation requested");
+                      preparation!.projectionPending = id;
+                      saveState(path, preparation!);
+                    },
+                    projected: (id, number) => {
+                      preparation!.issueByItemId[id] = number;
+                      delete preparation!.projectionPending;
+                      saveState(path, preparation!);
+                    },
+                  });
+                  preparation!.issueByItemId = result.issueByItemId;
+                  preparation!.projection = "projected";
+                  saveState(path, preparation!);
+                  return result;
+                } catch (error) {
+                  if (isCompletedProjectionRejection(error)) {
+                    preparation!.projection = "rejected";
+                    delete preparation!.projectionPending;
+                    saveState(path, preparation!);
+                  }
+                  throw error;
+                }
+              },
+            );
       state = {
         schemaVersion: 4,
         ...(preparation.planningRecovery
@@ -2237,6 +2291,7 @@ async function runObjectivePass(
       } else if (
         current.schemaVersion === 5 &&
         current.planning === "complete" &&
+        ["ready", "projected"].includes(current.projection) &&
         !current.projectionPending
       ) {
         current.coordinator.waitReason =
@@ -2399,11 +2454,101 @@ function abandonStoppedReadOnlyReview(
   }
 }
 
+/** Identified remote objects may be retired, never replayed or accepted, after stopped readback. */
+async function reconcileStoppedProjection(
+  config: FactoryConfig,
+  state: ContinuationState,
+  github: GitHubGateway | undefined,
+): Promise<void> {
+  const pending =
+    state.schemaVersion === 4 ? state.pendingAmendment : undefined;
+  if (
+    state.schemaVersion === 5
+      ? state.projection !== "rejected"
+      : !pending ||
+        pending.phase !== "rejected" ||
+        pending.rejectionStage !== "projection"
+  )
+    return;
+  const graph = state.schemaVersion === 5 ? state.plan?.graph : pending?.graph;
+  const knownIssues =
+    state.schemaVersion === 5 ? state.issueByItemId : pending!.issueByItemId;
+  if (
+    !github?.reconcileGraphProjection ||
+    config.execution.kind !== "local" ||
+    state.configDigest !== factoryConfigDigest(config) ||
+    owners.has(ownerKey(config, state.objective)) ||
+    !graph ||
+    state.planningRecovery?.phase === "submitted" ||
+    state.coordinator?.phase.includes("submitted") ||
+    (state.schemaVersion === 5
+      ? state.projectionPending
+      : pending!.projectionPending ||
+        Object.entries(state.issueByItemId).some(
+          ([id, issue]) => knownIssues[id] !== issue,
+        ) ||
+        !/^[a-f0-9]{64}$/.test(pending!.reviewDigest ?? "") ||
+        pending!.proposal.expectedGraphDigest !== graphDigest(state.graph) ||
+        Object.keys(state.stackMerges ?? {}).length ||
+        Object.values(state.work).some(
+          (work) =>
+            work.pendingEffect ||
+            work.execution ||
+            work.status === "running" ||
+            work.status === "published" ||
+            (work.step === "deliver" && work.status !== "done") ||
+            work.githubClosure === "pending",
+        ))
+  )
+    throw new Error(
+      "Stopped projection cancellation has unresolved ownership or mutation",
+    );
+  for (const owned of state.coordinator?.processes ?? []) {
+    const identity = linuxProcessIdentity(owned.pid);
+    if (processGroupExists(owned.pid) || (identity && identity.state !== "Z"))
+      throw new Error(
+        "Stopped projection cancellation has live owned subprocesses",
+      );
+  }
+  const objective = await github.objective(state.objective);
+  if (
+    createHash("sha256").update(objective.body).digest("hex") !==
+    state.objectiveBodyDigest
+  )
+    throw new Error("Stopped projection cancellation Objective source changed");
+  if (state.schemaVersion === 5)
+    verifyPlanCandidate(
+      state.plan!,
+      state.objective,
+      objective.body,
+      state.baseSha,
+      config.checkout,
+      state.configDigest,
+      false,
+      config.execution.concurrency,
+    );
+  else validateAmendment(state, graph, config, objective.body);
+  await github.reconcileGraphProjection({
+    graph,
+    ...(state.schemaVersion === 4 ? { previousGraph: state.graph } : {}),
+    objectiveIssue: state.objective,
+    objectiveBodyDigest: state.objectiveBodyDigest!,
+    knownIssues,
+    completedItems:
+      state.schemaVersion === 4
+        ? Object.keys(state.work).filter(
+            (id) => state.work[id]!.status === "done",
+          )
+        : [],
+  });
+}
+
 export async function cancelObjective(
   config: FactoryConfig,
   objective: number,
   driver: ExecutionDriver,
   abandonment?: ReadOnlyReviewAbandonmentRequest,
+  github?: GitHubGateway,
 ): Promise<"requested" | "cancelled"> {
   if (abandonment !== undefined)
     return abandonStoppedReadOnlyReview(config, objective, abandonment);
@@ -2436,6 +2581,23 @@ export async function cancelObjective(
     if (continuation.schemaVersion === 4 && continuation.finalAcceptance)
       throw new Error(
         "Acceptance is sealed; resume to reconcile Objective closure",
+      );
+    await reconcileStoppedProjection(config, continuation, github);
+    // Refuse unknown external effects before saving a cancellation request.
+    if (
+      (continuation.schemaVersion === 5 &&
+        (continuation.planning === "submitted" ||
+          continuation.projection === "submitted" ||
+          continuation.projectionPending)) ||
+      (continuation.schemaVersion === 4 &&
+        (hasPendingAmendmentEffect(continuation) ||
+          Object.values(continuation.work).some(
+            (work) => work.pendingEffect,
+          ))) ||
+      continuation.coordinator?.phase === "objective-review-submitted"
+    )
+      throw new Error(
+        "Submitted effect has unknown outcome; operator direction required",
       );
     continuation.cancelRequested = true;
     saveState(statePath(config.repository, objective), continuation);

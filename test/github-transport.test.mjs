@@ -3,7 +3,11 @@ import test from "node:test";
 import { Octokit } from "@octokit/core";
 import { projectionClient } from "./support/projection-client.mjs";
 import { RealGitHubGateway, projectedIssueBody } from "../dist/github.js";
-import { GitHubClient, GitHubOutcomeUnknown } from "../dist/github-client.js";
+import {
+  GitHubClient,
+  GitHubOutcomeUnknown,
+  GitHubRequestError,
+} from "../dist/github-client.js";
 import { withProcessCancellation } from "../dist/process.js";
 
 const json = (data, status = 200, headers = {}) =>
@@ -92,13 +96,18 @@ function projectionTransport() {
         path.endsWith("/issues"))
     )
       return json(await fixture.client.paginate(path));
-    return json(
-      await fixture.client.request(
-        method,
-        path,
-        options.body ? JSON.parse(options.body) : undefined,
-      ),
-    );
+    try {
+      return json(
+        await fixture.client.request(
+          method,
+          path,
+          options.body ? JSON.parse(options.body) : undefined,
+        ),
+      );
+    } catch (error) {
+      assert.ok(error instanceof GitHubRequestError);
+      return json({ message: "Not Found" }, error.status);
+    }
   };
   return { ...fixture, urls, fetch };
 }
@@ -517,3 +526,24 @@ test("native merge refuses missing, malformed, conflicting and disagreeing commi
     /Merged native stack head changed/,
   );
 });
+
+for (const status of [403, 404, 500])
+  test(`completed read rejection retains only structured HTTP ${status}`, async () => {
+    let calls = 0;
+    const client = clientFor(async () => {
+      calls++;
+      return json(
+        { message: "private server data", errors: ["private payload"] },
+        status,
+      );
+    });
+    await assert.rejects(
+      client.request("GET", "repos/a/b/issues/7/parent"),
+      (error) =>
+        error instanceof GitHubRequestError &&
+        error.status === status &&
+        error.message === `GitHub request failed (HTTP ${status})` &&
+        !JSON.stringify(error).includes("private"),
+    );
+    assert.equal(calls, 1);
+  });

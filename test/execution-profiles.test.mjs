@@ -35,7 +35,7 @@ import {
   verifyExecutionProfiles,
 } from "../dist/execution-profiles.js";
 import { RealGitHubGateway } from "../dist/github.js";
-import { GitHubClient } from "../dist/github-client.js";
+import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { parseFactoryState } from "../dist/state.js";
 import { withCoverage } from "./support/coverage.mjs";
 import {
@@ -663,7 +663,7 @@ test("GitHub issue projection renders the accepted assignment and resolved bindi
             const path = new URL(url).pathname.slice(1);
             assert.match(
               path,
-              /^repos\/example\/profiles\/(?:labels|issues(?:\/[12](?:\/(?:labels|dependencies\/blocked_by|sub_issues))?)?)$/,
+              /^repos\/example\/profiles\/(?:labels|issues(?:\/[12](?:\/(?:labels|dependencies\/blocked_by|sub_issues|parent))?)?)$/,
             );
             assert.equal(options.headers["x-github-api-version"], "2026-03-10");
             const method = options.method ?? "GET";
@@ -675,13 +675,21 @@ test("GitHub issue projection renders the accepted assignment and resolved bindi
                 path.endsWith("/sub_issues"))
             )
               return Response.json(await projection.client.paginate(path));
-            return Response.json(
-              await projection.client.request(
-                method,
-                path,
-                options.body ? JSON.parse(options.body) : undefined,
-              ),
-            );
+            try {
+              return Response.json(
+                await projection.client.request(
+                  method,
+                  path,
+                  options.body ? JSON.parse(options.body) : undefined,
+                ),
+              );
+            } catch (error) {
+              assert.ok(error instanceof GitHubRequestError);
+              return Response.json(
+                { message: "Not Found" },
+                { status: error.status },
+              );
+            }
           },
         },
       }),

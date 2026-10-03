@@ -144,6 +144,8 @@ export interface PreparationState {
   admission?: AutonomousAdmission;
   coordinator: CoordinatorDisposition;
   planning: "ready" | "submitted" | "complete";
+  /** Whole gateway-call outcome, independent of planning and display phase. */
+  projection: "ready" | "submitted" | "projected" | "rejected";
   plan?: import("./compiler.js").PlanCandidate;
   issueByItemId: Record<string, number>;
   projectionPending?: string;

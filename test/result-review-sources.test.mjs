@@ -309,6 +309,22 @@ test("actual adapter packet safely supplies multiline patches and quoted shell c
           (e) => e.path === "Command pass evidence",
         );
         assert.ok(receipt.content.includes(command));
+        const inventory = p.evidence.find(
+          (e) => e.path === "Exact result tree inventory",
+        );
+        assert.equal(inventory.origin, "controller");
+        assert.equal(inventory.complete, true);
+        assert.ok(inventory.content.includes("result.txt"));
+        for (const source of request.sources)
+          assert.ok(
+            p.evidence.some(
+              (entry) =>
+                entry.origin === "source" &&
+                entry.path === source.path &&
+                entry.content === source.content &&
+                entry.complete,
+            ),
+          );
         const patch = p.evidence.find((e) =>
           e.content.includes("+public result"),
         );

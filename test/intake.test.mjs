@@ -1031,6 +1031,7 @@ for (const disposition of ["failed", "cancelled"])
       saveState(statePath(f.config.repository, 1), {
         schemaVersion: 5,
         kind: "preparing",
+        projection: "ready",
         repository: f.config.repository,
         objective: 1,
         runId: "failed-preparation",
@@ -1370,6 +1371,7 @@ test("watch and refill preserve failed nonterminal fences and require real servi
     const failed = {
       schemaVersion: 5,
       kind: "preparing",
+      projection: "ready",
       repository: f.config.repository,
       objective: 1,
       configDigest: factoryConfigDigest(f.config),

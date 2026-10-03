@@ -11,6 +11,22 @@ export class GitHubOutcomeUnknown extends Error {
   }
 }
 
+/** A completed HTTP rejection exposes only its status, never transport data. */
+export class GitHubRequestError extends Error {
+  constructor(readonly status: number) {
+    super(`GitHub request failed (HTTP ${status})`);
+  }
+}
+
+/** Classify only an actual acknowledged rejection; retained prose is never evidence. */
+export function isCompletedProjectionRejection(error: unknown): boolean {
+  return (
+    error instanceof GitHubRequestError &&
+    error.status >= 400 &&
+    error.status < 500
+  );
+}
+
 /** One account/host gate shared by ordinary and native-stack delivery. No retries. */
 export class GitHubClient {
   private client?: Promise<Octokit>;
@@ -225,9 +241,8 @@ export class GitHubClient {
           (!error.status || error.status >= 500 || signal?.aborted)
         )
           throw new GitHubOutcomeUnknown();
-        throw new Error(
-          `GitHub request failed${error.status ? ` (HTTP ${error.status})` : ""}`,
-        );
+        if (error.status) throw new GitHubRequestError(error.status);
+        throw new Error("GitHub request failed");
       }
     } finally {
       if (abortListener) signal?.removeEventListener("abort", abortListener);

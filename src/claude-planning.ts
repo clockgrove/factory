@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
+  AccountInfo,
   Options,
   SDKAssistantMessageError,
   SDKMessage,
@@ -191,6 +192,88 @@ async function loadClaudeQuery(): Promise<ClaudePlanningQuery> {
     throw new Error(
       `Claude planning requires the optional ${CLAUDE_AGENT_SDK_ADAPTER_IDENTITY} package: ${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+}
+
+/** The Agent SDK control surface the model-free login probe uses. */
+export type ClaudeLoginQuery = (params: {
+  prompt: AsyncIterable<never>;
+  options: Options;
+}) => { accountInfo(): Promise<AccountInfo>; close(): void };
+
+export interface ClaudeLoginReadiness {
+  status: "present" | "missing";
+  /** Which login the SDK resolved; never the account identity. */
+  source?: string;
+  detail?: string;
+}
+
+const LOGIN_PROBE_TIMEOUT_MS = 30_000;
+
+/**
+ * Model-free check that the Agent SDK resolves a Claude login with the same
+ * scrubbed environment planning uses. It asks the runtime for account info
+ * and never sends a prompt; `environment` adds service-bound credentials.
+ */
+export async function probeClaudeLogin(
+  environment: Record<string, string> = {},
+  query?: ClaudeLoginQuery,
+): Promise<ClaudeLoginReadiness> {
+  const root = mkdtempSync(join(tmpdir(), "factory-claude-login-"));
+  const guard = new ProviderTurnGuard(LOGIN_PROBE_TIMEOUT_MS);
+  let session: ReturnType<ClaudeLoginQuery> | undefined;
+  let release: () => void = () => undefined;
+  const idle = new Promise<void>((resolve) => (release = resolve));
+  try {
+    const credentialDirectory = join(root, "empty-gh-config");
+    mkdirSync(credentialDirectory, { mode: 0o700 });
+    const start =
+      query ??
+      ((await guard.race(loadClaudeQuery())) as unknown as ClaudeLoginQuery);
+    session = start({
+      // Streaming input keeps the session open for control requests and
+      // ends, without a message, when the probe finishes.
+      prompt: {
+        [Symbol.asyncIterator]: () => ({
+          next: () =>
+            idle.then(() => ({ done: true as const, value: undefined })),
+        }),
+      },
+      options: {
+        cwd: root,
+        tools: [],
+        mcpServers: {},
+        strictMcpConfig: true,
+        settingSources: [],
+        persistSession: false,
+        env: {
+          ...claudeWorkerEnvironment(credentialDirectory),
+          ...environment,
+        },
+      },
+    });
+    const account = await guard.race(session.accountInfo());
+    const source = [account.apiKeySource, account.tokenSource].find(
+      (value) => value && value !== "none",
+    );
+    if (source) return { status: "present", source };
+    if (account.subscriptionType || account.email)
+      return { status: "present", source: "claude-login" };
+    return {
+      status: "missing",
+      detail:
+        "No Claude login found; run `claude auth login` on this host, or provide CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY",
+    };
+  } catch (error) {
+    return {
+      status: "missing",
+      detail: `Claude login could not be checked: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  } finally {
+    release();
+    session?.close();
+    guard.finish();
+    rmSync(root, { recursive: true, force: true });
   }
 }
 
@@ -503,7 +586,6 @@ class ClaudePlanningTransport implements PlanningTransport {
       state.response = JSON.stringify(result.structured_output);
   }
 }
-
 
 /** Planning and review through the Claude Agent SDK and the operator's login. */
 export class ClaudePlanningModel extends StructuredPlanningModel {

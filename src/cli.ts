@@ -3,6 +3,8 @@ import { objectiveCandidate } from "./qa.js";
 import {
   credentialFileBindings,
   executionCredential,
+  exportServiceLoginCredentials,
+  optionalProviderCredentials,
   requiredProviderCredentials,
   resolveProviderCredential,
 } from "./provider-credentials.js";
@@ -15,6 +17,7 @@ import { runAnalysisCommand } from "./analysis-cli.js";
 import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { readInteractionContent, readInteractionMetadata } from "./capture.js";
 import type { PlanCandidate } from "./compiler.js";
+import { probeClaudeLogin } from "./claude-planning.js";
 import {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   configPath,
@@ -112,9 +115,10 @@ async function main(): Promise<void> {
     // Service bindings are checked as files; foreground runs use the environment.
     const credentialFiles = options(args, "credential-file");
     const required = requiredProviderCredentials(config);
+    let bindings: { name: string; file: string }[] = [];
     try {
       if (credentialFiles.length)
-        credentialFileBindings(config, credentialFiles);
+        bindings = credentialFileBindings(config, credentialFiles);
       else for (const name of required) resolveProviderCredential(config, name);
     } catch (error) {
       console.log(
@@ -128,12 +132,33 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       return;
     }
+    // Claude planning needs a login the Agent SDK resolves; check it model-free.
+    let planning: Record<string, unknown> | undefined;
+    if (config.planning.kind === "claude-agent-sdk") {
+      const optional = optionalProviderCredentials(config);
+      const login = await probeClaudeLogin(
+        Object.fromEntries(
+          bindings
+            .filter(({ name }) => optional.includes(name))
+            .map(({ name, file }) => [name, readFileSync(file, "utf8").trim()]),
+        ),
+      );
+      if (login.status !== "present") {
+        console.log(
+          JSON.stringify({ status: "missing", planning: login }, null, 2),
+        );
+        process.exitCode = 1;
+        return;
+      }
+      planning = { ...login, accountAccess: "not verified" };
+    }
     // Remote execution has no local harness to probe beyond its credential.
     if (executionCredential(config)) {
       console.log(
         JSON.stringify({
           status: "present",
           credentials: required,
+          ...(planning && { planning }),
           source: credentialFiles.length
             ? "owner-private service credential"
             : "controller environment",
@@ -152,6 +177,7 @@ async function main(): Promise<void> {
       console.log(
         JSON.stringify({
           status: "unavailable",
+          ...(planning && { planning }),
           detail:
             "This model-free readiness probe supports the configured default local Codex harness only",
           controllerValidation: "not assessed",
@@ -173,6 +199,7 @@ async function main(): Promise<void> {
       JSON.stringify(
         {
           ...result,
+          ...(planning && { planning }),
           scope: "configured default implementation harness",
           controllerValidation:
             "not assessed; run source-declared acceptance commands in their declared environment",
@@ -260,6 +287,7 @@ async function main(): Promise<void> {
       const config = readConfig(path);
       // A service reads only the credentials systemd loaded for it.
       const loaded = options(args, "service-credential");
+      exportServiceLoginCredentials(config, loaded);
       if (input.intake) {
         checkIntakeServiceState(config);
         await compose(config, loaded).runIntake();

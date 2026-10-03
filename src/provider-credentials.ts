@@ -34,6 +34,34 @@ export function requiredProviderCredentials(config: FactoryConfig): string[] {
   return name === undefined ? [] : [name];
 }
 
+const CLAUDE_LOGIN_CREDENTIALS = [
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+];
+
+/** Whether a configured planner or local harness uses the Claude login. */
+export function usesClaudeLogin(config: FactoryConfig): boolean {
+  if (config.planning.kind === "claude-agent-sdk") return true;
+  if (config.execution.kind !== "local") return false;
+  return [
+    config.execution.harness,
+    ...Object.values(config.execution.profiles ?? {}).map(
+      (profile) => profile.harness,
+    ),
+  ].some((harness) => harness?.kind === "claude-agent-sdk");
+}
+
+/**
+ * Login credentials a headless service may bind but does not need: the Claude
+ * SDK otherwise uses the operator's Claude Code login.
+ */
+export function optionalProviderCredentials(config: FactoryConfig): string[] {
+  const required = requiredProviderCredentials(config);
+  return usesClaudeLogin(config)
+    ? CLAUDE_LOGIN_CREDENTIALS.filter((name) => !required.includes(name))
+    : [];
+}
+
 export function validateCredentialFile(
   config: FactoryConfig,
   name: string,
@@ -57,21 +85,23 @@ export function validateCredentialFile(
 }
 
 /**
- * Bind each required credential to exactly one `NAME=ABSOLUTE_PRIVATE_FILE`
- * entry; a missing, unknown or repeated name is refused.
+ * Bind each required credential, and any supplied optional login credential,
+ * to exactly one `NAME=ABSOLUTE_PRIVATE_FILE` entry; a missing required,
+ * unknown or repeated name is refused.
  */
 export function credentialFileBindings(
   config: FactoryConfig,
   entries: string[],
 ): { name: string; file: string }[] {
   const required = requiredProviderCredentials(config);
+  const optional = optionalProviderCredentials(config);
   const files = new Map<string, string>();
   for (const entry of entries) {
     const separator = entry.indexOf("=");
     const name = entry.slice(0, separator);
     if (separator < 1 || !VARIABLE_NAME.test(name))
       throw new Error("--credential-file must be NAME=ABSOLUTE_PRIVATE_FILE");
-    if (!required.includes(name))
+    if (!required.includes(name) && !optional.includes(name))
       throw new Error(
         `Credential ${name} is not required by the configured providers`,
       );
@@ -79,14 +109,17 @@ export function credentialFileBindings(
       throw new Error(`Credential ${name} is bound more than once`);
     files.set(name, entry.slice(separator + 1));
   }
-  return required.map((name) => {
-    const file = files.get(name);
-    if (!file)
+  for (const name of required)
+    if (!files.has(name))
       throw new Error(
         `Supervision requires --credential-file ${name}=ABSOLUTE_PRIVATE_FILE`,
       );
-    return { name, file: validateCredentialFile(config, name, file) };
-  });
+  return [...required, ...optional.filter((name) => files.has(name))].map(
+    (name) => ({
+      name,
+      file: validateCredentialFile(config, name, files.get(name)!),
+    }),
+  );
 }
 
 function readCredential(path: string, name: string): string {
@@ -136,4 +169,24 @@ export function resolveProviderCredential(
       `Set ${name} in the controller environment before starting Factory; for supervision use --credential-file ${name}=ABSOLUTE_PRIVATE_FILE`,
     );
   return value;
+}
+
+/**
+ * A supervised service exports the optional Claude login credentials systemd
+ * loaded, so the Claude SDK processes it starts can authenticate headlessly.
+ */
+export function exportServiceLoginCredentials(
+  config: FactoryConfig,
+  serviceCredentials: string[],
+): void {
+  const optional = optionalProviderCredentials(config);
+  const directory = process.env.CREDENTIALS_DIRECTORY;
+  for (const name of serviceCredentials) {
+    if (!optional.includes(name)) continue;
+    if (!directory || !isAbsolute(directory))
+      throw new Error(
+        `systemd credential directory is unavailable for ${name}; use LoadCredential-capable supervision`,
+      );
+    process.env[name] = readCredential(join(directory, name), name);
+  }
 }

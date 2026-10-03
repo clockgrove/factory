@@ -54,8 +54,8 @@ import {
   pinnedGitAsync,
   pinnedGitEnvironment,
   pinnedGitRaw,
+  removeWorktree,
   subprocessAsync,
-  withProcessCancellation,
 } from "./process.js";
 import {
   decodeReview,
@@ -2498,15 +2498,7 @@ export async function validateTree(
     };
     return evidence;
   } finally {
-    if (!hasUnresolvedSubprocesses()) {
-      try {
-        await withProcessCancellation(undefined, () =>
-          pinnedGitAsync(checkout, "worktree", "remove", "--force", worktree),
-        );
-      } catch {
-        rmSync(worktree, { recursive: true, force: true });
-      }
-    }
+    if (!hasUnresolvedSubprocesses()) await removeWorktree(checkout, worktree);
   }
 }
 

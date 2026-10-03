@@ -4,6 +4,7 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- Run git commands that change or walk a checkout's worktree registry (`worktree`, `fetch`, `pull`, `gc`, `prune`, `maintenance`) one at a time per repository. A fetch for one Work Item no longer dies with `Invalid path '.git/worktrees/<id>'` while another Work Item's validation worktree is being removed, and concurrent fetches no longer race on the remote-tracking ref. Worktree removal deletes the files first and holds the lock only to unregister.
 - `export-captures` sends standard OpenTelemetry (OTLP/HTTP JSON) traces instead of Langfuse- or LangSmith-specific uploads. Pass the OTLP base URL with `--endpoint` (HTTPS, or HTTP to a loopback collector) and authentication through `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or `OTEL_EXPORTER_OTLP_HEADERS`. `--destination`, `--project-id` and `--workspace-id` are removed, along with the `LANGFUSE_*` and `LANGSMITH_API_KEY` variables. Langfuse remains reachable through its OTLP endpoint.
 
 ## 0.1.75 — 2026-10-03

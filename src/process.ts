@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type SpawnOptions, spawn, spawnSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync } from "node:fs";
+import { readdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { type Fault, transient, withFault } from "./fault.js";
 
 export function command(
@@ -122,7 +124,140 @@ function classifiedGit<T>(args: string[], run: () => T): T {
   return withFault(run, (error) => gitFault(args, error));
 }
 
+/**
+ * Git commands that change or walk a repository's worktree registry
+ * (`.git/worktrees/<id>`), which git does not lock: `worktree remove`
+ * deletes an entry file by file, and a concurrent fetch, whose connectivity
+ * check resolves every worktree's HEAD, or a concurrent `worktree` command
+ * dies with "Invalid path '.git/worktrees/<id>'". Concurrent fetches of one
+ * branch also race on its remote-tracking ref ("incorrect old value
+ * provided"). These run one at a time per repository.
+ */
+const SERIALIZED_GIT = new Set([
+  "worktree",
+  "fetch",
+  "pull",
+  "gc",
+  "prune",
+  "maintenance",
+]);
+
+function serializedGit(args: string[]): boolean {
+  return SERIALIZED_GIT.has(gitSubcommand(args));
+}
+
+/** A synchronous call cannot wait for the repository lock. */
+function assertUnserialized(args: string[]): void {
+  if (serializedGit(args))
+    throw new Error(
+      `git ${gitSubcommand(args)} must run through gitAsync or pinnedGitAsync, which serialize it per repository`,
+    );
+}
+
+/** The tail of each repository's FIFO queue, keyed by git common directory. */
+const repositoryQueues = new Map<string, Promise<void>>();
+
+async function withRepositoryLock<T>(
+  key: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = repositoryQueues.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  // A successor waits for every earlier holder, even one cancelled while queued.
+  const tail = previous.then(() => held);
+  repositoryQueues.set(key, tail);
+  try {
+    await turnOrCancellation(previous, currentProcessSignal());
+    return await run();
+  } finally {
+    release();
+    if (repositoryQueues.get(key) === tail) repositoryQueues.delete(key);
+  }
+}
+
+function turnOrCancellation(
+  turn: Promise<void>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (!signal) return turn;
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    void turn.then(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    });
+  });
+}
+
+/** Linked worktrees share their main checkout's common directory and lock. */
+async function repositoryKey(
+  checkout: string,
+  env: NodeJS.ProcessEnv | undefined,
+): Promise<string> {
+  return realpathSync(
+    await commandAsync(
+      "git",
+      [
+        "-C",
+        checkout,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+      ],
+      undefined,
+      env,
+    ),
+  );
+}
+
+function gitProcess(
+  checkout: string,
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+): Promise<string> {
+  const run = () =>
+    commandAsync("git", ["-C", checkout, ...args], undefined, env);
+  return classifiedGit(args, async () =>
+    serializedGit(args)
+      ? withRepositoryLock(await repositoryKey(checkout, env), run)
+      : run(),
+  );
+}
+
+/**
+ * Delete a linked worktree of `checkout`. Its files go first, outside the
+ * repository lock, so the locked `git worktree remove` only unregisters it
+ * (milliseconds, where a dependency tree takes seconds to delete). Cleanup
+ * ignores cancellation. If git cannot unregister the worktree, its directory
+ * is still deleted and git lists the entry as prunable.
+ */
+export async function removeWorktree(
+  checkout: string,
+  worktree: string,
+): Promise<void> {
+  await withProcessCancellation(undefined, async () => {
+    try {
+      await Promise.all(
+        (await readdir(worktree))
+          .filter((name) => name !== ".git")
+          .map((name) =>
+            rm(join(worktree, name), { recursive: true, force: true }),
+          ),
+      );
+      await pinnedGitAsync(checkout, "worktree", "remove", "--force", worktree);
+    } catch {
+      await rm(worktree, { recursive: true, force: true });
+    }
+  });
+}
+
 export function git(checkout: string, ...args: string[]): string {
+  assertUnserialized(args);
   return classifiedGit(args, () => command("git", ["-C", checkout, ...args]));
 }
 
@@ -135,6 +270,7 @@ export function pinnedGit(checkout: string, ...args: string[]): string {
 
 /** Preserve exact pinned Git output without trimming or decoding. */
 export function pinnedGitRaw(checkout: string, ...args: string[]): Buffer {
+  assertUnserialized(args);
   return classifiedGit(args, () => {
     const result = spawnSync("git", ["-C", checkout, ...args], {
       env: pinnedGitEnvironment(),
@@ -399,21 +535,12 @@ export async function commandAsync(
 }
 
 export function gitAsync(checkout: string, ...args: string[]): Promise<string> {
-  return classifiedGit(args, () =>
-    commandAsync("git", ["-C", checkout, ...args]),
-  );
+  return gitProcess(checkout, args);
 }
 
 export function pinnedGitAsync(
   checkout: string,
   ...args: string[]
 ): Promise<string> {
-  return classifiedGit(args, () =>
-    commandAsync(
-      "git",
-      ["-C", checkout, ...args],
-      undefined,
-      pinnedGitEnvironment(),
-    ),
-  );
+  return gitProcess(checkout, args, pinnedGitEnvironment());
 }

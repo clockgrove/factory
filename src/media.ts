@@ -38,7 +38,7 @@ import {
   pinnedGit,
   pinnedGitAsync,
   pinnedGitRaw,
-  withProcessCancellation,
+  removeWorktree,
 } from "./process.js";
 import type { FactoryState } from "./state.js";
 
@@ -779,21 +779,8 @@ export async function materializeAssetSet(args: {
       treeSha: await pinnedGitAsync(worktree, "rev-parse", "HEAD^{tree}"),
     };
   } finally {
-    try {
-      if (!hasUnresolvedSubprocesses())
-        await withProcessCancellation(undefined, () =>
-          pinnedGitAsync(
-            args.checkout,
-            "worktree",
-            "remove",
-            "--force",
-            worktree,
-          ),
-        );
-    } catch {
-      if (!hasUnresolvedSubprocesses())
-        rmSync(worktree, { recursive: true, force: true });
-    }
+    if (!hasUnresolvedSubprocesses())
+      await removeWorktree(args.checkout, worktree);
   }
 }
 

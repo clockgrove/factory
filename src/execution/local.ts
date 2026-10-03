@@ -54,8 +54,8 @@ import {
   pinnedGitAsync,
   pinnedGitEnvironment,
   processGroupExists,
+  removeWorktree,
   sanitizedWorkerEnvironment,
-  withProcessCancellation,
 } from "../process.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
 import { SettledAttemptFailure } from "../work-repair.js";
@@ -711,15 +711,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
       this.active.set(identity, active);
       return { provider: "local", identity, data: active };
     } catch (error) {
-      await withProcessCancellation(undefined, () =>
-        pinnedGitAsync(
-          this.checkout,
-          "worktree",
-          "remove",
-          "--force",
-          worktree,
-        ),
-      );
+      await removeWorktree(this.checkout, worktree);
       throw error;
     }
   }
@@ -786,21 +778,8 @@ export class LocalExecutionDriver implements ExecutionDriver {
       if (
         !failed ||
         !existsSync(join(active.worktree, ".factory-discovery.json"))
-      ) {
-        try {
-          await withProcessCancellation(undefined, () =>
-            pinnedGitAsync(
-              this.checkout,
-              "worktree",
-              "remove",
-              "--force",
-              active.worktree,
-            ),
-          );
-        } catch {
-          rmSync(active.worktree, { recursive: true, force: true });
-        }
-      }
+      )
+        await removeWorktree(this.checkout, active.worktree);
     }
     if (failed) {
       if (collectionError instanceof AuthenticationRequiredError)

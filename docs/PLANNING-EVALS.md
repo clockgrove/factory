@@ -27,7 +27,7 @@ node scripts/eval-planning.mjs \
 | `--case NAME`             | Run only this case. Repeatable.                                                                                |
 | `--planning-model MODULE` | Use a module exporting `createPlanningModel({ config, directory })` instead of the configured `PlanningModel`. |
 
-Runs inherit your environment: Codex planning uses your Codex login, and `claude-api` planning reads the key named by `planning.credentialEnv`. To compare settings, run the same eval set once per configuration file and compare the two `summary.md` tables.
+Runs inherit your environment: Codex planning uses your Codex login, and `claude-agent-sdk` planning uses your Claude Code login (or `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` when set). To compare settings, run the same eval set once per configuration file and compare the two `summary.md` tables.
 
 A failed plan is a result, not a harness error: the script still writes the report and exits 0. An invalid case or option exits 2 before any model call.
 

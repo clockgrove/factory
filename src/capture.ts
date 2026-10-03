@@ -93,6 +93,8 @@ export interface InteractionMetadata {
     stage: "provider" | "parse" | "protocol" | "semantic";
     status: string;
     failureClass?: string;
+    /** Provider-native stop reason, when it reported one. */
+    stopReason?: string;
   };
 }
 

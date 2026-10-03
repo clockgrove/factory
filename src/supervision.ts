@@ -1,5 +1,6 @@
 import {
   credentialFileBindings,
+  optionalProviderCredentials,
   requiredProviderCredentials,
   validateCredentialFile,
 } from "./provider-credentials.js";
@@ -65,6 +66,15 @@ const serviceEnvironment = [
   "CODEX_HOME",
   "CODEX_SQLITE_HOME",
   "GH_CONFIG_DIR",
+  // Claude login location and the network settings needed to reach providers.
+  "CLAUDE_CONFIG_DIR",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY",
+  "https_proxy",
+  "http_proxy",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
 ] as const;
 const marker = "# Factory local supervision v1 ";
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -671,10 +681,11 @@ export async function supervise(
   );
   if (action === "start") {
     const required = requiredProviderCredentials(config);
+    const optional = optionalProviderCredentials(config);
     const bound = (value.credentials ?? []).map(({ name }) => name);
     if (
-      required.length !== bound.length ||
-      required.some((name) => !bound.includes(name))
+      required.some((name) => !bound.includes(name)) ||
+      bound.some((name) => !required.includes(name) && !optional.includes(name))
     )
       throw new Error(
         `Service credential bindings differ from the configured providers (${required.join(", ") || "none"}); reinstall with --credential-file NAME=ABSOLUTE_PRIVATE_FILE`,

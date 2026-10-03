@@ -3,6 +3,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { installFlags } from "./cli-flags.js";
 import { readConfig, resolveCapacity } from "./config.js";
 import { requestControl } from "./coordinator-control.js";
 import { redactDiagnosticDetail } from "./diagnostics.js";
@@ -19,6 +20,14 @@ const options = (args: string[], name: string) =>
   args.flatMap((arg, index) =>
     arg === `--${name}` && args[index + 1] ? [args[index + 1]!] : [],
   );
+/** The installation choices among setup's arguments; `install` refuses any other option. */
+function installArgs(args: string[]): string[] {
+  return args.flatMap((arg, index) => {
+    const name = arg.slice(2);
+    if (!arg.startsWith("--") || !installFlags.includes(name)) return [];
+    return name === "capture-content" ? [arg] : [arg, args[index + 1]!];
+  });
+}
 const cli = () =>
   realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url)));
 function withinCheckout(checkout: string, path: string): boolean {
@@ -107,7 +116,7 @@ export async function setupTarget(
         throw new Error(
           "Setup configuration and retained package must be outside the target checkout",
         );
-      await invoke(["install", ...args, "--config", configPath]);
+      await invoke(["install", ...installArgs(args), "--config", configPath]);
       completed.push("configuration-created");
     }
     const config = readConfig(configPath);

@@ -63,7 +63,7 @@ import { runNativeGraph } from "./delivery/native-runner.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { runRegularGraph } from "./delivery/regular-runner.js";
 import { DiagnosticEmitter, StateDiagnostics } from "./diagnostics.js";
-import { shortPlanDigest } from "./status-summary.js";
+import { namesPlan, shortPlanDigest } from "./status-summary.js";
 import {
   executionProfileChoices,
   verifyExecutionProfiles,
@@ -253,7 +253,7 @@ export async function decidePlan(
       throw new Error(
         "Objective has no persisted plan awaiting a decision; run it first",
       );
-    if (preparation.plan && input.plan !== shortPlanDigest(preparation.plan))
+    if (preparation.plan && !namesPlan(preparation.plan, input.plan))
       throw new Error(
         `Decision names plan ${input.plan ?? "(none)"}, but the saved plan is ${shortPlanDigest(preparation.plan)}; inspect status and decide again`,
       );

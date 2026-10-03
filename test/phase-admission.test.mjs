@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { syncBuiltinESMExports } from "node:module";
+import os from "node:os";
 import test from "node:test";
 import { phaseAdmission } from "../dist/phase-admission.js";
 import { readyItems } from "../dist/scheduler.js";
@@ -20,7 +22,6 @@ function fixture(limit = 2) {
       ),
     },
   };
-  const config = { execution: {} };
   const state = {
     capacity,
     work: Object.fromEntries(
@@ -29,7 +30,6 @@ function fixture(limit = 2) {
   };
   let cancelled = false;
   const phases = phaseAdmission(
-    config,
     state,
     () => {},
     () => cancelled,
@@ -87,7 +87,6 @@ test("restart consumes persisted reservations and the configured worker ceiling"
   state.work.a.phaseReservation = "coding";
   state.capacity.concurrency = 1;
   const restarted = phaseAdmission(
-    { execution: {} },
     state,
     () => {},
     () => false,
@@ -171,4 +170,35 @@ test("ready read-only QA gets the next suitable opportunity without preempting c
   work.coding.status = "running";
   assert.equal(readyItems(graph, work, new Set(["coding"]), 1)[0].id, "qa");
   assert.equal(work.coding.status, "running");
+});
+
+test("host-sized capacity never schedules beyond the current host; declared capacity is kept", async () => {
+  const { availableParallelism: cpus, totalmem: memory } = os;
+  try {
+    // The Objective started on a large host and now runs on a 4-CPU, 8 GiB one (1 worker).
+    os.availableParallelism = () => 4;
+    os.totalmem = () => 8 * 1024 ** 3;
+    syncBuiltinESMExports();
+    const run = (capacity) => {
+      const state = {
+        capacity,
+        work: { a: { status: "running" }, b: { status: "running" } },
+      };
+      return phaseAdmission(
+        state,
+        () => {},
+        () => false,
+      );
+    };
+    const sized = run({ concurrency: 8, hostSized: { concurrency: true } });
+    await sized.reserve("a", "coding");
+    assert.equal(sized.reason("b", "coding"), "coding concurrency ceiling");
+    const declared = run({ concurrency: 8 });
+    await declared.reserve("a", "coding");
+    assert.equal(declared.reason("b", "coding"), undefined);
+  } finally {
+    os.availableParallelism = cpus;
+    os.totalmem = memory;
+    syncBuiltinESMExports();
+  }
 });

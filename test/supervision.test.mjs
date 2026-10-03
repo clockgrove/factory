@@ -287,6 +287,42 @@ test("intake service pins its mode, requires consent and refuses unknown authori
     writeFileSync(path, JSON.stringify(value));
     assert.throws(() => checkIntakeServiceState(config), /Unsupported intake/);
   }));
+test("a service run that exits for a human decision is waiting, not failed", () =>
+  fixture(async ({ root, config, configPath }) => {
+    await supervise("install", configPath, { objective: 1 });
+    const unit = readFileSync(
+      join(
+        process.env.XDG_CONFIG_HOME,
+        "systemd/user",
+        serviceName(config.repository),
+      ),
+      "utf8",
+    );
+    // Exit 2 is a clean stop for a decision: never failed and never restarted.
+    assert.match(unit, /\nSuccessExitStatus=2\n/);
+    assert.match(unit, /\nRestartPreventExitStatus=1 2\n/);
+    writeFileSync(
+      join(root, "bin/systemctl"),
+      `#!/bin/sh
+case "$2" in
+  is-system-running) echo running;;
+  is-active) echo inactive;;
+  is-enabled) echo enabled;;
+  show) case "$4" in --property=ExecMainStatus) echo 2;; *) echo 0;; esac;;
+esac
+`,
+      { mode: 0o700 },
+    );
+    assert.deepEqual(await supervise("start", configPath), {
+      active: "inactive",
+      waitingFor: "human-decision",
+    });
+    assert.equal(
+      (await supervise("status", configPath)).waitingFor,
+      "human-decision",
+    );
+  }));
+
 test("intake service start requires an owner while pending but accepts an exhausted finite batch", () =>
   fixture(async ({ root, config, configPath, state }) => {
     await registerIntake(config);

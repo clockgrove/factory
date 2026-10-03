@@ -924,6 +924,7 @@ test("native paused admission does not start a pending QA proof", async () => {
     const state = {
       graph: graph(candidate),
       integratedSha: candidate,
+      capacity: { concurrency: 1 },
       work: {
         unit: { status: "done", integratedSha: candidate },
         integration: { status: "done", integratedSha: candidate },

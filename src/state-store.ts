@@ -7,6 +7,7 @@ import {
   linkSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmdirSync,
@@ -52,13 +53,41 @@ export function saveState(path: string, state: ContinuationState): void {
   }
 }
 
-/** Pre-release: state from an earlier Factory version is never migrated. */
-function assertCurrentVersion(repository: string, value: unknown): void {
+const currentVersion = (value: unknown): boolean => {
   const version = (value as { schemaVersion?: unknown } | null)?.schemaVersion;
-  if (version !== 6 && version !== 7)
-    throw new Error(
-      `State from an earlier Factory version; v0.2.0 starts fresh: delete ${stateRoot(repository)} (or finish it with the old version)`,
-    );
+  return version === 6 || version === 7;
+};
+
+/** Every Objective (or preparation) directory whose snapshot an earlier version wrote. */
+function earlierVersionDirectories(repository: string): string[] {
+  const root = join(stateRoot(repository), "objectives");
+  if (!existsSync(root)) return [];
+  return readdirSync(root)
+    .filter((name) => /^\d+$/.test(name))
+    .sort((left, right) => Number(left) - Number(right))
+    .map((name) => join(root, name))
+    .filter((directory) => {
+      const path = join(directory, "state.json");
+      if (!existsSync(path)) return false;
+      try {
+        return !currentVersion(JSON.parse(readFileSync(path, "utf8")));
+      } catch {
+        return false;
+      }
+    });
+}
+
+/** Pre-release: state from an earlier Factory version is never migrated. */
+function assertCurrentVersion(
+  repository: string,
+  path: string,
+  value: unknown,
+): void {
+  if (currentVersion(value)) return;
+  const found = earlierVersionDirectories(repository);
+  throw new Error(
+    `State from an earlier Factory version: ${(found.length ? found : [dirname(path)]).join(", ")}. v0.2.0 starts fresh: stop and uninstall any old Factory service with the old version (factory supervisor uninstall), then delete those directories, or finish them with the old version first`,
+  );
 }
 
 export function readContinuation(
@@ -68,7 +97,7 @@ export function readContinuation(
   const path = statePath(repository, objective);
   if (!existsSync(path)) return undefined;
   const value = JSON.parse(readFileSync(path, "utf8"));
-  assertCurrentVersion(repository, value);
+  assertCurrentVersion(repository, path, value);
   if (value.schemaVersion !== 7) return readState(repository, objective);
   if (
     value.kind !== "preparing" ||
@@ -121,7 +150,7 @@ export function readState(
   const path = statePath(repository, objective);
   if (!existsSync(path)) return undefined;
   const value = JSON.parse(readFileSync(path, "utf8"));
-  assertCurrentVersion(repository, value);
+  assertCurrentVersion(repository, path, value);
   try {
     const state = parseFactoryState(value, repository, objective);
     const root = resolve(stateRoot(repository));

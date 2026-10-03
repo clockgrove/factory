@@ -859,6 +859,8 @@ export function validateConfig(value: unknown): FactoryConfig {
 export interface Capacity {
   concurrency: number;
   scheduling?: SchedulingConfig;
+  /** Which values came from the host rather than the configuration. */
+  hostSized?: { concurrency?: true; scheduling?: true };
 }
 
 /** The declared capacity, or this host's defaults when `execution.concurrency` is omitted. */
@@ -868,22 +870,109 @@ export function resolveCapacity(config: FactoryConfig): Capacity {
       concurrency: config.execution.concurrency,
       ...(config.scheduling ? { scheduling: config.scheduling } : {}),
     };
-  const host = hostSchedulingDefaults({
-    cpus: availableParallelism(),
-    memoryBytes: totalmem(),
-  });
+  const host = currentHostDefaults();
   return {
     concurrency: host.concurrency,
     scheduling: config.scheduling ?? host.scheduling,
+    hostSized: config.scheduling
+      ? { concurrency: true }
+      : { concurrency: true, scheduling: true },
+  };
+}
+
+function currentHostDefaults() {
+  return hostSchedulingDefaults({
+    cpus: availableParallelism(),
+    memoryBytes: totalmem(),
+  });
+}
+
+/**
+ * The capacity to schedule with now. Stored values bind plan bounds; a host-sized value never
+ * exceeds what the current host offers, so a smaller host is not oversubscribed.
+ */
+export function liveCapacity(capacity: Capacity): Capacity {
+  const sized = capacity.hostSized;
+  if (!sized) return capacity;
+  const host = currentHostDefaults();
+  const least = (stored: number | undefined, live: number | undefined) =>
+    stored === undefined || live === undefined
+      ? stored
+      : Math.min(stored, live);
+  const stored = capacity.scheduling;
+  const scheduling =
+    sized.scheduling && stored
+      ? {
+          ...stored,
+          ...Object.fromEntries(
+            (
+              [
+                "cpu",
+                "memoryMiB",
+                "reviewConcurrency",
+                "validationConcurrency",
+              ] as const
+            ).flatMap((key) =>
+              stored[key] === undefined
+                ? []
+                : [[key, least(stored[key], host.scheduling[key])]],
+            ),
+          ),
+          ...(stored.phases
+            ? {
+                phases: Object.fromEntries(
+                  Object.entries(stored.phases).map(([phase, reserve]) => {
+                    const live = host.scheduling.phases[phase as ResourcePhase];
+                    return [
+                      phase,
+                      {
+                        ...reserve,
+                        ...(reserve?.cpu === undefined
+                          ? {}
+                          : { cpu: least(reserve.cpu, live?.cpu) }),
+                        ...(reserve?.memoryMiB === undefined
+                          ? {}
+                          : {
+                              memoryMiB: least(
+                                reserve.memoryMiB,
+                                live?.memoryMiB,
+                              ),
+                            }),
+                      },
+                    ];
+                  }),
+                ),
+              }
+            : {}),
+        }
+      : stored;
+  return {
+    concurrency: sized.concurrency
+      ? Math.min(capacity.concurrency, host.concurrency)
+      : capacity.concurrency,
+    ...(scheduling ? { scheduling } : {}),
   };
 }
 
 export function validateCapacity(value: Capacity): Capacity {
   assertObject(value, "capacity");
-  assertOnlyKeys(value, ["concurrency", "scheduling"], "capacity");
+  assertOnlyKeys(value, ["concurrency", "scheduling", "hostSized"], "capacity");
   if (!Number.isSafeInteger(value.concurrency) || value.concurrency <= 0)
     throw new Error("capacity.concurrency must be a positive integer");
   if (value.scheduling !== undefined) validateScheduling(value.scheduling);
+  if (value.hostSized !== undefined) {
+    assertObject(value.hostSized, "capacity.hostSized");
+    assertOnlyKeys(
+      value.hostSized,
+      ["concurrency", "scheduling"],
+      "capacity.hostSized",
+    );
+    if (
+      Object.values(value.hostSized).some((flag) => flag !== true) ||
+      (value.hostSized.scheduling && !value.scheduling)
+    )
+      throw new Error("capacity.hostSized is invalid");
+  }
   return value;
 }
 

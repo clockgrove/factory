@@ -165,7 +165,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
         assert.equal(invalid.stdout, "");
         assert.match(
           invalid.stderr,
-          /Invalid.*(?:state|snapshot)|earlier Factory version; v0.2.0 starts fresh/,
+          /Invalid.*(?:state|snapshot)|earlier Factory version: .*v0.2.0 starts fresh/,
         );
       }
     }

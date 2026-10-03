@@ -75,7 +75,7 @@ export async function runNativeGraph(args: {
     save,
     active,
   } = args;
-  const phases = phaseAdmission(config, state, save, args.cancelled);
+  const phases = phaseAdmission(state, save, args.cancelled);
   const branchFor = (id: string) => `factory/objective-${objective}/${id}`;
   const defaultBranch = await github.defaultBranch();
   const units = linearDeliveryUnits(state.graph);

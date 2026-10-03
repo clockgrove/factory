@@ -1,13 +1,14 @@
-import type { FactoryConfig, ResourcePhase } from "./config.js";
+import { liveCapacity, type ResourcePhase } from "./config.js";
 import type { FactoryState } from "./state.js";
 
 /** Shared by both concrete runners. The snapshot owns reservations; waiters only wake it. */
 export function phaseAdmission(
-  config: FactoryConfig,
   state: FactoryState,
   save: () => void,
   cancelled: () => boolean,
 ) {
+  // Stored capacity binds the plan; scheduling never exceeds what this host offers now.
+  const capacity = liveCapacity(state.capacity);
   const effectivePhase = (work: FactoryState["work"][string]) =>
     work.phaseReservation ??
     (!work.requestedPhase &&
@@ -43,7 +44,7 @@ export function phaseAdmission(
       throw new Error(
         "Driver availableSlots must be a nonnegative integer or unknown",
       );
-    const operator = state.capacity.concurrency;
+    const operator = capacity.concurrency;
     // Driver reports remaining slots, not total capacity. Subtract owned coding only from the operator ceiling.
     return Math.max(
       0,
@@ -62,13 +63,12 @@ export function phaseAdmission(
       .filter(([other, work]) => other !== id && work.phaseReservation);
     const ceiling =
       phase === "coding"
-        ? state.capacity.concurrency
+        ? capacity.concurrency
         : phase === "review"
-          ? (state.capacity.scheduling?.reviewConcurrency ??
-            state.capacity.concurrency)
+          ? (capacity.scheduling?.reviewConcurrency ?? capacity.concurrency)
           : phase === "validation"
-            ? (state.capacity.scheduling?.validationConcurrency ??
-              state.capacity.concurrency)
+            ? (capacity.scheduling?.validationConcurrency ??
+              capacity.concurrency)
             : undefined;
     if (
       ceiling !== undefined &&
@@ -76,9 +76,9 @@ export function phaseAdmission(
         .length >= ceiling
     )
       return `${phase} concurrency ceiling`;
-    const declaration = state.capacity.scheduling?.phases?.[phase];
+    const declaration = capacity.scheduling?.phases?.[phase];
     for (const resource of ["cpu", "memoryMiB"] as const) {
-      const limit = state.capacity.scheduling?.[resource];
+      const limit = capacity.scheduling?.[resource];
       if (limit === undefined) continue;
       const requested = declaration?.[resource];
       if (requested === undefined)
@@ -88,9 +88,7 @@ export function phaseAdmission(
       let total = requested;
       for (const [, work] of reservations) {
         const amount =
-          state.capacity.scheduling?.phases?.[work.phaseReservation!]?.[
-            resource
-          ];
+          capacity.scheduling?.phases?.[work.phaseReservation!]?.[resource];
         if (amount === undefined)
           return `unknown active ${resource} reservation`;
         total += amount;

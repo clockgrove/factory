@@ -417,7 +417,7 @@ export function renderService(value: ServiceBinding): string {
     .map(([key, val]) => `Environment=${quoted(`${key}=${val}`, false)}`)
     .join(
       "\n",
-    )}\n${(value.credentials ?? []).map(({ name, file }) => `LoadCredential=${quoted(`${name}:${file}`, false)}\n`).join("")}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nRestartPreventExitStatus=1 2\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
+    )}\n${(value.credentials ?? []).map(({ name, file }) => `LoadCredential=${quoted(`${name}:${file}`, false)}\n`).join("")}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nSuccessExitStatus=2\nRestartPreventExitStatus=1 2\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
 }
 function checkServiceContinuationFields(state: ContinuationState): void {
   // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
@@ -480,11 +480,18 @@ export async function handoffService(
     await pause(100);
   }
 }
+/** A stopped service whose run exited 2 is waiting for a human decision, not failed. */
+function awaitsDecision(name: string): boolean {
+  return (
+    inspect("is-active", name) !== "active" &&
+    inspect("show", name, "--property=ExecMainStatus", "--value") === "2"
+  );
+}
 async function verifyServiceOwner(
   config: FactoryConfig,
   objective: number,
   name: string,
-): Promise<void> {
+): Promise<"owner" | "settled" | "needs-decision"> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const owner = readControllerOwner(
@@ -500,16 +507,18 @@ async function verifyServiceOwner(
         objective,
         action: "status",
       });
-      if (reply.handled) return;
+      if (reply.handled) return "owner";
     }
     const intake = objective === 0 ? readIntake(config) : undefined;
-    if (intake && !intake.watch && intakeComplete(config, intake)) return;
+    if (intake && !intake.watch && intakeComplete(config, intake))
+      return "settled";
     const current = readContinuation(config.repository, objective);
     if (
       current?.cancelledAt ||
       (current?.schemaVersion === 6 && objectiveComplete(current))
     )
-      return;
+      return "settled";
+    if (awaitsDecision(name)) return "needs-decision";
     if (inspect("is-active", name) === "failed") break;
     await pause(100);
   }
@@ -571,6 +580,9 @@ export async function supervise(
       registered,
       active: inspect("is-active", name),
       enabled: inspect("is-enabled", name),
+      ...(registered && awaitsDecision(name)
+        ? { waitingFor: "human-decision" }
+        : {}),
       ...inspectBinding(config, registered),
     };
   }
@@ -642,8 +654,11 @@ export async function supervise(
         "An existing foreground owner must hand off before service start",
       );
     systemctl("start", name);
-    await verifyServiceOwner(config, value.objective, name);
-    return { active: inspect("is-active", name) };
+    const outcome = await verifyServiceOwner(config, value.objective, name);
+    return {
+      active: inspect("is-active", name),
+      ...(outcome === "needs-decision" ? { waitingFor: "human-decision" } : {}),
+    };
   }
   if (["stop", "disable", "uninstall", "upgrade"].includes(action)) {
     let candidate: ServiceBinding | undefined;

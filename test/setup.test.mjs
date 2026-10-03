@@ -567,6 +567,7 @@ test("guided setup leaves omitted concurrency to host sizing at run time and rep
     assert.equal(config.scheduling, undefined);
     const sized = {
       ...expected,
+      hostSized: { concurrency: true, scheduling: true },
       sizedFromHost: {
         cpus: availableParallelism(),
         memoryMiB: Math.floor(totalmem() / 1024 ** 2),

@@ -225,6 +225,10 @@ Running is the consent to execute that Objective. `run` compiles and independent
 | 2    | An Objective needs a human decision; status names it.       |
 | 1    | A failure or cancellation stopped it; the message says why. |
 
+The background service treats exit 2 as a clean stop: `supervisor status` reports `waitingFor: human-decision`, and the service is not restarted until you decide and start it again. Every command refuses an option it does not read.
+
+If Factory finds state written by an earlier version, every command stops and names those Objective directories. Stop and uninstall any old Factory service with the old version first, then delete the named directories (or finish them with the old version).
+
 When plan review leaves a specific question, `run` stops before creating any Work Item issue. Inspect the question and the plan's short digest with `factory status --objective ISSUE_NUMBER`, then decide on exactly that plan:
 
 ```sh
@@ -233,7 +237,7 @@ factory decide --objective ISSUE_NUMBER --plan PLAN_DIGEST --outcome accept \
 factory run --objective ISSUE_NUMBER
 ```
 
-`--plan` must name the saved plan; a different digest is refused. Accepting requires `--answer`. `--actor` defaults to your user name. `--outcome refuse` discards the saved plan, so the next `run` plans again. When planning itself stopped for a decision before producing a plan, status says so; resolve it in the Objective and refuse (no `--plan` is needed) to plan again. A decision cannot expand scope or override deterministic checks. If the base commit, Objective body, sources or configuration change before the plan is projected, `run` stops; refuse the plan to plan again.
+`--plan` must name the saved plan: the 12-character digest status prints, or any longer prefix of its full review digest. A different digest is refused. Accepting requires `--answer`. `--actor` defaults to your user name. `--outcome refuse` discards the saved plan, so the next `run` plans again. When planning itself stopped for a decision before producing a plan, status says so; resolve it in the Objective and refuse (no `--plan` is needed) to plan again. A decision cannot expand scope or override deterministic checks. If the base commit, Objective body, sources or configuration change before the plan is projected, `run` stops; refuse the plan to plan again.
 
 To preview a plan without saving any state, run `factory plan --objective ISSUE_NUMBER [--output /absolute/private/plan.json]`. The output file must be new and outside the target checkout. Inspect owned paths, dependencies, acceptance, non-goals, validation commands, and final integrated-result checks.
 

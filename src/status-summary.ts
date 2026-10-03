@@ -109,6 +109,18 @@ export function shortPlanDigest(plan: { reviewDigest: string }): string {
   return plan.reviewDigest.slice(0, 12);
 }
 
+/** Whether a decision names this plan: any prefix of its review digest, at least the short form. */
+export function namesPlan(
+  plan: { reviewDigest: string },
+  named: string | undefined,
+): boolean {
+  return (
+    named !== undefined &&
+    /^[0-9a-f]{12,64}$/.test(named) &&
+    plan.reviewDigest.startsWith(named)
+  );
+}
+
 const REASON = '"WHY"';
 const ANSWER = '"ANSWER"';
 const ACTOR = '"$USER"';

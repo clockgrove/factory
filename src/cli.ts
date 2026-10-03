@@ -48,6 +48,7 @@ import {
   intakeControl,
   watchIntake,
 } from "./intake.js";
+import { assertKnownFlags } from "./cli-flags.js";
 import { setupTarget } from "./setup.js";
 import { linuxProcessIdentity } from "./process.js";
 import {
@@ -105,6 +106,7 @@ function help(): void {
 async function main(): Promise<void> {
   const [, , command, ...args] = process.argv;
   if (!command || command === "help" || command === "--help") return help();
+  assertKnownFlags(command, args);
   const path = option(args, "config") ?? configPath();
   if (command === "setup") {
     const result = await setupTarget(args, path);

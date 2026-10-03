@@ -311,12 +311,24 @@ test("decisions bind to the plan status showed and refuse once projection starts
       answer: "Yes, the result item owns result.txt",
       reason: "Checked the Objective",
     };
-    for (const plan of [undefined, "000000000000"])
+    for (const plan of [
+      undefined,
+      "000000000000",
+      stopped.plan.reviewDigest.slice(0, 11),
+      stopped.plan.reviewDigest.toUpperCase(),
+    ])
       for (const outcome of ["accept", "refuse"])
         await assert.rejects(
           application.decidePlan(1, { ...decision, plan, outcome }),
           /saved plan is/,
         );
+    // Any prefix of at least the short form names the plan.
+    const accepted = await application.decidePlan(1, {
+      ...decision,
+      plan: stopped.plan.reviewDigest.slice(0, 20),
+      outcome: "accept",
+    });
+    assert.equal(accepted.plan.review.status, "human-accepted");
     // A crash between creating an issue and recording it leaves projection unknown.
     const path = statePath(config.repository, 1);
     const projecting = readContinuation(config.repository, 1);
@@ -325,7 +337,7 @@ test("decisions bind to the plan status showed and refuse once projection starts
     await assert.rejects(
       application.decidePlan(1, {
         ...decision,
-        plan: digest,
+        plan: stopped.plan.reviewDigest,
         outcome: "refuse",
       }),
       /projection has started/,
@@ -345,11 +357,22 @@ test("state from an earlier Factory version stops every command with one message
       actions: {},
       planningModel: model(graph, calls),
     });
-    const leftover = statePath(config.repository, 9);
-    mkdirSync(dirname(leftover), { recursive: true });
-    writeFileSync(leftover, JSON.stringify({ schemaVersion: 4 }));
-    const message = `State from an earlier Factory version; v0.2.0 starts fresh: delete ${stateRoot(config.repository)} (or finish it with the old version)`;
+    // An old Objective state and an old preparation, plus a current-version neighbour.
+    for (const [objective, schemaVersion] of [
+      [9, 4],
+      [12, 5],
+    ]) {
+      const leftover = statePath(config.repository, objective);
+      mkdirSync(dirname(leftover), { recursive: true });
+      writeFileSync(leftover, JSON.stringify({ schemaVersion }));
+    }
+    const objectives = join(stateRoot(config.repository), "objectives");
+    const message = `State from an earlier Factory version: ${join(objectives, "9")}, ${join(objectives, "12")}. v0.2.0 starts fresh: stop and uninstall any old Factory service with the old version (factory supervisor uninstall), then delete those directories, or finish them with the old version first`;
     await assert.rejects(application.runObjective(1), { message });
+    assert.doesNotMatch(
+      message,
+      new RegExp(`delete ${stateRoot(config.repository)}\\b`),
+    );
     assert.throws(() => readContinuation(config.repository, 9), { message });
     assert.throws(() => readState(config.repository, 9), { message });
     assert.deepEqual(calls, []);
@@ -567,5 +590,34 @@ test("the CLI requires an answer to accept a plan and keeps no admission vocabul
     const help = cli("help");
     assert.equal(help.status, 0);
     assert.doesNotMatch(help.stdout, /--authority\b|\badmit\b|admission/);
+    // Every command refuses options it does not read; removed ones say so.
+    for (const [args, message] of [
+      [
+        ["run", "--objective", "1", "--plan", "x"],
+        /Unknown option --plan for factory run/,
+      ],
+      [["status", "--objective", "1", "--follow"], /Unknown option --follow/],
+      [
+        ["plan", "--objective", "1", "--source", "a.md"],
+        /--source was removed/,
+      ],
+      [
+        ["intake", "enqueue", "--authority", "a.json"],
+        /--authority was removed/,
+      ],
+      [
+        ["run", "--objective", "1", "--admission", "a.json"],
+        /--admission was removed/,
+      ],
+      [["cancel", "--objective", "1", "--abandon"], /--abandon was removed/],
+      [
+        ["analyze", "--objective", "1", "--source", "a.md"],
+        /--source was removed/,
+      ],
+    ]) {
+      const result = cli(...args, "--config", configPath);
+      assert.equal(result.status, 1, args.join(" "));
+      assert.match(result.stderr, message);
+    }
   });
 });

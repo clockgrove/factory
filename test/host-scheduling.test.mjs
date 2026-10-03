@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   factoryConfigDigest,
   hostSchedulingDefaults,
+  liveCapacity,
   resolveCapacity,
   validateConfig,
 } from "../dist/config.js";
@@ -117,6 +118,7 @@ test("omitted concurrency resolves from the host, and the declared config digest
     assert.deepEqual(resolveCapacity(sized), {
       concurrency: host.concurrency,
       scheduling: host.scheduling,
+      hostSized: { concurrency: true, scheduling: true },
     });
     const explicit = validateConfig({
       ...rest,
@@ -228,4 +230,39 @@ test("autonomy defaults are bounded and on; the config section overrides them fi
     () => resolveAutonomy({ repairClasses: ["anything"] }),
     /unsupported repair classes/,
   );
+});
+
+test("live capacity takes the smaller of stored and current host values only where the host sized them", () => {
+  const large = hostSchedulingDefaults({ cpus: 64, memoryBytes: 256 * GiB });
+  const small = hostSchedulingDefaults({ cpus: 4, memoryBytes: 8 * GiB });
+  const { availableParallelism: cpus, totalmem: memory } = os;
+  try {
+    os.availableParallelism = () => 4;
+    os.totalmem = () => 8 * GiB;
+    syncBuiltinESMExports();
+    assert.deepEqual(
+      liveCapacity({
+        concurrency: large.concurrency,
+        scheduling: large.scheduling,
+        hostSized: { concurrency: true, scheduling: true },
+      }),
+      { concurrency: small.concurrency, scheduling: small.scheduling },
+    );
+    // Declared scheduling stays as declared even when the worker ceiling was host-sized.
+    const declared = { cpu: 40, memoryMiB: 100_000, reviewConcurrency: 9 };
+    assert.deepEqual(
+      liveCapacity({
+        concurrency: large.concurrency,
+        scheduling: declared,
+        hostSized: { concurrency: true },
+      }),
+      { concurrency: small.concurrency, scheduling: declared },
+    );
+    const stored = { concurrency: 30, scheduling: declared };
+    assert.equal(liveCapacity(stored), stored);
+  } finally {
+    os.availableParallelism = cpus;
+    os.totalmem = memory;
+    syncBuiltinESMExports();
+  }
 });

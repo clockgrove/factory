@@ -74,7 +74,7 @@ export async function runRegularGraph(args: {
     save,
     active,
   } = args;
-  const phases = phaseAdmission(config, state, save, args.cancelled);
+  const phases = phaseAdmission(state, save, args.cancelled);
   const graph = state.graph;
   const baseSha = state.baseSha;
   let failure: unknown;

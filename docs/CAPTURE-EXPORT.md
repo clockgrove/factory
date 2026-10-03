@@ -4,7 +4,7 @@ Factory exports existing observations explicitly, without model calls or backgro
 
 ## OpenTelemetry
 
-Factory sends standard OTLP/HTTP JSON traces to any collector or backend that accepts them. Pass the OTLP base URL; Factory appends the standard `/v1/traces` path. The endpoint must use HTTPS without credentials, query or fragment. If the destination needs authentication, set `OTEL_EXPORTER_OTLP_HEADERS` (comma-separated, URL-encoded `key=value` pairs, as in the OpenTelemetry specification) in your controller shell's secure environment. Keep credentials outside target repositories, command arguments and logs.
+Factory sends standard OTLP/HTTP JSON traces to any collector or backend that accepts them. Pass the OTLP base URL; Factory appends the standard `/v1/traces` path. The endpoint must use HTTPS without credentials, query or fragment. If the destination needs authentication, set `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or `OTEL_EXPORTER_OTLP_HEADERS` (comma-separated, URL-encoded `key=value` pairs, as in the OpenTelemetry specification; the traces-specific variable wins) in your controller shell's secure environment. Factory never prints header values. Keep credentials outside target repositories, command arguments and logs.
 
 First preview an explicit Objective and content choice:
 

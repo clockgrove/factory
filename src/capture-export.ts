@@ -226,15 +226,28 @@ export function prepareOtlpExport(selection: SelectedCaptures) {
 }
 export type OtlpExport = ReturnType<typeof prepareOtlpExport>;
 
-/** Standard OTEL_EXPORTER_OTLP_HEADERS: comma-separated, URL-encoded key=value pairs. */
-export function otlpHeaders(value = ""): Record<string, string> {
+/**
+ * Standard OTLP exporter headers: OTEL_EXPORTER_OTLP_TRACES_HEADERS, else
+ * OTEL_EXPORTER_OTLP_HEADERS; comma-separated, URL-encoded key=value pairs.
+ * Errors never echo the value, which usually carries credentials.
+ */
+export function otlpHeaders(
+  environment: NodeJS.ProcessEnv,
+): Record<string, string> {
+  const name = environment.OTEL_EXPORTER_OTLP_TRACES_HEADERS
+    ? "OTEL_EXPORTER_OTLP_TRACES_HEADERS"
+    : "OTEL_EXPORTER_OTLP_HEADERS";
   const headers: Record<string, string> = {};
-  for (const entry of value.split(",")) {
+  for (const entry of (environment[name] ?? "").split(",")) {
     if (!entry.trim()) continue;
     const at = entry.indexOf("=");
     const key = at > 0 ? entry.slice(0, at).trim() : "";
-    if (!key) throw new Error("OTEL_EXPORTER_OTLP_HEADERS is malformed");
-    headers[key] = decodeURIComponent(entry.slice(at + 1).trim());
+    try {
+      if (!key) throw new Error();
+      headers[key] = decodeURIComponent(entry.slice(at + 1).trim());
+    } catch {
+      throw new Error(`${name} is malformed`);
+    }
   }
   return headers;
 }
@@ -259,7 +272,7 @@ export async function sendOtlpExport(
     throw new Error(
       "Export changed; preview and authorize this exact destination/content/scope again",
     );
-  const headers = otlpHeaders(environment.OTEL_EXPORTER_OTLP_HEADERS);
+  const headers = otlpHeaders(environment);
   const receipt = {
     endpoint: prepared.preview.endpoint,
     authorizationDigest,

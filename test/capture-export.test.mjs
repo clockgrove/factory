@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import test from "node:test";
 import {
   exportEndpoint,
   mapOtlpCaptures,
+  otlpHeaders,
   prepareOtlpExport,
   selectCaptures,
   sendOtlpExport,
@@ -270,6 +272,11 @@ test("controller validation/delivery retain recorded scope without becoming mode
 });
 
 test("export CLI requires explicit endpoint/content and exact send authorization", () => {
+  for (const flag of ["--destination", "--project-id", "--workspace-id"])
+    assert.throws(
+      () => parseCaptureExportOptions([flag, "value"]),
+      /Unknown export-captures option/,
+    );
   assert.throws(
     () => parseCaptureExportOptions(["--endpoint", "https://example.test"]),
     /content/,
@@ -403,4 +410,90 @@ test("OTLP partial, HTTP refusal and uncertain acknowledgements are visible with
   );
   assert.equal(receipt.status, "unknown");
   assert.ok(!JSON.stringify(receipt).includes("test-secret"));
+});
+
+test("OTLP headers prefer the traces-specific variable and never echo malformed values", () => {
+  assert.deepEqual(
+    otlpHeaders({
+      OTEL_EXPORTER_OTLP_HEADERS: "Authorization=generic",
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: "Authorization=traces",
+    }),
+    { Authorization: "traces" },
+  );
+  assert.deepEqual(otlpHeaders({}), {});
+  for (const value of ["=test-secret", "Authorization=%E0%A4%A-test-secret"])
+    assert.throws(
+      () => otlpHeaders({ OTEL_EXPORTER_OTLP_TRACES_HEADERS: value }),
+      (error) =>
+        /OTEL_EXPORTER_OTLP_TRACES_HEADERS is malformed/.test(error.message) &&
+        !error.message.includes("test-secret"),
+    );
+});
+
+test("a local OTLP/HTTP receiver gets one standard JSON trace request", async () => {
+  const received = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      received.push({
+        method: req.method,
+        url: req.url,
+        headers: req.headers,
+        body,
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{}");
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = server.address();
+    const prepared = prepareOtlpExport(
+      selected({ ...options, endpoint: "https://collector.example.test/otlp" }),
+    );
+    assert.equal(
+      prepared.preview.endpoint,
+      "https://collector.example.test/otlp/v1/traces",
+    );
+    // The exporter requires HTTPS; route the exact request to a plain local receiver.
+    const receipt = await sendOtlpExport(
+      prepared,
+      prepared.preview.authorizationDigest,
+      { OTEL_EXPORTER_OTLP_TRACES_HEADERS: "authorization=Bearer%20local" },
+      (url, init) =>
+        fetch(
+          url.replace(
+            "https://collector.example.test",
+            `http://127.0.0.1:${port}`,
+          ),
+          init,
+        ),
+    );
+    assert.equal(receipt.status, "accepted");
+    assert.equal(received.length, 1);
+    const [request] = received;
+    assert.equal(request.method, "POST");
+    assert.equal(request.url, "/otlp/v1/traces");
+    assert.equal(request.headers["content-type"], "application/json");
+    assert.equal(request.headers.authorization, "Bearer local");
+    assert.equal(request.body, prepared.payload);
+    const [resourceSpans] = JSON.parse(request.body).resourceSpans;
+    assert.deepEqual(resourceSpans.resource.attributes, [
+      { key: "service.name", value: { stringValue: "factory" } },
+    ]);
+    const spans = resourceSpans.scopeSpans[0].spans;
+    assert.equal(spans.length, 2);
+    for (const span of spans)
+      assert.deepEqual(
+        span.attributes.map((attribute) => attribute.key),
+        ["session.id", "factory.metadata"],
+      );
+    assert.ok(!/langfuse|langsmith/i.test(request.body));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

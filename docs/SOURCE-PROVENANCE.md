@@ -6,6 +6,27 @@ The legacy repository was subsequently deleted. On September 28, 2026, the clean
 
 The MIT license text is retained from the archived repository. Runtime code does not read this ledger.
 
+## Verified v0.1.74 permanent-disposition handoff (#499 / #505)
+
+[PR #507](https://github.com/clockgrove/factory/pull/507) integrated the current
+shared abandonment boundary, notice generator and contributor Quality corrections
+as `86a5cd9724962ef1835f4a5e9fa01c31e045402b`, tree
+`d5277f4f344be5b110f0471b7128f491de9a541f`. The
+[immutable v0.1.74 record](BUILD-STATUS.md#immutable-v0174-artifact-record) binds
+722 installed tests across 54 whole files, four reviewed model-free families and
+[independent public acceptance](https://github.com/clockgrove/factory/issues/505#issuecomment-5965539396).
+[#499](https://github.com/clockgrove/factory/issues/499#issuecomment-5965556818) is
+accepted for its supported installed scope. Complete historical-state copies prove
+unknown/status/accounting preservation and permanent native fences; they neither
+supply actual cessation evidence nor resolve an earlier remote mutation.
+
+The existing approved actual disposition, fresh public service qualification and
+same-artifact Clockgrove handoff now share [#448](https://github.com/clockgrove/factory/issues/448)
+as their closeout owner; #445 is superseded with every public requirement retained.
+Public-phase acceptance precedes private work. No archived runtime, alternate
+state root, compatibility format, response repair, private disclosure or new worker
+permission supplies these corrections. Earlier evidence below stays historical.
+
 ## Dependency-notice generation without a Factory-version copy (#508)
 
 The existing current `scripts/generate-notices.mjs` owns production dependency

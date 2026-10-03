@@ -4,6 +4,49 @@ Current work and acceptance belong to the [Factory Project](https://github.com/o
 
 The v0.1.38 public scenario is independently accepted. The bounded Clockgrove pilot is independently verified under [#206](https://github.com/clockgrove/factory/issues/206) and explicitly accepted under [#207](https://github.com/clockgrove/factory/issues/207). Historical observations below retain their original artifact and scenario scope.
 
+## Immutable v0.1.74 artifact record
+
+[Release v0.1.74](https://github.com/clockgrove/factory/releases/tag/v0.1.74)
+was published on 2026-10-03 at 04:28:04 UTC from reviewed
+[PR #507](https://github.com/clockgrove/factory/pull/507), source
+`86a5cd9724962ef1835f4a5e9fa01c31e045402b`, tree
+`d5277f4f344be5b110f0471b7128f491de9a541f`, after successful
+[exact-main Quality](https://github.com/clockgrove/factory/actions/runs/37095757156).
+
+- Archive: `clockgrove-factory-0.1.74.tgz`, 153624926 bytes, SHA-256
+  `632b71c021d8dc268fbbc6d7f7eb3a6740c82a54e336469a74858f1efbcf3645`.
+- `SHA256SUMS` SHA-256:
+  `4d8c4cfa6b557bfc7335306c47b0d1e7e30f78f79f550f1236990df8e4fe52cb`.
+- Annotated tag object: `12b0b45bfe116e8878af30649c30122dc404cc40`;
+  exact immutable tag ruleset: `24407422`, with no bypass actors.
+- Sealed acceptance SHA-256:
+  `175dc04ad5ad34e37e7892633fed1a0afcc0e68194b676c514958dcb6c9247d0`.
+- Independent public receipt SHA-256:
+  `706e75e058139d5a078b748f8f370d4369ef13ed761069e5e108e3942b7e969a`.
+
+All **722/722 installed tests across 54 whole files** passed without failures,
+cancellations, skips or todos. Four reviewed model-free families retained complete
+original continuation and aggregate-response evidence, actual bundled-harness
+readiness, and complete stopped-state ordinary cancellation refusal plus unified
+explicit abandonment/preservation/permanent-fence controls. Isolated copies
+establish installed mechanics; no actual historical disposition is inferred.
+
+The [prepublication fingerprint](https://github.com/clockgrove/factory/issues/505#issuecomment-5965523242)
+and [independent public audit/completion](https://github.com/clockgrove/factory/issues/505#issuecomment-5965539396)
+match the archive, annotated source/tree, tag protection and enabled pinned plugin.
+#505 is Closed/Done; [#499 implementation acceptance](https://github.com/clockgrove/factory/issues/499#issuecomment-5965556818)
+is complete. The original unknown outcomes and every Work Item status remain
+preserved; this distribution accepts neither historical nor fresh Objectives.
+
+The remaining release-gate work has one active closeout owner,
+[#448](https://github.com/clockgrove/factory/issues/448): supported actual historical
+disposition, a complete bounded public scenario supplying #444/#447 live acceptance,
+then the already approved Clockgrove handoff on the same artifact. Former #445
+tracking is [superseded](https://github.com/clockgrove/factory/issues/445#issuecomment-5965462904);
+its full acceptance remains in #448 and private evidence stays private. Earlier
+published artifacts, failed preparations/producers and accounting retain their
+original scope. This handoff changes no immutable release bytes.
+
 ## Contributor build simplifications (#508 / #509)
 
 [The failed v0.1.74 preparation check](https://github.com/clockgrove/factory/actions/runs/37092979611)
@@ -15,7 +58,8 @@ license freshness. The focused actual-generator CLI regression reproduces the
 original failure, then proves version-only byte stability and refusal of changed
 dependency versions, license content and missing license metadata. Required
 candidate CI and [distribution gate #505](https://github.com/clockgrove/factory/issues/505)
-remain pending. This correction changes no runtime behavior or previous artifacts.
+subsequently passed, as recorded above. This correction changes no runtime behavior
+or previous artifacts.
 [#509](https://github.com/clockgrove/factory/issues/509) runs one strict emitting
 build before the unchanged PR/main test selections and removes the unexamined
 package dry run; actual packed/installed tests retain packaging coverage.

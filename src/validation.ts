@@ -40,6 +40,11 @@ import type {
   WorkDiscovery,
 } from "./contracts.js";
 import { CompletedModelInvocationError, Interruption } from "./contracts.js";
+import {
+  attachedFault,
+  attachFault,
+  decision as askOperator,
+} from "./fault.js";
 import { assetSelectionDigest, type HydrationReceipt } from "./media.js";
 import {
   hasUnresolvedSubprocesses,
@@ -79,9 +84,13 @@ export interface AcceptanceDecision {
 }
 
 export class AcceptanceDecisionRequired extends Error {
-  constructor(public readonly pending: AcceptancePending) {
+  constructor(
+    public readonly pending: AcceptancePending,
+    options?: ErrorOptions,
+  ) {
     super(
       `Acceptance decision required for ${pending.criterion}: ${pending.question}`,
+      options,
     );
   }
 }
@@ -1926,12 +1935,20 @@ export async function reviewAcceptance(args: {
   };
   let decoded: ReturnType<typeof decodeReview> | undefined;
   let reviewFailure: string | undefined;
+  let reviewError: unknown;
   let responseReceived = false;
   args.beforeSubmit?.();
   try {
     if (!model.reviewResult)
-      throw new CompletedModelInvocationError(
-        "No independent result reviewer is configured",
+      throw attachFault(
+        new CompletedModelInvocationError(
+          "No independent result reviewer is configured",
+        ),
+        {
+          kind: "config",
+          detail: "No independent result reviewer is configured",
+          fix: "Configure a reviewer model, then `factory run`",
+        },
       );
     const response = await model.reviewResult(request);
     responseReceived = true;
@@ -1940,6 +1957,7 @@ export async function reviewAcceptance(args: {
     // No completed answer arrived: the review did not happen, so ask again.
     if (!responseReceived && !(error instanceof CompletedModelInvocationError))
       throw new Interruption(error);
+    reviewError = error;
     reviewFailure = error instanceof Error ? error.message : String(error);
   }
   const proven: CriterionEvidence[] = [];
@@ -2037,7 +2055,12 @@ export async function reviewAcceptance(args: {
       );
   }
 
-  if (refused) throw new CompletedModelInvocationError(refused);
+  // A valid review that refuses a criterion judges the work, not the call.
+  if (refused)
+    throw attachFault(new CompletedModelInvocationError(refused), {
+      kind: "work",
+      evidence: { detail: refused },
+    });
   const automaticCriterion = criteria.find(
     (criterion) =>
       !proven.some(
@@ -2056,7 +2079,15 @@ export async function reviewAcceptance(args: {
       reviewRejection: { field: "finding", reason: "invalid-response" },
     };
   }
-  if (pending) throw new AcceptanceDecisionRequired(pending);
+  if (pending)
+    // A failed review call keeps its own fault (configuration, a limit, a
+    // lost response) through `cause`; otherwise the operator decides.
+    throw attachFault(
+      new AcceptanceDecisionRequired(pending, { cause: reviewError }),
+      attachedFault(reviewError)
+        ? undefined
+        : askOperator(pending.question, pending.detail),
+    );
   return { ...evidence, criteria: proven };
 }
 

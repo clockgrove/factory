@@ -32,8 +32,8 @@ import { CONTROLLER_CAPABILITIES_DIGEST } from "./controller-capabilities.js";
 import { checkStagedCandidate } from "./execution/staged-candidate.js";
 import {
   command,
-  commandAsync,
   currentProcessSignal,
+  gitAsync,
   hasUnresolvedSubprocesses,
   pinnedGit,
   pinnedGitAsync,
@@ -637,7 +637,7 @@ export async function materializeAssetSet(args: {
     args.baseCommit,
   );
   try {
-    await commandAsync("git", ["-C", worktree, "lfs", "install", "--local"]);
+    await gitAsync(worktree, "lfs", "install", "--local");
     const destinations = new Set<string>();
     for (const member of args.set.members) {
       if (
@@ -998,19 +998,19 @@ export async function verifyHydratedAssets(args: {
       `${args.integratedSha}^{tree}`,
     );
     phase = "clone";
-    await commandAsync("git", ["clone", "--no-checkout", remote, clone]);
+    await gitAsync(
+      args.workRoot,
+      "clone",
+      "--no-checkout",
+      remote,
+      resolve(clone),
+    );
     phase = "lfs-setup";
-    await commandAsync("git", ["-C", clone, "lfs", "install", "--local"]);
+    await gitAsync(clone, "lfs", "install", "--local");
     phase = "integrated-checkout";
-    await commandAsync("git", [
-      "-C",
-      clone,
-      "checkout",
-      "--detach",
-      args.integratedSha,
-    ]);
+    await gitAsync(clone, "checkout", "--detach", args.integratedSha);
     phase = "lfs-pull";
-    await commandAsync("git", ["-C", clone, "lfs", "pull"]);
+    await gitAsync(clone, "lfs", "pull");
     phase = "integrated-identity";
     if (pinnedGit(clone, "rev-parse", "HEAD") !== args.integratedSha)
       throw new Error("Fresh clone resolved a different integrated commit");
@@ -1052,9 +1052,10 @@ export async function verifyHydratedAssets(args: {
       integratedTreeSha,
       args.selections,
     );
-  } catch {
+  } catch (cause) {
     failure = new Error(
       `Fresh-clone hydration verification failed during ${phase}`,
+      { cause },
     );
   }
   try {

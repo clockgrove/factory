@@ -29,6 +29,7 @@ import {
   selectedInputsForItem,
   validationLfsMembersForItem,
 } from "../media.js";
+import { attachFault, transient } from "../fault.js";
 import { git, gitAsync } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
 import { phaseAdmission } from "../phase-admission.js";
@@ -1025,9 +1026,12 @@ export async function runNativeGraph(args: {
         integratedSha,
         "FETCH_HEAD",
       );
-    } catch {
-      throw new Error(
-        `Default branch does not contain the merge of native unit ${unit.id} (${integratedSha})`,
+    } catch (cause) {
+      // Read-after-merge lag until the step's window passes (#515).
+      const message = `Default branch does not contain the merge of native unit ${unit.id} (${integratedSha})`;
+      throw attachFault(
+        new Error(message, { cause }),
+        transient(message, false),
       );
     }
     const observedAfter = integratedSha;

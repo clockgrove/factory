@@ -213,7 +213,9 @@ export async function closeWorkItem(
     } catch (error) {
       state.githubClosureError = `QA ${itemId}: ${error instanceof Error ? error.message : String(error)}`;
       save();
-      throw new GitHubClosureFailure(state.githubClosureError);
+      throw new GitHubClosureFailure(state.githubClosureError, {
+        cause: error,
+      });
     }
   }
   if (
@@ -249,7 +251,7 @@ export async function closeWorkItem(
   } catch (error) {
     state.githubClosureError = `Work Item ${itemId}: ${error instanceof Error ? error.message : String(error)}`;
     save();
-    throw new GitHubClosureFailure(state.githubClosureError);
+    throw new GitHubClosureFailure(state.githubClosureError, { cause: error });
   }
 }
 
@@ -275,6 +277,6 @@ export async function closeObjectiveIssue(
   } catch (error) {
     state.githubClosureError = `Objective #${state.objective}: ${error instanceof Error ? error.message : String(error)}`;
     save();
-    throw new GitHubClosureFailure(state.githubClosureError);
+    throw new GitHubClosureFailure(state.githubClosureError, { cause: error });
   }
 }

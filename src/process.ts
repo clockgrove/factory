@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type SpawnOptions, spawn, spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
+import { type Fault, transient, withFault } from "./fault.js";
 
 export function command(
   file: string,
@@ -25,8 +26,104 @@ export function command(
   return result.stdout.trim();
 }
 
+/** The git subcommand, with LFS subcommands named in full. */
+function gitSubcommand(args: string[]): string {
+  let index = 0;
+  while (index < args.length && args[index]!.startsWith("-"))
+    index += ["-c", "-C"].includes(args[index]!) ? 2 : 1;
+  const name = args[index] ?? "";
+  return name === "lfs" ? `lfs ${args[index + 1] ?? ""}` : name;
+}
+
+const GIT_REMOTE = new Set([
+  "push",
+  "fetch",
+  "pull",
+  "clone",
+  "ls-remote",
+  "lfs push",
+  "lfs fetch",
+  "lfs pull",
+]);
+
+/**
+ * Classify a failed git command (the arguments after `-C <checkout>`).
+ * Remote transport, credentials and remote refusals are classified; other
+ * local failures are defects.
+ */
+export function gitFault(args: string[], error: unknown): Fault | undefined {
+  const detail = error instanceof Error ? error.message : String(error);
+  const subcommand = gitSubcommand(args);
+  if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT")
+    return {
+      kind: "config",
+      detail: "git is not installed on the controller host",
+      fix: "Install git, then `factory run`",
+    };
+  if (/git: 'lfs' is not a git command/.test(detail))
+    return {
+      kind: "config",
+      detail: "Git LFS is not installed on the controller host",
+      fix: "Install Git LFS, then `factory run`",
+    };
+  // Another git process holds the repository lock; it releases it shortly.
+  if (/Unable to create '[^']*\.lock': File exists/.test(detail))
+    return transient(`git ${subcommand} found the repository locked`, false);
+  if (!GIT_REMOTE.has(subcommand)) return undefined;
+  const push = subcommand === "push" || subcommand === "lfs push";
+  if (
+    /Authentication failed|could not read (Username|Password)|terminal prompts disabled|Permission denied \(publickey\)|Permission to \S+ denied|Repository not found|returned error: 40[13]\b|HTTP 40[13]\b|LFS: Authorization error/i.test(
+      detail,
+    )
+  )
+    return {
+      kind: "config",
+      detail: `git ${subcommand} was refused credentials or access`,
+      fix: "Check `gh auth status` and the origin remote's credentials, then `factory run`",
+    };
+  if (push && /\bGH001\b|exceeds GitHub's file size limit/i.test(detail))
+    return {
+      kind: "work",
+      evidence: {
+        detail: `git push refused a file over the size limit: ${detail}`,
+      },
+    };
+  if (
+    push &&
+    /\bGH006\b|GH013|protected branch|pre-receive hook declined|push declined/i.test(
+      detail,
+    )
+  )
+    return {
+      kind: "config",
+      detail: `The remote refused Factory's branch push: ${detail}`,
+      fix: "Allow the Factory login to push its own branches, then `factory run`",
+    };
+  // Whose head the remote holds is known only at the push site, which
+  // checks it with ls-remote (see RegularDelivery.publish).
+  if (push && pushRejected(error)) return undefined;
+  if (
+    /Could not resolve host|Temporary failure in name resolution|Connection (timed out|refused|reset)|Operation timed out|Failed to connect|Network is unreachable|early EOF|unexpected disconnect|remote end hung up|Remote side unexpectedly closed|RPC failed|returned error: (5\d\d|429)\b|HTTP (5\d\d|429)\b|gnutls_handshake|SSL_ERROR|SSL_connect|TLS connection|rate limit/i.test(
+      detail,
+    )
+  )
+    return transient(`git ${subcommand} failed in transit`, push);
+  return undefined;
+}
+
+/** The remote refused a push because its branch moved. */
+export function pushRejected(error: unknown): boolean {
+  return /\[rejected\]|\(stale info\)|\(fetch first\)|non-fast-forward/.test(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+function classifiedGit<T>(args: string[], run: () => T): T {
+  return withFault(run, (error) => gitFault(args, error));
+}
+
 export function git(checkout: string, ...args: string[]): string {
-  return command("git", ["-C", checkout, ...args]);
+  return classifiedGit(args, () => command("git", ["-C", checkout, ...args]));
 }
 
 /** Keep inherited Git overrides from redirecting a pinned local tree operation. */
@@ -38,16 +135,18 @@ export function pinnedGit(checkout: string, ...args: string[]): string {
 
 /** Preserve exact pinned Git output without trimming or decoding. */
 export function pinnedGitRaw(checkout: string, ...args: string[]): Buffer {
-  const result = spawnSync("git", ["-C", checkout, ...args], {
-    env: pinnedGitEnvironment(),
-    maxBuffer: Number.MAX_SAFE_INTEGER,
+  return classifiedGit(args, () => {
+    const result = spawnSync("git", ["-C", checkout, ...args], {
+      env: pinnedGitEnvironment(),
+      maxBuffer: Number.MAX_SAFE_INTEGER,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0)
+      throw new Error(
+        `git ${args.join(" ")} failed (${result.status}): ${result.stderr.toString("utf8")}`,
+      );
+    return result.stdout;
   });
-  if (result.error) throw result.error;
-  if (result.status !== 0)
-    throw new Error(
-      `git ${args.join(" ")} failed (${result.status}): ${result.stderr.toString("utf8")}`,
-    );
-  return result.stdout;
 }
 
 export function pinnedGitEnvironment(): NodeJS.ProcessEnv {
@@ -300,17 +399,21 @@ export async function commandAsync(
 }
 
 export function gitAsync(checkout: string, ...args: string[]): Promise<string> {
-  return commandAsync("git", ["-C", checkout, ...args]);
+  return classifiedGit(args, () =>
+    commandAsync("git", ["-C", checkout, ...args]),
+  );
 }
 
 export function pinnedGitAsync(
   checkout: string,
   ...args: string[]
 ): Promise<string> {
-  return commandAsync(
-    "git",
-    ["-C", checkout, ...args],
-    undefined,
-    pinnedGitEnvironment(),
+  return classifiedGit(args, () =>
+    commandAsync(
+      "git",
+      ["-C", checkout, ...args],
+      undefined,
+      pinnedGitEnvironment(),
+    ),
   );
 }

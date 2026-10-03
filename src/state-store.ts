@@ -17,6 +17,7 @@ import {
 import { dirname, join, resolve, sep } from "node:path";
 import { stateRoot, validateCapacity } from "./config.js";
 import { linuxProcessIdentity } from "./process.js";
+import { assertRepeats, assertWait } from "./fault.js";
 import {
   assertCoordinator,
   type ContinuationState,
@@ -140,6 +141,8 @@ export function readContinuation(
   assertCoordinator(value.coordinator);
   validateCapacity(value.capacity);
   assertRepairLedger(value);
+  assertRepeats(value.repeats, "repeats");
+  assertWait(value.wait, "wait");
   return value as PreparationState;
 }
 

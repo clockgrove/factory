@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { attachFault, faultOf } from "../dist/fault.js";
 import { GitHubOutcomeUnknown } from "../dist/github-client.js";
 import { readState } from "../dist/state-store.js";
 import {
@@ -142,6 +144,69 @@ for (const delivery of ["regular", "native-stack"])
         assert.equal(calls, 2);
         assert.equal(mergeEvents(github), 1);
       });
+    });
+
+    test("a merge the default branch does not show yet is classified as lag", async () => {
+      await withApp(
+        "ancestry",
+        delivery,
+        {},
+        async ({ application, github, descriptor }) => {
+          const checkout = descriptor.config.checkout;
+          // A commit GitHub reports as merged but the fetched default
+          // branch does not contain yet.
+          const unseen = execFileSync(
+            "git",
+            ["-C", checkout, "commit-tree", "-m", "unseen", "HEAD^{tree}"],
+            {
+              encoding: "utf8",
+              env: {
+                ...process.env,
+                GIT_AUTHOR_NAME: "Fixture",
+                GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+                GIT_COMMITTER_NAME: "Fixture",
+                GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+              },
+            },
+          ).trim();
+          const original = github.merge.bind(github);
+          github.merge = async (...args) => ({
+            ...(await original(...args)),
+            integratedSha: unseen,
+          });
+          const error = await application
+            .runObjective(objective)
+            .catch((caught) => caught);
+          assert.match(error.message, /Default branch does not contain/);
+          assert.deepEqual(
+            [faultOf(error).kind, faultOf(error).outcomeUnknown],
+            ["transient", false],
+          );
+        },
+      );
+    });
+
+    test("an issue closure failure keeps the gateway's fault as its cause", async () => {
+      await withApp(
+        "closure",
+        delivery,
+        {},
+        async ({ application, github }) => {
+          const outage = attachFault(new Error("GitHub HTTP 502"), {
+            kind: "transient",
+            detail: "GitHub HTTP 502",
+            outcomeUnknown: false,
+          });
+          github.closeIssue = async () => {
+            throw outage;
+          };
+          const error = await application
+            .runObjective(objective)
+            .catch((caught) => caught);
+          assert.ok(error instanceof Error, String(error));
+          assert.deepEqual(faultOf(error), faultOf(outage));
+        },
+      );
     });
 
     test("a worker that ends without a result gets a fresh attempt", async () => {

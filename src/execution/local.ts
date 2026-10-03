@@ -1,3 +1,5 @@
+import { classifyFaults } from "../fault.js";
+import { executionFault } from "./fault.js";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -587,14 +589,17 @@ export class LocalExecutionDriver implements ExecutionDriver {
       );
   }
 
+  @classifyFaults(executionFault)
   async preflight(graph: WorkGraph): Promise<void> {
     for (const item of graph.items) this.resolveHarness(item);
   }
 
+  @classifyFaults(executionFault)
   async availableSlots(): Promise<number> {
     return Math.max(0, this.concurrency - this.active.size);
   }
 
+  @classifyFaults(executionFault)
   async start(request: ExecutionRequest): Promise<ExecutionHandle> {
     const harness = this.resolveHarness(request.item);
     const identity = request.attemptId ?? randomUUID();
@@ -719,6 +724,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     }
   }
 
+  @classifyFaults(executionFault)
   async observe(handle: ExecutionHandle): Promise<ExecutionObservation> {
     const active = this.require(handle);
     return this.resolveHarness(
@@ -727,6 +733,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     ).observe(active.handle);
   }
 
+  @classifyFaults(executionFault)
   async cancel(handle: ExecutionHandle): Promise<void> {
     const active = this.require(handle);
     await this.resolveHarness(
@@ -735,6 +742,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     ).cancel(active.handle);
   }
 
+  @classifyFaults(executionFault)
   async collect(handle: ExecutionHandle): Promise<ExecutionResult> {
     const active = this.require(handle);
     let collected: ExecutionResult | undefined;

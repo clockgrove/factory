@@ -14,6 +14,7 @@ import { ClaudeManagedExecutionDriver } from "../dist/execution/claude-managed.j
 import { LocalContentStore } from "../dist/content/local.js";
 import { claudeByteDigest } from "../dist/execution/claude-managed-transfer.js";
 import { SettledAttemptFailure } from "../dist/work-repair.js";
+import { faultOf } from "../dist/fault.js";
 const config = () => ({
   agentId: "agent_pinned",
   agentVersion: 3,
@@ -661,4 +662,50 @@ test("Claude preserves binary selected bytes through the ordinary collector", as
       .git("ls-tree", "-r", "--name-only", collected.changeRef)
       .includes(".factory-inputs"),
   );
+});
+
+const notFound = () =>
+  Object.assign(new Error("session not found"), { status: 404 });
+
+test("Claude session gone while collecting is a dead worker, not a failed result", async (t) => {
+  const f = fixture(t);
+  const handle = await f.driver().start(f.request, f.context);
+  f.state.gone = true;
+  const error = await f
+    .driver()
+    .collect(handle, f.context)
+    .catch((caught) => caught);
+  // Behaviour is unchanged: the attempt still settles as before.
+  assert.ok(error instanceof SettledAttemptFailure);
+  assert.deepEqual(
+    [faultOf(error).kind, faultOf(error).outcomeUnknown],
+    ["transient", true],
+  );
+});
+
+test("Claude cancel succeeds when the session disappears before its interrupt", async (t) => {
+  const f = fixture(t);
+  const handle = await f.driver().start(f.request, f.context);
+  f.state.session.status = "running";
+  const client = f.driver().args.client;
+  const send = client.send;
+  client.send = async (id, input) => {
+    if (input.type !== "user.interrupt") return send(id, input);
+    f.state.gone = true;
+    throw notFound();
+  };
+  await f.driver().cancel(handle, f.context);
+  assert.equal(f.saved.at(-1).data.phase, "disposed");
+});
+
+test("Claude cleanup succeeds when the session disappears before its history is read", async (t) => {
+  const f = fixture(t);
+  const handle = await f.driver().start(f.request, f.context);
+  const client = f.driver().args.client;
+  client.events = async () => {
+    throw notFound();
+  };
+  await f.driver().cancel(handle, f.context);
+  assert.equal(f.saved.at(-1).data.phase, "disposed");
+  assert.ok(f.state.calls.includes("delete:sesn_1"));
 });

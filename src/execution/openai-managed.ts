@@ -1,3 +1,5 @@
+import { classifyFaults } from "../fault.js";
+import { executionFault } from "./fault.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -198,6 +200,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
         args.apiKey,
       );
   }
+  @classifyFaults(executionFault)
   async availableSlots(): Promise<"unknown"> {
     return "unknown";
   }
@@ -318,6 +321,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     } while (after);
     return all;
   }
+  @classifyFaults(executionFault)
   async start(
     input: ExecutionRequest,
     context?: ExecutionContext,
@@ -488,6 +492,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     );
   }
 
+  @classifyFaults(executionFault)
   async observe(
     handle: ExecutionHandle,
     context?: ExecutionContext,
@@ -626,6 +631,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     data.phase = "disposed";
     this.save(handle, context);
   }
+  @classifyFaults(executionFault)
   async cancel(
     handle: ExecutionHandle,
     context?: ExecutionContext,
@@ -680,6 +686,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
    * Any failure either interrupts the step (it reattaches) or deletes the
    * session first, so a repeated attempt never runs beside it.
    */
+  @classifyFaults(executionFault)
   async collect(
     handle: ExecutionHandle,
     context?: ExecutionContext,

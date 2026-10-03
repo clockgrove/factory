@@ -19,6 +19,12 @@ import {
   finalValidationLfsMembers,
 } from "./media.js";
 import { assertGraphRevisions } from "./graph-amendments.js";
+import {
+  assertRepeats,
+  assertWait,
+  type RepeatRecord,
+  type Wait,
+} from "./fault.js";
 import { assertCompletedCoverage, assertCoverageShape } from "./qa.js";
 import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
 import {
@@ -106,6 +112,8 @@ export interface WorkState {
   completedAt?: string;
   integratedSha?: string;
   githubClosure?: "pending" | "complete";
+  /** Structured wait; replaces waitingReason once steps use it (#515). */
+  wait?: Wait;
 }
 
 export interface CoordinatorDisposition {
@@ -149,6 +157,9 @@ export interface PreparationState {
   error?: string;
   cancelRequested?: boolean;
   cancelledAt?: string;
+  /** Objective step repeat records (#515). */
+  repeats?: Record<string, RepeatRecord>;
+  wait?: Wait;
 }
 export type ContinuationState = FactoryState | PreparationState;
 
@@ -199,6 +210,9 @@ export interface FactoryState {
   cancelRequested?: boolean;
   cancelledAt?: string;
   error?: string;
+  /** Step repeat records for Work Items and the Objective (#515). */
+  repeats?: Record<string, RepeatRecord>;
+  wait?: Wait;
 }
 
 export function assertCoordinator(value: unknown): void {
@@ -1025,6 +1039,10 @@ export function parseFactoryState(
     throw new Error("githubClosureError is invalid");
   if (state.error !== undefined && typeof state.error !== "string")
     throw new Error("state.error is invalid");
+  assertRepeats(state.repeats, "repeats", ids);
+  assertWait(state.wait, "wait");
+  for (const id of ids)
+    assertWait((work[id] as { wait?: unknown }).wait, `work.${id}.wait`);
   const validated = value as FactoryState;
   objectiveCandidate(validated);
   const selectedMembers = finalValidationLfsMembers(validated);

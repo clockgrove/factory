@@ -7,7 +7,8 @@ import type {
   GitHubGateway,
   MergeResult,
 } from "../contracts.js";
-import { gitAsync } from "../process.js";
+import { attachFault, decision, transient } from "../fault.js";
+import { gitAsync, pushRejected } from "../process.js";
 
 export class RegularDelivery implements DeliveryStrategy {
   constructor(
@@ -32,12 +33,18 @@ export class RegularDelivery implements DeliveryStrategy {
       };
     if (request.lfs)
       await gitAsync(this.checkout, "lfs", "push", "origin", commit);
-    await gitAsync(
-      this.checkout,
-      "push",
-      "origin",
-      `${commit}:refs/heads/${request.branch}`,
-    );
+    try {
+      await gitAsync(
+        this.checkout,
+        "push",
+        "origin",
+        `${commit}:refs/heads/${request.branch}`,
+      );
+    } catch (error) {
+      if (pushRejected(error))
+        await this.classifyRejection(error, request.branch, commit);
+      throw error;
+    }
     const pr = await this.github.publish({
       branch: request.branch,
       base,
@@ -52,6 +59,43 @@ export class RegularDelivery implements DeliveryStrategy {
       pullRequest: pr.number,
       headSha: pr.headSha,
     };
+  }
+
+  /**
+   * A rejected push is lag when the remote branch already holds the commit
+   * Factory produced (an earlier push whose response was lost); any other
+   * head is not Factory's, so the operator decides.
+   */
+  private async classifyRejection(
+    error: unknown,
+    branch: string,
+    commit: string,
+  ): Promise<void> {
+    let remote: string;
+    try {
+      remote = await gitAsync(
+        this.checkout,
+        "ls-remote",
+        "origin",
+        `refs/heads/${branch}`,
+      );
+    } catch {
+      attachFault(
+        error,
+        transient(`Could not read remote branch ${branch}`, false),
+      );
+      return;
+    }
+    const head = remote.split(/\s+/)[0];
+    attachFault(
+      error,
+      head === commit
+        ? transient(`Remote branch ${branch} already holds ${commit}`, false)
+        : decision(
+            `Remote branch ${branch} holds a commit Factory did not produce. Inspect it, then retry or cancel.`,
+            `remote head ${head || "missing"}, expected ${commit}`,
+          ),
+    );
   }
 
   async observe(result: DeliveryResult): Promise<DeliveryObservation> {

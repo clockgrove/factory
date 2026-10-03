@@ -1,8 +1,22 @@
+import { attachFault, decision, transient } from "../fault.js";
 import {
+  classifiedGitHubCall,
   type GitHubClient,
+  type GitHubCall,
   sharedGitHubClient,
   timelineMergeCommit,
 } from "../github-client.js";
+
+/** The stack no longer matches what Factory recorded; ownership is not checked. */
+function foreignChange(message: string): Error {
+  return attachFault(
+    new Error(message),
+    decision(
+      "The native stack no longer matches what Factory recorded. Inspect it, then retry or cancel.",
+      message,
+    ),
+  );
+}
 
 type Pull = {
   number: number;
@@ -34,8 +48,19 @@ export class NativeStackDelivery {
     route: string,
     method = "GET",
     body?: Record<string, unknown>,
+    call: Omit<GitHubCall, "method" | "path"> = {},
   ): Promise<T> {
-    return this.client.request<T>(method, route, body);
+    const prefix = `repos/${this.repository}/`;
+    return classifiedGitHubCall(
+      this.client,
+      this.repository,
+      {
+        method,
+        path: route.startsWith(prefix) ? route.slice(prefix.length) : route,
+        ...call,
+      },
+      () => this.client.request<T>(method, route, body),
+    );
   }
 
   private async pull(number: number): Promise<Pull> {
@@ -50,10 +75,22 @@ export class NativeStackDelivery {
       detail.head.sha !== layer.headSha ||
       detail.head.ref !== layer.branch
     )
-      throw new Error(
-        `Native stack PR #${layer.pullRequest} has no matching integrated head`,
+      throw attachFault(
+        new Error(
+          `Native stack PR #${layer.pullRequest} has no matching integrated head`,
+        ),
+        transient(
+          `Native stack PR #${layer.pullRequest} does not show its merge yet`,
+          false,
+        ),
       );
-    return timelineMergeCommit(this.client, this.repository, layer.pullRequest);
+    return classifiedGitHubCall(
+      this.client,
+      this.repository,
+      { method: "GET", path: `issues/${layer.pullRequest}/timeline` },
+      () =>
+        timelineMergeCommit(this.client, this.repository, layer.pullRequest),
+    );
   }
 
   private async assertLayers(
@@ -69,7 +106,7 @@ export class NativeStackDelivery {
         observed.base.ref !== expectedBase ||
         observed.state !== "open"
       ) {
-        throw new Error(
+        throw foreignChange(
           `Native stack PR #${layer.pullRequest} changed head, base, or state; operator direction required`,
         );
       }
@@ -92,7 +129,7 @@ export class NativeStackDelivery {
         JSON.stringify(stack.pull_requests.map((pull) => pull.number)) !==
           JSON.stringify(numbers)
       )
-        throw new Error(
+        throw foreignChange(
           "Native stack topology changed; operator direction required",
         );
       return stack.number;
@@ -138,7 +175,7 @@ export class NativeStackDelivery {
           pull.head.ref !== layers[index]!.branch ||
           pull.head.sha !== layers[index]!.headSha
         )
-          throw new Error(
+          throw foreignChange(
             "Merged native stack head changed; operator direction required",
           );
       const merged = await Promise.all(
@@ -152,7 +189,7 @@ export class NativeStackDelivery {
       !options.resumeUuid &&
       (await this.ensureStack(layers, baseBranch)) !== expectedStack
     )
-      throw new Error("Native stack identity changed before merge");
+      throw foreignChange("Native stack identity changed before merge");
     const top = layers.at(-1)!;
     type AsyncResult = {
       status: string;
@@ -160,6 +197,8 @@ export class NativeStackDelivery {
     };
     let uuid = options.resumeUuid;
     let observed: AsyncResult;
+    // A merge submitted in this call may not be readable by its UUID yet.
+    let submittedAt: number | undefined;
     if (uuid) {
       observed = await this.api(
         `repos/${this.repository}/pulls/${top.pullRequest}/merge-async/${uuid}`,
@@ -174,8 +213,11 @@ export class NativeStackDelivery {
           merge_method: "merge",
           merge_action: "default",
         },
+        // ensureStack has just confirmed every layer holds Factory's head.
+        { head: "ours" },
       );
       if (observed.status === "pending" && observed.details.uuid) {
+        submittedAt = Date.now();
         uuid = observed.details.uuid;
         options.onPending(uuid);
       }
@@ -187,6 +229,9 @@ export class NativeStackDelivery {
       if (uuid)
         observed = await this.api(
           `repos/${this.repository}/pulls/${top.pullRequest}/merge-async/${uuid}`,
+          "GET",
+          undefined,
+          { createdAt: submittedAt },
         );
       else {
         const pull = await this.pull(top.pullRequest);
@@ -198,8 +243,14 @@ export class NativeStackDelivery {
       }
     }
     if (observed.status !== "merged" || !observed.details.sha)
-      throw new Error(
-        `Native stack merge failed: ${observed.details.message ?? observed.status}`,
+      throw attachFault(
+        new Error(
+          `Native stack merge failed: ${observed.details.message ?? observed.status}`,
+        ),
+        decision(
+          "GitHub did not merge the native stack. Inspect it, then retry or cancel.",
+          `merge-async ended ${observed.status}: ${observed.details.message ?? "no detail"}`,
+        ),
       );
     for (;;) {
       if (options.cancelled())

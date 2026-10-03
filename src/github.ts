@@ -13,8 +13,11 @@ import type {
   WorkItem,
 } from "./contracts.js";
 import type { NativeStackDelivery } from "./delivery/native-stack.js";
+import { attachFault, decision, transient } from "./fault.js";
 import {
+  classifiedGitHubCall,
   type GitHubClient,
+  type GitHubCall,
   GitHubRequestError,
   sharedGitHubClient,
   timelineMergeCommit,
@@ -43,6 +46,30 @@ export function projectedIssueBody(item: WorkItem, objective: number): string {
   return `${marker}\n\n## Goal\n${item.goal}\n\n## Acceptance\n${item.acceptance.map((a) => `- ${a}`).join("\n")}\n\n## Non-goals\n${item.nonGoals.map((a) => `- ${a}`).join("\n")}\n\n## Dependencies\n${item.dependencies.length ? item.dependencies.map((id) => `- ${id}`).join("\n") : "- None"}\n\n## Sources\n${item.citations.map((c) => `- ${c.path}${c.heading ? ` — ${c.heading}` : ""}`).join("\n")}\n\n## Owned paths\n${item.ownedPaths.map((p) => `- ${p}`).join("\n")}\n\n## Validation\n${item.validation.map((check) => `- \`${check.command}\` (${check.provenance}${check.source ? `: ${check.source}` : ""})`).join("\n")}\n\n## Brief\n${item.brief}${item.executionBinding ? `\n\n## Assigned execution profile\n${JSON.stringify(item.executionProfile)}\n\nResolved binding: ${JSON.stringify(item.executionBinding)}` : ""}`;
 }
 
+/**
+ * GitHub no longer matches what Factory recorded. Ownership is not checked
+ * here, so the operator decides.
+ */
+function foreignChange(message: string): Error {
+  return attachFault(
+    new Error(message),
+    decision(
+      "GitHub no longer matches what Factory recorded. Inspect it, then retry or cancel.",
+      message,
+    ),
+  );
+}
+
+/** A readback has not caught up with a write GitHub accepted. */
+function notYet(message: string): Error {
+  return attachFault(new Error(message), transient(message, false));
+}
+
+/** A create answered with something unreadable: it may exist; find it again. */
+function unverifiedCreate(message: string): Error {
+  return attachFault(new Error(message), transient(message, true));
+}
+
 export class RealGitHubGateway implements GitHubGateway {
   constructor(
     readonly repository: string,
@@ -52,6 +79,34 @@ export class RealGitHubGateway implements GitHubGateway {
 
   private route(path: string): string {
     return `repos/${this.repository}/${path}`;
+  }
+
+  /** One repository request, classified with what this gateway knows about it. */
+  private api<T>(
+    method: string,
+    path: string,
+    body?: Record<string, unknown>,
+    observation?: { etag?: string },
+    call: Omit<GitHubCall, "method" | "path"> = {},
+  ): Promise<T> {
+    return classifiedGitHubCall(
+      this.client,
+      this.repository,
+      { method, path, ...call },
+      () => this.client.request<T>(method, this.route(path), body, observation),
+    );
+  }
+
+  private pages<T>(
+    path: string,
+    call: Omit<GitHubCall, "method" | "path"> = {},
+  ): Promise<T[]> {
+    return classifiedGitHubCall(
+      this.client,
+      this.repository,
+      { method: "GET", path, ...call },
+      () => this.client.paginate<T>(this.route(path)),
+    );
   }
 
   async namedCheck(
@@ -72,14 +127,12 @@ export class RealGitHubGateway implements GitHubGateway {
     };
     const matches: CheckRun[] = [];
     for (let page = 1; ; page++) {
-      const result = await this.client.request<{
+      const result = await this.api<{
         total_count: number;
         check_runs: CheckRun[];
       }>(
         "GET",
-        this.route(
-          `commits/${headSha}/check-runs?check_name=${encodeURIComponent(name)}&filter=latest&per_page=100&page=${page}`,
-        ),
+        `commits/${headSha}/check-runs?check_name=${encodeURIComponent(name)}&filter=latest&per_page=100&page=${page}`,
       );
       if (!Array.isArray(result.check_runs))
         throw new Error("Named CI response lacks check runs");
@@ -93,7 +146,7 @@ export class RealGitHubGateway implements GitHubGateway {
     // GitHub selects latest reruns. Multiple apps/suites using the same name
     // are ambiguous: choosing a convenient successful check would weaken proof.
     if (matches.length > 1)
-      throw new Error("Required named CI check is ambiguous");
+      throw foreignChange("Required named CI check is ambiguous");
     const check = matches[0];
     return check
       ? {
@@ -113,12 +166,11 @@ export class RealGitHubGateway implements GitHubGateway {
     headSha: string,
   ): Promise<PullRequestIdentity | undefined> {
     const owner = this.repository.split("/")[0]!;
-    const pulls = await this.client.paginate<Pull>(
-      this.route(
-        `pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`,
-      ),
+    const pulls = await this.pages<Pull>(
+      `pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`,
     );
-    if (pulls.length > 1) throw new Error(`Multiple open PRs for ${branch}`);
+    if (pulls.length > 1)
+      throw foreignChange(`Multiple open PRs for ${branch}`);
     const pull = pulls[0];
     if (!pull) return undefined;
     if (
@@ -126,31 +178,25 @@ export class RealGitHubGateway implements GitHubGateway {
       pull.base.ref !== base ||
       pull.head.ref !== branch
     )
-      throw new Error(`Existing PR for ${branch} changed head or base`);
+      throw foreignChange(`Existing PR for ${branch} changed head or base`);
     return { number: pull.number, branch, headSha };
   }
 
   async defaultBranch(): Promise<string> {
-    const result = await this.client.request<{ default_branch: string }>(
-      "GET",
-      this.route(""),
-    );
+    const result = await this.api<{ default_branch: string }>("GET", "");
     if (!result.default_branch)
       throw new Error("Repository has no default branch");
     return result.default_branch;
   }
 
   async objective(number: number): Promise<ObjectiveIssue> {
-    const issue = await this.client.request<Issue>(
-      "GET",
-      this.route(`issues/${number}`),
-    );
+    const issue = await this.api<Issue>("GET", `issues/${number}`);
     if (
       issue.pull_request ||
       issue.number !== number ||
       !["open", "closed"].includes(issue.state)
     )
-      throw new Error("Objective issue identity or state changed");
+      throw foreignChange("Objective issue identity or state changed");
     return {
       title: issue.title,
       body: issue.body ?? "",
@@ -162,15 +208,13 @@ export class RealGitHubGateway implements GitHubGateway {
   }
 
   async intakePage(page: number, etag?: string): Promise<IntakeIssuePage> {
-    const observed = await this.client.request<{
+    const observed = await this.api<{
       status: number;
       etag?: string;
       data?: Issue[];
     }>(
       "GET",
-      this.route(
-        `issues?state=all&sort=created&direction=asc&per_page=100&page=${page}`,
-      ),
+      `issues?state=all&sort=created&direction=asc&per_page=100&page=${page}`,
       undefined,
       { etag },
     );
@@ -190,8 +234,8 @@ export class RealGitHubGateway implements GitHubGateway {
   }
 
   async objectiveDependencies(number: number): Promise<number[]> {
-    const blockedBy = await this.client.paginate<Issue>(
-      this.route(`issues/${number}/dependencies/blocked_by`),
+    const blockedBy = await this.pages<Issue>(
+      `issues/${number}/dependencies/blocked_by`,
     );
     return blockedBy.map((issue) => {
       if (
@@ -200,7 +244,7 @@ export class RealGitHubGateway implements GitHubGateway {
         issue.repository_url !==
           `https://api.github.com/repos/${this.repository}`
       )
-        throw new Error(
+        throw foreignChange(
           "Objective predecessor is outside the bound repository",
         );
       return issue.number;
@@ -212,10 +256,7 @@ export class RealGitHubGateway implements GitHubGateway {
     comment: string,
     expected: { body?: string; workItem?: { objective: number; id: string } },
   ): Promise<void> {
-    const issue = await this.client.request<Issue>(
-      "GET",
-      this.route(`issues/${number}`),
-    );
+    const issue = await this.api<Issue>("GET", `issues/${number}`);
     const marker = expected.workItem
       ? `<!-- factory:objective=${expected.workItem.objective};item=${expected.workItem.id} -->`
       : undefined;
@@ -225,25 +266,21 @@ export class RealGitHubGateway implements GitHubGateway {
       (marker && (issue.body ?? "").split(marker).length !== 2) ||
       (expected.body !== undefined && issue.body !== expected.body)
     )
-      throw new Error(
+      throw foreignChange(
         `Issue #${number} identity changed; operator direction required`,
       );
-    const comments = await this.client.paginate<{ body: string }>(
-      this.route(`issues/${number}/comments`),
+    const comments = await this.pages<{ body: string }>(
+      `issues/${number}/comments`,
     );
     if (!comments.some((entry) => entry.body === comment)) {
       if (issue.state !== "open")
-        throw new Error(
+        throw foreignChange(
           `Issue #${number} closed without Factory completion evidence; operator direction required`,
         );
-      await this.client.request(
-        "POST",
-        this.route(`issues/${number}/comments`),
-        { body: comment },
-      );
+      await this.api("POST", `issues/${number}/comments`, { body: comment });
     }
     if (issue.state === "open")
-      await this.client.request("PATCH", this.route(`issues/${number}`), {
+      await this.api("PATCH", `issues/${number}`, {
         state: "closed",
         state_reason: "completed",
       });
@@ -277,28 +314,28 @@ export class RealGitHubGateway implements GitHubGateway {
     const authenticated = (issue: Issue, number?: number) =>
       this.authenticatedIssue(issue, number);
     const roles = ["factory:objective", "factory:work-item"];
-    const labels = await this.client.paginate<{
+    const labels = await this.pages<{
       name: string;
       archived_at?: string | null;
-    }>(this.route("labels"));
+    }>("labels");
     for (const role of roles) {
       const matches = labels.filter((label) => label.name === role);
       if (matches.length > 1 || matches[0]?.archived_at)
-        throw new Error(
+        throw foreignChange(
           `Required Factory role label is archived or ambiguous: ${role}`,
         );
       if (!matches.length) {
-        await this.client.request("POST", this.route("labels"), {
+        await this.api("POST", "labels", {
           name: role,
           color: "ededed",
         });
-        const observed = await this.client.paginate<{
+        const observed = await this.pages<{
           name: string;
           archived_at?: string | null;
-        }>(this.route("labels"));
+        }>("labels");
         const created = observed.filter((label) => label.name === role);
         if (created.length !== 1 || created[0]!.archived_at)
-          throw new Error(
+          throw notYet(
             `Factory role label creation did not reconcile exactly: ${role}`,
           );
       }
@@ -308,16 +345,11 @@ export class RealGitHubGateway implements GitHubGateway {
         typeof label === "string" ? label : label.name,
       );
       if (names.includes(role)) return issue;
-      await this.client.request(
-        "POST",
-        this.route(`issues/${issue.number}/labels`),
-        { labels: [role] },
-      );
+      await this.api("POST", `issues/${issue.number}/labels`, {
+        labels: [role],
+      });
       const observed = authenticated(
-        await this.client.request<Issue>(
-          "GET",
-          this.route(`issues/${issue.number}`),
-        ),
+        await this.api<Issue>("GET", `issues/${issue.number}`),
         issue.number,
       );
       const observedNames = (observed.labels ?? []).map((label) =>
@@ -331,53 +363,49 @@ export class RealGitHubGateway implements GitHubGateway {
         !observedNames.includes(role) ||
         names.some((name) => !observedNames.includes(name))
       )
-        throw new Error(
+        throw foreignChange(
           "Factory role label did not reconcile exactly; issue changed",
         );
       return observed;
     };
     const objective = authenticated(
-      await this.client.request<Issue>(
-        "GET",
-        this.route(`issues/${request.objectiveIssue}`),
-      ),
+      await this.api<Issue>("GET", `issues/${request.objectiveIssue}`),
       request.objectiveIssue,
     );
     await ensureRole(objective, roles[0]!);
     const issueByItemId: Record<string, number> = {};
     const issues = new Map<number, Issue>();
+    // Issues this call created; GitHub may not show them for a moment.
+    const createdAt = new Map<number, number>();
     let existing: Issue[] | undefined;
     for (const item of request.graph.items) {
       const marker = `<!-- factory:objective=${request.objectiveIssue};item=${item.id} -->`;
       const known = request.knownIssues?.[item.id];
       let found: Issue | undefined;
       if (known !== undefined) {
-        found = await this.client.request<Issue>(
-          "GET",
-          this.route(`issues/${known}`),
-        );
+        found = await this.api<Issue>("GET", `issues/${known}`);
         if (
           found.number !== known ||
           found.pull_request ||
           (found.body ?? "").split(marker).length !== 2
         )
-          throw new Error(
+          throw foreignChange(
             `Known Work Item issue for ${item.id} changed identity`,
           );
       } else {
-        existing ??= (
-          await this.client.paginate<Issue>(this.route("issues?state=all"))
-        ).filter((issue) => !issue.pull_request);
+        existing ??= (await this.pages<Issue>("issues?state=all")).filter(
+          (issue) => !issue.pull_request,
+        );
         const matches = existing.filter((issue) =>
           issue.body?.includes(marker),
         );
         if (matches.length > 1)
-          throw new Error(
+          throw foreignChange(
             `Multiple Work Item issues for ${item.id}; operator direction required`,
           );
         found = matches[0];
         if (found && (found.body ?? "").split(marker).length !== 2)
-          throw new Error(
+          throw foreignChange(
             `Work Item issue for ${item.id} has ambiguous identity`,
           );
       }
@@ -388,7 +416,7 @@ export class RealGitHubGateway implements GitHubGateway {
             found.state === "closed" &&
             !request.completedItems?.includes(item.id)
           )
-            throw new Error("Unreviewed remote issue closure");
+            throw foreignChange("Unreviewed remote issue closure");
           const old = request.previousGraph.items.find(
             (previous) => previous.id === item.id,
           );
@@ -400,17 +428,16 @@ export class RealGitHubGateway implements GitHubGateway {
               found.title !== old.title ||
               found.state !== "open"
             )
-              throw new Error(
+              throw foreignChange(
                 `Work Item ${item.id} projection changed; edits are proposals, not graph authority`,
               );
-            await this.client.request(
-              "PATCH",
-              this.route(`issues/${found.number}`),
-              { title: item.title, body: expectedBody },
-            );
-            const observed = await this.client.request<Issue>(
+            await this.api("PATCH", `issues/${found.number}`, {
+              title: item.title,
+              body: expectedBody,
+            });
+            const observed = await this.api<Issue>(
               "GET",
-              this.route(`issues/${found.number}`),
+              `issues/${found.number}`,
             );
             authenticated(observed, found.number);
             if (
@@ -418,7 +445,7 @@ export class RealGitHubGateway implements GitHubGateway {
               observed.body !== expectedBody ||
               observed.title !== item.title
             )
-              throw new Error(
+              throw notYet(
                 "Amendment issue projection did not reconcile exactly",
               );
             found = observed;
@@ -430,7 +457,7 @@ export class RealGitHubGateway implements GitHubGateway {
             found.title !== item.title ||
             found.state !== "open")
         )
-          throw new Error(
+          throw foreignChange(
             `Work Item ${item.id} projection changed; edits are proposals, not graph authority`,
           );
         found = await ensureRole(found, roles[1]!);
@@ -441,17 +468,17 @@ export class RealGitHubGateway implements GitHubGateway {
       }
       const body = projectedIssueBody(item, request.objectiveIssue);
       await request.beforeCreate?.(item.id);
-      const created = await this.client.request<Issue>(
-        "POST",
-        this.route("issues"),
-        { title: item.title, body, labels: [roles[1]!] },
-      );
+      const created = await this.api<Issue>("POST", "issues", {
+        title: item.title,
+        body,
+        labels: [roles[1]!],
+      });
       if (
         !created ||
         !Number.isSafeInteger(created.number) ||
         created.number <= 0
       )
-        throw new Error(
+        throw unverifiedCreate(
           "Cannot parse created Work Item issue identity; outcome unknown",
         );
       authenticated(created);
@@ -473,23 +500,24 @@ export class RealGitHubGateway implements GitHubGateway {
           "Created Work Item projection did not reconcile exactly",
         );
       issues.set(created.number, created);
+      createdAt.set(created.number, Date.now());
       existing?.push(created);
     }
     for (const item of request.graph.items) {
       const number = issueByItemId[item.id]!;
-      const observations = await this.client.paginate<Issue>(
-        this.route(`issues/${number}/dependencies/blocked_by`),
+      const observations = await this.pages<Issue>(
+        `issues/${number}/dependencies/blocked_by`,
       );
       for (const issue of observations) {
         authenticated(issue);
         if (issues.get(issue.number)?.id !== issue.id)
-          throw new Error("Unreviewed remote dependency edit");
+          throw foreignChange("Unreviewed remote dependency edit");
       }
       if (
         new Set(observations.map((issue) => issue.number)).size !==
         observations.length
       )
-        throw new Error("Ambiguous remote dependency identity");
+        throw foreignChange("Ambiguous remote dependency identity");
       const existing = new Set(observations.map((issue) => issue.number));
       const allowed = new Set(
         [
@@ -500,16 +528,16 @@ export class RealGitHubGateway implements GitHubGateway {
         ].map((id) => issueByItemId[id]),
       );
       if (observations.some((issue) => !allowed.has(issue.number)))
-        throw new Error("Unreviewed remote dependency edit");
+        throw foreignChange("Unreviewed remote dependency edit");
       if (request.previousGraph) {
         for (const issue of observations) {
           if (
             item.dependencies.some((id) => issueByItemId[id] === issue.number)
           )
             continue;
-          await this.client.request(
+          await this.api(
             "DELETE",
-            this.route(`issues/${number}/dependencies/blocked_by/${issue.id}`),
+            `issues/${number}/dependencies/blocked_by/${issue.id}`,
           );
         }
       }
@@ -521,16 +549,14 @@ export class RealGitHubGateway implements GitHubGateway {
             throw new Error(
               "Dependency issue has no authenticated database identity",
             );
-          await this.client.request(
-            "POST",
-            this.route(`issues/${number}/dependencies/blocked_by`),
-            { issue_id: issue.id },
-          );
+          await this.api("POST", `issues/${number}/dependencies/blocked_by`, {
+            issue_id: issue.id,
+          });
         }
       }
       {
-        const observed = await this.client.paginate<Issue>(
-          this.route(`issues/${number}/dependencies/blocked_by`),
+        const observed = await this.pages<Issue>(
+          `issues/${number}/dependencies/blocked_by`,
         );
         const expected = item.dependencies.map((id) => issueByItemId[id]);
         if (
@@ -545,7 +571,7 @@ export class RealGitHubGateway implements GitHubGateway {
             );
           })
         )
-          throw new Error("Work Item dependencies did not reconcile exactly");
+          throw notYet("Work Item dependencies did not reconcile exactly");
       }
     }
     {
@@ -580,19 +606,17 @@ export class RealGitHubGateway implements GitHubGateway {
       // reviewed move may already have completed before an interrupted readback.
       const observedParents = new Map<number, number>();
       for (const parent of childrenByParent.keys()) {
-        const existing = await this.client.paginate<Issue>(
-          this.route(`issues/${parent}/sub_issues`),
-        );
+        const existing = await this.pages<Issue>(`issues/${parent}/sub_issues`);
         for (const issue of existing) {
           authenticated(issue);
           if (issues.get(issue.number)?.id !== issue.id)
-            throw new Error("Ambiguous remote hierarchy identity");
+            throw foreignChange("Ambiguous remote hierarchy identity");
           if (
             observedParents.has(issue.number) ||
             (desiredParents.get(issue.number) !== parent &&
               previousParents.get(issue.number) !== parent)
           )
-            throw new Error("Unreviewed remote hierarchy edit");
+            throw foreignChange("Unreviewed remote hierarchy edit");
           observedParents.set(issue.number, parent);
         }
       }
@@ -600,22 +624,24 @@ export class RealGitHubGateway implements GitHubGateway {
         const currentParent = observedParents.get(child);
         if (currentParent === parent) continue;
         const childIssue = authenticated(
-          await this.client.request<Issue>(
+          await this.api<Issue>(
             "GET",
-            this.route(`issues/${child}`),
+            `issues/${child}`,
+            undefined,
+            undefined,
+            {
+              createdAt: createdAt.get(child),
+            },
           ),
           child,
         );
         if (childIssue.id !== issues.get(child)!.id)
-          throw new Error("Ambiguous remote hierarchy identity");
+          throw foreignChange("Ambiguous remote hierarchy identity");
         const replacing = currentParent !== undefined;
         let observedParent: Issue | undefined;
         try {
           observedParent = authenticated(
-            await this.client.request<Issue>(
-              "GET",
-              this.route(`issues/${child}/parent`),
-            ),
+            await this.api<Issue>("GET", `issues/${child}/parent`),
           );
         } catch (error) {
           if (!(error instanceof GitHubRequestError && error.status === 404))
@@ -634,18 +660,15 @@ export class RealGitHubGateway implements GitHubGateway {
               observedParent?.id !== expectedParent?.id)) ||
           (!replacing && observedParent !== undefined)
         )
-          throw new Error("Unreviewed remote hierarchy parent");
-        await this.client.request(
-          "POST",
-          this.route(`issues/${parent}/sub_issues`),
-          { sub_issue_id: childIssue.id, replace_parent: replacing },
-        );
+          throw foreignChange("Unreviewed remote hierarchy parent");
+        await this.api("POST", `issues/${parent}/sub_issues`, {
+          sub_issue_id: childIssue.id,
+          replace_parent: replacing,
+        });
       }
       // Read back every affected parent, including those that became empty.
       for (const [parent, children] of childrenByParent) {
-        const observed = await this.client.paginate<Issue>(
-          this.route(`issues/${parent}/sub_issues`),
-        );
+        const observed = await this.pages<Issue>(`issues/${parent}/sub_issues`);
         if (
           observed.length !== children.length ||
           new Set(observed.map((issue) => issue.number)).size !==
@@ -658,7 +681,7 @@ export class RealGitHubGateway implements GitHubGateway {
             );
           })
         )
-          throw new Error("Work Item hierarchy did not reconcile exactly");
+          throw notYet("Work Item hierarchy did not reconcile exactly");
       }
     }
     return { issueByItemId };
@@ -666,22 +689,20 @@ export class RealGitHubGateway implements GitHubGateway {
 
   /** Observe old/new facts only. This never completes or accepts a graph projection. */
   async publish(request: PullRequestPublication): Promise<PullRequestIdentity> {
-    const detail = await this.client.request<Pull>(
-      "POST",
-      this.route("pulls"),
-      {
-        head: request.branch,
-        base: request.base,
-        title: request.title,
-        body: request.body,
-      },
-    );
+    const detail = await this.api<Pull>("POST", "pulls", {
+      head: request.branch,
+      base: request.base,
+      title: request.title,
+      body: request.body,
+    });
     if (
       !Number.isSafeInteger(detail.number) ||
       !detail.head?.sha ||
       detail.head.ref !== request.branch
     )
-      throw new Error("Cannot verify created PR identity; outcome unknown");
+      throw unverifiedCreate(
+        "Cannot verify created PR identity; outcome unknown",
+      );
     return {
       number: detail.number,
       branch: request.branch,
@@ -692,17 +713,14 @@ export class RealGitHubGateway implements GitHubGateway {
   async observe(
     identity: PullRequestIdentity,
   ): Promise<PullRequestObservation> {
-    const detail = await this.client.request<Pull>(
-      "GET",
-      this.route(`pulls/${identity.number}`),
-    );
+    const detail = await this.api<Pull>("GET", `pulls/${identity.number}`);
     if (
       detail.head.sha !== identity.headSha ||
       detail.head.ref !== identity.branch ||
       (identity.baseBranch !== undefined &&
         detail.base?.ref !== identity.baseBranch)
     )
-      throw new Error(
+      throw foreignChange(
         `PR #${identity.number} identity changed; operator direction required`,
       );
     const runs: {
@@ -715,21 +733,19 @@ export class RealGitHubGateway implements GitHubGateway {
       app?: { id?: number } | null;
     }[] = [];
     for (let page = 1; ; page++) {
-      const result = await this.client.request<{ check_runs: typeof runs }>(
+      const result = await this.api<{ check_runs: typeof runs }>(
         "GET",
-        this.route(
-          `commits/${identity.headSha}/check-runs?filter=latest&per_page=100&page=${page}`,
-        ),
+        `commits/${identity.headSha}/check-runs?filter=latest&per_page=100&page=${page}`,
       );
       if (!Array.isArray(result.check_runs))
         throw new Error("PR CI response lacks check runs");
       runs.push(...result.check_runs);
       if (result.check_runs.length < 100) break;
     }
-    const statuses = await this.client.request<{
+    const statuses = await this.api<{
       state: string;
       total_count: number;
-    }>("GET", this.route(`commits/${identity.headSha}/status`));
+    }>("GET", `commits/${identity.headSha}/status`);
     const failing =
       runs.some(
         (run) =>
@@ -780,16 +796,19 @@ export class RealGitHubGateway implements GitHubGateway {
     });
     let mergeReadiness: PullRequestObservation["mergeReadiness"];
     if (!detail.merged && detail.state !== "closed") {
-      const readiness = await this.client.pullRequestReadiness(
+      const readiness = await classifiedGitHubCall(
+        this.client,
         this.repository,
-        identity.number,
+        { method: "POST", path: "graphql" },
+        () =>
+          this.client.pullRequestReadiness(this.repository, identity.number),
       );
       if (
         readiness.headRefOid !== identity.headSha ||
         readiness.headRefName !== identity.branch ||
         readiness.baseRefName !== detail.base?.ref
       )
-        throw new Error(
+        throw foreignChange(
           `PR #${identity.number} readiness identity changed; operator direction required`,
         );
       switch (readiness.mergeStateStatus) {
@@ -842,30 +861,34 @@ export class RealGitHubGateway implements GitHubGateway {
       throw new Error("Merge expected head differs from PR identity");
     // A merge whose response was lost has already happened: confirm it
     // rather than merging again.
-    const current = await this.client.request<Pull>(
-      "GET",
-      this.route(`pulls/${identity.number}`),
-    );
+    const current = await this.api<Pull>("GET", `pulls/${identity.number}`);
     if (current.merged) {
       if (
         current.head.sha !== expectedHead ||
         current.head.ref !== identity.branch
       )
-        throw new Error(
+        throw foreignChange(
           `PR #${identity.number} was merged at a different head; operator direction required`,
         );
       return {
-        integratedSha: await timelineMergeCommit(
+        integratedSha: await classifiedGitHubCall(
           this.client,
           this.repository,
-          identity.number,
+          { method: "GET", path: `issues/${identity.number}/timeline` },
+          () =>
+            timelineMergeCommit(this.client, this.repository, identity.number),
         ),
       };
     }
-    const result = await this.client.request<{ merged: boolean; sha: string }>(
+    const result = await this.api<{ merged: boolean; sha: string }>(
       "PUT",
-      this.route(`pulls/${identity.number}/merge`),
+      `pulls/${identity.number}/merge`,
       { sha: expectedHead, merge_method: "merge" },
+      undefined,
+      // GitHub refuses a head that moved (409). Factory pushed the head it
+      // just observed, so a refusal against that head is lag; any other
+      // head is a change Factory did not make.
+      { head: current.head.sha === expectedHead ? "ours" : "foreign" },
     );
     if (
       result.merged !== true ||
@@ -873,17 +896,14 @@ export class RealGitHubGateway implements GitHubGateway {
       !/^[a-f0-9]{40}$/.test(result.sha)
     )
       throw new Error("PR merge did not produce an integrated commit");
-    const detail = await this.client.request<Pull>(
-      "GET",
-      this.route(`pulls/${identity.number}`),
-    );
+    const detail = await this.api<Pull>("GET", `pulls/${identity.number}`);
     if (
       detail.state !== "closed" ||
       detail.merged !== true ||
       detail.head.sha !== expectedHead ||
       detail.head.ref !== identity.branch
     )
-      throw new Error("PR merge has not confirmed the exact integrated commit");
+      throw notYet("PR merge has not confirmed the exact integrated commit");
     return { integratedSha: result.sha };
   }
 

@@ -1,3 +1,5 @@
+import { classifyFaults } from "../fault.js";
+import { executionFault } from "./fault.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
@@ -83,9 +85,11 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     )
       throw new Error("Sandbox requires explicit provider and installed argv");
   }
+  @classifyFaults(executionFault)
   async availableSlots(): Promise<number> {
     return this.options.concurrency;
   }
+  @classifyFaults(executionFault)
   async preflight(graph: WorkGraph): Promise<void> {
     if (graph.items.some((i) => i.executionProfile))
       throw new Error(
@@ -204,6 +208,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     this.save(handle, context);
     return reply.value;
   }
+  @classifyFaults(executionFault)
   async start(
     request: ExecutionRequest,
     context?: ExecutionContext,
@@ -374,6 +379,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     a.phase = "ready";
     this.save(handle, context);
   }
+  @classifyFaults(executionFault)
   async observe(
     handle: ExecutionHandle,
     context?: ExecutionContext,
@@ -459,6 +465,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       a.stopped.interrupted ? "interruption" : "implementation",
     );
   }
+  @classifyFaults(executionFault)
   async cancel(
     handle: ExecutionHandle,
     context?: ExecutionContext,
@@ -475,6 +482,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
    * Any failure either interrupts the step (it reattaches) or destroys the
    * sandbox first, so a repeated attempt never runs beside it.
    */
+  @classifyFaults(executionFault)
   async collect(
     handle: ExecutionHandle,
     context?: ExecutionContext,

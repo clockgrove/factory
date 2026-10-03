@@ -169,13 +169,13 @@ export type FaultClassifier = (
  * Synchronous methods stay synchronous.
  */
 export function classifyFaults(classify: FaultClassifier) {
-  return function <This, Args extends unknown[], Return>(
+  return <This, Args extends unknown[], Return>(
     method: (this: This, ...args: Args) => Return,
     context: ClassMethodDecoratorContext<
       This,
       (this: This, ...args: Args) => Return
     >,
-  ): (this: This, ...args: Args) => Return {
+  ): ((this: This, ...args: Args) => Return) => {
     const name = String(context.name);
     return function (this: This, ...args: Args): Return {
       return withFault(

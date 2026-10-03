@@ -89,7 +89,7 @@ Public cases live in `evals/cases/`. Keep private cases outside this repository 
 
 - `fixture`: an in-repo target tree under `evals/targets/`. It is committed with fixed metadata, so its SHA is the same everywhere. Names starting with `dot-` become dotfiles.
 - For a private case use `commit` and optionally `target` (a checkout; default `--target`) instead of `fixture`. Use a full SHA so the case stays repeatable; a branch resolves at start and the report records the SHA.
-- `sources` adds `PATH#HEADING` selectors like `factory plan --source`. Prefer the Objective's own `## Planning sources`, which `factory run` reads.
+- Sources come from the Objective's own `## Planning sources`, as in `factory run`.
 - `repository` defaults to the configuration's; `objective` defaults to 1.
 - `expect` is optional: `outcome`, `requiredChecks`, `maxWorkItems`, `maxCriticalPath`, `readOnly`, and `questionPattern`, a regular expression the operator question must match when `outcome` is `question`. Planning that stops on an undelegated decision also counts as a question.
 

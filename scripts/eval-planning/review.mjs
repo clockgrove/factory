@@ -117,23 +117,19 @@ export async function prepareVariants(fixture, config) {
     `${dist}/execution-profiles.js`
   );
   const { preflightObjective } = await import(`${dist}/local-preflight.js`);
+  const { resolveCapacity } = await import(`${dist}/config.js`);
   const evalCase = fixture.case;
   const checkout = config.checkout;
   // The same packet inputs as planObjective. Prerequisites stay undefined:
   // the eval gateway serves no predecessor Objectives.
-  const bounds = { configuredConcurrency: config.execution.concurrency };
+  const bounds = { configuredConcurrency: resolveCapacity(config).concurrency };
   const profiles = executionProfileChoices(config);
   const localExecutables = preflightObjective(
     config,
     evalCase.body,
     evalCase.commit,
   );
-  const sources = planningSources(
-    evalCase.body,
-    evalCase.commit,
-    checkout,
-    evalCase.sources,
-  );
+  const sources = planningSources(evalCase.body, evalCase.commit, checkout);
   const variants = planVariants(fixture.graph, {
     native: fixture.native,
     workerTest: fixture.workerTest,
@@ -151,7 +147,6 @@ export async function prepareVariants(fixture, config) {
         [],
         undefined,
         profiles,
-        evalCase.sources,
         undefined,
         undefined,
         localExecutables,

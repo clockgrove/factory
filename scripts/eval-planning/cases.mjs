@@ -15,7 +15,6 @@ import { basename, join, resolve } from "node:path";
 
 const caseKeys = new Set([
   "commit",
-  "sources",
   "target",
   "fixture",
   "repository",
@@ -110,13 +109,6 @@ export function materializeFixture(fixture, destination) {
   return git(destination, "rev-parse", "HEAD");
 }
 
-function parseSource(value) {
-  const at = value.indexOf("#");
-  return at < 0
-    ? { path: value }
-    : { path: value.slice(0, at), heading: value.slice(at + 1) };
-}
-
 /** Read one case directory; fixtures materialize under `targets`. */
 export function loadCase(root, { defaultTarget, repository, targets }) {
   const name = basename(root);
@@ -134,9 +126,6 @@ export function loadCase(root, { defaultTarget, repository, targets }) {
     fail("case.json must be an object");
   const unknown = Object.keys(spec).filter((key) => !caseKeys.has(key));
   if (unknown.length) fail(`unknown case.json keys ${unknown}`);
-  const sources = spec.sources ?? [];
-  if (!Array.isArray(sources) || sources.some((s) => typeof s !== "string"))
-    fail("sources must be an array of PATH#HEADING strings");
   const objective = spec.objective ?? 1;
   if (!Number.isSafeInteger(objective) || objective <= 0)
     fail("objective must be a positive integer");
@@ -183,7 +172,6 @@ export function loadCase(root, { defaultTarget, repository, targets }) {
     objective,
     title: /^#\s+(.+)$/m.exec(body)?.[1]?.trim() ?? name,
     body,
-    sources: sources.map(parseSource),
     tags: spec.tags ?? [],
     ...(spec.expect ? { expect: spec.expect } : {}),
   };

@@ -125,7 +125,6 @@ function runOne(evalCase, repeat, options) {
         repeat,
         repository: evalCase.repository,
         commit: evalCase.commit,
-        sources: evalCase.sources,
         tags: evalCase.tags,
       };
       const log = relative(options.output, join(directory, "worker.log"));

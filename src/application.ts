@@ -111,10 +111,7 @@ export interface FactoryApplication {
     admission?: AutonomousAdmission,
     options?: { deadlineAt?: string },
   ): Promise<FactoryState>;
-  cancelObjective(
-    objective: number,
-    abandonment?: import("./state.js").PermanentAbandonmentRequest,
-  ): Promise<"requested" | "cancelled">;
+  cancelObjective(objective: number): Promise<"requested" | "cancelled">;
   retryWorkItem(objective: number, itemId: string): void;
   repairWorkItem(
     objective: number,
@@ -214,14 +211,8 @@ export function createApplication(
         admission,
         options,
       ),
-    cancelObjective: (objective, abandonment) =>
-      cancelObjective(
-        config,
-        objective,
-        services.driver,
-        abandonment,
-        services.github,
-      ),
+    cancelObjective: (objective) =>
+      cancelObjective(config, objective, services.driver),
     repairWorkItem: (objective, input) =>
       repairWorkItem(config, objective, input),
     retryWorkItem: (objective, itemId) =>

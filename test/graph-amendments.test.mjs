@@ -859,60 +859,251 @@ test("operator amendment source inputs are hydrated from pinned citations before
   });
 });
 
-test("partial/unknown projection retains exact intent and prevents duplicate issue creation on restart", async () => {
-  await fixture("projection", async ({ config, initial }) => {
-    const obligations = coverageObligations(body, objectiveCriteria(body));
-    const graph = withCoverage({ coverageObligations: obligations }, initial);
-    graph.coverage[0].source = obligations[0].source;
-    const state = {
-      graph,
-      objective: 1,
-      baseSha: initial.baseSha,
-      runId: "fixture",
-      issueByItemId: { result: 2 },
-      work: { result: { status: "done", attempt: "preserved" } },
-      admission: { graphDigest: graphDigest(graph), authority },
-      coordinator: { mode: "running" },
-    };
-    submitAmendment(state, {
-      ...discovery,
-      actor: "operator",
-      expectedGraphDigest: graphDigest(graph),
-      graph: qaGraph(graph),
+// GitHub stand-in that finds existing issues by their Factory marker, as
+// projectGraph does. The first `losses` calls lose their response: right after
+// creating an issue, or at the end of a call that created nothing.
+function markerGitHub(lostError, losses) {
+  const issues = new Map([["result", 2]]);
+  const github = {
+    knownIssues: [],
+    creates: 0,
+    async projectGraph(request) {
+      github.knownIssues.push(structuredClone(request.knownIssues));
+      const lose = github.knownIssues.length <= losses;
+      const issueByItemId = { ...request.knownIssues };
+      for (const { id } of request.graph.items) {
+        if (!issues.has(id)) {
+          await request.beforeCreate(id);
+          issues.set(id, 2 + ++github.creates);
+          if (lose) throw lostError;
+        }
+        issueByItemId[id] = issues.get(id);
+        request.projected(id, issueByItemId[id]);
+      }
+      if (lose) throw lostError;
+      return { issueByItemId };
+    },
+  };
+  return github;
+}
+
+function assertAmendmentCompleted(state) {
+  assert.equal(state.pendingAmendment, undefined);
+  assert.deepEqual(state.issueByItemId, { result: 2, qa: 3 });
+  assert.deepEqual(
+    state.graph.items.map((entry) => entry.id),
+    ["result", "qa"],
+  );
+  assert.equal(state.work.qa.status, "pending");
+  assert.equal(state.graphRevisions.length, 2);
+  assert.equal(state.allowanceConsumption.planningRevisions, 1);
+}
+
+async function assertProjectionRepeats(name, lostError, pattern) {
+  // One lost response is repeated by the same call; three pause the coordinator.
+  for (const losses of [1, 3])
+    await fixture(`${name}-${losses}`, async ({ config, initial }) => {
+      const obligations = coverageObligations(body, objectiveCriteria(body));
+      const graph = withCoverage({ coverageObligations: obligations }, initial);
+      graph.coverage[0].source = obligations[0].source;
+      const state = {
+        graph,
+        objective: 1,
+        baseSha: initial.baseSha,
+        runId: "fixture",
+        issueByItemId: { result: 2 },
+        work: { result: { status: "done", attempt: "preserved" } },
+        admission: { graphDigest: graphDigest(graph), authority },
+        coordinator: { mode: "running" },
+      };
+      submitAmendment(state, {
+        ...discovery,
+        actor: "operator",
+        expectedGraphDigest: graphDigest(graph),
+        graph: qaGraph(graph),
+      });
+      let reviews = 0;
+      const saved = [];
+      const github = markerGitHub(lostError, losses);
+      const args = {
+        state,
+        config,
+        body,
+        model: {
+          async reviewGraph(request) {
+            reviews++;
+            return {
+              packetId: request.reviewPacket.id,
+              findings: [],
+            };
+          },
+        },
+        github,
+        save() {
+          if (state.pendingAmendment)
+            saved.push(structuredClone(state.pendingAmendment));
+        },
+        cancelled: () => false,
+      };
+      if (losses === 1) {
+        assert.equal(await applyPendingAmendment(args, 1), true);
+        // The repeat projects again with the known issues and finds the issue
+        // the lost call created by its marker instead of creating a duplicate.
+        assert.deepEqual(github.knownIssues, [{ result: 2 }, { result: 2 }]);
+        assert.equal(github.creates, 1);
+        assert.equal(reviews, 1);
+        const interrupted = saved.find((entry) => entry.interruptions === 1);
+        assert.equal(interrupted.phase, "reviewed");
+        assert.match(interrupted.error, pattern);
+        assert.equal(interrupted.rejectionStage, undefined);
+        assert.equal(state.coordinator.mode, "running");
+        assert.equal(state.work.result.attempt, "preserved");
+        assertAmendmentCompleted(state);
+        return;
+      }
+      await assert.rejects(applyPendingAmendment(args, 1), pattern);
+      // Interrupted, not rejected: the amendment stays at its last completed phase.
+      assert.equal(state.pendingAmendment.phase, "reviewed");
+      assert.equal(state.pendingAmendment.interruptions, 2);
+      assert.equal(state.pendingAmendment.rejectionStage, undefined);
+      assert.ok(state.pendingAmendment.reviewDigest);
+      // Repeats found the lost create's issue by marker and kept its number.
+      assert.deepEqual(state.pendingAmendment.issueByItemId, {
+        result: 2,
+        qa: 3,
+      });
+      assert.deepEqual(github.knownIssues, [
+        { result: 2 },
+        { result: 2 },
+        { result: 2, qa: 3 },
+      ]);
+      assert.equal(state.coordinator.mode, "paused");
+      assert.equal(state.coordinator.waitReason, state.pendingAmendment.error);
+      assert.equal(state.graph.items.length, 1);
+      assert.equal(state.work.result.attempt, "preserved");
+      assert.equal(github.creates, 1);
+      // A paused coordinator does not repeat the call by itself.
+      assert.equal(await applyPendingAmendment(args, 1), false);
+      assert.equal(github.knownIssues.length, 3);
+
+      state.coordinator.mode = "running";
+      assert.equal(await applyPendingAmendment(args, 1), true);
+      assert.deepEqual(github.knownIssues.at(-1), { result: 2, qa: 3 });
+      assert.equal(github.knownIssues.length, 4);
+      assert.equal(github.creates, 1);
+      assert.equal(reviews, 1);
+      assert.equal(state.work.result.attempt, "preserved");
+      assertAmendmentCompleted(state);
     });
-    let creates = 0;
-    const args = {
-      state,
-      config,
-      body,
-      model: {
-        async reviewGraph(request) {
-          return {
-            packetId: request.reviewPacket.id,
-            findings: [],
-          };
-        },
+}
+
+test("partial/unknown projection repeats without duplicate issues", async () => {
+  await assertProjectionRepeats(
+    "projection",
+    new Error("response lost"),
+    /response lost/,
+  );
+});
+
+test("interrupted amendment compile is repeated and charged once", async () => {
+  // One lost compile is repeated by the same call; three pause the coordinator.
+  for (const losses of [1, 3])
+    await fixture(
+      `compile-interrupted-${losses}`,
+      async ({ config, initial }) => {
+        const obligations = coverageObligations(body, objectiveCriteria(body));
+        const graph = withCoverage(
+          { coverageObligations: obligations },
+          initial,
+        );
+        graph.coverage[0].source = obligations[0].source;
+        const state = {
+          graph,
+          objective: 1,
+          baseSha: initial.baseSha,
+          runId: "fixture",
+          issueByItemId: { result: 2 },
+          work: { result: { status: "done", attempt: "preserved" } },
+          admission: {
+            graphDigest: graphDigest(graph),
+            authority: {
+              ...authority,
+              allowances: { ...authority.allowances, planningRevisions: 2 },
+            },
+          },
+          coordinator: { mode: "running" },
+        };
+        submitAmendment(state, {
+          ...discovery,
+          actor: "operator",
+          expectedGraphDigest: graphDigest(graph),
+        });
+        let compiles = 0;
+        let reviews = 0;
+        let projections = 0;
+        const saved = [];
+        const args = {
+          state,
+          config,
+          body,
+          model: {
+            async generateStructured(request) {
+              compiles++;
+              if (compiles <= losses) throw new Error("compile response lost");
+              const wire = compilerWire(
+                request,
+                compilerCitationChoices(request.sources),
+              );
+              return wire.decode(encodeCompilerWire(qaGraph(graph), wire.data));
+            },
+            async reviewGraph(request) {
+              reviews++;
+              return { packetId: request.reviewPacket.id, findings: [] };
+            },
+          },
+          github: {
+            async projectGraph(request) {
+              projections++;
+              return { issueByItemId: { ...request.knownIssues, qa: 3 } };
+            },
+          },
+          save() {
+            if (state.pendingAmendment)
+              saved.push(structuredClone(state.pendingAmendment));
+          },
+          cancelled: () => false,
+        };
+        if (losses === 1) {
+          assert.equal(await applyPendingAmendment(args, 1), true);
+          const interrupted = saved.find((entry) => entry.interruptions === 1);
+          assert.equal(interrupted.phase, "ready");
+          assert.equal(interrupted.charged, true);
+        } else {
+          await assert.rejects(
+            applyPendingAmendment(args, 1),
+            /compile response lost/,
+          );
+          assert.equal(state.pendingAmendment.phase, "ready");
+          assert.equal(state.pendingAmendment.charged, true);
+          assert.equal(state.pendingAmendment.interruptions, 2);
+          assert.equal(state.pendingAmendment.rejectionStage, undefined);
+          assert.equal(state.coordinator.mode, "paused");
+          assert.equal(
+            state.coordinator.waitReason,
+            state.pendingAmendment.error,
+          );
+          assert.equal(compiles, 3);
+          assert.equal(state.allowanceConsumption.planningRevisions, 1);
+          state.coordinator.mode = "running";
+          assert.equal(await applyPendingAmendment(args, 1), true);
+        }
+        assert.equal(compiles, losses + 1);
+        assert.equal(reviews, 1);
+        assert.equal(projections, 1);
+        assert.equal(state.work.result.attempt, "preserved");
+        assertAmendmentCompleted(state);
       },
-      github: {
-        async projectGraph(request) {
-          request.projected("result", 2);
-          await request.beforeCreate("qa");
-          creates++;
-          throw new Error("response lost");
-        },
-      },
-      save() {},
-      cancelled: () => false,
-    };
-    await assert.rejects(applyPendingAmendment(args), /response lost/);
-    assert.equal(state.pendingAmendment.phase, "projecting");
-    assert.equal(state.pendingAmendment.projectionPending, "qa");
-    assert.equal(state.graph.items.length, 1);
-    assert.equal(state.work.result.attempt, "preserved");
-    await assert.rejects(applyPendingAmendment(args), /cannot be replayed/);
-    assert.equal(creates, 1);
-    assert.equal(state.allowanceConsumption.planningRevisions, 1);
-  });
+    );
 });
 
 test("compound: amendment invalidates final review before lost closure acknowledgement is reconciled", async () => {
@@ -2008,13 +2199,8 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
         (s, p) => {
           p.ownership = ["outside.txt"];
         },
-        (s) => {
-          s.pendingAmendment.phase = "compiling";
-        },
-        (s) => {
-          s.pendingAmendment.projectionPending = "qa";
-        },
-        ...["reviewing", "projecting", "reviewed", "projected"].map(
+        // An interrupted call leaves its last completed phase, never "rejected".
+        ...["ready", "compiled", "reviewed", "projected"].map(
           (phase) => (s) => {
             s.pendingAmendment.phase = phase;
           },
@@ -2244,6 +2430,7 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
 
 test("actual review provider/protocol failures cannot authorize amendment replacement", async () => {
   for (const failure of [
+    "unknown-once",
     "unknown",
     "completed-provider",
     "wrong-packet",
@@ -2287,62 +2474,101 @@ test("actual review provider/protocol failures cannot authorize amendment replac
         actor: "operator",
         expectedGraphDigest: graphDigest(graph),
       });
+      let compiled = 0;
       let reviewed = 0;
       let projected = 0;
-      await assert.rejects(
-        applyPendingAmendment({
-          state,
-          config,
-          body,
-          model: {
-            async generateStructured(request) {
-              const wire = compilerWire(
-                request,
-                compilerCitationChoices(request.sources),
+      let reviewAnswers = false;
+      const saved = [];
+      const args = {
+        state,
+        config,
+        body,
+        model: {
+          async generateStructured(request) {
+            compiled++;
+            const wire = compilerWire(
+              request,
+              compilerCitationChoices(request.sources),
+            );
+            return wire.decode(encodeCompilerWire(qaGraph(graph), wire.data));
+          },
+          async reviewGraph(request) {
+            reviewed++;
+            if (reviewAnswers || (failure === "unknown-once" && reviewed > 1))
+              return { packetId: request.reviewPacket.id, findings: [] };
+            if (failure.startsWith("unknown"))
+              throw new Error("Unknown review submission outcome");
+            if (failure === "completed-provider")
+              throw new CompletedModelInvocationError(
+                "Provider refused the request",
               );
-              return wire.decode(encodeCompilerWire(qaGraph(graph), wire.data));
-            },
-            async reviewGraph(request) {
-              reviewed++;
-              if (failure === "unknown")
-                throw new Error("Unknown review submission outcome");
-              if (failure === "completed-provider")
-                throw new CompletedModelInvocationError(
-                  "Provider refused the request",
-                );
-              if (failure === "wrong-packet")
-                return { packetId: "stale", findings: [] };
-              return {
-                packetId: request.reviewPacket.id,
-                findings: [
-                  {
-                    evidenceIndices: [0],
-                    detail: "Partial finding with missing question",
-                  },
-                ],
-              };
-            },
+            if (failure === "wrong-packet")
+              return { packetId: "stale", findings: [] };
+            return {
+              packetId: request.reviewPacket.id,
+              findings: [
+                {
+                  evidenceIndices: [0],
+                  detail: "Partial finding with missing question",
+                },
+              ],
+            };
           },
-          github: {
-            async projectGraph() {
-              projected++;
+        },
+        github: {
+          async projectGraph(request) {
+            projected++;
+            if (!reviewAnswers && failure !== "unknown-once")
               throw new Error("Unexpected projection");
-            },
+            return { issueByItemId: { ...request.knownIssues, qa: 3 } };
           },
-          save() {},
-          cancelled: () => false,
-        }),
+        },
+        save() {
+          if (state.pendingAmendment)
+            saved.push(structuredClone(state.pendingAmendment));
+        },
+        cancelled: () => false,
+      };
+      if (failure === "unknown-once") {
+        // The same call repeats the lost review and completes.
+        assert.equal(await applyPendingAmendment(args, 1), true);
+        const interrupted = saved.find((entry) => entry.interruptions === 1);
+        assert.equal(interrupted.phase, "compiled");
+        assert.equal(interrupted.rejectionStage, undefined);
+        assert.equal(compiled, 1);
+        assert.equal(reviewed, 2);
+        assert.equal(projected, 1);
+        assert.equal(state.coordinator.mode, "running");
+        assert.equal(state.pendingAmendment, undefined);
+        assert.deepEqual(state.issueByItemId, { result: 2, qa: 3 });
+        assert.equal(state.allowanceConsumption.planningRevisions, 1);
+        return;
+      }
+      await assert.rejects(applyPendingAmendment(args, 1));
+      // Lost answers are repeated twice before pausing; answers are not.
+      assert.equal(
+        reviewed,
+        failure === "unknown" ? 3 : 1,
+        state.pendingAmendment.error,
       );
-      assert.equal(reviewed, 1, state.pendingAmendment.error);
+      assert.equal(
+        state.pendingAmendment.interruptions,
+        failure === "unknown" ? 2 : undefined,
+      );
       assert.equal(projected, 0);
+      // A lost transport answer is an interruption: the amendment stays at its
+      // last completed phase. A completed refusal or protocol failure rejects it.
       assert.equal(
         state.pendingAmendment.phase,
-        failure === "unknown" ? "reviewing" : "rejected",
+        failure === "unknown" ? "compiled" : "rejected",
       );
       assert.equal(
         state.pendingAmendment.rejectionStage,
         failure === "unknown" ? undefined : "review",
       );
+      assert.equal(state.pendingAmendment.reviewDigest, undefined);
+      assert.equal(state.coordinator.mode, "paused");
+      assert.equal(state.coordinator.waitReason, state.pendingAmendment.error);
       assert.equal(state.allowanceConsumption.planningRevisions, 1);
       const correction = {
         ...state.pendingAmendment.proposal,
@@ -2365,6 +2591,24 @@ test("actual review provider/protocol failures cannot authorize amendment replac
         /known unprojected/,
       );
       assert.equal(JSON.stringify(state), before);
+      if (failure !== "unknown") {
+        await assert.rejects(
+          applyPendingAmendment(args, 1),
+          /cannot be replayed/,
+        );
+        assert.equal(reviewed, 1);
+        return;
+      }
+      // Resuming repeats only the interrupted review, then completes.
+      state.coordinator.mode = "running";
+      reviewAnswers = true;
+      assert.equal(await applyPendingAmendment(args, 1), true);
+      assert.equal(compiled, 1);
+      assert.equal(reviewed, 4);
+      assert.equal(projected, 1);
+      assert.equal(state.pendingAmendment, undefined);
+      assert.deepEqual(state.issueByItemId, { result: 2, qa: 3 });
+      assert.equal(state.allowanceConsumption.planningRevisions, 1);
     });
 });
 
@@ -2417,7 +2661,6 @@ test("completed-rejection preserves projection history without replay", async ()
       };
       await assert.rejects(applyPendingAmendment(args), /GitHub/);
       assert.equal(state.pendingAmendment.phase, "rejected");
-      assert.equal(state.pendingAmendment.projectionPending, undefined);
       assert.equal(state.pendingAmendment.rejectionStage, "projection");
       assert.ok(state.pendingAmendment.reviewDigest);
       assert.deepEqual(state.pendingAmendment.issueByItemId, { result: 2 });
@@ -2430,62 +2673,12 @@ test("completed-rejection preserves projection history without replay", async ()
   );
 });
 
-test("mutation-unknown preserves projection history without replay", async () => {
-  await fixture("projection-mutation-unknown", async ({ config, initial }) => {
-    const obligations = coverageObligations(body, objectiveCriteria(body));
-    const graph = withCoverage({ coverageObligations: obligations }, initial);
-    graph.coverage[0].source = obligations[0].source;
-    const state = {
-      graph,
-      objective: 1,
-      baseSha: initial.baseSha,
-      runId: "fixture",
-      issueByItemId: { result: 2 },
-      work: { result: { status: "done", attempt: "preserved" } },
-      admission: { graphDigest: graphDigest(graph), authority },
-      coordinator: { mode: "running" },
-    };
-    submitAmendment(state, {
-      ...discovery,
-      actor: "operator",
-      expectedGraphDigest: graphDigest(graph),
-      graph: qaGraph(graph),
-    });
-    let creates = 0;
-    const args = {
-      state,
-      config,
-      body,
-      model: {
-        async reviewGraph(request) {
-          return {
-            packetId: request.reviewPacket.id,
-            findings: [],
-          };
-        },
-      },
-      github: {
-        async projectGraph(request) {
-          request.projected("result", 2);
-          await request.beforeCreate("qa");
-          creates++;
-          throw new GitHubOutcomeUnknown();
-        },
-      },
-      save() {},
-      cancelled: () => false,
-    };
-    await assert.rejects(applyPendingAmendment(args), /GitHub/);
-    assert.equal(state.pendingAmendment.phase, "projecting");
-    assert.equal(state.pendingAmendment.projectionPending, "qa");
-    assert.ok(state.pendingAmendment.reviewDigest);
-    assert.deepEqual(state.pendingAmendment.issueByItemId, { result: 2 });
-    assert.equal(state.graph.items.length, 1);
-    assert.equal(state.work.result.attempt, "preserved");
-    await assert.rejects(applyPendingAmendment(args), /cannot be replayed/);
-    assert.equal(creates, 1);
-    assert.equal(state.allowanceConsumption.planningRevisions, 1);
-  });
+test("mutation-unknown projection repeats without duplicate issues", async () => {
+  await assertProjectionRepeats(
+    "projection-mutation-unknown",
+    new GitHubOutcomeUnknown(),
+    /GitHub/,
+  );
 });
 
 test("completed-auth-rejection preserves projection history without replay", async () => {
@@ -2537,7 +2730,6 @@ test("completed-auth-rejection preserves projection history without replay", asy
       };
       await assert.rejects(applyPendingAmendment(args), /GitHub/);
       assert.equal(state.pendingAmendment.phase, "rejected");
-      assert.equal(state.pendingAmendment.projectionPending, undefined);
       assert.equal(state.pendingAmendment.rejectionStage, "projection");
       assert.ok(state.pendingAmendment.reviewDigest);
       assert.deepEqual(state.pendingAmendment.issueByItemId, { result: 2 });

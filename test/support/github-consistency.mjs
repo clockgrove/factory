@@ -86,10 +86,13 @@ const scenarios = [
     // Real GitHub (#630): the list shows a new issue after 2.5-3.4 s. Factory
     // keeps the number a create answers, so only a lost answer makes it list
     // within that span; the number probe must find the issue, not a duplicate.
-    name: "lost issue creation, then the issue list lags 3 s after each creation",
+    // The test clock runs 100x fast (src/clock.ts), so real overhead between
+    // the create and the list read counts 100x too: the span is 30 s logical
+    // (0.3 s real), still inside Factory's lag window, so the read stays stale.
+    name: "lost issue creation, then the issue list lags after each creation",
     deliveries: BOTH,
     http: [{ match: CREATE_ISSUE, kind: "drop" }],
-    fake: { lag: [{ read: ISSUES, after: CREATE_ISSUE, ms: 3000 }] },
+    fake: { lag: [{ read: ISSUES, after: CREATE_ISSUE, ms: 30_000 }] },
   },
   {
     name: "sub-issue list lags one read after a sub-issue is added",

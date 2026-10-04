@@ -4,22 +4,121 @@
 // restart neither progresses nor completes, and following the commands the
 // status names does not continue it.
 //
+// The named-command finder runs in the same cases. At each sampled stop it
+// reads every command the stop names — the status's next action, its other
+// sentences (`nextDecision`, reasons, errors, waits) and the run's own message
+// — and executes it through the same calls the CLI makes (retry, repair,
+// decide, propose-amendment, resume, cancel...): through the owner's control
+// socket while one runs, else the application. A stop whose owner is still up
+// (paused, draining, a held phase) gets each command both ways. A named
+// command that is refused, or after which the next run neither progresses nor
+// reaches a terminal or decision stop, is a dead end.
+//
 // Known dead ends are inverted, like the fault matrix's known failures: the
 // test passes while the state stays stranded for its diagnosed reason and fails
-// once it has an exit; then remove its entry. Entries name a state by its
-// structure — delivery, anchor shape, overlays — and are checked whether or
-// not the pairwise sample picks them.
+// once it has an exit; then remove its entry. A diagnosis names the states it
+// strands by structure (`when`: delivery, anchor shape, overlays) and the
+// refusal it shows (`pattern`). Every stranding the sample finds must match a
+// diagnosis, and every diagnosis must show up in the sample. Entries in KNOWN
+// name a state outright and are checked whether or not the pairwise sample
+// picks them.
 import assert from "node:assert/strict";
 import { availableParallelism } from "node:os";
 import { describe, test } from "node:test";
-import { identityName, prepare } from "./support/dead-ends.mjs";
+import { identityName, OVERLAY_VALUES, prepare } from "./support/dead-ends.mjs";
 
-const D = {};
+const has = (identity, ...values) =>
+  values.some((value) => identity.slice(2).includes(value));
 
 /**
- * Stranded states by diagnosis: [delivery, anchor shape, ...overlays]. Empty:
- * the step conversions (#563, #566, #562) gave every earlier entry an exit. A
- * new entry needs a diagnosis in D and an open P0 issue.
+ * Diagnoses of stranded states. `pattern` matches the stranding reason, `when`
+ * the identity ([delivery, anchor shape, ...overlays]) of the states it
+ * strands, `issue` says where it is tracked. A new diagnosis needs an open P0
+ * issue (P1 when the Objective has another exit).
+ */
+const D = {
+  repairAllowance: {
+    diagnosis:
+      "Status names `factory repair` after the repair allowance is used up (this item's path or the Objective's); repair is refused",
+    issue: "#676, fixed by #567",
+    pattern:
+      /factory repair is refused \((?:Repair path \S+ implementationRepairs allowance exhausted|Objective implementationRepairs allowance exhausted)/,
+    when: (identity) =>
+      has(
+        identity,
+        "this item's repair path is used up",
+        "the Objective's implementation repairs are used up",
+      ),
+  },
+  repairClass: {
+    diagnosis:
+      "Status names `factory repair` when repairClasses omits implementation; repair is refused",
+    issue: "#676, fixed by #567",
+    pattern:
+      /factory repair is refused \(Repair class implementation is not enabled/,
+    when: (identity) =>
+      has(
+        identity,
+        "no repair class is enabled",
+        "only planning repairs are enabled",
+      ),
+  },
+  amendmentPlanningRevision: {
+    diagnosis:
+      "A rejected amendment used the Objective's only planning revision, so its replacement (`factory propose-amendment`) is refused: allowance exhausted",
+    issue: "#715",
+    pattern:
+      /factory propose-amendment is refused \(Objective planningRevisions allowance exhausted\)/,
+    when: (identity) => has(identity, "an amendment was rejected"),
+  },
+  amendmentClass: {
+    diagnosis:
+      "Status names `factory propose-amendment` for a rejected amendment when repairClasses omits the planning classes; the replacement is refused",
+    issue: "#716",
+    pattern:
+      /factory propose-amendment is refused \(Repair class planning-output is not enabled/,
+    when: (identity) =>
+      has(identity, "an amendment was rejected") &&
+      has(
+        identity,
+        "no repair class is enabled",
+        "only planning repairs are enabled",
+      ),
+  },
+  amendmentUnsettled: {
+    diagnosis:
+      "Status names `factory propose-amendment` for a rejected amendment while an item is published or running; the replacement needs settled ownership, and the pending amendment blocks the delivery that would settle it",
+    issue: "#717",
+    pattern:
+      /factory propose-amendment is refused \(Amendment replacement requires paused, settled ownership\)/,
+    when: (identity) =>
+      has(identity, "an amendment was rejected") &&
+      /published|running/.test(identity[1]),
+  },
+  cancelledItem: {
+    diagnosis:
+      "A cancelled item of a live Objective is never retried: status names `factory run` (waiting for a decision nothing offers) or an Objective-wide `factory retry` (no dependency-ready delivery unit); `factory retry --item` would restart it",
+    issue: "#718",
+    pattern:
+      /factory run does not continue after .*Awaiting exact candidate decision|factory retry does not continue after stopped: No dependency-ready delivery unit/,
+    when: (identity) =>
+      has(identity, "an item was cancelled and the Objective retried"),
+  },
+  configurationChanged: {
+    diagnosis:
+      "The installation configuration changed after the Objective started: status names `factory retry`, which is accepted, and the next run stops identically (the state does not match this installation)",
+    issue: "#739",
+    pattern:
+      /factory retry does not continue after stopped: Existing Objective state does not match this Factory installation/,
+    when: (identity) =>
+      has(identity, "the installation configuration changed") &&
+      !identity[1].startsWith("preparing"),
+  },
+};
+
+/**
+ * Stranded states named outright: diagnosis → [delivery, anchor shape,
+ * ...overlays]. Checked whether or not the pairwise sample picks them.
  */
 const KNOWN = {};
 
@@ -186,9 +285,6 @@ for (const [diagnosis, identities] of Object.entries(KNOWN))
     known.set(name, diagnosis);
   }
 const fixed = new Set(FIXED.map(identityName));
-const byDiagnosis = new Map(
-  Object.values(D).map((entry) => [entry.diagnosis, entry]),
-);
 
 // Cases run one at a time per slot; a slot is one recorded world root.
 const slots = Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
@@ -198,36 +294,90 @@ const { cases, schedule } = await prepare({
   include: [...Object.values(KNOWN).flat(), ...FIXED],
 });
 
+/** Run each case once; the test of the case and the final check share it. */
+const outcomes = new Map();
+const outcomeOf = (testCase) => {
+  if (!outcomes.has(testCase)) outcomes.set(testCase, schedule(testCase));
+  return outcomes.get(testCase);
+};
+
+/**
+ * Every stranding of a case: the restart's own, then each named command that
+ * was refused or did not continue.
+ */
+const reasonsOf = (outcome) => [
+  ...(outcome.kind === "stranded" ? [outcome.reason] : []),
+  ...(outcome.problems ?? []),
+];
+
+/** The diagnosis of each reason, undefined when it has none. */
+const diagnose = (testCase, reasons) =>
+  reasons.map(
+    (reason) =>
+      Object.entries(D).find(
+        ([key, entry]) =>
+          entry.pattern.test(reason) &&
+          (entry.when(testCase.identity) || known.get(testCase.name) === key),
+      )?.[0],
+  );
+
 describe("dead ends", { concurrency: true }, () => {
   for (const testCase of cases) {
-    test(testCase.name, { timeout: 3_600_000 }, async (t) => {
-      const outcome = await schedule(testCase);
-      const detail = `${outcome.kind}: ${outcome.reason ?? ""}\n${outcome.trace.join("\n")}`;
-      const diagnosis = known.get(testCase.name);
-      if (!diagnosis) {
+    test(testCase.name, { timeout: 3_600_000 }, async () => {
+      const outcome = await outcomeOf(testCase);
+      const reasons = reasonsOf(outcome);
+      const detail = `${outcome.kind}: ${outcome.reason ?? ""}\n${reasons.join("\n")}\n${outcome.trace.join("\n")}`;
+      const pinned = known.get(testCase.name);
+      if (outcome.kind === "unreachable") {
         // A pinned former dead end must still be a state the sample reaches.
-        if (fixed.has(testCase.name))
-          assert.notEqual(outcome.kind, "unreachable", detail);
-        assert.notEqual(outcome.kind, "stranded", detail);
-        return;
-      }
-      assert.notEqual(
-        outcome.kind,
-        "unreachable",
-        `Known dead end is no longer a reachable state; remove it from KNOWN: ${diagnosis}`,
-      );
-      if (outcome.kind === "stranded") {
-        assert.match(
-          outcome.reason,
-          byDiagnosis.get(diagnosis).pattern,
-          detail,
+        assert.ok(
+          !pinned,
+          `Known dead end is no longer a reachable state; remove it from KNOWN: ${pinned}`,
         );
-        t.diagnostic(`known dead end: ${diagnosis}`);
+        assert.ok(!fixed.has(testCase.name), detail);
         return;
       }
-      assert.fail(
-        `Known dead end no longer reproduces; remove it from KNOWN in test/dead-ends.test.mjs: ${diagnosis}\n${detail}`,
+      // Each stranding is a diagnosed one, in a state its diagnosis names.
+      const diagnosed = diagnose(testCase, reasons);
+      assert.deepEqual(
+        reasons.filter((_, index) => !diagnosed[index]),
+        [],
+        detail,
       );
+      if (pinned)
+        assert.ok(
+          diagnosed.includes(pinned),
+          `Known dead end no longer reproduces; remove it from KNOWN in test/dead-ends.test.mjs: ${D[pinned].diagnosis}\n${detail}`,
+        );
     });
   }
+
+  // An overlay the sampler never picks is a scenario CI does not run.
+  test("every overlay value is exercised", () => {
+    const used = new Set(
+      cases.flatMap((testCase) => Object.values(testCase.values ?? {})),
+    );
+    assert.deepEqual(
+      OVERLAY_VALUES.filter((value) => !used.has(value)),
+      [],
+      "No case applies these overlays; they change nothing or apply to no anchor",
+    );
+  });
+
+  // A diagnosis that no case shows any more is fixed: remove it.
+  test("every diagnosis is still reproduced", async () => {
+    const seen = new Set();
+    for (const testCase of cases) {
+      const outcome = await outcomeOf(testCase);
+      for (const key of diagnose(testCase, reasonsOf(outcome)))
+        if (key) seen.add(key);
+    }
+    assert.deepEqual(
+      Object.entries(D)
+        .filter(([key]) => !seen.has(key))
+        .map(([key, entry]) => `${key}: ${entry.diagnosis}`),
+      [],
+      "No case shows these diagnoses any more; remove them from D in test/dead-ends.test.mjs",
+    );
+  });
 });

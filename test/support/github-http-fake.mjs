@@ -97,6 +97,7 @@ const ROUTES = [
 /** Endpoint names as they appear in the request log. */
 export const ENDPOINTS = [
   ...ROUTES.map((route) => route.endpoint),
+  "GET /user",
   "POST /graphql",
   "GIT fetch-advertise",
   "GIT fetch",
@@ -505,6 +506,10 @@ export class GitHubHttpFake {
     if (path === "/graphql")
       return method === "POST"
         ? { endpoint: "POST /graphql", handler: "graphql", params: {} }
+        : undefined;
+    if (path === "/user")
+      return method === "GET"
+        ? { endpoint: "GET /user", handler: "viewer", params: {} }
         : undefined;
     const match = /^\/repos\/([^/]+)\/([^/]+)(\/.*)?$/.exec(path);
     if (!match) return undefined;
@@ -923,9 +928,19 @@ export class GitHubHttpFake {
     };
   }
 
+  /** The token's user, who authors everything Factory creates here. */
+  viewer() {
+    return {
+      status: 200,
+      data: { login: this.owner, id: 1, type: "User" },
+    };
+  }
+
   listIssues(s, { query }) {
     const state = query.get("state") ?? "open";
     const labels = query.get("labels")?.split(",").filter(Boolean) ?? [];
+    // Every issue here is authored by the owner.
+    const creator = query.get("creator");
     const direction = query.get("direction") ?? "desc";
     const sort = query.get("sort") ?? "created";
     if (!["open", "closed", "all"].includes(state))
@@ -937,6 +952,11 @@ export class GitHubHttpFake {
       .filter((number) => state === "all" || s.issues[number].state === state)
       .filter((number) =>
         labels.every((name) => s.issues[number].labels.includes(name)),
+      )
+      .filter(
+        () =>
+          creator === null ||
+          creator.toLowerCase() === this.owner.toLowerCase(),
       )
       .sort((a, b) => (direction === "asc" ? a - b : b - a));
     const page = this.page(query, issues, `/repos/${this.repository}/issues`);

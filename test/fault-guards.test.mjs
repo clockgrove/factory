@@ -44,8 +44,33 @@ const done = { alpha: "done", beta: "done" };
 
 /** One representative target per diagnosis, as the matrix produces them. */
 const SAMPLES = {
+<<<<<<< HEAD
   PLANNER_STOP: stopped("socket hang up", {}),
   FINAL_REVIEW: stopped(objectiveStopped("socket hang up"), done),
+=======
+  GIT_PUSH: stopped(
+    objectiveStopped(
+      `git -C /tmp/t/target push origin ${sha}:refs/heads/factory/objective-1/alpha failed (1): error: RPC failed; HTTP 503`,
+    ),
+    { alpha: "failed@deliver", beta: "pending" },
+  ),
+  GIT_FETCH: stopped(
+    objectiveStopped(
+      "git -C /tmp/t/target fetch --no-tags --no-write-fetch-head --refmap= origin +refs/heads/main:refs/factory/fetch/0f8fad5b-d9cb-469f-a165-70867728950e failed (128): fatal: unable to access 'http://127.0.0.1:1/git/example/r.git/': The requested URL returned error: 503 ",
+    ),
+    published,
+  ),
+  GIT_FETCH_RESET: stopped(
+    objectiveStopped(
+      "git -C /tmp/t/target fetch --no-tags --no-write-fetch-head --refmap= origin +refs/heads/main:refs/factory/fetch/0f8fad5b-d9cb-469f-a165-70867728950e failed (128): fatal: unable to access 'http://127.0.0.1:1/git/example/r.git/': Empty reply from server ",
+    ),
+    { alpha: "failed", beta: "pending" },
+  ),
+  NATIVE_READS: stopped(
+    objectiveStopped("GitHub request failed (HTTP 503)"),
+    published,
+  ),
+>>>>>>> origin/claude/phase-a-4-objective
   START_AMBIGUOUS: stopped(
     "Objective stopped: Work Item beta has ambiguous active state at execute; operator direction required. Use explicit retry or operator direction.",
     { alpha: "done", beta: "running@execute" },
@@ -68,6 +93,7 @@ const SAMPLES = {
       },
     ),
   }),
+<<<<<<< HEAD
   PROJECTION_STOP: stopped(
     "GitHub mutation outcome unknown; reconcile authenticated evidence before retrying",
     {},
@@ -88,6 +114,36 @@ const SAMPLES = {
     ),
     done,
   ),
+=======
+  MERGE_READ_LAG: stopped(
+    objectiveStopped("PR merge has not confirmed the exact integrated commit"),
+    { alpha: "failed", beta: "pending" },
+  ),
+  TIMELINE_LAG: stopped(
+    objectiveStopped("PR #4 has missing or conflicting merge evidence"),
+    published,
+  ),
+  PULL_LIST_LAG: stopped(objectiveStopped("GitHub request failed (HTTP 422)"), {
+    alpha: "failed@deliver",
+    beta: "pending",
+  }),
+  STACK_MERGE_REPEAT: stopped(
+    objectiveStopped("GitHub request failed (HTTP 409)"),
+    published,
+  ),
+  SECONDARY_403: stopped(objectiveStopped("GitHub request failed (HTTP 403)"), {
+    alpha: "failed@deliver",
+    beta: "pending",
+  }),
+  PRIMARY_403: stopped(objectiveStopped("GitHub request failed (HTTP 403)"), {
+    alpha: "failed",
+    beta: "pending",
+  }),
+  BASE_MODIFIED: stopped(objectiveStopped("GitHub request failed (HTTP 405)"), {
+    alpha: "failed",
+    beta: "pending",
+  }),
+>>>>>>> origin/claude/phase-a-4-objective
 };
 
 test("every diagnosis has a sample, and each sample matches only its own diagnosis", () => {
@@ -137,19 +193,14 @@ test("generic transport text matches only where the run stopped", () => {
       beta: "pending",
     },
   );
+<<<<<<< HEAD
   for (const key of ["PLANNER_STOP", "FINAL_REVIEW", "PROJECTION_STOP"]) {
+=======
+  for (const key of ["NATIVE_READS"]) {
+>>>>>>> origin/claude/phase-a-4-objective
     assert.equal(DIAGNOSES[key].pattern.test(midRun), false, key);
     assert.equal(DIAGNOSES[key].pattern.test(midDelivery), false, key);
   }
-  // The page-shift stop is not a duplicate issue, nor the reverse.
-  assert.equal(
-    DIAGNOSES.ISSUE_LIST_LAG.pattern.test(SAMPLES.PAGE_SHIFT),
-    false,
-  );
-  assert.equal(
-    DIAGNOSES.PAGE_SHIFT.pattern.test(SAMPLES.ISSUE_LIST_LAG),
-    false,
-  );
 });
 
 test("the target is the run that ended the scenario, or the last stop", () => {
@@ -164,12 +215,6 @@ test("the target is the run that ended the scenario, or the last stop", () => {
   assert.equal(
     diagnosisTarget({ runs: [early, late] }, "end", error),
     summarizeRun(late),
-  );
-  assert.equal(
-    DIAGNOSES.PAGE_SHIFT.pattern.test(
-      diagnosisTarget({ runs: [early, late] }, "end", error),
-    ),
-    false,
   );
   // After a complete run: the operator-stop check names the last stop, other
   // checks the end-state fact.

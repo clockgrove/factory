@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { planReviewPacket } from "../dist/compiler.js";
+import { CompletedModelInvocationError } from "../dist/contracts.js";
 import { readContinuation, saveState, statePath } from "../dist/state-store.js";
 import { shortPlanDigest } from "../dist/status-summary.js";
 import { withCoverage } from "./support/coverage.mjs";
@@ -28,7 +29,8 @@ function undecidedModel(graph, calls) {
     },
     async reviewGraph() {
       calls.push("graph-review");
-      throw new Error("Fixture malformed review");
+      // A completed answer that is not a valid review.
+      throw new CompletedModelInvocationError("Fixture malformed review");
     },
     async reviewResult(request) {
       return {

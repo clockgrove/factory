@@ -24,6 +24,7 @@ import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import {
   assertObjectiveCriteria,
   compilePlan,
+  paidModel,
   finalObjectiveCommands,
   objectiveCriteria,
   type PlanCandidate,
@@ -37,7 +38,6 @@ import {
   sealFinalAcceptance,
   closeObjectiveIssue,
   closeWorkItem,
-  GitHubClosureFailure,
 } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
 import {
@@ -53,7 +53,7 @@ import type {
   GitHubGateway,
   PlanningModel,
 } from "./contracts.js";
-import { CompletedModelInvocationError } from "./contracts.js";
+import { attachedFault, attachFault, decision, faultDetail } from "./fault.js";
 import {
   type ControlRequest,
   requestControl,
@@ -67,6 +67,10 @@ import {
   awaitsOperator,
   clearAllRepeats,
   clearRepeats,
+  outageOf,
+  step,
+  type StepContext,
+  type StepState,
   waitOf,
 } from "./step.js";
 import { namesPlan, shortPlanDigest } from "./status-summary.js";
@@ -114,6 +118,9 @@ import {
   reviewAcceptance,
   validateTree,
 } from "./validation.js";
+
+/** Heads others push during final validation that Factory follows before asking. */
+const FOLLOWED_HEAD_LIMIT = 3;
 
 /** One controller-derived binding for the immutable preparation inputs. */
 function preparationSourceDigest(
@@ -605,12 +612,14 @@ export async function runObjective(
     };
     owner.snapshot.coordinator.waitReason = "Verifying owned work cessation";
     persist();
-    owner.abort.abort();
+    owner.abort.abort(new Error("Objective cancellation requested"));
     if (owner.cancellation) return;
     owner.cancellation = (async () => {
       const state = owner.snapshot!;
       try {
         await cancelKnownWork(state, services.driver, persist);
+        // Cessation is verified: an earlier unresolved attempt is answered.
+        delete state.coordinator!.cancelError;
         // The run settles its in-flight effect before recording terminal cancellation.
         state.coordinator!.waitReason =
           "Owned cancellation acknowledged; waiting for in-flight phase to settle";
@@ -872,12 +881,17 @@ export async function runObjective(
             work.recovery?.phase === "diagnosing") &&
           ["failed", "waiting"].includes(work.status),
       );
+<<<<<<< HEAD
       // A step's question or configuration fix names what to answer.
       const asked = Object.entries(result.work).find(([, work]) =>
         awaitsOperator(work.wait),
       );
       result.coordinator!.waitReason = result.githubClosureError
         ? "GitHub closure acknowledgement unresolved; resume to reconcile"
+=======
+      result.coordinator!.waitReason = result.wait
+        ? result.wait.detail
+>>>>>>> origin/claude/phase-a-4-objective
         : result.coordinator!.mode === "draining"
           ? "Drained; no owned attempts remain"
           : stoppedRepair
@@ -969,35 +983,39 @@ async function runObjectivePass(
   const cancellationRequested = () => Boolean(owner.snapshot?.cancelRequested);
   try {
     diagnostics.emit({ operation: "objective-run", outcome: "started" });
-    const observeObjective = async () => {
-      for (;;) {
-        if (cancellationRequested())
-          throw new Error("Objective cancellation requested");
-        try {
-          const observed = await github.objective(objective);
-          if (owner.snapshot?.coordinator) {
-            owner.snapshot.coordinator.observedAt = new Date().toISOString();
-            delete owner.snapshot.coordinator.observationError;
-          }
-          return observed;
-        } catch (error) {
-          if (!owner.snapshot?.coordinator || cancellationRequested())
-            throw error;
-          owner.snapshot.coordinator.observationError =
-            "Exact Objective observation unavailable";
-          owner.snapshot.coordinator.waitReason =
-            "GitHub API unavailable; resume to observe again or cancel locally";
-          owner.snapshot.coordinator.mode = "paused";
-          saveState(path, owner.snapshot);
-          do {
-            await owner.waitForWake();
-          } while (
-            String(owner.snapshot.coordinator.mode) !== "running" &&
-            !cancellationRequested()
-          );
-        }
-      }
-    };
+    // Before the Objective has state its first reads repeat in memory: there
+    // is nothing to save yet.
+    const unsaved: Pick<PreparationState, "repeats" | "wait"> = {};
+    /** Run one Objective step (see src/step.ts) on `state`'s records. */
+    const objectiveStep = <T>(
+      state: ContinuationState | undefined,
+      name: string,
+      fn: (context: StepContext) => Promise<T>,
+      paid = false,
+    ): Promise<T> =>
+      step(
+        state ?? (unsaved as StepState),
+        { scope: "objective", name, paid },
+        fn,
+        {
+          save: () => {
+            if (state?.schemaVersion === 7) save(state);
+            else if (state) saveState(path, state);
+            else {
+              // Nothing is saved before the Objective has state: report an
+              // outage to the run's output instead.
+              const outage = outageOf(unsaved as StepState, "objective");
+              if (outage)
+                reportRunStatus?.(
+                  `Factory: ${outage.step} failing since ${outage.since} (${outage.tries} tries): ${faultDetail(outage.last)}`,
+                );
+            }
+          },
+          signal: owner.abort.signal,
+        },
+      );
+    const observeObjective = (state = owner.snapshot) =>
+      objectiveStep(state, "observe", () => github.objective(objective));
     const issue = await observeObjective();
     assertObjectiveCriteria(issue.body);
     const installationConfigDigest = factoryConfigDigest(config);
@@ -1034,7 +1052,7 @@ async function runObjectivePass(
       }
       if (state.error)
         throw new Error(
-          `Objective stopped: ${state.error}. Use explicit retry or operator direction.`,
+          `Objective stopped: ${state.error}. Fix the cause, then run \`factory retry --objective ${objective}\``,
         );
       if (
         !state.objectiveBodyDigest &&
@@ -1066,6 +1084,7 @@ async function runObjectivePass(
             github,
             saveCurrent,
             config.delivery.kind === "native-stack",
+            owner.abort.signal,
           );
       if (state.finalValidation?.passed) {
         reportRunStatus?.(
@@ -1080,7 +1099,13 @@ async function runObjectivePass(
               "Default branch changed before historical final acceptance could be sealed",
             );
         }
-        await closeObjectiveIssue(state, issue.body, github, saveCurrent);
+        await closeObjectiveIssue(
+          state,
+          issue.body,
+          github,
+          saveCurrent,
+          owner.abort.signal,
+        );
         return state;
       }
       if (state.cancelRequested || state.cancelledAt)
@@ -1090,11 +1115,10 @@ async function runObjectivePass(
       reportRunStatus?.("Factory: resuming the existing run from atomic state");
     } else {
       const baseSha = git(config.checkout, "rev-parse", "HEAD");
-      const prerequisites = await planningPrerequisites(
-        config,
-        github,
-        objective,
-        baseSha,
+      const prerequisites = await objectiveStep(
+        owner.snapshot,
+        "prerequisites",
+        () => planningPrerequisites(config, github, objective, baseSha),
       );
       const objectivesRoot = join(root, "objectives");
       if (existsSync(objectivesRoot)) {
@@ -1191,26 +1215,33 @@ async function runObjectivePass(
               reportRunStatus?.(
                 "Factory: compiling and independently reviewing a fresh plan",
               );
-              // The plan and its review persist in the preparation, so a rerun never pays again.
-              return compilePlan(
-                objective,
-                issue.body,
-                baseSha,
-                config.checkout,
-                planningModel,
-                installationConfigDigest,
-                diagnostics.modelObserver({ scopeId: planningScopeId }),
-                executionProfileChoices(config),
-                {
-                  state: preparation!,
-                  save: () => saveState(path, preparation!),
-                  stopped: () =>
-                    cancellationRequested() ||
-                    preparation!.coordinator.mode !== "running",
-                },
-                prerequisites,
-                localExecutables,
-                { configuredConcurrency: capacity.concurrency },
+              // The plan and its review persist in the preparation, so a
+              // repeat never pays again for a call that completed.
+              return objectiveStep(
+                preparation,
+                "plan",
+                (context) =>
+                  compilePlan(
+                    objective,
+                    issue.body,
+                    baseSha,
+                    config.checkout,
+                    paidModel(planningModel, context),
+                    installationConfigDigest,
+                    diagnostics.modelObserver({ scopeId: planningScopeId }),
+                    executionProfileChoices(config),
+                    {
+                      state: preparation!,
+                      save: () => saveState(path, preparation!),
+                      stopped: () =>
+                        cancellationRequested() ||
+                        preparation!.coordinator.mode !== "running",
+                    },
+                    prerequisites,
+                    localExecutables,
+                    { configuredConcurrency: capacity.concurrency },
+                  ),
+                true,
               );
             },
             (candidate) => ({ itemCount: candidate.graph.items.length }),
@@ -1317,23 +1348,31 @@ async function runObjectivePass(
       };
       await waitWhileStopped();
       // Projection finds existing issues by marker before creating any, so a
-      // restart simply projects again; recorded numbers are passed as known.
+      // repeat simply projects again; recorded numbers are passed as known.
       const projected = await diagnostics.span(
         {
           operation: "github-projection",
           metadata: { itemCount: graph.items.length },
         },
         () =>
-          github.projectGraph({
-            graph,
-            objectiveIssue: objective,
-            knownIssues: preparation!.issueByItemId,
-            beforeCreate: waitWhileStopped,
-            projected: (id, number) => {
-              preparation!.issueByItemId[id] = number;
-              saveState(path, preparation!);
-            },
-          }),
+          objectiveStep(preparation, "project", (context) =>
+            github.projectGraph({
+              graph,
+              objectiveIssue: objective,
+              knownIssues: preparation!.issueByItemId,
+              author: preparation!.issueAuthor,
+              authored: (login) => {
+                preparation!.issueAuthor = login;
+                saveState(path, preparation!);
+              },
+              beforeCreate: waitWhileStopped,
+              projected: (id, number) => {
+                preparation!.issueByItemId[id] = number;
+                saveState(path, preparation!);
+                context.progress();
+              },
+            }),
+          ),
       );
       state = {
         schemaVersion: 7,
@@ -1367,6 +1406,9 @@ async function runObjectivePass(
           .update(issue.body)
           .digest("hex"),
         issueByItemId: projected.issueByItemId,
+        ...(preparation.issueAuthor
+          ? { issueAuthor: preparation.issueAuthor }
+          : {}),
         work: Object.fromEntries(
           graph.items.map((item) => [item.id, { status: "pending" }]),
         ),
@@ -1384,7 +1426,6 @@ async function runObjectivePass(
       phaseStartedAt: new Date().toISOString(),
     };
     state.coordinator.observedAt = new Date().toISOString();
-    delete state.coordinator.observationError;
     await applyPendingAmendment({
       state,
       config,
@@ -1393,6 +1434,7 @@ async function runObjectivePass(
       github,
       save: () => save(state),
       cancelled: cancellationRequested,
+      signal: owner.abort.signal,
       diagnostics,
     });
     if (state.coordinator.mode === "running" && !cancellationRequested()) {
@@ -1427,6 +1469,38 @@ async function runObjectivePass(
     );
     stateForSignal = state;
     save(state);
+    /** Delivery re-observes the Objective: a foreign edit or closure is a decision. */
+    // Items deliver concurrently; they share one observation in flight.
+    let observing: Promise<void> | undefined;
+    const reconcile = async () => {
+      observing ??= observeUnchanged().finally(() => {
+        observing = undefined;
+      });
+      await observing;
+      if (cancellationRequested())
+        throw new Error("Objective cancellation requested");
+    };
+    const observeUnchanged = async () => {
+      await objectiveStep(state, "observe", async () => {
+        const refreshed = await github.objective(objective);
+        const changed =
+          refreshed.state === "closed"
+            ? "The Objective issue was closed"
+            : createHash("sha256").update(refreshed.body).digest("hex") !==
+                state.objectiveBodyDigest
+              ? "The Objective issue body changed"
+              : undefined;
+        if (changed)
+          throw attachFault(
+            new Error(`${changed}; operator direction required`),
+            decision(
+              `${changed} outside Factory. Restore it, then factory retry --objective ${objective}; or factory cancel --objective ${objective}`,
+            ),
+          );
+      });
+      state.coordinator!.observedAt = new Date().toISOString();
+      save(state);
+    };
     if (config.delivery.kind === "native-stack") {
       await runNativeGraph({
         config,
@@ -1441,32 +1515,7 @@ async function runObjectivePass(
         planningModel,
         save: () => save(state),
         active,
-        reconcile: async () => {
-          try {
-            const refreshed = await observeObjective();
-            state.coordinator!.observedAt = new Date().toISOString();
-            delete state.coordinator!.observationError;
-            if (refreshed.state === "closed")
-              throw new Error(
-                "Objective issue is confirmed closed; operator direction required",
-              );
-            if (
-              createHash("sha256").update(refreshed.body).digest("hex") !==
-              state.objectiveBodyDigest
-            )
-              throw new Error(
-                "Objective issue body changed; operator direction required",
-              );
-          } catch (error) {
-            state.coordinator!.observationError =
-              error instanceof Error ? error.message : String(error);
-            save(state);
-            throw error;
-          }
-          if (cancellationRequested())
-            throw new Error("Objective cancellation requested");
-          save(state);
-        },
+        reconcile,
         cancelled: cancellationRequested,
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
@@ -1488,32 +1537,7 @@ async function runObjectivePass(
         planningModel,
         save: () => save(state),
         active,
-        reconcile: async () => {
-          try {
-            const refreshed = await observeObjective();
-            state.coordinator!.observedAt = new Date().toISOString();
-            delete state.coordinator!.observationError;
-            if (refreshed.state === "closed")
-              throw new Error(
-                "Objective issue is confirmed closed; operator direction required",
-              );
-            if (
-              createHash("sha256").update(refreshed.body).digest("hex") !==
-              state.objectiveBodyDigest
-            )
-              throw new Error(
-                "Objective issue body changed; operator direction required",
-              );
-          } catch (error) {
-            state.coordinator!.observationError =
-              error instanceof Error ? error.message : String(error);
-            save(state);
-            throw error;
-          }
-          if (cancellationRequested())
-            throw new Error("Objective cancellation requested");
-          save(state);
-        },
+        reconcile,
         cancelled: cancellationRequested,
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
@@ -1529,257 +1553,366 @@ async function runObjectivePass(
       return state;
     if (cancellationRequested())
       throw new Error("Objective cancellation requested");
-    const observedHead = await fetchHead(
-      config.checkout,
-      await github.defaultBranch(),
-    );
-    const finalGraphDigest = graphDigest(state.graph);
-    const candidateCommitSha = objectiveCandidate(state)!.commitSha;
-    if (observedHead !== candidateCommitSha)
-      throw new Error(
-        `Default branch changed before final validation: expected ${candidateCommitSha}, observed ${observedHead}`,
+    /**
+     * Fetch the default branch. Commits others pushed on top of the
+     * integrated Objective move the final candidate to that head, which is
+     * validated again; that is not a fault. Returns whether it moved.
+     */
+    const followDefaultBranch = () =>
+      objectiveStep(state, "final-head", async (context) => {
+        const head = await fetchHead(
+          config.checkout,
+          await github.defaultBranch(),
+        );
+        context.progress();
+        const candidate = objectiveCandidate(state)!;
+        if (head === candidate.commitSha) return false;
+        const integrated = state.integratedSha;
+        let contained = false;
+        if (candidate.basis === "current-graph-integration" && integrated)
+          try {
+            git(
+              config.checkout,
+              "merge-base",
+              "--is-ancestor",
+              integrated,
+              head,
+            );
+            contained = true;
+          } catch {
+            contained = false;
+          }
+        if (!contained) {
+          const detail =
+            candidate.basis === "pinned-baseline"
+              ? `The default branch moved to ${head} from the pinned baseline ${candidate.commitSha}`
+              : `The default branch ${head} no longer contains the integrated Objective ${integrated}`;
+          throw attachFault(
+            new Error(detail),
+            decision(
+              `${detail}. Only cancelling resolves this: factory cancel --objective ${objective}`,
+            ),
+          );
+        }
+        // Commits others pushed on top: follow them, bounded, apart from
+        // the integration Factory made.
+        const followed =
+          state.finalHead?.integratedSha === integrated
+            ? state.finalHead
+            : undefined;
+        const heads = (followed?.heads ?? []).filter((entry) => entry !== head);
+        if (head === integrated) delete state.finalHead;
+        else {
+          // A pending question is answered once the step runs again.
+          if (
+            !followed?.asked &&
+            (followed?.heads.length ?? 0) >= FOLLOWED_HEAD_LIMIT
+          ) {
+            state.finalHead = { ...followed!, asked: head };
+            save(state);
+            throw attachFault(
+              new Error(`The default branch keeps moving; now at ${head}`),
+              decision(
+                `The default branch keeps moving: ${followed!.heads.length} pushes by others during final validation, now at ${head}. Validate at ${head} now with factory retry --objective ${objective}, or wait and retry later.`,
+              ),
+            );
+          }
+          state.finalHead = {
+            integratedSha: integrated!,
+            heads: [...heads, head],
+          };
+        }
+        save(state);
+        return true;
+      });
+    await followDefaultBranch();
+    for (;;) {
+      const finalGraphDigest = graphDigest(state.graph);
+      const candidateCommitSha = objectiveCandidate(state)!.commitSha;
+      const finalTree = git(
+        config.checkout,
+        "rev-parse",
+        `${candidateCommitSha}^{tree}`,
       );
-    const finalTree = git(
-      config.checkout,
-      "rev-parse",
-      `${candidateCommitSha}^{tree}`,
-    );
-    assertCompletedCoverage(state);
-    const finalValidationStarted = Date.now();
-    diagnostics.emit({
-      runId: state.runId,
-      operation: "objective-validation",
-      outcome: "started",
-      metadata: {
+      assertCompletedCoverage(state);
+      const finalValidationStarted = Date.now();
+      diagnostics.emit({
+        runId: state.runId,
+        operation: "objective-validation",
+        outcome: "started",
+        metadata: {
+          candidateCommitSha,
+          candidateBasis: objectiveCandidate(state)!.basis,
+          ...(state.integratedSha
+            ? { integratedSha: state.integratedSha }
+            : {}),
+          treeSha: finalTree,
+        },
+      });
+      assertPinnedNpmScripts(
+        config.checkout,
+        state.baseSha,
         candidateCommitSha,
-        candidateBasis: objectiveCandidate(state)!.basis,
-        ...(state.integratedSha ? { integratedSha: state.integratedSha } : {}),
-        treeSha: finalTree,
-      },
-    });
-    assertPinnedNpmScripts(
-      config.checkout,
-      state.baseSha,
-      candidateCommitSha,
-      state.objectiveCommands ?? finalObjectiveCommands(issue.body),
-      {
-        sourceDeclared:
-          state.objectiveCommands ?? finalObjectiveCommands(issue.body),
-        workspacePackageAdditions: workspacePackageAdditions(issue.body),
-      },
-    );
-    const commandEvidence = await validateTree(
-      config.checkout,
-      join(root, "final-validation"),
-      candidateCommitSha,
-      finalTree,
-      state.objectiveCommands ?? finalObjectiveCommands(issue.body),
-      (entry) =>
-        diagnostics.emit({
-          runId: state.runId,
-          operation: "objective-validation-command",
-          outcome: entry.passed ? "completed" : "failed",
-          durationMs: entry.durationMs,
-          metadata: { commandIndex: entry.index, exitCode: entry.exitCode },
-          detail: entry.output,
-        }),
-      (entry) =>
-        diagnostics.emitStream(
-          {
-            runId: state.runId,
-            operation: "objective-validation-output",
-            outcome: "observed",
-            metadata: { commandIndex: entry.index, stream: entry.stream },
-          },
-          entry.output,
-          entry.final,
-        ),
-      finalValidationLfsMembers(state),
-      contentStore,
-    );
-    const selectedAssets = graph.items.flatMap((item) => {
-      const work = state.work[item.id];
-      const set = work?.assets?.find(
-        (candidate) => candidate.id === work.selectedAssetSet,
+        state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+        {
+          sourceDeclared:
+            state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+          workspacePackageAdditions: workspacePackageAdditions(issue.body),
+        },
       );
-      return set ? [{ itemId: item.id, set }] : [];
-    });
-    const hydrationReceipt = selectedAssets.length
-      ? await diagnostics.span(
+      const commandEvidence = await validateTree(
+        config.checkout,
+        join(root, "final-validation"),
+        candidateCommitSha,
+        finalTree,
+        state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+        (entry) =>
+          diagnostics.emit({
+            runId: state.runId,
+            operation: "objective-validation-command",
+            outcome: entry.passed ? "completed" : "failed",
+            durationMs: entry.durationMs,
+            metadata: { commandIndex: entry.index, exitCode: entry.exitCode },
+            detail: entry.output,
+          }),
+        (entry) =>
+          diagnostics.emitStream(
+            {
+              runId: state.runId,
+              operation: "objective-validation-output",
+              outcome: "observed",
+              metadata: { commandIndex: entry.index, stream: entry.stream },
+            },
+            entry.output,
+            entry.final,
+          ),
+        finalValidationLfsMembers(state),
+        contentStore,
+      );
+      const selectedAssets = graph.items.flatMap((item) => {
+        const work = state.work[item.id];
+        const set = work?.assets?.find(
+          (candidate) => candidate.id === work.selectedAssetSet,
+        );
+        return set ? [{ itemId: item.id, set }] : [];
+      });
+      const hydrationReceipt = selectedAssets.length
+        ? await diagnostics.span(
+            {
+              runId: state.runId,
+              operation: "media-hydration-verification",
+              metadata: {
+                integratedSha: state.integratedSha!,
+                treeSha: finalTree,
+              },
+            },
+            async () =>
+              verifyHydratedAssets({
+                checkout: config.checkout,
+                workRoot: join(root, "hydration"),
+                integratedSha: candidateCommitSha,
+                selections: selectedAssets,
+              }),
+            (receipt) => ({ members: receipt?.members.length ?? 0 }),
+          )
+        : undefined;
+      const acceptanceEvidence = hydrationReceipt
+        ? { ...commandEvidence, hydrationReceipt }
+        : commandEvidence;
+      let finalEvidence;
+      try {
+        const objectiveEvidence = objectiveReviewEvidence({
+          state,
+          checkout: config.checkout,
+          candidateCommitSha,
+          candidateTreeSha: finalTree,
+        });
+        // A lost review repeats; a criterion the operator must judge is
+        // recorded as the pending final acceptance below.
+        const reviewFinal = () =>
+          objectiveStep(
+            state,
+            "final-review",
+            async (context) => {
+              try {
+                return await reviewFinalOnce(context);
+              } catch (error) {
+                if (
+                  error instanceof AcceptanceDecisionRequired &&
+                  attachedFault(error)?.kind === "decision"
+                )
+                  return error;
+                throw error;
+              }
+            },
+            true,
+          ).then((result) => {
+            if (result instanceof AcceptanceDecisionRequired) throw result;
+            return result;
+          });
+        const reviewFinalOnce = (context: StepContext) =>
+          reviewAcceptance({
+            beforeSubmit: () => {
+              if (cancellationRequested())
+                throw new Error("Objective cancellation requested");
+            },
+            model: paidModel(planningModel, context),
+            reviewPhase: "objective-review",
+            checkout: config.checkout,
+            baseSha: state.baseSha,
+            commit: candidateCommitSha,
+            evidence: acceptanceEvidence,
+            criteria: objectiveCriteria(issue.body),
+            sources: planningSources(
+              issue.body,
+              state.baseSha,
+              config.checkout,
+            ),
+            evidenceSources: [
+              ...objectiveEvidence.evidence,
+              ...(hydrationReceipt
+                ? [
+                    {
+                      path: "Controller hydration receipt",
+                      content: JSON.stringify(hydrationReceipt),
+                    },
+                  ]
+                : []),
+            ],
+            decisions: state.finalAcceptanceDecisions,
+            observations: objectiveEvidence.observations,
+            invocation: {
+              invocationId: randomUUID(),
+              phase: "objective-review",
+              ordinal: 0,
+              observe: diagnostics.modelObserver({
+                scopeId: state.runId,
+                runId: state.runId,
+              }),
+            },
+          });
+        finalEvidence = await diagnostics.span(
           {
             runId: state.runId,
-            operation: "media-hydration-verification",
+            operation: "objective-acceptance-review",
             metadata: {
-              integratedSha: state.integratedSha!,
               treeSha: finalTree,
+              candidateCommitSha,
+              candidateBasis: objectiveCandidate(state)!.basis,
+              ...(state.integratedSha
+                ? { integratedSha: state.integratedSha }
+                : {}),
             },
           },
-          async () =>
-            verifyHydratedAssets({
-              checkout: config.checkout,
-              workRoot: join(root, "hydration"),
-              integratedSha: candidateCommitSha,
-              selections: selectedAssets,
+          reviewFinal,
+          (result) => ({ criteria: result.criteria?.length ?? 0 }),
+          (error) =>
+            error instanceof AcceptanceDecisionRequired ? "waiting" : "failed",
+        );
+        if (cancellationRequested())
+          throw new Error("Objective cancellation requested");
+        delete state.finalAcceptancePending;
+      } catch (error) {
+        if (error instanceof AcceptanceDecisionRequired) {
+          state.coordinator.phase = "waiting";
+          state.finalAcceptancePending = error.pending;
+          save(state);
+          diagnostics.emit({
+            runId: state.runId,
+            operation: "objective-validation",
+            outcome: "waiting",
+            durationMs: Date.now() - finalValidationStarted,
+            metadata: { treeSha: finalTree },
+            detail: JSON.stringify({
+              question: error.pending.question,
+              detail: error.pending.detail,
+              reviewFinding: error.pending.reviewFinding ?? null,
+              reviewRejection: error.pending.reviewRejection ?? null,
             }),
-          (receipt) => ({ members: receipt?.members.length ?? 0 }),
-        )
-      : undefined;
-    const acceptanceEvidence = hydrationReceipt
-      ? { ...commandEvidence, hydrationReceipt }
-      : commandEvidence;
-    let finalEvidence;
-    try {
-      const objectiveEvidence = objectiveReviewEvidence({
-        state,
-        checkout: config.checkout,
-        candidateCommitSha,
-        candidateTreeSha: finalTree,
-      });
-      const reviewFinal = () =>
-        reviewAcceptance({
-          beforeSubmit: () => {
-            if (cancellationRequested())
-              throw new Error("Objective cancellation requested");
-          },
-          model: planningModel,
-          reviewPhase: "objective-review",
-          checkout: config.checkout,
-          baseSha: state.baseSha,
-          commit: candidateCommitSha,
-          evidence: acceptanceEvidence,
-          criteria: objectiveCriteria(issue.body),
-          sources: planningSources(issue.body, state.baseSha, config.checkout),
-          evidenceSources: [
-            ...objectiveEvidence.evidence,
-            ...(hydrationReceipt
-              ? [
-                  {
-                    path: "Controller hydration receipt",
-                    content: JSON.stringify(hydrationReceipt),
-                  },
-                ]
-              : []),
-          ],
-          decisions: state.finalAcceptanceDecisions,
-          observations: objectiveEvidence.observations,
-          invocation: {
-            invocationId: randomUUID(),
-            phase: "objective-review",
-            ordinal: 0,
-            observe: diagnostics.modelObserver({
-              scopeId: state.runId,
-              runId: state.runId,
-            }),
-          },
-        });
-      finalEvidence = await diagnostics.span(
-        {
-          runId: state.runId,
-          operation: "objective-acceptance-review",
-          metadata: {
-            treeSha: finalTree,
-            candidateCommitSha,
-            candidateBasis: objectiveCandidate(state)!.basis,
-            ...(state.integratedSha
-              ? { integratedSha: state.integratedSha }
-              : {}),
-          },
-        },
-        reviewFinal,
-        (result) => ({ criteria: result.criteria?.length ?? 0 }),
-        (error) =>
-          error instanceof AcceptanceDecisionRequired ? "waiting" : "failed",
-      );
-      if (cancellationRequested())
-        throw new Error("Objective cancellation requested");
-      state.coordinator.phase = "objective-review-complete";
-      delete state.finalAcceptancePending;
-    } catch (error) {
-      if (error instanceof CompletedModelInvocationError)
-        state.coordinator.phase = "objective-review-complete";
-      if (error instanceof AcceptanceDecisionRequired) {
-        state.coordinator.phase = "waiting";
-        state.finalAcceptancePending = error.pending;
+          });
+          return state;
+        }
+        throw error;
+      }
+      if (
+        state.coordinator.mode !== "running" ||
+        amendmentBlocksDispatch(state) ||
+        graphDigest(state.graph) !== finalGraphDigest ||
+        objectiveCandidate(state)?.commitSha !== candidateCommitSha
+      ) {
         save(state);
-        diagnostics.emit({
-          runId: state.runId,
-          operation: "objective-validation",
-          outcome: "waiting",
-          durationMs: Date.now() - finalValidationStarted,
-          metadata: { treeSha: finalTree },
-          detail: JSON.stringify({
-            question: error.pending.question,
-            detail: error.pending.detail,
-            reviewFinding: error.pending.reviewFinding ?? null,
-            reviewRejection: error.pending.reviewRejection ?? null,
-          }),
-        });
         return state;
       }
-      throw error;
-    }
-    if (
-      state.coordinator.mode !== "running" ||
-      amendmentBlocksDispatch(state) ||
-      graphDigest(state.graph) !== finalGraphDigest ||
-      objectiveCandidate(state)?.commitSha !== candidateCommitSha
-    ) {
+      // The default branch moved during final validation: validate its head.
+      if (await followDefaultBranch()) continue;
+      // No await between this CAS, the immutable seal and pending closure persistence.
+      if (
+        cancellationRequested() ||
+        state.coordinator.mode !== "running" ||
+        amendmentBlocksDispatch(state) ||
+        graphDigest(state.graph) !== finalGraphDigest ||
+        objectiveCandidate(state)?.commitSha !== candidateCommitSha
+      ) {
+        save(state);
+        return state;
+      }
+      state.finalValidation = { ...finalEvidence, passed: true };
+      sealFinalAcceptance(state);
+      diagnostics.emit({
+        runId: state.runId,
+        operation: "objective-validation",
+        outcome: "completed",
+        durationMs: Date.now() - finalValidationStarted,
+        metadata: {
+          treeSha: finalTree,
+          candidateCommitSha,
+          candidateBasis: objectiveCandidate(state)!.basis,
+          ...(state.integratedSha
+            ? { integratedSha: state.integratedSha }
+            : {}),
+        },
+      });
       save(state);
-      return state;
-    }
-    const reviewedHead = await fetchHead(
-      config.checkout,
-      await github.defaultBranch(),
-    );
-    if (reviewedHead !== candidateCommitSha)
-      throw new Error(
-        `Default branch changed during final review: expected ${candidateCommitSha}, observed ${reviewedHead}`,
+      await closeObjectiveIssue(
+        state,
+        issue.body,
+        github,
+        () => save(state),
+        owner.abort.signal,
       );
-    // No await between this CAS, the immutable seal and pending closure persistence.
-    if (
-      cancellationRequested() ||
-      state.coordinator.mode !== "running" ||
-      amendmentBlocksDispatch(state) ||
-      graphDigest(state.graph) !== finalGraphDigest ||
-      objectiveCandidate(state)?.commitSha !== candidateCommitSha
-    ) {
-      save(state);
       return state;
     }
-    state.finalValidation = { ...finalEvidence, passed: true };
-    sealFinalAcceptance(state);
-    diagnostics.emit({
-      runId: state.runId,
-      operation: "objective-validation",
-      outcome: "completed",
-      durationMs: Date.now() - finalValidationStarted,
-      metadata: {
-        treeSha: finalTree,
-        candidateCommitSha,
-        candidateBasis: objectiveCandidate(state)!.basis,
-        ...(state.integratedSha ? { integratedSha: state.integratedSha } : {}),
-      },
-    });
-    save(state);
-    await closeObjectiveIssue(state, issue.body, github, () => save(state));
-    return state;
   } catch (error) {
     if (error instanceof CoordinatorHandoff) throw error;
     // A handoff that stopped planning releases ownership; the step repeats on restart.
     if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
       throw new CoordinatorHandoff();
+    const current = owner.snapshot;
+    // A step saved its wait (a decision or a prerequisite to fix) on the
+    // Objective or a Work Item: the Objective waits for the operator
+    // instead of failing.
+    const fault = attachedFault(error);
+    const waiting =
+      !!current &&
+      (fault?.kind === "decision" || fault?.kind === "config") &&
+      (awaitsOperator(waitOf(current, "objective")) ||
+        (current.schemaVersion === 7 &&
+          Object.values(current.work).some((work) =>
+            awaitsOperator(work.wait),
+          ))) &&
+      !active.size &&
+      !cancellationRequested();
     diagnostics.emit({
       runId: stateForSignal?.runId,
       operation: "objective-run",
-      outcome: "failed",
+      outcome: waiting ? "waiting" : "failed",
       detail: error instanceof Error ? error.message : String(error),
     });
-    const current = owner.snapshot;
-    if (
-      current?.schemaVersion === 7 &&
-      current.finalAcceptance &&
-      !(error instanceof GitHubClosureFailure)
-    ) {
+    if (waiting && current) {
+      saveState(path, current);
+      return current;
+    }
+    if (current?.schemaVersion === 7 && current.finalAcceptance) {
       // A rejected resume cannot turn immutable accepted evidence into a failed run.
       current.coordinator!.waitReason = `Sealed acceptance preserved: ${error instanceof Error ? error.message : String(error)}`;
       saveState(path, current);
@@ -1845,11 +1978,6 @@ async function runObjectivePass(
               if (work.status !== "done" && work.status !== "published")
                 work.status = "cancelled";
         }
-      } else if (
-        error instanceof GitHubClosureFailure &&
-        current.schemaVersion === 7
-      ) {
-        current.githubClosureError = error.message;
       } else if (current.schemaVersion === 8) {
         // Preparation resumes by repeating its step; record why it paused.
         current.coordinator.waitReason =
@@ -1981,8 +2109,16 @@ function retryStep(
     )
       return false;
     const scope = itemId === undefined ? "objective" : { item: itemId };
-    if (!awaitsOperator(waitOf(state, scope))) return false;
+    // An Objective stopped by a defect outside any Work Item runs its step
+    // again once the operator has dealt with the cause.
+    const stopped =
+      itemId === undefined &&
+      !!state.error &&
+      !state.cancelRequested &&
+      !state.cancelledAt;
+    if (!awaitsOperator(waitOf(state, scope)) && !stopped) return false;
     clearRepeats(state, scope);
+    if (stopped) delete state.error;
     saveState(statePath(config.repository, objective), state);
     new DiagnosticEmitter(config.repository, objective).emit({
       runId: state.runId,
@@ -2083,7 +2219,6 @@ export function repairWorkItem(
     if (
       !state ||
       state.finalValidation?.passed ||
-      state.error ||
       state.configDigest !== factoryConfigDigest(config)
     )
       throw new Error("Objective is not available for diagnosed repair");
@@ -2101,6 +2236,8 @@ export function repairWorkItem(
         );
     }
     applyWorkCorrection(state, input.item, input.correction);
+    // The repair answers the stop the item's failure caused, as retry does.
+    delete state.error;
     saveState(statePath(config.repository, objective), state);
   } finally {
     releaseMutationLock(lock, handle);

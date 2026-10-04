@@ -120,14 +120,6 @@ export function redactCoordinatorDisposition(
   return coordinator
     ? {
         ...coordinator,
-        ...(coordinator.observationError
-          ? {
-              observationError: redactDiagnosticDetail(
-                coordinator.observationError,
-                secrets,
-              ),
-            }
-          : {}),
         ...(coordinator.cancelError
           ? {
               cancelError: redactDiagnosticDetail(
@@ -1307,15 +1299,8 @@ export function statusDocument(
     finalAcceptance: state.finalAcceptance ?? null,
     finalAcceptancePending: pendingDecision(state.finalAcceptancePending),
     objectiveClosure: state.objectiveClosure ?? null,
-    lastError:
-      state.error || state.githubClosureError
-        ? redactDiagnosticDetail(
-            state.error ?? state.githubClosureError!,
-            secrets,
-          )
-        : null,
-    githubClosureError: state.githubClosureError
-      ? redactDiagnosticDetail(state.githubClosureError, secrets)
+    lastError: state.error
+      ? redactDiagnosticDetail(state.error, secrets)
       : null,
     ...waitStatus(state, state.wait, "objective", secrets),
     work,

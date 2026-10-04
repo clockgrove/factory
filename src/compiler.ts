@@ -90,6 +90,7 @@ import {
   reviewPacket,
 } from "./review-evidence.js";
 import { validateAndOrderGraph } from "./scheduler.js";
+import type { StepContext } from "./step.js";
 import { codexRawTokenUsage } from "./usage.js";
 import {
   assertPinnedNpmScripts,
@@ -127,6 +128,28 @@ export function observeModelInvocation(
       `Factory model diagnostics unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
     );
   }
+}
+
+/**
+ * The planning model with its calls made as its step's paid calls (see
+ * src/step.ts), so only the model's own faults count toward the bound. A
+ * diagnosis is bounded per failure by PAID_ATTEMPTS instead, never by both.
+ */
+export function paidModel(
+  model: PlanningModel,
+  step: Pick<StepContext, "paid">,
+): PlanningModel {
+  const reviewResult = model.reviewResult?.bind(model);
+  return {
+    generateStructured: (request) =>
+      request.purpose === "diagnosis"
+        ? model.generateStructured(request)
+        : step.paid(() => model.generateStructured(request)),
+    reviewGraph: (request) => step.paid(() => model.reviewGraph(request)),
+    ...(reviewResult && {
+      reviewResult: (request) => step.paid(() => reviewResult(request)),
+    }),
+  };
 }
 
 export class MalformedPlannerOutput extends CompletedModelInvocationError {}

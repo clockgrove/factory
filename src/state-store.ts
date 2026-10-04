@@ -169,6 +169,11 @@ function parsePreparation(
     !/^[a-f0-9]{64}$/.test(value.sourcePacketDigest)
   )
     throw new Error("Invalid preparation source packet binding");
+  if (
+    value.issueAuthor !== undefined &&
+    (typeof value.issueAuthor !== "string" || !value.issueAuthor)
+  )
+    throw new Error("Invalid preparation issue author");
   assertCoordinator(value.coordinator);
   validateCapacity(value.capacity);
   assertRepairLedger(value);

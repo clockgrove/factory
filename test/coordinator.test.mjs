@@ -15,6 +15,7 @@ import { Octokit } from "@octokit/core";
 import { GitHubClient } from "../dist/github-client.js";
 import { RealGitHubGateway } from "../dist/github.js";
 import { withProcessCancellation } from "../dist/process.js";
+import { attachFault, transient } from "../dist/fault.js";
 import { stateRoot } from "../dist/config.js";
 import { defaultAutonomy } from "../dist/index.js";
 import { requestControl } from "../dist/coordinator-control.js";
@@ -328,39 +329,42 @@ test("deadline elapsed during a hung planning call preserves unknown disposition
   );
 });
 
-test("exact-ID API outage keeps the owner responsive and resumes without new planning", async () => {
+test("exact-ID API outage repeats the observation with backoff and resumes without new planning", async () => {
   await fixture(
     "outage",
     async ({ application, config, github, planningPath }) => {
-      const original = github.objective.bind(github);
-      let reads = 0;
-      let offline = true;
-      github.objective = async (...args) => {
-        reads++;
-        if (reads > 1 && offline) throw new Error("API unavailable");
-        return original(...args);
-      };
-      const run = application.runObjective(1);
-      await until(
-        () =>
-          readContinuation(config.repository, 1)?.coordinator.observationError,
-      );
-      const before = readEvents(planningPath).length;
-      const status = await requestControl(config.repository, {
-        objective: 1,
-        action: "status",
-      });
-      assert.equal(status.result.mode, "paused");
-      assert.match(status.result.waitReason, /GitHub API unavailable/);
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      assert.equal(readEvents(planningPath).length, before);
-      assert.equal(reads, 2, "no blind API polling");
-      offline = false;
-      await requestControl(config.repository, {
-        objective: 1,
-        action: "resume",
-      });
-      assert.equal((await run).finalValidation.passed, true);
+      {
+        const original = github.objective.bind(github);
+        let reads = 0;
+        let offline = true;
+        github.objective = async (...args) => {
+          reads++;
+          if (reads > 1 && offline)
+            throw attachFault(
+              new Error("API unavailable"),
+              transient("API unavailable", false),
+            );
+          return original(...args);
+        };
+        const run = application.runObjective(1);
+        await until(
+          () =>
+            readContinuation(config.repository, 1)?.repeats?.[
+              "objective/observe"
+            ]?.faults?.count >= 2,
+        );
+        const before = readEvents(planningPath).length;
+        const status = await requestControl(config.repository, {
+          objective: 1,
+          action: "status",
+        });
+        assert.equal(status.result.mode, "running");
+        assert.equal(readEvents(planningPath).length, before);
+        offline = false;
+        const result = await run;
+        assert.equal(result.finalValidation.passed, true);
+        assert.equal(result.repeats, undefined);
+      }
       assert.equal(
         readEvents(planningPath).filter(
           (event) => event.type !== "result-review",
@@ -385,10 +389,9 @@ test("confirmed closure or body change prevents dispatch rather than masqueradin
             ? { ...value, state: "closed" }
             : { ...value, body: `${value.body}changed` };
         };
-        await assert.rejects(
-          application.runObjective(1),
-          /confirmed closed|body changed/,
-        );
+        const result = await application.runObjective(1);
+        assert.equal(result.wait.kind, "decision");
+        assert.match(result.wait.detail, /was closed|body changed/);
         assert.equal(
           readEvents(eventsPath).filter((event) => event.type === "start")
             .length,
@@ -405,12 +408,18 @@ test("cancellation while GitHub is unavailable stops locally with no dispatch", 
       const original = github.objective.bind(github);
       let reads = 0;
       github.objective = (...args) =>
-        ++reads > 1 ? Promise.reject(new Error("offline")) : original(...args);
+        ++reads > 1
+          ? Promise.reject(
+              attachFault(new Error("offline"), transient("offline", false)),
+            )
+          : original(...args);
       const run = application.runObjective(1);
-      const rejected = assert.rejects(run, /cancel/);
+      const rejected = assert.rejects(run, /cancel|abort/i);
       await until(
         () =>
-          readContinuation(config.repository, 1)?.coordinator.observationError,
+          readContinuation(config.repository, 1)?.repeats?.[
+            "objective/observe"
+          ],
       );
       await requestControl(config.repository, {
         objective: 1,
@@ -739,7 +748,7 @@ test("first deadline added to existing preparation persists before a wait and ca
   });
 });
 
-test("one resume wakes both concurrent GitHub outage waiters without replaying workers", async () => {
+test("concurrent deliveries share one repeated observation through a GitHub outage without replaying workers", async () => {
   await fixture(
     "concurrent-outage",
     async ({ application, config, github, eventsPath }) => {
@@ -748,16 +757,17 @@ test("one resume wakes both concurrent GitHub outage waiters without replaying w
       let offline = true;
       github.objective = async (...args) => {
         reads++;
-        if (reads >= 3 && offline) throw new Error("shared outage");
+        if (reads >= 3 && offline)
+          throw attachFault(
+            new Error("shared outage"),
+            transient("shared outage", false),
+          );
         return original(...args);
       };
+      // Both items' deliveries share one repeated observation.
       const run = application.runObjective(1);
       await until(() => reads >= 4);
       offline = false;
-      await requestControl(config.repository, {
-        objective: 1,
-        action: "resume",
-      });
       const result = await run;
       assert.ok(result.finalValidation.passed);
       assert.equal(

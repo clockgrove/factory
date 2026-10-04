@@ -38,6 +38,7 @@
       "GET /repos/{owner}/{repo}/pulls/{number} #1",
       "GET /repos/{owner}/{repo}/pulls/{number}/merge-async/{uuid} #1",
       "GET /repos/{owner}/{repo}/stacks #1",
+      "GET /user #1",
       "GIT fetch-advertise #1",
       "GIT push-advertise #1",
       "POST /graphql #1"
@@ -90,6 +91,7 @@
       "GET /repos/{owner}/{repo}/labels #1",
       "GET /repos/{owner}/{repo}/pulls #1",
       "GET /repos/{owner}/{repo}/pulls/{number} #1",
+      "GET /user #1",
       "GIT fetch-advertise #1",
       "GIT push-advertise #1",
       "POST /graphql #1"

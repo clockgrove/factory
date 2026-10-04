@@ -806,7 +806,6 @@ const view = (work, overrides = {}) => ({
   finalAcceptancePending: null,
   objectiveClosure: null,
   lastError: null,
-  githubClosureError: null,
   work,
   ...overrides,
 });

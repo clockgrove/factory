@@ -21,6 +21,7 @@ import { resolveCapacity, stateRoot } from "../../dist/config.js";
 import { LocalContentStore } from "../../dist/content/local.js";
 import { RegularDelivery } from "../../dist/delivery/regular.js";
 import { LocalExecutionDriver } from "../../dist/execution/local.js";
+import { attachFault, decision } from "../../dist/fault.js";
 import { withCoverage } from "./coverage.mjs";
 import { resultFindings } from "./review-protocol.mjs";
 
@@ -750,7 +751,12 @@ export class StatefulGitHubFake {
     });
     if (this.failCloseAfterComment === number) {
       this.failCloseAfterComment = undefined;
-      throw new Error("Injected close failure after comment");
+      // Classified as the real gateway classifies a refused permission.
+      throw attachFault(new Error("Injected close failure after comment"), {
+        kind: "config",
+        detail: "Injected close failure after comment",
+        fix: "Restore the login's issue permission, then `factory run`",
+      });
     }
     this.update((state) => {
       state.closedIssues[number] = true;
@@ -836,7 +842,11 @@ export class StatefulGitHubFake {
       pull.branch !== identity.branch ||
       pull.headSha !== identity.headSha
     )
-      throw new Error("Pull request identity changed");
+      // A foreign change, as the real gateway classifies it.
+      throw attachFault(
+        new Error("Pull request identity changed"),
+        decision("Pull request identity changed. Inspect it, then retry."),
+      );
     return { state: pull.state, checks: pull.checks };
   }
 

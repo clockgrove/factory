@@ -773,6 +773,10 @@ export interface GraphProjection {
   graph: WorkGraph;
   objectiveIssue: number;
   knownIssues?: Record<string, number>;
+  /** The login that authored Factory's issues, once known. */
+  author?: string;
+  /** Learned the author from Factory's first created issue. */
+  authored?: (login: string) => void;
   beforeCreate?: (itemId: string) => void | Promise<void>;
   projected?: (itemId: string, issue: number) => void;
 }
@@ -836,7 +840,12 @@ export interface GitHubGateway {
   closeIssue(
     number: number,
     comment: string,
-    expected: { body?: string; workItem?: { objective: number; id: string } },
+    expected: {
+      body?: string;
+      workItem?: { objective: number; id: string };
+      /** The login that authored Factory's issues, once known. */
+      author?: string;
+    },
   ): Promise<void>;
   projectGraph(request: GraphProjection): Promise<ProjectedGraph>;
   /** The open PR for the pushed branch, found by its head before it is created. */

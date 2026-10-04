@@ -257,11 +257,11 @@ factory status --objective ISSUE_NUMBER --json
 factory resume --objective ISSUE_NUMBER
 ```
 
-Pause and drain stop new dispatch and persist across controller restarts. Inspect status to distinguish a requested drain from completed owned work. Resume permits the existing continuation to proceed; it grants no new attempt or repair authority. Exact-tree decisions and media selections reach a live owner through its private local socket; when `run` has exited for a decision, the command records it directly and the next `run` continues.
+Pause and drain stop new dispatch and persist across controller restarts; `resume` continues either. Inspect status to distinguish a requested drain from completed owned work. Resume permits the existing continuation to proceed; it grants no new attempt or repair authority. Exact-tree decisions and media selections reach a live owner through its private local socket; when `run` has exited for a decision, the command records it directly and the next `run` continues.
 
 An optional `factory run --deadline ISO_TIMESTAMP` records an absolute deadline. Restart cannot extend it. Expiry requests cancellation; it does not prove that a remote effect failed or that owned work stopped. Cancellation remains unresolved until cessation is verified. Preserve retained workspaces and evidence when status reports unresolved ownership.
 
-An unavailable exact GitHub observation pauses progress while local control remains available. Inspect the reported failure, then use `resume` to request another observation. Factory does not spend model calls on idle wakes or infer issue closure from a failed API request. Submitted planning, review or publication whose outcome is unknown cannot be replayed merely by restarting the controller.
+An unavailable GitHub observation is repeated with backoff while local control remains available; status reports an outage once it lasts about a minute. Factory does not spend model calls on idle wakes or infer issue closure from a failed API request. A planning or review call whose response was lost is asked again at most three times, then Factory asks you to decide. A closed or edited Objective issue also waits for your decision.
 
 ## Inspect progress
 

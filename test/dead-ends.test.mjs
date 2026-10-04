@@ -25,41 +25,11 @@ const D = {
       "cancelling while a Work Item sits at execute without a recorded driver handle never finishes, even when that item already failed: cancelKnownWork refuses 'Active attempt has no stable handle; cessation is unknown', and status names `factory cancel`, which refuses the same way",
     pattern: /factory cancel is refused \(Active attempt has no stable handle/,
   },
-  PLAN_REFUSAL_DISCARDS: {
-    diagnosis:
-      "planning stopped for a decision while the Objective is paused or draining: status names `factory decide --outcome refuse`, which deletes the whole preparation, so the pause or drain is silently dropped and the next `factory run` plans again",
-    pattern:
-      /factory decide discards the preparation with its (paused|draining) mode/,
-  },
-  DECIDE_REFUSED: {
-    diagnosis:
-      "a pending result or final criterion with state.error set (any stop on a later restart, such as a failed fetch before the final review): status names `factory decide-result`, which refuses while state.error is set ('Objective is not awaiting a result decision'), and with no failed item nothing clears state.error",
-    pattern:
-      /factory decide-result is refused \(Objective is not awaiting a result decision\)/,
-  },
-  REPAIR_REFUSED: {
-    diagnosis:
-      "a stopped Work Item failure combined with a stop outside any Work Item step (state.error): status names `factory repair`, which refuses any Objective with state.error ('Objective is not available for diagnosed repair')",
-    pattern:
-      /factory repair is refused \(.*Objective is not available for diagnosed repair/,
-  },
   RETRY_REFUSED: {
     diagnosis:
       "a step failure that is not isolated stops the Objective (state.error) where retry cannot follow: status names `factory retry`, which refuses at deliver, after a PR ('Published PR requires operator direction before retry') and for an attempt with a handle and an unknown outcome, or only `factory logs` once the item has a PR",
     pattern:
       /factory retry is refused \((Published PR requires operator direction|Submitted effect outcome is unknown; operator direction required) before retry\)|only inspection \(factory logs\) after stopped: Objective stopped:/,
-  },
-  STOPPED_WITHOUT_EXIT: {
-    diagnosis:
-      "state.error with no failed, unpublished Work Item (a stop outside any Work Item step, or a failed item with a PR): every restart refuses 'Objective stopped: … Use explicit retry or operator direction', status names only `factory diagnostics`, and retry needs a failed item without a PR (r1 #1, #2)",
-    pattern:
-      /only inspection \(factory diagnostics\) after stopped: Objective stopped:/,
-  },
-  DRAINED: {
-    diagnosis:
-      "a drained Objective (`factory drain`, or the SIGTERM handoff) stays 'draining' in the snapshot: a restarted `factory run` waits forever for a control request, and status names `factory run` instead of `factory resume` (it offers resume only when paused)",
-    pattern:
-      /factory run does not continue after idle: .*\(coordinator draining/,
   },
 };
 
@@ -128,81 +98,6 @@ const KNOWN = {
       "alpha running/execute; beta pending",
       "cancellation is unresolved",
       "validation phase reserved",
-    ],
-  ],
-  [D.PLAN_REFUSAL_DISCARDS.diagnosis]: [
-    [
-      "regular",
-      "preparing, no plan, 0 issues, planning",
-      "draining",
-      "planning stopped",
-    ],
-    [
-      "regular",
-      "preparing, no plan, 0 issues, planning",
-      "paused",
-      "planning stopped",
-    ],
-    [
-      "native-stack",
-      "preparing, no plan, 0 issues, planning",
-      "draining",
-      "planning stopped",
-    ],
-    [
-      "native-stack",
-      "preparing, no plan, 0 issues, planning",
-      "paused",
-      "planning stopped",
-    ],
-  ],
-  [D.DECIDE_REFUSED.diagnosis]: [
-    [
-      "regular",
-      "alpha done; beta done (handle, PR, closure complete); pending final criterion",
-      "an error stops the Objective outside any Work Item step",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "regular",
-      "alpha waiting/approve-result (handle, pending criterion); beta pending",
-      "an error stops the Objective outside any Work Item step",
-    ],
-    [
-      "native-stack",
-      "alpha done; beta done (PR, closure complete); pending final criterion; stack merge pending",
-      "an error stops the Objective outside any Work Item step",
-    ],
-    [
-      "native-stack",
-      "alpha waiting/approve-result (pending criterion); beta pending",
-      "an error stops the Objective outside any Work Item step",
-    ],
-  ],
-  [D.REPAIR_REFUSED.diagnosis]: [
-    [
-      "regular",
-      "alpha running/validate (handle); beta pending",
-      "validation fails",
-      "an error stops the Objective outside any Work Item step",
-    ],
-    [
-      "regular",
-      "alpha running/validate (handle); beta pending",
-      "the validation environment fails",
-      "an error stops the Objective outside any Work Item step",
-    ],
-    [
-      "native-stack",
-      "alpha running/execute (handle); beta pending",
-      "the worker settles without a result",
-      "an error stops the Objective outside any Work Item step",
-    ],
-    [
-      "native-stack",
-      "alpha running/validate; beta pending",
-      "the validation environment fails",
-      "an error stops the Objective outside any Work Item step",
     ],
   ],
   [D.RETRY_REFUSED.diagnosis]: [
@@ -309,6 +204,7 @@ const KNOWN = {
       "review phase reserved",
     ],
   ],
+<<<<<<< HEAD
   [D.STOPPED_WITHOUT_EXIT.diagnosis]: [
     [
       "regular",
@@ -540,6 +436,8 @@ const KNOWN = {
       "draining",
     ],
   ],
+=======
+>>>>>>> origin/claude/phase-a-4-objective
 };
 
 const known = new Map();

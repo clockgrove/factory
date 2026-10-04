@@ -9,7 +9,6 @@ import {
   objectiveEvent,
   type RepairCorrection,
 } from "./repair-policy.js";
-import { isCompletedProjectionRejection } from "./github-client.js";
 import { preflightObjective } from "./local-preflight.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -17,6 +16,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   commandAuthority,
   compileObjective,
+  paidModel,
   finalObjectiveCommands,
   hydrateWorkerInputSources,
   objectiveCriteria,
@@ -35,9 +35,9 @@ import type {
   WorkGraph,
   WorkItem,
 } from "./contracts.js";
-import { CompletedModelInvocationError, Interruption } from "./contracts.js";
-import { setTimeout as delay } from "node:timers/promises";
-import { MAX_INTERRUPTIONS } from "./work-repair.js";
+import { CompletedModelInvocationError } from "./contracts.js";
+import { attachedFault, attachFault } from "./fault.js";
+import { step, type StepOptions } from "./step.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import {
   executionProfileChoices,
@@ -73,8 +73,6 @@ export interface PendingAmendment {
   reviewDigest?: string;
   issueByItemId: Record<string, number>;
   error?: string;
-  /** Interrupted repeats of the current call; reset when a call completes. */
-  interruptions?: number;
   rejectionStage?:
     | "compilation"
     | "validation"
@@ -376,17 +374,23 @@ function validateAmendmentReplacement(
     !rejected.error ||
     rejected.proposal.graph ||
     proposal.graph ||
-    rejected.reviewDigest ||
     (rejected.rejectionStage !== undefined
-      ? !["compilation", "validation", "review-findings"].includes(
-          rejected.rejectionStage,
-        )
+      ? ![
+          "compilation",
+          "validation",
+          "review-findings",
+          "projection",
+        ].includes(rejected.rejectionStage)
       : !!rejected.graph) ||
     (rejected.rejectionStage === "review-findings" && !rejected.graph) ||
-    !isDeepStrictEqual(rejected.issueByItemId, state.issueByItemId)
+    // A rejection after review may have projected issues; the replacement
+    // finds them again by marker.
+    (rejected.rejectionStage !== "projection" &&
+      (rejected.reviewDigest !== undefined ||
+        !isDeepStrictEqual(rejected.issueByItemId, state.issueByItemId)))
   )
     throw new Error(
-      "Replacement requires a known unprojected generated amendment rejection",
+      "Replacement requires a known generated amendment rejection",
     );
   if (
     state.coordinator?.mode !== "paused" ||
@@ -572,25 +576,23 @@ export function validateAmendment(
   }
 }
 
-/** Advance the pending amendment, repeating an interrupted call at most twice. */
-export async function applyPendingAmendment(
-  args: Parameters<typeof advanceAmendment>[0],
-  backoffMs = 1_000,
+/**
+ * Advance the pending amendment as the Objective's `amend` step: its compile
+ * and review are paid calls, and a call that ended without a completed
+ * answer repeats from the last completed phase.
+ */
+export function applyPendingAmendment(
+  args: Parameters<typeof advanceAmendment>[0] &
+    Pick<StepOptions, "signal" | "clock">,
 ): Promise<boolean> {
-  // An operator resume after exhausted repeats starts a fresh budget.
-  const pending = args.state.pendingAmendment;
-  if (pending && (pending.interruptions ?? 0) >= MAX_INTERRUPTIONS)
-    delete pending.interruptions;
-  for (;;) {
-    try {
-      return await advanceAmendment(args);
-    } catch (error) {
-      if (!(error instanceof Interruption)) throw error;
-      await delay(
-        backoffMs * (args.state.pendingAmendment?.interruptions ?? 1),
-      );
-    }
-  }
+  const { signal, clock, ...rest } = args;
+  return step(
+    args.state,
+    { scope: "objective", name: "amend", paid: true },
+    (context) =>
+      advanceAmendment({ ...rest, model: paidModel(args.model, context) }),
+    { save: args.save, signal, clock },
+  );
 }
 
 /** One compile, review and projection pass from the last completed phase. */
@@ -639,6 +641,16 @@ async function advanceAmendment(args: {
   let compilationResponseObserved = false;
   let calling: "compile" | "review" | "projection" | undefined;
   let stage: NonNullable<PendingAmendment["rejectionStage"]> = "compilation";
+  /** The amendment's result is refused: a `work` fault. */
+  const refused = (error: Error) =>
+    attachFault(error, { kind: "work", evidence: { detail: error.message } });
+  const checkAmendment = () => {
+    try {
+      validateAmendment(state, pending.graph!, config, args.body);
+    } catch (error) {
+      throw error instanceof Error ? refused(error) : error;
+    }
+  };
   try {
     if (args.cancelled()) throw new Error("Objective cancelled");
     const choices = executionProfileChoices(config);
@@ -670,8 +682,10 @@ async function advanceAmendment(args: {
         observed !== state.prerequisitesDigest ||
         !isDeepStrictEqual(current, prerequisites)
       )
-        throw new Error(
-          "Amendment native prerequisites differ from those the plan was made with",
+        throw refused(
+          new Error(
+            "Amendment native prerequisites differ from those the plan was made with",
+          ),
         );
     };
     await verifyPrerequisites();
@@ -726,13 +740,12 @@ async function advanceAmendment(args: {
       }
       calling = undefined;
       pending.phase = "compiled";
-      delete pending.interruptions;
       save();
     }
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (stopped()) return false;
     stage = "validation";
-    validateAmendment(state, pending.graph!, config, args.body);
+    checkAmendment();
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (pending.phase === "compiled") {
       stage = "review";
@@ -781,24 +794,31 @@ async function advanceAmendment(args: {
         },
       });
       calling = undefined;
-      const findings = decodeGraphReview(response, evidence);
+      // An answer that does not decode refuses the amendment like findings.
+      let findings: ReturnType<typeof decodeGraphReview>;
+      try {
+        findings = decodeGraphReview(response, evidence);
+      } catch (error) {
+        throw error instanceof Error ? refused(error) : error;
+      }
       if (findings.length) {
         // Only a complete packet-bound decoded finding permits diagnosed correction.
         stage = "review-findings";
-        throw new Error(
-          `Independent amendment review rejected: ${JSON.stringify(findings)}`,
+        throw refused(
+          new Error(
+            `Independent amendment review rejected: ${JSON.stringify(findings)}`,
+          ),
         );
       }
       pending.reviewDigest = createHash("sha256")
         .update(JSON.stringify({ packet, findings }))
         .digest("hex");
       pending.phase = "reviewed";
-      delete pending.interruptions;
       save();
     }
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (stopped()) return false;
-    validateAmendment(state, pending.graph!, config, args.body);
+    checkAmendment();
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (pending.phase === "reviewed") {
       await verifyPrerequisites();
@@ -810,6 +830,11 @@ async function advanceAmendment(args: {
         previousGraph: state.graph,
         objectiveIssue: state.objective,
         knownIssues: pending.issueByItemId,
+        author: state.issueAuthor,
+        authored: (login) => {
+          state.issueAuthor = login;
+          save();
+        },
         completedItems: Object.keys(state.work).filter(
           (id) => state.work[id]!.status === "done",
         ),
@@ -824,12 +849,11 @@ async function advanceAmendment(args: {
       calling = undefined;
       pending.issueByItemId = projected.issueByItemId;
       pending.phase = "projected";
-      delete pending.interruptions;
       save();
     }
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (stopped()) return false;
-    validateAmendment(state, pending.graph!, config, args.body);
+    checkAmendment();
     await verifyPrerequisites();
     const proposalReceipt = structuredClone(pending.proposal);
     delete proposalReceipt.graph;
@@ -853,29 +877,26 @@ async function advanceAmendment(args: {
     save();
     return true;
   } catch (error) {
-    // A call that ended without a completed answer was interrupted: the
-    // amendment stays at its last completed phase and the next run repeats
-    // the call. Anything else is a real rejection.
-    const interrupted =
-      calling !== undefined &&
-      !(error instanceof CompletedModelInvocationError) &&
-      !(calling === "compile" && compilationResponseObserved) &&
-      !(calling === "projection" && isCompletedProjectionRejection(error));
-    if (!interrupted) {
-      pending.rejectionStage = stage;
-      pending.phase = "rejected";
-    }
+    // Only a refused result (a `work` fault) or an answered model output
+    // rejects the amendment. Anything else leaves it at its last completed
+    // phase: the step repeats a transient fault, waits on a decision or a
+    // configuration fix, and stops on cancellation or a defect.
+    const answered =
+      error instanceof CompletedModelInvocationError ||
+      (calling === "compile" && compilationResponseObserved);
+    if (!answered && attachedFault(error)?.kind !== "work") throw error;
+    pending.rejectionStage = stage;
+    pending.phase = "rejected";
     pending.error = error instanceof Error ? error.message : String(error);
-    if (interrupted && (pending.interruptions ?? 0) < MAX_INTERRUPTIONS) {
-      pending.interruptions = (pending.interruptions ?? 0) + 1;
-      save();
-      throw new Interruption(error);
-    }
     if (state.coordinator) {
       state.coordinator.mode = "paused";
       state.coordinator.waitReason = pending.error;
     }
     save();
-    throw error;
+    // The amendment's result is refused, whatever the call reported.
+    throw attachFault(new Error(pending.error, { cause: error }), {
+      kind: "work",
+      evidence: { detail: pending.error || "Amendment rejected" },
+    });
   }
 }

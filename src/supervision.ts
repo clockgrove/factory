@@ -4,7 +4,6 @@ import {
   requiredProviderCredentials,
   validateCredentialFile,
 } from "./provider-credentials.js";
-import type { ContinuationState } from "./state.js";
 import {
   readIntake,
   intakeSettled,
@@ -188,22 +187,16 @@ function privateFile(path: string): void {
   )
     throw new Error(`Expected an owner-private file: ${path}`);
 }
-export const LEGACY_CREDENTIAL_BINDING =
-  "This service binding uses the retired single `credential` field; run `factory supervisor uninstall`, then `factory setup --background --credential-file NAME=ABSOLUTE_PRIVATE_FILE`";
-
 export const LEGACY_SERVICE_BINDING =
   "This service was bound to one Objective by an earlier Factory version; run `factory supervisor uninstall`, then `factory setup --background`";
 
 /**
- * Only stop and uninstall may act on a retired binding (a single credential, or
- * one bound to an Objective), so an operator can remove it; nothing reuses or rewrites it.
+ * Only stop and uninstall may act on a retired binding (one bound to an Objective), so an operator can remove it; nothing reuses or rewrites it.
  */
 function decodeBinding(text: string, teardown = false): ServiceBinding {
   if (!text.startsWith(marker))
     throw new Error("Refusing a service not registered by Factory");
   const value = JSON.parse(text.split("\n")[0]!.slice(marker.length));
-  if (!teardown && value && typeof value === "object" && "credential" in value)
-    throw new Error(LEGACY_CREDENTIAL_BINDING);
   if (
     !teardown &&
     value &&
@@ -301,13 +294,7 @@ function inspectBinding(
   try {
     value = decodeBinding(text);
   } catch (error) {
-    if (error instanceof Error && error.message === LEGACY_CREDENTIAL_BINDING)
-      report(
-        "legacy-credential-binding",
-        "The unit uses the retired single-credential binding.",
-        LEGACY_CREDENTIAL_BINDING,
-      );
-    else if (error instanceof Error && error.message === LEGACY_SERVICE_BINDING)
+    if (error instanceof Error && error.message === LEGACY_SERVICE_BINDING)
       report(
         "legacy-service-binding",
         "The unit is bound to one Objective, as earlier Factory versions did.",
@@ -426,28 +413,15 @@ export function renderService(value: ServiceBinding): string {
       "\n",
     )}\n${(value.credentials ?? []).map(({ name, file }) => `LoadCredential=${quoted(`${name}:${file}`, false)}\n`).join("")}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nSuccessExitStatus=2\nRestartPreventExitStatus=1 2\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
 }
-function checkServiceContinuationFields(state: ContinuationState): void {
-  // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
-  const fields =
-    state.schemaVersion === 8
-      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest autonomy capacity charges planningRecovery coordinator plan issueByItemId issueAuthor error cancelRequested cancelledAt permanentAbandonment repeats wait"
-      : "schemaVersion repository objective runId configDigest baseSha autonomy capacity planGraphDigest prerequisitesDigest coordinator graph graphRevisions pendingAmendment rejectedAmendments charges planningRecovery backlogDiscoveries objectiveCommands issueByItemId issueAuthor work stackNumbers stackMerges integratedSha finalHead finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure cancelRequested cancelledAt error repeats wait";
-  for (const field of Object.keys(state))
-    if (!fields.split(" ").includes(field))
-      throw new Error(
-        `This artifact cannot validate continuation field ${field}; use the Factory version that wrote the state`,
-      );
-}
-/** Continuation state an Objective already has must match this installation and be readable by this artifact. */
+/** Installing a service for an Objective is its service consent; state must match this installation. */
 export function checkServiceState(
   config: FactoryConfig,
   objective: number,
 ): void {
   const state = readContinuation(config.repository, objective);
-  if (state) checkServiceContinuationFields(state);
   if (state && state.configDigest !== factoryConfigDigest(config))
     throw new Error(
-      "Continuation configuration differs; refusing compatibility claim",
+      "Continuation configuration differs from this installation; start fresh or reinstall with the original configuration",
     );
 }
 function hasOwner(config: FactoryConfig): boolean {
@@ -524,18 +498,6 @@ async function verifyServiceOwner(
     `Service has not established its exact coordinator owner; inspect \`factory status\` and retained evidence${readIntake(config)?.mode === "draining" ? "; the queue is draining, so `factory queue resume` is needed before the service stays up" : ""}`,
   );
 }
-function validateArtifact(value: ServiceBinding): void {
-  const result = command(
-    value.node,
-    [value.cli, "supervisor", "check", "--config", value.config],
-    undefined,
-    { ...process.env, ...value.environment, XDG_STATE_HOME: value.stateHome },
-  );
-  if (result !== "factory-supervision-compatible-v1")
-    throw new Error(
-      "Candidate does not affirm state compatibility; no service switch performed",
-    );
-}
 function saveUnit(path: string, value: ServiceBinding): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.tmp`;
@@ -554,10 +516,6 @@ export async function supervise(
   } = {},
 ): Promise<unknown> {
   const config = readConfig(configPath);
-  if (action === "check") {
-    checkIntakeServiceState(config);
-    return "factory-supervision-compatible-v1";
-  }
   const path = unitPath(config),
     name = serviceName(config.repository);
   if (action === "status") {
@@ -625,7 +583,6 @@ export async function supervise(
       );
     for (const { name, file } of value.credentials ?? [])
       validateCredentialFile(config, name, file);
-    validateArtifact(value);
     if (hasOwner(config) && inspect("is-active", name) !== "active")
       throw new Error(
         "An existing foreground owner must hand off before service start",
@@ -648,7 +605,6 @@ export async function supervise(
       if (!input.cli || !isAbsolute(input.cli))
         throw new Error("upgrade requires --cli ABSOLUTE_INSTALLED_CLI");
       candidate = { ...value, cli: realpathSync(input.cli) };
-      validateArtifact(candidate);
     }
     const wasActive = inspect("is-active", name) === "active";
     const beforeIntake = candidate ? readIntake(config) : undefined;
@@ -660,7 +616,6 @@ export async function supervise(
     await handoffService(config, undefined, value.objective);
     systemctl("stop", name);
     if (candidate) {
-      validateArtifact(candidate);
       saveUnit(path, candidate);
       systemctl("daemon-reload");
       const restart = beforeIntake?.watch

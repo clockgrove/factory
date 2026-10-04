@@ -294,33 +294,6 @@ test("actual guided CLI sets up an idle service, verifies its owner and reuses i
     assert.equal(json.queue.watch, true);
   }));
 
-test("guided setup refuses to reuse a retired single-credential service binding", () =>
-  fixture(async ({ root, run, configure }) => {
-    configure();
-    const first = run(["setup", ...background]);
-    assert.equal(first.status, 0, first.stderr + first.stdout);
-    const unit = readFileSync(join(root, "registered"), "utf8");
-    const prefix = "# Factory local supervision v1 ";
-    const text = readFileSync(unit, "utf8");
-    const value = JSON.parse(text.split("\n")[0].slice(prefix.length));
-    value.credential = { name: "KEY", file: join(root, "key") };
-    writeFileSync(
-      unit,
-      `${prefix}${JSON.stringify(value)}\n${text.split("\n").slice(1).join("\n")}`,
-      { mode: 0o600 },
-    );
-    const starts = readFileSync(join(root, "starts"), "utf8");
-    const again = run(["setup", ...background]);
-    assert.equal(again.status, 1, again.stderr + again.stdout);
-    assert.equal(again.document.blocked.stage, "service-binding");
-    assert.match(
-      again.document.blocked.detail,
-      /retired single `credential` field.*--credential-file NAME=/,
-    );
-    assert.equal(readFileSync(join(root, "starts"), "utf8"), starts);
-    assert.equal(readFileSync(unit, "utf8").includes('"credential":'), true);
-  }));
-
 test("actual guided configuration-only setup succeeds with unavailable manager and background setup stops at the host", () =>
   fixture(async ({ root, run, installArgs, configPath }) => {
     writeFileSync(join(root, "unsupported"), "");

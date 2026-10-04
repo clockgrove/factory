@@ -88,7 +88,7 @@ factory supervisor start | stop [--disable] | upgrade --cli /abs/installed/dist/
 
 - `queue add` never replaces the queue. An Objective already queued keeps its place and takes the issue's current body. `remove` withdraws a pending Objective and refuses an active one.
 - With an empty queue the service only watches GitHub, makes no model calls and lists unqueued candidates. Labels and discovery never admit work. Polling uses `queue.pollSeconds` (default 30).
-- `supervisor stop` drains and keeps state. `--disable` also stops it starting at login. `upgrade` checks that the new package can continue the retained state before switching.
+- `supervisor stop` drains and keeps state. `--disable` also stops it starting at login. `upgrade` drains the owner, then switches the unit. The new package refuses state written by an incompatible version when it starts.
 - An Objective that needs a human exits the service with code 2. Decide it, run `factory queue resume`, then `factory supervisor start`.
 
 ## Status

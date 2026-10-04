@@ -31,6 +31,7 @@ import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
 import {
   assertSelectedLfsValidation,
   assertValidationWorktreeObservation,
+  validStoppedLeftovers,
 } from "./validation.js";
 
 export type WorkStatus =
@@ -392,7 +393,8 @@ function validationEvidence(value: unknown, label: string): string[] {
       receipt.index !== index ||
       receipt.passed !== true ||
       receipt.exitCode !== 0 ||
-      sha(receipt.treeSha, `${label}.commands[${index}].treeSha`) !== treeSha
+      sha(receipt.treeSha, `${label}.commands[${index}].treeSha`) !== treeSha ||
+      !validStoppedLeftovers(receipt.stoppedLeftovers)
     )
       throw new Error(
         `${label}.commands[${index}] is not bound to the exact tree and order`,

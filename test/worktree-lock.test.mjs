@@ -32,6 +32,7 @@ import {
   pinnedGitRaw,
   processGroupExists,
   removeWorktree,
+  SSH_KEEPALIVE_COMMAND,
   withProcessCancellation,
 } from "../dist/process.js";
 
@@ -52,7 +53,8 @@ function run(cwd, ...args) {
 const SHIM = `#!/bin/sh
 sub=$3
 [ "$sub" = worktree ] && sub="worktree-$4"
-case "$sub" in rev-parse|update-ref|--version) quiet=1 ;; *) quiet= ;; esac
+case "$sub" in rev-parse|update-ref|config|--version) quiet=1 ;; *) quiet= ;; esac
+[ "$sub" = fetch ] && printf '%s' "\${GIT_SSH_COMMAND-}" >"$FACTORY_TEST_DIR/ssh-command"
 [ -n "$quiet" ] || echo "start $sub" >>"$FACTORY_TEST_DIR/log"
 if [ "$sub" = "$FACTORY_TEST_HOLD" ] && mkdir "$FACTORY_TEST_DIR/holding" 2>/dev/null; then
   if [ "$sub" = fetch ]; then
@@ -290,6 +292,40 @@ test("a failed command releases the lock", async () => {
   await next;
 });
 
+test("a fetch queued behind a waiting registry change waits for it", async () => {
+  const { root, checkout, worktree, head } = fixture();
+  const validation = worktree("validation");
+  await withShim(root, "fetch", async ({ held, release, log }) => {
+    const first = fetchHead(checkout, "main");
+    await held();
+    // The removal queues behind the held fetch; the second fetch, queued
+    // after it, must not overtake it although it could share the lock.
+    // (removeWorktree deletes files before it queues, so queue the
+    // unregistration directly.)
+    const removal = pinnedGitAsync(
+      checkout,
+      "worktree",
+      "remove",
+      "--force",
+      validation,
+    );
+    const second = fetchHead(checkout, "main");
+    await settledOrStarted(second);
+    release();
+    assert.equal(await first, head);
+    await removal;
+    assert.equal(await second, head);
+    assert.deepEqual(log(), [
+      "start fetch",
+      "end fetch",
+      "start worktree-remove",
+      "end worktree-remove",
+      "start fetch",
+      "end fetch",
+    ]);
+  });
+});
+
 test("a caller cancelled while queued leaves the queue", async () => {
   const { root, checkout, worktree, head } = fixture();
   const validation = worktree("validation");
@@ -404,6 +440,83 @@ test("Factory's git never starts automatic maintenance", async () => {
     assert.equal(await read(checkout, "config", "--get", "gc.auto"), "0");
   }
   assert.equal(git(checkout, "config", "--get", "gc.auto"), "0");
+});
+
+test("Factory's git never runs repository hooks", async () => {
+  const { root, checkout } = fixture();
+  const marker = join(root, "hook-ran");
+  const hook = `#!/bin/sh\necho "$0" >>${JSON.stringify(marker)}\n`;
+  // A hook in the repository's own directory, and one a worker points
+  // core.hooksPath at.
+  writeFileSync(join(checkout, ".git", "hooks", "pre-commit"), hook, {
+    mode: 0o755,
+  });
+  const redirected = join(root, "worker-hooks");
+  mkdirSync(redirected);
+  writeFileSync(join(redirected, "post-commit"), hook, { mode: 0o755 });
+  const added = join(root, "added");
+  await addWorktree(checkout, added, "HEAD");
+  run(added, "config", "core.hooksPath", redirected);
+  writeFileSync(join(added, "new.txt"), "new\n");
+  await pinnedGitAsync(added, "add", "new.txt");
+  await pinnedGitAsync(
+    added,
+    "-c",
+    "user.name=Factory",
+    "-c",
+    "user.email=factory@example.invalid",
+    "commit",
+    "-q",
+    "-m",
+    "pinned",
+  );
+  await gitAsync(
+    added,
+    "-c",
+    "user.name=Factory",
+    "-c",
+    "user.email=factory@example.invalid",
+    "commit",
+    "-q",
+    "--allow-empty",
+    "-m",
+    "ambient",
+  );
+  await removeWorktree(checkout, added);
+  assert.equal(existsSync(marker), false);
+  // The same hooks do run for plain git, so the test would see them.
+  run(
+    checkout,
+    "-c",
+    "user.name=t",
+    "-c",
+    "user.email=t@t",
+    "commit",
+    "-q",
+    "--allow-empty",
+    "-m",
+    "plain",
+  );
+  assert.equal(existsSync(marker), true);
+});
+
+test("a locked fetch bounds SSH stalls unless the operator chose the SSH command", async () => {
+  const { root, checkout } = fixture();
+  await withShim(root, "none", async () => {
+    const used = () => readFileSync(join(root, "ssh-command"), "utf8");
+    await fetchHead(checkout, "main");
+    assert.equal(used(), SSH_KEEPALIVE_COMMAND);
+    process.env.GIT_SSH_COMMAND = "ssh -i operator-key";
+    try {
+      await fetchHead(checkout, "main");
+      assert.equal(used(), "ssh -i operator-key");
+    } finally {
+      delete process.env.GIT_SSH_COMMAND;
+    }
+    run(checkout, "config", "core.sshCommand", "ssh -F operator-config");
+    await fetchHead(checkout, "main");
+    assert.equal(used(), "");
+  });
 });
 
 test("synchronous git refuses commands that need the repository lock", () => {

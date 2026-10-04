@@ -1133,11 +1133,20 @@ function assertCommandReceipts(
       !receipt.command ||
       receipt.passed !== true ||
       receipt.exitCode !== 0 ||
-      receipt.treeSha !== expectedTree
+      receipt.treeSha !== expectedTree ||
+      !validStoppedLeftovers(receipt.stoppedLeftovers)
     )
       throw new Error(
         `${label} command receipt ${index} is not bound to the exact result tree and order`,
       );
+}
+
+/** Absent, or a positive count of stopped leftover processes. */
+export function validStoppedLeftovers(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "number" && Number.isSafeInteger(value) && value > 0)
+  );
 }
 
 function workItemDeltaSources(args: {
@@ -2453,6 +2462,9 @@ export async function validateTree(
         passed: true,
         exitCode: 0,
         treeSha,
+        ...(result.stoppedLeftovers && {
+          stoppedLeftovers: result.stoppedLeftovers,
+        }),
       });
     }
     for (const member of lfsMembers) {

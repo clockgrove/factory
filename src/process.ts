@@ -262,10 +262,17 @@ async function withRepositoryLock<T>(
   }
 }
 
-/** Factory's git never starts background maintenance, which would walk the registry unlocked. */
+/**
+ * Configuration for every git command Factory runs. No background
+ * maintenance, which would walk the worktree registry unlocked. No
+ * repository hooks: they are code from a worker-modified tree or checkout
+ * that would run with the controller's environment and credentials.
+ * Command-line scope overrides any hooksPath the repository sets.
+ */
 const GIT_CONFIG: [string, string][] = [
   ["maintenance.auto", "false"],
   ["gc.auto", "0"],
+  ["core.hooksPath", "/dev/null"],
 ];
 /** A stalled transfer must not hold the repository lock indefinitely. */
 const LOCKED_NETWORK_CONFIG: [string, string][] = [
@@ -274,6 +281,31 @@ const LOCKED_NETWORK_CONFIG: [string, string][] = [
 ];
 /** Deadline for a locked network command (fetch, pull); tests shorten it. */
 export const lockedNetworkDeadline = { milliseconds: 15 * 60_000 };
+/** The SSH counterpart of the HTTP low-speed bound: 4 unanswered 15 s probes. */
+export const SSH_KEEPALIVE_COMMAND =
+  "ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=4";
+
+/**
+ * Bound a stalled SSH transfer the way LOCKED_NETWORK_CONFIG bounds HTTP,
+ * unless the operator chose the SSH command (GIT_SSH_COMMAND, GIT_SSH or
+ * core.sshCommand), which is then used unchanged. ssh still reads the
+ * operator's ssh configuration.
+ */
+function withSshKeepalive(
+  checkout: string,
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  if (env.GIT_SSH_COMMAND || env.GIT_SSH) return env;
+  const configured = spawnSync(
+    "git",
+    ["-C", checkout, "config", "--get", "core.sshCommand"],
+    { env, encoding: "utf8" },
+  );
+  if (configured.error) throw configured.error;
+  // Exit 1 means unset; anything else leaves the choice to git itself.
+  if (configured.status !== 1) return env;
+  return { ...env, GIT_SSH_COMMAND: SSH_KEEPALIVE_COMMAND };
+}
 
 /** Append configuration through GIT_CONFIG_COUNT, after any entries already set. */
 function withGitConfig(
@@ -314,7 +346,7 @@ function gitProcess(
       : undefined;
     try {
       const result = await subprocessAsync("git", ["-C", checkout, ...args], {
-        env,
+        env: network ? withSshKeepalive(checkout, env) : env,
         ...(deadline && { signal: deadline }),
       });
       if (result.status !== 0)
@@ -576,12 +608,19 @@ export function linuxProcessIdentity(
 }
 
 export function processGroupExists(group: number): boolean {
+  return processGroupMembers(group, 1) > 0;
+}
+
+/** Live (non-zombie) members of a process group, counted up to `limit`. */
+function processGroupMembers(group: number, limit = Infinity): number {
+  let members = 0;
   for (const name of readdirSync("/proc")) {
     if (!/^[1-9]\d*$/.test(name)) continue;
     const identity = linuxProcessIdentity(Number(name));
-    if (identity?.group === group && identity.state !== "Z") return true;
+    if (identity?.group === group && identity.state !== "Z")
+      if (++members >= limit) break;
   }
-  return false;
+  return members;
 }
 
 export interface OwnedSubprocess {
@@ -632,8 +671,15 @@ export async function subprocessAsync(
   options: SpawnOptions = {},
   input?: string,
   observe?: (stream: "stdout" | "stderr", chunk: Buffer) => void,
-): Promise<{ status: number | null; stdout: string; stderr: string }> {
+): Promise<{
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  /** Processes the exited command left running that were stopped after the grace period. */
+  stoppedLeftovers?: number;
+}> {
   const scope = processCancellation.getStore();
+  let stoppedLeftovers = 0;
   // `options.signal` (such as a deadline) also stops the whole process group.
   const { signal: extra, ...spawnOptions } = options;
   const signal =
@@ -700,6 +746,7 @@ export async function subprocessAsync(
     // The command has exited, but descendants it left in its group (such as
     // a git transport helper after a connection reset) are still running.
     // Stop them and verify they are gone; the exit status stays authoritative.
+    stoppedLeftovers = processGroupMembers(owned.pid);
     let stopError: unknown;
     try {
       process.kill(-owned.pid, "SIGKILL");
@@ -722,6 +769,7 @@ export async function subprocessAsync(
     status,
     stdout: Buffer.concat(output.stdout).toString("utf8"),
     stderr: Buffer.concat(output.stderr).toString("utf8"),
+    ...(stoppedLeftovers && { stoppedLeftovers }),
   };
 }
 

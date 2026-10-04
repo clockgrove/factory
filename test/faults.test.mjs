@@ -2004,12 +2004,13 @@ test("repeat records and structured waits are validated", () => {
     activeMs: 1000,
   };
   const nextAt = "2026-10-03T00:00:04.000Z";
+  const scheduledAt = "2026-10-03T00:00:02.000Z";
   assertRepeats(undefined, "repeats");
   assertRepeats(
     {
-      "objective/plan": { nextAt, faults },
-      "item/one/publish": { nextAt },
-      "item/one/execute": { paid: 2, inFlight: true },
+      "objective/plan": { nextAt, scheduledAt, faults },
+      "item/one/publish": { nextAt, scheduledAt },
+      "item/one/execute": { paid: 2, inFlight: true, asked: "Keep it?" },
     },
     "repeats",
   );
@@ -2018,7 +2019,10 @@ test("repeat records and structured waits are validated", () => {
     { "item/one": { nextAt } },
     { "objective/Plan": { nextAt } },
     { "objective/plan": {} },
-    { "objective/plan": { nextAt: "later" } },
+    { "objective/plan": { nextAt: "later", scheduledAt } },
+    { "objective/plan": { nextAt } },
+    { "objective/plan": { scheduledAt } },
+    { "objective/plan": { asked: "" } },
     { "objective/plan": { faults: { ...faults, count: 0 } } },
     {
       "objective/plan": { faults: { ...faults, last: { kind: "transient" } } },
@@ -2030,7 +2034,7 @@ test("repeat records and structured waits are validated", () => {
     },
     { "objective/plan": { paid: 0 } },
     { "objective/plan": { inFlight: 1 } },
-    { "objective/plan": { nextAt, extra: true } },
+    { "objective/plan": { nextAt, scheduledAt, extra: true } },
     [],
   ])
     assert.throws(() => assertRepeats(bad, "repeats"), /repeats/);

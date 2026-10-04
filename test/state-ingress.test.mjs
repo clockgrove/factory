@@ -1320,6 +1320,7 @@ for (const scope of ["work", "final"])
 test("state ingress validates repeat records and structured waits", () => {
   const record = {
     nextAt: "2026-10-03T00:00:01.000Z",
+    scheduledAt: "2026-10-03T00:00:00.000Z",
     faults: {
       since: "2026-10-03T00:00:00.000Z",
       count: 1,

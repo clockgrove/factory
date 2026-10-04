@@ -356,6 +356,8 @@ export interface FaultRun {
 export interface RepeatRecord {
   /** Earliest time the step runs again (backoff or a pending poll). */
   nextAt?: string;
+  /** When `nextAt` was chosen; with it, bounds the sleep if the clock jumps. */
+  scheduledAt?: string;
   faults?: FaultRun;
   /**
    * Paid-call faults that may have been paid for. Progress does not reset
@@ -364,6 +366,8 @@ export interface RepeatRecord {
   paid?: number;
   /** A paid call started and has not settled; a restart counts it. */
   inFlight?: true;
+  /** A decision the step asked and the operator has not answered. */
+  asked?: string;
 }
 
 export type WaitKind =
@@ -450,9 +454,20 @@ export function assertRepeats(value: unknown, label: string): void {
     if (
       !keys.length ||
       keys.some(
-        (name) => !["nextAt", "faults", "paid", "inFlight"].includes(name),
+        (name) =>
+          ![
+            "nextAt",
+            "scheduledAt",
+            "faults",
+            "paid",
+            "inFlight",
+            "asked",
+          ].includes(name),
       ) ||
-      (record.nextAt !== undefined && !iso(record.nextAt)) ||
+      (record.nextAt === undefined) !== (record.scheduledAt === undefined) ||
+      (record.nextAt !== undefined &&
+        (!iso(record.nextAt) || !iso(record.scheduledAt))) ||
+      (record.asked !== undefined && !text(record.asked)) ||
       (record.faults !== undefined && !validFaultRun(record.faults)) ||
       (record.paid !== undefined && !atLeast(record.paid, 1)) ||
       (record.inFlight !== undefined && record.inFlight !== true)

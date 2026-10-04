@@ -6,22 +6,30 @@
  * 3. The body classifies its own checks: a bad result throws `work`, a foreign change `decision`, lag or
  *    "not visible yet" a `transient` StepFault. Anything unclassified is a `defect`.
  * 4. `ctx.progress()` after each successful poll or sub-call; `ctx.pending(wait)` for "not yet" (CI, capacity).
- * 5. A paid step wraps its model turn or worker run in `ctx.paid(() => ...)`; only those faults count.
- * 6. Never rotate the attempt inside a step. Records are keyed by item, so rotation cannot reset the bound.
+ * 5. A paid step wraps its model turn or worker start in `ctx.paid(() => ...)` and reports a worker the driver
+ *    confirmed dead with `ctx.paidLost(detail)`; only those faults count toward the bound.
+ * 6. Never rotate the attempt inside a step. Records are keyed by item, so rotation alone never resets the
+ *    paid bound; work and defect end the step and reset it (repair allowances bound those).
  * 7. `step` returns only on success. On a throw, branch on `faultOf(error).kind`: `cancelled` stop quietly;
  *    `work` fail the attempt, then repair or retry; `decision` / `config` leave the scope waiting (the wait
  *    is saved; `factory retry` answers it); `defect` stop and report. Transient faults never leave `step`.
- * 8. Delete the site's old repeat loop (repeatInterrupted, retryTransient, ...); spans go inside the body.
+ * 8. Delete the old repeat loop (repeatInterrupted, retryTransient, ...); diagnostics spans go inside the body.
  */
 /*
  * Worked examples (sketches):
  *
- * execute: paid start and collect, progress per poll.
+ * execute: a session is attempt + seq, saved before its start. A dead session ends that seq; the next try
+ * starts seq + 1 (inside the step: the attempt does not rotate). find() skips ended sessions.
  *   await step(state, { scope: { item: id }, name: "execute", paid: true }, async (ctx) => {
- *     const session = (await driver.find(work.attempt)) ?? (await ctx.paid(() => driver.start(input)));
+ *     work.session ??= { attempt: work.attempt, seq: 1 }; save();
+ *     const session = (await driver.find(work.session)) ?? (await ctx.paid(() => driver.start(input, work.session)));
  *     const seen = await driver.poll(session);
  *     ctx.progress();
- *     if (!seen.done) ctx.pending({ kind: "capacity", detail: "worker running" }, seen.nextPollAt);
+ *     if (seen.dead) {                                     // driver confirmed it stopped
+ *       work.session = { ...work.session, seq: work.session.seq + 1 }; save();
+ *       ctx.paidLost(`worker ${session.id} ended without a result`);   // counts toward the bound
+ *     }
+ *     if (!seen.done) ctx.pending(undefined, seen.nextPollAt);         // running: poll, no wait
  *     return ctx.paid(() => driver.collect(session));
  *   }, opts);
  *
@@ -51,6 +59,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   attachedFault,
   decision,
+  transient,
   type Fault,
   faultDetail,
   faultOf,
@@ -87,10 +96,17 @@ export interface StepContext {
   /** Run the paid call of a paid step; only its faults count toward the bound. */
   paid<T>(call: () => Promise<T>): Promise<T>;
   /**
-   * Not yet: end this try, show `wait`, and run the body again at `retryAt`
-   * (default `PENDING_POLL_MS`, at most `MAX_BACKOFF_MS`). Never catch it.
+   * Not yet: end this try, show `wait` (none for healthy running work), and
+   * run the body again at `retryAt` (default `PENDING_POLL_MS`). The wait
+   * shows the last known state: faults keep it, `progress()` clears it.
+   * Never catch what it throws.
    */
-  pending(wait: PendingWait, retryAt?: string): never;
+  pending(wait: PendingWait | undefined, retryAt?: string): never;
+  /**
+   * A paid step's effect was lost after it started (a dead worker the
+   * driver confirmed stopped): counts toward the paid bound and repeats.
+   */
+  paidLost(detail: string): never;
 }
 
 /** Time for backoff. Tests inject one so nothing waits in real time. */
@@ -197,9 +213,10 @@ export function clearWait(state: StepState, scope: StepScope): boolean {
 }
 
 /**
- * The operator's retry: delete the scope's repeat records and the wait its
- * steps wrote, so the steps start fresh. Returns whether anything was
- * cleared; the caller saves.
+ * The operator's retry: delete every repeat record of the scope (an item
+ * runs one step at a time, so that is the waiting step) and the wait its
+ * steps wrote, so the steps start fresh. A decision blocks only the step
+ * that asked it. Returns whether anything was cleared; the caller saves.
  */
 export function clearRepeats(state: StepState, scope: StepScope): boolean {
   let cleared = false;
@@ -217,6 +234,17 @@ export function clearRepeats(state: StepState, scope: StepScope): boolean {
     }
   if (!Object.keys(repeats).length) delete state.repeats;
   return cleared;
+}
+
+/**
+ * Cancellation completed: no step resumes, so every repeat record and every
+ * step-owned wait goes. The caller saves.
+ */
+export function clearAllRepeats(state: StepState): void {
+  clearRepeats(state, "objective");
+  if ("work" in state)
+    for (const item of Object.keys(state.work)) clearRepeats(state, { item });
+  delete state.repeats;
 }
 
 /** A step of the scope in a run of transient faults, for status. */
@@ -265,10 +293,10 @@ const paidBound = (name: string, paid: number) =>
 /** The body's "not yet", caught by `step`; never a fault. */
 class StepPending extends Error {
   constructor(
-    readonly wait: PendingWait,
+    readonly wait: PendingWait | undefined,
     readonly retryAt: string | undefined,
   ) {
-    super(`pending: ${wait.detail}`);
+    super(`pending: ${wait?.detail ?? "running"}`);
     this.name = "StepPending";
   }
 }
@@ -323,7 +351,11 @@ async function repeat<T>(
     }
   };
   const owned = () => holder.wait?.step === key;
-  /** Write this step's wait, or clear it. Never replaces another step's unanswered wait. */
+  /**
+   * Write this step's wait, or clear it. Never replaces another step's
+   * unanswered wait: status then shows the first question, and this step's
+   * own question shows after `factory retry` answers the first.
+   */
   const own = (wait?: Omit<Wait, "step">) => {
     if (!wait) {
       if (owned()) delete holder.wait;
@@ -352,36 +384,30 @@ async function repeat<T>(
     own();
     save();
   }
-  // A decision waits for the operator's answer, which clears it.
+  // An unanswered decision (asked, or the paid bound) holds until
+  // `factory retry` clears the record; the body is not called.
   const paidSoFar = record().paid ?? 0;
-  if (paidSoFar > PAID_FAULT_LIMIT) {
-    if (!owned()) {
-      own({ kind: "decision", detail: paidBound(name, paidSoFar) });
+  const asked =
+    record().asked ??
+    (paidSoFar > PAID_FAULT_LIMIT ? paidBound(name, paidSoFar) : undefined);
+  if (asked) {
+    if (!owned() || holder.wait!.detail !== asked) {
+      own({ kind: "decision", detail: asked });
       save();
     }
-    throw new StepFault(decision(paidBound(name, paidSoFar)));
+    throw new StepFault(decision(asked));
   }
-  if (owned() && holder.wait!.kind === "decision")
-    throw new StepFault(decision(holder.wait!.detail));
 
   // Running time of the current run of faults; downtime is never counted.
   let activeFrom = clock.now();
   for (;;) {
     if (signal?.aborted) throw cancelled();
     const next = record();
-    if (next.nextAt) {
-      const now = clock.now();
-      const last = next.faults?.last;
-      const retryAt =
-        last?.kind === "transient" && last.retryAt
-          ? Date.parse(last.retryAt)
-          : 0;
-      // Never longer than the delay the step chose, so a clock that jumps
-      // backwards cannot stall it.
-      const longest = next.faults
-        ? Math.max(backoffDelay(next.faults.count), retryAt - now)
-        : MAX_BACKOFF_MS;
-      const delay = Math.min(Date.parse(next.nextAt) - now, longest);
+    if (next.nextAt && next.scheduledAt) {
+      // Never longer than the delay chosen when it was scheduled, so a
+      // clock that jumps backwards cannot stall the step.
+      const chosen = Date.parse(next.nextAt) - Date.parse(next.scheduledAt);
+      const delay = Math.min(Date.parse(next.nextAt) - clock.now(), chosen);
       if (delay > 0)
         await clock.sleep(delay, signal).catch((error: unknown) => {
           throw signal?.aborted ? cancelled() : error;
@@ -393,15 +419,27 @@ async function repeat<T>(
     const paidFaults = new WeakSet<Fault>();
     /** The service answered: the run of faults is over; the paid count stays. */
     const endFaults = () =>
-      write({ ...record(), faults: undefined, nextAt: undefined });
+      write({
+        ...record(),
+        faults: undefined,
+        nextAt: undefined,
+        scheduledAt: undefined,
+      });
     const progress = () => {
-      if (done || !record().faults) return;
+      if (done) return;
+      // A successful observation replaces the last known "not yet".
+      const stale = owned() && !awaitsOperator(holder.wait);
+      if (!record().faults && !stale) return;
       endFaults();
+      if (stale) own();
       save();
     };
     const paid = async <R>(call: () => Promise<R>): Promise<R> => {
       if (!spec.paid)
         throw new Error(`Step ${name} is not paid but made a paid call`);
+      // One paid call at a time, so one marker settles exactly one call.
+      if (record().inFlight)
+        throw new Error(`Step ${name} made a paid call while one is running`);
       write({ ...record(), inFlight: true });
       save();
       let result: R;
@@ -419,12 +457,22 @@ async function repeat<T>(
       progress();
       return result;
     };
-    const pending = (wait: PendingWait, retryAt?: string): never => {
+    const pending = (
+      wait: PendingWait | undefined,
+      retryAt?: string,
+    ): never => {
       throw new StepPending(wait, retryAt);
+    };
+    const paidLost = (detail: string): never => {
+      if (!spec.paid)
+        throw new Error(`Step ${name} is not paid but lost a paid effect`);
+      const lost = new StepFault(transient(detail, true));
+      paidFaults.add(lost.fault);
+      throw lost;
     };
 
     try {
-      const result = await fn({ progress, paid, pending });
+      const result = await fn({ progress, paid, pending, paidLost });
       done = true;
       if (state.repeats?.[key] || owned()) {
         write({});
@@ -441,8 +489,11 @@ async function repeat<T>(
           ...record(),
           faults: undefined,
           nextAt: iso(at > now ? at : now + PENDING_POLL_MS),
+          scheduledAt: iso(now),
         });
-        own({ kind: error.wait.kind, detail: error.wait.detail });
+        if (error.wait)
+          own({ kind: error.wait.kind, detail: error.wait.detail });
+        else if (!awaitsOperator(holder.wait)) own();
         save();
         continue;
       }
@@ -460,6 +511,10 @@ async function repeat<T>(
       }
       if (fault.kind === "decision" || fault.kind === "config") {
         endFaults();
+        // The record holds the question, so it blocks re-entry even when
+        // another step's unanswered wait keeps this one from showing.
+        if (fault.kind === "decision")
+          write({ ...record(), asked: fault.question });
         own(
           fault.kind === "decision"
             ? { kind: "decision", detail: fault.question }
@@ -483,6 +538,7 @@ async function repeat<T>(
       write({
         ...current,
         nextAt: iso(retryAt > now ? retryAt : now + backoffDelay(count)),
+        scheduledAt: iso(now),
         faults: {
           since: run?.since ?? iso(now),
           count,

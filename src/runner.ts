@@ -63,7 +63,12 @@ import { runNativeGraph } from "./delivery/native-runner.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { runRegularGraph } from "./delivery/regular-runner.js";
 import { DiagnosticEmitter, StateDiagnostics } from "./diagnostics.js";
-import { awaitsOperator, clearRepeats, waitOf } from "./step.js";
+import {
+  awaitsOperator,
+  clearAllRepeats,
+  clearRepeats,
+  waitOf,
+} from "./step.js";
 import { namesPlan, shortPlanDigest } from "./status-summary.js";
 import {
   executionProfileChoices,
@@ -777,6 +782,7 @@ export async function runObjective(
         await owner.cancellation;
         if (!state.coordinator?.cancelError) {
           state.cancelledAt = new Date().toISOString();
+          clearAllRepeats(state);
           if (state.schemaVersion === 6)
             for (const work of Object.values(state.work))
               if (work.status === "pending" || work.status === "running")
@@ -1823,6 +1829,7 @@ async function runObjectivePass(
         await Promise.allSettled(active.values());
         if (!current.coordinator?.cancelError && active.size === 0) {
           current.cancelledAt = new Date().toISOString();
+          clearAllRepeats(current);
           if (current.schemaVersion === 6)
             for (const work of Object.values(current.work))
               if (work.status !== "done" && work.status !== "published")
@@ -1922,6 +1929,7 @@ export async function cancelObjective(
         }
       }
     continuation.cancelledAt = new Date().toISOString();
+    clearAllRepeats(continuation);
     saveState(statePath(config.repository, objective), continuation);
     const state = continuation;
     new DiagnosticEmitter(config.repository, objective).emit({
@@ -1952,7 +1960,15 @@ function retryStep(
       owners.get(ownerKey(config, objective))?.snapshot ??
       readContinuation(config.repository, objective);
     if (!state) throw new Error("Objective has no Factory state");
-    if (itemId !== undefined && !("work" in state && state.work[itemId]))
+    // A failed or cancelled item's attempt is over: retry starts a new one.
+    const work =
+      itemId === undefined || !("work" in state)
+        ? undefined
+        : state.work[itemId];
+    if (
+      itemId !== undefined &&
+      (!work || work.status === "failed" || work.status === "cancelled")
+    )
       return false;
     const scope = itemId === undefined ? "objective" : { item: itemId };
     if (!awaitsOperator(waitOf(state, scope))) return false;
@@ -2025,6 +2041,8 @@ export function retryWorkItem(
           state.stackMerges?.[nativeUnit.id]))
     )
       throw new Error("Published PR requires operator direction before retry");
+    // The new attempt starts without the old one's records or bound.
+    clearRepeats(state, { item: itemId });
     state.work[itemId] = { status: "pending", recovery: archiveAttempt(work) };
     state.cancelRequested = false;
     delete state.cancelledAt;

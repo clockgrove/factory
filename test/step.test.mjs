@@ -129,6 +129,7 @@ test("transient faults repeat with a persisted backoff; success deletes the reco
   );
   assert.deepEqual(h.disk[2].repeats[KEY], {
     nextAt: at(T0 + 7 * SECOND),
+    scheduledAt: at(T0 + 3 * SECOND),
     faults: {
       since: at(T0),
       count: 3,
@@ -174,10 +175,12 @@ test("a restart mid-backoff resumes from the record and never counts downtime", 
 });
 
 test("a backwards clock jump cannot stall a backoff", async () => {
+  // Scheduled for one second after a fault the clock then put 24 hours ahead.
   const h = harness();
   h.state.repeats = {
     [KEY]: {
-      nextAt: at(T0 + 24 * HOUR),
+      nextAt: at(T0 + 24 * HOUR + SECOND),
+      scheduledAt: at(T0 + 24 * HOUR),
       faults: {
         since: at(T0),
         count: 1,
@@ -453,6 +456,7 @@ test("24 hours of running time escalates; downtime between processes does not co
   old.state.repeats = {
     [KEY]: {
       nextAt: at(T0 - 47 * HOUR),
+      scheduledAt: at(T0 - 47 * HOUR - MINUTE),
       faults: {
         since: at(T0 - 48 * HOUR),
         count: 3,
@@ -661,8 +665,110 @@ test("Objective steps run on a planning snapshot; item steps need the item", asy
   );
 });
 
+test("running work polls without a wait; progress clears a stale pending wait", async () => {
+  const h = harness();
+  const waits = observing(h, () => structuredClone(h.state.work.one.wait));
+  let calls = 0;
+  await step(
+    h.state,
+    { scope: item, name: "merge" },
+    async (ctx) => {
+      calls++;
+      if (calls === 1) ctx.pending({ kind: "ci", detail: "PR #5 checks" });
+      if (calls === 2) throw transient();
+      ctx.progress();
+      if (calls === 3) ctx.pending(undefined, at(h.clock.time + 5 * SECOND));
+      return "merged";
+    },
+    h.options,
+  );
+  const ci = { kind: "ci", detail: "PR #5 checks", step: "item/one/merge" };
+  // The fault keeps the last known state; the next observation clears it.
+  assert.deepEqual(waits.slice(0, 3), [ci, ci, undefined]);
+  assert.deepEqual(h.clock.sleeps, [30 * SECOND, SECOND, 5 * SECOND]);
+  assert.equal(h.state.work.one.wait, undefined);
+});
+
+test("a worker confirmed dead counts toward the paid bound through paidLost", async () => {
+  const h = harness();
+  h.state.work.one.session = { attempt: "a1", seq: 1 };
+  const error = await caught(
+    step(
+      h.state,
+      { scope: item, name: "execute", paid: true },
+      async (ctx) => {
+        const session = h.state.work.one.session;
+        h.state.work.one.session = { ...session, seq: session.seq + 1 };
+        ctx.paidLost(`worker ${session.seq} ended without a result`);
+      },
+      h.options,
+    ),
+  );
+  assert.equal(faultOf(error).kind, "decision");
+  assert.deepEqual(faultOf(error).evidence, [
+    "worker 4 ended without a result",
+  ]);
+  // Each try started a new session of the same attempt.
+  assert.equal(h.state.work.one.session.seq, 5);
+  const free = await caught(
+    step(h.state, publish, (ctx) => ctx.paidLost("x"), h.options),
+  );
+  assert.equal(faultOf(free).kind, "defect");
+});
+
+test("a paid step makes one paid call at a time", async () => {
+  const h = harness();
+  const error = await caught(
+    step(
+      h.state,
+      { scope: item, name: "review", paid: true },
+      (ctx) =>
+        Promise.all([
+          ctx.paid(() => new Promise(() => {})),
+          ctx.paid(async () => 1),
+        ]),
+      h.options,
+    ),
+  );
+  assert.equal(faultOf(error).kind, "defect");
+  assert.match(error.message, /while one is running/);
+});
+
+test("a decision blocks its step even while another step's question holds the wait", async () => {
+  const h = harness();
+  h.state.work.one.wait = {
+    kind: "decision",
+    detail: "review failed 4 times with an unknown outcome; retry or cancel?",
+    step: "item/one/review",
+  };
+  const merge = { scope: item, name: "merge" };
+  const fn = scripted(
+    new StepFault({
+      kind: "decision",
+      question: "Foreign head; keep it?",
+      evidence: [],
+    }),
+  );
+  await caught(step(h.state, merge, fn, h.options));
+  // Status shows the first question; this step's waits in its record.
+  assert.equal(h.state.work.one.wait.step, "item/one/review");
+  assert.equal(
+    h.state.repeats["item/one/merge"].asked,
+    "Foreign head; keep it?",
+  );
+  const again = await caught(step(h.state, merge, fn, h.options));
+  assert.equal(faultOf(again).question, "Foreign head; keep it?");
+  assert.equal(fn.calls.count, 1);
+  // Retry answers the item's waiting steps.
+  clearRepeats(h.state, item);
+  assert.equal(
+    await step(h.state, merge, async () => "merged", h.options),
+    "merged",
+  );
+});
+
 test("clearRepeats clears one scope's records and step waits", () => {
-  const record = { nextAt: at(T0) };
+  const record = { nextAt: at(T0), scheduledAt: at(T0) };
   const state = factoryState();
   state.repeats = {
     "item/one/publish": record,
@@ -869,6 +975,7 @@ test("planning status reads the Objective's outage from state, redacted", () => 
       repeats: {
         "objective/plan": {
           nextAt: at(Date.now() + 5 * HOUR),
+          scheduledAt: at(Date.now()),
           faults: {
             since: "2026-10-03T10:00:00.000Z",
             count: 4,

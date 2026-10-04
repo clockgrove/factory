@@ -423,8 +423,8 @@ function checkServiceContinuationFields(state: ContinuationState): void {
   // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
   const fields =
     state.schemaVersion === 7
-      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest autonomy capacity allowanceConsumption repairConsumption planningRecovery coordinator plan issueByItemId error cancelRequested cancelledAt permanentAbandonment"
-      : "schemaVersion repository objective runId configDigest baseSha autonomy capacity planGraphDigest prerequisitesDigest coordinator graph graphRevisions pendingAmendment rejectedAmendments allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
+      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest autonomy capacity charges planningRecovery coordinator plan issueByItemId error cancelRequested cancelledAt permanentAbandonment"
+      : "schemaVersion repository objective runId configDigest baseSha autonomy capacity planGraphDigest prerequisitesDigest coordinator graph graphRevisions pendingAmendment rejectedAmendments charges planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
   for (const field of Object.keys(state))
     if (!fields.split(" ").includes(field))
       throw new Error(

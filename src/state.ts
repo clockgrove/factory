@@ -137,11 +137,7 @@ export interface PreparationState {
   autonomy: Autonomy;
   /** Worker ceiling and scheduling resolved when the Objective started. */
   capacity: import("./config.js").Capacity;
-  allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
-  repairConsumption?: Record<
-    string,
-    import("./graph-amendments.js").AllowanceConsumption
-  >;
+  charges?: import("./repair-policy.js").RepairLedger["charges"];
   schemaVersion: 7;
   kind: "preparing";
   repository: string;
@@ -167,16 +163,13 @@ export type ContinuationState = FactoryState | PreparationState;
 export interface FactoryState {
   finalAcceptance?: import("./completion.js").FinalAcceptance;
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
-  repairConsumption?: Record<
-    string,
-    import("./graph-amendments.js").AllowanceConsumption
-  >;
+  /** Charged failure events (see repair-policy.ts). */
+  charges?: import("./repair-policy.js").RepairLedger["charges"];
   backlogDiscoveries?: import("./graph-amendments.js").AmendmentProposal[];
   graphRevisions?: import("./graph-amendments.js").GraphRevision[];
   pendingAmendment?: import("./graph-amendments.js").PendingAmendment;
   /** Superseded known rejections retain their original proposal and evidence. */
   rejectedAmendments?: import("./graph-amendments.js").PendingAmendment[];
-  allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
   coordinator?: CoordinatorDisposition;
   /** Limits snapshotted from configuration when the Objective started. */
   autonomy: Autonomy;

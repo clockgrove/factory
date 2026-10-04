@@ -1328,12 +1328,7 @@ async function runObjectivePass(
         ...(preparation.planningRecovery
           ? { planningRecovery: preparation.planningRecovery }
           : {}),
-        ...(preparation.allowanceConsumption
-          ? { allowanceConsumption: preparation.allowanceConsumption }
-          : {}),
-        ...(preparation.repairConsumption
-          ? { repairConsumption: preparation.repairConsumption }
-          : {}),
+        ...(preparation.charges ? { charges: preparation.charges } : {}),
         autonomy: preparation.autonomy,
         capacity,
         planGraphDigest: plan.graphDigest,
@@ -1395,7 +1390,7 @@ async function runObjectivePass(
           work.recovery?.phase === "ready" &&
           work.recovery.correction
         ) {
-          applyWorkCorrection(state, id, work.recovery.correction, true);
+          applyWorkCorrection(state, id, work.recovery.correction);
           save(state);
         }
       }

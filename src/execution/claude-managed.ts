@@ -1,4 +1,4 @@
-import { attachFault, classifyFaults, transient } from "../fault.js";
+import { classifyFaults } from "../fault.js";
 import { executionFault } from "./fault.js";
 import { randomUUID } from "node:crypto";
 import {
@@ -200,25 +200,15 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     context: ExecutionContext,
   ): Promise<never> {
     const data = this.active(handle);
-    try {
-      return await failAttempt(error, {
-        transient: claudeTransient,
-        expired: this.expired(data),
-        cancelled: context.cancelled(),
-        settle: (detail) => this.settle(handle, context, detail, false),
-      });
-    } catch (settled) {
-      // The provider no longer has the session: its worker is gone with it.
-      throw claudeGone(error) && settled instanceof SettledAttemptFailure
-        ? attachFault(
-            settled,
-            transient(
-              `Claude managed session is gone: ${settled.message}`,
-              true,
-            ),
-          )
-        : settled;
-    }
+    return failAttempt(error, {
+      transient: claudeTransient,
+      expired: this.expired(data),
+      cancelled: context.cancelled(),
+      // The provider no longer has the session: its worker is gone with it,
+      // so the attempt ended without a result rather than with a wrong one.
+      settle: (detail) =>
+        this.settle(handle, context, detail, claudeGone(error)),
+    });
   }
   /** Records why the attempt ended, stops its session and reports a settled failure. */
   private async settle(

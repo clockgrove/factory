@@ -251,10 +251,7 @@ test("compound: after an interrupted projection, read-only observations keep the
     const stopped = readContinuation(config.repository, 1);
     assert.equal(stopped.runId, original.runId);
     assert.deepEqual(stopped.plan, original.plan);
-    assert.deepEqual(
-      stopped.allowanceConsumption,
-      original.allowanceConsumption,
-    );
+    assert.deepEqual(stopped.charges, original.charges);
     assert.equal(creates, 1);
   });
 });

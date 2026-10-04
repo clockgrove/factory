@@ -11,6 +11,7 @@ import {
   ProviderTurnTimeoutError,
 } from "./provider-turn.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
+import { attachFault, faultOf, transient } from "./fault.js";
 import type { PlanningModel, WorkItem } from "./contracts.js";
 import {
   installedControllerCapabilities,
@@ -20,20 +21,35 @@ import type { FactoryState, WorkState } from "./state.js";
 import {
   archiveAttempt,
   chargeRepair,
+  consumption,
   failureDigest,
+  itemEvent,
   repairScopes,
   validateCorrection,
   type FailureDisposition,
   type RepairCorrection,
 } from "./repair-policy.js";
 
-/** Collection settled the owned worker and removed its unfinished checkout. */
+/**
+ * Collection settled the owned worker and removed its unfinished checkout.
+ * A failed result is a wrong result (`work`); a worker that stopped without
+ * one is `transient` and may have spent a paid run.
+ */
 export class SettledAttemptFailure extends Error {
   constructor(
     cause: unknown,
     readonly classification: "implementation" | "interruption" = "interruption",
   ) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
+    attachFault(
+      this,
+      classification === "implementation"
+        ? { kind: "work", evidence: { detail: this.message } }
+        : transient(
+            `The worker stopped without a result: ${this.message}`,
+            true,
+          ),
+    );
   }
 }
 const transientCodes = new Set([
@@ -189,10 +205,29 @@ export async function repeatInterrupted<T>(
   }
 }
 
-/** The exact collected candidate exists, but settled local validation failed. */
-export class CandidateValidationFailure extends Error {}
-export class CandidateEnvironmentFailure extends Error {}
+/** The exact collected candidate exists, but settled local validation failed: a wrong result. */
+export class CandidateValidationFailure extends Error {
+  constructor(detail: string) {
+    super(detail);
+    attachFault(this, { kind: "work", evidence: { detail } });
+  }
+}
+/** The controller could not prepare validation; the candidate was never judged. */
+export class CandidateEnvironmentFailure extends Error {
+  constructor(detail: string) {
+    super(detail);
+    attachFault(this, {
+      kind: "config",
+      detail,
+      fix: "Restore the controller's validation environment, then supply a validation-environment correction",
+    });
+  }
+}
 
+/**
+ * Record a failed attempt. Only a contained wrong result (a `work` fault)
+ * gets a failure event, so only it can be charged for a correction.
+ */
 export function recordWorkFailure(
   state: FactoryState,
   id: string,
@@ -206,8 +241,14 @@ export function recordWorkFailure(
     (error instanceof SettledAttemptFailure ||
       error instanceof CandidateValidationFailure ||
       error instanceof CandidateEnvironmentFailure);
+  const fault = faultOf(error);
+  const event =
+    isolated && fault.kind === "work" && work.attempt && work.step
+      ? itemEvent(work.attempt, work.step, work.recovery?.history?.length ?? 0)
+      : undefined;
   const failure: FailureDisposition = {
     digest: failureDigest(detail),
+    ...(event && { event }),
     detail,
     at: new Date().toISOString(),
     classification: isolated
@@ -227,11 +268,13 @@ export function recordWorkFailure(
           : "operator-decision",
     unfinishedEdits:
       error instanceof SettledAttemptFailure ? "removed" : "unavailable",
-    decision: isolated
+    decision: event
       ? "Supply a concrete diagnosis and correction or enable implementation repair in the configured autonomy"
-      : isInterruption(error)
-        ? "Interrupted repeatedly; check the provider, network or GitHub status, then run again"
-        : "Resolve external outcome or ownership before another attempt",
+      : fault.kind === "config"
+        ? fault.fix
+        : isolated || isInterruption(error)
+          ? "Interrupted repeatedly; check the provider, network or GitHub status, then run again"
+          : "Resolve external outcome or ownership before another attempt",
   };
   work.recovery = {
     ...work.recovery,
@@ -245,7 +288,6 @@ export function applyWorkCorrection(
   state: FactoryState,
   id: string,
   correction: RepairCorrection,
-  alreadyCharged = false,
 ): void {
   const work = state.work[id];
   if (
@@ -272,8 +314,12 @@ export function applyWorkCorrection(
       throw new Error(
         "Implementation repair needs an unpublished failed attempt",
       );
-    if (!alreadyCharged)
-      chargeRepair(state, correction.kind, repairScopes(state, id));
+    chargeRepair(
+      state,
+      work.recovery!.failure!.event,
+      correction.kind,
+      repairScopes(state, id),
+    );
     state.work[id] = { status: "pending", recovery };
   } else {
     if (
@@ -306,8 +352,12 @@ export function applyWorkCorrection(
       throw new Error(
         "Environment revalidation requires a failed collected-result validation, not a semantic review decision",
       );
-    if (!alreadyCharged)
-      chargeRepair(state, correction.kind, repairScopes(state, id));
+    chargeRepair(
+      state,
+      work.recovery!.failure!.event,
+      correction.kind,
+      repairScopes(state, id),
+    );
     work.recovery = recovery;
     work.status = "running";
     work.step = "validate";
@@ -337,30 +387,29 @@ export async function diagnoseWorkRepair(args: {
   const { state, item, save } = args;
   const work = state.work[item.id]!;
   const failure = work.recovery?.failure;
-  if (
-    !failure ||
-    work.status !== "failed" ||
-    failure.classification === "uncertain" ||
-    args.stopped()
-  )
+  // Only a wrong result has a failure event; anything else is repeated or
+  // fixed, never diagnosed against an allowance.
+  if (!failure?.event || work.status !== "failed" || args.stopped())
     return false;
-  if (failure.classification === "validation-environment") return false;
   if (work.recovery?.phase === "ready" && work.recovery.correction) {
-    applyWorkCorrection(state, item.id, work.recovery.correction, true);
+    applyWorkCorrection(state, item.id, work.recovery.correction);
     save();
     return true;
   }
   if (!state.autonomy.repairClasses.includes("implementation")) return false;
-  // A diagnosis interrupted by a restart is issued again. It was charged
-  // before it was first sent, so the reissue is not charged twice.
-  if (work.recovery?.phase !== "diagnosing") {
-    try {
-      chargeRepair(state, "implementation", repairScopes(state, item.id));
-    } catch (error) {
-      failure.decision = error instanceof Error ? error.message : String(error);
-      save();
-      return false;
-    }
+  // The charge is keyed by the failure event, so a diagnosis repeated after
+  // a restart or a lost response is not charged again.
+  try {
+    chargeRepair(
+      state,
+      failure.event,
+      "implementation",
+      repairScopes(state, item.id),
+    );
+  } catch (error) {
+    failure.decision = error instanceof Error ? error.message : String(error);
+    save();
+    return false;
   }
   work.recovery!.phase = "diagnosing";
   save();
@@ -381,7 +430,7 @@ export async function diagnoseWorkRepair(args: {
       invocation: {
         invocationId: randomUUID(),
         phase: "diagnosis",
-        ordinal: state.allowanceConsumption!.implementationRepairs,
+        ordinal: consumption(state).implementationRepairs,
         observe: args.diagnostics?.modelObserver({
           scopeId: work.attempt!,
           runId: state.runId,
@@ -424,7 +473,7 @@ export async function diagnoseWorkRepair(args: {
   work.recovery!.phase = "ready";
   save();
   if (args.stopped()) return false;
-  applyWorkCorrection(state, item.id, correction, true);
+  applyWorkCorrection(state, item.id, correction);
   save();
   return true;
 }
@@ -438,11 +487,18 @@ export function prepareEvidenceRecovery(
   const rejection = work.acceptancePending?.reviewRejection;
   if (!rejection) return false;
   const detail = JSON.stringify(work.acceptancePending);
+  // A completed review answer whose evidence was refused is corrected like a
+  // wrong result: one charge per refused review.
+  const event =
+    work.attempt && work.step
+      ? itemEvent(work.attempt, work.step, work.recovery?.history?.length ?? 0)
+      : undefined;
   work.recovery = {
     ...work.recovery,
     scopes: repairScopes(state, id),
     failure: {
       digest: failureDigest(detail),
+      ...(event && { event }),
       classification: "review-evidence",
       detail,
       at: new Date().toISOString(),
@@ -454,6 +510,7 @@ export function prepareEvidenceRecovery(
     phase: "stopped",
   };
   if (
+    !event ||
     rejection.reason === "source-truncated" ||
     !state.autonomy.repairClasses.includes("review-evidence")
   )

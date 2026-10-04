@@ -1,3 +1,4 @@
+import { consumption } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -390,7 +391,7 @@ test("sequential planning supplies grounded native acceptance in every rendered 
         packet.prompt.includes(JSON.stringify(currentRequest.localExecutables)),
       );
     }
-    assert.equal(second.allowanceConsumption.planningRevisions, 1);
+    assert.equal(consumption(second).planningRevisions, 1);
     assert.equal(
       readEvents(f.eventsPath).filter((event) => event.type === "start").length,
       2,
@@ -693,7 +694,7 @@ for (const [descendant, dependent, historical] of [
       assert.deepEqual(second.graph.items[0], candidate.graph.items[0]);
       assert.equal(second.graphRevisions.length, 2);
       assert.equal(second.graphRevisions[0].digest, candidate.graphDigest);
-      assert.equal(second.allowanceConsumption.planningRevisions, 1);
+      assert.equal(consumption(second).planningRevisions, 1);
       assert.equal(second.baseSha, candidate.baseSha);
       assert.equal(second.objectiveBodyDigest, candidate.bodyDigest);
       assert.equal(second.configDigest, candidate.configDigest);
@@ -764,7 +765,7 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
       assert.equal(calls, 0, fault);
       assert.equal(state.pendingAmendment.phase, "rejected");
       assert.deepEqual(state.graph, second.graph);
-      assert.equal(state.allowanceConsumption.planningRevisions, 1);
+      assert.equal(consumption(state).planningRevisions, 1);
       saveState(statePath(f.config.repository, 1), first);
       f.issues.get(1).body = body(1);
       f.dependencies.set(2, [1]);

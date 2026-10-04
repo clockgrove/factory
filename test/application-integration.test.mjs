@@ -1,3 +1,4 @@
+import { consumption } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -895,7 +896,7 @@ test("application fails closed once after exhausted result-review capacity witho
           .slice(0, 3)
           .every((prompt) => prompt === resultPrompts[0]),
       );
-      assert.equal(waiting.allowanceConsumption.resultRereviews, 1);
+      assert.equal(consumption(waiting).resultRereviews, 1);
       assert.equal(
         readEvents(eventsPath).filter(
           (event) =>

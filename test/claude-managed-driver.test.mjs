@@ -604,11 +604,12 @@ test("Claude session that is gone settles the attempt and still deletes its file
   const f = fixture(t);
   const handle = await f.driver().start(f.request, f.context);
   f.state.gone = true;
+  // The worker is gone with its session: no result, not a wrong one.
   await assert.rejects(
     f.driver().collect(handle, f.context),
     (error) =>
       error instanceof SettledAttemptFailure &&
-      error.classification === "implementation",
+      error.classification === "interruption",
   );
   assert.equal(f.saved.at(-1).data.phase, "disposed");
   assert.equal(f.state.calls.filter((c) => /^delete:file_/.test(c)).length, 4);
@@ -675,7 +676,6 @@ test("Claude session gone while collecting is a dead worker, not a failed result
     .driver()
     .collect(handle, f.context)
     .catch((caught) => caught);
-  // Behaviour is unchanged: the attempt still settles as before.
   assert.ok(error instanceof SettledAttemptFailure);
   assert.deepEqual(
     [faultOf(error).kind, faultOf(error).outcomeUnknown],

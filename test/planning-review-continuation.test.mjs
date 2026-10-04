@@ -1,3 +1,4 @@
+import { consumption } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -227,7 +228,7 @@ test("completed clean review survives persisted pause and repeated completion wi
   assert.equal(candidate.review.status, "clean");
   assert.equal(f.emitted.length, before);
   assert.deepEqual(state.planningRecovery.review, original);
-  assert.equal(state.allowanceConsumption?.planningRevisions ?? 0, 0);
+  assert.equal(consumption(state).planningRevisions, 0);
   verifyPlanCandidate(
     candidate,
     1,
@@ -250,7 +251,7 @@ test("known rejected review keeps exact resolved identities across pause and one
   const resolved = decodeGraphReview(original.response, original.packet);
   const candidate = await compilePlan(...f.args, { state, save() {} });
   assert.equal(candidate.review.status, "clean");
-  assert.equal(state.allowanceConsumption.planningRevisions, 1);
+  assert.equal(consumption(state).planningRevisions, 1);
   assert.equal(state.planningRecovery.history.length, 1);
   assert.deepEqual(state.planningRecovery.history[0].review, original);
   assert.deepEqual(
@@ -273,7 +274,7 @@ test("pause after packet retention and before submission reuses that packet for 
   assert.deepEqual(state.planningRecovery.review.packet, packet);
   assert.equal(f.reviews, 1);
   assert.equal(state.planningRecovery.review.response.packetId, packet.id);
-  assert.equal(state.allowanceConsumption?.planningRevisions ?? 0, 0);
+  assert.equal(consumption(state).planningRevisions, 0);
 });
 
 test("changed reviewed context, damaged request and old missing binding refuse before calls or consumption", async (t) => {
@@ -384,7 +385,7 @@ test("exhausted allowance and repeated failures keep real findings for a human d
     assert.deepEqual(state.plan, candidate);
     assert.equal(state.planningRecovery.phase, "stopped");
     assert.equal(f.emitted.length, calls);
-    assert.equal(state.allowanceConsumption?.planningRevisions ?? 0, 0);
+    assert.equal(consumption(state).planningRevisions, 0);
     assert.deepEqual(
       decodeGraphReview(
         state.planningRecovery.review.response,

@@ -4,6 +4,7 @@ import { assertGraphRevisions } from "./graph-amendments.js";
 import {
   allowanceKey,
   assertRepairLedger,
+  consumption,
   failureDigest,
   repairScopes,
 } from "./repair-policy.js";
@@ -1456,12 +1457,10 @@ function retainedRepairProof(
     );
   }
   const key = allowanceKey(correction.kind);
-  const consumed = state.allowanceConsumption?.[key];
   const scopes = repairScopes(state, item.id);
   if (
     !state.autonomy.repairClasses.includes(correction.kind) ||
-    !consumed ||
-    scopes.some((scope) => !state.repairConsumption?.[scope]?.[key])
+    (prior.failure.event !== undefined && !state.charges?.[prior.failure.event])
   )
     throw new Error(
       `Work Item ${item.id} correction lacks charged consumption`,
@@ -1575,10 +1574,13 @@ function retainedRepairProof(
       repairClass: correction.kind,
       snapshotConsumption: {
         allowance: key,
-        objective: { consumed, limit: state.autonomy.allowances[key] },
+        objective: {
+          consumed: consumption(state)[key],
+          limit: state.autonomy.allowances[key],
+        },
         paths: scopes.map((scope) => ({
           scope,
-          consumed: state.repairConsumption![scope]![key],
+          consumed: consumption(state, scope)[key],
           limit: state.autonomy.repairPolicy.perPath[key],
         })),
       },

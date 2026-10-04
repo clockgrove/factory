@@ -1,3 +1,4 @@
+import { consumption } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -834,7 +835,7 @@ test("completed SDK decoder failure enters the admitted bounded planning repair 
     ),
   );
   assert.equal(state.planningRecovery.phase, "complete");
-  assert.equal(state.allowanceConsumption.planningRevisions, 1);
+  assert.equal(consumption(state).planningRevisions, 1);
   assert.equal(state.planningRecovery.history.length, 1);
   assert.equal(state.planningRecovery.history[0].kind, "planning-output");
   // The planner sees the correction as a diagnosis, not an independent review.
@@ -2001,7 +2002,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
   assert.equal(candidate.review.status, "clean");
   assert.equal(candidate.review.revisions, 1);
   assert.deepEqual(candidate.executionBounds, executionBounds);
-  assert.equal(state.allowanceConsumption.planningRevisions, 1);
+  assert.equal(consumption(state).planningRevisions, 1);
   assert.deepEqual(
     captured.map(({ schema }) =>
       schema.properties.contextId
@@ -2309,5 +2310,5 @@ test("semantic validation rejection retains the actual decoded graph for bounded
   assert.equal(candidate.review.status, "clean");
   assert.equal(diagnoses, 1);
   assert.equal(compiles, 2);
-  assert.equal(state.allowanceConsumption.planningRevisions, 1);
+  assert.equal(consumption(state).planningRevisions, 1);
 });

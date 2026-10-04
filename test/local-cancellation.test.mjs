@@ -341,10 +341,19 @@ test("supported Objective cancellation retains the ceased worker failure and con
         },
         repairClasses: [],
       }),
-      allowanceConsumption: {
-        planningRevisions: 1,
-        implementationRepairs: 1,
-        resultRereviews: 1,
+      charges: {
+        "objective/plan/0": {
+          allowance: "planningRevisions",
+          scopes: ["$planning"],
+        },
+        "prior/execute/0": {
+          allowance: "implementationRepairs",
+          scopes: ["worker"],
+        },
+        "prior/validate/0": {
+          allowance: "resultRereviews",
+          scopes: ["worker"],
+        },
       },
       work: {
         worker: {
@@ -382,7 +391,7 @@ test("supported Objective cancellation retains the ceased worker failure and con
     assert.equal(after.runId, state.runId);
     assert.equal(after.work.worker.attempt, state.work.worker.attempt);
     assert.deepEqual(after.work.worker.execution, execution);
-    assert.deepEqual(after.allowanceConsumption, state.allowanceConsumption);
+    assert.deepEqual(after.charges, state.charges);
     assert.equal(after.work.worker.validation, undefined);
     assert.equal(after.finalAcceptance, undefined);
     assert.equal(existsSync(h.data.resultPath), false);

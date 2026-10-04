@@ -1,3 +1,4 @@
+import { consumption } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import {
   chmodSync,
@@ -600,7 +601,7 @@ test("actual planning packets carry presence without executing acceptance, and b
     assert.equal(existsSync(marker), false);
     assert.deepEqual(readEvents(setup.eventsPath), []);
     const preparation = readContinuation(descriptorInput.config.repository, 1);
-    assert.equal(preparation.allowanceConsumption.planningRevisions, 1);
+    assert.equal(consumption(preparation).planningRevisions, 1);
     assert.equal(preparation.planningRecovery.phase, "stopped");
     assert.equal(candidate.review.status, "needs-human");
     const verify = (value) =>

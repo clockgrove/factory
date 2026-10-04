@@ -28,7 +28,7 @@ import type {
   ModelInvocationUsage,
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
-import { failureDigest } from "./repair-policy.js";
+import { consumption, failureDigest } from "./repair-policy.js";
 import { itemsConflict } from "./scheduler.js";
 import type {
   ContinuationState,
@@ -1265,8 +1265,8 @@ export function statusDocument(
             : null,
         }
       : null,
-    allowanceConsumption: state.allowanceConsumption ?? null,
-    repairConsumption: state.repairConsumption ?? null,
+    allowanceConsumption: consumption(state),
+    charges: state.charges ?? {},
     repairs: Object.fromEntries(
       Object.entries(state.work)
         .filter(([, work]) => work.recovery)

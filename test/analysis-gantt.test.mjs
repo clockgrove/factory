@@ -203,6 +203,7 @@ test("StateDiagnostics whole item duration never becomes a delayed closure opera
     objective: 12,
     runId: "run-one",
     autonomy: defaultAutonomy,
+    capacity: { concurrency: 1 },
     graph: {
       items: [{ id: "one", dependencies: [], ownedPaths: [], resources: [] }],
     },

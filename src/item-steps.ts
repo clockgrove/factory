@@ -13,7 +13,7 @@ import type {
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { workerContext } from "./execution/checkpoint.js";
 import { faultOf, StepFault } from "./fault.js";
-import { repeatKey, step } from "./step.js";
+import { repeatKey, StepPaused, step } from "./step.js";
 import type { FactoryState } from "./state.js";
 import {
   type ReviewOutcome,
@@ -27,6 +27,8 @@ interface ItemStep {
   save: () => void;
   /** The Objective run's cancel signal (one per run). */
   signal?: AbortSignal;
+  /** The owner's pause, drain or handoff signal. */
+  pause?: AbortSignal;
 }
 
 const scopeOf = ({ item }: ItemStep) => ({ item: item.id });
@@ -37,18 +39,6 @@ export function cancelledFault(detail = "Objective cancelled"): StepFault {
 }
 
 /**
- * The owner paused while an item waited (for CI): stop at this safe point.
- * Pause is not cancel and not a fault: nothing is charged or failed, and
- * the next run resumes the step.
- */
-export class ItemPaused extends Error {
-  constructor() {
-    super("paused");
-    this.name = "ItemPaused";
-  }
-}
-
-/**
  * Step rule 7 for a Work Item: whether a step's throw leaves the item where
  * it is. `decision` and `config` wait for the operator (the step saved the
  * wait; `factory retry` or the fix answers it), `cancelled` and a pause stop
@@ -56,9 +46,35 @@ export class ItemPaused extends Error {
  * `defect` return false: the attempt fails.
  */
 export function staysInPlace(error: unknown): boolean {
-  if (error instanceof ItemPaused) return true;
+  // Pause is not a fault: the step's record and wait stay for the next run.
+  if (error instanceof StepPaused) return true;
   const { kind } = faultOf(error);
   return kind === "decision" || kind === "config" || kind === "cancelled";
+}
+
+/**
+ * The operator cancelled the item's step: its diagnostics end with a
+ * terminal event (the attempt did not complete). Pause and operator waits
+ * emit nothing; the step resumes or waits.
+ */
+export function reportCancelled(
+  error: unknown,
+  state: FactoryState,
+  itemId: string,
+  diagnostics?: DiagnosticEmitter,
+): void {
+  if (error instanceof StepPaused) return;
+  const fault = faultOf(error);
+  if (fault.kind !== "cancelled") return;
+  const work = state.work[itemId]!;
+  diagnostics?.emit({
+    runId: state.runId,
+    itemId,
+    attemptId: work.attempt,
+    operation: work.step ?? work.status,
+    outcome: "failed",
+    detail: fault.detail,
+  });
 }
 
 const stopped = (args: { signal?: AbortSignal; cancelled?: () => boolean }) =>
@@ -147,7 +163,7 @@ export async function executeItem(
       ctx.progress();
       return result;
     },
-    { save, signal: args.signal },
+    { save, signal: args.signal, pause: args.pause },
   );
 }
 
@@ -164,7 +180,7 @@ export function validateItem(
     args.state,
     { scope: scopeOf(args), name: "validate" },
     () => args.validate(),
-    { save: args.save, signal: args.signal },
+    { save: args.save, signal: args.signal, pause: args.pause },
   );
 }
 
@@ -200,6 +216,6 @@ export function reviewItem(
         ),
       );
     },
-    { save: args.save, signal: args.signal },
+    { save: args.save, signal: args.signal, pause: args.pause },
   );
 }

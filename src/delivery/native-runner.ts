@@ -5,7 +5,7 @@ import { recordWorkFailure, diagnoseWorkRepair } from "../work-repair.js";
 import {
   cancelledFault,
   executeItem,
-  ItemPaused,
+  reportCancelled,
   reviewItem,
   staysInPlace,
   validateItem,
@@ -36,13 +36,18 @@ import {
   validationLfsMembersForItem,
 } from "../media.js";
 import { faultOf } from "../fault.js";
-import { earlierHeads } from "../repair-policy.js";
 import { currentProcessSignal } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { itemsConflict, rankPending } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
-import { type StepContext, step } from "../step.js";
+import { type StepContext, StepPaused, step } from "../step.js";
+import {
+  deliveredHead,
+  deliveryEarlierHeads,
+  retireDeliveredHead,
+  updateBehindBranch,
+} from "./branch-update.js";
 import {
   validateWorkItem,
   workItemReviewEvidence,
@@ -71,6 +76,8 @@ export async function runNativeGraph(args: {
   diagnostics?: DiagnosticEmitter;
   /** The Objective run's cancel signal, passed to every step. */
   signal?: AbortSignal;
+  /** The owner's pause, drain or handoff signal, passed to every step. */
+  pause?: AbortSignal;
 }): Promise<void> {
   const {
     config,
@@ -100,6 +107,14 @@ export async function runNativeGraph(args: {
       throw error;
     }
   };
+  /**
+   * Cancel the run: items stop at their own safe points first, so each
+   * one's state and diagnostics settle before the run reports the cancel.
+   */
+  const cancelRun = async (): Promise<Error> => {
+    await Promise.allSettled(active.values());
+    return cancelledFault();
+  };
   /** What a diagnostics span records for one try of a delivery step. */
   interface Span<T> {
     itemId?: string;
@@ -113,6 +128,7 @@ export async function runNativeGraph(args: {
     name: "publish" | "await-ci" | "stack" | "merge",
     fn: (context: StepContext) => Promise<T>,
     span?: Span<T>,
+    pause = args.pause,
   ): Promise<T> =>
     step(
       state,
@@ -135,7 +151,7 @@ export async function runNativeGraph(args: {
               span.summarize,
             )
           : fn(context),
-      { save, signal },
+      { save, signal, pause },
     );
   /** A unit's CI wait, stack and merge steps belong to its top item. */
   const unitStep = <T>(
@@ -143,7 +159,8 @@ export async function runNativeGraph(args: {
     name: "await-ci" | "stack" | "merge",
     fn: (context: StepContext) => Promise<T>,
     span?: Span<T>,
-  ): Promise<T> => itemStep(unit.items.at(-1)!.id, name, fn, span);
+    pause?: AbortSignal,
+  ): Promise<T> => itemStep(unit.items.at(-1)!.id, name, fn, span, pause);
   /** Diagnose a failed item's wrong result within its repair allowances. */
   const diagnose = async (item: WorkItem): Promise<void> => {
     phases.release(item.id);
@@ -161,6 +178,8 @@ export async function runNativeGraph(args: {
           config.checkout,
         ),
         save,
+        signal,
+        pause: args.pause,
         stopped: () => stopped() || Boolean(args.paused?.()),
       });
     } finally {
@@ -196,6 +215,7 @@ export async function runNativeGraph(args: {
       driver,
       save,
       signal,
+      pause: args.pause,
       cancelled: args.cancelled,
       diagnostics: args.diagnostics,
       request: (attemptId) => ({
@@ -316,7 +336,7 @@ export async function runNativeGraph(args: {
     }
     if (prepared.length) {
       await args.reconcile?.();
-      if (stopped()) throw cancelledFault();
+      if (stopped()) throw await cancelRun();
       if (args.paused?.() || args.amendmentPending?.()) return;
       const tasks = prepared.map(async (unit) => {
         const item = unit.items[0]!;
@@ -346,6 +366,7 @@ export async function runNativeGraph(args: {
               work.authentication = error.authentication;
             if (!work.execution) phases.release(item.id);
             save();
+            reportCancelled(error, state, item.id, args.diagnostics);
             return;
           }
           work.status = "failed";
@@ -497,25 +518,41 @@ export async function runNativeGraph(args: {
       continue;
     }
     for (const [index, item] of unit.items.entries()) {
-      if (stopped()) throw cancelledFault();
+      if (stopped()) throw await cancelRun();
       const work = state.work[item.id]!;
-      if (work.status === "published") continue;
-      if (state.work[item.id]?.status === "waiting") return settlePrepared();
-      if (work.status !== "pending" && work.status !== "running")
-        throw new Error(`Work Item ${item.id} cannot enter native delivery`);
       const previous = index ? state.work[unit.items[index - 1]!.id]! : null;
       const itemBase = previous
         ? previous.changeRef
         : (state.integratedSha ?? state.baseSha);
+      if (work.status === "published") {
+        // The bottom layer's base is the default branch, which may move.
+        if (!index || work.baseSha === itemBase) continue;
+        // A lower layer was repaired: this layer's result was built on its
+        // old head. It is replayed onto the new one, validated, reviewed
+        // and republished with a lease (#619).
+        retireDeliveredHead(work);
+        work.status = "running";
+        work.step = "deliver";
+        save();
+      }
+      if (work.status === "waiting") return settlePrepared();
+      if (work.status !== "pending" && work.status !== "running")
+        throw new Error(`Work Item ${item.id} cannot enter native delivery`);
       if (!itemBase) throw new Error("Native stack predecessor has no commit");
-      if (work.status === "running" && work.baseSha !== itemBase && index !== 0)
+      // A worker's result on the old base cannot be replayed until collected.
+      if (
+        work.status === "running" &&
+        work.baseSha !== itemBase &&
+        index !== 0 &&
+        (work.step === "execute" || work.step === "approve-asset")
+      )
         throw new Error(`Work Item ${item.id} resumed on a changed base`);
       if (work.status === "pending" && args.paused?.()) return settlePrepared();
       if (work.status === "pending") {
         const available = await driver.availableSlots();
         if (phases.availableSlots(available) <= 0) return settlePrepared();
         await args.reconcile?.();
-        if (stopped()) throw cancelledFault();
+        if (stopped()) throw await cancelRun();
         if (args.paused?.()) return settlePrepared();
         work.status = "running";
         work.step = "execute";
@@ -618,6 +655,8 @@ export async function runNativeGraph(args: {
             state,
             item,
             save,
+            signal,
+            pause: args.pause,
             validate: () =>
               validateWorkItem(
                 config.checkout,
@@ -674,6 +713,9 @@ export async function runNativeGraph(args: {
               state,
               item,
               save,
+              signal,
+              pause: args.pause,
+              cancelled: args.cancelled,
               review: (retry) => ({
                 ...retry,
                 model: args.planningModel,
@@ -765,7 +807,7 @@ export async function runNativeGraph(args: {
               changeRef: work.changeRef!,
               branch: branchFor(item.id),
               lfs: Boolean(work.selectedAssetSet),
-              earlierHeads: earlierHeads(work),
+              earlierHeads: deliveryEarlierHeads(work),
               baseBranch: previous
                 ? branchFor(unit.items[index - 1]!.id)
                 : await github.defaultBranch(),
@@ -808,6 +850,7 @@ export async function runNativeGraph(args: {
               work.authentication = error.authentication;
             if (!work.execution) phases.release(item.id);
             save();
+            reportCancelled(error, state, item.id, args.diagnostics);
             waiting = true;
             return;
           }
@@ -855,6 +898,12 @@ export async function runNativeGraph(args: {
       Boolean(args.paused?.()) && topWork.wait?.kind === "ci";
     if (pausedWhileWaiting() && !state.stackMerges?.[unit.id])
       return settlePrepared();
+    /**
+     * The unit's CI wait pauses with the owner's signal, and when a poll
+     * finds the owner paused: the wait then ends with `StepPaused` and
+     * keeps its record and wait.
+     */
+    const ciPause = new AbortController();
     const layers: NativeStackLayer[] = unit.items.map((item) => {
       const work = state.work[item.id]!;
       if (work.status !== "published" || !work.pullRequest || !work.changeRef)
@@ -862,7 +911,7 @@ export async function runNativeGraph(args: {
       return {
         pullRequest: work.pullRequest,
         branch: branchFor(item.id),
-        headSha: work.changeRef,
+        headSha: deliveredHead(work)!,
       };
     });
     const pendingMerge = state.stackMerges?.[unit.id];
@@ -878,8 +927,38 @@ export async function runNativeGraph(args: {
     // The layer whose published result is wrong, when one is.
     let failedLayer: number | undefined;
     /** Observe every layer; return them when the unit may merge, else wait for CI. */
+    /**
+     * Strict protection: GitHub updates a layer's branch with its base from
+     * exactly `from`. The new head is that layer's delivered head; its
+     * checks run again.
+     */
+    const updateLayer = async (
+      context: StepContext,
+      index: number,
+      from: string,
+    ): Promise<never> => {
+      const layer = layers[index]!;
+      layer.headSha = await updateBehindBranch({
+        github,
+        work: state.work[unit.items[index]!.id]!,
+        save,
+        identity: { number: layer.pullRequest, branch: layer.branch },
+        from,
+      });
+      context.progress();
+      return context.pending({
+        kind: "ci",
+        detail: `Awaiting checks on PR #${layer.pullRequest} after GitHub updated it with its base`,
+      });
+    };
     const ready = async (context: StepContext) => {
       failedLayer = undefined;
+      // An update already requested is finished before the layers are read:
+      // its head is GitHub's merge, not a foreign change.
+      for (const [index, item] of unit.items.entries()) {
+        const from = state.work[item.id]!.branchUpdate;
+        if (from) await updateLayer(context, index, from);
+      }
       // If the default branch moved, the layers' checks and mergeability
       // decide; a move is not a fault.
       const defaultBranch = await github.defaultBranch();
@@ -889,7 +968,9 @@ export async function runNativeGraph(args: {
             number: layer.pullRequest,
             branch: layer.branch,
             headSha: layer.headSha,
-            earlierHeads: earlierHeads(state.work[unit.items[index]!.id]!),
+            earlierHeads: deliveryEarlierHeads(
+              state.work[unit.items[index]!.id]!,
+            ),
             baseBranch: index ? layers[index - 1]!.branch : defaultBranch,
           }),
         ),
@@ -900,24 +981,8 @@ export async function runNativeGraph(args: {
       const behind = observations.findIndex(
         (observation) => observation.mergeReadiness === "behind",
       );
-      if (behind >= 0) {
-        const layer = layers[behind]!;
-        const work = state.work[unit.items[behind]!.id]!;
-        const head = await github.updateBranch({
-          number: layer.pullRequest,
-          branch: layer.branch,
-          headSha: layer.headSha,
-          earlierHeads: earlierHeads(work),
-        });
-        context.progress();
-        work.changeRef = head;
-        layer.headSha = head;
-        save();
-        context.pending({
-          kind: "ci",
-          detail: `PR #${layer.pullRequest} was updated with its base; awaiting its checks`,
-        });
-      }
+      if (behind >= 0)
+        await updateLayer(context, behind, layers[behind]!.headSha);
       // Every layer is judged before any wait: another layer's failure must
       // still surface, and it is that layer's.
       const pending = observations
@@ -947,9 +1012,18 @@ export async function runNativeGraph(args: {
           unit,
           "await-ci",
           async (context) => {
-            if (pausedWhileWaiting()) throw new ItemPaused();
+            // Paused while waiting: keep the wait; the step stops before
+            // its next poll.
+            if (pausedWhileWaiting()) {
+              ciPause.abort();
+              context.pending({ kind: "ci", detail: topWork.wait!.detail });
+            }
             return ready(context);
           },
+          undefined,
+          args.pause
+            ? AbortSignal.any([args.pause, ciPause.signal])
+            : ciPause.signal,
         );
         for (const [index, observation] of observations.entries())
           state.work[unit.items[index]!.id]!.preIntegrationChecks =
@@ -997,7 +1071,7 @@ export async function runNativeGraph(args: {
                         number: layers[0]!.pullRequest,
                         branch: layers[0]!.branch,
                         headSha: layers[0]!.headSha,
-                        earlierHeads: earlierHeads(topWork),
+                        earlierHeads: deliveryEarlierHeads(topWork),
                       },
                       layers[0]!.headSha,
                     )
@@ -1056,6 +1130,7 @@ export async function runNativeGraph(args: {
         // A failed merge request is not resumed: answering the decision
         // requests the merge anew.
         if (
+          !(error instanceof StepPaused) &&
           faultOf(error).kind !== "cancelled" &&
           state.stackMerges?.[unit.id]
         ) {
@@ -1091,6 +1166,9 @@ export async function runNativeGraph(args: {
         const isolated = recordWorkFailure(state, failed.id, error);
         save();
         if (isolated && !stopped()) await diagnose(failed);
+        // A repaired layer is delivered again in this pass; a failed one
+        // keeps the unit out until the operator answers.
+        remainingUnits.push(unit);
         continue;
       }
       throw error;

@@ -5,7 +5,7 @@ import { recordWorkFailure, diagnoseWorkRepair } from "../work-repair.js";
 import {
   cancelledFault,
   executeItem,
-  ItemPaused,
+  reportCancelled,
   reviewItem,
   staysInPlace,
   validateItem,
@@ -33,13 +33,24 @@ import {
   selectedInputsForItem,
   validationLfsMembersForItem,
 } from "../media.js";
-import { earlierHeads } from "../repair-policy.js";
 import { currentProcessSignal } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { readyItems } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
-import { clearWait, setWait, type StepContext, step } from "../step.js";
+import {
+  clearWait,
+  repeatKey,
+  setWait,
+  type StepContext,
+  StepPaused,
+  step,
+} from "../step.js";
+import {
+  deliveredHead,
+  deliveryEarlierHeads,
+  updateBehindBranch,
+} from "./branch-update.js";
 import {
   validateWorkItem,
   workItemReviewEvidence,
@@ -66,6 +77,8 @@ export async function runRegularGraph(args: {
   diagnostics?: DiagnosticEmitter;
   /** The Objective run's cancel signal, passed to every step. */
   signal?: AbortSignal;
+  /** The owner's pause, drain or handoff signal, passed to every step. */
+  pause?: AbortSignal;
 }): Promise<boolean> {
   const {
     config,
@@ -98,6 +111,14 @@ export async function runRegularGraph(args: {
       throw error;
     }
   };
+  /**
+   * Cancel the run: items stop at their own safe points first, so each
+   * one's state and diagnostics settle before the run reports the cancel.
+   */
+  const cancelRun = async (): Promise<Error> => {
+    await Promise.allSettled(active.values());
+    return cancelledFault();
+  };
   /** What a diagnostics span records for one try of a delivery step. */
   interface Span<T> {
     operation: string;
@@ -110,6 +131,7 @@ export async function runRegularGraph(args: {
     name: "publish" | "await-ci" | "merge",
     fn: (context: StepContext) => Promise<T>,
     span?: Span<T>,
+    pause = args.pause,
   ): Promise<T> =>
     step(
       state,
@@ -128,11 +150,25 @@ export async function runRegularGraph(args: {
               span.summarize,
             )
           : fn(context),
-      { save, signal },
+      { save, signal, pause },
     );
   /** The owner paused while this item waits for CI: stop polling. */
   const pausedWhileWaiting = (item: WorkItem): boolean =>
     Boolean(args.paused?.()) && state.work[item.id]!.wait?.kind === "ci";
+  /**
+   * The pause signal of one item's CI wait: the owner's, and aborted here
+   * when a poll finds the owner paused, so the wait ends with `StepPaused`
+   * and keeps its record and wait.
+   */
+  const ciPause = () => {
+    const local = new AbortController();
+    return {
+      abort: () => local.abort(),
+      signal: args.pause
+        ? AbortSignal.any([args.pause, local.signal])
+        : local.signal,
+    };
+  };
   /**
    * Publish a reviewed item, wait for its CI, merge it. Every effect is
    * observed before it is made, so a restart at any point runs the steps
@@ -157,7 +193,7 @@ export async function runRegularGraph(args: {
             changeRef: work.changeRef!,
             branch,
             lfs: Boolean(work.selectedAssetSet),
-            earlierHeads: earlierHeads(work),
+            earlierHeads: deliveryEarlierHeads(work),
           }),
         {
           operation: "github-publication",
@@ -179,33 +215,45 @@ export async function runRegularGraph(args: {
     const published: DeliveryResult = {
       branch,
       pullRequest: work.pullRequest!,
-      headSha: work.changeRef!,
-      earlierHeads: earlierHeads(work),
+      headSha: deliveredHead(work)!,
+      earlierHeads: deliveryEarlierHeads(work),
     };
-    if (pausedWhileWaiting(item)) throw new ItemPaused();
+    if (pausedWhileWaiting(item))
+      throw new StepPaused(repeatKey({ item: item.id }, "await-ci"));
     await reconcile();
+    /**
+     * Strict protection: GitHub updates the branch with its base from
+     * exactly `from`. The new head is the delivered head; its checks run
+     * again.
+     */
+    const updateBranch = async (
+      context: StepContext,
+      from: string,
+    ): Promise<never> => {
+      const head = await updateBehindBranch({
+        github,
+        work,
+        save,
+        identity: { number: published.pullRequest, branch },
+        from,
+      });
+      context.progress();
+      published.headSha = head;
+      published.earlierHeads = deliveryEarlierHeads(work);
+      return context.pending({
+        kind: "ci",
+        detail: `Awaiting checks on PR #${published.pullRequest} after GitHub updated it with its base`,
+      });
+    };
     /** Observe the PR; return it when it may merge, else wait for CI. */
     const ready = async (context: StepContext) => {
+      // An update already requested is finished before the PR is read: its
+      // head is GitHub's merge, not a foreign change.
+      if (work.branchUpdate) await updateBranch(context, work.branchUpdate);
       const observation = await delivery.observe(published);
       context.progress();
-      // Strict protection: bring the branch up to date with its base, from
-      // exactly the head Factory published; its checks run again.
-      if (observation.mergeReadiness === "behind") {
-        const head = await github.updateBranch({
-          number: published.pullRequest,
-          branch,
-          headSha: published.headSha,
-          earlierHeads: published.earlierHeads,
-        });
-        context.progress();
-        work.changeRef = head;
-        published.headSha = head;
-        save();
-        context.pending({
-          kind: "ci",
-          detail: `PR #${published.pullRequest} was updated with its base; awaiting its checks`,
-        });
-      }
+      if (observation.mergeReadiness === "behind")
+        await updateBranch(context, published.headSha);
       const pending = deliveryReadiness(
         published.pullRequest,
         observation,
@@ -217,13 +265,21 @@ export async function runRegularGraph(args: {
       if (pending) context.pending({ kind: "ci", detail: pending });
       return observation;
     };
+    const pause = ciPause();
     const observation = await deliveryStep(
       item,
       "await-ci",
       async (context) => {
-        if (pausedWhileWaiting(item)) throw new ItemPaused();
+        // Paused while waiting: keep the wait; the step stops before its
+        // next poll.
+        if (pausedWhileWaiting(item)) {
+          pause.abort();
+          context.pending({ kind: "ci", detail: work.wait!.detail });
+        }
         return ready(context);
       },
+      undefined,
+      pause.signal,
     );
     work.preIntegrationChecks = observation.namedChecks ?? [];
     save();
@@ -334,6 +390,7 @@ export async function runRegularGraph(args: {
         driver,
         save,
         signal,
+        pause: args.pause,
         cancelled: args.cancelled,
         diagnostics: args.diagnostics,
         request: (attemptId) => ({
@@ -422,6 +479,7 @@ export async function runRegularGraph(args: {
       item,
       save,
       signal,
+      pause: args.pause,
       validate: () =>
         validateWorkItem(
           config.checkout,
@@ -476,6 +534,7 @@ export async function runRegularGraph(args: {
         item,
         save,
         signal,
+        pause: args.pause,
         cancelled: args.cancelled,
         review: (retry) => ({
           ...retry,
@@ -584,6 +643,7 @@ export async function runRegularGraph(args: {
           work.authentication = error.authentication;
         if (!work.execution) phases.release(item.id);
         save();
+        reportCancelled(error, state, item.id, args.diagnostics);
         return;
       }
       if (work.status !== "done") work.status = "failed";
@@ -616,6 +676,8 @@ export async function runRegularGraph(args: {
               config.checkout,
             ),
             save,
+            signal,
+            pause: args.pause,
             stopped: () =>
               stopped() ||
               Boolean(args.paused?.()) ||
@@ -690,7 +752,7 @@ export async function runRegularGraph(args: {
   }
   while (graph.items.some((item) => state.work[item.id]?.status !== "done")) {
     if (failure) throw failure;
-    if (stopped()) throw cancelledFault();
+    if (stopped()) throw await cancelRun();
     const reported = await driver.availableSlots();
     args.diagnostics?.emit({
       runId: state.runId,
@@ -748,7 +810,7 @@ export async function runRegularGraph(args: {
           });
     if (ready.length) await args.reconcile?.();
     for (const item of ready) {
-      if (stopped()) throw cancelledFault();
+      if (stopped()) throw await cancelRun();
       if (args.paused?.() || args.amendmentPending?.()) break;
       const work = state.work[item.id]!;
       work.status = "running";

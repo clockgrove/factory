@@ -7,7 +7,9 @@
 //   new state shape, so the test can copy that reachable state and its world;
 // - run: restart the Objective once and report how it ended, stopping as soon
 //   as a snapshot shows progress or the controller sits idle;
-// - command: apply one operator command through the application.
+// - command: apply one operator command the way the CLI does: through the
+//   running owner's control socket when one is alive, else through the
+//   application.
 //
 // Prints one JSON line (trajectory: one per anchor).
 import fs from "node:fs";
@@ -35,7 +37,11 @@ const { composeWithLocalHarness } = await import("../../dist/index.js");
 const { EXIT_COMPLETE, EXIT_NEEDS_DECISION, runOutcome } = await import(
   "../../dist/run-outcome.js"
 );
-const { readContinuation } = await import("../../dist/state-store.js");
+const { readContinuation, readControllerOwner } = await import(
+  "../../dist/state-store.js"
+);
+const { linuxProcessIdentity } = await import("../../dist/process.js");
+const { requestControl } = await import("../../dist/coordinator-control.js");
 const { continuationStatusDocument } = await import(
   "../../dist/diagnostics.js"
 );
@@ -65,6 +71,24 @@ function readJson(path) {
   }
 }
 
+/** Whether a live controller owns this Objective, as `factory status` reads it. */
+function controllerActive() {
+  try {
+    const owner = readControllerOwner(
+      join(stateRoot(config.repository), "controller.lock"),
+    );
+    if (!owner) return false;
+    const current = linuxProcessIdentity(owner.pid);
+    return (
+      current?.startTime === owner.startTime &&
+      current.state !== "Z" &&
+      (owner.intake === true || owner.objective === objective)
+    );
+  } catch {
+    return null;
+  }
+}
+
 /** The operator's view: the status document `factory status --json` prints. */
 function status() {
   try {
@@ -76,12 +100,32 @@ function status() {
       config.delivery.kind,
       [],
       continuation?.capacity.concurrency,
-      false,
+      controllerActive(),
     );
     return {
       phase: document.phase,
       summary: document.summary,
       nextAction: document.nextAction,
+      active: document.runActive ?? null,
+      // Every sentence of the status that can name a command: the summary,
+      // the next action's reason, each repair's nextDecision, item errors
+      // and waits, and the coordinator's wait reason.
+      texts: [
+        document.summary,
+        document.nextAction?.reason,
+        ...Object.values(document.repairs ?? {}).map(
+          (repair) => repair.nextDecision,
+        ),
+        document.lastError,
+        document.wait?.detail,
+        document.wait?.fix,
+        document.coordinator?.waitReason,
+        ...(document.work ?? []).flatMap((item) => [
+          item.lastError,
+          item.wait?.detail,
+          item.wait?.fix,
+        ]),
+      ].filter((text) => typeof text === "string"),
       coordinator: continuation?.coordinator && {
         mode: continuation.coordinator.mode,
         waitReason: continuation.coordinator.waitReason,
@@ -171,21 +215,37 @@ const application = composeWithLocalHarness(
 
 /**
  * Run one operator command a status names ({verb, options}, parsed in
- * dead-ends.mjs), filling its placeholders: decisions accept.
+ * dead-ends.mjs), filling its placeholders: decisions accept. Control actions
+ * go to the running owner first and fall back to the application, as the CLI
+ * does (src/cli.ts).
  */
-async function command({ verb, options }) {
+async function command({ verb, options, input }) {
   const item = options.item;
+  const viaOwner = async (action, body, apply) => {
+    const reply = await requestControl(config.repository, {
+      objective,
+      action,
+      input: body,
+    });
+    return reply.handled ? reply.result : apply();
+  };
   switch (verb) {
     case "run":
       return;
     case "retry":
-      return application.retryWorkItem(objective, item);
+      return viaOwner("retry", item === undefined ? {} : { item }, () =>
+        application.retryWorkItem(objective, item),
+      );
     case "select":
-      return application.selectAssetSet(objective, item, options.set, {
-        actor: "operator",
-      });
+      return viaOwner(
+        "select",
+        { item, set: options.set, actor: "operator" },
+        () =>
+          application.selectAssetSet(objective, item, options.set, {
+            actor: "operator",
+          }),
+      );
     case "repair": {
-      // The operator writes the proposal: a diagnosed implementation correction.
       const state = readContinuation(config.repository, objective);
       const [id, work] =
         Object.entries(state.work ?? {}).find(
@@ -193,7 +253,8 @@ async function command({ verb, options }) {
         ) ?? [];
       if (!work?.recovery?.failure)
         throw new Error("No stopped repair names a failure to correct");
-      return application.repairWorkItem(objective, {
+      // The operator writes the proposal: a diagnosed implementation correction.
+      const proposal = {
         item: id,
         correction: {
           failureDigest: work.recovery.failure.digest,
@@ -202,7 +263,10 @@ async function command({ verb, options }) {
           correction: "Make the scripted change again",
           actor: "operator",
         },
-      });
+      };
+      return viaOwner("repair", proposal, () =>
+        application.repairWorkItem(objective, proposal),
+      );
     }
     case "decide":
       // The state says whether this is a plan or a result; only a plan takes an answer.
@@ -214,9 +278,19 @@ async function command({ verb, options }) {
         reason: "Decided by the dead-end finder",
       });
     case "cancel":
-      return application.cancelObjective(objective);
+      return viaOwner("cancel", {}, () =>
+        application.cancelObjective(objective),
+      );
     case "resume":
-      return controlObjective(config, { objective, action: "resume" });
+    case "pause":
+    case "drain":
+      return controlObjective(config, { objective, action: verb });
+    case "propose-amendment":
+      return controlObjective(config, {
+        objective,
+        action: "propose-amendment",
+        input,
+      });
   }
   throw new Error(`Unsupported operator command: factory ${verb}`);
 }
@@ -252,20 +326,34 @@ if (descriptor.mode === "run") {
     const state = readJson(path);
     if (!state) return;
     const step = baseline && advanced(baseline, fingerprint(state));
-    if (step) finish({ outcome: "progressed", step, status: status() });
+    if (!step) return;
+    const progressed = () =>
+      finish({ outcome: "progressed", step, status: status() });
+    // A command sent to the owner is answered after the snapshot it wrote.
+    if (idleReported) setTimeout(progressed, 200);
+    else progressed();
   };
   // A controller that has nothing in progress — no subprocess, file
   // operation or timer other than this one, and no snapshot for a while —
   // waits for an operator (a paused or draining owner waits for a control
-  // request). Idle keep-alive sockets do not count.
+  // request). Idle keep-alive sockets do not count. It reports every
+  // quiet period, so the test sees the state after its commands.
   let quietSince = Date.now();
+  let idleReported = false;
   setInterval(() => {
     const busy = process
       .getActiveResourcesInfo()
       .filter((resource) => !/TCP|Pipe|TTY/.test(resource));
     if (busy.length > 1 || requests) quietSince = Date.now();
-    else if (Date.now() - quietSince > descriptor.idleMs)
-      finish({ outcome: "idle", status: status() });
+    else if (Date.now() - quietSince > descriptor.idleMs) {
+      const idle = { outcome: "idle", at: Date.now(), status: status() };
+      if (!descriptor.keepOwner) finish(idle);
+      // The owner stays alive: the test applies the operator's commands
+      // through its control socket, then reads the next report.
+      fs.writeSync(1, `${JSON.stringify(idle)}\n`);
+      idleReported = true;
+      quietSince = Date.now();
+    }
   }, 50);
 }
 

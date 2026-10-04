@@ -3,6 +3,15 @@
 // an exit — the restart progresses or completes, or it stops for a human
 // decision whose named command continues the Objective.
 //
+// The named-command finder: at the first stop of each case, every command the
+// stop names — the status's next action and its other sentences (repair
+// `nextDecision`, reasons, errors, waits) and the run's own message — is
+// executed from a restored copy of the stop, through the calls the CLI makes
+// (the owner's control socket while a controller runs, else the application).
+// It must be accepted, and the next run must progress or reach a terminal or
+// decision stop. A refused command, or one after which the same stop repeats,
+// is a dead end (`problems`). Equal stops share their probes.
+//
 // States come from two structural sources:
 // - anchors: every distinct state shape Factory itself persists along a
 //   scripted Objective (alpha → beta; alpha's result review and the final
@@ -15,7 +24,10 @@
 //   (recorded by Factory's own recordWorkFailure), an error outside any Work
 //   Item step, cancel, pause, drain, a held phase reservation, an exhausted
 //   interruption budget, a recorded subprocess that exited or whose pid was
-//   reused, a closure error, repeat and wait records, a stopped planning.
+//   reused, a closure error, repeat and wait records (including a run of
+//   faults over a day old and a step asking the operator), a stopped planning,
+//   a rejected amendment, a cancelled item of a live Objective, spent
+//   autonomy allowances and disabled repair classes.
 //   Overlays apply only where Factory could write them (a reservation matches
 //   its step, a settled worker had a handle); the state validators prune the
 //   rest.
@@ -27,6 +39,7 @@
 // binds the checkout), so each trajectory is recorded once per slot and a
 // slot's cases run one at a time in that slot's own root.
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
@@ -53,6 +66,9 @@ const errors = await import(dist("work-repair.js"));
 const { attachFault } = await import(dist("fault.js"));
 const { parseFactoryState } = await import(dist("state.js"));
 const { readContinuation } = await import(dist("state-store.js"));
+
+const { repairClasses } = await import(dist("repair-policy.js"));
+const repairClassCount = repairClasses.length;
 
 const REPOSITORY = "example/dead-ends";
 const ITEMS = [workItem("alpha"), workItem("beta", ["alpha"])];
@@ -262,71 +278,104 @@ const copyWorld = (from, to) =>
 
 /**
  * Start one controller process in `world` ({root, fake, descriptor}) with
- * `extra` descriptor fields. `onLine(message, child)` sees every JSON line;
- * resolves to the last one.
+ * `extra` descriptor fields. `onLine(message, child)` sees every JSON line.
+ * `done` resolves to the last line once the process ends; `waitFor(accept)`
+ * resolves to the first line `accept` takes, or to `done` if none comes.
  */
 let descriptors = 0;
-function controllerProcess(world, extra, onLine, timeoutMs = 120_000) {
+function openController(world, extra, onLine, timeoutMs = 120_000) {
   const path = join(world.root, `descriptor-${descriptors++}.json`);
   writeDescriptor(path, {
     ...world.descriptor,
     apiUrl: world.fake.apiUrl,
     ...extra,
   });
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [controller, path], {
-      env: {
-        ...process.env,
-        ...gitTransportEnvironment(world.fake.gitUrl),
-        XDG_STATE_HOME: join(world.root, "state"),
-      },
-      cwd: repositoryRoot,
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let buffer = "";
-    let stderr = "";
-    let last;
-    let timedOut = false;
-    let pending = Promise.resolve();
-    const timer = setTimeout(() => {
-      timedOut = true;
+  const child = spawn(process.execPath, [controller, path], {
+    env: {
+      ...process.env,
+      ...gitTransportEnvironment(world.fake.gitUrl),
+      XDG_STATE_HOME: join(world.root, "state"),
+    },
+    cwd: repositoryRoot,
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const lines = [];
+  const listeners = new Set();
+  let closed;
+  let buffer = "";
+  let stderr = "";
+  let last;
+  let timedOut = false;
+  let pending = Promise.resolve();
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {}
+  }, timeoutMs);
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  child.stdout.on("data", (chunk) => {
+    buffer += chunk;
+    for (
+      let newline = buffer.indexOf("\n");
+      newline >= 0;
+      newline = buffer.indexOf("\n")
+    ) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
       try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {}
-    }, timeoutMs);
-    child.stderr.on("data", (chunk) => (stderr += chunk));
-    child.stdout.on("data", (chunk) => {
-      buffer += chunk;
-      for (
-        let newline = buffer.indexOf("\n");
-        newline >= 0;
-        newline = buffer.indexOf("\n")
-      ) {
-        const line = buffer.slice(0, newline);
-        buffer = buffer.slice(newline + 1);
-        try {
-          last = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        const message = last;
-        if (onLine) pending = pending.then(() => onLine(message, child));
+        last = JSON.parse(line);
+      } catch {
+        continue;
       }
-    });
+      const message = last;
+      lines.push(message);
+      for (const listener of [...listeners]) listener();
+      if (onLine) pending = pending.then(() => onLine(message, child));
+    }
+  });
+  const done = new Promise((resolve) =>
     child.on("close", async () => {
       clearTimeout(timer);
       try {
         process.kill(-child.pid, "SIGKILL");
       } catch {}
       await pending;
-      resolve(
-        timedOut
-          ? { outcome: "hung", stderr: stderr.slice(-1000) }
-          : (last ?? { outcome: "crashed", stderr: stderr.slice(-1000) }),
-      );
+      closed = timedOut
+        ? { outcome: "hung", stderr: stderr.slice(-1000) }
+        : (last ?? { outcome: "crashed", stderr: stderr.slice(-1000) });
+      for (const listener of [...listeners]) listener();
+      resolve(closed);
+    }),
+  );
+  const waitFor = (accept) =>
+    new Promise((resolve) => {
+      const check = () => {
+        const line = lines.find(accept);
+        if (line) resolve(line);
+        else if (closed) resolve(closed);
+        else return false;
+        listeners.delete(check);
+        return true;
+      };
+      if (!check()) listeners.add(check);
     });
-  });
+  return { child, done, waitFor };
+}
+
+const controllerProcess = (world, extra, onLine, timeoutMs) =>
+  openController(world, extra, onLine, timeoutMs).done;
+
+/** Apply one operator command in a fresh process, as the CLI would. */
+async function runCommand(world, command) {
+  const applied = await controllerProcess(world, { mode: "command", command });
+  return applied.ok === true
+    ? applied
+    : {
+        ok: false,
+        message: applied.message ?? applied.stderr ?? applied.outcome,
+      };
 }
 
 // ---- trajectories --------------------------------------------------------------
@@ -444,7 +493,11 @@ const failStep = (make, steps, handle) => (state) => {
   work.error = error.message;
   delete work.authentication;
   if (work.phaseReservation !== "coding") delete work.phaseReservation;
-  if (!errors.recordWorkFailure(state, id, error)) state.error = error.message;
+  // The runner stops the Objective with the failed item named (errorItem).
+  if (!errors.recordWorkFailure(state, id, error)) {
+    state.error = error.message;
+    state.errorItem = id;
+  }
   return true;
 };
 
@@ -484,6 +537,58 @@ const reserve = (phase) => (state) => {
   return true;
 };
 
+/** The other Work Items of the graph: where a spent allowance can sit. */
+const otherItems = (state) =>
+  state.graph.items.map((item) => item.id).filter((id) => id !== focus(state));
+
+/** Record failure events as charged, so consumption counts them (repair-policy.ts). */
+function spend(state, events, allowance, scopes) {
+  state.charges ??= {};
+  for (const event of events)
+    state.charges[event] = { allowances: [allowance], scopes };
+}
+
+/** The Objective's own step asks for the operator: a question or a fix. */
+const objectiveWait = (wait) => (state) => {
+  if (state.wait) return false;
+  state.wait = { ...wait, step: "objective/plan" };
+  return true;
+};
+
+/** A Work Item's step asks for the operator (it keeps its status). */
+const itemWait = (wait) => (state) => {
+  if (state.schemaVersion !== 7) return false;
+  const id = focus(state);
+  const work = state.work[id];
+  if (!["running", "waiting"].includes(work.status) || work.wait) return false;
+  work.wait = { ...wait, step: `item/${id}/${work.step ?? "execute"}` };
+  return true;
+};
+
+/** A clean plan whose review instead asks a human (`acceptable` false: refuse only). */
+const reviewNeedsHuman = (acceptable) => (state) => {
+  const plan = state.schemaVersion === 8 && state.plan;
+  if (!plan || plan.review.status !== "clean") return false;
+  plan.review.status = "needs-human";
+  if (acceptable === false) plan.review.acceptable = false;
+  plan.review.failure = {
+    detail: "Injected review failure",
+    question: "Is this plan acceptable?",
+  };
+  // The review digest binds the packet and the review result.
+  plan.reviewDigest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        packetDigest: plan.packetDigest,
+        revisions: plan.review.revisions,
+        findings: plan.review.findings,
+        failure: plan.review.failure,
+      }),
+    )
+    .digest("hex");
+  return true;
+};
+
 /** Overlay dimensions; each value mutates a state and says if it applies. */
 const OVERLAYS = {
   "item event": {
@@ -502,6 +607,48 @@ const OVERLAYS = {
         new errors.CandidateEnvironmentFailure("Injected environment failure"),
       ["validate"],
     ),
+    // A decision, a configuration fault or a transient fault ends the
+    // attempt only when a caller ends it on them (see recordWorkFailure).
+    "a step fails and needs a decision": failStep(() =>
+      attachFault(new Error("Injected decision failure"), {
+        kind: "decision",
+        question: "Injected question?",
+        evidence: ["Injected evidence"],
+      }),
+    ),
+    "a step fails for configuration": failStep(() =>
+      attachFault(new Error("Injected configuration failure"), {
+        kind: "config",
+        detail: "Injected configuration failure",
+        fix: "Fix the injected configuration",
+      }),
+    ),
+    "a step fails transiently": failStep(() =>
+      attachFault(new Error("Injected transient failure"), {
+        kind: "transient",
+        detail: "Injected transient failure",
+        outcomeUnknown: false,
+      }),
+    ),
+    // The worker's login expired: the item fails naming the command to run.
+    "a worker needs authentication": (state) => {
+      if (!failStep(() => new Error("Injected authentication failure"))(state))
+        return false;
+      state.work[focus(state)].authentication = {
+        provider: "scripted-test",
+        command: "scripted-test login",
+      };
+      return true;
+    },
+    // `factory cancel` finished, then `factory retry` cleared the Objective's
+    // cancel; the items it had cancelled stay cancelled until retried.
+    "an item was cancelled and the Objective retried": (state) => {
+      if (state.schemaVersion !== 7) return false;
+      const work = state.work[focus(state)];
+      if (!active(work) && work.status !== "pending") return false;
+      state.work[focus(state)] = { status: "cancelled" };
+      return true;
+    },
     // The driver collected a settled worker with no result: a `work` fault.
     "the worker settles without a result": failStep(
       () =>
@@ -517,6 +664,23 @@ const OVERLAYS = {
     "an error stops the Objective outside any Work Item step": (state) => {
       if (state.schemaVersion !== 7 || state.error) return false;
       state.error = "Injected stop outside a Work Item step";
+      return true;
+    },
+    // The stop names a Work Item (errorItem); which commands answer it
+    // depends on that item's status.
+    "an error stops the Objective in the first Work Item's step": (state) => {
+      if (
+        state.schemaVersion !== 7 ||
+        state.error ||
+        state.work[state.graph.items[0].id].status === "cancelled"
+      )
+        return false;
+      state.error = "Injected stop in the first Work Item";
+      state.errorItem = state.graph.items[0].id;
+      return true;
+    },
+    "the installation configuration changed": (state) => {
+      state.configDigest = "0".repeat(64);
       return true;
     },
     "cancel was requested": (state) => {
@@ -544,6 +708,58 @@ const OVERLAYS = {
       coordinator(state).mode = "draining";
       return true;
     },
+  },
+  // Autonomy allowances already spent by earlier failure events.
+  allowance: {
+    "this item's repair path is used up": (state) => {
+      if (state.schemaVersion !== 7) return false;
+      const id = focus(state);
+      spend(state, [`item/${id}/prior/0`], "implementationRepairs", [id]);
+      return true;
+    },
+    "the Objective's implementation repairs are used up": (state) => {
+      if (state.schemaVersion !== 7) return false;
+      const [other] = otherItems(state);
+      if (!other) return false;
+      spend(
+        state,
+        [`item/${other}/prior/0`, `item/${other}/prior/1`],
+        "implementationRepairs",
+        [other],
+      );
+      return true;
+    },
+    "planning revisions are used up": (state) => {
+      spend(state, ["objective/plan/1"], "planningRevisions", ["$planning"]);
+      return true;
+    },
+    "result rereviews are used up": (state) => {
+      if (state.schemaVersion !== 7) return false;
+      const id = focus(state);
+      spend(state, [`item/${id}/prior/0`], "resultRereviews", [id]);
+      return true;
+    },
+  },
+  // The classes of correction the Objective snapshotted as enabled.
+  "repair classes": {
+    "no repair class is enabled": (state) => {
+      state.autonomy.repairClasses = [];
+      return true;
+    },
+    "only planning repairs are enabled": (state) => {
+      state.autonomy.repairClasses = [
+        "planning-output",
+        "planning-evidence",
+        "planning-choice",
+      ];
+      return true;
+    },
+  },
+  // The plan review asked a question only a human answers, or Factory's own
+  // checks refuse the plan so that only a refusal answers it.
+  "plan review": {
+    "the plan review needs a human decision": reviewNeedsHuman(),
+    "Factory cannot accept the plan": reviewNeedsHuman(false),
   },
   "phase reservation": {
     "coding phase reserved": reserve("coding"),
@@ -587,6 +803,31 @@ const OVERLAYS = {
       };
       return true;
     },
+    // A run of transient faults that has lasted over a day: status offers cancel.
+    "a step has failed for over a day": (state) => {
+      const id = state.schemaVersion === 7 ? focus(state) : undefined;
+      const work = id && state.work[id];
+      const key = work?.step ? `item/${id}/${work.step}` : "objective/plan";
+      const now = new Date();
+      const since = new Date(now.getTime() - 25 * 3_600_000);
+      state.repeats = {
+        [key]: {
+          nextAt: new Date(now.getTime() + 60_000).toISOString(),
+          scheduledAt: now.toISOString(),
+          faults: {
+            since: since.toISOString(),
+            count: 40,
+            last: {
+              kind: "transient",
+              detail: "socket hang up",
+              outcomeUnknown: false,
+            },
+            activeMs: 25 * 3_600_000,
+          },
+        },
+      };
+      return true;
+    },
     "a wait is recorded": (state) => {
       state.wait = { kind: "dependency", detail: "predecessor Objective open" };
       if (state.schemaVersion === 7)
@@ -594,6 +835,54 @@ const OVERLAYS = {
           kind: "ci",
           detail: "checks pending",
         };
+      return true;
+    },
+    "the Objective asks a question": objectiveWait({
+      kind: "decision",
+      detail: "Injected question",
+    }),
+    "the Objective needs a fix": objectiveWait({
+      kind: "prerequisite",
+      detail: "Injected prerequisite",
+      fix: "Install the missing tool",
+    }),
+    "an item asks a question": itemWait({
+      kind: "decision",
+      detail: "Injected item question",
+    }),
+    "an item needs a fix": itemWait({
+      kind: "prerequisite",
+      detail: "Injected item prerequisite",
+      fix: "Install the missing tool",
+    }),
+    "an amendment was rejected": (state) => {
+      if (state.schemaVersion !== 7 || state.pendingAmendment || state.error)
+        return false;
+      const error = "Injected amendment rejection";
+      state.pendingAmendment = {
+        id: "amendment-1",
+        proposal: {
+          scope: "in-scope",
+          reason: "Discovered a missing step",
+          evidence: ["observed while working"],
+          ownership: ["extra.txt"],
+          acceptance: ["extra.txt exists"],
+          dependencies: [],
+          expectedGraphDigest: state.planGraphDigest,
+          actor: "operator",
+        },
+        phase: "rejected",
+        issueByItemId: structuredClone(state.issueByItemId),
+        error,
+        rejectionStage: "compilation",
+      };
+      // Each started amendment is charged one planning revision.
+      spend(state, ["objective/amend/amendment-1"], "planningRevisions", [
+        "$planning",
+      ]);
+      // As runAmendment leaves it: paused with the rejection as the reason.
+      coordinator(state).mode = "paused";
+      coordinator(state).waitReason = error;
       return true;
     },
     "planning stopped": (state) => {
@@ -667,14 +956,50 @@ function dimensionsOf(state) {
         ? "pid reused"
         : "exited",
   };
+  // Which allowances the charged events have used up, Objective-wide or for
+  // the focus item's path, and which repair classes the Objective enables.
+  const limits = state.autonomy.allowances;
+  const charges = Object.values(state.charges ?? {});
+  const spent = (key, scope) =>
+    charges.filter(
+      (charge) =>
+        charge.allowances.includes(key) &&
+        (scope === undefined || charge.scopes.includes(scope)),
+    ).length;
+  const focusId = state.schemaVersion === 7 ? focus(state) : undefined;
+  const exhausted = [
+    spent("planningRevisions") >= limits.planningRevisions &&
+      "planning revisions",
+    spent("implementationRepairs") >= limits.implementationRepairs &&
+      "Objective repairs",
+    focusId &&
+      spent("implementationRepairs", focusId) >=
+        state.autonomy.repairPolicy.perPath.implementationRepairs &&
+      "path repairs",
+    spent("resultRereviews") >= limits.resultRereviews && "rereviews",
+  ].filter(Boolean);
+  const classes = state.autonomy.repairClasses;
+  shared.allowance = exhausted.length ? exhausted.join(" + ") : "left";
+  shared["repair classes"] = !classes.length
+    ? "none"
+    : classes.includes("implementation")
+      ? classes.length === repairClassCount
+        ? "all"
+        : "partial with implementation"
+      : "partial without implementation";
   const single = {
     "repeat or wait record": Boolean(state.repeats || state.wait),
+    "Objective wait": state.wait?.kind ?? "none",
+    amendment: state.pendingAmendment?.phase ?? "none",
+    "item wait": (focusId && state.work[focusId].wait?.kind) || "none",
   };
   if (state.schemaVersion === 8)
     return {
       paired: {
         ...shared,
-        plan: state.plan ? state.plan.review.status : "none",
+        plan: state.plan
+          ? `${state.plan.review.status}${state.plan.review.acceptable === false ? " (refusal only)" : ""}`
+          : "none",
         "planning recovery": state.planningRecovery?.phase ?? "none",
         projection: `${Object.keys(state.issueByItemId).length} issues`,
       },
@@ -693,7 +1018,11 @@ function dimensionsOf(state) {
         : "none",
       "pending criterion": Boolean(work.acceptancePending),
       "phase reservation": work.phaseReservation ?? "none",
-      "Objective error": Boolean(state.error),
+      "Objective error": state.error
+        ? state.errorItem
+          ? `names a ${state.work[state.errorItem].status} item`
+          : "names no item"
+        : "none",
       "final stage": state.objectiveClosure
         ? `closure ${state.objectiveClosure}`
         : state.finalValidation
@@ -833,7 +1162,77 @@ function operatorCommand(text) {
   return { verb: words[1], options };
 }
 
-const INSPECTION = new Set(["diagnostics", "status"]);
+const INSPECTION = new Set([
+  "diagnostics",
+  "logs",
+  "status",
+  "review",
+  "plan",
+  "analyze",
+  "captures",
+]);
+/** The commands the finder executes when a status or a run's message names them. */
+const EXECUTED = new Set([
+  "retry",
+  "repair",
+  "decide",
+  "select",
+  "resume",
+  "pause",
+  "drain",
+  "cancel",
+  "propose-amendment",
+]);
+
+/**
+ * Every command an operator-facing text names: `factory <verb> --objective N …`
+ * up to the end of the quoted or sentence-final command.
+ */
+export function commandsIn(text) {
+  const found = [];
+  for (const match of String(text).matchAll(
+    /factory [a-z-]+ --objective \d+[^`;\n]*/g,
+  )) {
+    const command = match[0]
+      // The command ends where the sentence continues.
+      .replace(/(?:, | or | then |\)|\. ).*$/, "")
+      .replace(/[.,]+$/, "")
+      .trim();
+    found.push(command);
+  }
+  return found;
+}
+
+/** A command's identity: verb, item and the flags that pick what it acts on. */
+const commandKey = (command) => {
+  const { verb, options = {} } = command;
+  return [verb, options.item, options.plan, options.set, options.tree]
+    .filter((part) => part !== undefined)
+    .join(" ");
+};
+
+/**
+ * The commands a stop names besides its next action: in the status document's
+ * sentences and in the run's own message (the run-outcome message).
+ */
+function namedCommands(report) {
+  const primary = report.status?.nextAction?.command;
+  const seen = new Set(primary ? [commandKey(operatorCommand(primary))] : []);
+  const named = [];
+  for (const [source, text] of [
+    ...(report.status?.texts ?? []).map((text) => ["status", text]),
+    ["run message", report.message ?? ""],
+  ])
+    for (const found of commandsIn(text)) {
+      const command = operatorCommand(found);
+      if (!command.verb || !EXECUTED.has(command.verb)) continue;
+      if (seen.has(commandKey(command))) continue;
+      seen.add(commandKey(command));
+      named.push({ ...command, source, text: found });
+    }
+  return named;
+}
+
 /** How a stop reads to the operator, to tell two stops apart. */
 const stopOf = (report) =>
   JSON.stringify([
@@ -842,8 +1241,68 @@ const stopOf = (report) =>
     report.status?.pending,
   ]);
 
+/** What an operator sees at a stop, to share the probes of equal stops. */
+const sightOf = (delivery, report) =>
+  JSON.stringify([
+    delivery,
+    report.status?.phase,
+    report.status?.summary,
+    report.status?.nextAction,
+    report.status?.coordinator,
+    report.status?.pending,
+    report.status?.active,
+    report.message,
+  ]);
+
 /** Operator commands followed from one state before it counts as stranded. */
 const MAX_COMMANDS = 4;
+/** Named commands besides the next action that one case exercises. */
+const MAX_PROBES = 4;
+
+/** The replacement an operator proposes for a rejected amendment. */
+function replacementProposal(state) {
+  const rejected = state.pendingAmendment;
+  const { scope, reason, evidence, ownership, acceptance, dependencies } =
+    rejected.proposal;
+  return {
+    scope,
+    reason,
+    evidence,
+    ownership,
+    acceptance,
+    dependencies,
+    expectedGraphDigest: rejected.proposal.expectedGraphDigest,
+    actor: "operator",
+    replacement: {
+      amendmentId: rejected.id,
+      correction: {
+        failureDigest: createHash("sha256")
+          .update(rejected.error)
+          .digest("hex"),
+        kind: "planning-output",
+        diagnosis: "Diagnosed by the dead-end finder",
+        correction: "Describe the same discovery again",
+        actor: "operator",
+      },
+    },
+  };
+}
+
+/** One line for a stop: how the run ended and who owns the Objective. */
+function stopText(report) {
+  const owner = report.status?.coordinator;
+  return `${report.outcome}: ${report.message?.split("\n")[0] ?? report.status?.summary ?? ""} (coordinator ${owner?.mode ?? "none"}${owner?.waitReason ? `: ${owner.waitReason}` : ""}${report.status?.active ? "; owner running" : ""})`;
+}
+
+/** Whether a report is a stop that names a next command. */
+const stopped = (report) =>
+  !["complete", "progressed", "hung", "crashed"].includes(report.outcome) &&
+  !report.status?.unreadable &&
+  !["cancelled", "complete"].includes(report.status?.phase) &&
+  Boolean(report.status?.nextAction);
+
+/** Probes already made, by what the operator saw: equal stops share them. */
+const probed = new Map();
 
 /**
  * Restart the controller from `state` in a copy of the anchor's world (in
@@ -857,6 +1316,10 @@ const MAX_COMMANDS = 4;
  * - config: it waits for a named fix outside Factory;
  * - stranded: anything else — no command, an inspection-only command, a
  *   refused command, a command after which the same stop repeats, a hang.
+ *
+ * The first stop is also probed: every other command its status or run
+ * message names is executed from a restored copy of that stop and must be
+ * accepted and continue. `problems` lists those that are not.
  */
 async function classify(slot, anchor, state) {
   rmSync(slot.root, { recursive: true, force: true });
@@ -871,24 +1334,112 @@ async function classify(slot, anchor, state) {
     existsSync(statePath(slot.root))
       ? JSON.parse(readFileSync(statePath(slot.root), "utf8"))
       : undefined;
+  // The live controller that owns the Objective while it waits for an
+  // operator (a paused or draining owner, a held phase): commands reach it
+  // through its control socket, as the CLI does.
+  let owner;
+  const stopOwner = () => {
+    if (!owner) return;
+    try {
+      process.kill(-owner.child.pid, "SIGKILL");
+    } catch {}
+    owner = undefined;
+  };
   // Progress is judged against the state the last command was given at.
   let baseline = fingerprint(state);
-  const run = async () => {
-    const report = await controllerProcess(world, {
+  const run = async (since = 0) => {
+    owner ??= openController(world, {
       mode: "run",
       baseline,
       idleMs: 300,
+      keepOwner: true,
     });
+    const report = await owner.waitFor(
+      (line) => line.outcome !== "idle" || line.at >= since,
+    );
+    // Every other outcome ended the controller's own process group.
+    if (report.outcome !== "idle") owner = undefined;
     trace.push(
-      `run: ${report.outcome}${report.step ? ` (${report.step})` : ""}${report.message ? `: ${report.message.split("\n")[0]}` : ""} → ${report.status?.phase ?? "?"}: ${report.status?.nextAction?.command ?? "no next command"}`,
+      `run: ${report.outcome}${report.step ? ` (${report.step})` : ""}${report.message ? `: ${report.message.split("\n")[0]}` : ""} → ${report.status?.phase ?? "?"}: ${report.status?.nextAction?.command ?? "no next command"}${report.outcome === "idle" ? " [owner running]" : ""}`,
     );
     return report;
   };
-  const result = (kind, reason) => ({ kind, reason, trace });
-  try {
+  const result = (kind, reason, extra = {}) => ({
+    kind,
+    reason,
+    trace,
+    ...extra,
+  });
+  /** Apply one command; with a live owner it goes through the owner. */
+  const apply = async (command) => {
+    const input =
+      command.verb === "propose-amendment"
+        ? replacementProposal(snapshot())
+        : undefined;
+    const applied = await runCommand(world, { ...command, input });
+    trace.push(
+      `factory ${command.verb}: ${applied.ok ? "applied" : `refused: ${applied.message}`}${owner ? " [via owner]" : ""}`,
+    );
+    return { ...applied, at: Date.now() };
+  };
+  /**
+   * Follow the commands the status names from a stop until the Objective
+   * continues or the stop proves a dead end. `command` is applied first when
+   * given, else `report` is the stop to read.
+   */
+  const follow = async ({ command, report, context }) => {
     const stops = new Map();
     let followed;
-    for (let report = await run(); ; report = await run()) {
+    let since = 0;
+    for (;;) {
+      if (command) {
+        followed = command;
+        const before = snapshot();
+        if (before) baseline = fingerprint(before);
+        if (command.verb === "run") {
+          // A second controller cannot start while one owns the Objective.
+          if (owner) {
+            const second = await controllerProcess(world, {
+              mode: "run",
+              baseline,
+              idleMs: 300,
+            });
+            if (second.outcome === "stopped")
+              return result(
+                "stranded",
+                `factory run is refused (${second.message}) after ${context}`,
+              );
+          }
+        } else {
+          const applied = await apply(command);
+          if (!applied.ok)
+            return result(
+              "stranded",
+              `factory ${command.verb} is refused (${applied.message}) after ${context}`,
+            );
+          since = applied.at;
+          if (applied.status?.phase === "cancelled") return result("terminal");
+          // Refusing a plan discards the preparation, and the next run plans
+          // again. That is the decision only when nothing else was pending.
+          if (!snapshot() && before?.schemaVersion === 8) {
+            const lost = [
+              before.cancelRequested && "cancel request",
+              before.coordinator.cancelError && "unresolved cancellation",
+              before.coordinator.mode !== "running" &&
+                `${before.coordinator.mode} mode`,
+            ].filter(Boolean);
+            if (lost.length)
+              return result(
+                "stranded",
+                `factory ${command.verb} discards the preparation with its ${lost.join(" and ")} after ${context}`,
+              );
+            baseline = { milestone: 0, items: {} };
+          }
+        }
+        command = undefined;
+        report = undefined;
+      }
+      report ??= await run(since);
       const continued = followed?.verb === "run" ? "rerun" : "decision";
       if (report.outcome === "complete" || report.status?.phase === "complete")
         return result(followed ? continued : "complete");
@@ -905,63 +1456,87 @@ async function classify(slot, anchor, state) {
         return followed || state.cancelRequested
           ? result("terminal")
           : result("stranded", "cancelled without a request");
-      const owner = report.status?.coordinator;
-      const why = `${report.outcome}: ${report.message?.split("\n")[0] ?? report.status?.summary ?? ""} (coordinator ${owner?.mode ?? "none"}${owner?.waitReason ? `: ${owner.waitReason}` : ""})`;
+      context = stopText(report);
       const stop = stopOf(report);
       if (stops.has(stop))
         return result(
           "stranded",
           `factory ${followed.verb} does not continue after ${stops.get(stop)}`,
         );
-      stops.set(stop, why);
+      stops.set(stop, context);
       const action = report.status?.nextAction;
-      if (!action) return result("stranded", `no next command after ${why}`);
-      const command = operatorCommand(action.command);
-      if (command.external) return result("config", action.command);
-      if (INSPECTION.has(command.verb))
+      if (!action)
+        return result("stranded", `no next command after ${context}`);
+      const next = operatorCommand(action.command);
+      if (next.external) return result("config", action.command);
+      if (INSPECTION.has(next.verb))
         return result(
           "stranded",
-          `only inspection (factory ${command.verb}) after ${why}`,
+          `only inspection (factory ${next.verb}) after ${context}`,
         );
-      if (command.verb === "propose-amendment")
-        return result("decision", "propose-amendment (not exercised)");
       if (stops.size > MAX_COMMANDS)
-        return result("stranded", `commands do not converge after ${why}`);
-      followed = command;
-      const before = snapshot();
-      if (before) baseline = fingerprint(before);
-      if (command.verb === "run") continue;
-      const applied = await controllerProcess(world, {
-        mode: "command",
-        command,
-      });
-      trace.push(
-        `factory ${command.verb}: ${applied.ok ? "applied" : `refused: ${applied.message}`}`,
-      );
-      if (!applied.ok)
-        return result(
-          "stranded",
-          `factory ${command.verb} is refused (${applied.message}) after ${why}`,
-        );
-      if (applied.status?.phase === "cancelled") return result("terminal");
-      // Refusing a plan discards the preparation, and the next run plans
-      // again. That is the decision only when nothing else was pending.
-      if (!snapshot() && before?.schemaVersion === 8) {
-        const lost = [
-          before.cancelRequested && "cancel request",
-          before.coordinator.cancelError && "unresolved cancellation",
-          before.coordinator.mode !== "running" &&
-            `${before.coordinator.mode} mode`,
-        ].filter(Boolean);
-        if (lost.length)
-          return result(
-            "stranded",
-            `factory ${command.verb} discards the preparation with its ${lost.join(" and ")} after ${why}`,
-          );
-        baseline = { milestone: 0, items: {} };
-      }
+        return result("stranded", `commands do not converge after ${context}`);
+      command = next;
     }
+  };
+
+  try {
+    // The first stop: the state as sampled, restarted once.
+    let report = await run();
+    const problems = [];
+    const named = stopped(report)
+      ? namedCommands(report).slice(0, MAX_PROBES)
+      : [];
+    if (named.length) {
+      const context = stopText(report);
+      // Each named command is executed from a restored copy of this stop.
+      stopOwner();
+      const stop = {
+        dir: temporary("fde-stop-"),
+        fakeState: structuredClone(fake.state),
+      };
+      copyWorld(slot.root, stop.dir);
+      const restore = () => {
+        rmSync(slot.root, { recursive: true, force: true });
+        copyWorld(stop.dir, slot.root);
+        rmSync(join(slot.root, STATE, "controller.lock"), { force: true });
+        fake.state = structuredClone(stop.fakeState);
+        baseline = fingerprint(snapshot() ?? state);
+      };
+      try {
+        for (const command of named) {
+          const key = `${sightOf(anchor.delivery, report)}|${commandKey(command)}`;
+          if (!probed.has(key)) {
+            restore();
+            probed.set(
+              key,
+              follow({
+                command,
+                context: `${context} (named by the ${command.source}: ${command.text})`,
+              }).then((probe) => {
+                stopOwner();
+                return probe.kind === "stranded"
+                  ? `${command.text} (${command.source}): ${probe.reason}`
+                  : undefined;
+              }),
+            );
+          }
+          const problem = await probed.get(key);
+          if (problem) problems.push(problem);
+        }
+      } finally {
+        stopOwner();
+        restore();
+        rmSync(stop.dir, { recursive: true, force: true });
+        liveRoots.delete(stop.dir);
+      }
+      // A stop with a live owner is reached again from the restored world.
+      if (report.outcome === "idle") report = await run();
+    }
+    const outcome = await follow({ report, context: stopText(report) });
+    return { ...outcome, problems, named: named.map((c) => c.text) };
   } finally {
+    stopOwner();
     await fake.stop();
   }
 }

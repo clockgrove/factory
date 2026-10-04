@@ -1222,9 +1222,13 @@ test("a base-observed command the plan itself creates is revision feedback befor
       {
         async generateStructured(request) {
           requests.push(request);
+          if (request.purpose === "diagnosis")
+            return planningDiagnosis(
+              "Use a source-declared command, not one the plan creates",
+            );
           return withCoverage(
             request,
-            requests.length === 1
+            requests.filter((r) => r.purpose !== "diagnosis").length === 1
               ? creating(target.baseSha)
               : graph(target.baseSha),
           );
@@ -1235,14 +1239,21 @@ test("a base-observed command the plan itself creates is revision feedback befor
         },
       },
     );
-    // Refused before review and revised once; the review never sees it.
-    assert.equal(requests.length, 2);
+    // Refused before review; the diagnosis of the refusal corrects the second
+    // compile, and the review never sees the refused plan.
+    assert.deepEqual(
+      requests.map((request) => request.invocation.phase),
+      ["compile", "diagnosis", "compile"],
+    );
     assert.equal(reviews, 1);
     assert.match(
-      requests[1].compileContext.instructions,
-      /"source":"check","detail":"Work Item one marks .*bash scripts\/cli\.sh.* base-observed/,
+      requests[1].objective,
+      /Work Item one marks .*bash scripts\/cli\.sh.* base-observed/,
     );
-    assert.equal(candidate.review.revisions, 1);
+    assert.match(
+      requests[2].compileContext.instructions,
+      /"source":"diagnosis".*Use a source-declared command/,
+    );
     assert.equal(candidate.review.status, "clean");
   });
 });

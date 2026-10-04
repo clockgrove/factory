@@ -1179,7 +1179,8 @@ export function statusDocument(
             actualExecution:
               (
                 current.execution?.data as
-                  { executionBinding?: unknown } | undefined
+                  | { executionBinding?: unknown }
+                  | undefined
               )?.executionBinding ?? null,
           }
         : {}),

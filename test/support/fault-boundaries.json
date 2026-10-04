@@ -55,13 +55,9 @@
       "model.reviewResult #2",
       "model.reviewResult #3"
     ],
-    "cancel-running": [
-      "driver.cancel #1"
-    ],
+    "cancel-running": ["driver.cancel #1"],
     "cancel-starting": [],
-    "stop-running": [
-      "driver.cancel #1"
-    ]
+    "stop-running": ["driver.cancel #1"]
   },
   "regular": {
     "mutations": [
@@ -116,12 +112,8 @@
       "model.reviewResult #2",
       "model.reviewResult #3"
     ],
-    "cancel-running": [
-      "driver.cancel #1"
-    ],
+    "cancel-running": ["driver.cancel #1"],
     "cancel-starting": [],
-    "stop-running": [
-      "driver.cancel #1"
-    ]
+    "stop-running": ["driver.cancel #1"]
   }
 }

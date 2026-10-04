@@ -22,11 +22,11 @@
 // comment, close, objective-comment, objective-close, stack-merge (see KILLS).
 // The GitHub points use scripts/live-check-hook.mjs (a --import preload that
 // wraps fetch); Factory has no test hook. Needs `gh` logged in with repo
-// admin, and the planner/worker logins Factory's install defaults use.
+// admin, and the planner/worker logins Factory's setup defaults use.
 // `--worker scripted` makes no model calls: the controller is
 // scripts/live-check-scripted.mjs, which composes Factory with the test
 // harness's scripted planner, reviewer and worker over real GitHub, and the
-// install needs no model login. The nightly workflow uses it. The run exits 1
+// setup needs no model login. The nightly workflow uses it. The run exits 1
 // unless the last launch completed, every kill point was reached and GitHub
 // holds the expected counts.
 // Run `npm run build` first. `reset` closes only what this harness made: Objectives
@@ -449,7 +449,8 @@ export async function run(options) {
       process.execPath,
       [
         join(ROOT, "dist", "cli.js"),
-        "install",
+        "setup",
+        "--config-only",
         "--repository",
         REPO,
         "--checkout",

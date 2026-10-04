@@ -132,13 +132,9 @@ async function fixture(name, callback, options = {}) {
   }
 }
 
-/** Decide on the plan currently saved, as the status command names it. */
+/** Decide on the plan currently saved, as the decide command does. */
 function decideSaved(application, config, input) {
-  const plan = readContinuation(config.repository, 1)?.plan;
-  return application.decidePlan(1, {
-    ...(plan ? { plan: shortPlanDigest(plan) } : {}),
-    ...input,
-  });
+  return application.decidePlan(1, input);
 }
 
 const accept = {

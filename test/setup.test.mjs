@@ -21,15 +21,8 @@ import { readIntake } from "../dist/intake.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 
 const installedCli = realpathSync(new URL("../dist/cli.js", import.meta.url));
-const consent = [
-  "--background",
-  "--service-consent",
-  "--actor",
-  "fixture",
-  "--reason",
-  "Consented model-free target watcher",
-  "--retain-package",
-];
+/** Running setup --background is the service consent; nothing else is asked. */
+const background = ["--background"];
 async function fixture(fn) {
   const root = mkdtempSync(join(tmpdir(), "factory-setup-entry-"));
   const checkout = createTarget(root).checkout;
@@ -105,7 +98,7 @@ else if(action==='enable'){if(fs.existsSync(file('enable-failure')))process.exit
 else if(action==='disable'){fs.rmSync(file('enabled'),{force:true});}
 else if(action==='stop'&&fs.existsSync(file('refill-at-stop'))){
  fs.rmSync(file('refill-at-stop'));
- const target=spawnSync(process.execPath,[${JSON.stringify(installedCli)},'intake','enqueue','--objective','1','--config',file('factory.json')],{env:process.env,encoding:'utf8'});
+ const target=spawnSync(process.execPath,[${JSON.stringify(installedCli)},'queue','add','1','--config',file('factory.json')],{env:process.env,encoding:'utf8'});
  if(target.status!==0){console.error(target.stderr);process.exit(1);}
 }
 else if(action==='stop'&&fs.existsSync(file('foreign-at-stop'))){
@@ -116,7 +109,7 @@ else if(action==='stop'&&fs.existsSync(file('foreign-at-stop'))){
 else if(action==='start'&&!alive()&&!fs.existsSync(file('start-failure'))){
  const unit=fs.readFileSync(fs.readFileSync(file('registered'),'utf8'),'utf8');
  const binding=JSON.parse(unit.split('\\n')[0].slice('# Factory local supervision v1 '.length));
- const args=[binding.cli,'supervisor','serve','--intake','--config',binding.config];
+ const args=[binding.cli,'supervisor','serve','--config',binding.config];
  const env={...process.env,...binding.environment,XDG_STATE_HOME:binding.stateHome};
  for(const credential of binding.credentials??[]){const dir=file('loaded');fs.mkdirSync(dir,{recursive:true});fs.copyFileSync(credential.file,dir+'/'+credential.name);env.CREDENTIALS_DIRECTORY=dir;args.push('--service-credential',credential.name);}
  const child=spawn(binding.node,args,{env,detached:true,stdio:['ignore',fs.openSync(file('service-out'),'a'),fs.openSync(file('service-error'),'a')]});
@@ -125,8 +118,12 @@ else if(action==='start'&&!alive()&&!fs.existsSync(file('start-failure'))){
 `,
     { mode: 0o700 },
   );
+  // The sandbox probe writes a sentinel into the home directory; keep it private to the fixture.
+  mkdirSync(join(root, "home"));
+  writeFileSync(join(root, "readiness-mode"), "refused");
   const env = {
     ...process.env,
+    HOME: join(root, "home"),
     PATH: `${bin}:${process.env.PATH}`,
     XDG_CONFIG_HOME: join(root, "config"),
     XDG_STATE_HOME: join(root, "state"),
@@ -157,9 +154,41 @@ else if(action==='start'&&!alive()&&!fs.existsSync(file('start-failure'))){
       "1",
     ];
   }
+  /** Write the configuration and poll the queue quickly, so the service observes within the test. */
+  function configure(...extra) {
+    const configured = run([
+      "setup",
+      "--config-only",
+      ...installArgs(),
+      ...extra,
+    ]);
+    assert.equal(configured.status, 0, configured.stdout + configured.stderr);
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    config.queue = { pollSeconds: 0.05 };
+    writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+  }
+  /** Run a read-only command until its document satisfies the check. */
+  async function until(commandArgs, check) {
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      const result = run(commandArgs);
+      if (result.document && check(result.document)) return result.document;
+      assert.ok(Date.now() < deadline, `waiting for ${commandArgs.join(" ")}`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
   let bodyError;
   try {
-    await fn({ root, checkout, configPath, env, run, installArgs });
+    await fn({
+      root,
+      checkout,
+      configPath,
+      env,
+      run,
+      installArgs,
+      configure,
+      until,
+    });
   } catch (error) {
     bodyError = error;
   } finally {
@@ -204,28 +233,25 @@ test("setup fixture preserves its original failure when owner cleanup also fails
   }
 });
 
-test("actual guided CLI creates a consented idle watcher, verifies its owner and reuses it without duplicate controllers", () =>
-  fixture(async ({ root, run, installArgs, configPath }) => {
+test("actual guided CLI sets up an idle service, verifies its owner and reuses it without duplicate controllers", () =>
+  fixture(async ({ root, run, configure, configPath }) => {
     writeFileSync(join(root, "open-unapproved"), "");
-    const first = run([
-      "setup",
-      ...consent,
-      ...installArgs(),
-      "--poll-seconds",
-      "0.05",
-    ]);
+    configure();
+    const first = run(["setup", ...background]);
     assert.equal(first.status, 0, first.stderr + first.stdout);
     assert.equal(first.document.status, "ready");
     assert.equal(first.document.repository, "example/setup");
     assert.equal(first.document.service.active, "active");
     assert.equal(first.document.service.binding.cli, installedCli);
-    assert.equal(first.document.intake.pollSeconds, 0.05);
-    assert.deepEqual(first.document.intake.approvedObjectives, []);
-    assert.equal(first.document.readiness.status, "not-assessed");
+    assert.equal(first.document.queue.pollSeconds, 0.05);
+    assert.deepEqual(first.document.queue.queued, []);
+    // The same checks `run` makes on an Objective's first start run here, queued work or not.
+    assert.equal(first.document.readiness.status, "ready");
+    assert.equal(first.document.readiness.outsideWriteRefused, true);
     assert.equal(first.document.host.logoutPersistence, "not-enabled");
     const config = readFileSync(configPath);
     const pid = readFileSync(join(root, "pid"), "utf8");
-    const again = run(["setup", ...consent]);
+    const again = run(["setup", ...background]);
     assert.equal(again.status, 0, again.stderr + again.stdout);
     assert.equal(again.document.status, "ready");
     assert.equal(readFileSync(join(root, "pid"), "utf8"), pid);
@@ -242,11 +268,12 @@ test("actual guided CLI creates a consented idle watcher, verifies its owner and
         (request) => !new URL(request.address).pathname.endsWith("/issues/99"),
       ),
     );
-    const state = run(["intake", "status"]).document;
+    const state = run(["queue", "list"]).document;
     assert.deepEqual(state.observation.unapproved, [99]);
     assert.equal(state.observation.idleReason, "awaiting-approved-work");
     assert.deepEqual(state.objectives, []);
     assert.deepEqual(state.bodyDigests, {});
+    assert.equal(state.watch, true);
     const repositoryState = join(
       root,
       "state/clockgrove-factory/repositories/example/setup",
@@ -256,11 +283,21 @@ test("actual guided CLI creates a consented idle watcher, verifies its owner and
     for (const path of ["forbidden-sdk-construction", "forbidden-dispatch"])
       assert.equal(existsSync(join(root, path)), false, path);
     assert.equal(readFileSync(join(root, "service-error"), "utf8"), "");
+    // status without an Objective is the service and the queue.
+    const shown = run(["status"]);
+    assert.equal(shown.status, 0, shown.stderr);
+    assert.match(shown.stdout, /^Service: active, enabled \(factory-/m);
+    assert.match(shown.stdout, /^Queue: running; empty$/m);
+    assert.match(shown.stdout, /`factory queue add N` queues an Objective/);
+    const json = JSON.parse(run(["status", "--json"]).stdout);
+    assert.equal(json.service.active, "active");
+    assert.equal(json.queue.watch, true);
   }));
 
 test("guided setup refuses to reuse a retired single-credential service binding", () =>
-  fixture(async ({ root, run, installArgs }) => {
-    const first = run(["setup", ...consent, ...installArgs()]);
+  fixture(async ({ root, run, configure }) => {
+    configure();
+    const first = run(["setup", ...background]);
     assert.equal(first.status, 0, first.stderr + first.stdout);
     const unit = readFileSync(join(root, "registered"), "utf8");
     const prefix = "# Factory local supervision v1 ";
@@ -273,7 +310,7 @@ test("guided setup refuses to reuse a retired single-credential service binding"
       { mode: 0o600 },
     );
     const starts = readFileSync(join(root, "starts"), "utf8");
-    const again = run(["setup", ...consent]);
+    const again = run(["setup", ...background]);
     assert.equal(again.status, 1, again.stderr + again.stdout);
     assert.equal(again.document.blocked.stage, "service-binding");
     assert.match(
@@ -284,7 +321,7 @@ test("guided setup refuses to reuse a retired single-credential service binding"
     assert.equal(readFileSync(unit, "utf8").includes('"credential":'), true);
   }));
 
-test("actual guided configuration-only setup succeeds with unavailable manager and requires explicit service consent for background", () =>
+test("actual guided configuration-only setup succeeds with unavailable manager and background setup stops at the host", () =>
   fixture(async ({ root, run, installArgs, configPath }) => {
     writeFileSync(join(root, "unsupported"), "");
     const configured = run(["setup", "--config-only", ...installArgs()]);
@@ -292,11 +329,14 @@ test("actual guided configuration-only setup succeeds with unavailable manager a
     assert.equal(configured.document.status, "configured");
     assert.equal(existsSync(join(root, "registered")), false);
     const saved = readFileSync(configPath);
-    const absent = run(["setup", "--background", "--retain-package"]);
-    assert.equal(absent.status, 1);
-    assert.equal(absent.document.blocked.stage, "intent");
-    assert.match(absent.document.blocked.detail, /explicit --service-consent/);
-    const unsupported = run(["setup", ...consent]);
+    // Neither mode takes a consent flag: choosing --background is the consent.
+    const neither = run(["setup"]);
+    assert.equal(neither.status, 1);
+    assert.equal(neither.document.blocked.stage, "intent");
+    const both = run(["setup", "--background", "--config-only"]);
+    assert.equal(both.status, 1);
+    assert.match(both.document.blocked.detail, /exactly one of/);
+    const unsupported = run(["setup", ...background]);
     assert.equal(unsupported.status, 1);
     assert.equal(unsupported.document.blocked.stage, "host-readiness");
     assert.deepEqual(readFileSync(configPath), saved);
@@ -304,30 +344,31 @@ test("actual guided configuration-only setup succeeds with unavailable manager a
   }));
 
 test("actual guided setup reports partial registration/start failures and completes a corrected repeat without replacing state", () =>
-  fixture(async ({ root, run, installArgs, configPath }) => {
+  fixture(async ({ root, run, configure, configPath }) => {
+    configure();
     writeFileSync(join(root, "enable-failure"), "");
-    const failed = run(["setup", ...consent, ...installArgs()]);
+    const failed = run(["setup", ...background]);
     assert.equal(failed.status, 1);
     assert.equal(failed.document.blocked.stage, "service-registration");
-    assert.ok(failed.document.completed.includes("intake-bound"));
+    assert.ok(failed.document.completed.includes("queue-bound"));
     assert.equal(existsSync(join(root, "starts")), false);
     const saved = readFileSync(configPath);
     rmSync(join(root, "enable-failure"));
     writeFileSync(join(root, "start-failure"), "");
-    const start = run(["setup", ...consent]);
+    const start = run(["setup", ...background]);
     assert.equal(start.status, 1);
     assert.equal(start.document.blocked.stage, "service-start");
     assert.match(start.document.blocked.detail, /exact coordinator owner/);
     rmSync(join(root, "start-failure"));
-    const ready = run(["setup", ...consent]);
+    const ready = run(["setup", ...background]);
     assert.equal(ready.status, 0, ready.stdout + ready.stderr);
     assert.equal(ready.document.status, "ready");
     assert.deepEqual(readFileSync(configPath), saved);
     assert.equal(readFileSync(join(root, "starts"), "utf8"), "start\n");
   }));
 
-test("actual guided setup checks selected execution readiness and retains a closed finite selection without dispatch", () =>
-  fixture(async ({ root, run, configPath, env, checkout }) => {
+test("actual guided setup checks the configured credentials, then the queue keeps a closed Objective without dispatch", () =>
+  fixture(async ({ root, run, until, configPath, env, checkout }) => {
     const config = factoryConfig(checkout, "example/setup");
     config.execution = {
       kind: "managed-agent",
@@ -341,35 +382,44 @@ test("actual guided setup checks selected execution readiness and retains a clos
         timeoutSeconds: 10,
       },
     };
+    config.queue = { pollSeconds: 0.05 };
     writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
     const credential = join(root, "credential");
     writeFileSync(credential, "fixture-no-provider-call", { mode: 0o600 });
     const args = [
       "setup",
-      ...consent,
-      "--objective",
-      "1",
+      ...background,
       "--credential-file",
       `FACTORY_SERVICE_TEST_KEY=${credential}`,
     ];
     delete env.FACTORY_SERVICE_TEST_KEY;
-    const missing = run(["setup", ...consent, "--objective", "1"]);
+    const missing = run(["setup", ...background]);
     assert.equal(missing.status, 1);
     assert.equal(missing.document.blocked.stage, "execution-readiness");
+    assert.match(
+      missing.document.blocked.detail,
+      /FACTORY_SERVICE_TEST_KEY.* Fix: Provide FACTORY_SERVICE_TEST_KEY/,
+    );
+    assert.equal(missing.document.readiness.status, "missing");
     assert.equal(existsSync(join(root, "registered")), false);
     const ready = run(args);
     assert.equal(ready.status, 0, ready.stdout + ready.stderr);
-    assert.deepEqual(ready.document.intake.approvedObjectives, [1]);
+    assert.deepEqual(ready.document.queue.queued, []);
     assert.equal(ready.document.readiness.status, "present");
     assert.doesNotMatch(ready.stdout, /fixture-no-provider-call/);
-    const status = run(["intake", "status"]);
-    assert.equal(status.status, 0);
-    assert.deepEqual(status.document.objectives, [1]);
-    assert.equal(status.document.serviceConsent.consent, true);
-    assert.equal(status.document.observation.reasons[1], "Issue is closed");
+    const added = run(["queue", "add", "1"]);
+    assert.equal(added.status, 0, added.stdout + added.stderr);
+    assert.deepEqual(added.document.objectives, [1]);
+    assert.equal(added.document.note, undefined);
+    const status = await until(["queue", "list"], (document) =>
+      Boolean(document.observation?.reasons?.[1]),
+    );
+    assert.deepEqual(status.objectives, [1]);
+    assert.equal(status.watch, true);
+    assert.equal(status.observation.reasons[1], "Issue is closed");
   }));
 
-test("actual setup and readiness CLI share the home default and preserve outside overrides before service effects", () =>
+test("setup and the first run share the readiness checks, the home default and the outside override before service effects", () =>
   fixture(async ({ root, run, configPath, env, checkout }) => {
     writeFileSync(
       configPath,
@@ -386,29 +436,45 @@ test("actual setup and readiness CLI share the home default and preserve outside
       [[], home],
       [["--outside-directory", override], override],
     ]) {
-      const result = run(["setup", ...consent, "--objective", "1", ...args]);
+      const result = run(["setup", ...background, ...args]);
       assert.equal(result.status, 1, result.stdout + result.stderr);
       assert.equal(result.document.blocked.stage, "execution-readiness");
-      const readiness = JSON.parse(result.document.blocked.detail);
+      const readiness = result.document.readiness;
       assert.equal(readiness.outsideDirectory, realpathSync(selected));
       assert.equal(readiness.outsideHostWritable, true);
       assert.equal(readiness.outsideWriteRefused, false);
+      assert.match(result.document.blocked.detail, / Fix: /);
       assert.equal(existsSync(join(root, "registered")), false);
       assert.equal(existsSync(join(root, "starts")), false);
     }
+    // A first run stops on the same failing check, names its fix and creates no state.
+    const first = run(["run", "--objective", "1"]);
+    assert.equal(first.status, 2, first.stdout + first.stderr);
+    assert.match(first.stdout, /Objective #1 waits before it starts: /);
+    assert.match(first.stdout, /\nFix: Make the Codex sandbox usable/);
+    assert.match(first.stdout, /run `factory run --objective 1` again/);
+    assert.equal(
+      existsSync(
+        join(
+          root,
+          "state/clockgrove-factory/repositories/example/setup/objectives",
+        ),
+      ),
+      false,
+    );
     writeFileSync(join(root, "readiness-mode"), "refused");
-    const direct = run(["readiness"]);
-    assert.equal(direct.status, 0, direct.stdout + direct.stderr);
-    assert.equal(direct.document.outsideDirectory, realpathSync(home));
-    assert.equal(direct.document.outsideHostWritable, true);
-    assert.equal(direct.document.outsideWriteRefused, true);
+    const ready = run(["setup", ...background]);
+    assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+    assert.equal(ready.document.readiness.outsideDirectory, realpathSync(home));
+    assert.equal(ready.document.readiness.outsideHostWritable, true);
+    assert.equal(ready.document.readiness.outsideWriteRefused, true);
     const requests = readFileSync(join(root, "readiness-requests"), "utf8")
       .trim()
       .split("\n")
       .map(JSON.parse);
     assert.deepEqual(
       requests.map(({ message }) => message.method),
-      Array(3).fill(["initialize", "initialized", "command/exec"]).flat(),
+      Array(4).fill(["initialize", "initialized", "command/exec"]).flat(),
     );
     for (const { args } of requests) {
       assert.ok(args.includes('sandbox_mode="workspace-write"'));
@@ -417,15 +483,10 @@ test("actual setup and readiness CLI share the home default and preserve outside
   }));
 
 test("guided ready requires the service owner's own GitHub observation and retains a blocked live watcher for correction", () =>
-  fixture(async ({ root, run, installArgs }) => {
+  fixture(async ({ root, run, configure }) => {
+    configure();
     writeFileSync(join(root, "service-github-unavailable"), "");
-    const blocked = run([
-      "setup",
-      ...consent,
-      ...installArgs(),
-      "--poll-seconds",
-      "0.05",
-    ]);
+    const blocked = run(["setup", ...background]);
     assert.equal(blocked.status, 1);
     assert.equal(blocked.document.blocked.stage, "service-observation");
     assert.match(
@@ -436,7 +497,7 @@ test("guided ready requires the service owner's own GitHub observation and retai
     assert.equal(blocked.document.service.active, "active");
     const pid = readFileSync(join(root, "pid"), "utf8");
     rmSync(join(root, "service-github-unavailable"));
-    const ready = run(["setup", ...consent]);
+    const ready = run(["setup", ...background]);
     assert.equal(ready.status, 0, ready.stdout + ready.stderr);
     assert.equal(ready.document.status, "ready");
     assert.equal(ready.document.observation.error, undefined);
@@ -445,14 +506,9 @@ test("guided ready requires the service owner's own GitHub observation and retai
   }));
 
 test("guided setup upgrades a live settled watcher through compatibility and drain without losing its running mode", () =>
-  fixture(async ({ root, run, installArgs, configPath }) => {
-    const first = run([
-      "setup",
-      ...consent,
-      ...installArgs(),
-      "--poll-seconds",
-      "0.05",
-    ]);
+  fixture(async ({ root, run, configure, configPath }) => {
+    configure();
+    const first = run(["setup", ...background]);
     assert.equal(first.status, 0, first.stdout + first.stderr);
     const before = readFileSync(configPath);
     const oldPackage = join(root, "retained-package");
@@ -480,10 +536,10 @@ test("guided setup upgrades a live settled watcher through compatibility and dra
       0,
       switchToPrevious.stdout + switchToPrevious.stderr,
     );
-    const upgraded = run(["setup", ...consent]);
+    const upgraded = run(["setup", ...background]);
     assert.equal(upgraded.status, 0, upgraded.stdout + upgraded.stderr);
     assert.ok(upgraded.document.completed.includes("artifact-upgraded"));
-    assert.equal(upgraded.document.intake.mode, "running");
+    assert.equal(upgraded.document.queue.mode, "running");
     assert.equal(upgraded.document.service.binding.cli, installedCli);
     assert.equal(upgraded.document.service.active, "active");
     assert.deepEqual(readFileSync(configPath), before);
@@ -495,14 +551,9 @@ test("guided setup upgrades a live settled watcher through compatibility and dra
 
 for (const fault of ["refill", "foreign"]) {
   test(`watcher artifact upgrade refuses automatic resume after ${fault} changes its settled boundary`, () =>
-    fixture(async ({ root, run, installArgs, configPath }) => {
-      const initial = run([
-        "setup",
-        ...consent,
-        ...installArgs(),
-        "--poll-seconds",
-        "0.05",
-      ]);
+    fixture(async ({ root, run, configure, configPath }) => {
+      configure();
+      const initial = run(["setup", ...background]);
       assert.equal(initial.status, 0, initial.stdout + initial.stderr);
       const config = JSON.parse(readFileSync(configPath, "utf8"));
       if (fault === "refill") {
@@ -546,12 +597,56 @@ for (const fault of ["refill", "foreign"]) {
       assert.equal(upgraded.document.restarted, false);
       assert.equal(upgraded.document.resumeRequired, true);
       assert.equal(readFileSync(join(root, "starts"), "utf8"), "start\n");
-      const status = run(["intake", "status"]);
+      const status = run(["queue", "list"]);
       assert.equal(status.status, 0, status.stderr);
       assert.equal(status.document.mode, "draining");
       if (fault === "refill") assert.deepEqual(status.document.objectives, [1]);
     }));
 }
+
+test("supervisor stop drains the service; --disable also stops it starting again, and status says so", () =>
+  fixture(async ({ root, run, configure }) => {
+    configure();
+    const ready = run(["setup", ...background]);
+    assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+    assert.equal(run(["status", "--json"]).document.service.enabled, "enabled");
+    const refused = (args, message) => {
+      const result = run(args);
+      assert.equal(result.status, 1, args.join(" "));
+      assert.match(result.stderr, message, args.join(" "));
+    };
+    refused(
+      ["supervisor"],
+      /Unknown supervisor action \(none\); use start, stop, upgrade or uninstall/,
+    );
+    refused(["supervisor", "restart"], /Unknown supervisor action restart/);
+    refused(
+      ["supervisor", "upgrade"],
+      /upgrade requires --cli ABSOLUTE_INSTALLED_CLI/,
+    );
+    refused(
+      ["supervisor", "start", "--cli", installedCli],
+      /--cli belongs to factory supervisor upgrade/,
+    );
+    const stopped = run(["supervisor", "stop", "--disable"]);
+    assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
+    assert.deepEqual(stopped.document, {
+      stopped: true,
+      evidenceRetained: true,
+    });
+    const calls = readFileSync(join(root, "calls"), "utf8");
+    assert.match(calls, /--user stop /);
+    assert.match(calls, /--user disable /);
+    assert.match(calls, /--user link /);
+    const service = run(["status", "--json"]).document.service;
+    assert.equal(service.registered, true);
+    assert.notEqual(service.enabled, "enabled");
+    // The status line for a registered, stopped service names the command that starts it.
+    assert.match(
+      run(["status"]).stdout,
+      /Not running; `factory supervisor start` starts it/,
+    );
+  }));
 
 test("guided setup leaves omitted concurrency to host sizing at run time and reports it", () =>
   fixture(async ({ run, installArgs, configPath }) => {
@@ -618,24 +713,15 @@ test("guided setup rejects configuration inside the target before writing it and
     assert.deepEqual(readFileSync(configPath), before);
   }));
 
-test("setup reuses an identical Objective selection and refuses replacing it while an Objective is active", () =>
+test("setup keeps a paused queue and a retained Objective's state untouched and does not start the service", () =>
   fixture(async ({ root, run, configPath, env, checkout }) => {
     const config = factoryConfig(checkout, "example/setup");
     writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
-    writeFileSync(join(root, "readiness-mode"), "refused");
-    const watching = run([
-      "intake",
-      "watch",
-      "--service-consent",
-      "--actor",
-      "fixture",
-      "--reason",
-      "Consented model-free target watcher",
-    ]);
-    assert.equal(watching.status, 0, watching.stdout + watching.stderr);
-    const enqueue = run(["intake", "enqueue", "--objective", "1", "--watch"]);
-    assert.equal(enqueue.status, 0, enqueue.stdout + enqueue.stderr);
-    const pause = run(["intake", "pause"]);
+    const added = run(["queue", "add", "1"]);
+    assert.equal(added.status, 0, added.stdout + added.stderr);
+    // The queue exists before the service: it says so and names the command.
+    assert.match(added.document.note, /factory setup --background/);
+    const pause = run(["queue", "pause"]);
     assert.equal(pause.status, 0, pause.stdout + pause.stderr);
     const oldStateHome = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = env.XDG_STATE_HOME;
@@ -661,24 +747,15 @@ test("setup reuses an identical Objective selection and refuses replacing it whi
         },
       });
       const before = readFileSync(path, "utf8");
-      const intakeBefore = readIntake(config);
-      const same = run(["setup", ...consent, "--objective", "1"]);
+      const same = run(["setup", ...background]);
       assert.equal(same.status, 1, same.stdout + same.stderr);
       assert.match(same.document.blocked.detail, /paused or draining/);
-      const changed = run([
-        "setup",
-        ...consent,
-        "--objective",
-        "1",
-        "--objective",
-        "2",
-      ]);
-      assert.equal(changed.status, 1, changed.stdout + changed.stderr);
-      assert.match(
-        changed.document.blocked.detail,
-        /active Objective prevents replacing the intake selection/,
-      );
-      assert.deepEqual(readIntake(config), intakeBefore);
+      assert.match(same.document.blocked.detail, /factory queue resume/);
+      // The queue keeps what was added, now marked as served, still paused.
+      const kept = readIntake(config);
+      assert.deepEqual(kept.objectives, [1]);
+      assert.equal(kept.watch, true);
+      assert.equal(kept.mode, "paused");
       assert.equal(readFileSync(path, "utf8"), before);
       assert.equal(existsSync(join(root, "registered")), false);
       assert.equal(existsSync(join(root, "starts")), false);
@@ -686,4 +763,77 @@ test("setup reuses an identical Objective selection and refuses replacing it whi
       if (oldStateHome === undefined) delete process.env.XDG_STATE_HOME;
       else process.env.XDG_STATE_HOME = oldStateHome;
     }
+  }));
+
+test("factory queue parses each form, and its stop messages name queue commands that run", () =>
+  fixture(async ({ run, configPath, checkout }) => {
+    writeFileSync(
+      configPath,
+      JSON.stringify(factoryConfig(checkout, "example/setup")),
+      { mode: 0o600 },
+    );
+    const refused = (args, message) => {
+      const result = run(args);
+      assert.equal(result.status, 1, args.join(" "));
+      assert.match(result.stderr, message, args.join(" "));
+    };
+    refused(["queue"], /Unknown queue action \(none\); use add, list, remove/);
+    refused(["queue", "enqueue", "1"], /Unknown queue action enqueue/);
+    refused(["queue", "add"], /queue add requires Objective numbers/);
+    refused(["queue", "add", "one"], /one is not an Objective number/);
+    refused(["queue", "add", "0"], /0 is not an Objective number/);
+    refused(["queue", "add", "1", "--watch"], /--watch was removed/);
+    refused(
+      ["queue", "add", "1", "--priority-label", "x"],
+      /--priority-label was removed/,
+    );
+    refused(["queue", "list", "1"], /queue list takes no Objective numbers/);
+    refused(["queue", "remove"], /queue remove requires Objective numbers/);
+    refused(["queue", "pause", "--drain"], /Unknown option --drain/);
+    // Nothing queued yet: listing is empty, changing the queue names the way in.
+    const empty = run(["queue", "list"]);
+    assert.equal(empty.status, 0, empty.stderr);
+    assert.deepEqual(empty.document, { objectives: [], dequeued: [] });
+    refused(
+      ["queue", "pause"],
+      /Nothing is queued; add Objectives with `factory queue add N`/,
+    );
+    refused(["queue", "remove", "1"], /Nothing is queued/);
+    const status = run(["status"]);
+    assert.equal(status.status, 0, status.stderr);
+    assert.match(
+      status.stdout,
+      /^Service: not set up; `factory setup --background` sets it up$/m,
+    );
+    assert.match(status.stdout, /^Queue: running; empty$/m);
+
+    const added = run(["queue", "add", "1", "1"]);
+    assert.equal(added.status, 0, added.stdout + added.stderr);
+    assert.deepEqual(added.document.objectives, [1]);
+    assert.equal(added.document.mode, "running");
+    assert.equal(added.document.watch, undefined);
+    assert.match(run(["status"]).stdout, /^Queue: running; queued #1$/m);
+    for (const [verb, mode] of [
+      ["pause", "paused"],
+      ["drain", "draining"],
+      ["resume", "running"],
+    ]) {
+      const changed = run(["queue", verb]);
+      assert.equal(changed.status, 0, changed.stderr);
+      assert.equal(changed.document.mode, mode);
+      assert.equal(run(["queue", "list"]).document.mode, mode);
+    }
+    // A paused queue's status line names the command that continues it.
+    run(["queue", "pause"]);
+    assert.match(
+      run(["status"]).stdout,
+      /Paused; `factory queue resume` continues it/,
+    );
+    const removed = run(["queue", "remove", "1"]);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.deepEqual(removed.document.dequeued, [1]);
+    refused(["queue", "remove", "2"], /Objective #2 is not in the queue/);
+    const again = run(["queue", "add", "1"]);
+    assert.deepEqual(again.document.dequeued, []);
+    assert.deepEqual(again.document.objectives, [1]);
   }));

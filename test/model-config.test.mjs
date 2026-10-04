@@ -983,7 +983,8 @@ test("install flags persist independent planner, reviewer, and worker selections
       process.execPath,
       [
         resolve(import.meta.dirname, "../dist/cli.js"),
-        "install",
+        "setup",
+        "--config-only",
         "--repository",
         "example/model-install",
         "--checkout",
@@ -1042,7 +1043,8 @@ test("install selects the pinned optional Claude adapter without changing planni
       process.execPath,
       [
         resolve(import.meta.dirname, "../dist/cli.js"),
-        "install",
+        "setup",
+        "--config-only",
         "--repository",
         "example/claude-install",
         "--checkout",
@@ -1107,7 +1109,8 @@ test("install selects the pinned optional GitHub Copilot adapter with local auth
       process.execPath,
       [
         resolve(import.meta.dirname, "../dist/cli.js"),
-        "install",
+        "setup",
+        "--config-only",
         "--repository",
         "example/copilot-install",
         "--checkout",
@@ -1196,7 +1199,8 @@ test("install resolves Factory-owned role defaults and isolates one-role overrid
         process.execPath,
         [
           resolve(import.meta.dirname, "../dist/cli.js"),
-          "install",
+          "setup",
+          "--config-only",
           "--repository",
           `example/model-${scenario.name}`,
           "--checkout",

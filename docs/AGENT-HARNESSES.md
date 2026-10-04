@@ -17,14 +17,14 @@ To run a harness in a remote sandbox instead of locally, see [remote execution](
 
 ## Choose a harness
 
-Codex is used when `--harness` is omitted. Select another at install:
+Codex is used when `--harness` is omitted. Select another when you set up:
 
 ```sh
-factory install --repository OWNER/REPO --checkout /absolute/target \
+factory setup --config-only --repository OWNER/REPO --checkout /absolute/target \
   --harness claude-agent-sdk --worker-model MODEL --worker-reasoning medium \
   --claude-max-turns 12
 
-factory install --repository OWNER/REPO --checkout /absolute/target \
+factory setup --config-only --repository OWNER/REPO --checkout /absolute/target \
   --harness github-copilot-sdk --worker-model MODEL --worker-reasoning medium \
   --copilot-timeout-seconds 900
 ```

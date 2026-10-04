@@ -17,7 +17,7 @@ export interface ControlRequest {
     | "repair"
     | "retry"
     | "rereview"
-    | "decide-result"
+    | "decide"
     | "select"
     | "propose-amendment"
     | "dequeue"

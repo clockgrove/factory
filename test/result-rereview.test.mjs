@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { stateRoot } from "../dist/config.js";
@@ -109,22 +109,21 @@ for (const delivery of ["regular", "native-stack"]) {
       );
       const identities = structuredClone(waiting.work);
       const path = statePath(config.repository, 1);
-      const input = {
-        item: "second",
-        treeSha: waiting.work.second.treeSha,
-        actor: "operator",
-        reason: "Inspected stopped review; request automatic evaluation again",
-      };
+      const input = { item: "second", actor: "operator" };
+      const treeSha = waiting.work.second.treeSha;
       const before = readFileSync(path, "utf8");
       const priorDiagnostics = readDiagnostics(config.repository, 1);
+      // The tree is the one state holds; a result that no longer matches it is refused.
+      const drifted = structuredClone(waiting);
+      drifted.work.second.acceptancePending.treeSha = "0".repeat(40);
+      writeStateFile(path, drifted);
+      const driftedText = readFileSync(path, "utf8");
       assert.throws(
-        () =>
-          application.rereviewWorkItem(1, {
-            ...input,
-            treeSha: "0".repeat(40),
-          }),
+        () => application.rereviewWorkItem(1, input),
         /tree differs/,
       );
+      assert.equal(readFileSync(path, "utf8"), driftedText);
+      saveState(path, waiting);
       assert.equal(readFileSync(path, "utf8"), before);
       const lockPath = join(stateRoot(config.repository), "controller.lock");
       const lock = acquireControllerLock(lockPath, 1);
@@ -160,7 +159,7 @@ for (const delivery of ["regular", "native-stack"]) {
           s.work.second.acceptanceDecisions = [
             {
               criterion: commands[1],
-              treeSha: input.treeSha,
+              treeSha,
               actor: "owner",
               at: new Date().toISOString(),
               outcome: "refuse",
@@ -183,17 +182,12 @@ for (const delivery of ["regular", "native-stack"]) {
         process.execPath,
         [
           resolve("dist/cli.js"),
-          "rereview",
+          "retry",
           "--objective",
           "1",
           "--item",
           input.item,
-          "--tree",
-          input.treeSha,
-          "--actor",
-          input.actor,
-          "--reason",
-          input.reason,
+          "--rereview",
           "--config",
           configPath,
         ],
@@ -258,7 +252,7 @@ for (const delivery of ["regular", "native-stack"]) {
           (e) =>
             e.operation === "result-rereview-request" &&
             e.attemptId === identities.second.attempt &&
-            e.metadata.actor === input.actor,
+            e.metadata.actor === userInfo().username,
         ),
       );
       const finished = readFileSync(path, "utf8");

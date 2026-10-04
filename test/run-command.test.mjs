@@ -192,7 +192,6 @@ test("run persists a plan that needs a decision and resumes it without planning 
 
     // Refusing discards the unprojected plan, so the next run plans afresh.
     await application.decidePlan(1, {
-      plan: shortPlanDigest(stopped.plan),
       actor: "operator",
       outcome: "refuse",
       answer: "",
@@ -205,7 +204,6 @@ test("run persists a plan that needs a decision and resumes it without planning 
 
     await assert.rejects(
       application.decidePlan(1, {
-        plan: shortPlanDigest(replanned.plan),
         actor: "operator",
         outcome: "accept",
         answer: "",
@@ -214,7 +212,6 @@ test("run persists a plan that needs a decision and resumes it without planning 
       /specific answer/,
     );
     const decided = await application.decidePlan(1, {
-      plan: shortPlanDigest(replanned.plan),
       actor: "operator",
       outcome: "accept",
       answer: "Yes, the result item owns result.txt",
@@ -303,7 +300,7 @@ test("required environment is checked before any model is called", async () => {
   });
 });
 
-test("decisions bind to the plan status showed and refuse once projection starts", async () => {
+test("a plan decision reads the saved plan from state and refuses once projection starts", async () => {
   await fixture("bind", async ({ root, config, graph }) => {
     const calls = [];
     const { application } = makeApplication({
@@ -318,27 +315,18 @@ test("decisions bind to the plan status showed and refuse once projection starts
     const digest = shortPlanDigest(stopped.plan);
     const status = preparationStatusDocument(stopped);
     assert.equal(status.planReview.digest, digest);
-    assert.match(status.nextAction.command, new RegExp(`--plan ${digest} `));
+    // The digest is shown, never typed: the command carries no plan to bind.
+    assert.equal(
+      status.nextAction.command,
+      'factory decide --objective 1 --outcome accept|refuse --answer "ANSWER" --reason "WHY"',
+    );
     const decision = {
       actor: "operator",
       answer: "Yes, the result item owns result.txt",
       reason: "Checked the Objective",
     };
-    for (const plan of [
-      undefined,
-      "000000000000",
-      stopped.plan.reviewDigest.slice(0, 11),
-      stopped.plan.reviewDigest.toUpperCase(),
-    ])
-      for (const outcome of ["accept", "refuse"])
-        await assert.rejects(
-          application.decidePlan(1, { ...decision, plan, outcome }),
-          /saved plan is/,
-        );
-    // Any prefix of at least the short form names the plan.
     const accepted = await application.decidePlan(1, {
       ...decision,
-      plan: stopped.plan.reviewDigest.slice(0, 20),
       outcome: "accept",
     });
     assert.equal(accepted.plan.review.status, "human-accepted");
@@ -350,7 +338,6 @@ test("decisions bind to the plan status showed and refuse once projection starts
     await assert.rejects(
       application.decidePlan(1, {
         ...decision,
-        plan: stopped.plan.reviewDigest,
         outcome: "refuse",
       }),
       /projection has started/,
@@ -418,7 +405,6 @@ test("an Objective keeps the capacity it started with when the host changes", as
       assert.equal(stopped.plan.executionBounds.configuredConcurrency, 1);
       host(64, 256);
       await application.decidePlan(1, {
-        plan: shortPlanDigest(stopped.plan),
         actor: "operator",
         outcome: "accept",
         answer: "Yes, the result item owns result.txt",
@@ -680,8 +666,6 @@ for (const [name, expected, answers, diagnose, runs] of [
           ...args.map((arg) =>
             arg === '"WHY"' ? "Clarified the Objective" : arg,
           ),
-          "--actor",
-          "operator",
           "--config",
           configPath,
         ],
@@ -697,8 +681,8 @@ for (const [name, expected, answers, diagnose, runs] of [
     });
   });
 
-test("the CLI requires an answer to accept a plan and keeps no admission vocabulary", async () => {
-  await fixture("cli", async ({ root, config }) => {
+test("the CLI decides from state, requires an answer to accept a plan, and keeps no admission vocabulary", async () => {
+  await fixture("cli", async ({ root, config, graph }) => {
     const configPath = join(root, "config.json");
     writeFileSync(configPath, JSON.stringify(config));
     const cli = (...args) =>
@@ -707,37 +691,52 @@ test("the CLI requires an answer to accept a plan and keeps no admission vocabul
         [join(import.meta.dirname, "../dist/cli.js"), ...args],
         { encoding: "utf8", env: { ...process.env } },
       );
-    const accept = cli(
-      "decide",
-      "--objective",
-      "1",
-      "--plan",
-      "0123456789ab",
-      "--outcome",
-      "accept",
-      "--reason",
-      "Looks right",
-      "--config",
-      configPath,
+    const decide = (...args) =>
+      cli(
+        "decide",
+        "--objective",
+        "1",
+        ...args,
+        "--reason",
+        "Looks right",
+        "--config",
+        configPath,
+      );
+    const none = decide("--outcome", "refuse");
+    assert.equal(none.status, 1);
+    assert.match(
+      none.stderr,
+      /no Factory state; run `factory run --objective 1`/,
     );
+    const { application } = makeApplication({
+      config,
+      graph,
+      objectiveBody: body,
+      fakeRoot: join(root, "fake"),
+      actions: {},
+      planningModel: model(graph, [], { planFinding: true }),
+    });
+    await application.runObjective(1);
+    const accept = decide("--outcome", "accept");
     assert.equal(accept.status, 1);
     assert.match(accept.stderr, /requires --answer/);
+    const named = decide("--outcome", "refuse", "--item", "result");
+    assert.equal(named.status, 1);
+    assert.match(named.stderr, /plan decision takes none/);
+    assert.ok(existsSync(statePath(config.repository, 1)));
     const help = cli("help");
     assert.equal(help.status, 0);
     assert.doesNotMatch(help.stdout, /--authority\b|\badmit\b|admission/);
-    // Every command refuses options it does not read; removed ones say so.
+    // Every command refuses options it does not read; removed ones say so
+    // and removed commands point at the one that replaced them.
     for (const [args, message] of [
       [
         ["run", "--objective", "1", "--plan", "x"],
-        /Unknown option --plan for factory run/,
+        /--plan was removed; the plan digest is read from the Objective's state/,
       ],
       [["status", "--objective", "1", "--follow"], /Unknown option --follow/],
       [
-        ["plan", "--objective", "1", "--source", "a.md"],
-        /--source was removed/,
-      ],
-      [
-        ["intake", "enqueue", "--authority", "a.json"],
+        ["queue", "add", "1", "--authority", "a.json"],
         /--authority was removed/,
       ],
       [
@@ -746,13 +745,81 @@ test("the CLI requires an answer to accept a plan and keeps no admission vocabul
       ],
       [["cancel", "--objective", "1", "--abandon"], /--abandon was removed/],
       [
-        ["analyze", "--objective", "1", "--source", "a.md"],
+        ["diagnostics", "--objective", "1", "--analyze", "--source", "a.md"],
         /--source was removed/,
+      ],
+      [
+        ["setup", "--background", "--service-consent"],
+        /--service-consent was removed; running the command is the consent/,
+      ],
+      [
+        ["setup", "--background", "--actor", "me", "--reason", "x"],
+        /--actor was removed/,
+      ],
+      [
+        ["setup", "--background", "--retain-package"],
+        /--retain-package was removed/,
+      ],
+      [
+        ["setup", "--background", "--objective", "1"],
+        /--objective was removed from factory setup; queue Objectives with factory queue add N/,
+      ],
+      [["setup", "--background", "--poll-seconds", "5"], /queue\.pollSeconds/],
+      [["retry", "--objective", "1", "--reason", "x"], /--reason was removed/],
+      [["select", "--objective", "1", "--actor", "me"], /--actor was removed/],
+      [["decide", "--objective", "1", "--tree", "abc"], /--tree was removed/],
+      [
+        ["supervisor", "stop", "--intake"],
+        /--intake was removed; factory setup --background installs the service/,
+      ],
+      [["supervisor", "install"], /use factory setup --background/],
+      [["supervisor", "status"], /use factory status/],
+      [["supervisor", "disable"], /use factory supervisor stop --disable/],
+      [
+        ["supervisor", "start", "--disable"],
+        /--disable belongs to factory supervisor stop/,
+      ],
+      [["install", "--repository", "a/b"], /use factory setup --config-only/],
+      [
+        ["readiness"],
+        /factory readiness was removed; use factory setup --background or factory run/,
+      ],
+      [
+        ["intake", "status"],
+        /use factory queue add\|list\|remove\|pause\|resume\|drain/,
+      ],
+      [
+        ["decide-result", "--objective", "1"],
+        /use factory decide --objective N/,
+      ],
+      [
+        ["rereview", "--objective", "1"],
+        /use factory retry --objective N --item X --rereview/,
+      ],
+      [
+        ["plan", "--objective", "1"],
+        /factory plan was removed; use factory run/,
+      ],
+      [
+        ["analyze", "--objective", "1"],
+        /use factory diagnostics --objective N --analyze/,
+      ],
+      [
+        ["logs", "--objective", "1"],
+        /use factory diagnostics --objective N --logs ITEM/,
+      ],
+      [
+        ["captures", "--objective", "1"],
+        /use factory diagnostics --objective N --captures/,
+      ],
+      [
+        ["review", "--objective", "1"],
+        /use factory select --objective N --item X --output DIR/,
       ],
     ]) {
       const result = cli(...args, "--config", configPath);
       assert.equal(result.status, 1, args.join(" "));
-      assert.match(result.stderr, message);
+      assert.match(result.stderr, message, args.join(" "));
     }
   });
 });

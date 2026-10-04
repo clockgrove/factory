@@ -5,7 +5,7 @@ import type { ContinuationState } from "./state.js";
 import { shortPlanDigest } from "./status-summary.js";
 import { awaitsOperator } from "./step.js";
 
-/** Process exit codes for run, supervisor serve and intake run. */
+/** Process exit codes for run and the background service (supervisor serve). */
 export const EXIT_COMPLETE = 0;
 export const EXIT_FAILED = 1;
 export const EXIT_NEEDS_DECISION = 2;
@@ -86,8 +86,8 @@ export function runOutcome(state: ContinuationState): {
       code: EXIT_NEEDS_DECISION,
       message: state.plan
         ? state.plan.review.acceptable === false
-          ? `Objective #${objective} plan ${shortPlanDigest(state.plan)} cannot be accepted: ${state.coordinator.waitReason ?? "inspect status"}\nRefuse it with \`factory decide --objective ${objective} --plan ${shortPlanDigest(state.plan)} --outcome refuse --reason "…"\`, then rerun \`${rerun}\``
-          : `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\nDecide with \`factory decide --objective ${objective} --plan ${shortPlanDigest(state.plan)} --outcome accept|refuse --answer "…" --reason "…"\`, then rerun \`${rerun}\``
+          ? `Objective #${objective} plan ${shortPlanDigest(state.plan)} cannot be accepted: ${state.coordinator.waitReason ?? "inspect status"}\nRefuse it with \`factory decide --objective ${objective} --outcome refuse --reason "…"\`, then rerun \`${rerun}\``
+          : `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\nDecide with \`factory decide --objective ${objective} --outcome accept|refuse --answer "…" --reason "…"\`, then rerun \`${rerun}\``
         : `Objective #${objective}: ${state.coordinator.waitReason ?? "planning stopped for a decision; inspect status"}\nResolve it in the Objective, discard the stopped planning with \`factory decide --objective ${objective} --outcome refuse --reason "…"\`, then rerun \`${rerun}\``,
     };
   if (objectiveComplete(state))

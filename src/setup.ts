@@ -1,33 +1,22 @@
-import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { installFlags } from "./cli-flags.js";
+import { option, options } from "./cli-flags.js";
 import { readConfig, resolveCapacity } from "./config.js";
 import { requestControl } from "./coordinator-control.js";
 import { redactDiagnosticDetail } from "./diagnostics.js";
 import { sharedGitHubClient } from "./github-client.js";
-import { composeIntake } from "./application.js";
-import { readIntake, watchIntake, type IntakeAuthorization } from "./intake.js";
+import { writeConfiguration } from "./install.js";
+import {
+  queuePollSeconds,
+  readIntake,
+  watchIntake,
+  type IntakeAuthorization,
+} from "./intake.js";
+import { checkReadiness } from "./readiness.js";
 import { supervise, supervisorHost } from "./supervision.js";
 
-const option = (args: string[], name: string) => {
-  const index = args.indexOf(`--${name}`);
-  return index < 0 ? undefined : args[index + 1];
-};
-const options = (args: string[], name: string) =>
-  args.flatMap((arg, index) =>
-    arg === `--${name}` && args[index + 1] ? [args[index + 1]!] : [],
-  );
-/** The installation choices among setup's arguments; `install` refuses any other option. */
-function installArgs(args: string[]): string[] {
-  return args.flatMap((arg, index) => {
-    const name = arg.slice(2);
-    if (!arg.startsWith("--") || !installFlags.includes(name)) return [];
-    return name === "capture-content" ? [arg] : [arg, args[index + 1]!];
-  });
-}
 const cli = () =>
   realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url)));
 function withinCheckout(checkout: string, path: string): boolean {
@@ -43,33 +32,6 @@ function withinCheckout(checkout: string, path: string): boolean {
   );
   return location === "" || (!location.startsWith("../") && location !== "..");
 }
-async function invoke(args: string[]): Promise<string> {
-  const child = spawn(process.execPath, [cli(), ...args], {
-    env: process.env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stdout = "",
-    stderr = "";
-  child.stdout.on("data", (part: Buffer) => {
-    stdout += part.toString();
-  });
-  child.stderr.on("data", (part: Buffer) => {
-    stderr += part.toString();
-  });
-  return new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) =>
-      code === 0
-        ? resolve(stdout.trim())
-        : reject(
-            new Error(
-              stderr.trim() || stdout.trim() || `Setup command exited ${code}`,
-            ),
-          ),
-    );
-  });
-}
-
 /** One guided outcome, composed from existing installation and lifecycle boundaries. */
 export async function setupTarget(
   args: string[],
@@ -91,19 +53,6 @@ export async function setupTarget(
       throw new Error(
         "setup requires exactly one of --background or --config-only",
       );
-    if (
-      background &&
-      (!args.includes("--service-consent") ||
-        !option(args, "actor")?.trim() ||
-        !option(args, "reason")?.trim())
-    )
-      throw new Error(
-        "Background setup requires explicit --service-consent, --actor and --reason; installation alone is not consent",
-      );
-    if (background && !args.includes("--retain-package"))
-      throw new Error(
-        "Background setup requires --retain-package: retain the exact external package until supported upgrade/uninstall",
-      );
     stage = "configuration";
     if (!existsSync(configPath)) {
       const checkout = option(args, "checkout");
@@ -116,7 +65,7 @@ export async function setupTarget(
         throw new Error(
           "Setup configuration and retained package must be outside the target checkout",
         );
-      await invoke(["install", ...installArgs(args), "--config", configPath]);
+      writeConfiguration(args, configPath);
       completed.push("configuration-created");
     }
     const config = readConfig(configPath);
@@ -186,24 +135,22 @@ export async function setupTarget(
       active: string;
       enabled: string;
       binding?: {
-        intake?: boolean;
         cli: string;
         config: string;
         credentials?: { name: string; file: string }[];
       };
       bindingHealth?: { diagnostics: { code: string; action: string }[] };
     };
-    const legacy = service.bindingHealth?.diagnostics.find(
-      ({ code }) => code === "legacy-credential-binding",
+    const legacy = service.bindingHealth?.diagnostics.find(({ code }) =>
+      code.startsWith("legacy-"),
     );
     if (legacy) throw new Error(legacy.action);
     if (
       service.registered &&
-      (!service.binding?.intake ||
-        service.binding.config !== realpathSync(configPath))
+      service.binding?.config !== realpathSync(configPath)
     )
       throw new Error(
-        "Existing service is not this exact intake/configuration binding; inspect supervisor status and use supported lifecycle controls",
+        "The existing service is bound to a different configuration; inspect it with `factory status`, then `factory supervisor uninstall` before setting up this one",
       );
     // Supplied bindings replace an existing service's; otherwise reuse them.
     const suppliedFiles = options(args, "credential-file");
@@ -212,32 +159,15 @@ export async function setupTarget(
       : (service.binding?.credentials ?? []).map(
           ({ name, file }) => `${name}=${file}`,
         );
-    const objectives = options(args, "objective").map(Number);
     let intake = readIntake(config);
     stage = "execution-readiness";
-    if (objectives.length || intake?.objectives.length) {
-      const proof = JSON.parse(
-        await invoke([
-          "readiness",
-          ...credentialFiles.flatMap((entry) => ["--credential-file", entry]),
-          ...(option(args, "outside-directory")
-            ? ["--outside-directory", option(args, "outside-directory")!]
-            : []),
-          "--config",
-          configPath,
-        ]),
-      ) as { status: string; [key: string]: unknown };
-      result.readiness = proof;
-      if (!["ready", "present"].includes(proof.status))
-        throw new Error(
-          "Configured harness readiness remains unresolved; no service start was attempted",
-        );
-      completed.push("execution-readiness-checked");
-    } else
-      result.readiness = {
-        status: "not-assessed",
-        reason: "Observation-only watcher has no selected Objectives",
-      };
+    const proof = await checkReadiness(config, {
+      credentialFiles,
+      outsideDirectory: option(args, "outside-directory"),
+    });
+    result.readiness = proof.document;
+    if (!proof.ready) throw new Error(`${proof.detail} Fix: ${proof.fix}`);
+    completed.push("execution-readiness-checked");
     stage = "github-readiness";
     const observed = await sharedGitHubClient.request<unknown>(
       "GET",
@@ -248,50 +178,22 @@ export async function setupTarget(
         "Authenticated GitHub issue observation is unavailable for the configured target",
       );
     completed.push("github-readable");
-    stage = "intake-binding";
-    if (
-      !intake?.watch ||
-      !intake.serviceConsent ||
-      (option(args, "poll-seconds") !== undefined &&
-        intake.pollSeconds !== Number(option(args, "poll-seconds")))
-    ) {
-      intake = await watchIntake(
-        config,
-        {
-          actor: option(args, "actor")!,
-          reason: option(args, "reason")!,
-          consent: true,
-        },
-        option(args, "poll-seconds")
-          ? { pollSeconds: Number(option(args, "poll-seconds")) }
-          : {},
-      );
-    }
-    if (objectives.length) {
-      // A repeated setup reuses an identical selection rather than refilling live work.
-      if (JSON.stringify(intake.objectives) !== JSON.stringify(objectives)) {
-        intake = await composeIntake(config).enqueueIntake(objectives, {
-          watch: true,
-          ...(option(args, "poll-seconds")
-            ? { pollSeconds: Number(option(args, "poll-seconds")) }
-            : {}),
-        });
-      }
-    }
-    result.intake = {
+    stage = "queue-binding";
+    if (!intake?.watch) intake = await watchIntake(config);
+    result.queue = {
       watch: intake.watch,
       mode: intake.mode,
-      pollSeconds: intake.pollSeconds,
-      approvedObjectives: intake.objectives,
+      pollSeconds: queuePollSeconds(config),
+      queued: intake.objectives.filter((id) => !intake!.dequeued.includes(id)),
       idleReason: intake.objectives.length
-        ? "selected Objectives queued"
-        : "awaiting approved work",
+        ? "queued Objectives"
+        : "the queue is empty; add Objectives with `factory queue add N`",
     };
     if (intake.mode !== "running")
       throw new Error(
-        "Retained intake is paused or draining; inspect retained work and explicitly resume when safe",
+        "The queue is paused or draining; inspect `factory queue list`, then `factory queue resume` when safe",
       );
-    completed.push("intake-bound");
+    completed.push("queue-bound");
     stage = "service-registration";
     if (service.registered && service.binding?.cli !== cli()) {
       const upgraded = (await supervise("upgrade", configPath, {
@@ -300,13 +202,10 @@ export async function setupTarget(
       completed.push("artifact-upgraded");
       if (upgraded.resumeRequired)
         throw new Error(
-          "Artifact upgraded with state retained; changed authority or nonterminal work requires explicit safe resume before setup can complete",
+          "Artifact upgraded with state retained; nonterminal work requires `factory queue resume` when safe before setup can complete",
         );
     } else {
-      await supervise("install", configPath, {
-        intake: true,
-        credentialFiles,
-      });
+      await supervise("install", configPath, { credentialFiles });
       completed.push("service-registered");
     }
     stage = "service-start";
@@ -359,13 +258,13 @@ export async function setupTarget(
     }
     if (!serviceObservation)
       throw new Error(
-        "Service has not established a successful authenticated observation; inspect retained intake status",
+        "Service has not established a successful authenticated observation; inspect `factory queue list`",
       );
     result.observation = serviceObservation;
     completed.push("service-observation-verified");
     result.status = "ready";
     result.detail =
-      "Background service verified; discovery never authorizes Objective execution or provider spending";
+      "Background service verified; it runs only Objectives added with `factory queue add N`";
     return result;
   } catch (error) {
     result.blocked = {
@@ -374,7 +273,7 @@ export async function setupTarget(
         error instanceof Error ? error.message : String(error),
       ),
       continuation:
-        "Preserve completed stages and retained state. Inspect supervisor/intake status, resolve the stated prerequisite through supported controls, then repeat setup.",
+        "Preserve completed stages and retained state. Resolve the stated prerequisite (`factory status` shows the service and queue), then repeat `factory setup --background`.",
     };
     return result;
   }

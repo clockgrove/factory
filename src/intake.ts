@@ -43,28 +43,19 @@ import {
 } from "./state-store.js";
 import type { PreparationState, ContinuationState } from "./state.js";
 
-/** Authorization and idle control only. Pending order is derived, never copied into a queue. */
-export interface IntakeServiceConsent {
-  actor: string;
-  reason: string;
-  consent: true;
-}
-export interface IntakeOptions {
-  priorityLabels?: string[];
-  pollSeconds?: number;
-  watch?: boolean;
-}
+/**
+ * The queue and its service switch. Pending order is derived from `objectives`, never copied
+ * into a second queue. `watch` is set by `factory setup --background`, which is the consent to
+ * run the service; a queue without it is only a list waiting for that setup.
+ */
 export interface IntakeAuthorization {
   version: 1;
   repository: string;
   configDigest: string;
-  /** Objectives the operator selected to run, in order; empty for a watch-only intake. */
+  /** Objectives the operator queued, in order; empty for a watch-only service. */
   objectives: number[];
   watch?: true;
-  serviceConsent?: IntakeServiceConsent;
   bodyDigests: Record<string, string>;
-  priorityLabels: string[];
-  pollSeconds: number;
   dequeued: number[];
   mode: "running" | "paused" | "draining";
   observation?: {
@@ -77,6 +68,10 @@ export interface IntakeAuthorization {
     unapproved?: number[];
   };
 }
+/** How often the service looks at GitHub for queued work. */
+export const DEFAULT_QUEUE_POLL_SECONDS = 30;
+export const queuePollSeconds = (config: FactoryConfig): number =>
+  config.queue?.pollSeconds ?? DEFAULT_QUEUE_POLL_SECONDS;
 const digest = (body: string) =>
   createHash("sha256").update(body).digest("hex");
 const intakePath = (config: FactoryConfig) =>
@@ -112,13 +107,7 @@ export function readIntake(
     value.repository !== config.repository ||
     value.configDigest !== factoryConfigDigest(config) ||
     !["running", "paused", "draining"].includes(value.mode) ||
-    !Array.isArray(value.dequeued) ||
-    !Array.isArray(value.priorityLabels) ||
-    value.priorityLabels.some(
-      (label) => typeof label !== "string" || !label.trim(),
-    ) ||
-    !Number.isFinite(value.pollSeconds) ||
-    value.pollSeconds <= 0
+    !Array.isArray(value.dequeued)
   )
     throw new Error(
       "Intake record differs from this installation or is invalid",
@@ -131,10 +120,7 @@ export function readIntake(
         "configDigest",
         "objectives",
         "watch",
-        "serviceConsent",
         "bodyDigests",
-        "priorityLabels",
-        "pollSeconds",
         "dequeued",
         "mode",
         "observation",
@@ -145,18 +131,9 @@ export function readIntake(
       );
   if (value.watch !== undefined && value.watch !== true)
     throw new Error("Invalid continuous intake selection");
-  if (value.serviceConsent !== undefined)
-    validateServiceConsent(value.serviceConsent);
   validateObjectives(value.objectives);
-  if (
-    !value.objectives.length &&
-    (!value.watch || !intakeServiceConsent(value))
-  )
-    throw new Error(
-      "Observation-only intake requires explicit watch and service consent",
-    );
-  if (value.watch && !intakeServiceConsent(value))
-    throw new Error("Continuous watch requires explicit service consent");
+  if (!value.objectives.length && !value.watch)
+    throw new Error("An empty queue exists only with the background service");
   for (const objective of value.objectives)
     if (!/^[a-f0-9]{64}$/.test(value.bodyDigests[objective] ?? ""))
       throw new Error("Intake issue body binding is missing");
@@ -170,7 +147,7 @@ function validateObjectives(objectives: number[]): void {
     objectives.some((id) => !Number.isSafeInteger(id) || id <= 0) ||
     new Set(objectives).size !== objectives.length
   )
-    throw new Error("Intake requires distinct positive Objective numbers");
+    throw new Error("The queue takes distinct positive Objective numbers");
 }
 function continuations(config: FactoryConfig): ContinuationState[] {
   const path = join(stateRoot(config.repository), "objectives");
@@ -187,137 +164,88 @@ function terminal(state: ContinuationState): boolean {
     (state.schemaVersion === 7 && objectiveComplete(state))
   );
 }
-export function intakeComplete(
-  config: FactoryConfig,
-  record: IntakeAuthorization,
-): boolean {
-  return record.objectives.every((id) => {
-    if (record.dequeued.includes(id)) return true;
-    const state = readContinuation(config.repository, id);
-    return !!state && terminal(state);
-  });
-}
-function validateServiceConsent(consent: IntakeServiceConsent): void {
-  if (
-    !consent ||
-    consent.consent !== true ||
-    typeof consent.actor !== "string" ||
-    !consent.actor.trim() ||
-    typeof consent.reason !== "string" ||
-    !consent.reason.trim() ||
-    Object.keys(consent).some(
-      (key) => !["actor", "reason", "consent"].includes(key),
-    )
-  )
-    throw new Error(
-      "Watcher requires explicit service consent, actor and reason",
-    );
-}
-export function intakeServiceConsent(record: IntakeAuthorization): boolean {
-  return record.serviceConsent?.consent === true;
-}
 export function intakeSettled(config: FactoryConfig): boolean {
   return continuations(config).every(terminal);
 }
-function settledRefill(config: FactoryConfig): void {
-  if (!intakeSettled(config))
-    throw new Error(
-      "An active Objective prevents replacing the intake selection",
-    );
-}
-async function bindIntake(
+/** Authorize the issues' current bodies; the queue runs an Objective only while its body matches. */
+async function authorizedBodies(
   config: FactoryConfig,
   github: GitHubGateway,
   objectives: number[],
-  options: IntakeOptions,
-  previous?: IntakeAuthorization,
-): Promise<IntakeAuthorization> {
-  settledRefill(config);
+): Promise<Record<string, string>> {
   validateObjectives(objectives);
   if (!objectives.length)
-    throw new Error("Intake enqueue requires at least one --objective N");
-  if ((options.watch ?? previous?.watch) && !previous?.serviceConsent)
-    throw new Error("Continuous watch requires explicit service consent");
+    throw new Error("queue add needs at least one Objective number");
   checkRequiredEnvironment(config);
   const bodyDigests: Record<string, string> = {};
   for (const objective of objectives)
     bodyDigests[objective] = digest((await github.objective(objective)).body);
-  const value: IntakeAuthorization = {
+  return bodyDigests;
+}
+/**
+ * The queue with these Objectives added: new ones go last, one already queued keeps its place
+ * and takes the freshly authorized body, one removed earlier is queued again.
+ */
+function queued(
+  config: FactoryConfig,
+  objectives: number[],
+  bodyDigests: Record<string, string>,
+  previous?: IntakeAuthorization,
+): IntakeAuthorization {
+  return {
     version: 1,
     repository: config.repository,
     configDigest: factoryConfigDigest(config),
-    objectives: [...objectives],
-    bodyDigests,
-    priorityLabels: options.priorityLabels ?? previous?.priorityLabels ?? [],
-    pollSeconds: options.pollSeconds ?? previous?.pollSeconds ?? 30,
-    dequeued: [],
+    objectives: [
+      ...(previous?.objectives ?? []),
+      ...objectives.filter((id) => !previous?.objectives.includes(id)),
+    ],
+    bodyDigests: { ...previous?.bodyDigests, ...bodyDigests },
+    dequeued: (previous?.dequeued ?? []).filter(
+      (id) => !objectives.includes(id),
+    ),
     mode: previous?.mode ?? "running",
-    ...((options.watch ?? previous?.watch) ? { watch: true as const } : {}),
-    ...(previous?.serviceConsent
-      ? { serviceConsent: previous.serviceConsent }
-      : {}),
+    ...(previous?.watch ? { watch: true as const } : {}),
   };
-  if (
-    !Number.isFinite(value.pollSeconds) ||
-    value.pollSeconds <= 0 ||
-    value.priorityLabels.some(
-      (label) => typeof label !== "string" || !label.trim(),
-    )
-  )
-    throw new Error(
-      "Intake polling interval and priority labels must be explicit valid values",
-    );
-  return value;
 }
-/** Refill is handled by the current owner, or by the ordinary lock when stopped. */
+/** `queue add`: handled by the service when it owns the installation, else under the ordinary lock. */
 export async function enqueueIntake(
   config: FactoryConfig,
   github: GitHubGateway,
   objectives: number[],
-  options: IntakeOptions = {},
 ): Promise<IntakeAuthorization> {
   const reply = await requestControl(config.repository, {
     objective: 0,
     action: "enqueue",
-    input: { objectives, options },
+    input: { objectives },
   });
   if (reply.handled) return reply.result as IntakeAuthorization;
   mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
   const lockPath = join(stateRoot(config.repository), "controller.lock");
   const lock = acquireControllerLock(lockPath, 0);
   try {
-    const value = await bindIntake(
-      config,
-      github,
-      objectives,
-      options,
-      readIntake(config),
-    );
+    const bodyDigests = await authorizedBodies(config, github, objectives);
+    const value = queued(config, objectives, bodyDigests, readIntake(config));
     saveIntake(config, value);
     return value;
   } finally {
     releaseControllerLock(lockPath, lock);
   }
 }
+/** Mark the queue as served by the background service: what `factory setup --background` does. */
 export async function watchIntake(
   config: FactoryConfig,
-  consent: IntakeServiceConsent,
-  options: Pick<IntakeOptions, "pollSeconds"> = {},
 ): Promise<IntakeAuthorization> {
-  validateServiceConsent(consent);
   const reply = await requestControl(config.repository, {
     objective: 0,
     action: "watch",
-    input: { consent, options },
   });
   if (reply.handled) return reply.result as IntakeAuthorization;
   mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
   const path = join(stateRoot(config.repository), "controller.lock");
   const lock = acquireControllerLock(path, 0);
   try {
-    const previous = readIntake(config);
-    settledRefill(config);
-    const value = watchRecord(config, consent, options, previous);
+    const value = watchRecord(config, readIntake(config));
     saveIntake(config, value);
     return value;
   } finally {
@@ -326,27 +254,18 @@ export async function watchIntake(
 }
 function watchRecord(
   config: FactoryConfig,
-  consent: IntakeServiceConsent,
-  options: Pick<IntakeOptions, "pollSeconds">,
   previous?: IntakeAuthorization,
 ): IntakeAuthorization {
-  validateServiceConsent(consent);
-  const pollSeconds = options.pollSeconds ?? previous?.pollSeconds ?? 30;
-  if (!Number.isFinite(pollSeconds) || pollSeconds <= 0)
-    throw new Error("Intake polling interval must be a positive number");
   return {
     version: 1,
     repository: config.repository,
     configDigest: factoryConfigDigest(config),
     objectives: [],
     bodyDigests: {},
-    priorityLabels: [],
     dequeued: [],
     mode: "running",
     ...previous,
     watch: true,
-    serviceConsent: structuredClone(consent),
-    pollSeconds,
   };
 }
 
@@ -402,7 +321,12 @@ export async function intakeControl(
     lock = acquireControllerLock(path, 0);
   try {
     const record = readIntake(config);
-    if (!record) throw new Error("No intake selection registered");
+    if (!record) {
+      if (action === "status") return { objectives: [], dequeued: [] };
+      throw new Error(
+        "Nothing is queued; add Objectives with `factory queue add N`",
+      );
+    }
     applyControl(config, record, action, objective);
     if (["pause", "resume", "drain"].includes(action)) {
       for (const current of continuations(config).filter(
@@ -427,18 +351,17 @@ function applyControl(
 ): void {
   if (action === "dequeue") {
     if (!objective || !record.objectives.includes(objective))
-      throw new Error("Objective is outside the intake selection");
+      throw new Error(`Objective #${objective} is not in the queue`);
     const state = readContinuation(config.repository, objective);
     if (state && !terminal(state))
       throw new Error(
-        "An active Objective cannot be dequeued; pause or cancel its owned work",
+        `Objective #${objective} is running and cannot be removed; cancel it with \`factory cancel --objective ${objective}\``,
       );
     if (!record.dequeued.includes(objective)) record.dequeued.push(objective);
   } else if (action === "pause") record.mode = "paused";
   else if (action === "resume") record.mode = "running";
   else if (action === "drain" || action === "handoff") record.mode = "draining";
-  else if (action !== "status")
-    throw new Error("Unsupported intake control action");
+  else if (action !== "status") throw new Error("Unsupported queue action");
   if (action !== "status") saveIntake(config, record);
 }
 
@@ -497,8 +420,11 @@ export async function runIntake(
   services: ApplicationServices,
 ): Promise<IntakeAuthorization> {
   const initial = readIntake(config);
-  if (!initial) throw new Error("No intake selection registered");
-  let record: IntakeAuthorization = initial;
+  if (!initial)
+    throw new Error(
+      "Nothing is queued; add Objectives with `factory queue add N`",
+    );
+  const record: IntakeAuthorization = initial;
   const lockPath = join(stateRoot(config.repository), "controller.lock");
   const lock = acquireControllerLock(lockPath, 0);
   const observations = new IntakeObservation(services.github);
@@ -508,8 +434,6 @@ export async function runIntake(
     | ((request: ControlRequest) => Promise<unknown>)
     | undefined;
   let handingOff = false;
-  let observing = false;
-  let refilling = false;
   let wake: (() => void) | undefined;
   /**
    * When GitHub may answer again after a transient fault with a time (a
@@ -531,6 +455,7 @@ export async function runIntake(
     saveIntake(config, record);
     wake?.();
   };
+  const closing = () => handingOff || record.mode === "draining";
   const handle = async (request: ControlRequest): Promise<unknown> => {
     if (request.objective === 0 && request.action === "status")
       return { ...record, activeObjective: activeObjective ?? null };
@@ -538,36 +463,22 @@ export async function runIntake(
       request.objective === 0 &&
       ["enqueue", "watch"].includes(request.action)
     ) {
-      if (activeObjective || observing || refilling || handingOff)
-        throw new Error(
-          "Intake is not at a settled refill boundary; inspect status and retry after observation settles",
+      if (closing())
+        throw new Error("The queue is draining; it cannot take new work");
+      if (request.action === "enqueue") {
+        // Authorized outside the loop, applied in one step: the loop sees the new Objectives next pass.
+        const objectives = request.input?.objectives as number[];
+        const bodyDigests = await authorizedBodies(
+          config,
+          services.github,
+          objectives,
         );
-      settledRefill(config);
-      refilling = true;
-      try {
-        const next =
-          request.action === "enqueue"
-            ? await bindIntake(
-                config,
-                services.github,
-                request.input?.objectives as number[],
-                (request.input?.options ?? {}) as IntakeOptions,
-                record,
-              )
-            : watchRecord(
-                config,
-                request.input?.consent as IntakeServiceConsent,
-                (request.input?.options ?? {}) as IntakeOptions,
-                record,
-              );
-        if (handingOff || record.mode === "draining")
-          throw new Error("Intake handoff prevents replacing authorization");
-        saveIntake(config, next);
-        record = next;
-      } finally {
-        refilling = false;
-        wake?.();
-      }
+        if (closing())
+          throw new Error("The queue is draining; it cannot take new work");
+        Object.assign(record, queued(config, objectives, bodyDigests, record));
+      } else Object.assign(record, watchRecord(config, record));
+      saveIntake(config, record);
+      wake?.();
       return record;
     }
     if (request.objective !== 0) {
@@ -586,7 +497,7 @@ export async function runIntake(
         !record.objectives.includes(request.objective)
       )
         throw new Error(
-          "Use intake control while discovery owns this installation",
+          `Objective #${request.objective} is not the one the service is running; \`factory queue list\` shows what is`,
         );
       if (request.action === "status") return preparing.coordinator;
       if (request.action === "cancel") {
@@ -664,30 +575,16 @@ export async function runIntake(
         throw new Error("Active Objective is outside this intake selection");
       const reasons: Record<string, string> = {};
       let selected = current?.objective;
-      if (record.mode === "running" && !selected && !refilling) {
+      if (record.mode === "running" && !selected) {
         const remaining = record.objectives.filter(
           (id) =>
             !record.dequeued.includes(id) &&
             !readContinuation(config.repository, id),
         );
         if (!remaining.length && !record.watch) return record;
-        observing = true;
         try {
           const scanned = await observations.scan();
-          const ranked = [...remaining].sort((left, right) => {
-            const rank = (id: number) => {
-              const labels = scanned.get(id)?.labels ?? [];
-              const index = record.priorityLabels.findIndex((label) =>
-                labels.includes(label),
-              );
-              return index < 0 ? record.priorityLabels.length : index;
-            };
-            return (
-              rank(left) - rank(right) ||
-              record.objectives.indexOf(left) - record.objectives.indexOf(right)
-            );
-          });
-          for (const id of ranked) {
+          for (const id of remaining) {
             try {
               const issue = await services.github.objective(id);
               if (issue.state !== "open") {
@@ -749,12 +646,10 @@ export async function runIntake(
             reasons,
             error: String(error),
           };
-        } finally {
-          observing = false;
         }
         saveIntake(config, record);
       }
-      if (selected && record.mode === "running" && !refilling) {
+      if (selected && record.mode === "running") {
         let unavailable = false;
         activeObjective = selected;
         retargetControllerLock(lockPath, lock, selected);
@@ -795,7 +690,7 @@ export async function runIntake(
               },
             });
             if (!terminal(result)) {
-              // The queue stops on a human decision; C2 redesigns this route.
+              // The queue stops on a human decision; status names the command, then `factory queue resume`.
               record.mode = "paused";
               record.observation = {
                 at: new Date().toISOString(),
@@ -833,7 +728,10 @@ export async function runIntake(
         // Unavailable: wait below for GitHub, as an idle observation does.
         if (!unavailable) continue;
       }
-      const wait = Math.max(record.pollSeconds * 1000, heldUntil - time.now());
+      const wait = Math.max(
+        queuePollSeconds(config) * 1000,
+        heldUntil - time.now(),
+      );
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           wake = undefined;

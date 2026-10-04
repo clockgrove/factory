@@ -1432,9 +1432,6 @@ test("an explicitly accepted unresolved graph review runs the same pinned graph 
     config.planning.reviewer.reasoningEffort = "high";
     await assert.rejects(
       application.decidePlan(objective, {
-        plan: shortPlanDigest(
-          readContinuation(config.repository, objective).plan,
-        ),
         actor: "test operator",
         outcome: "accept",
         answer: "I inspected the exact graph and accept its sole item",
@@ -1448,9 +1445,6 @@ test("an explicitly accepted unresolved graph review runs the same pinned graph 
     );
     config.planning.reviewer.reasoningEffort = "medium";
     const decided = await application.decidePlan(objective, {
-      plan: shortPlanDigest(
-        readContinuation(config.repository, objective).plan,
-      ),
       actor: "test operator",
       outcome: "accept",
       answer: "I inspected the exact graph and accept its sole item",
@@ -1550,9 +1544,6 @@ test("preview planning stays read-only and a refused plan is planned again", asy
     assert.equal(preparing.plan.review.status, "needs-human");
     const planned = generationCount;
     await application.decidePlan(objective, {
-      plan: shortPlanDigest(
-        readContinuation(config.repository, objective).plan,
-      ),
       actor: "test operator",
       outcome: "refuse",
       answer: "",
@@ -2308,23 +2299,23 @@ test("regular and native asset selection preserve a complete set and hydrate tar
       assert.equal(waiting.work.media.assets.length, 2);
       assert.equal(waiting.work.media.assets[1].members.length, 2);
       const review = join(root, "review");
-      await application.exportAssetSetForReview(
-        objective,
-        "media",
-        "candidate-b",
-        review,
+      assert.deepEqual(
+        await application.exportAssetSetsForReview(objective, "media", review),
+        waiting.work.media.assets.map((set) => set.id),
       );
       assert.deepEqual(
-        readFileSync(join(review, "model-model.bin")),
+        readFileSync(join(review, "candidate-b", "model-model.bin")),
         selectedModel,
       );
       assert.equal(
-        readFileSync(join(review, "metadata-metadata.json"), "utf8"),
+        readFileSync(
+          join(review, "candidate-b", "metadata-metadata.json"),
+          "utf8",
+        ),
         '{"candidate":"b"}\n',
       );
       const selection = {
         actor: "test-operator",
-        reason: "reviewed opaque pair",
         downstreamItems: ["consumer"],
       };
       if (delivery === "regular")

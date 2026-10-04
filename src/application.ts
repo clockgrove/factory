@@ -54,9 +54,10 @@ import {
   type ApplicationServices,
   cancelObjective,
   controlObjective,
+  decideObjective,
   decidePlan,
   decideResult,
-  exportAssetSetForReview,
+  exportAssetSetsForReview,
   planObjective,
   rereviewWorkItem,
   retryWorkItem,
@@ -67,10 +68,7 @@ import {
 import type { ContinuationState, PreparationState } from "./state.js";
 
 export interface FactoryApplication {
-  enqueueIntake(
-    objectives: number[],
-    options?: import("./intake.js").IntakeOptions,
-  ): Promise<IntakeAuthorization>;
+  enqueueIntake(objectives: number[]): Promise<IntakeAuthorization>;
   runIntake(): Promise<IntakeAuthorization>;
   proposeAmendment(
     objective: number,
@@ -80,13 +78,17 @@ export interface FactoryApplication {
   decidePlan(
     objective: number,
     input: {
-      plan?: string;
       actor: string;
       outcome: "accept" | "refuse";
       answer: string;
       reason: string;
     },
   ): Promise<PreparationState>;
+  /** Decide the saved plan or a pending result criterion, whichever the Objective's state holds. */
+  decide(
+    objective: number,
+    input: import("./runner.js").DecisionInput,
+  ): Promise<"plan-accepted" | "plan-refused" | "result">;
   runObjective(
     objective: number,
     options?: { deadlineAt?: string },
@@ -100,13 +102,12 @@ export interface FactoryApplication {
   ): void;
   rereviewWorkItem(
     objective: number,
-    input: { item: string; treeSha: string; actor: string; reason: string },
+    input: { item: string; actor: string },
   ): void;
   decideResult(
     objective: number,
     input: {
       item?: string;
-      treeSha: string;
       actor: string;
       outcome: "accept" | "refuse";
       reason: string;
@@ -118,16 +119,15 @@ export interface FactoryApplication {
     setId: string,
     decision?: {
       actor?: string;
-      reason?: string;
       downstreamItems?: string[];
     },
   ): Promise<void>;
-  exportAssetSetForReview(
+  /** Write each candidate AssetSet of a waiting Work Item under `output`; returns their ids. */
+  exportAssetSetsForReview(
     objective: number,
     itemId: string,
-    setId: string,
     output: string,
-  ): Promise<void>;
+  ): Promise<string[]>;
 }
 
 export interface LocalHarnessRegistration<
@@ -166,12 +166,14 @@ export function createApplication(
   services: ApplicationServices,
 ): FactoryApplication {
   return {
-    enqueueIntake: (objectives, options) =>
-      enqueueIntake(config, services.github, objectives, options),
+    enqueueIntake: (objectives) =>
+      enqueueIntake(config, services.github, objectives),
     runIntake: () => runIntake(config, services),
     planObjective: (objective) => planObjective(config, objective, services),
     decidePlan: (objective, input) =>
       decidePlan(config, objective, services, input),
+    decide: (objective, input) =>
+      decideObjective(config, objective, services, input),
     proposeAmendment: (objective, proposal) =>
       controlObjective(config, {
         objective,
@@ -198,12 +200,11 @@ export function createApplication(
         services.contentStore,
         decision,
       ),
-    exportAssetSetForReview: (objective, itemId, setId, output) =>
-      exportAssetSetForReview(
+    exportAssetSetsForReview: (objective, itemId, output) =>
+      exportAssetSetsForReview(
         config,
         objective,
         itemId,
-        setId,
         output,
         services.contentStore,
       ),
@@ -220,8 +221,7 @@ export function composeIntake(
     new NativeStackDelivery(config.repository),
   );
   return {
-    enqueueIntake: (objectives, options) =>
-      enqueueIntake(config, github, objectives, options),
+    enqueueIntake: (objectives) => enqueueIntake(config, github, objectives),
   };
 }
 
@@ -245,7 +245,7 @@ export function composePlanningModel(config: FactoryConfig): PlanningModel {
 export function composePlanning(
   config: FactoryConfig,
   options: LocalHarnessCompositionOptions = {},
-): Pick<FactoryApplication, "planObjective" | "decidePlan"> {
+): Pick<FactoryApplication, "planObjective" | "decidePlan" | "decide"> {
   validateTarget(config.repository, config.checkout);
   const services = {
     planningModel: options.planningModel ?? composePlanningModel(config),
@@ -260,6 +260,8 @@ export function composePlanning(
     planObjective: (objective) => planObjective(config, objective, services),
     decidePlan: (objective, input) =>
       decidePlan(config, objective, services, input),
+    decide: (objective, input) =>
+      decideObjective(config, objective, services, input),
   };
 }
 

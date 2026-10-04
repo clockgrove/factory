@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { stateRoot } from "../dist/config.js";
 import { DiagnosticEmitter } from "../dist/diagnostics.js";
 import { saveState, statePath } from "../dist/state-store.js";
 import { coverageObligations } from "../dist/qa.js";
@@ -231,4 +238,149 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
       assert.equal(readFileSync(snapshotPath, "utf8"), beforeStatus);
     }
   }
+});
+
+test("diagnostics is the one observation command: timeline, summary, analyze, logs and captures are modes", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-diagnostics-modes-"));
+  const previous = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  t.after(() => {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+    rmSync(root, { recursive: true, force: true });
+  });
+  const target = createTarget(root);
+  const config = factoryConfig(target.checkout, "example/diagnostics-modes");
+  const configPath = join(root, "config.json");
+  writeFileSync(configPath, JSON.stringify(config));
+  const cli = (...args) =>
+    spawnSync(
+      process.execPath,
+      [
+        new URL("../dist/cli.js", import.meta.url).pathname,
+        "diagnostics",
+        "--objective",
+        "1",
+        ...args,
+        "--config",
+        configPath,
+      ],
+      { encoding: "utf8", env: process.env },
+    );
+  const refused = (args, message) => {
+    const result = cli(...args);
+    assert.equal(result.status, 1, args.join(" "));
+    assert.match(result.stderr, message, args.join(" "));
+  };
+  // One mode at a time; a flag belongs to the mode that reads it.
+  refused(
+    ["--summary", "--analyze"],
+    /diagnostics takes one mode: --follow, --summary, --analyze, --logs ITEM or --captures/,
+  );
+  refused(["--follow", "--summary"], /takes one mode/);
+  refused(["--captures", "--logs", "one"], /takes one mode/);
+  refused(["--follow", "--analyze"], /takes one mode/);
+  refused(
+    ["--group-by", "phase"],
+    /--group-by belongs to diagnostics --analyze/,
+  );
+  refused(["--summary", "--gantt"], /--gantt belongs to diagnostics --analyze/);
+  refused(["--content", "abc"], /--content belongs to diagnostics --captures/);
+  refused(["--logs"], /diagnostics --logs requires ITEM/);
+  refused(
+    ["--analyze", "--wat"],
+    /Unknown option --wat for factory diagnostics/,
+  );
+  refused(["--analyze", "--gantt"], /--gantt requires --output/);
+  refused(
+    ["--analyze", "--group-by", "nonsense"],
+    /Unknown analysis field nonsense/,
+  );
+  // --logs needs a Work Item with a recorded attempt.
+  refused(["--logs", "one"], /requires a Work Item with a recorded attempt/);
+
+  // --analyze reports on the retained interactions (none yet), as text or JSON.
+  const report = cli("--analyze", "--json");
+  assert.equal(report.status, 0, report.stderr);
+  assert.equal(JSON.parse(report.stdout).invocationCount, 0);
+  assert.equal(
+    cli("--analyze", "--group-by", "phase").status,
+    0,
+    "text analysis with grouping",
+  );
+  const saved = join(root, "analysis.json");
+  const written = cli("--analyze", "--json", "--output", saved);
+  assert.equal(written.status, 0, written.stderr);
+  assert.match(written.stdout, /Saved private analysis report to /);
+  assert.equal(JSON.parse(readFileSync(saved, "utf8")).invocationCount, 0);
+
+  // --captures lists retained captures: none; one that is unknown names the failure.
+  const none = cli("--captures");
+  assert.equal(none.status, 0, none.stderr);
+  assert.equal(none.stdout, "");
+  refused(
+    ["--captures", "--content", "missing"],
+    /Captured content unavailable for this record/,
+  );
+
+  // --logs prints the worker output of the item's recorded attempt.
+  const attempt = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+  const harness = join(stateRoot(config.repository), "harness");
+  mkdirSync(harness, { recursive: true, mode: 0o700 });
+  writeFileSync(join(harness, `${attempt}.log`), "first line\nsecond line\n", {
+    mode: 0o600,
+  });
+  const item = {
+    id: "one",
+    title: "One",
+    goal: "Result",
+    brief: "Implement",
+    acceptance: ["Result exists"],
+    nonGoals: ["No deployment"],
+    citations: [{ path: "OBJECTIVE", heading: "Goal" }],
+    dependencies: [],
+    ownedPaths: ["result.txt"],
+    resources: [],
+    validation: [],
+    sourceAssets: [],
+    expectedOutputRoles: [],
+    minimumAssetSets: 0,
+    requiredLfsRoles: [],
+  };
+  saveState(statePath(config.repository, 1), {
+    schemaVersion: 7,
+    repository: config.repository,
+    objective: 1,
+    runId: "logs-run",
+    configDigest: "b".repeat(64),
+    autonomy: structuredClone(defaultAutonomy),
+    capacity: { concurrency: 1 },
+    get planGraphDigest() {
+      return graphDigest(this.graph);
+    },
+    baseSha: target.baseSha,
+    graph: {
+      objective: 1,
+      baseSha: target.baseSha,
+      items: [item],
+      coverage: [
+        {
+          ...coverageObligations("Result exists", ["Result exists"])[0],
+          itemId: "one",
+          proof: { kind: "final-review" },
+          environment: {
+            kind: "local",
+            readiness: "available",
+            probe: "",
+            preparedBy: "",
+          },
+        },
+      ],
+    },
+    issueByItemId: { one: 2 },
+    work: { one: { status: "pending", attempt } },
+  });
+  const logs = cli("--logs", "one");
+  assert.equal(logs.status, 0, logs.stderr);
+  assert.equal(logs.stdout, "first line\nsecond line\n");
 });

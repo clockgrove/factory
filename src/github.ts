@@ -1158,8 +1158,8 @@ export class RealGitHubGateway implements GitHubGateway {
       ) || ["error", "failure"].includes(statuses.state);
     // Completed runs that failed; cancelled or superseded runs did not.
     const failedChecks = [
-      ...new Set(
-        runs
+      ...new Set([
+        ...runs
           .filter((run) =>
             [
               "failure",
@@ -1176,7 +1176,7 @@ export class RealGitHubGateway implements GitHubGateway {
             ? [status.context]
             : [],
         ),
-      ),
+      ]),
     ];
     const checksByName = new Map<string, typeof runs>();
     for (const run of runs) {

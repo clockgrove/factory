@@ -24,22 +24,46 @@ node scripts/eval-planning.mjs --review-only --config factory.json \
 node scripts/eval-planning.mjs --compare out/a/report.json out/b/report.json
 ```
 
-| Option                       | Meaning                                                                                                                      |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `--config FILE`              | A Factory configuration. Its `planning` block picks provider and models; `autonomy` bounds revisions. `checkout` is ignored. |
-| `--output DIR`               | New or empty directory for `report.json` and `summary.md`.                                                                   |
-| `--cases DIR`                | Case directory. Repeatable. Default `evals/cases`.                                                                           |
-| `--case NAME`                | Run only this case (or review fixture). Repeatable.                                                                          |
-| `--target CHECKOUT`          | Checkout for private cases that name only a commit.                                                                          |
-| `--repeat N`                 | Runs per case. Use at least 5 for a decision. Default 1.                                                                     |
-| `--parallel N`               | Concurrent runs. Default: available parallelism / 4.                                                                         |
-| `--judge FILE`               | Grade each plan with this frozen judge. Repeatable: several judges form a panel.                                             |
-| `--fixtures DIR`             | Review fixtures for `--review-only`. Default `evals/review`.                                                                 |
-| `--planning-model MODULE`    | Module exporting `createPlanningModel({ config, directory })`, replacing the configured planner and reviewer.                |
-| `--allow-unsandboxed-judges` | Run judges without the sandbox when the host cannot create one. See Frozen judges. The report records it.                    |
-| `--judge-transport MODULE`   | Testing only: module exporting `createJudgeTransport({ judge })`. The report records it.                                     |
+| Option                       | Meaning                                                                                                                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--config FILE`              | A Factory configuration. Its `planning` block picks provider and models; `autonomy` bounds revisions. `checkout` is ignored.                                               |
+| `--output DIR`               | New or empty directory for `report.json` and `summary.md`.                                                                                                                 |
+| `--cases DIR`                | Case directory. Repeatable. Default `evals/cases`.                                                                                                                         |
+| `--case NAME`                | Run only this case (or review fixture). Repeatable.                                                                                                                        |
+| `--target CHECKOUT`          | Checkout for private cases that name only a commit.                                                                                                                        |
+| `--repeat N`                 | Runs per case. Use at least 5 for a decision. Default 1.                                                                                                                   |
+| `--parallel N`               | Concurrent runs. Default: available parallelism / 4.                                                                                                                       |
+| `--judge FILE`               | Grade each plan with this frozen judge. Repeatable: several judges form a panel.                                                                                           |
+| `--fixtures DIR`             | Review fixtures for `--review-only`. Default `evals/review`.                                                                                                               |
+| `--planning-model MODULE`    | Module exporting `createPlanningModel({ config, directory })`, replacing the configured planner and reviewer.                                                              |
+| `--reviewer-config FILE`     | Pair the planner from `--config` with the reviewer from another Factory configuration's `planning` block, for example a Codex planner with a Claude reviewer. See Pairing. |
+| `--max-retries N`            | Retries per run after a usage limit or network outage. Default 4; 0 turns retrying off. See Retries.                                                                       |
+| `--max-wait MINUTES`         | Most one run waits in total. Default 360.                                                                                                                                  |
+| `--retry-wait SECONDS`       | First wait, doubling up to 8x. Default 15 minutes for a usage limit and 30 seconds for a network outage, each capped (60 and 5 minutes).                                   |
+| `--allow-unsandboxed-judges` | Run judges without the sandbox when the host cannot create one. See Frozen judges. The report records it.                                                                  |
+| `--judge-transport MODULE`   | Testing only: module exporting `createJudgeTransport({ judge })`. The report records it.                                                                                   |
 
 Runs use your provider login: the Codex login for `codex-sdk`, the Claude Code login for `claude-agent-sdk`.
+
+## Retries
+
+A provider usage limit (`You've hit your session limit`, `usage limit`) or a network outage (`EAI_AGAIN`, `ENOTFOUND`, a refused or reset connection) says nothing about planning quality. The eval does not score it: it holds every run for the wait, starts the run again from nothing, and records the wait. Each wait doubles up to a cap. A run stops retrying after `--max-retries` retries or `--max-wait` minutes of waiting, and then stays an `error`.
+
+- The pause is shared. When one run hits a limit, runs that have not started wait too.
+- Provider and process errors arrive as text, so the eval reads them to decide this. It looks at an errored run's `error` and at errored judge calls. It also looks at the `failure` and `stop` text of a question, because production reports an unclassified provider error during review as an invalid review. For those only the provider's own limit and network wording counts, because a plan can talk about rate limits.
+- A judge that hits a limit repeats the whole plan run in plan mode, since the checkout is gone by then. In review-only mode only the judge call repeats.
+- A retried run carries `retries` (kind, wait, first line of the error) and `retriesExhausted`. `report.json` has `retry` (the options) and `summary.overall.retries` (plan mode) or `summary.retries` (review-only): runs retried, retries, runs still failing, retries by kind, and the time all runs were held. `summary.md` repeats this in one row.
+
+## Pairing a planner and a reviewer
+
+`--reviewer-config FILE` takes the `planning` block of another Factory configuration. Planning and diagnosis use the planner from `--config`. Graph review and result review use the reviewer from the file, built the way production builds it, so the two can be on different providers:
+
+```sh
+node scripts/eval-planning.mjs --config codex.json --reviewer-config claude.json \
+  --output out/codex-plans-claude-reviews --repeat 5
+```
+
+The report records the pairing (`reviewer.path`, `reviewer.planning`) and `summary.md` names it. It cannot be combined with `--planning-model`, which replaces both.
 
 Each plan run ends with one outcome:
 
@@ -72,21 +96,22 @@ One metric is primary and reported unadjusted: production clean in plan mode, re
 
 Review mode has 3 fixtures and pools units per fixture, so every review-only `--compare` row is insufficient until there are at least 5 fixtures. Read the per-defect recall counts instead, and add fixtures before relying on a review comparison.
 
-| Number                           | Meaning                                                                                                                                                                                            |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Production review clean          | The plan ended clean, with no review findings or questions.                                                                                                                                        |
-| Judge pass                       | A frozen judge passed all seven dimensions. Shown per judge, separately from the production review.                                                                                                |
-| Judges agree                     | How often two judges gave the same verdict, Cohen's kappa, and both-pass, both-fail and one-fails counts.                                                                                          |
-| Case expectation met             | The case's `expect` held: outcome (`plan` or `question`), required checks, size, critical path, read-only.                                                                                         |
-| First try                        | How the first compile ended: `accepted`, `review-findings`, `review-invalid`, `parse`, `semantic:<field>`, `provider`.                                                                             |
-| Final review for command         | Command obligations proved by final review, by production's rule (`commandObligation` with `commandAuthority`), outside Final validation. Compile validation refuses these, so this should stay 0. |
-| Proof kinds, final-review proofs | Coverage proofs per kind (result command, semantic, QA, CI, final review).                                                                                                                         |
-| Ungrounded CI                    | Named CI checks that no workflow job produces (job `name`, or job id). Should be 0.                                                                                                                |
-| Critical path, items, revisions  | Longest dependency chain, Work Items, planning revisions.                                                                                                                                          |
-| Tokens, wall                     | Planning tokens (judge tokens are separate) and planning wall time.                                                                                                                                |
-| Recall (review-only)             | The reviewer returned a finding for a plan with that defect. Recall counts the review status only; findings carry no structured pointer to items yet.                                              |
-| False positive (review-only)     | The reviewer returned a finding for a known-good plan. Compared separately from recall. Invalid reviews count in neither.                                                                          |
-| Caught by compile validation     | A seeded defect that deterministic validation already refuses, so it never reaches review. Today that is invented CI names and final review of a command criterion.                                |
+| Number                           | Meaning                                                                                                                                                                                                                                 |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Production review clean          | The plan ended clean, with no review findings or questions.                                                                                                                                                                             |
+| Judge pass                       | A frozen judge passed all seven dimensions. Shown per judge, separately from the production review.                                                                                                                                     |
+| Judges agree                     | How often two judges gave the same verdict, Cohen's kappa, and both-pass, both-fail and one-fails counts.                                                                                                                               |
+| Case expectation met             | The case's `expect` held: outcome (`plan` or `question`), required checks, size, critical path, read-only.                                                                                                                              |
+| First try                        | How the first compile ended: `accepted`, `review-findings`, `review-invalid`, `parse`, `semantic`, `provider`. A semantic refusal is one row whatever it was about; the run's `firstTryField` names the Work Item, heading or response. |
+| Final review for command         | Command obligations proved by final review, by production's rule (`commandObligation` with `commandAuthority`), outside Final validation. Compile validation refuses these, so this should stay 0.                                      |
+| Proof kinds, final-review proofs | Coverage proofs per kind (result command, semantic, QA, CI, final review).                                                                                                                                                              |
+| Ungrounded CI                    | Named CI checks that no workflow job produces (job `name`, or job id). Should be 0.                                                                                                                                                     |
+| Critical path, items, revisions  | Longest dependency chain, Work Items, planning revisions.                                                                                                                                                                               |
+| Tokens, wall                     | Planning tokens (judge tokens are separate) and planning wall time.                                                                                                                                                                     |
+| Recall (review-only)             | The reviewer returned a finding for a plan with that defect.                                                                                                                                                                            |
+| Names the item (review-only)     | Of the flagging reviews, how often a finding's `itemIds` included the Work Item the defect was injected into. Plan-wide defects (an invented CI name) and findings without `itemIds` are left out.                                      |
+| False positive (review-only)     | The reviewer returned a finding for a known-good plan. Compared separately from recall. Invalid reviews count in neither.                                                                                                               |
+| Caught by compile validation     | A seeded defect that deterministic validation already refuses, so it never reaches review. Today that is invented CI names and final review of a command criterion.                                                                     |
 
 Each seeded defect breaks exactly one rule:
 

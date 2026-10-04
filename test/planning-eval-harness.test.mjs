@@ -33,11 +33,30 @@ import {
   expectation,
   finalReviewInsteadOfCommand,
   firstTry,
+  firstTryOutcome,
   proofKinds,
   requiredCommandLine,
   workflowCheckNames,
 } from "../scripts/eval-planning/metrics.mjs";
+import {
+  pointsAtItem,
+  projectFinding,
+} from "../scripts/eval-planning/findings.mjs";
 import { DEFECTS, planVariants } from "../scripts/eval-planning/mutations.mjs";
+import {
+  composePairedPlanningModel,
+  pairedPlanningModel,
+} from "../scripts/eval-planning/pairing.mjs";
+import {
+  backoffMs,
+  createGate,
+  gradesFailure,
+  infrastructureKind,
+  planFailure,
+  retrySummary,
+  reviewFailure,
+  withRetries,
+} from "../scripts/eval-planning/retry.mjs";
 import {
   compareReports,
   reviewRunMetrics,
@@ -474,7 +493,7 @@ test("judge-free metrics count structured fields only", () => {
       ],
       false,
     ),
-    "semantic:coverage",
+    "semantic",
   );
   assert.equal(
     firstTry(
@@ -1152,4 +1171,401 @@ test("the Claude judge runs with no tools, MCP servers, agents, plugins or setti
   ])
     assert.match(CODEX_JUDGE_CONFIG, new RegExp(`^${feature} = false$`, "m"));
   assert.match(CODEX_JUDGE_CONFIG, /^web_search = "disabled"$/m);
+});
+
+test("first-try semantic refusals group into one reason, the field stays detail", () => {
+  const semantic = (field) => [
+    {
+      operation: "model-invocation",
+      metadata: {
+        invocationId: "1",
+        phase: "compile",
+        observationType: "response-invalid",
+        failureClass: "semantic-validation",
+        failureField: field,
+      },
+    },
+  ];
+  for (const field of ["implement-wrap", "implement-faster-wrap", "coverage"])
+    assert.deepEqual(firstTryOutcome(semantic(field), false), {
+      reason: "semantic",
+      field,
+    });
+  assert.equal(firstTry(semantic("implement-wrap"), false), "semantic");
+
+  const run = (firstTryReason, field) => ({
+    case: "c",
+    outcome: "question",
+    firstTry: firstTryReason,
+    ...(field ? { firstTryField: field } : {}),
+  });
+  const { overall } = summarizePlanRuns([
+    run("semantic", "implement-wrap"),
+    run("semantic", "implement-textkit"),
+    run("semantic", "compiler-choices"),
+    run("accepted"),
+  ]);
+  // One row per reason class, not one per Work Item name.
+  assert.deepEqual(Object.keys(overall.firstTry), ["accepted", "semantic"]);
+  assert.equal(overall.firstTry.semantic.successes, 3);
+});
+
+test("usage limits and outages are infrastructure; other failures are not", () => {
+  assert.equal(
+    infrastructureKind(
+      "Claude planning ended with success (stop_reason stop_sequence): You've hit your session limit \u00b7 resets 2:40pm (America/Los_Angeles)",
+    ),
+    "usage-limit",
+  );
+  assert.equal(
+    infrastructureKind(
+      "You've hit your usage limit. Upgrade to Pro or try again in 2 hours 5 minutes.",
+    ),
+    "usage-limit",
+  );
+  assert.equal(infrastructureKind("HTTP 429 Too Many Requests"), "usage-limit");
+  assert.equal(
+    infrastructureKind(
+      "API Error: Can't reach the API server \u2014 check your internet or DNS (EAI_AGAIN)",
+    ),
+    "network",
+  );
+  assert.equal(
+    infrastructureKind("getaddrinfo ENOTFOUND api.openai.com"),
+    "network",
+  );
+  assert.equal(infrastructureKind("Work Item a cites a missing heading"), null);
+  assert.equal(infrastructureKind(undefined), null);
+  // Plan prose about rate limits is not the provider throttling the eval.
+  assert.equal(
+    infrastructureKind("Add a rate limit to the API (429 on overflow)", {
+      error: false,
+    }),
+    null,
+  );
+
+  const limit = "You've hit your session limit";
+  assert.deepEqual(planFailure({ outcome: "error", error: `${limit}\nmore` }), {
+    kind: "usage-limit",
+    detail: limit,
+  });
+  assert.equal(planFailure({ outcome: "error", error: "boom" }), null);
+  assert.equal(planFailure({ outcome: "plan", error: null }), null);
+  // A judge call that hit the limit, on an otherwise good run.
+  assert.equal(
+    planFailure({
+      outcome: "plan",
+      judges: [{ judge: "j", verdict: "error", error: limit }],
+    }).kind,
+    "usage-limit",
+  );
+  // An unclassified provider error during review reaches the report as an
+  // invalid review or a stop, not as an error.
+  assert.equal(
+    planFailure({
+      outcome: "question",
+      failure: {
+        detail: `Independent plan review could not be validated: ${limit}`,
+      },
+    }).kind,
+    "usage-limit",
+  );
+  assert.equal(
+    planFailure({
+      outcome: "question",
+      stop: "Unchanged planning failure: getaddrinfo EAI_AGAIN",
+    }).kind,
+    "network",
+  );
+  assert.equal(
+    reviewFailure({
+      review: "invalid",
+      failure: { detail: "review could not be validated: EAI_AGAIN" },
+    }).kind,
+    "network",
+  );
+  assert.equal(reviewFailure({ review: "clean" }), null);
+  assert.equal(
+    gradesFailure([{ judge: "j", verdict: "error", error: limit }]).kind,
+    "usage-limit",
+  );
+  assert.equal(gradesFailure([{ judge: "j", verdict: "pass" }]), null);
+});
+
+test("backoff doubles to a cap, per kind, or from a chosen base", () => {
+  const usage = [1, 2, 3, 4, 5].map((n) => backoffMs("usage-limit", n, {}));
+  assert.deepEqual(
+    usage,
+    [15, 30, 60, 60, 60].map((m) => m * 60_000),
+  );
+  const network = [1, 2, 3, 4, 5, 6, 7].map((n) => backoffMs("network", n, {}));
+  assert.deepEqual(
+    network,
+    [30, 60, 120, 240, 300, 300, 300].map((s) => s * 1000),
+  );
+  assert.deepEqual(
+    [1, 2, 3, 4, 5].map((n) => backoffMs("network", n, { baseSeconds: 2 })),
+    [2000, 4000, 8000, 16_000, 16_000],
+  );
+});
+
+/** A gate on a fake clock: sleeping advances time and is recorded. */
+function fakeGate() {
+  const clock = { time: 0, slept: [] };
+  const gate = createGate({
+    now: () => clock.time,
+    sleep: async (ms) => {
+      clock.slept.push(ms);
+      clock.time += ms;
+    },
+  });
+  return { clock, gate };
+}
+
+const limited = { outcome: "error", error: "You've hit your session limit" };
+const policy = { maxRetries: 4, maxWaitMs: 6 * 3_600_000 };
+
+test("a run waits out a usage limit and resumes, recording each wait", async () => {
+  const { clock, gate } = fakeGate();
+  const results = [limited, limited, { outcome: "plan" }];
+  const attempts = [];
+  const outcome = await withRetries(
+    async (n) => {
+      attempts.push(n);
+      return results[n];
+    },
+    { ...policy, gate, failureOf: planFailure },
+  );
+  assert.equal(outcome.result.outcome, "plan");
+  assert.equal(outcome.exhausted, false);
+  assert.deepEqual(attempts, [0, 1, 2]);
+  assert.deepEqual(
+    outcome.retries.map(({ kind, waitMs }) => [kind, waitMs]),
+    [
+      ["usage-limit", 15 * 60_000],
+      ["usage-limit", 30 * 60_000],
+    ],
+  );
+  // The waits were slept, not skipped, and the gate counted them.
+  assert.deepEqual(clock.slept, [15 * 60_000, 30 * 60_000]);
+  assert.equal(gate.pausedMs, 45 * 60_000);
+});
+
+test("retries stop at the retry limit, at the wait limit, and for real errors", async () => {
+  const always = async () => limited;
+  let { gate } = fakeGate();
+  const byCount = await withRetries(always, {
+    ...policy,
+    maxRetries: 2,
+    gate,
+    failureOf: planFailure,
+  });
+  assert.equal(byCount.retries.length, 2);
+  assert.equal(byCount.exhausted, true);
+  assert.equal(byCount.result, limited);
+
+  // 15 + 30 minutes fit in 50; the next wait (60) does not.
+  ({ gate } = fakeGate());
+  const byTime = await withRetries(always, {
+    ...policy,
+    maxWaitMs: 50 * 60_000,
+    gate,
+    failureOf: planFailure,
+  });
+  assert.equal(byTime.retries.length, 2);
+  assert.equal(byTime.exhausted, true);
+
+  // Disabled: the failure is returned as it came, not called exhausted.
+  ({ gate } = fakeGate());
+  const off = await withRetries(always, {
+    ...policy,
+    maxRetries: 0,
+    gate,
+    failureOf: planFailure,
+  });
+  assert.deepEqual([off.retries.length, off.exhausted], [0, false]);
+
+  // A planning error is never retried.
+  let calls = 0;
+  ({ gate } = fakeGate());
+  const real = await withRetries(
+    async () => {
+      calls += 1;
+      return { outcome: "error", error: "Work Item a is invalid" };
+    },
+    { ...policy, gate, failureOf: planFailure },
+  );
+  assert.deepEqual([calls, real.retries.length], [1, 0]);
+});
+
+test("one lane's pause holds every other lane", async () => {
+  const gate = createGate();
+  const begin = Date.now();
+  const startedAt = [];
+  const lane = (delayMs, results) =>
+    new Promise((resolve) => setTimeout(resolve, delayMs)).then(() =>
+      withRetries(
+        async (n) => {
+          startedAt.push(Date.now() - begin);
+          return results[n];
+        },
+        {
+          ...policy,
+          baseSeconds: 0.2,
+          gate,
+          failureOf: planFailure,
+        },
+      ),
+    );
+  await Promise.all([
+    lane(0, [limited, { outcome: "plan" }]),
+    // Starts while the first lane is waiting out its limit.
+    lane(50, [{ outcome: "plan" }]),
+  ]);
+  // Lane one: starts at once, then again after its 200ms wait. Lane two asked
+  // to start at 50ms but was held until the pause ended.
+  assert.equal(startedAt.length, 3);
+  assert.ok(startedAt[0] < 50, `first lane starts at once: ${startedAt}`);
+  assert.ok(
+    startedAt.slice(1).every((at) => at >= 190),
+    `both lanes wait for the pause: ${startedAt}`,
+  );
+  assert.ok(gate.pausedMs >= 200 && gate.pausedMs < 400);
+
+  // Overlapping pauses count once.
+  const overlap = createGate({ now: () => 0, sleep: async () => {} });
+  overlap.pause(1000);
+  overlap.pause(400);
+  assert.equal(overlap.pausedMs, 1000);
+});
+
+test("retry counts and waits are summarized for the report", () => {
+  assert.deepEqual(
+    retrySummary(
+      [
+        {
+          retries: [
+            { kind: "usage-limit", waitMs: 5 },
+            { kind: "network", waitMs: 7 },
+          ],
+        },
+        { retries: [{ kind: "network", waitMs: 7 }], retriesExhausted: true },
+        {},
+      ],
+      12,
+    ),
+    {
+      runs: 2,
+      retries: 3,
+      exhausted: 1,
+      byKind: { "usage-limit": 1, network: 2 },
+      pausedMs: 12,
+    },
+  );
+  assert.equal(
+    summarizePlanRuns([{ case: "c", outcome: "plan" }]).overall.retries.runs,
+    0,
+  );
+});
+
+test("a paired model plans with one config and reviews with another", async () => {
+  const calls = [];
+  const model = (name) => ({
+    generateStructured: async (request) => calls.push([name, "plan", request]),
+    reviewGraph: async (request) => calls.push([name, "review", request]),
+    reviewResult: async (request) => calls.push([name, "result", request]),
+  });
+  const paired = pairedPlanningModel(model("planner"), model("reviewer"));
+  await paired.generateStructured(1);
+  await paired.reviewGraph(2);
+  await paired.reviewResult(3);
+  assert.deepEqual(
+    calls.map(([name, kind, request]) => [name, kind, request]),
+    [
+      ["planner", "plan", 1],
+      ["reviewer", "review", 2],
+      ["reviewer", "result", 3],
+    ],
+  );
+  // No result review when the reviewer has none.
+  assert.equal(
+    pairedPlanningModel(model("p"), { reviewGraph() {} }).reviewResult,
+    undefined,
+  );
+
+  // Composition: the planner keeps the config, the reviewer takes the other
+  // config's planning block and nothing else.
+  const composed = [];
+  const claude = { kind: "claude-agent-sdk", planner: {}, reviewer: {} };
+  const built = await composePairedPlanningModel(
+    { ...config, checkout: "/c" },
+    claude,
+    (given) => {
+      composed.push(given);
+      return model(given.planning.kind);
+    },
+  );
+  assert.deepEqual(
+    composed.map((given) => [given.planning.kind, given.checkout]),
+    [
+      ["codex-sdk", "/c"],
+      ["claude-agent-sdk", "/c"],
+    ],
+  );
+  calls.length = 0;
+  await built.reviewGraph(4);
+  assert.deepEqual(
+    calls.map(([name]) => name),
+    ["claude-agent-sdk"],
+  );
+});
+
+test("findings keep itemIds so recall can check the item", () => {
+  assert.deepEqual(
+    projectFinding({
+      detail: "d",
+      question: "q",
+      itemIds: ["a"],
+      evidence: [],
+    }),
+    { detail: "d", question: "q", itemIds: ["a"] },
+  );
+  // A review without the field reports none, not an empty list.
+  assert.deepEqual(projectFinding({ detail: "d", question: "q" }), {
+    detail: "d",
+    question: "q",
+  });
+  const finding = (...itemIds) => ({ detail: "d", question: "q", itemIds });
+  assert.equal(pointsAtItem([finding("a", "b")], "a"), true);
+  assert.equal(pointsAtItem([finding("b"), finding("c")], "a"), false);
+  // A plan-wide finding names no item.
+  assert.equal(pointsAtItem([finding()], "a"), false);
+  // Cannot be told: no mutated item, no finding, or findings without itemIds.
+  assert.equal(pointsAtItem([finding("a")], null), null);
+  assert.equal(pointsAtItem([], "a"), null);
+  assert.equal(pointsAtItem([{ detail: "d", question: "q" }], "a"), null);
+
+  const run = (located) => ({
+    review: "findings",
+    flagged: true,
+    defect: "missing-dependency",
+    fixture: "f",
+    itemId: "a",
+    located,
+  });
+  assert.equal(reviewRunMetrics(run(true)).namesItem, 1);
+  assert.equal(reviewRunMetrics(run(false)).namesItem, 0);
+  assert.equal("namesItem" in reviewRunMetrics(run(null)), false);
+  assert.equal(
+    "namesItem" in reviewRunMetrics({ ...run(true), defect: null }),
+    false,
+  );
+  const [defect] = summarizeReviewRuns(
+    [run(true), run(true), run(false), run(null)],
+    [],
+  ).defects;
+  assert.deepEqual(
+    [defect.recall.successes, defect.located.successes, defect.located.total],
+    [4, 2, 3],
+  );
 });

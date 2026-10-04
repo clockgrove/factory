@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { CaseError, loadCase } from "./cases.mjs";
+import { pointsAtItem, projectFinding } from "./findings.mjs";
 import { planVariants } from "./mutations.mjs";
 
 const dist = resolve(import.meta.dirname, "../../dist");
@@ -212,14 +213,12 @@ export async function reviewVariant(model, fixture, variant, repeat) {
     fixture: fixture.name,
     variant: variant.variant,
     defect: variant.defect,
+    ...(typeof variant.itemId === "string" ? { itemId: variant.itemId } : {}),
     repeat,
   };
   try {
     const review = await checkedPlanReview(model, variant.packet, invocation);
-    const findings = review.findings.map(({ detail, question }) => ({
-      detail,
-      question,
-    }));
+    const findings = review.findings.map(projectFinding);
     return {
       ...base,
       review: review.failure
@@ -229,6 +228,7 @@ export async function reviewVariant(model, fixture, variant, repeat) {
           : "clean",
       flagged: findings.length > 0,
       findings,
+      located: pointsAtItem(findings, variant.itemId),
       ...(review.failure ? { failure: review.failure } : {}),
       tokens,
       wallMs: Math.round(performance.now() - started),

@@ -15,6 +15,8 @@ import { resolveCapacity } from "../dist/config.js";
 import { composePlanning, validateConfig } from "../dist/index.js";
 import { preflightObjective } from "../dist/local-preflight.js";
 import { prepareCheckout, repositoryFacts } from "./eval-planning/cases.mjs";
+import { composePairedPlanningModel } from "./eval-planning/pairing.mjs";
+import { projectFinding } from "./eval-planning/findings.mjs";
 import {
   gradeInIsolation,
   judgeInput,
@@ -22,7 +24,7 @@ import {
 } from "./eval-planning/judge.mjs";
 import {
   expectation,
-  firstTry,
+  firstTryOutcome,
   planMetrics,
 } from "./eval-planning/metrics.mjs";
 
@@ -91,7 +93,9 @@ try {
     ? await (
         await import(pathToFileURL(spec.planningModule).href)
       ).createPlanningModel({ config, directory: spec.directory })
-    : undefined;
+    : spec.reviewerPlanning
+      ? await composePairedPlanningModel(config, spec.reviewerPlanning)
+      : undefined;
   const application = composePlanning(config, {
     github: evalGateway(),
     planningModel,
@@ -140,10 +144,7 @@ if (plan && spec.judges?.length)
     { allowUnsandboxed: Boolean(spec.allowUnsandboxedJudges) },
   );
 if (plan) {
-  result.findings = plan.review.findings.map(({ detail, question }) => ({
-    detail,
-    question,
-  }));
+  result.findings = plan.review.findings.map(projectFinding);
   if (plan.review.failure) result.failure = plan.review.failure;
   result.plan = join(spec.directory, "plan.json");
   writeFileSync(result.plan, `${JSON.stringify(plan, null, 2)}\n`);
@@ -164,8 +165,11 @@ try {
     ),
   };
   result.tokens = usage.objective.tokenTotals;
-  if (result.outcome !== "error")
-    result.firstTry = firstTry(events, result.outcome === "plan");
+  if (result.outcome !== "error") {
+    const first = firstTryOutcome(events, result.outcome === "plan");
+    result.firstTry = first.reason;
+    if (first.field) result.firstTryField = first.field;
+  }
 } catch (error) {
   result.outcome = "error";
   result.error ??= `Diagnostics unreadable: ${error instanceof Error ? error.message : String(error)}`;

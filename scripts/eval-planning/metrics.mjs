@@ -107,10 +107,11 @@ export function ciCheckNames(graph, checkNames) {
 
 /**
  * How the first compile attempt ended, from model-invocation diagnostics:
- * accepted, review-findings, review-invalid, parse, semantic:<field>,
- * provider, or none.
+ * accepted, review-findings, review-invalid, parse, semantic, provider, or
+ * none. `field` names what a semantic refusal was about (a Work Item, a
+ * heading, the response); it is detail, never a category of its own.
  */
-export function firstTry(events, finalReviewClean) {
+export function firstTryOutcome(events, finalReviewClean) {
   // A provider-capacity retry reuses the invocation id; the last attempt
   // decides how the invocation ended.
   const invocations = [];
@@ -141,15 +142,15 @@ export function firstTry(events, finalReviewClean) {
     }
   }
   const index = invocations.findIndex((entry) => entry.phase === "compile");
-  if (index < 0) return "none";
+  if (index < 0) return { reason: "none" };
   const outcome = (entry) => {
     if (entry.types.has("response-invalid"))
       return entry.failureClass === "structured-output-parse"
-        ? "parse"
+        ? { reason: "parse" }
         : entry.failureClass === "review-protocol"
-          ? "review-invalid"
-          : `semantic:${entry.failureField ?? "response"}`;
-    if (entry.types.has("failed")) return "provider";
+          ? { reason: "review-invalid" }
+          : { reason: "semantic", field: entry.failureField ?? "response" };
+    if (entry.types.has("failed")) return { reason: "provider" };
     return undefined;
   };
   const compile = outcome(invocations[index]);
@@ -157,12 +158,18 @@ export function firstTry(events, finalReviewClean) {
   const reviewIndex = invocations.findIndex(
     (entry, at) => at > index && entry.phase === "graph-review",
   );
-  if (reviewIndex < 0) return "none";
+  if (reviewIndex < 0) return { reason: "none" };
   const review = outcome(invocations[reviewIndex]);
-  if (review) return review === "parse" ? "review-invalid" : review;
-  if (invocations.length > reviewIndex + 1) return "review-findings";
-  return finalReviewClean ? "accepted" : "review-findings";
+  if (review)
+    return review.reason === "parse" ? { reason: "review-invalid" } : review;
+  if (invocations.length > reviewIndex + 1)
+    return { reason: "review-findings" };
+  return { reason: finalReviewClean ? "accepted" : "review-findings" };
 }
+
+/** The reason alone, for the grouped counts. */
+export const firstTry = (events, finalReviewClean) =>
+  firstTryOutcome(events, finalReviewClean).reason;
 
 /**
  * Whether a run met its case's declared expectation; failed lists why not.

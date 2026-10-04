@@ -6,7 +6,6 @@ import {
 } from "../item-worker.js";
 import { recordWorkFailure, diagnoseWorkRepair } from "../work-repair.js";
 import {
-  cancelledFault,
   reportCancelled,
   reviewItem,
   staysInPlace,
@@ -33,7 +32,7 @@ import type {
 import { AuthenticationRequiredError } from "../contracts.js";
 import type { DiagnosticEmitter } from "../diagnostics.js";
 import { materializeAssetSet, validationLfsMembersForItem } from "../media.js";
-import { faultOf } from "../fault.js";
+import { cancelledFault, faultOf } from "../fault.js";
 import { currentProcessSignal } from "../process.js";
 import { runQaItem } from "../qa-execution.js";
 import { phaseAdmission } from "../phase-admission.js";

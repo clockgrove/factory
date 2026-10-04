@@ -62,6 +62,11 @@ export class StepFault extends Error {
   }
 }
 
+/** The operator cancelled: the `cancelled` fault, never an unclassified error. */
+export function cancelledFault(detail = "Objective cancelled"): StepFault {
+  return new StepFault({ kind: "cancelled", detail });
+}
+
 const FAULT = "fault";
 
 /**

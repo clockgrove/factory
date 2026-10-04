@@ -9,11 +9,7 @@ import {
   installedControllerCapabilities,
 } from "../dist/controller-capabilities.js";
 import { coverageObligations } from "../dist/qa.js";
-import {
-  AcceptanceDecisionRequired,
-  reviewAcceptance,
-  validateTree,
-} from "../dist/validation.js";
+import { reviewAcceptance, validateTree } from "../dist/validation.js";
 import { withCoverage } from "./support/coverage.mjs";
 import { invalidReviewAnswer } from "./support/review-protocol.mjs";
 import {
@@ -92,7 +88,7 @@ function finding(packet, index = 0, overrides = {}) {
 test("item and final review map reordered findings and multiple evidence IDs without transcribing text", async () => {
   await fixture(async (request) => {
     for (const reviewPhase of ["result-review", "objective-review"]) {
-      const result = await reviewAcceptance({
+      const { evidence: result } = await reviewAcceptance({
         ...request,
         reviewPhase,
         criteria: ["Foundation", "Toolchain"],
@@ -223,14 +219,11 @@ test("colliding labels remain disjoint IDs and incomplete cited chunks cannot gr
         });
         if (verdict === "refuse")
           await assert.rejects(promise, /Acceptance criterion disproved/);
-        else
-          await assert.rejects(promise, (error) =>
-            verdict === "pass"
-              ? invalidReviewAnswer(error)
-              : error instanceof AcceptanceDecisionRequired,
-          );
+        else if (verdict === "pass")
+          await assert.rejects(promise, invalidReviewAnswer);
+        else assert.ok((await promise).pending);
       }
-      const accepted = await reviewAcceptance({
+      const { evidence: accepted } = await reviewAcceptance({
         ...request,
         reviewPhase,
         criteria: ["A separate complete assertion passes"],
@@ -335,7 +328,7 @@ test("actual adapter packet safely supplies multiline patches and quoted shell c
           ],
         };
       };
-      const result = await reviewAcceptance({
+      const { evidence: result } = await reviewAcceptance({
         ...request,
         evidence,
         reviewPhase,
@@ -475,7 +468,7 @@ test("exact-tree operator decisions remain authoritative when the model returns 
         };
       },
     };
-    const result = await reviewAcceptance({
+    const { evidence: result } = await reviewAcceptance({
       ...request,
       criteria,
       decisions,

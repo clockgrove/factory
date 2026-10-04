@@ -1,5 +1,5 @@
 import { liveCapacity, type ResourcePhase } from "./config.js";
-import { StepFault } from "./fault.js";
+import { cancelledFault, StepFault } from "./fault.js";
 import type { FactoryState } from "./state.js";
 import { clearWait, setWait } from "./step.js";
 
@@ -144,20 +144,15 @@ export function phaseAdmission(
     save();
     notify();
     while (true) {
-      if (cancelled())
-        throw new StepFault({
-          kind: "cancelled",
-          detail: "Objective cancelled",
-        });
+      if (cancelled()) throw cancelledFault();
       // The runner cancels the Objective when its deadline passes.
       if (
         state.coordinator?.deadlineAt &&
         Date.now() >= Date.parse(state.coordinator.deadlineAt)
       )
-        throw new StepFault({
-          kind: "cancelled",
-          detail: "Objective deadline reached before phase admission",
-        });
+        throw cancelledFault(
+          "Objective deadline reached before phase admission",
+        );
       const blocked = blocker(id, phase);
       if (!blocked) break;
       if (blocked.fix)

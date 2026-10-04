@@ -12,12 +12,12 @@ import type {
 } from "./contracts.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { workerContext } from "./execution/checkpoint.js";
-import { faultOf, StepFault } from "./fault.js";
+import { cancelledFault, faultOf } from "./fault.js";
 import { repeatKey, StepPaused, step } from "./step.js";
 import type { FactoryState } from "./state.js";
 import {
   type ReviewOutcome,
-  reviewOutcome,
+  reviewAcceptance,
   type ValidationEvidence,
 } from "./validation.js";
 
@@ -32,11 +32,6 @@ interface ItemStep {
 }
 
 const scopeOf = ({ item }: ItemStep) => ({ item: item.id });
-
-/** The operator cancelled: the `cancelled` fault, never an unclassified error. */
-export function cancelledFault(detail = "Objective cancelled"): StepFault {
-  return new StepFault({ kind: "cancelled", detail });
-}
 
 /**
  * Step rule 7 for a Work Item: whether a step's throw leaves the item where
@@ -199,7 +194,7 @@ export function reviewItem(
     review: (retry: {
       previousInvalid?: string;
       onInvalid: (detail: string) => void;
-    }) => Parameters<typeof reviewOutcome>[0];
+    }) => Parameters<typeof reviewAcceptance>[0];
   },
 ): Promise<ReviewOutcome> {
   const work = args.state.work[args.item.id]!;
@@ -211,7 +206,7 @@ export function reviewItem(
       const previousInvalid = ctx.previousInvalid();
       const ask = () =>
         ctx.paid(() =>
-          reviewOutcome(
+          reviewAcceptance(
             args.review({
               ...(previousInvalid ? { previousInvalid } : {}),
               onInvalid: (detail) => ctx.invalid(detail),

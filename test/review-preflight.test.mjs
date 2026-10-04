@@ -95,7 +95,7 @@ for (const attributes of [undefined, "*.bin filter=lfs # café\n"])
           },
         });
         if (bytes === 32_000) {
-          const result = await review;
+          const { evidence: result } = await review;
           assert.equal(result.criteria[0].verdict, "pass");
           assert.equal(packet.patches[0].truncated, false);
           assert.ok(Buffer.byteLength(packet.patches[0].excerpt) > 24_000);
@@ -301,7 +301,7 @@ test("binary same-path selected LFS validation supplies exact pointer and inheri
       { model: "gpt-5.6-sol", reasoningEffort: "medium" },
       { model: "gpt-5.6-sol", reasoningEffort: "medium" },
     );
-    const reviewed = await reviewAcceptance({
+    const { evidence: reviewed } = await reviewAcceptance({
       model,
       checkout: target.checkout,
       baseSha: base,

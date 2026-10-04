@@ -57,9 +57,9 @@ import type {
 import {
   attachedFault,
   attachFault,
+  cancelledFault,
   decision,
   faultDetail,
-  StepFault,
 } from "./fault.js";
 import {
   type ControlRequest,
@@ -123,7 +123,7 @@ import {
 import {
   assertPinnedNpmScripts,
   objectiveReviewEvidence,
-  reviewOutcome,
+  reviewAcceptance,
   sweepValidationWorktrees,
   validateTree,
 } from "./validation.js";
@@ -345,17 +345,14 @@ function canHandoff(state: ContinuationState): boolean {
     return false;
   // Preparation resumes by repeating its current step, so any point is safe.
   if (state.schemaVersion === 8) return true;
-  return (
-    !state.coordinator?.phase.endsWith("-submitted") &&
-    !Object.entries(state.work).some(
-      ([id, work]) =>
-        // An item waiting in place for the operator holds no effect in flight.
-        (work.status === "running" &&
-          !isReadinessWait(state, id) &&
-          !awaitsOperator(work.wait)) ||
-        (work.status === "published" &&
-          (!work.pullRequest || !work.changeRef || !work.treeSha)),
-    )
+  return !Object.entries(state.work).some(
+    ([id, work]) =>
+      // An item waiting in place for the operator holds no effect in flight.
+      (work.status === "running" &&
+        !isReadinessWait(state, id) &&
+        !awaitsOperator(work.wait)) ||
+      (work.status === "published" &&
+        (!work.pullRequest || !work.changeRef || !work.treeSha)),
   );
 }
 
@@ -861,10 +858,7 @@ export async function runObjective(
             else persist();
           } else persist();
         }
-        throw new StepFault({
-          kind: "cancelled",
-          detail: "Objective cancellation requested",
-        });
+        throw cancelledFault("Objective cancellation requested");
       }
       if (
         state?.coordinator?.mode !== "running" &&
@@ -1051,10 +1045,7 @@ async function runObjectivePass(
   /** Stop a pass the operator cancelled: a `cancelled` fault, never a failure. */
   const stopIfCancelled = () => {
     if (cancellationRequested())
-      throw new StepFault({
-        kind: "cancelled",
-        detail: "Objective cancellation requested",
-      });
+      throw cancelledFault("Objective cancellation requested");
   };
   try {
     diagnostics.emit({ operation: "objective-run", outcome: "started" });
@@ -1886,7 +1877,7 @@ async function runObjectivePass(
           (context) => {
             const previousInvalid = context.previousInvalid();
             return context.paid(() =>
-              reviewOutcome({
+              reviewAcceptance({
                 beforeSubmit: stopIfCancelled,
                 model: planningModel,
                 reviewPhase: "objective-review",

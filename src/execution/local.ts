@@ -1,4 +1,4 @@
-import { classifyFaults, StepFault } from "../fault.js";
+import { cancelledFault, classifyFaults } from "../fault.js";
 import { executionFault } from "./fault.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -595,10 +595,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
       await removeWorktree(this.checkout, worktree);
     }
     if (context?.cancelled())
-      throw new StepFault({
-        kind: "cancelled",
-        detail: "Cancelled before the worker started",
-      });
+      throw cancelledFault("Cancelled before the worker started");
     const verified = pinnedGit(
       this.checkout,
       "rev-parse",

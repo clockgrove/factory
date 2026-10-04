@@ -35,7 +35,13 @@ import type {
   WorkGraph,
   WorkItem,
 } from "./contracts.js";
-import { attachedFault, attachFault, decision, StepFault } from "./fault.js";
+import {
+  attachedFault,
+  attachFault,
+  cancelledFault,
+  decision,
+  StepFault,
+} from "./fault.js";
 import { step, type StepOptions } from "./step.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import {
@@ -633,8 +639,7 @@ async function advanceAmendment(args: {
   let stage: NonNullable<PendingAmendment["rejectionStage"]> = "compilation";
   /** The operator cancelled: stop quietly at this safe point. */
   const stopIfCancelled = () => {
-    if (args.cancelled())
-      throw new StepFault({ kind: "cancelled", detail: "Objective cancelled" });
+    if (args.cancelled()) throw cancelledFault();
   };
   /** The amendment's result is refused: a `work` fault. */
   const refused = (error: Error) =>

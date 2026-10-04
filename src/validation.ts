@@ -43,12 +43,7 @@ import type {
   WorkDiscovery,
 } from "./contracts.js";
 
-import {
-  StepFault,
-  transient,
-  attachFault,
-  decision as askOperator,
-} from "./fault.js";
+import { StepFault, transient, attachFault } from "./fault.js";
 import { assetSelectionDigest, type HydrationReceipt } from "./media.js";
 import {
   addWorktree,
@@ -87,18 +82,6 @@ export interface AcceptanceDecision {
   at: string;
   outcome: "accept" | "refuse";
   reason: string;
-}
-
-export class AcceptanceDecisionRequired extends Error {
-  constructor(
-    public readonly pending: AcceptancePending,
-    options?: ErrorOptions,
-  ) {
-    super(
-      `Acceptance decision required for ${pending.criterion}: ${pending.question}`,
-      options,
-    );
-  }
 }
 
 export interface ValidationEvidence {
@@ -1902,7 +1885,7 @@ export async function reviewAcceptance(args: {
   previousInvalid?: string;
   /** Called with the validation error before an invalid answer is reported. */
   onInvalid?: (detail: string) => void;
-}): Promise<ValidationEvidence> {
+}): Promise<ReviewOutcome> {
   const { model, checkout, baseSha, commit, evidence, criteria, sources } =
     args;
   if (!criteria.length) throw new Error("No acceptance criteria to prove");
@@ -2143,31 +2126,14 @@ export async function reviewAcceptance(args: {
       question: `The independent reviewer could not give a valid answer for this criterion twice. Inspect the evidence and accept or refuse it.`,
     };
   }
-  if (pending)
-    throw attachFault(
-      new AcceptanceDecisionRequired(pending),
-      askOperator(pending.question, pending.detail),
-    );
-  return { ...evidence, criteria: proven };
+  if (pending) return { pending };
+  return { evidence: { ...evidence, criteria: proven } };
 }
 
 /** A review either accepts the result or names the criterion a human must decide. */
 export type ReviewOutcome =
   | { evidence: ValidationEvidence; pending?: undefined }
   | { pending: AcceptancePending; evidence?: undefined };
-
-/** `reviewAcceptance` with a needed human decision as a value, for the review steps. */
-export async function reviewOutcome(
-  args: Parameters<typeof reviewAcceptance>[0],
-): Promise<ReviewOutcome> {
-  try {
-    return { evidence: await reviewAcceptance(args) };
-  } catch (error) {
-    if (error instanceof AcceptanceDecisionRequired)
-      return { pending: error.pending };
-    throw error;
-  }
-}
 
 function observeInvalidReview(
   invocation: ModelInvocationContext | undefined,

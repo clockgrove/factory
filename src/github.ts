@@ -13,7 +13,7 @@ import type {
   WorkItem,
 } from "./contracts.js";
 import * as time from "./clock.js";
-import { notYet as lagged, settled } from "./delivery/lag.js";
+import { notYet, settled } from "./delivery/lag.js";
 import type { NativeStackDelivery } from "./delivery/native-stack.js";
 import { deliveryReadiness } from "./delivery/readiness.js";
 import { attachedFault, attachFault, decision, transient } from "./fault.js";
@@ -95,8 +95,8 @@ function listedSoon(message: string): Error {
  * The key names the object; the success path calls `settled(key)`, or a
  * stale window makes the next lag an immediate decision.
  */
-function notYet(key: string, message: string): Error {
-  return lagged(
+function stillLagging(key: string, message: string): Error {
+  return notYet(
     key,
     message,
     decision(
@@ -361,7 +361,7 @@ export class RealGitHubGateway implements GitHubGateway {
       };
     }
     if (request.earlierHeads?.includes(pull.head.sha))
-      throw notYet(
+      throw stillLagging(
         key,
         `PR #${pull.number} does not show the pushed head ${request.headSha} yet`,
       );
@@ -621,7 +621,7 @@ export class RealGitHubGateway implements GitHubGateway {
         const created = observed.filter((label) => label.name === role);
         const key = `${this.repository}:label:${role}`;
         if (created.length !== 1 || created[0]!.archived_at)
-          throw notYet(
+          throw stillLagging(
             key,
             `Factory role label creation did not reconcile exactly: ${role}`,
           );
@@ -655,7 +655,10 @@ export class RealGitHubGateway implements GitHubGateway {
         );
       const key = `${this.repository}:issue-label:${issue.number}:${role}`;
       if (!observedNames.includes(role))
-        throw notYet(key, `Factory role label ${role} is not visible yet`);
+        throw stillLagging(
+          key,
+          `Factory role label ${role} is not visible yet`,
+        );
       settled(key);
       return observed;
     };
@@ -781,7 +784,7 @@ export class RealGitHubGateway implements GitHubGateway {
               observed.body !== expectedBody ||
               observed.title !== item.title
             )
-              throw notYet(
+              throw stillLagging(
                 key,
                 `Amendment issue #${found.number} projection did not reconcile exactly`,
               );
@@ -935,7 +938,7 @@ export class RealGitHubGateway implements GitHubGateway {
             );
           })
         )
-          throw notYet(
+          throw stillLagging(
             key,
             `Work Item issue #${number} dependencies did not reconcile exactly`,
           );
@@ -1069,7 +1072,7 @@ export class RealGitHubGateway implements GitHubGateway {
             );
           })
         )
-          throw notYet(
+          throw stillLagging(
             key,
             `Issue #${parent} sub-issues did not reconcile exactly`,
           );
@@ -1116,7 +1119,7 @@ export class RealGitHubGateway implements GitHubGateway {
       );
     this.pullCreates.delete(request.branch);
     if (request.earlierHeads?.includes(detail.head.sha))
-      throw notYet(
+      throw stillLagging(
         this.pushedHeadKey(request),
         `PR #${detail.number} does not show the pushed head ${request.headSha} yet`,
       );
@@ -1143,7 +1146,7 @@ export class RealGitHubGateway implements GitHubGateway {
       pull.head.sha !== identity.headSha &&
       identity.earlierHeads?.includes(pull.head.sha)
     )
-      throw lagged(
+      throw notYet(
         key,
         `PR #${identity.number} does not show the pushed head ${identity.headSha} yet`,
         decision(
@@ -1447,7 +1450,7 @@ export class RealGitHubGateway implements GitHubGateway {
       return updated;
     }
     const pending = () =>
-      lagged(
+      notYet(
         key,
         `PR #${identity.number} does not show its branch update yet`,
         decision(
@@ -1524,7 +1527,7 @@ export class RealGitHubGateway implements GitHubGateway {
     const current = await this.api<Pull>("GET", `pulls/${identity.number}`);
     if (current.merged) return this.confirmMerged(identity, current);
     if (current.state === "closed")
-      throw lagged(
+      throw notYet(
         `closed:${identity.number}:${identity.headSha}`,
         `PR #${identity.number} is closed without a merge`,
         decision(
@@ -1572,7 +1575,7 @@ export class RealGitHubGateway implements GitHubGateway {
           throw attachFault(new Error(waiting), transient(waiting, false));
         }
         // Otherwise a merge in progress, or readiness GitHub has not settled.
-        throw lagged(
+        throw notYet(
           refused,
           `GitHub refused to merge PR #${identity.number} (HTTP 405)`,
           decision(
@@ -1617,7 +1620,7 @@ export class RealGitHubGateway implements GitHubGateway {
       detail.head.sha !== expectedHead ||
       detail.head.ref !== identity.branch
     )
-      throw lagged(
+      throw notYet(
         key,
         `PR #${identity.number} does not show its merge ${result.sha} yet`,
       );
@@ -1658,7 +1661,7 @@ export class RealGitHubGateway implements GitHubGateway {
       () => timelineMergeCommit(this.client, this.repository, identity.number),
     );
     if (!integratedSha)
-      throw lagged(
+      throw notYet(
         key,
         `PR #${identity.number} merge is not on its timeline yet`,
       );

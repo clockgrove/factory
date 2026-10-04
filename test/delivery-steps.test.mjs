@@ -130,6 +130,50 @@ test("a PR still on an earlier attempt's head has not caught up; a foreign head 
   assert.equal(faultOf(changed).kind, "decision");
 });
 
+test("a PR that keeps showing an earlier head is lag for GitHub's lag window, then a decision (#613)", async () => {
+  const earlier = "e".repeat(40);
+  const start = Date.parse("2026-10-03T00:00:00Z");
+  let time = start;
+  const restore = setLagClock(() => time);
+  try {
+    // Its own branch, so no other test's window applies.
+    const request = {
+      ...publication,
+      branch: "factory/lagging-head",
+      earlierHeads: [earlier],
+    };
+    const g = gateway({
+      "GET /repos/a/b/pulls": [
+        () =>
+          json([pull({ head: { sha: earlier, ref: "factory/lagging-head" } })]),
+        () =>
+          json([pull({ head: { sha: earlier, ref: "factory/lagging-head" } })]),
+        () =>
+          json([pull({ head: { sha: earlier, ref: "factory/lagging-head" } })]),
+        () =>
+          json([pull({ head: { sha: head, ref: "factory/lagging-head" } })]),
+        () =>
+          json([pull({ head: { sha: earlier, ref: "factory/lagging-head" } })]),
+      ],
+    }).gateway;
+    const kind = async (at) => {
+      time = at;
+      const error = await g.publish(request).catch((caught) => caught);
+      return faultOf(error).kind;
+    };
+    assert.equal(await kind(start), "transient");
+    assert.equal(await kind(start + 119_000), "transient");
+    // A human pushed or reset the branch: the operator decides, not 24 h of repeats.
+    assert.equal(await kind(start + 120_000), "decision");
+    // Once it matched, a later lag starts a new window.
+    time = start + 200_000;
+    assert.equal((await g.publish(request)).headSha, head);
+    assert.equal(await kind(start + 400_000), "transient");
+  } finally {
+    restore();
+  }
+});
+
 test("a merged PR is confirmed from its timeline, never merged again", async () => {
   const { gateway: g, log } = gateway({
     "GET /repos/a/b/pulls/5": () =>

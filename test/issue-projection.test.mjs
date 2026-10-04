@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { faultOf } from "../dist/fault.js";
+import { setLagClock } from "../dist/delivery/lag.js";
 import { RealGitHubGateway, projectedIssueBody } from "../dist/github.js";
 import { projectionClient } from "./support/projection-client.mjs";
 const item = (id, kind = "work") => ({
@@ -408,6 +409,36 @@ test("label observation cannot hide loss of unrelated metadata or changed issue 
     f.gateway.projectGraph(f.request),
     /label did not reconcile/,
   );
+});
+
+test("a role label that never shows on its issue is lag for GitHub's lag window, then a decision (#613)", async () => {
+  const f = fixture();
+  const request = f.client.request;
+  f.client.request = async (...args) => {
+    const result = await request(...args);
+    // A human removes the label as soon as Factory adds it.
+    if (args[0] === "POST" && args[1].endsWith("/issues/1/labels"))
+      f.issues.get(1).labels = ["unrelated"];
+    return result;
+  };
+  const start = Date.parse("2026-10-03T00:00:00Z");
+  let time = start;
+  const restore = setLagClock(() => time);
+  try {
+    const kind = async (at) => {
+      time = at;
+      const error = await f.gateway
+        .projectGraph(f.request)
+        .catch((caught) => caught);
+      assert.match(error.message, /label factory:objective is not visible/);
+      return faultOf(error).kind;
+    };
+    assert.equal(await kind(start), "transient");
+    assert.equal(await kind(start + 119_000), "transient");
+    assert.equal(await kind(start + 120_000), "decision");
+  } finally {
+    restore();
+  }
 });
 
 test("missing role labels bootstrap once with neutral color and preserve existing presentation", async () => {

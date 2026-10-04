@@ -148,17 +148,23 @@ export function assertKnownFlags(command: string, args: string[]): void {
       );
     if (derivedFlags[name])
       throw new Error(`${arg} was removed; ${derivedFlags[name]}`);
+    // `--objective=5` is the same mistake as `--objective 5`.
+    const [flag, inline] = name.split("=", 2) as [string, string | undefined];
     if (
-      name === "objective" &&
+      flag === "objective" &&
       (command === "setup" || command === "supervisor")
     )
       throw new Error(
         `${arg} was removed from factory ${command}; queue Objectives with factory queue add N`,
       );
-    if (name === "objective" && command === "queue")
+    if (flag === "objective" && command === "queue") {
+      // The number to name: the inline value, else the next word if it is one, else a placeholder.
+      const value = inline ?? args[args.indexOf(arg) + 1];
+      const number = /^\d+$/.test(value ?? "") ? value : undefined;
       throw new Error(
-        `factory queue takes Objective numbers as arguments, not --objective; use factory queue add ${args[args.indexOf(arg) + 1] ?? "N"} (or remove)`,
+        `factory queue takes Objective numbers as arguments, not --objective; use factory queue add ${number ?? "N"} (or remove)`,
       );
+    }
     const allowed = commandFlags[command];
     if (
       allowed &&

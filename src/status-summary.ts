@@ -844,6 +844,8 @@ export interface ServiceStatusDocument {
     active?: string;
     enabled?: string;
     waitingFor?: string;
+    /** A foreground `factory run` holds the installation and the service is not the owner. */
+    foregroundOwner?: true;
     bindingHealth?: { diagnostics: { message: string; action: string }[] };
   };
   queue: {
@@ -871,15 +873,6 @@ export function summarizeService(
       summary: "no background service on this host",
       action: null,
     };
-  if (!service.registered)
-    return {
-      phase: "not-started",
-      summary: "the background service is not set up",
-      action: {
-        command: "factory setup --background",
-        reason: "Installs and starts the service that runs the queue",
-      },
-    };
   const decision = queue.observation?.needsDecision;
   if (service.waitingFor === "human-decision")
     return {
@@ -896,27 +889,39 @@ export function summarizeService(
           : "Names the Objective",
       },
     };
-  const resume = {
-    command: "factory queue resume",
-    reason: "Continues the queue",
-  };
-  if (queue.mode === "draining")
+  // A paused or draining queue comes first: `factory setup --background` and `factory supervisor start`
+  // both refuse until it is resumed, whether or not the service is set up.
+  if (queue.mode === "draining" || queue.mode === "paused") {
+    const then = service.foregroundOwner
+      ? ""
+      : !service.registered
+        ? "; then factory setup --background sets up the service"
+        : service.active !== "active"
+          ? "; then factory supervisor start"
+          : "";
     return {
       phase: "waiting",
-      summary: "the operator: the queue is draining",
-      action:
-        service.active === "active"
-          ? resume
-          : {
-              ...resume,
-              reason: "Continues the queue; then factory supervisor start",
-            },
+      summary: `the operator: the queue is ${queue.mode}`,
+      action: {
+        command: "factory queue resume",
+        reason: `Continues the queue${then}`,
+      },
     };
-  if (queue.mode === "paused")
+  }
+  if (service.active !== "active" && service.foregroundOwner)
     return {
-      phase: "waiting",
-      summary: "the operator: the queue is paused",
-      action: resume,
+      phase: "running",
+      summary: "a foreground run owns the installation",
+      action: null,
+    };
+  if (!service.registered)
+    return {
+      phase: "not-started",
+      summary: "the background service is not set up",
+      action: {
+        command: "factory setup --background",
+        reason: "Installs and starts the service that runs the queue",
+      },
     };
   if (service.active !== "active")
     return {
@@ -959,7 +964,14 @@ export function renderServiceStatus(document: ServiceStatusDocument): string[] {
       "Service: unavailable on this host (no running systemd user manager); `factory run --objective N` runs an Objective in the foreground",
     );
   else if (!service.registered)
-    lines.push("Service: not set up; `factory setup --background` sets it up");
+    lines.push(
+      service.foregroundOwner
+        ? "Service: not set up; a foreground run owns the installation"
+        : queue.mode === "draining" || queue.mode === "paused"
+          ? "Service: not set up; the queue is " +
+            `${queue.mode}, so \`factory queue resume\` first, then \`factory setup --background\` sets it up`
+          : "Service: not set up; `factory setup --background` sets it up",
+    );
   else {
     lines.push(
       `Service: ${service.active ?? "unknown"}, ${service.enabled ?? "unknown"}${service.unit ? ` (${service.unit})` : ""}`,
@@ -975,9 +987,11 @@ export function renderServiceStatus(document: ServiceStatusDocument): string[] {
     else if (service.active !== "active")
       // A draining queue ends a started service at once: resume it first.
       lines.push(
-        queue.mode === "draining"
-          ? "  Not running; the queue is draining, so `factory queue resume` first, then `factory supervisor start`"
-          : "  Not running; `factory supervisor start` starts it",
+        service.foregroundOwner
+          ? "  Not running; a foreground run owns the installation"
+          : queue.mode === "draining"
+            ? "  Not running; the queue is draining, so `factory queue resume` first, then `factory supervisor start`"
+            : "  Not running; `factory supervisor start` starts it",
       );
   }
   const queued = queuedObjectives(queue);

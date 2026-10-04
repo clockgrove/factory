@@ -1098,3 +1098,98 @@ test("a queue written under another configuration can be read before it is delet
     // Changing it still refuses until the record is deleted and the Objectives are added again.
     assert.equal(run(["queue", "pause"]).status, 1);
   }));
+
+test("with no service set up and the queue draining, status leads with queue resume, and the commands it names run in order", () =>
+  fixture(async ({ run, configure }) => {
+    configure();
+    const ready = run(["setup", ...background]);
+    assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+    // Uninstalling a live service drains the queue and removes the unit.
+    const removed = run(["supervisor", "uninstall"]);
+    assert.equal(removed.status, 0, removed.stdout + removed.stderr);
+    const status = run(["status", "--json"]).document;
+    assert.equal(status.service.registered, false);
+    assert.equal(status.queue.mode, "draining");
+    // Setup would refuse this state, so it is not what line 2 names; the reason does name it.
+    const printed = run(["status"]).stdout.split("\n");
+    assert.match(printed[0], /^Waiting on /);
+    assert.equal(printed[1], "factory queue resume");
+    assert.match(printed[2], /factory setup --background/);
+    const refused = run(["setup", ...background]);
+    assert.equal(refused.status, 1);
+    assert.match(refused.stdout + refused.stderr, /queue resume/);
+    const resumed = follow(run, printed[1]);
+    assert.equal(resumed.status, 0, resumed.stderr);
+    const next = run(["status"]).stdout.split("\n");
+    assert.match(
+      next[0],
+      /^Not started: the background service is not set up$/,
+    );
+    assert.equal(next[1], "factory setup --background");
+    const setUp = follow(run, next[1]);
+    assert.equal(setUp.status, 0, setUp.stdout + setUp.stderr);
+    assert.equal(run(["status", "--json"]).document.service.active, "active");
+  }));
+
+test("status with a foreground run holding the installation says so, not that the service is not set up", () =>
+  fixture(async ({ run, configure, env }) => {
+    configure();
+    const holder = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import {mkdirSync} from 'node:fs';
+import {join} from 'node:path';
+import {stateRoot} from ${JSON.stringify(new URL("../dist/config.js", import.meta.url).href)};
+import {acquireControllerLock} from ${JSON.stringify(new URL("../dist/state-store.js", import.meta.url).href)};
+mkdirSync(stateRoot('example/setup'),{recursive:true,mode:0o700});
+acquireControllerLock(join(stateRoot('example/setup'),'controller.lock'),1);
+console.log('held');process.stdin.resume();`,
+      ],
+      { env, stdio: ["pipe", "pipe", "inherit"] },
+    );
+    try {
+      await new Promise((resolve, reject) => {
+        holder.once("error", reject);
+        holder.stdout.once("data", resolve);
+      });
+      const held = run(["status", "--json"]);
+      assert.equal(held.status, 0, held.stderr);
+      assert.equal(held.document.service.foregroundOwner, true);
+      assert.equal(held.document.phase, "running");
+      assert.equal(held.document.action, null);
+      const lines = run(["status"]).stdout.split("\n");
+      assert.equal(lines[0], "Running: a foreground run owns the installation");
+      assert.equal(lines[1], "");
+      assert.doesNotMatch(lines[0], /not set up/i);
+    } finally {
+      holder.kill("SIGKILL");
+    }
+    // Once it ends the installation is free again.
+    const after = run(["status", "--json"]);
+    assert.equal(after.document.service.foregroundOwner, undefined);
+    assert.equal(after.document.action.command, "factory setup --background");
+  }));
+
+test("the pointer for --objective on queue names the number given, inline or next, and N otherwise", () =>
+  fixture(async ({ run, configure }) => {
+    configure();
+    for (const [args, expected] of [
+      [["queue", "add", "--objective", "1"], "factory queue add 1"],
+      [["queue", "add", "--objective=1"], "factory queue add 1"],
+      [["queue", "add", "--objective"], "factory queue add N"],
+      [["queue", "--objective", "--json"], "factory queue add N"],
+      [["queue", "--objective=x"], "factory queue add N"],
+    ]) {
+      const refused = run(args);
+      assert.equal(refused.status, 1, args.join(" "));
+      assert.match(refused.stderr, /takes Objective numbers/, args.join(" "));
+      const command = /factory queue add \S+/.exec(refused.stderr)?.[0];
+      assert.equal(command, expected, `${args.join(" ")}: ${refused.stderr}`);
+      assert.doesNotMatch(refused.stderr, /Unknown option/);
+    }
+    const added = follow(run, "factory queue add N", { N: "1" });
+    assert.equal(added.status, 0, added.stderr);
+    assert.deepEqual(added.document.objectives, [1]);
+  }));

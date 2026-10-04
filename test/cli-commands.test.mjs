@@ -461,6 +461,19 @@ test("status without an Objective leads with the phase and the command that move
       lead(registered, { objectives: [4], activeObjective: 4 }),
       lead(registered, { mode: "paused" }),
       lead({ ...registered, active: "inactive" }, { mode: "draining" }),
+      // No service set up and the queue held: setup --background would refuse, so resume leads.
+      lead({ supported: true, registered: false }, { mode: "draining" }),
+      lead({ supported: true, registered: false }, { mode: "paused" }),
+      // A foreground run owns the installation: nothing to do, and not "not set up".
+      lead(
+        {
+          supported: true,
+          registered: false,
+          active: "inactive",
+          foregroundOwner: true,
+        },
+        {},
+      ),
       lead({ ...registered, active: "inactive" }, {}),
       lead(registered, {}),
     ].map(({ phase, action }) => [phase, action?.command ?? null]),
@@ -470,9 +483,32 @@ test("status without an Objective leads with the phase and the command that move
       ["running", null],
       ["waiting", "factory queue resume"],
       ["waiting", "factory queue resume"],
+      ["waiting", "factory queue resume"],
+      ["waiting", "factory queue resume"],
+      ["running", null],
       ["waiting", "factory supervisor start"],
       ["waiting", "factory queue add N"],
     ],
+  );
+  // The reason names the next step, so an operator who resumes is not left guessing.
+  assert.match(
+    summarizeService({
+      service: { supported: true, registered: false },
+      queue: { mode: "draining" },
+    }).action.reason,
+    /factory setup --background/,
+  );
+  assert.match(
+    renderServiceStatus({
+      service: {
+        supported: true,
+        registered: false,
+        active: "inactive",
+        foregroundOwner: true,
+      },
+      queue: {},
+    })[0],
+    /^Running: a foreground run owns the installation$/,
   );
   const decision = lead(
     { ...registered, active: "inactive", waitingFor: "human-decision" },

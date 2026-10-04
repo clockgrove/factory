@@ -568,6 +568,10 @@ export async function supervise(
       registered,
       active: inspect("is-active", name),
       enabled: inspect("is-enabled", name),
+      // A foreground `factory run` holds the installation while the service is not the owner.
+      ...(inspect("is-active", name) !== "active" && hasOwner(config)
+        ? { foregroundOwner: true }
+        : {}),
       ...(registered && awaitsDecision(name)
         ? { waitingFor: "human-decision" }
         : {}),

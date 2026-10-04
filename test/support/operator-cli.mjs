@@ -14,7 +14,18 @@ import { pathToFileURL } from "node:url";
 import { gitTransportEnvironment } from "./github-http-fake.mjs";
 
 const cli = join(import.meta.dirname, "..", "..", "dist", "cli.js");
-const { statusHeadline } = await import("../../dist/status-summary.js");
+
+/** The words the first line starts with, written out here so a wrong label in the source fails. */
+const HEADLINE_LEAD = {
+  "not-started": "Not started: ",
+  planning: "Planning: ",
+  "needs-decision": "Needs decision: ",
+  running: "Running: ",
+  waiting: "Waiting on ",
+  complete: "Complete: ",
+  failed: "Failed: ",
+  cancelled: "Cancelled: ",
+};
 
 /** What an operator types for each placeholder a status command prints. */
 const PLACEHOLDERS = {
@@ -93,7 +104,9 @@ globalThis.fetch = (url, init) =>
       const text = run(["status", "--objective", String(objective)]);
       assert.equal(text.status, 0, `factory status: ${text.stderr}`);
       const lines = text.stdout.split("\n");
-      assert.equal(lines[0], statusHeadline(document), "the first line");
+      const lead = HEADLINE_LEAD[document.phase];
+      assert.ok(lead, `no headline wording for phase ${document.phase}`);
+      assert.equal(lines[0], `${lead}${document.summary}`, "the first line");
       assert.equal(
         lines[1],
         document.action?.command ?? "",

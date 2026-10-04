@@ -174,6 +174,12 @@ function parsePreparation(
     (typeof value.issueAuthor !== "string" || !value.issueAuthor)
   )
     throw new Error("Invalid preparation issue author");
+  if (
+    value.plan?.review?.acceptable !== undefined &&
+    (value.plan.review.acceptable !== false ||
+      value.plan.review.status !== "needs-human")
+  )
+    throw new Error("Invalid preparation plan acceptability");
   assertCoordinator(value.coordinator);
   validateCapacity(value.capacity);
   assertRepairLedger(value);

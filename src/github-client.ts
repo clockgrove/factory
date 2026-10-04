@@ -1,7 +1,11 @@
 import { setTimeout } from "node:timers/promises";
 import { Octokit } from "@octokit/core";
 import { attachFault, decision, transient, type Fault } from "./fault.js";
-import { commandAsync, currentProcessSignal } from "./process.js";
+import {
+  commandAsync,
+  currentProcessSignal,
+  withProcessCancellation,
+} from "./process.js";
 
 /**
  * GitHub refusals recognised by their documented message or error code.
@@ -268,12 +272,11 @@ export class GitHubClient {
         if (this.supplied) return this.supplied;
         let token: string;
         try {
-          token = await commandAsync("gh", [
-            "auth",
-            "token",
-            "--hostname",
-            "github.com",
-          ]);
+          // A credential helper is not owned work: it keeps the caller's
+          // cancellation but is not recorded in coordinator.processes.
+          token = await withProcessCancellation(currentProcessSignal(), () =>
+            commandAsync("gh", ["auth", "token", "--hostname", "github.com"]),
+          );
         } catch {
           throw attachFault(
             new Error("GitHub credential lookup failed"),

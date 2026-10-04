@@ -387,26 +387,36 @@ test("controller planning bounds are observed from configuration and refuse reha
       const original = readContinuation(config.repository, 1);
       const before = github.state();
       const planned = calls.length;
-      for (const [altered, message] of [
-        [
-          { configuredConcurrency: config.execution.concurrency + 1 },
-          /execution bounds differ/,
-        ],
-        [
-          {
-            configuredConcurrency: config.execution.concurrency,
-            authorizedMaxConcurrency: 3,
-          },
-          /Invalid controller planning execution bounds/,
-        ],
-      ]) {
-        const invalid = structuredClone(original);
-        invalid.plan.executionBounds = altered;
-        if (!("authorizedMaxConcurrency" in altered))
-          rehash(invalid.plan, objectiveBody, target);
-        saveState(path, invalid);
-        await assert.rejects(application.runObjective(1), message);
-      }
+      // A rehashed plan whose bounds differ from configuration waits for a
+      // refusal: Factory marks it unacceptable instead of failing the run.
+      const altered = structuredClone(original);
+      altered.plan.executionBounds = {
+        configuredConcurrency: config.execution.concurrency + 1,
+      };
+      rehash(altered.plan, objectiveBody, target);
+      saveState(path, altered);
+      const waiting = await application.runObjective(1);
+      assert.equal(waiting.coordinator.phase, "waiting");
+      assert.equal(waiting.plan.review.acceptable, false);
+      assert.equal(
+        readContinuation(config.repository, 1).plan.review.acceptable,
+        false,
+      );
+      await assert.rejects(
+        decideSaved(application, config, accept),
+        /cannot accept plan/,
+      );
+      // Authored bounds Factory never derives are refused when parsed.
+      const invalid = structuredClone(original);
+      invalid.plan.executionBounds = {
+        configuredConcurrency: config.execution.concurrency,
+        authorizedMaxConcurrency: 3,
+      };
+      saveState(path, invalid);
+      await assert.rejects(
+        application.runObjective(1),
+        /Invalid controller planning execution bounds/,
+      );
       assert.deepEqual(github.state(), before);
       assert.equal(calls.length, planned);
     },

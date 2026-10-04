@@ -1329,6 +1329,7 @@ export function preparationStatusDocument(
     planReview: review?.status
       ? {
           status: review.status,
+          acceptable: review.acceptable !== false,
           question: redact(question),
           digest: shortPlanDigest(preparation.plan!),
         }

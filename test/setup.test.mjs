@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
@@ -836,4 +836,143 @@ test("factory queue parses each form, and its stop messages name queue commands 
     const again = run(["queue", "add", "1"]);
     assert.deepEqual(again.document.dequeued, []);
     assert.deepEqual(again.document.objectives, [1]);
+  }));
+
+/** Run the command a refusal names, as the operator would; `factory X` becomes the CLI with X. */
+function named(run, message, pattern) {
+  const command = new RegExp(pattern).exec(message)?.[0];
+  assert.ok(command, `${message} names ${pattern}`);
+  return run(command.replace(/^factory /, "").split(" "));
+}
+
+test("while a foreground run holds the lock, status and queue list still read, and a refusal names a command that works", () =>
+  fixture(async ({ run, configPath, checkout, env }) => {
+    writeFileSync(
+      configPath,
+      JSON.stringify(factoryConfig(checkout, "example/setup")),
+      { mode: 0o600 },
+    );
+    const holder = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import {mkdirSync} from 'node:fs';
+import {join} from 'node:path';
+import {stateRoot} from ${JSON.stringify(new URL("../dist/config.js", import.meta.url).href)};
+import {acquireControllerLock} from ${JSON.stringify(new URL("../dist/state-store.js", import.meta.url).href)};
+mkdirSync(stateRoot('example/setup'),{recursive:true,mode:0o700});
+acquireControllerLock(join(stateRoot('example/setup'),'controller.lock'),1);
+console.log('held');process.stdin.resume();`,
+      ],
+      { env, stdio: ["pipe", "pipe", "inherit"] },
+    );
+    try {
+      await new Promise((resolve, reject) => {
+        holder.once("error", reject);
+        holder.stdout.once("data", resolve);
+      });
+      const refused = run(["queue", "add", "2"]);
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /Controller is running Objective #1/);
+      // The command it names works while that run holds the lock.
+      const status = named(run, refused.stderr, "factory status[^`]*");
+      assert.equal(status.status, 0, status.stderr);
+      // Reading the queue and the service needs no control of the run.
+      const list = run(["queue", "list"]);
+      assert.equal(list.status, 0, list.stderr);
+      assert.equal(list.document.activeObjective, 1);
+      const overview = run(["status"]);
+      assert.equal(overview.status, 0, overview.stderr);
+      assert.match(overview.stdout, /^Queue: running; empty; #1 running$/m);
+      // Changing the queue still waits for the run, and says what shows it.
+      assert.equal(run(["queue", "pause"]).status, 1);
+    } finally {
+      holder.kill("SIGKILL");
+    }
+  }));
+
+test("a stopped service leaves its queue draining; status and a refused start name the command that continues it", () =>
+  fixture(async ({ run, configure }) => {
+    configure();
+    const ready = run(["setup", ...background]);
+    assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+    const stopped = run(["supervisor", "stop"]);
+    assert.equal(stopped.status, 0, stopped.stderr);
+    // The queue is empty and draining: status still names the way out.
+    assert.equal(run(["queue", "list"]).document.mode, "draining");
+    assert.match(
+      run(["status"]).stdout,
+      /Draining; `factory queue resume` continues it, then `factory supervisor start`/,
+    );
+    const refused = run(["supervisor", "start"]);
+    assert.equal(refused.status, 1);
+    const resumed = named(run, refused.stderr, "factory queue resume");
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.equal(resumed.document.mode, "running");
+    const started = named(run, refused.stderr, "factory supervisor start");
+    assert.equal(started.status, 0, started.stdout + started.stderr);
+    assert.equal(run(["status", "--json"]).document.service.active, "active");
+  }));
+
+test("an intake.json from an earlier build is refused naming the file and the fix, and the fix works", () =>
+  fixture(async ({ run, configPath, checkout, env }) => {
+    const config = factoryConfig(checkout, "example/setup");
+    writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+    const path = join(
+      env.XDG_STATE_HOME,
+      "clockgrove-factory/repositories/example/setup/intake.json",
+    );
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        version: 1,
+        priorityLabels: ["urgent"],
+        mode: "running",
+      }),
+    );
+    for (const args of [["queue", "list"], ["status"]]) {
+      const refused = run(args);
+      assert.equal(refused.status, 1, args.join(" "));
+      assert.ok(refused.stderr.includes(path), refused.stderr);
+      assert.match(
+        refused.stderr,
+        /delete it, then run `factory setup --background`/,
+      );
+    }
+    // Deleting the file, as named, leaves a working empty queue.
+    rmSync(path);
+    const empty = run(["queue", "list"]);
+    assert.equal(empty.status, 0, empty.stderr);
+    assert.deepEqual(empty.document, { objectives: [], dequeued: [] });
+  }));
+
+test("supervisor --credential-file points to the setup command that takes it, and that command accepts it", () =>
+  fixture(async ({ run, root, configure }) => {
+    configure();
+    const refused = run([
+      "supervisor",
+      "start",
+      "--credential-file",
+      "NAME=/x",
+    ]);
+    assert.equal(refused.status, 1);
+    const pointer = /factory setup --background --credential-file/.exec(
+      refused.stderr,
+    );
+    assert.ok(pointer, refused.stderr);
+    const file = join(root, "credential");
+    writeFileSync(file, "secret\n", { mode: 0o600 });
+    const setup = run([
+      "setup",
+      "--background",
+      "--credential-file",
+      `NAME=${file}`,
+    ]);
+    // The flag is accepted; setup goes on to judge the credential itself.
+    assert.doesNotMatch(
+      setup.stderr + JSON.stringify(setup.document ?? {}),
+      /Unknown option|belongs to factory setup/,
+    );
   }));

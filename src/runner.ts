@@ -15,6 +15,7 @@ import {
 } from "./work-repair.js";
 import { workerIdentity } from "./item-steps.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
+import { operatorName } from "./operator.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
 import {
   amendmentBlocksDispatch,
@@ -25,7 +26,6 @@ import {
 } from "./graph-amendments.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
-import { userInfo } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import {
   assertObjectiveCriteria,
@@ -68,6 +68,7 @@ import {
 } from "./fault.js";
 import {
   type ControlRequest,
+  ForegroundControllerError,
   requestControl,
   serveControl,
 } from "./coordinator-control.js";
@@ -2227,7 +2228,7 @@ export async function cancelObjective(
     const current = linuxProcessIdentity(owner.pid);
     if (current?.startTime === owner.startTime && current.state !== "Z") {
       if (owner.objective !== objective)
-        throw new Error(`Controller is running Objective #${owner.objective}`);
+        throw new ForegroundControllerError(owner.objective);
       process.kill(owner.pid, "SIGUSR1");
       return "requested";
     }
@@ -2735,7 +2736,7 @@ async function selectAssetSetWithSurface(
     work.selectedAssetSet = setId;
     work.selectionDigest = assetSelectionDigest(set);
     work.selection = {
-      actor: decision?.actor ?? userInfo().username,
+      actor: decision?.actor ?? operatorName(),
       at: new Date().toISOString(),
       surface,
       destinations: set.members.map((member) => ({

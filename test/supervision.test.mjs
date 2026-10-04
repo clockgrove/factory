@@ -282,12 +282,23 @@ test("the service pins its mode, needs the background setup and refuses unknown 
     value.watch = true;
     value.futureAuthority = true;
     writeFileSync(path, JSON.stringify(value));
-    assert.throws(() => checkIntakeServiceState(config), /Unsupported intake/);
+    assert.throws(
+      () => checkIntakeServiceState(config),
+      (error) =>
+        error.message.includes(path) &&
+        /unsupported field futureAuthority.*delete it/.test(error.message),
+    );
     // A retired queue record that carried consent text is refused, never migrated.
     delete value.futureAuthority;
     value.serviceConsent = { actor: "x", reason: "y", consent: true };
     writeFileSync(path, JSON.stringify(value));
-    assert.throws(() => checkIntakeServiceState(config), /Unsupported intake/);
+    assert.throws(() => checkIntakeServiceState(config), /unsupported field/);
+    // The fix it names: delete the file, and the service check says to set up the background service.
+    rmSync(path);
+    assert.throws(
+      () => checkIntakeServiceState(config),
+      /run `factory setup --background`/,
+    );
   }));
 test("a service run that exits for a human decision is waiting, not failed", () =>
   fixture(async ({ root, config, configPath }) => {

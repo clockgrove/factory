@@ -148,8 +148,21 @@ writeFileSync(
 let installed = false;
 try {
   // `factory setup --background` needs GitHub; this proof marks the queue as served and
-  // installs the service through the same library steps, with no network.
+  // installs the service through the same library steps, with no network. The synthetic
+  // Objective is queued and the queue is paused, so the service keeps it without observing GitHub.
   await watchIntake(config);
+  const intakeFile = join(stateRoot(config.repository), "intake.json");
+  const queue = JSON.parse(readFileSync(intakeFile, "utf8"));
+  writeFileSync(
+    intakeFile,
+    JSON.stringify({
+      ...queue,
+      objectives: [1],
+      bodyDigests: { 1: state.objectiveBodyDigest },
+      mode: "paused",
+    }),
+    { mode: 0o600 },
+  );
   await supervise("install", configPath);
   installed = true;
   await supervise("install", configPath);
@@ -206,6 +219,15 @@ try {
   execFileSync("systemctl", ["--user", "restart", status.unit], {
     timeout: 45_000,
   });
+  // The manager's stop left the queue draining, so the restarted service ends at once, and
+  // `supervisor start` says which command continues it. `queue pause` keeps this proof model-free
+  // (`queue resume` would make the service observe GitHub).
+  for (let wait = 0; wait < 150; wait++) {
+    if (JSON.parse(run("status", "--json")).service.active !== "active") break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.throws(() => run("supervisor", "start"), /factory queue resume/);
+  run("queue", "pause");
   run("supervisor", "start");
   const second = JSON.parse(
     readFileSync(join(stateRoot(config.repository), "controller.lock"), "utf8"),

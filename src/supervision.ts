@@ -514,7 +514,7 @@ async function verifyServiceOwner(
     await pause(100);
   }
   throw new Error(
-    "Service has not established its exact coordinator owner; inspect `factory status` and retained evidence",
+    `Service has not established its exact coordinator owner; inspect \`factory status\` and retained evidence${readIntake(config)?.mode === "draining" ? "; the queue is draining, so `factory queue resume` is needed before the service stays up" : ""}`,
   );
 }
 function validateArtifact(value: ServiceBinding): void {
@@ -622,6 +622,11 @@ export async function supervise(
     if (hasOwner(config) && inspect("is-active", name) !== "active")
       throw new Error(
         "An existing foreground owner must hand off before service start",
+      );
+    // A stopped service leaves its queue draining, and a draining queue ends the service at once.
+    if (!hasOwner(config) && readIntake(config)?.mode === "draining")
+      throw new Error(
+        "The queue is draining, so a started service would exit at once; run `factory queue resume`, then `factory supervisor start`",
       );
     systemctl("start", name);
     const outcome = await verifyServiceOwner(config, name);

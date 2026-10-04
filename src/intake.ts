@@ -24,6 +24,7 @@ import { attachedFault } from "./fault.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import {
   type ControlRequest,
+  ForegroundControllerError,
   requestControl,
   serveControl,
 } from "./coordinator-control.js";
@@ -68,6 +69,8 @@ export interface IntakeAuthorization {
     unapproved?: number[];
   };
 }
+const DRAINING_REFUSAL =
+  "The queue is draining; it cannot take new work. `factory queue resume` reopens it";
 /** How often the service looks at GitHub for queued work. */
 export const DEFAULT_QUEUE_POLL_SECONDS = 30;
 export const queuePollSeconds = (config: FactoryConfig): number =>
@@ -98,10 +101,19 @@ function saveIntake(config: FactoryConfig, value: IntakeAuthorization): void {
 export function readIntake(
   config: FactoryConfig,
 ): IntakeAuthorization | undefined {
-  if (!existsSync(intakePath(config))) return;
-  const value = JSON.parse(
-    readFileSync(intakePath(config), "utf8"),
-  ) as IntakeAuthorization;
+  const path = intakePath(config);
+  if (!existsSync(path)) return;
+  const invalid = (reason: string): never => {
+    throw new Error(
+      `The queue record ${path} cannot be used (${reason}). It is from an earlier build or another configuration; delete it, then run \`factory setup --background\` and \`factory queue add N\` to start a new queue`,
+    );
+  };
+  let value: IntakeAuthorization;
+  try {
+    value = JSON.parse(readFileSync(path, "utf8")) as IntakeAuthorization;
+  } catch {
+    return invalid("not valid JSON");
+  }
   if (
     value.version !== 1 ||
     value.repository !== config.repository ||
@@ -109,9 +121,7 @@ export function readIntake(
     !["running", "paused", "draining"].includes(value.mode) ||
     !Array.isArray(value.dequeued)
   )
-    throw new Error(
-      "Intake record differs from this installation or is invalid",
-    );
+    invalid("it does not match this installation");
   for (const key of Object.keys(value))
     if (
       ![
@@ -126,19 +136,21 @@ export function readIntake(
         "observation",
       ].includes(key)
     )
-      throw new Error(
-        `Unsupported intake record field ${key}; compatibility refused`,
-      );
+      invalid(`unsupported field ${key}`);
   if (value.watch !== undefined && value.watch !== true)
-    throw new Error("Invalid continuous intake selection");
-  validateObjectives(value.objectives);
+    invalid("invalid service switch");
+  try {
+    validateObjectives(value.objectives);
+  } catch {
+    invalid("invalid Objective list");
+  }
   if (!value.objectives.length && !value.watch)
-    throw new Error("An empty queue exists only with the background service");
+    invalid("an empty queue exists only with the background service");
   for (const objective of value.objectives)
     if (!/^[a-f0-9]{64}$/.test(value.bodyDigests[objective] ?? ""))
-      throw new Error("Intake issue body binding is missing");
+      invalid(`Objective #${objective} has no issue body binding`);
   if (value.dequeued.some((id) => !value.objectives.includes(id)))
-    throw new Error("Dequeued Objective is outside the intake selection");
+    invalid("a removed Objective is not in the queue");
   return value;
 }
 function validateObjectives(objectives: number[]): void {
@@ -310,11 +322,22 @@ export async function intakeControl(
   action: "status" | "pause" | "resume" | "drain" | "dequeue",
   objective?: number,
 ): Promise<unknown> {
-  const reply = await requestControl(config.repository, {
-    objective: 0,
-    action,
-    input: objective ? { objective } : undefined,
-  });
+  let reply: Awaited<ReturnType<typeof requestControl>>;
+  try {
+    reply = await requestControl(config.repository, {
+      objective: 0,
+      action,
+      input: objective ? { objective } : undefined,
+    });
+  } catch (error) {
+    // A foreground run answers only for its Objective, but the queue can still be read.
+    if (action !== "status" || !(error instanceof ForegroundControllerError))
+      throw error;
+    return {
+      ...(readIntake(config) ?? { objectives: [], dequeued: [] }),
+      activeObjective: error.objective,
+    };
+  }
   if (reply.handled) return reply.result;
   mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
   const path = join(stateRoot(config.repository), "controller.lock"),
@@ -463,8 +486,7 @@ export async function runIntake(
       request.objective === 0 &&
       ["enqueue", "watch"].includes(request.action)
     ) {
-      if (closing())
-        throw new Error("The queue is draining; it cannot take new work");
+      if (closing()) throw new Error(DRAINING_REFUSAL);
       if (request.action === "enqueue") {
         // Authorized outside the loop, applied in one step: the loop sees the new Objectives next pass.
         const objectives = request.input?.objectives as number[];
@@ -473,8 +495,7 @@ export async function runIntake(
           services.github,
           objectives,
         );
-        if (closing())
-          throw new Error("The queue is draining; it cannot take new work");
+        if (closing()) throw new Error(DRAINING_REFUSAL);
         Object.assign(record, queued(config, objectives, bodyDigests, record));
       } else Object.assign(record, watchRecord(config, record));
       saveIntake(config, record);

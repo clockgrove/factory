@@ -115,7 +115,7 @@ function waitingObjective(root) {
 }
 
 /** Run a command a status printed, as the operator would, filling its placeholders. */
-function runNamed(command, configPath, fill = {}) {
+function runNamed(command, configPath, fill = {}, env = process.env, cwd) {
   const [factory, ...args] = command.match(/"[^"]*"|\S+/g);
   assert.equal(factory, "factory");
   return spawnSync(
@@ -129,7 +129,7 @@ function runNamed(command, configPath, fill = {}) {
       "--config",
       configPath,
     ],
-    { encoding: "utf8", env: { ...process.env } },
+    { encoding: "utf8", env: { ...env }, cwd },
   );
 }
 
@@ -229,6 +229,75 @@ test("the result decision a stop names runs end to end, for a Work Item and for 
     );
     assert.equal(stray.status, 1);
     assert.match(stray.stderr, /--answer belongs to a plan decision/);
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a decision records USER, then the git identity, when the account has no passwd entry, else says what to set", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-cli-actor-"));
+  const previous = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  try {
+    const { config, state } = waitingObjective(root);
+    const configPath = join(root, "config.json");
+    writeFileSync(configPath, JSON.stringify(config));
+    saveState(statePath(config.repository, 1), state);
+    // A container whose UID has no passwd entry: os.userInfo() throws.
+    const preload = join(root, "no-passwd.mjs");
+    writeFileSync(
+      preload,
+      "import os from 'node:os';import {syncBuiltinESMExports} from 'node:module';os.userInfo=()=>{throw new Error('no passwd entry for uid')};syncBuiltinESMExports();",
+    );
+    const gitIdentity = join(root, "gitconfig");
+    writeFileSync(gitIdentity, "[user]\n\tname = Git Identity\n");
+    const base = {
+      ...process.env,
+      NODE_OPTIONS: `--import=${preload}`,
+      GIT_CONFIG_SYSTEM: "/dev/null",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+    };
+    delete base.USER;
+    delete base.LOGNAME;
+    const decide =
+      'factory decide --objective 1 --item one --outcome accept --reason "WHY"';
+    const none = runNamed(decide, configPath, {}, base, root);
+    assert.equal(none.status, 1);
+    assert.match(none.stderr, /set USER|git config --global user.name/);
+    assert.equal(readState(config.repository, 1).work.one.status, "waiting");
+
+    const viaGit = runNamed(
+      decide,
+      configPath,
+      {},
+      {
+        ...base,
+        GIT_CONFIG_GLOBAL: gitIdentity,
+      },
+      root,
+    );
+    assert.equal(viaGit.status, 0, viaGit.stderr);
+    assert.equal(
+      readState(config.repository, 1).work.one.acceptanceDecisions[0].actor,
+      "Git Identity",
+    );
+
+    // USER wins over git.
+    saveState(statePath(config.repository, 1), state);
+    const viaUser = runNamed(
+      decide,
+      configPath,
+      {},
+      { ...base, GIT_CONFIG_GLOBAL: gitIdentity, USER: "ci-user" },
+      root,
+    );
+    assert.equal(viaUser.status, 0, viaUser.stderr);
+    assert.equal(
+      readState(config.repository, 1).work.one.acceptanceDecisions[0].actor,
+      "ci-user",
+    );
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previous;

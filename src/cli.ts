@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { userInfo } from "node:os";
 import { join } from "node:path";
 import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { assertKnownFlags, option } from "./cli-flags.js";
@@ -14,6 +13,7 @@ import {
 } from "./diagnostics.js";
 import { compose, composeIntake, composePlanning } from "./index.js";
 import { type IntakeAuthorization, intakeControl } from "./intake.js";
+import { operatorName } from "./operator.js";
 import { linuxProcessIdentity } from "./process.js";
 import { loadServiceLoginCredentials } from "./provider-credentials.js";
 import { checkReadiness } from "./readiness.js";
@@ -249,7 +249,7 @@ async function decideCommand(
     throw new Error("decide requires --outcome accept|refuse and --reason");
   const decided = await composePlanning(config).decide(objective, {
     item,
-    actor: userInfo().username,
+    actor: operatorName(),
     outcome,
     answer: option(args, "answer"),
     reason,
@@ -380,7 +380,7 @@ async function main(): Promise<void> {
     const item = option(args, "item");
     if (args.includes("--rereview")) {
       if (!item) throw new Error("retry --rereview requires --item");
-      const input = { item, actor: userInfo().username };
+      const input = { item, actor: operatorName() };
       const reply = await requestControl(config.repository, {
         objective,
         action: "rereview",

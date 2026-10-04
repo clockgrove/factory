@@ -96,7 +96,7 @@ export interface PreparingStatusView extends WaitView {
   /** Whether a controller process owns this installation; null when unknown. */
   runActive: boolean | null;
   coordinator: CoordinatorView | null;
-  /** `digest` is the short review digest `decide --plan` must name. */
+  /** The plan under review; `factory decide` reads its digest from state. */
   planReview: {
     status: string;
     /** False when Factory refuses the plan: only `refuse` can answer it. */
@@ -877,11 +877,13 @@ export function renderServiceStatus(document: ServiceStatusDocument): string[] {
     ...(queue.activeObjective ? [`#${queue.activeObjective} running`] : []),
   ];
   lines.push(`Queue: ${parts.join("; ")}`);
-  if (!queued.length) lines.push("  `factory queue add N` queues an Objective");
-  else if (queue.mode === "paused")
+  if (queue.mode === "paused")
     lines.push("  Paused; `factory queue resume` continues it");
   else if (queue.mode === "draining")
-    lines.push("  Draining; `factory queue resume` continues it");
+    lines.push(
+      "  Draining; `factory queue resume` continues it, then `factory supervisor start` if the service stopped",
+    );
+  if (!queued.length) lines.push("  `factory queue add N` queues an Objective");
   if (queue.observation?.error)
     lines.push(`  Last error: ${short(queue.observation.error, 160)}`);
   return lines;

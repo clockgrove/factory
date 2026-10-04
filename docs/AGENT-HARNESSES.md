@@ -107,7 +107,7 @@ Profiles let the compiler assign different harness configs to different Work Ite
 }
 ```
 
-- Claude and Copilot profiles need `policy.network: "host"`. Copy a built-in harness object from the config `factory install` writes.
+- Claude and Copilot profiles need `policy.network: "host"`. Copy a built-in harness object from the config `factory setup --config-only` writes.
 - Listing a profile approves its provider to read the whole worktree and its inputs. Owned paths limit writes, not reads.
 - Descriptions and hints go to the compiler and reviewer, so keep credentials and private paths out of them. Hints grant no tools or permissions.
 - The compiler honors explicit assignments, then requirements and preferences, and uses the default only when it fits. Each Work Item records its profile and reason; editing the issue cannot change it.

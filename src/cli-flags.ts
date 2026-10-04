@@ -143,6 +143,15 @@ export function assertKnownFlags(command: string, args: string[]): void {
         `${arg} was removed from factory ${command}; queue Objectives with factory queue add N`,
       );
     const allowed = commandFlags[command];
+    if (
+      allowed &&
+      command !== "setup" &&
+      !allowed.includes(name) &&
+      commandFlags.setup!.includes(name)
+    )
+      throw new Error(
+        `${arg} belongs to factory setup; use factory setup --background ${arg} VALUE`,
+      );
     if (allowed && name !== "config" && !allowed.includes(name))
       throw new Error(
         `Unknown option ${arg} for factory ${command}; see factory help`,

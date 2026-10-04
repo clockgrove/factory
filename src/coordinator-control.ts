@@ -90,6 +90,18 @@ export async function serveControl(
   return server;
 }
 
+/**
+ * A foreground `factory run` holds the installation; only that Objective answers. The message
+ * names the command that does work meanwhile.
+ */
+export class ForegroundControllerError extends Error {
+  constructor(readonly objective: number) {
+    super(
+      `Controller is running Objective #${objective} in the foreground; \`factory status --objective ${objective}\` shows it, and queue commands work once it ends`,
+    );
+  }
+}
+
 export async function requestControl(
   repository: string,
   request: ControlRequest,
@@ -102,7 +114,7 @@ export async function requestControl(
   if (current?.startTime !== owner.startTime || current.state === "Z")
     return { handled: false };
   if (owner.objective !== request.objective && !owner.intake)
-    throw new Error(`Controller is running Objective #${owner.objective}`);
+    throw new ForegroundControllerError(owner.objective);
   return new Promise((resolve, reject) => {
     const directory = openSync(stateRoot(repository), "r");
     const socket = createConnection(`/proc/self/fd/${directory}/control.sock`);

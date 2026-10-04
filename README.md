@@ -89,7 +89,7 @@ Factory's setup skill binds the checkout and reports the configuration. For back
 
 > Use Factory to set up this repository and keep watching for explicitly approved Objectives, with a concurrency limit of two.
 
-On a supported Linux/WSL user-service host, the guided setup configures Factory, registers and starts its background service, and verifies the actual service-owned GitHub observation in one flow. An idle watcher makes no model calls. It checks every 30 seconds by default and starts only explicitly authorized Objective IDs; discovered issues and labels grant no execution authority. Later approved batches use the supported intake refill operation while idle. The service must be able to run on this machine; shutdown, sleep and user-manager lifetime still apply.
+On a supported Linux/WSL user-service host, the guided setup configures Factory, registers and starts its background service, and verifies the actual service-owned GitHub observation in one flow. An idle watcher makes no model calls. It checks every 30 seconds by default and starts only explicitly authorized Objective IDs; discovered issues and labels grant no execution authority. Add later approved batches with `factory queue add N` while the service is idle or running. The service must be able to run on this machine; shutdown, sleep and user-manager lifetime still apply.
 
 The target must be a trusted GitHub repository with committed requirements and available validation tools. Factory cannot run against its own source repository.
 

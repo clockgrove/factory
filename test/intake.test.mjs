@@ -854,7 +854,13 @@ test("one intake listener serves entry and terminal return controls under the sa
         0,
       );
       assert.equal(readControllerOwner(ownerPath).token, owner.token);
-      await intakeControl(f.config, "resume");
+      // Adding to a draining queue is refused with the command that reopens it; run that command.
+      await assert.rejects(f.application.enqueueIntake([2]), (error) => {
+        const named = /`factory queue (resume)`/.exec(error.message);
+        assert.ok(named, error.message);
+        return true;
+      });
+      assert.equal((await intakeControl(f.config, "resume")).mode, "running");
       releaseEntry.resolve();
       await returned.promise;
       assert.equal(objectiveComplete(readState(f.config.repository, 1)), true);

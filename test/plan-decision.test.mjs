@@ -7,7 +7,6 @@ import test from "node:test";
 import { planReviewPacket } from "../dist/compiler.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
 import { readContinuation, saveState, statePath } from "../dist/state-store.js";
-import { shortPlanDigest } from "../dist/status-summary.js";
 import { withCoverage } from "./support/coverage.mjs";
 import { writeStateFile } from "./support/state-file.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";

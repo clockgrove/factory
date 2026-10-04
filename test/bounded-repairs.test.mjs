@@ -29,7 +29,6 @@ import {
 import { objectiveCriteria, CodexPlanningModel } from "../dist/compiler.js";
 import { coverageObligations, aggregateAcceptance } from "../dist/qa.js";
 import { faultOf, StepFault } from "../dist/fault.js";
-import { shortPlanDigest } from "../dist/status-summary.js";
 import {
   validateTree,
   workItemReviewEvidence,

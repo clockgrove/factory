@@ -15,7 +15,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { shortPlanDigest } from "../dist/status-summary.js";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel } from "../dist/compiler.js";
 import {

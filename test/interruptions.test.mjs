@@ -5,8 +5,7 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { setLagClock } from "../dist/delivery/lag.js";
-import { attachFault, faultOf } from "../dist/fault.js";
-import { GitHubOutcomeUnknown } from "../dist/github-client.js";
+import { attachFault, faultOf, requestFault } from "../dist/fault.js";
 import { readState } from "../dist/state-store.js";
 import {
   createTarget,
@@ -147,7 +146,7 @@ for (const delivery of ["regular", "native-stack"])
           const result = await original(...args);
           // As the client raises it: a lost response, outcome unknown.
           if (++calls === 1)
-            throw attachFault(new GitHubOutcomeUnknown(), {
+            throw attachFault(new Error("GitHub mutation outcome unknown"), {
               kind: "transient",
               detail: "GitHub PUT response was lost; it may have taken effect",
               outcomeUnknown: true,
@@ -281,81 +280,28 @@ for (const delivery of ["regular", "native-stack"])
     });
   });
 
-test("provider request failures in transit are transient; refusals are not", async () => {
-  const { transientRequestFailure } = await import("../dist/work-repair.js");
+test("provider request failures in transit are transient; refusals are not", () => {
+  const transient = (error) =>
+    requestFault(error, { outcomeUnknown: true, fix: "fix" })?.kind ===
+    "transient";
   const status = (code) => Object.assign(new Error("http"), { status: code });
   for (const code of [408, 429, 500, 503])
-    assert.equal(transientRequestFailure(status(code)), true, String(code));
+    assert.equal(transient(status(code)), true, String(code));
   for (const code of [400, 401, 403, 404, 409, 422])
-    assert.equal(transientRequestFailure(status(code)), false, String(code));
+    assert.equal(transient(status(code)), false, String(code));
   assert.equal(
-    transientRequestFailure(
-      Object.assign(new Error("daytona"), { statusCode: 502 }),
-    ),
+    transient(Object.assign(new Error("daytona"), { statusCode: 502 })),
     true,
   );
   assert.equal(
-    transientRequestFailure(
+    transient(
       new TypeError("fetch failed", {
         cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }),
       }),
     ),
     true,
   );
-  assert.equal(
-    transientRequestFailure(new DOMException("timed out", "TimeoutError")),
-    true,
-  );
-  assert.equal(transientRequestFailure(new TypeError("x is undefined")), false);
-  assert.equal(transientRequestFailure(new Error("invalid result")), false);
-});
-
-test("transient failures are retried in place until the budget, then surface", async () => {
-  const { retryTransient, transientRequestFailure } = await import(
-    "../dist/work-repair.js"
-  );
-  const unavailable = () =>
-    Object.assign(new Error("unavailable"), { status: 503 });
-  let calls = 0;
-  assert.equal(
-    await retryTransient(
-      async () => {
-        if (++calls < 3) throw unavailable();
-        return "read";
-      },
-      transientRequestFailure,
-      1_000,
-      1,
-    ),
-    "read",
-  );
-  assert.equal(calls, 3);
-  calls = 0;
-  await assert.rejects(
-    retryTransient(
-      async () => {
-        calls++;
-        throw unavailable();
-      },
-      transientRequestFailure,
-      30,
-      5,
-    ),
-    /unavailable/,
-  );
-  assert.ok(calls >= 2 && calls < 10);
-  calls = 0;
-  await assert.rejects(
-    retryTransient(
-      async () => {
-        calls++;
-        throw Object.assign(new Error("forbidden"), { status: 403 });
-      },
-      transientRequestFailure,
-      1_000,
-      1,
-    ),
-    /forbidden/,
-  );
-  assert.equal(calls, 1);
+  assert.equal(transient(new DOMException("timed out", "TimeoutError")), true);
+  assert.equal(transient(new TypeError("x is undefined")), false);
+  assert.equal(transient(new Error("invalid result")), false);
 });

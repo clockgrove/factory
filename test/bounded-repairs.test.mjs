@@ -21,11 +21,9 @@ import {
 } from "../dist/repair-policy.js";
 import {
   applyWorkCorrection,
-  isInterruption,
   recordWorkFailure,
   CandidateValidationFailure,
   CandidateEnvironmentFailure,
-  SettledAttemptFailure,
 } from "../dist/work-repair.js";
 import {
   compilePlan,
@@ -293,7 +291,11 @@ test("settled failures ignore sibling processes while correction still requires 
       new CandidateEnvironmentFailure("temporary path unavailable"),
       "validation-environment",
     ],
-    [new SettledAttemptFailure("worker stopped"), "interruption"],
+    [
+      // A worker that settled with a failed result.
+      new StepFault({ kind: "work", evidence: { detail: "worker failed" } }),
+      "implementation",
+    ],
   ]) {
     const state = {
       autonomy: autonomy(),
@@ -337,20 +339,19 @@ test("settled failures ignore sibling processes while correction still requires 
       Object.assign(uncertain.work.result, guard.work);
       Object.assign(uncertain.coordinator, guard.coordinator);
       assert.equal(recordWorkFailure(uncertain, "result", error), false);
-      // Not isolated either way; an interrupted worker is still named as such.
+      // Not isolated: a wrong result past these boundaries is a decision.
       assert.equal(
         uncertain.work.result.recovery.failure.classification,
-        isInterruption(error) ? "interruption" : "uncertain",
+        error instanceof CandidateEnvironmentFailure
+          ? "validation-environment"
+          : "decision",
       );
     }
     assert.equal(
       recordWorkFailure(state, "result", new Error("ownership unresolved")),
       false,
     );
-    assert.equal(
-      state.work.result.recovery.failure.classification,
-      "uncertain",
-    );
+    assert.equal(state.work.result.recovery.failure.classification, "defect");
   }
 });
 
@@ -1516,7 +1517,8 @@ test("a lost diagnosis is reissued once charged; ambiguous publication never aut
   assert.equal(consumption(restarted).implementationRepairs, charged);
   work.pullRequest = 1;
   recordWorkFailure(state, "result", new Error("publication response lost"));
-  assert.equal(work.recovery.failure.classification, "uncertain");
+  // Unclassified: a defect, never repaired by diagnosis.
+  assert.equal(work.recovery.failure.classification, "defect");
   assert.equal(
     await diagnoseWorkRepair({
       state,

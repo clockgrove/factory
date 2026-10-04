@@ -23,10 +23,7 @@ import { Octokit } from "@octokit/core";
 import { Codex } from "@openai/codex-sdk";
 import { ClaudePlanningModel } from "../dist/claude-planning.js";
 import { CodexPlanningModel, modelFault } from "../dist/compiler.js";
-import {
-  AuthenticationRequiredError,
-  Interruption,
-} from "../dist/contracts.js";
+import { AuthenticationRequiredError } from "../dist/contracts.js";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { verifyHydratedAssets } from "../dist/media.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
@@ -45,7 +42,6 @@ import {
 import { projectedIssueBody, RealGitHubGateway } from "../dist/github.js";
 import {
   GitHubClient,
-  GitHubOutcomeUnknown,
   GitHubRequestError,
   gitHubFault,
 } from "../dist/github-client.js";
@@ -60,7 +56,6 @@ import {
   ProviderTurnTimeoutError,
 } from "../dist/provider-turn.js";
 import { reviewAcceptance, validateTree } from "../dist/validation.js";
-import { SettledAttemptFailure } from "../dist/work-repair.js";
 import {
   createTarget,
   git as fixtureGit,
@@ -103,7 +98,8 @@ test("faults attach once, invisibly, and default to defect", () => {
   assert.deepEqual(faultOf(error), fault);
   assert.deepEqual(Object.keys(error), []);
   assert.equal(JSON.stringify(error), "{}");
-  assert.deepEqual(faultOf(new Interruption(error)), fault);
+  // A wrapper that carries the classified error as its cause keeps its fault.
+  assert.deepEqual(faultOf(new Error("wrapped", { cause: error })), fault);
   assert.deepEqual(faultOf(new Error("plain")), {
     kind: "defect",
     detail: "plain",
@@ -640,11 +636,11 @@ for (const [name, call, routes, expected] of gitHubCases)
     assertFault(faultOf(error), expected, name);
   });
 
-test("a lost mutation is still GitHubOutcomeUnknown, now carrying its fault", async () => {
+test("a lost mutation is a transient fault with an unknown outcome", async () => {
   const error = await gateway({ ...noPulls, "POST /repos/a/b/pulls": lost })
     .publish(publication)
     .catch((caught) => caught);
-  assert.ok(error instanceof GitHubOutcomeUnknown);
+  assert.equal(faultOf(error).kind, "transient");
   assert.equal(faultOf(error).outcomeUnknown, true);
 });
 
@@ -1889,18 +1885,6 @@ const executionCases = [
     { kind: "config", fix: /codex login/ },
   ],
   [
-    "worker settled without a result",
-    new SettledAttemptFailure(new Error("worker exited"), "interruption"),
-    "collect",
-    { kind: "transient", outcomeUnknown: true },
-  ],
-  [
-    "worker settled with a failed result",
-    new SettledAttemptFailure(new Error("tests failed"), "implementation"),
-    "collect",
-    { kind: "work" },
-  ],
-  [
     "provider turn idle",
     new ProviderTurnTimeoutError(1000),
     "observe",
@@ -1937,16 +1921,8 @@ const executionCases = [
     { kind: "defect" },
   ],
   [
-    "missing controller credential",
-    new Error(
-      "OpenAI Agents API requires controller credential OPENAI_API_KEY",
-    ),
-    "start",
-    { kind: "config" },
-  ],
-  [
-    "interrupted by a lost Anthropic connection",
-    new Interruption(new Anthropic.APIConnectionError({ message: "reset" })),
+    "a lost Anthropic connection",
+    new Anthropic.APIConnectionError({ message: "reset" }),
     "observe",
     { kind: "transient", outcomeUnknown: false },
   ],

@@ -37,10 +37,7 @@ import {
 } from "./support/integration-fixture.mjs";
 import { withCoverage } from "./support/coverage.mjs";
 import { compilerWire } from "../dist/compiler-wire.js";
-import {
-  GitHubRequestError,
-  GitHubOutcomeUnknown,
-} from "../dist/github-client.js";
+import { GitHubRequestError } from "../dist/github-client.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
 import { encodeCompilerWire } from "./support/compiler-wire.mjs";
 import { attachFault, decision, transient } from "../dist/fault.js";
@@ -2597,7 +2594,7 @@ test("mutation-unknown projection repeats without duplicate issues", async () =>
   await assertProjectionRepeats(
     "projection-mutation-unknown",
     attachFault(
-      new GitHubOutcomeUnknown(),
+      new Error("GitHub mutation outcome unknown"),
       transient("GitHub POST response was lost", true),
     ),
   );

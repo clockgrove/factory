@@ -3,11 +3,7 @@ import test from "node:test";
 import { Octokit } from "@octokit/core";
 import { projectionClient } from "./support/projection-client.mjs";
 import { RealGitHubGateway, projectedIssueBody } from "../dist/github.js";
-import {
-  GitHubClient,
-  GitHubOutcomeUnknown,
-  GitHubRequestError,
-} from "../dist/github-client.js";
+import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { faultOf } from "../dist/fault.js";
 import { withProcessCancellation } from "../dist/process.js";
 
@@ -75,8 +71,10 @@ test("lost mutation response is unknown and does not expose transport details", 
   await assert.rejects(
     client.request("POST", "repos/a/b/issues", { title: "x" }),
     (error) =>
-      error instanceof GitHubOutcomeUnknown &&
-      !error.message.includes("private"),
+      faultOf(error).kind === "transient" &&
+      faultOf(error).outcomeUnknown === true &&
+      !error.message.includes("private") &&
+      !faultOf(error).detail.includes("private"),
   );
   assert.equal(calls, 1);
 });
@@ -325,7 +323,9 @@ test("cancelled in-flight mutation retains unknown outcome", async () => {
     withProcessCancellation(controller.signal, () =>
       client.request("POST", "repos/a/b/issues", { title: "x" }),
     ),
-    GitHubOutcomeUnknown,
+    (error) =>
+      faultOf(error).kind === "transient" &&
+      faultOf(error).outcomeUnknown === true,
   );
 });
 

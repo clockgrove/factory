@@ -17,11 +17,15 @@ import { SandboxExecutionDriver } from "../dist/index.js";
 import { sandboxFiles } from "../dist/execution/sandbox-files.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { executionContext } from "../dist/execution/checkpoint.js";
-import { SettledAttemptFailure } from "../dist/work-repair.js";
 import {
   FixtureSandboxProvider,
   writeSandboxInvoker,
 } from "./support/sandbox-provider.mjs";
+import { faultOf } from "../dist/fault.js";
+/** The driver confirmed the worker stopped without a result. */
+const stoppedWithoutResult = (error) =>
+  faultOf(error).kind === "transient" &&
+  faultOf(error).outcomeUnknown === false;
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "factory-sandbox-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -181,11 +185,8 @@ test("lost harness start destroys the sandbox and interrupts the attempt directl
   const f = fixture(t);
   f.provider.executeUnknown = true;
   // Harness start cannot repeat in one sandbox, so no step interruption is spent first.
-  await assert.rejects(
-    f.driver.start(f.request, f.context),
-    (error) =>
-      error instanceof SettledAttemptFailure &&
-      error.classification === "interruption",
+  await assert.rejects(f.driver.start(f.request, f.context), (error) =>
+    stoppedWithoutResult(error),
   );
   assert.equal(f.provider.resources.size, 0);
   assert.equal(f.work.execution.data.phase, "destroyed");
@@ -255,8 +256,7 @@ test("wrong reply digest, identity and unsafe result path fail closed and settle
     await assert.rejects(f.driver.collect(h, f.context), (error) =>
       variant === "cleanup"
         ? /destruction/.test(error.message)
-        : error instanceof SettledAttemptFailure &&
-          error.classification === "implementation" &&
+        : faultOf(error).kind === "work" &&
           /digest|identity|Unsafe/.test(error.message),
     );
     assert.equal(f.provider.resources.size, variant === "cleanup" ? 1 : 0);
@@ -400,7 +400,7 @@ test("failed input verification destroys its known resource without a nonexisten
   await assert.rejects(
     f.driver.start(f.request, f.context),
     (error) =>
-      error instanceof SettledAttemptFailure &&
+      faultOf(error).kind === "work" &&
       /input digest mismatch/.test(error.message),
   );
   assert.equal(f.provider.resources.size, 0);

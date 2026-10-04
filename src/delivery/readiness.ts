@@ -133,6 +133,26 @@ export function deliveryReadiness(
 }
 
 /**
+ * The gates a PR has not reported on at all: no check run or status of that
+ * name at the exact head, in any state (queued, running, or ended with any
+ * conclusion). Only these can be waiting for a check that never comes. A
+ * merged or closed PR waits for nothing, and a gate that exists on the exact
+ * head, whether running, passed, failed, cancelled or skipped, is there
+ * whatever main has renamed since.
+ */
+export function unreportedGates(
+  observation: DeliveryObservation,
+  gates: string[],
+): string[] {
+  if (observation.state !== "open") return [];
+  return gates.filter(
+    (name) =>
+      !observation.failedChecks?.includes(name) &&
+      !observation.reportedChecks?.includes(name),
+  );
+}
+
+/**
  * A published item waiting for CI (its await-ci step's wait), or a QA item
  * waiting for named CI. Existing publication/QA identity is the durable
  * continuation, not another store.

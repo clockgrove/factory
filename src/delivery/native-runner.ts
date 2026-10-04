@@ -1,5 +1,6 @@
 import { assertIntegrated, laterIntegration } from "./integration.js";
-import { deliveryReadiness } from "./readiness.js";
+import { assertCheckSourcesAtIntegration } from "./check-sources.js";
+import { deliveryReadiness, unreportedGates } from "./readiness.js";
 import {
   runWorker as runSharedWorker,
   stopWorker as stopSharedWorker,
@@ -914,6 +915,26 @@ export async function runNativeGraph(args: {
           }),
         ),
       );
+      // A gate that has not reported on a layer's head, and whose job main
+      // has renamed, never will. A gate already on every head, or merged
+      // layers, are not asked.
+      const gateNames = (state.graph.requiredPreIntegrationChecks ?? []).map(
+        (check) => check.checkName,
+      );
+      await assertCheckSourcesAtIntegration({
+        graph: state.graph,
+        baseSha: state.baseSha,
+        objectiveBody: args.objectiveBody,
+        checkout: config.checkout,
+        gates: [
+          ...new Set(
+            observations.flatMap((observation) =>
+              unreportedGates(observation, gateNames),
+            ),
+          ),
+        ],
+        defaultBranch: () => defaultBranch,
+      });
       context.progress();
       // Strict protection: bring a layer up to date with its base, from
       // exactly the head Factory published; its checks run again.

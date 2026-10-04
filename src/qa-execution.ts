@@ -15,6 +15,7 @@ import { reviewItem } from "./item-steps.js";
 import { validationLfsMembersForItem } from "./media.js";
 import type { PhaseAdmission } from "./phase-admission.js";
 import { cancelledFault, faultOf } from "./fault.js";
+import { assertProofCheckDefined } from "./delivery/check-sources.js";
 import { currentProcessSignal, fetchHead, gitAsync } from "./process.js";
 import { itemCoverage, objectiveCandidate } from "./qa.js";
 import type { FactoryState } from "./state.js";
@@ -190,6 +191,15 @@ export async function runQaItem(args: {
               Number.isSafeInteger(check.id) &&
               check.id > 0)
           ) {
+            // Only a proof that must still wait is bound, and to the commit
+            // its check must report on: a name that commit never defines
+            // would wait forever.
+            assertProofCheckDefined({
+              checkName: proof.checkName,
+              commit: target.changeRef,
+              objectiveBody: args.objectiveBody,
+              checkout: args.config.checkout,
+            });
             setWait(
               state,
               { item: item.id },

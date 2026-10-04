@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Octokit } from "@octokit/core";
 import { RealGitHubGateway } from "../dist/github.js";
 import { now, realDelay } from "../dist/clock.js";
-import { faultOf } from "../dist/fault.js";
+import { faultOf, StepFault, transient } from "../dist/fault.js";
 import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { withProcessCancellation } from "../dist/process.js";
 import { controlObjective } from "../dist/runner.js";
@@ -18,11 +18,15 @@ import {
   readState,
 } from "../dist/state-store.js";
 import { stateRoot } from "../dist/config.js";
-import { deliveryReadiness } from "../dist/delivery/readiness.js";
+import {
+  deliveryReadiness,
+  unreportedGates,
+} from "../dist/delivery/readiness.js";
 import { setLagClock } from "../dist/delivery/lag.js";
 import {
   createTarget,
   factoryConfig,
+  git,
   makeApplication,
   readEvents,
 } from "./support/integration-fixture.mjs";
@@ -186,6 +190,11 @@ async function fixture(route, name, run, chain = false, namedGate = false) {
       if (namedMode === "pending") receipt.status = "in_progress";
       return {
         ...observation,
+        // The real observe lists a name here for a run in any state at the
+        // exact head, so a stale run does not count.
+        ...(receipt.headSha === identity.headSha
+          ? { reportedChecks: ["quality"] }
+          : {}),
         namedChecks:
           namedMode === "ambiguous"
             ? [receipt, { ...receipt, id: 2 }]
@@ -596,6 +605,133 @@ for (const route of ["regular", "native-stack"]) {
     ));
 }
 
+/** Main renames a workflow job, as a merged change on the default branch. */
+function renameJob(f, from, to, name) {
+  const clone = join(f.root, name);
+  git(f.root, "clone", join(f.root, "origin.git"), clone);
+  const workflow = join(clone, ".github/workflows/quality.yml");
+  writeFileSync(
+    workflow,
+    readFileSync(workflow, "utf8").replace(`${from}:`, `${to}:`),
+  );
+  git(clone, "add", "-A");
+  git(
+    clone,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.com",
+    "commit",
+    "-m",
+    `Rename ${from} to ${to}`,
+  );
+  git(clone, "push", "origin", "main");
+}
+
+for (const route of ["regular", "native-stack"]) {
+  test(`${route}: a workflow job renamed after planning stops with a decision; restoring the job and factory retry proceeds`, async () =>
+    fixture(
+      route,
+      "named-renamed",
+      async (f) => {
+        const { running } = await startWaiting(f);
+        // Main now names the job differently, and the gate has not reported
+        // on the head: "quality" will never report.
+        renameJob(f, "quality", "qa", "rename");
+        f.ready();
+        await running;
+        const stopped = readState(f.config.repository, 1);
+        assert.equal(f.counts().merges, 0);
+        assert.notEqual(stopped.finalValidation?.passed, true);
+        const wait = stopped.work.result.wait;
+        assert.equal(wait.kind, "decision");
+        assert.match(
+          wait.detail,
+          /CI check "quality" has not reported on the PR head and is no longer a job/,
+        );
+        // Only answers that work mid-run are offered.
+        assert.match(
+          wait.detail,
+          /Restore the job under that name and run factory retry, or cancel and plan again\?/,
+        );
+        assert.doesNotMatch(
+          wait.detail,
+          /Required checks, or amend|amend the plan/,
+        );
+        assert.equal(stopped.work.result.status, "published");
+        // The named answer: restore the job, then factory retry.
+        renameJob(f, "qa", "quality", "restore");
+        f.setNamedMode("success");
+        f.application.retryWorkItem(1, "result");
+        const done = await f.track(f.application.runObjective(1));
+        assert.equal(done.finalValidation.passed, true);
+        assert.equal(f.counts().merges, 1);
+        assert.equal(done.work.result.status, "done");
+      },
+      false,
+      true,
+    ));
+}
+
+for (const route of ["regular", "native-stack"]) {
+  test(`${route}: a gate already satisfied on the exact head merges although main renamed the job since`, async () =>
+    fixture(
+      route,
+      "named-renamed-satisfied",
+      async (f) => {
+        const { running } = await startWaiting(f);
+        // The gate has passed on the exact head; the PR only waits for
+        // protection.
+        f.setNamedMode("success");
+        await observedAgain(f);
+        renameJob(f, "quality", "qa", "rename");
+        await observedAgain(f);
+        assert.equal(f.counts().merges, 0);
+        assert.equal(
+          readState(f.config.repository, 1).work.result.wait?.kind,
+          "ci",
+        );
+        f.ready();
+        const done = await running;
+        assert.equal(done.finalValidation.passed, true);
+        assert.equal(f.counts().merges, 1);
+        assert.equal(done.work.result.status, "done");
+      },
+      false,
+      true,
+    ));
+}
+
+test("regular: a PR already merged re-enters merge after a restart without asking about a job main renamed", async () =>
+  fixture(
+    "regular",
+    "named-renamed-merged",
+    async (f) => {
+      const { running } = await startWaiting(f);
+      f.setNamedMode("success");
+      const merge = f.github.merge.bind(f.github);
+      let lost = false;
+      f.github.merge = async (...args) => {
+        const result = await merge(...args);
+        if (!lost) {
+          lost = true;
+          // The merge landed, main renames the job, and the response is
+          // lost: the step repeats against a PR that is already merged.
+          renameJob(f, "quality", "qa", "rename");
+          throw new StepFault(transient("Lost the merge response", true));
+        }
+        return result;
+      };
+      f.ready();
+      const done = await running;
+      assert.equal(lost, true);
+      assert.equal(done.finalValidation.passed, true);
+      assert.equal(done.work.result.status, "done");
+    },
+    false,
+    true,
+  ));
+
 test("intake keeps its ordinary pending-CI Objective owned and finishes it when checks pass", async () =>
   fixture("regular", "intake", async (f) => {
     f.github.objective = async (number) => ({
@@ -1002,4 +1138,83 @@ test("public no-registered-check reproduction refuses gated integration while pr
   const observed = await gateway.observe(identity);
   assert.equal(observed.namedChecks[0].name, "quality");
   assert.equal(observed.namedChecks[0].headSha, head);
+  assert.deepEqual(observed.reportedChecks, ["quality"]);
+});
+
+test("a gate with any run or status at the exact head has reported, whatever its state", async () => {
+  const head = "a".repeat(40);
+  const identity = { number: 1, branch: "work", headSha: head };
+  let runs = [];
+  let statuses = [];
+  const client = {
+    async request(method, path) {
+      if (path.endsWith("/pulls/1"))
+        return {
+          head: { sha: head, ref: "work" },
+          base: { ref: "main" },
+          state: "open",
+          merged: false,
+        };
+      if (path.includes("/check-runs?")) return { check_runs: runs };
+      if (path.includes("/status?"))
+        return { state: "pending", total_count: 0, statuses };
+      if (path.endsWith("/branches/main/protection/required_status_checks"))
+        throw new GitHubRequestError(404);
+      throw new Error(`Unexpected request ${method} ${path}`);
+    },
+    async paginate(route) {
+      if (route.endsWith("/rules/branches/main")) return [];
+      throw new Error(`Unexpected paginated request ${route}`);
+    },
+    async pullRequestReadiness() {
+      return {
+        headRefOid: head,
+        headRefName: "work",
+        baseRefName: "main",
+        mergeStateStatus: "BLOCKED",
+      };
+    },
+  };
+  const gateway = new RealGitHubGateway("example/fixture", false, client);
+  const run = (overrides) => ({
+    id: 1,
+    name: "quality",
+    head_sha: head,
+    status: "completed",
+    conclusion: "success",
+    html_url: "https://example.test/check/1",
+    app: { id: 100 },
+    ...overrides,
+  });
+  const unreported = async () =>
+    unreportedGates(await gateway.observe(identity), ["quality"]);
+  // Nothing at the head yet.
+  assert.deepEqual(await unreported(), ["quality"]);
+  // Queued, running and every ended state have reported.
+  for (const variant of [
+    { status: "queued", conclusion: null },
+    { status: "in_progress", conclusion: null },
+    { conclusion: "success" },
+    { conclusion: "failure" },
+    { conclusion: "cancelled" },
+    { conclusion: "neutral" },
+    { conclusion: "skipped" },
+    { conclusion: "stale" },
+  ]) {
+    runs = [run(variant)];
+    assert.deepEqual(await unreported(), [], JSON.stringify(variant));
+  }
+  // Repeated triggers that disagree still count as reported.
+  runs = [run(), run({ id: 2, app: { id: 200 } })];
+  assert.deepEqual(await unreported(), []);
+  // A run on another commit is not a report on this head.
+  runs = [run({ head_sha: "f".repeat(40) })];
+  assert.deepEqual(await unreported(), ["quality"]);
+  // A commit status context counts, in any state.
+  runs = [];
+  statuses = [{ context: "quality", state: "pending" }];
+  assert.deepEqual(await unreported(), []);
+  // Another name does not.
+  statuses = [{ context: "lint", state: "success" }];
+  assert.deepEqual(await unreported(), ["quality"]);
 });

@@ -104,7 +104,8 @@ export function workflowCheckNames(
       );
     } catch (error) {
       throw new Error(
-        `Cannot read workflow ${path} at base ${baseSha}: ${error instanceof Error ? error.message : String(error)}`,
+        `Cannot read workflow ${path} at commit ${baseSha}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     }
     try {
@@ -136,7 +137,8 @@ export function workflowCheckNames(
       : [];
   } catch (error) {
     throw new Error(
-      `Cannot read the GitHub workflows at base ${baseSha}: ${error instanceof Error ? error.message : String(error)}`,
+      `Cannot read the GitHub workflows at commit ${baseSha}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
   const names = new Set<string>();
@@ -173,17 +175,27 @@ export function workflowCheckNames(
   return [...names].sort();
 }
 
+/** The names in `names` that no known source defines. */
+export function unknownCheckNames(names: string[], known: string[]): string[] {
+  const defined = new Set(known);
+  return [...new Set(names)].filter((name) => !defined.has(name));
+}
+
 /** Every CI check the plan names must be one the base or Objective defines. */
 export function assertKnownCheckNames(graph: WorkGraph, names: string[]): void {
-  const known = new Set(names);
-  for (const name of [
-    ...(graph.requiredPreIntegrationChecks ?? []).map((gate) => gate.checkName),
-    ...(graph.coverage ?? []).flatMap((entry) =>
-      "checkName" in entry.proof ? [entry.proof.checkName] : [],
-    ),
-  ])
-    if (!known.has(name))
-      throw new Error(
-        `CI check ${JSON.stringify(name)} is not a job in the base's GitHub workflows or an entry under the Objective's Required checks; use one of those exact names: ${JSON.stringify([...known].slice(0, 20))}${known.size > 20 ? ` and ${known.size - 20} more` : ""}`,
-      );
+  const [name] = unknownCheckNames(
+    [
+      ...(graph.requiredPreIntegrationChecks ?? []).map(
+        (gate) => gate.checkName,
+      ),
+      ...(graph.coverage ?? []).flatMap((entry) =>
+        "checkName" in entry.proof ? [entry.proof.checkName] : [],
+      ),
+    ],
+    names,
+  );
+  if (name !== undefined)
+    throw new Error(
+      `CI check ${JSON.stringify(name)} is not a job in the base's GitHub workflows or an entry under the Objective's Required checks; use one of those exact names: ${JSON.stringify(names.slice(0, 20))}${names.length > 20 ? ` and ${names.length - 20} more` : ""}`,
+    );
 }

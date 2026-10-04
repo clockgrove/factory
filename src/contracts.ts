@@ -641,6 +641,12 @@ export interface DeliveryResult {
 export interface DeliveryObservation {
   /** Successful uniquely named check runs observed on this exact PR head. */
   namedChecks?: NamedCheckEvidence[];
+  /**
+   * Every check name with any run (queued, running or ended, whatever the
+   * conclusion) or commit status on this exact PR head. A name here has
+   * reported; namedChecks lists only the successful ones.
+   */
+  reportedChecks?: string[];
   state: "open" | "merged" | "closed";
   /** When a closed PR was closed. */
   closedAt?: string;

@@ -228,7 +228,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
         // Unresolved cancellation comes first while planning and after.
         assert.match(
           status.stdout,
-          /^Objective #1: needs decision — cancellation unresolved: Cessation unknown: \[REDACTED\]\nNext: factory cancel --objective 1\n/,
+          /^Needs decision: cancellation unresolved: Cessation unknown: \[REDACTED\]\nfactory cancel --objective 1\n/,
         );
         assert.match(
           status.stdout,

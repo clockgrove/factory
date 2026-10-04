@@ -462,7 +462,7 @@ test("a lost planning reply is reissued on restart under the same run", async ()
   }
 });
 
-test("offline cancellation verifies recorded subprocess cessation and refuses a mismatched identity", async () => {
+test("offline cancellation verifies recorded subprocess cessation and leaves a reused pid's process alone", async () => {
   const { cancelObjective } = await import("../dist/runner.js");
   const { linuxProcessIdentity, processGroupExists } = await import(
     "../dist/process.js"
@@ -509,15 +509,18 @@ test("offline cancellation verifies recorded subprocess cessation and refuses a 
         },
       });
       if (mismatch) {
-        await assert.rejects(
-          cancelObjective(config, 1, {}),
-          /identity is unresolved/,
-        );
-        assert.equal(
-          readContinuation(config.repository, 1).cancelledAt,
-          undefined,
-        );
+        // The recorded pid now belongs to a foreign process group (pid
+        // reuse after a crash or reboot): the recorded subprocess is gone,
+        // and the foreign group is never signalled.
+        assert.equal(await cancelObjective(config, 1, {}), "cancelled");
         assert.equal(processGroupExists(child.pid), true);
+        assert.equal(
+          linuxProcessIdentity(child.pid)?.startTime,
+          identity.startTime,
+        );
+        const cancelled = readContinuation(config.repository, 1);
+        assert.ok(cancelled.cancelledAt);
+        assert.deepEqual(cancelled.coordinator.processes, []);
       } else {
         assert.equal(await cancelObjective(config, 1, {}), "cancelled");
         assert.equal(processGroupExists(child.pid), false);

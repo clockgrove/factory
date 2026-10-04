@@ -32,7 +32,7 @@ import {
 } from "../media.js";
 import { attachFault, transient } from "../fault.js";
 import { earlierHeads } from "../repair-policy.js";
-import { git, gitAsync } from "../process.js";
+import { fetchHead, git } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { readyItems } from "../scheduler.js";
@@ -108,10 +108,8 @@ export async function runRegularGraph(args: {
           delete work.waitingReason;
           save();
         });
-        await gitAsync(
+        const defaultHead = await fetchHead(
           config.checkout,
-          "fetch",
-          "origin",
           await github.defaultBranch(),
         );
         // Other work may have merged since; the merge commit only needs to
@@ -122,7 +120,7 @@ export async function runRegularGraph(args: {
             "merge-base",
             "--is-ancestor",
             merged.integratedSha,
-            "FETCH_HEAD",
+            defaultHead,
           );
         } catch (cause) {
           // Read-after-merge lag until the step's window passes (#515).

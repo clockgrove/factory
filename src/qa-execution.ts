@@ -15,7 +15,7 @@ import { repeatInterrupted } from "./work-repair.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { validationLfsMembersForItem } from "./media.js";
 import type { PhaseAdmission } from "./phase-admission.js";
-import { gitAsync } from "./process.js";
+import { fetchHead, gitAsync } from "./process.js";
 import { itemCoverage, objectiveCandidate } from "./qa.js";
 import type { FactoryState } from "./state.js";
 import {
@@ -115,15 +115,11 @@ export async function runQaItem(args: {
       if (args.cancelled()) throw new Error("Objective cancelled");
       const commit = candidate.commitSha;
       if (candidate.basis === "pinned-baseline") {
-        await gitAsync(
-          args.config.checkout,
-          "fetch",
-          "origin",
-          await args.github.defaultBranch(),
-        );
         if (
-          (await gitAsync(args.config.checkout, "rev-parse", "FETCH_HEAD")) !==
-          commit
+          (await fetchHead(
+            args.config.checkout,
+            await args.github.defaultBranch(),
+          )) !== commit
         )
           throw new Error("Default branch changed before pinned-baseline QA");
       }

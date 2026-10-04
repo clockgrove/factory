@@ -1,19 +1,18 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { CodexPlanningModel, objectiveCriteria } from "../dist/compiler.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { coverageObligations } from "../dist/qa.js";
-import { pinnedGit, withProcessCancellation } from "../dist/process.js";
+import {
+  lingeringDescendants,
+  pinnedGit,
+  processGroupExists,
+  withProcessCancellation,
+} from "../dist/process.js";
 import {
   CandidateValidationFailure,
   recordWorkFailure,
@@ -283,57 +282,50 @@ test("escaped control-character paths bound the complete diagnostic envelope ind
     });
   }));
 
-test("unresolved validation descendants remain uncertain and retain the dirty owned checkout", async () =>
+test("validation descendants left running are stopped and the tree they changed is judged", async () =>
   fixture(async ({ root, validate }) => {
-    let owned;
+    const saved = lingeringDescendants.graceMilliseconds;
+    lingeringDescendants.graceMilliseconds = 200;
+    const groups = [];
     try {
       await withProcessCancellation(
         undefined,
         async () => {
+          // A descendant that finishes within the grace period is waited for.
+          const evidence = await validate(["(sleep 0.05) >/dev/null 2>&1 &"]);
+          assert.equal(
+            evidence.worktreeObservation.subprocessOwnership,
+            "settled",
+          );
+          // One still running after it is stopped; the change it made counts.
           await assert.rejects(
             validate(["printf dirty >> base.txt; sleep 30 >/dev/null 2>&1 &"]),
             (error) => {
-              assert.equal(error instanceof CandidateValidationFailure, false);
-              assert.match(
-                error.message,
-                /Owned subprocess group remains active; outcome unknown/,
-              );
-              const directories = readdirSync(join(root, "validation")).filter(
-                (name) => name !== "empty-gh-config",
-              );
-              assert.equal(directories.length, 1);
-              assert.equal(
-                existsSync(
-                  join(root, "validation", directories[0], "base.txt"),
-                ),
-                true,
-              );
-              const state = {
-                graph: { items: [{ id: "result", dependencies: [] }] },
-                work: { result: { status: "failed" } },
-              };
-              assert.equal(recordWorkFailure(state, "result", error), false);
-              assert.equal(
-                state.work.result.recovery.failure.classification,
-                "uncertain",
-              );
+              assert.ok(error instanceof CandidateValidationFailure, error);
+              assert.match(error.message, /modified the result tree/);
               return true;
             },
           );
         },
-        (process, settled) => {
-          if (!settled) owned = process;
-        },
+        (owned, settled) => groups.push({ owned, settled }),
       );
     } finally {
-      if (owned) {
-        try {
-          process.kill(-owned.pid, "SIGKILL");
-        } catch (error) {
-          if (error.code !== "ESRCH") throw error;
-        }
-      }
+      lingeringDescendants.graceMilliseconds = saved;
     }
+    assert.ok(groups.length > 0);
+    for (const { owned } of groups)
+      assert.equal(processGroupExists(owned.pid), false);
+    assert.equal(
+      groups.filter(({ settled }) => settled).length,
+      groups.filter(({ settled }) => !settled).length,
+    );
+    // The stopped validation's worktree is removed like any other.
+    assert.deepEqual(
+      readdirSync(join(root, "validation")).filter(
+        (name) => name !== "empty-gh-config",
+      ),
+      [],
+    );
   }));
 
 test("malformed or wrong-tree observations fail before reviewer submission while historical absence stays absent", async () =>

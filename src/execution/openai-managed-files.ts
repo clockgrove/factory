@@ -15,7 +15,7 @@ import type {
   HarnessRequest,
 } from "../contracts.js";
 import { importSourceAssets } from "../media.js";
-import { pinnedGitAsync, pinnedGitRaw } from "../process.js";
+import { addWorktree, pinnedGitRaw } from "../process.js";
 
 export const OPENAI_INPUT_MAX_BYTES = 5 * 1024 * 1024;
 export const OPENAI_OUTPUT_MAX_BYTES = 200 * 1024 * 1024;
@@ -162,14 +162,7 @@ export async function importOpenAIResult(args: {
   if (!names.has(".factory-result.json"))
     throw new Error("Managed result binding is missing");
   mkdirSync(dirname(worktree), { recursive: true, mode: 0o700 });
-  await pinnedGitAsync(
-    checkout,
-    "worktree",
-    "add",
-    "--detach",
-    worktree,
-    baseSha,
-  );
+  await addWorktree(checkout, worktree, baseSha);
   for (const path of pinnedGitRaw(worktree, "ls-files", "-z")
     .toString("utf8")
     .split("\0")

@@ -12,12 +12,12 @@ const D = {
   GIT_FETCH: {
     text: "a failing git fetch (regular: right after the PR merged; native: before the stack merge) is a plain Error outside any repeat: the Objective stops with state.error and a restart refuses it (r1 #2, #8)",
     pattern:
-      /^outcome=stopped; message=(Objective stopped: )+git -C \S+ fetch origin main failed \(128\): fatal: unable to access '[^']+': The requested URL returned error: 503 .*; work=(alpha:failed,beta:pending|alpha:published,beta:published)(;|$)/,
+      /^outcome=stopped; message=(Objective stopped: )+git -C \S+ fetch .*origin \+refs\/heads\/main:\S+ failed \(128\): fatal: unable to access '[^']+': The requested URL returned error: 503 .*; work=(alpha:failed,beta:pending|alpha:published,beta:published)(;|$)/,
   },
   GIT_FETCH_RESET: {
-    text: "a connection reset during git fetch stops the Objective with state.error, as the fetch failure (a plain Error outside any repeat, r1 #2) or, when git exits before its git-remote-http helper, as 'Owned subprocess group remains active; outcome unknown': subprocessAsync checks the process group once after a normal exit, with no grace period, so a lingering helper reads as an unknown outcome",
+    text: "a connection reset during git fetch stops the Objective with state.error as the fetch failure, a plain Error outside any repeat (r1 #2). (A git-remote-http helper outliving git no longer reads as an unknown outcome: subprocessAsync stops leftovers after a grace period.)",
     pattern:
-      /^outcome=stopped; message=(Objective stopped: )*(git -C \S+ fetch origin main failed \(128\): fatal: unable to access '[^']+': Empty reply from server|Owned subprocess group remains active; outcome unknown).*; work=(alpha:failed,beta:pending|alpha:published,beta:published)(;|$)/,
+      /^outcome=stopped; message=(Objective stopped: )*git -C \S+ fetch .*origin \+refs\/heads\/main:\S+ failed \(128\): fatal: unable to access '[^']+': Empty reply from server.*; work=(alpha:failed,beta:pending|alpha:published,beta:published)(;|$)/,
   },
   NATIVE_READS: {
     text: "native delivery's reads outside a Work Item step (defaultBranch at start; PR, check-run, status and readiness observation before the stack merge) are not repeated: one 5xx or connection reset stops the Objective with state.error and a restart refuses it (r1 #8)",
@@ -47,7 +47,7 @@ const D = {
   START_REPEAT: {
     text: "driver.start is repeated with the same attempt id after its response was lost (or, native, after a crash): the local driver's `git worktree add` fails because the attempt's worktree exists, and the item fails (r1 #4)",
     pattern:
-      /^outcome=stopped; message=(Objective stopped: )+git -C \S+ worktree add --detach \S+ [0-9a-f]{40} failed \(128\): .*already exists.*; work=.*\b\w+:failed@execute\b/,
+      /^outcome=stopped; message=(Objective stopped: )+git -C \S+ worktree add --no-checkout --detach \S+ [0-9a-f]{40} failed \(128\): .*already exists.*; work=.*\b\w+:failed@execute\b/,
   },
   COLLECT_REPEAT: {
     text: "driver.collect removes the worktree before the runner records the produced commit: a repeated collect after a lost response or crash fails with 'cannot change to <worktree>' and is recorded as an implementation failure of a worker that succeeded (r1 #5)",

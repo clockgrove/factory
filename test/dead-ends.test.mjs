@@ -31,12 +31,6 @@ const D = {
     pattern:
       /factory decide discards the preparation with its (paused|draining) mode/,
   },
-  PLANNING_CANCEL: {
-    diagnosis:
-      "a cancel during planning whose cessation cannot be verified (here a recorded subprocess whose pid was reused) records cancelError; the owner's cancel never clears it, so every restart throws 'Objective cancellation requested', and preparation status ignores cancelError and names `factory run`",
-    pattern:
-      /factory run does not continue after stopped: Objective cancellation requested/,
-  },
   DECIDE_REFUSED: {
     diagnosis:
       "a pending result or final criterion with state.error set (any stop on a later restart, such as a failed fetch before the final review): status names `factory decide-result`, which refuses while state.error is set ('Objective is not awaiting a result decision'), and with no failed item nothing clears state.error",
@@ -48,11 +42,6 @@ const D = {
       "a step failure that is not isolated (an unclassified error or exhausted interruptions) leaves the item's recovery 'stopped' and stops the Objective (state.error): status names `factory repair`, which refuses any Objective with state.error ('Objective is not available for diagnosed repair'); `factory retry`, never named, also refuses at deliver, after a PR, and for an attempt with a handle and an uncertain outcome",
     pattern:
       /factory repair is refused \(.*Objective is not available for diagnosed repair/,
-  },
-  REUSED_PID: {
-    diagnosis:
-      "a recorded subprocess whose pid now leads another process group (pid reuse after a crash or reboot, so its start time differs) never resolves: the restart's subprocess cleanup throws 'Subprocess owner identity is unresolved; operator direction required', stopping the Objective, and `factory cancel` throws the same, so no command clears the record",
-    pattern: /Subprocess owner identity is unresolved/,
   },
   STOPPED_WITHOUT_EXIT: {
     diagnosis:
@@ -147,32 +136,6 @@ const KNOWN = {
       "preparing, no plan, 0 issues, planning",
       "paused",
       "planning stopped",
-    ],
-  ],
-  [D.PLANNING_CANCEL.diagnosis]: [
-    [
-      "regular",
-      "preparing, no plan, 0 issues, planning",
-      "cancel was requested",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "regular",
-      "preparing, plan clean, planning complete, 2 issues, projection",
-      "cancel was requested",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "native-stack",
-      "preparing, no plan, 0 issues, planning",
-      "cancel was requested",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "native-stack",
-      "preparing, plan clean, planning complete, 2 issues, projection",
-      "cancel was requested",
-      "a recorded subprocess's pid was reused",
     ],
   ],
   [D.DECIDE_REFUSED.diagnosis]: [
@@ -291,18 +254,6 @@ const KNOWN = {
     ],
     [
       "regular",
-      "alpha running/execute (handle); beta pending",
-      "the worker settles without a result",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "regular",
-      "alpha running/validate (handle); beta pending",
-      "the validation environment fails",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "regular",
       "alpha running/deliver (handle); beta pending",
       "a step fails with an unclassified error",
       "coding phase reserved",
@@ -399,21 +350,9 @@ const KNOWN = {
     ],
     [
       "native-stack",
-      "alpha running/execute (handle); beta pending",
-      "the worker settles without a result",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "native-stack",
       "alpha running/validate; beta pending",
       "the validation environment fails",
       "an error stops the Objective outside any Work Item step",
-    ],
-    [
-      "native-stack",
-      "alpha running/validate; beta pending",
-      "the validation environment fails",
-      "a recorded subprocess's pid was reused",
     ],
     [
       "native-stack",
@@ -428,87 +367,13 @@ const KNOWN = {
       "review phase reserved",
     ],
   ],
-  [D.REUSED_PID.diagnosis]: [
-    [
-      "regular",
-      "alpha done; beta done (handle, PR, closure pending)",
-      "GitHub closure failed",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "regular",
-      "alpha waiting/approve-result (handle, pending criterion); beta pending",
-      "cancellation is unresolved",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "regular",
-      "alpha running/validate (handle); beta pending",
-      "draining",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "regular",
-      "alpha published (handle, PR); beta pending",
-      "paused",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "regular",
-      "alpha pending; beta pending",
-      "cancel was requested",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "native-stack",
-      "alpha done; beta done (PR, closure pending); stack merge pending",
-      "GitHub closure failed",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "native-stack",
-      "alpha running/execute (handle); beta pending",
-      "paused",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "native-stack",
-      "alpha running/deliver; beta pending",
-      "cancel was requested",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "native-stack",
-      "alpha waiting/approve-result (pending criterion); beta pending",
-      "cancellation is unresolved",
-      "a recorded subprocess's pid was reused",
-    ],
+  [D.STOPPED_WITHOUT_EXIT.diagnosis]: [
     [
       "native-stack",
       "alpha pending; beta pending",
       "an error stops the Objective outside any Work Item step",
       "a recorded subprocess's pid was reused",
     ],
-    [
-      "native-stack",
-      "alpha published (PR); beta pending",
-      "cancellation is unresolved",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "native-stack",
-      "alpha running/execute; beta pending",
-      "validation phase reserved",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "native-stack",
-      "alpha running/validate; beta pending",
-      "review phase reserved",
-      "a recorded subprocess's pid was reused",
-    ],
-  ],
-  [D.STOPPED_WITHOUT_EXIT.diagnosis]: [
     [
       "regular",
       "alpha running/validate (handle); beta pending",

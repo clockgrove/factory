@@ -129,6 +129,8 @@ for (const strategy of ["regular", "native-stack"]) {
         assert.equal(completed.work[id].validation.commands[0].passed, true);
       }
       assert.equal(readFileSync(marker, "utf8"), "pass\npass\npass\n");
+      // Factory's fetches leave origin/main alone; observe the remote here.
+      git(target.checkout, "fetch", "-q", "origin");
       assert.equal(
         git(target.checkout, "show", "origin/main:pnpm-workspace.yaml"),
         expanded.trim(),
@@ -172,6 +174,7 @@ for (const strategy of ["regular", "native-stack"]) {
         "the pinned npm script must not run on rejected configuration",
       );
       const failed = readState(descriptor.config.repository, 1);
+      git(target.checkout, "fetch", "-q", "origin");
       assert.equal(failed.work.addition.status, "failed");
       assert.equal(failed.work.addition.pullRequest, undefined);
       assert.equal(

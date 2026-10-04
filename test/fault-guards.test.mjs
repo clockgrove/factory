@@ -54,12 +54,14 @@ const SAMPLES = {
   ),
   GIT_FETCH: stopped(
     objectiveStopped(
-      "git -C /tmp/t/target fetch origin main failed (128): fatal: unable to access 'http://127.0.0.1:1/git/example/r.git/': The requested URL returned error: 503 ",
+      "git -C /tmp/t/target fetch --no-tags --no-write-fetch-head --refmap= origin +refs/heads/main:refs/factory/fetch/0f8fad5b-d9cb-469f-a165-70867728950e failed (128): fatal: unable to access 'http://127.0.0.1:1/git/example/r.git/': The requested URL returned error: 503 ",
     ),
     published,
   ),
   GIT_FETCH_RESET: stopped(
-    "Owned subprocess group remains active; outcome unknown",
+    objectiveStopped(
+      "git -C /tmp/t/target fetch --no-tags --no-write-fetch-head --refmap= origin +refs/heads/main:refs/factory/fetch/0f8fad5b-d9cb-469f-a165-70867728950e failed (128): fatal: unable to access 'http://127.0.0.1:1/git/example/r.git/': Empty reply from server ",
+    ),
     { alpha: "failed", beta: "pending" },
   ),
   NATIVE_READS: stopped(
@@ -80,7 +82,7 @@ const SAMPLES = {
   ),
   START_REPEAT: stopped(
     objectiveStopped(
-      `git -C /tmp/t/target worktree add --detach /tmp/t/w ${sha} failed (128): Preparing worktree (detached HEAD abc1234) fatal: '/tmp/t/w' already exists `,
+      `git -C /tmp/t/target worktree add --no-checkout --detach /tmp/t/w ${sha} failed (128): Preparing worktree (detached HEAD abc1234) fatal: '/tmp/t/w' already exists `,
     ),
     { alpha: "failed@execute", beta: "pending" },
   ),

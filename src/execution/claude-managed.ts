@@ -21,7 +21,11 @@ import type {
   ModelInvocationUsage,
 } from "../contracts.js";
 import { Interruption } from "../contracts.js";
-import { pinnedGitAsync } from "../process.js";
+import {
+  addWorktree,
+  hasUnresolvedSubprocesses,
+  removeWorktree,
+} from "../process.js";
 import {
   SettledAttemptFailure,
   failAttempt,
@@ -973,45 +977,42 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     const stage = join(data.root, "result-files");
     materializeClaudeSnapshot(stage, snapshot);
     const worktree = join(data.root, "result");
-    await pinnedGitAsync(
-      this.args.checkout,
-      "worktree",
-      "add",
-      "--detach",
-      worktree,
-      data.request.baseSha,
-    );
-    for (const name of readdirSync(worktree))
-      if (name !== ".git")
-        rmSync(join(worktree, name), { recursive: true, force: true });
-    for (const name of readdirSync(stage))
-      cpSync(join(stage, name), join(worktree, name), { recursive: true });
-    const evidenceBytes = readFileSync(
-      join(data.root, "provider-evidence.json"),
-    );
-    if (claudeByteDigest(evidenceBytes) !== data.evidenceDigest)
-      throw new Error("Captured Claude provider evidence changed locally");
-    writeFileSync(join(data.root, "result-evidence.json"), evidenceBytes, {
-      mode: 0o600,
-    });
-    const evidence = {
-      harness: "claude-managed-agents",
-      sessionId: data.sessionId,
-      bootstrap: data.bootstrap,
-      artifact: data.artifact,
-      providerEvidenceDigest: data.evidenceDigest,
-      providerEvidenceFile: "result-evidence.json",
-    };
-    const result = await collectWorktreeResult(
-      this.args.checkout,
-      worktree,
-      data.request,
-      this.args.contentStore,
-      {
-        assets: readProducedAssets({ item: data.request.item, worktree }),
-        evidence,
-      },
-    );
-    return result;
+    await addWorktree(this.args.checkout, worktree, data.request.baseSha);
+    try {
+      for (const name of readdirSync(worktree))
+        if (name !== ".git")
+          rmSync(join(worktree, name), { recursive: true, force: true });
+      for (const name of readdirSync(stage))
+        cpSync(join(stage, name), join(worktree, name), { recursive: true });
+      const evidenceBytes = readFileSync(
+        join(data.root, "provider-evidence.json"),
+      );
+      if (claudeByteDigest(evidenceBytes) !== data.evidenceDigest)
+        throw new Error("Captured Claude provider evidence changed locally");
+      writeFileSync(join(data.root, "result-evidence.json"), evidenceBytes, {
+        mode: 0o600,
+      });
+      const evidence = {
+        harness: "claude-managed-agents",
+        sessionId: data.sessionId,
+        bootstrap: data.bootstrap,
+        artifact: data.artifact,
+        providerEvidenceDigest: data.evidenceDigest,
+        providerEvidenceFile: "result-evidence.json",
+      };
+      return await collectWorktreeResult(
+        this.args.checkout,
+        worktree,
+        data.request,
+        this.args.contentStore,
+        {
+          assets: readProducedAssets({ item: data.request.item, worktree }),
+          evidence,
+        },
+      );
+    } finally {
+      if (!hasUnresolvedSubprocesses())
+        await removeWorktree(this.args.checkout, worktree);
+    }
   }
 }

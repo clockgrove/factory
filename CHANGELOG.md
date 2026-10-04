@@ -4,6 +4,12 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- A fetch for one Work Item no longer dies with `Invalid path '.git/worktrees/<id>'` while another Work Item's worktree is being added or removed. Git commands that change a checkout's worktree registry (`worktree add/remove/prune`, `gc`, `prune`, `maintenance`, `pull`) hold a per-repository lock exclusively; fetches and `worktree list` share it. Worktree creation and removal hold it only to register and unregister; files are checked out and deleted outside it.
+- Factory reads the default branch head without FETCH_HEAD or the remote-tracking ref, so concurrent fetches no longer race on them. A locked fetch stops after 15 minutes, or after 60 seconds below 1000 bytes per second over HTTP, and the step repeats later.
+- Factory's git commands never start automatic background maintenance.
+- When a command Factory ran has exited but left processes in its group (such as git's HTTP helper after a connection reset, or a validation command's background job), Factory waits up to 5 seconds, then stops them and keeps the command's own result instead of recording an unknown outcome. A validation command's changes to the tree are judged after its leftovers stop.
+- Restart cleanup and `factory cancel` treat a recorded subprocess whose pid now belongs to a different process (a reused pid after a crash or reboot) as ended, and never signal that process, instead of stopping for operator direction.
+- Factory requires Git 2.31 or later and checks it with the target checkout.
 - `export-captures` sends standard OpenTelemetry (OTLP/HTTP JSON) traces instead of Langfuse- or LangSmith-specific uploads. Pass the OTLP base URL with `--endpoint` (HTTPS, or HTTP to a loopback collector) and authentication through `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or `OTEL_EXPORTER_OTLP_HEADERS`. `--destination`, `--project-id` and `--workspace-id` are removed, along with the `LANGFUSE_*` and `LANGSMITH_API_KEY` variables. Langfuse remains reachable through its OTLP endpoint.
 
 ## 0.1.75 — 2026-10-03

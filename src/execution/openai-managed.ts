@@ -13,6 +13,7 @@ import type {
   ExecutionResult,
 } from "../contracts.js";
 import { Interruption } from "../contracts.js";
+import { hasUnresolvedSubprocesses, removeWorktree } from "../process.js";
 import {
   SettledAttemptFailure,
   failAttempt,
@@ -787,33 +788,38 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     };
     this.save(handle, context);
     const worktree = join(data.root, "result");
-    await importOpenAIResult({
-      file,
-      checkout: this.args.checkout,
-      worktree,
-      baseSha: data.request.baseSha,
-      attemptId: handle.identity,
-      inputDigest: data.inputDigest,
-    });
-    const evidence = {
-      harness: "openai-agents",
-      sessionId: data.sessionId,
-      turnId: data.turnId,
-      inputDigest: data.inputDigest,
-      artifact: data.artifact,
-      usage: data.usage ?? null,
-      model: this.args.config.model,
-    };
-    this.remaining(data);
-    return collectWorktreeResult(
-      this.args.checkout,
-      worktree,
-      data.request,
-      this.args.contentStore,
-      {
-        assets: readProducedAssets({ item: data.request.item, worktree }),
-        evidence,
-      },
-    );
+    try {
+      await importOpenAIResult({
+        file,
+        checkout: this.args.checkout,
+        worktree,
+        baseSha: data.request.baseSha,
+        attemptId: handle.identity,
+        inputDigest: data.inputDigest,
+      });
+      const evidence = {
+        harness: "openai-agents",
+        sessionId: data.sessionId,
+        turnId: data.turnId,
+        inputDigest: data.inputDigest,
+        artifact: data.artifact,
+        usage: data.usage ?? null,
+        model: this.args.config.model,
+      };
+      this.remaining(data);
+      return await collectWorktreeResult(
+        this.args.checkout,
+        worktree,
+        data.request,
+        this.args.contentStore,
+        {
+          assets: readProducedAssets({ item: data.request.item, worktree }),
+          evidence,
+        },
+      );
+    } finally {
+      if (!hasUnresolvedSubprocesses())
+        await removeWorktree(this.args.checkout, worktree);
+    }
   }
 }

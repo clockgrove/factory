@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   commandAsync,
+  lingeringDescendants,
   processGroupExists,
   subprocessAsync,
   withProcessCancellation,
@@ -51,4 +52,38 @@ test("already cancelled scope cannot launch a command", async () => {
       commandAsync("sh", ["-c", "exit 0"]),
     ),
   );
+});
+
+test("an exited command's lingering descendants are waited for, then stopped", async () => {
+  const saved = lingeringDescendants.graceMilliseconds;
+  lingeringDescendants.graceMilliseconds = 300;
+  const groups = [];
+  try {
+    await withProcessCancellation(
+      undefined,
+      async () => {
+        // Finishes within the grace period: waited for.
+        const short = await subprocessAsync("sh", [
+          "-c",
+          "(sleep 0.1; true) >/dev/null 2>&1 & exit 3",
+        ]);
+        assert.equal(short.status, 3);
+        // Still running after it: stopped; the command's own result stands.
+        const started = Date.now();
+        const long = await subprocessAsync("sh", [
+          "-c",
+          "sleep 30 >/dev/null 2>&1 & echo exited",
+        ]);
+        assert.equal(long.status, 0);
+        assert.equal(long.stdout.trim(), "exited");
+        assert.ok(Date.now() - started < 5_000);
+      },
+      (owned, settled) => groups.push({ owned, settled }),
+    );
+  } finally {
+    lingeringDescendants.graceMilliseconds = saved;
+  }
+  assert.equal(groups.filter(({ settled }) => settled).length, 2);
+  for (const { owned } of groups)
+    assert.equal(processGroupExists(owned.pid), false);
 });

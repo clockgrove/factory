@@ -84,8 +84,8 @@ import {
   verifyHydratedAssets,
 } from "./media.js";
 import {
+  fetchHead,
   git,
-  gitAsync,
   linuxProcessIdentity,
   pinnedGit,
   processGroupExists,
@@ -430,12 +430,16 @@ async function cancelRecordedSubprocesses(
   state: ContinuationState,
 ): Promise<void> {
   for (const subprocess of state.coordinator?.processes ?? []) {
-    if (!processGroupExists(subprocess.pid)) continue;
     const identity = linuxProcessIdentity(subprocess.pid);
-    if (
-      identity?.startTime !== subprocess.startTime ||
-      identity.group !== subprocess.pid
-    )
+    // Another process now has the pid. The kernel reuses a pid only once no
+    // process belongs to the group it led, so ours is gone; the process
+    // group there now is foreign and is never signalled.
+    if (identity && identity.startTime !== subprocess.startTime) continue;
+    if (!processGroupExists(subprocess.pid)) continue;
+    // No process has the pid but its group remains (a reused pid's group
+    // whose leader also exited looks the same), or our leader moved to
+    // another group: ownership of the group is unproven.
+    if (identity?.group !== subprocess.pid)
       throw new Error(
         "Subprocess owner identity is unresolved; operator direction required",
       );
@@ -1056,14 +1060,8 @@ async function runObjectivePass(
           "Factory: resuming the existing run from atomic state",
         );
         if (!state.finalAcceptance && state.objectiveClosure !== "complete") {
-          await gitAsync(
-            config.checkout,
-            "fetch",
-            "origin",
-            await github.defaultBranch(),
-          );
           if (
-            git(config.checkout, "rev-parse", "FETCH_HEAD") !==
+            (await fetchHead(config.checkout, await github.defaultBranch())) !==
             objectiveCandidate(state)?.commitSha
           )
             throw new Error(
@@ -1513,15 +1511,12 @@ async function runObjectivePass(
       return state;
     if (cancellationRequested())
       throw new Error("Objective cancellation requested");
-    await gitAsync(
+    const observedHead = await fetchHead(
       config.checkout,
-      "fetch",
-      "origin",
       await github.defaultBranch(),
     );
     const finalGraphDigest = graphDigest(state.graph);
     const candidateCommitSha = objectiveCandidate(state)!.commitSha;
-    const observedHead = git(config.checkout, "rev-parse", "FETCH_HEAD");
     if (observedHead !== candidateCommitSha)
       throw new Error(
         `Default branch changed before final validation: expected ${candidateCommitSha}, observed ${observedHead}`,
@@ -1714,13 +1709,10 @@ async function runObjectivePass(
       save(state);
       return state;
     }
-    await gitAsync(
+    const reviewedHead = await fetchHead(
       config.checkout,
-      "fetch",
-      "origin",
       await github.defaultBranch(),
     );
-    const reviewedHead = git(config.checkout, "rev-parse", "FETCH_HEAD");
     if (reviewedHead !== candidateCommitSha)
       throw new Error(
         `Default branch changed during final review: expected ${candidateCommitSha}, observed ${reviewedHead}`,

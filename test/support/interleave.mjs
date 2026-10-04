@@ -232,9 +232,11 @@ if (
 // with plain git): a fetch that received objects resolves every registered
 // worktree's HEAD in its connectivity check, and `worktree remove` walks the
 // registry, so either dies with "Invalid path" when a worktree listed at its
-// start was removed while it ran; and a fetch updates its remote-tracking
-// ref from the value it read at its start, so it fails with "incorrect old
-// value" when another fetch moved the ref meanwhile. Such a command also
+// start was removed while it ran; and a fetch updates its destination ref
+// from the value it read at its start, so it fails with "incorrect old
+// value" when another fetch moved that ref meanwhile (Factory's fetches now
+// write a private ref each, so only a regression meets this). Such a
+// command also
 // yields at `mid`: after its start-time reads, before git runs.
 const SHIM = String.raw`#!/bin/sh
 PATH=$FACTORY_INTERLEAVE_PATH
@@ -291,7 +293,13 @@ if [ "$model" = model ]; then
   common=$(git -C "$directory" rev-parse --path-format=absolute --git-common-dir)
   entries=$(ls "$common/worktrees" 2>/dev/null)
   ref=
-  [ "$subcommand" = fetch ] && [ -n "$second" ] && ref="refs/remotes/$first/$second"
+  # The ref the fetch updates: its refspec's destination, else origin/<branch>.
+  if [ "$subcommand" = fetch ] && [ -n "$second" ]; then
+    case "$second" in
+      *:*) ref=$(printf %s "$second" | sed "s/^[^:]*://") ;;
+      *) ref="refs/remotes/$first/$second" ;;
+    esac
+  fi
   old=
   [ -n "$ref" ] && old=$(git -C "$directory" rev-parse -q --verify "$ref")
   answer=$(ask mid "$id" "" "$@") || exit 1

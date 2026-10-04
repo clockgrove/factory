@@ -18,7 +18,7 @@ const AMBIGUOUS = /Work Item (\w+) has ambiguous active state at execute/;
 const ambiguousItem = (message) => AMBIGUOUS.exec(message)?.[1];
 const crashedItem = (result) => result.crashed?.label.split(" ")[0];
 const REPEATED_ADD =
-  /worktree add --detach \S+\/worktrees\/[\w-]+ [0-9a-f]+ failed \(128\)[\s\S]*already exists/;
+  /worktree add (?:-\S+ )*\S+\/worktrees\/[\w-]+ [0-9a-f]+ failed \(128\)[\s\S]*already exists/;
 
 export const DIAGNOSES = {
   START_WINDOW: {
@@ -43,16 +43,6 @@ export const DIAGNOSES = {
     diagnosis:
       "native-stack delivery repeats driver.start with the same attempt id after a crash between `git worktree add` and the handle checkpoint; the local driver's `git worktree add` fails because the attempt's worktree exists, and the run stops uncertain (fault matrix START_REPEAT, r1 #4)",
     match: { ambiguous: REPEATED_ADD, stop: REPEATED_ADD },
-  },
-  REGISTRY: {
-    diagnosis:
-      "MODELLED, not observed: Factory runs `git fetch` and `git worktree remove` for different Work Items concurrently in one checkout without a lock, so the schedule can put a removal inside a fetch's or another removal's registry walk. The git shim models what #555 measured with plain git for that overlap: the fetch dies with 'fatal: Invalid path', the Work Item fails as uncertain and the Objective stops, or the other removal fails, Factory ignores it and the worktree stays registered",
-    match: {
-      stop: /Invalid path '[^']*': No such file or directory \(interleave model/,
-      ambiguous:
-        /Invalid path '[^']*': No such file or directory \(interleave model/,
-      worktrees: /stranded worktree \S+ \(removal failed\)/,
-    },
   },
   INTEGRATION_ORDER: {
     diagnosis:
@@ -121,51 +111,6 @@ export const PINNED = [
     name: "crash right after alpha's execute checkpoint",
     schedule: {
       crash: { at: "alpha state running/execute #1", phase: "done" },
-    },
-  },
-  {
-    known: "REGISTRY",
-    family: "independent",
-    name: "beta's validation worktree removal lands inside alpha's post-merge fetch",
-    schedule: {
-      holds: [
-        { hold: "alpha git fetch #1", until: "beta git worktree add #2" },
-        {
-          hold: "beta git worktree remove #2",
-          until: "alpha git fetch #1",
-          phase: "mid",
-        },
-        {
-          hold: "alpha git fetch #1",
-          at: "mid",
-          until: "beta git worktree remove #2",
-        },
-      ],
-      models: ["alpha git fetch #1"],
-    },
-  },
-  {
-    known: "REGISTRY",
-    family: "independent",
-    name: "beta's validation worktree removal lands inside alpha's",
-    schedule: {
-      holds: [
-        {
-          hold: "alpha git worktree remove #2",
-          until: "beta git worktree add #2",
-        },
-        {
-          hold: "beta git worktree remove #2",
-          until: "alpha git worktree remove #2",
-          phase: "mid",
-        },
-        {
-          hold: "alpha git worktree remove #2",
-          at: "mid",
-          until: "beta git worktree remove #2",
-        },
-      ],
-      models: ["alpha git worktree remove #2"],
     },
   },
   {

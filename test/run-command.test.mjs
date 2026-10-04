@@ -1000,6 +1000,7 @@ test("a stop after an item defect names the item's retry; a waiting diagnosis na
     schemaVersion: 7,
     objective: 5,
     error: "boom",
+    errorItem: "X",
     coordinator: { mode: "running" },
     work: {
       other: { status: "done" },
@@ -1010,6 +1011,13 @@ test("a stop after an item defect names the item's retry; a waiting diagnosis na
   assert.equal(outcome.code, 1);
   assert.match(outcome.message, /Objective #5 stopped: boom\n/);
   assert.match(outcome.message, /`factory retry --objective 5 --item X` and/);
+  // A failed item the stop did not come from is not named.
+  const unmarked = { ...state };
+  delete unmarked.errorItem;
+  assert.match(
+    runOutcome(unmarked).message,
+    /`factory retry --objective 5` and/,
+  );
   // A defect outside any item runs the Objective's step again.
   const objectiveOnly = runOutcome({
     ...state,

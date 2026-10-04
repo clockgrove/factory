@@ -44,13 +44,11 @@ export function awaitingOutcome(wait: AwaitingBeforeState): {
  */
 export function stopRetryCommand(state: ContinuationState): string {
   const retry = `factory retry --objective ${state.objective}`;
-  const failed =
-    "work" in state
-      ? Object.entries(state.work).find(
-          ([, work]) => work.status === "failed" && work.recovery?.failure,
-        )
-      : undefined;
-  return failed ? `${retry} --item ${failed[0]}` : retry;
+  if (!("work" in state) || state.error === undefined) return retry;
+  const item = state.errorItem;
+  return item !== undefined && state.work[item]
+    ? `${retry} --item ${item}`
+    : retry;
 }
 
 /** How a run ended: the exit code and one message naming the next command. */

@@ -2994,6 +2994,8 @@ test("hydration failure is URL-free and blocks final review, evidence, and closu
         failed.error,
         "Fresh-clone hydration verification failed during clone",
       );
+      // The stop is not an item's: its retry is the Objective's.
+      assert.equal(failed.errorItem, undefined);
       assert.equal(github.state().closedIssues[objective], undefined);
       assert.doesNotMatch(
         JSON.stringify(failed),

@@ -8,7 +8,11 @@ import {
   resolveAutonomy,
 } from "./repair-policy.js";
 import { stopRetryCommand } from "./run-outcome.js";
-import { applyWorkCorrection, resumeDiagnoses } from "./work-repair.js";
+import {
+  applyWorkCorrection,
+  failedItemOf,
+  resumeDiagnoses,
+} from "./work-repair.js";
 import { workerIdentity } from "./item-steps.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
@@ -2137,8 +2141,12 @@ async function runObjectivePass(
       } else {
         // A run refused for an earlier stop keeps that stop's error; it must
         // not wrap the same cause again on every run.
-        current.error ??=
-          error instanceof Error ? error.message : String(error);
+        if (current.error === undefined) {
+          current.error =
+            error instanceof Error ? error.message : String(error);
+          const item = failedItemOf(error);
+          if (item !== undefined) current.errorItem = item;
+        }
       }
       if (current.schemaVersion === 7) save(current);
       else saveState(path, current);
@@ -2274,7 +2282,10 @@ function retryStep(
       !state.cancelledAt;
     if (!awaitsOperator(waitOf(state, scope)) && !stopped) return false;
     clearRepeats(state, scope);
-    if (stopped) delete state.error;
+    if (stopped) {
+      delete state.error;
+      if ("work" in state) delete state.errorItem;
+    }
     saveState(statePath(config.repository, objective), state);
     new DiagnosticEmitter(config.repository, objective).emit({
       runId: state.runId,
@@ -2374,6 +2385,7 @@ export function retryWorkItem(
       state.cancelRequested = false;
       delete state.cancelledAt;
       delete state.error;
+      delete state.errorItem;
       saveState(statePath(config.repository, objective), state);
       new DiagnosticEmitter(config.repository, objective).emit({
         runId: state.runId,
@@ -2407,6 +2419,7 @@ export function retryWorkItem(
     state.cancelRequested = false;
     delete state.cancelledAt;
     delete state.error;
+    delete state.errorItem;
     saveState(statePath(config.repository, objective), state);
     new DiagnosticEmitter(config.repository, objective).emit({
       runId: state.runId,
@@ -2424,7 +2437,7 @@ export function retryWorkItem(
 export function repairWorkItem(
   config: FactoryConfig,
   objective: number,
-  input: { item: string; treeSha?: string; correction: RepairCorrection },
+  input: { item: string; correction: RepairCorrection },
 ): void {
   const lock = join(stateRoot(config.repository), "controller.lock");
   const handle = mutationLock(config, objective);
@@ -2439,6 +2452,7 @@ export function repairWorkItem(
     applyWorkCorrection(state, input.item, input.correction);
     // The repair answers the stop the item's failure caused, as retry does.
     delete state.error;
+    delete state.errorItem;
     saveState(statePath(config.repository, objective), state);
   } finally {
     releaseMutationLock(lock, handle);

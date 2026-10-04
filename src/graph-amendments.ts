@@ -351,7 +351,10 @@ export function submitAmendment(
     state.rejectedAmendments ??= [];
     state.rejectedAmendments.push(structuredClone(rejected));
     // Only this exact known rejection may be cleared; all other state is retained.
-    if (state.error === rejected.error) delete state.error;
+    if (state.error === rejected.error) {
+      delete state.error;
+      delete state.errorItem;
+    }
   }
   state.pendingAmendment = {
     id: randomUUID(),

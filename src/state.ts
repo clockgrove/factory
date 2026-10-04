@@ -225,6 +225,8 @@ export interface FactoryState {
   cancelRequested?: boolean;
   cancelledAt?: string;
   error?: string;
+  /** The Work Item whose failure ended the run and set `error`; absent for a defect outside any item. */
+  errorItem?: string;
   /** Step repeat records for Work Items and the Objective (#515). */
   repeats?: Record<string, RepeatRecord>;
   wait?: Wait;
@@ -1074,6 +1076,11 @@ export function parseFactoryState(
     throw new Error("Objective GitHub closure is invalid");
   if (state.error !== undefined && typeof state.error !== "string")
     throw new Error("state.error is invalid");
+  if (
+    state.errorItem !== undefined &&
+    (typeof state.errorItem !== "string" || state.error === undefined)
+  )
+    throw new Error("state.errorItem is invalid");
   assertRepeats(state.repeats, "repeats");
   // Records of items no longer in the graph are dropped, not refused.
   const repeats = state.repeats as Record<string, unknown> | undefined;

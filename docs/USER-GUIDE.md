@@ -346,7 +346,9 @@ Automatic repairs are on within the [configured limits](#limit-unattended-work).
 
 Factory requires a concrete diagnosis and correction before another implementation attempt. The new attempt starts from the accepted base; removed unfinished edits are unavailable. Missing product or security decisions, unknown external outcomes and exhausted limits stop for an explicit decision. `status --json` reports the failure identity, consumed allowances, the charged failure events and the next decision.
 
-When the controller could not prepare validation (a configuration failure), or a validation failed because of an external prerequisite, the Work Item waits. Restore only the already authorized environment, then run `factory retry --objective ISSUE_NUMBER --item ITEM`; the same result is validated again.
+When the controller could not prepare validation (a configuration fault, such as an unwritable validation directory), the Work Item waits and the candidate is not judged. Restore only the already authorized environment, then run `factory retry --objective ISSUE_NUMBER --item ITEM`; the same result is validated again.
+
+A validation command that fails is a wrong result, whatever the cause. Factory diagnoses and charges it like any other wrong result. `factory repair` or `factory retry` starts a new attempt from the accepted base; the failed result is not validated again.
 
 To supply a diagnosed correction for a wrong result yourself, submit a proposal file containing `item` and `correction` with `kind: "implementation"`, `failureDigest`, `actor`, `diagnosis` and `correction`:
 

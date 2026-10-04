@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { stateRoot } from "../dist/config.js";
 import {
   chargeRepair,
   consumption,
@@ -401,38 +402,78 @@ for (const delivery of ["regular", "native-stack"])
       rmSync(root, { recursive: true, force: true });
     }
   });
-test("a validation environment failure is a configuration fault; once restored, the same candidate validates", async () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-env-repair-"));
-  try {
-    const target = createTarget(root, { "result.txt": "accepted\n" });
-    const tree = git(target.checkout, "rev-parse", "HEAD^{tree}");
-    await assert.rejects(
-      validateTree(
+for (const delivery of ["regular", "native-stack"])
+  test(`${delivery}: a validation environment failure waits uncharged; once restored, retry validates the same candidate`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "factory-env-repair-"));
+    const previous = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = join(root, "state");
+    try {
+      const target = createTarget(root);
+      const config = factoryConfig(
         target.checkout,
-        join(root, "x".repeat(260)),
-        target.baseSha,
-        tree,
-        ["test -s result.txt"],
-      ),
-      (error) => {
-        assert.ok(error instanceof CandidateEnvironmentFailure);
-        assert.equal(faultOf(error).kind, "config");
-        return true;
-      },
-    );
-    const evidence = await validateTree(
-      target.checkout,
-      join(root, "short"),
-      target.baseSha,
-      tree,
-      ["test -s result.txt"],
-    );
-    assert.equal(evidence.treeSha, tree);
-    assert.equal(evidence.commands.length, 1);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+        `example/env-repair-${delivery}`,
+        delivery,
+        2,
+      );
+      config.autonomy = autonomy();
+      const graph = { objective: 1, baseSha: target.baseSha, items: [item()] };
+      let diagnoses = 0;
+      const descriptor = {
+        config,
+        graph,
+        objectiveBody: body,
+        fakeRoot: join(root, "fake"),
+        actions: {
+          result: { files: [{ path: "result.txt", text: "accepted\n" }] },
+        },
+        planningModel: model(graph, () => {
+          diagnoses++;
+          throw new Error("an environment fault is never diagnosed");
+        }),
+      };
+      const fixture = makeApplication(descriptor);
+      // The controller cannot prepare validation: the item's directory is a file.
+      const validationRoot = join(
+        stateRoot(config.repository),
+        "validation",
+        "result",
+      );
+      mkdirSync(join(stateRoot(config.repository), "validation"), {
+        recursive: true,
+      });
+      writeFileSync(validationRoot, "not a directory\n");
+      const waiting = await fixture.application.runObjective(1);
+      const stopped = waiting.work.result;
+      assert.equal(stopped.status, "running");
+      assert.equal(stopped.wait?.kind, "prerequisite");
+      assert.match(stopped.wait.detail, /Validation environment unavailable/);
+      assert.equal(stopped.recovery?.failure, undefined);
+      assert.equal(stopped.validation, undefined);
+      assert.equal(waiting.charges, undefined);
+      assert.equal(diagnoses, 0);
+      const candidate = stopped.treeSha;
+      assert.match(candidate, /^[a-f0-9]{40}$/);
+      const workers = () =>
+        readEvents(fixture.eventsPath).filter((event) => event.type === "start")
+          .length;
+      const started = workers();
+      // Restoring the environment alone changes nothing; the retry answers it.
+      rmSync(validationRoot);
+      assert.equal(fixture.application.retryWorkItem(1, "result"), "step");
+      const done =
+        await makeApplication(descriptor).application.runObjective(1);
+      assert.equal(done.finalValidation.passed, true);
+      assert.equal(done.work.result.validation.treeSha, candidate);
+      assert.equal(done.work.result.recovery, undefined);
+      assert.equal(done.charges, undefined);
+      assert.equal(diagnoses, 0);
+      assert.equal(workers(), started);
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 for (const kind of [
   "planning-output",
   "planning-evidence",

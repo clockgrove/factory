@@ -40,6 +40,13 @@ export class CandidateEnvironmentFailure extends Error {
   }
 }
 
+/** The Work Item whose failure an error carries, set where the failure is recorded. */
+const failedItems = new WeakMap<object, string>();
+export const failedItemOf = (error: unknown): string | undefined =>
+  typeof error === "object" && error !== null
+    ? failedItems.get(error)
+    : undefined;
+
 const retryCommand = (state: FactoryState, id: string): string =>
   `factory retry --objective ${state.objective} --item ${id}`;
 
@@ -55,6 +62,7 @@ export function recordWorkFailure(
   error: unknown,
 ): boolean {
   const work = state.work[id]!;
+  if (typeof error === "object" && error !== null) failedItems.set(error, id);
   const detail = error instanceof Error ? error.message : String(error);
   const fault = faultOf(error);
   // A published result that fails (a failed check, a conflict) is repaired

@@ -8,8 +8,10 @@ import { assertPreIntegrationCheckSources } from "./readiness.js";
 
 /**
  * Checks already verified, keyed by everything the answer depends on. Only
- * successes are kept, so a poll against an unchanged default branch costs no
- * git reads. The set stays small: a new tip is a new key.
+ * successes are kept, so a poll against an unchanged default branch does not
+ * re-read the workflows or sources. The tip itself is fetched on every call
+ * (it is part of the key), so this saves the reads, not the fetch. The set
+ * stays small: a new tip is a new key.
  */
 const verified = new Set<string>();
 const MAX_VERIFIED = 256;
@@ -112,7 +114,7 @@ export async function assertCheckSourcesAtIntegration(args: {
   if (unknown.length)
     throw new StepFault(
       decision(
-        `CI check ${unknown.map((name) => JSON.stringify(name)).join(", ")} is no longer a job in ${defaultBranch}'s GitHub workflows (at ${tip.slice(0, 12)}) or an entry under the Objective's Required checks, so it will never report. Restore the job under that name and run factory retry, or cancel and plan again?`,
+        `CI check ${unknown.map((name) => JSON.stringify(name)).join(", ")} has not reported on the PR head and is no longer a job in ${defaultBranch}'s GitHub workflows (at ${tip.slice(0, 12)}) or an entry under the Objective's Required checks, so it will never report. Restore the job under that name and run factory retry, or cancel and plan again?`,
         `Defined now: ${JSON.stringify(known.slice(0, 20))}`,
       ),
     );

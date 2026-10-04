@@ -262,7 +262,7 @@ test("delivery refuses a gate that main no longer defines, offering only answers
       assert.equal(fault.kind, "decision");
       assert.match(
         fault.question,
-        /CI check "lint" is no longer a job in main's/,
+        /CI check "lint" has not reported on the PR head and is no longer a job in main's/,
       );
       assert.match(
         fault.question,
@@ -352,21 +352,18 @@ test("a QA CI proof is bound to its own commit, only while it must wait", () => 
 });
 
 test("only gates a PR has not reported on at its head can be waiting for a check that never comes", () => {
-  const head = "a".repeat(40);
-  const run = (name, headSha = head) => ({
-    id: 1,
-    name,
-    headSha,
-    status: "in_progress",
-  });
   const gates = ["lint", "test", "build", "docs"];
   const open = {
     state: "open",
-    namedChecks: [run("lint"), run("test", "b".repeat(40))],
+    // The real observe lists a name for a run in any state at the exact head.
+    reportedChecks: ["lint"],
     failedChecks: ["build"],
   };
-  // Running or failed on the head has reported; a stale head has not.
-  assert.deepEqual(unreportedGates(open, gates, head), ["test", "docs"]);
-  assert.deepEqual(unreportedGates({ state: "merged" }, gates, head), []);
-  assert.deepEqual(unreportedGates({ state: "closed" }, gates, head), []);
+  // Running, ended or failed on the head has reported; nothing at the head
+  // has not. Whether a name gets into reportedChecks is tested through the
+  // real observe in ci-readiness.test.mjs.
+  assert.deepEqual(unreportedGates(open, gates), ["test", "docs"]);
+  assert.deepEqual(unreportedGates({ state: "open" }, gates), gates);
+  assert.deepEqual(unreportedGates({ state: "merged" }, gates), []);
+  assert.deepEqual(unreportedGates({ state: "closed" }, gates), []);
 });

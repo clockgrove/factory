@@ -133,24 +133,22 @@ export function deliveryReadiness(
 }
 
 /**
- * The gates a PR has not reported on at all: no check run of that name at the
- * head and no failure of it. Only these can be waiting for a check that never
- * comes. A merged or closed PR waits for nothing, and a gate already running,
- * passed or failed on the exact head exists on it whatever main has renamed
- * since.
+ * The gates a PR has not reported on at all: no check run or status of that
+ * name at the exact head, in any state (queued, running, or ended with any
+ * conclusion). Only these can be waiting for a check that never comes. A
+ * merged or closed PR waits for nothing, and a gate that exists on the exact
+ * head, whether running, passed, failed, cancelled or skipped, is there
+ * whatever main has renamed since.
  */
 export function unreportedGates(
   observation: DeliveryObservation,
   gates: string[],
-  expectedHead: string,
 ): string[] {
   if (observation.state !== "open") return [];
   return gates.filter(
     (name) =>
       !observation.failedChecks?.includes(name) &&
-      !(observation.namedChecks ?? []).some(
-        (check) => check.name === name && check.headSha === expectedHead,
-      ),
+      !observation.reportedChecks?.includes(name),
   );
 }
 

@@ -301,7 +301,6 @@ export async function runRegularGraph(args: {
           (state.graph.requiredPreIntegrationChecks ?? []).map(
             (check) => check.checkName,
           ),
-          published.headSha,
         ),
         defaultBranch: () => github.defaultBranch(),
       });

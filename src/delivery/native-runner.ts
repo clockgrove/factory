@@ -928,8 +928,8 @@ export async function runNativeGraph(args: {
         checkout: config.checkout,
         gates: [
           ...new Set(
-            observations.flatMap((observation, index) =>
-              unreportedGates(observation, gateNames, layers[index]!.headSha),
+            observations.flatMap((observation) =>
+              unreportedGates(observation, gateNames),
             ),
           ),
         ],

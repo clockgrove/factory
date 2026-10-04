@@ -1433,8 +1433,21 @@ export class RealGitHubGateway implements GitHubGateway {
     ]);
     const unreported = requiredChecks.some((name) => !reported.has(name));
     if (unreported && mergeReadiness === "ready") mergeReadiness = "waiting";
+    // Every name with any run (whatever its state or conclusion) or status
+    // on the exact head; both reads above are of that commit.
+    const reportedChecks = [
+      ...new Set(
+        [
+          ...runs
+            .filter((run) => run.head_sha === identity.headSha)
+            .map((run) => run.name),
+          ...contexts.map((status) => status.context),
+        ].filter((name): name is string => typeof name === "string" && !!name),
+      ),
+    ];
     return {
       namedChecks,
+      ...(reportedChecks.length ? { reportedChecks } : {}),
       ...(failedChecks.length ? { failedChecks } : {}),
       ...(failedChecks.length && requiredChecks.length
         ? { requiredChecks }

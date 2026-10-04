@@ -631,7 +631,7 @@ export async function materializeAssetSet(args: {
   mkdirSync(args.workRoot, { recursive: true });
   await addWorktree(args.checkout, worktree, args.baseCommit);
   try {
-    await gitAsync(worktree, "lfs", "install", "--local");
+    await gitAsync(worktree, "lfs", "install", "--local", "--skip-repo");
     const destinations = new Set<string>();
     for (const member of args.set.members) {
       if (
@@ -987,7 +987,7 @@ export async function verifyHydratedAssets(args: {
       resolve(clone),
     );
     phase = "lfs-setup";
-    await gitAsync(clone, "lfs", "install", "--local");
+    await gitAsync(clone, "lfs", "install", "--local", "--skip-repo");
     phase = "integrated-checkout";
     await gitAsync(clone, "checkout", "--detach", args.integratedSha);
     phase = "lfs-pull";

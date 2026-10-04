@@ -334,7 +334,15 @@ export async function runRegularGraph(args: {
     // The delivery slot frees only once closure is durable, so the scheduler
     // never starts dependent work while this item's issue is closing.
     try {
-      await closeWorkItem(state, item.id, github, save, false);
+      await closeWorkItem(
+        state,
+        item.id,
+        github,
+        save,
+        false,
+        signal,
+        args.pause,
+      );
     } finally {
       phases.release(item.id);
     }
@@ -360,6 +368,8 @@ export async function runRegularGraph(args: {
         save,
         cancelled: args.cancelled,
         paused: args.paused,
+        signal,
+        pause: args.pause,
         phases,
       });
       return;

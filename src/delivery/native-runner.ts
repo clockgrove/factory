@@ -499,21 +499,30 @@ export async function runNativeGraph(args: {
       }
       if (args.paused?.() && state.work[item.id]?.wait?.kind === "ci")
         return settlePrepared();
-      await runQaItem({
-        config,
-        root,
-        state,
-        item,
-        github,
-        model: args.planningModel,
-        diagnostics: args.diagnostics,
-        objectiveBody: args.objectiveBody,
-        store: contentStore,
-        save,
-        cancelled: args.cancelled,
-        paused: args.paused,
-        phases,
-      });
+      try {
+        await runQaItem({
+          config,
+          root,
+          state,
+          item,
+          github,
+          model: args.planningModel,
+          diagnostics: args.diagnostics,
+          objectiveBody: args.objectiveBody,
+          store: contentStore,
+          save,
+          cancelled: args.cancelled,
+          paused: args.paused,
+          signal,
+          pause: args.pause,
+          phases,
+        });
+      } catch (error) {
+        // A decision or a configuration fix is the item's wait (its step
+        // saved it), and cancel stops it quietly: the unit keeps its place.
+        if (staysInPlace(error)) return settlePrepared();
+        throw error;
+      }
       if (state.work[item.id]?.status !== "done") return settlePrepared();
       continue;
     }
@@ -1183,6 +1192,14 @@ export async function runNativeGraph(args: {
     phases.release(top.id);
     save();
     for (const item of unit.items)
-      await closeWorkItem(state, item.id, github, save, true);
+      await closeWorkItem(
+        state,
+        item.id,
+        github,
+        save,
+        true,
+        signal,
+        args.pause,
+      );
   }
 }

@@ -312,7 +312,7 @@ scenarios.push({
 scenarios.push({
   name: "an App installation token without a user",
   deliveries: BOTH,
-  fake: { appToken: true },
+  fake: { appToken: true, protectionChecks: () => [] },
 });
 
 // A maintainer deleted the newest issue: the number probe past the newest

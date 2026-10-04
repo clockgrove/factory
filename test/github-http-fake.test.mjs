@@ -479,6 +479,34 @@ test("update-branch merges the base into the head, guarded by the expected head;
     [head, base],
   );
   assert.equal((await readiness()).mergeStateStatus, "CLEAN");
+  const update = await client.request(
+    "GET",
+    `repos/example/target/commits/${after.head.sha}`,
+  );
+  assert.equal(update.committer.login, "web-flow");
+  assert.deepEqual(
+    update.parents.map((parent) => parent.sha),
+    [head, base],
+  );
+  assert.equal(
+    (await client.request("GET", `repos/example/target/compare/${base}...main`))
+      .status,
+    "identical",
+  );
+  assert.equal(
+    (
+      await client.request(
+        "GET",
+        `repos/example/target/compare/${head}...${after.head.sha}`,
+      )
+    ).status,
+    "ahead",
+  );
+  assert.equal(
+    (await client.request("GET", `repos/example/target/commits/${head}`))
+      .committer.login,
+    "example",
+  );
   const protection = await client.request(
     "GET",
     "repos/example/target/branches/main/protection/required_status_checks",
@@ -504,7 +532,23 @@ test("a deleted issue answers 410 and leaves the lists", async (t) => {
 });
 
 test("an App token has no user; what it creates carries the bot login", async (t) => {
-  const { fake, client } = await setup(t, { appToken: true });
+  const { fake, client } = await setup(t, {
+    appToken: true,
+    protectionChecks: () => ["ci"],
+  });
+  // It cannot read classic protection; the branch shows the required checks.
+  await assert.rejects(
+    client.request(
+      "GET",
+      "repos/example/target/branches/main/protection/required_status_checks",
+    ),
+    (error) => error instanceof GitHubRequestError && error.status === 403,
+  );
+  const branch = await client.request(
+    "GET",
+    "repos/example/target/branches/main",
+  );
+  assert.deepEqual(branch.protection.required_status_checks.contexts, ["ci"]);
   await assert.rejects(
     client.request("GET", "user"),
     (error) => error instanceof GitHubRequestError && error.status === 403,

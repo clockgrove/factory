@@ -25,9 +25,14 @@
 //   or 422 for a stale expected_head_sha, a closed PR, a conflict or a head
 //   that already contains the base. Under strict protection (`strict`), a PR
 //   whose head lacks the base tip reads BEHIND.
+//   The update is GitHub's commit (committer web-flow, GET /commits/{sha});
+//   GET /compare/{base}...{head} reports identical, ahead, behind or
+//   diverged.
 // - A deleted issue (`deleteIssue`) answers 410 and leaves every list.
 // - With `appToken`, GET /user is 403 (an App installation token has no user)
-//   and what Factory creates is authored by the App's bot login.
+//   and what Factory creates is authored by the App's bot login; the classic
+//   protection route is 403 too, and GET /branches/{branch} shows the same
+//   required checks.
 // - Unknown routes are 404 and recorded as `unhandled`.
 //
 // Modes: read-after-write lag per endpoint, fault rules on the Nth matching
@@ -86,6 +91,9 @@ const ROUTES = [
   ["GET", "/commits/:sha/check-runs", "checkRuns"],
   ["GET", "/commits/:sha/status", "combinedStatus"],
   ["GET", "/rules/branches/:branch", "branchRules"],
+  ["GET", "/branches/:branch", "getBranch"],
+  ["GET", "/commits/:sha", "getCommit"],
+  ["GET", "/compare/:basehead", "compare"],
   [
     "GET",
     "/branches/:branch/protection/required_status_checks",
@@ -284,6 +292,8 @@ export class GitHubHttpFake {
       stacks: [],
       jobs: {},
       readinessReads: {},
+      // Commits GitHub made itself (branch updates), committed by web-flow.
+      webFlow: [],
     };
     for (const issue of options.issues ?? [])
       this.createIssueRecord(this.state, issue);
@@ -924,6 +934,7 @@ export class GitHubHttpFake {
       pull.head.sha,
     );
     pull.head.sha = commit;
+    s.webFlow.push(commit);
     this.event(s, number, "head_ref_force_pushed");
     return {
       status: 202,
@@ -1646,6 +1657,8 @@ export class GitHubHttpFake {
     const branch = decodeURIComponent(params.branch);
     const checks = this.options.protectionChecks?.(branch);
     if (!checks) throw new HttpError(404, "Branch not protected");
+    if (this.options.appToken)
+      throw new HttpError(403, "Resource not accessible by integration");
     return {
       status: 200,
       data: {
@@ -1657,20 +1670,109 @@ export class GitHubHttpFake {
     };
   }
 
-  combinedStatus(s, { params }) {
+  /** A branch with its protection's required checks (readable with read access). */
+  async getBranch(s, { params }) {
+    const branch = decodeURIComponent(params.branch);
+    const sha = (await this.refs()).get(branch);
+    if (!sha) throw new HttpError(404, "Branch not found");
+    const checks = this.options.protectionChecks?.(branch);
+    return {
+      status: 200,
+      data: {
+        name: branch,
+        commit: { sha },
+        protected: Boolean(checks),
+        protection: checks
+          ? {
+              enabled: true,
+              required_status_checks: {
+                enforcement_level: "non_admins",
+                contexts: checks,
+                checks: checks.map((context) => ({ context, app_id: null })),
+              },
+            }
+          : { enabled: false, required_status_checks: null },
+      },
+    };
+  }
+
+  /** A commit with its parents; GitHub's own commits name web-flow. */
+  async getCommit(s, { params }) {
+    const result = await gitStatus(
+      this.origin,
+      "rev-list",
+      "--parents",
+      "-n",
+      "1",
+      params.sha,
+    );
+    if (result.status !== 0)
+      throw validation(`No commit found for SHA: ${params.sha}`);
+    const [sha, ...parents] = result.stdout.trim().split(" ");
+    const login = s.webFlow.includes(sha) ? "web-flow" : this.owner;
+    return {
+      status: 200,
+      data: {
+        sha,
+        url: `${API}/repos/${this.repository}/commits/${sha}`,
+        parents: parents.map((parent) => ({ sha: parent })),
+        author: { login },
+        committer: { login },
+      },
+    };
+  }
+
+  /** How `head` relates to `base` (`base...head`, branch names or SHAs). */
+  async compare(s, { params }) {
+    const [base, head] = decodeURIComponent(params.basehead).split("...");
+    const resolve = async (ref) => {
+      const result = await gitStatus(
+        this.origin,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `${ref}^{commit}`,
+      );
+      if (result.status !== 0) throw new HttpError(404, "Not Found");
+      return result.stdout.trim();
+    };
+    const [from, to] = [await resolve(base), await resolve(head)];
+    const status =
+      from === to
+        ? "identical"
+        : (await this.isAncestor(from, to))
+          ? "ahead"
+          : (await this.isAncestor(to, from))
+            ? "behind"
+            : "diverged";
+    return { status: 200, data: { status, base_commit: { sha: from } } };
+  }
+
+  combinedStatus(s, { params, query }) {
     // With no commit statuses GitHub reports a pending combined state.
-    const statuses = this.options.statuses?.(params.sha) ?? [];
-    const state = statuses.some((status) =>
+    const all = this.options.statuses?.(params.sha) ?? [];
+    const page = this.page(
+      query,
+      all,
+      `/repos/${this.repository}/commits/${params.sha}/status`,
+    );
+    // The combined state covers every status; the list is one page.
+    const state = all.some((status) =>
       ["error", "failure"].includes(status.state),
     )
       ? "failure"
-      : statuses.length &&
-          statuses.every((status) => status.state === "success")
+      : all.length && all.every((status) => status.state === "success")
         ? "success"
         : "pending";
     return {
       status: 200,
-      data: { state, sha: params.sha, total_count: statuses.length, statuses },
+      data: {
+        state,
+        sha: params.sha,
+        total_count: all.length,
+        statuses: page.data,
+      },
+      headers: page.headers,
     };
   }
 

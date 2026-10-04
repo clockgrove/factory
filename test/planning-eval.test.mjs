@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -89,7 +90,7 @@ test("plan mode plans public cases through planObjective and reports review, jud
   try {
     const config = writeConfig(work);
     const output = join(work, "out");
-    const { status, stdout } = runStatus([
+    const { status, stdout, stderr } = runStatus([
       "--config",
       config,
       "--output",
@@ -116,6 +117,18 @@ test("plan mode plans public cases through planObjective and reports review, jud
     // Two runs errored, so the eval exits 1 after writing its report.
     assert.equal(status, 1);
     assert.match(stdout, /4\/6 clean plans, 2 errors, 0 judge errors/);
+    // The stop names each errored run's log and a rerun of just that case.
+    assert.match(
+      stderr,
+      new RegExp(
+        `single-item #1: .* \\(log: ${join(output, "runs", "single-item-1", "worker.log").replaceAll(".", "\\.")}\\)`,
+      ),
+    );
+    assert.match(
+      stderr,
+      /Rerun only the failed ones[^\n]*\n  node [^\n]*--output \S+-rerun --case single-item$/m,
+    );
+    assert.doesNotMatch(stderr, /--case native-stack-chain \S*-rerun/);
     const report = readReport(output);
     assert.equal(report.schemaVersion, 2);
     assert.equal(report.mode, "plan");
@@ -255,6 +268,10 @@ test("plan mode plans public cases through planObjective and reports review, jud
       join(work, "cmp"),
     ]);
     assert.match(compared, /Paired over 3 shared units, clustered by case/);
+    assert.match(
+      compared,
+      /Errored and excluded from every rate: A 2 runs, 0 judge calls; B 2 runs, 0 judge calls\./,
+    );
     const comparison = JSON.parse(
       readFileSync(join(work, "cmp", "compare.json"), "utf8"),
     );
@@ -619,39 +636,139 @@ test("planning that never validates a correction is a question, not an error", (
   }
 });
 
-test("a Codex judge without the sandbox is refused with exit 2 before any model call", () => {
-  const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-nosandbox-"));
+// No bwrap on PATH makes the sandbox unavailable on any host; node, git and sh stay.
+function pathWithoutBubblewrap(work) {
+  const bin = join(work, "bin-without-bwrap");
+  mkdirSync(bin);
+  const tools = {
+    node: process.execPath,
+    git: execFileSync("which", ["git"], { encoding: "utf8" }).trim(),
+    sh: "/bin/sh",
+  };
+  for (const [name, target] of Object.entries(tools))
+    symlinkSync(target, join(bin, name));
+  return bin;
+}
+
+const judgeFiles = {
+  claude: join(root, "evals/judges/strict-rubric-v1-claude.json"),
+  codex: join(root, "evals/judges/strict-rubric-v1-codex.json"),
+};
+
+for (const kind of ["claude", "codex"])
+  test(`a ${kind} judge without the sandbox is refused with exit 2 and no model call`, () => {
+    const work = mkdtempSync(
+      join(tmpdir(), "factory-planning-eval-nosandbox-"),
+    );
+    try {
+      const output = join(work, "out");
+      const { status, stderr } = runStatus(
+        [
+          "--config",
+          writeConfig(work),
+          "--output",
+          output,
+          "--case",
+          "single-item",
+          "--planning-model",
+          support("eval-fixture-planner.mjs"),
+          "--judge",
+          judgeFiles[kind],
+          "--judge-transport",
+          support("eval-judge-transport.mjs"),
+        ],
+        { PATH: pathWithoutBubblewrap(work) },
+      );
+      assert.equal(status, 2, stderr);
+      assert.match(
+        stderr,
+        new RegExp(`strict-rubric-v1-${kind} needs the Linux judge sandbox`),
+      );
+      // The refusal names a working command, the Ubuntu 24.04 note and the flag.
+      assert.match(stderr, /sudo apt install bubblewrap/);
+      assert.match(stderr, /kernel\.apparmor_restrict_unprivileged_userns/);
+      assert.match(stderr, /--allow-unsandboxed-judges/);
+      assert.match(stderr, /Drop --judge/);
+      // The output directory is created only after the checks, so no run began.
+      assert.equal(existsSync(output), false);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+test("--allow-unsandboxed-judges runs judges without the sandbox and records it", () => {
+  const work = mkdtempSync(
+    join(tmpdir(), "factory-planning-eval-unsandboxed-"),
+  );
   try {
-    const empty = join(work, "empty-path");
-    mkdirSync(empty);
     const output = join(work, "out");
-    const { status, stderr } = runStatus(
+    const { status, stdout, stderr } = runStatus(
       [
         "--config",
         writeConfig(work),
         "--output",
         output,
         "--case",
-        "single-item",
+        "native-stack-chain",
         "--planning-model",
         support("eval-fixture-planner.mjs"),
         "--judge",
-        join(root, "evals/judges/strict-rubric-v1-claude.json"),
+        judgeFiles.claude,
         "--judge",
-        join(root, "evals/judges/strict-rubric-v1-codex.json"),
+        judgeFiles.codex,
         "--judge-transport",
         support("eval-judge-transport.mjs"),
+        "--allow-unsandboxed-judges",
       ],
-      // No bwrap on PATH, so the sandbox is unavailable on any host.
-      { PATH: empty },
+      { PATH: pathWithoutBubblewrap(work) },
     );
-    assert.equal(status, 2, stderr);
+    assert.equal(status, 0, stderr);
+    assert.match(stdout, /1\/1 clean plans, 0 errors, 0 judge errors/);
     assert.match(
       stderr,
-      /strict-rubric-v1-codex needs the Linux judge sandbox/,
+      /WARNING: judges run WITHOUT the sandbox \(--allow-unsandboxed-judges\)/,
     );
-    // The output directory is created only after the checks, so no run began.
-    assert.equal(existsSync(output), false);
+    const report = readReport(output);
+    assert.equal(report.judgeIsolation, "none (--allow-unsandboxed-judges)");
+    assert.deepEqual(
+      report.runs[0].judges.map((grade) => [grade.judge, grade.verdict]),
+      [
+        ["strict-rubric-v1-claude", "pass"],
+        ["strict-rubric-v1-codex", "pass"],
+      ],
+    );
+    assert.match(
+      readFileSync(join(output, "summary.md"), "utf8"),
+      /Judge isolation: none \(--allow-unsandboxed-judges\)\./,
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("the flag needs a judge, and a missing dist/ says to build", () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-flags-"));
+  try {
+    const { status, stderr } = runStatus([
+      "--config",
+      writeConfig(work),
+      "--output",
+      join(work, "out"),
+      "--allow-unsandboxed-judges",
+    ]);
+    assert.equal(status, 2);
+    assert.match(stderr, /--allow-unsandboxed-judges needs --judge/);
+    // A copy of the script without a dist/ next to it.
+    cpSync(join(root, "scripts"), join(work, "checkout", "scripts"), {
+      recursive: true,
+    });
+    const bare = spawnSync(
+      process.execPath,
+      [join(work, "checkout", "scripts", "eval-planning.mjs"), "--help"],
+      { encoding: "utf8" },
+    );
+    assert.equal(bare.status, 2);
+    assert.match(bare.stderr, /dist\/ is missing.*run `npm run build`/);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

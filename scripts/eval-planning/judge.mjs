@@ -366,26 +366,51 @@ memories = false
 hooks = false
 `;
 
-/** Codex judges run only inside the sandbox; refuse them without it. */
-export function assertJudgeIsolation(judges) {
-  if (sandboxBinary()) return;
-  const codex = judges.filter((judge) => judge.model.kind === "codex-sdk");
-  if (codex.length)
-    throw new Error(
-      `Judge ${codex.map((judge) => judge.name).join(", ")} needs the Linux judge sandbox: install bubblewrap (bwrap) with unprivileged user namespaces enabled.`,
-    );
+/** Where the judge sandbox comes from and how to check it. */
+const SANDBOX_HELP = `Install and enable bubblewrap (bwrap) with unprivileged user namespaces:
+  Debian/Ubuntu: sudo apt install bubblewrap
+  Fedora:        sudo dnf install bubblewrap
+  Arch:          sudo pacman -S bubblewrap
+  Check:         bwrap --unshare-all --ro-bind / / true
+Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor, so bwrap can fail even when installed. Allow it system-wide with
+  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+or add an AppArmor profile that lets /usr/bin/bwrap create user namespaces.
+macOS, Windows and most containers cannot run the sandbox; use a Linux host.`;
+
+/**
+ * Judges run only inside the sandbox. Without it, every judge (Claude
+ * included) is refused unless the operator passes --allow-unsandboxed-judges.
+ */
+export function assertJudgeIsolation(
+  judges,
+  { allowUnsandboxed = false } = {},
+) {
+  if (!judges.length || allowUnsandboxed || sandboxBinary()) return;
+  throw new Error(
+    `Judge ${judges.map((judge) => judge.name).join(", ")} needs the Linux judge sandbox, and this host cannot create one.
+${SANDBOX_HELP}
+Alternatives:
+  - Run on a Linux host where the check above passes.
+  - Drop --judge to run without judges (judge-free metrics only).
+  - Pass --allow-unsandboxed-judges to run the judges without isolation. Judges have no tools, but they run with your own HOME and provider configuration. The report records the flag.`,
+  );
 }
 
 /**
  * Grade one plan with every judge in the panel, in a separate process. With
- * bubblewrap (required for Codex judges) that process runs in a mount
+ * bubblewrap (required unless `allowUnsandboxed`) that process runs in a mount
  * namespace that holds only system directories, the Factory code, its
  * scratch directory and the provider logins; the eval's files do not exist
  * there. Its working directory is an empty Git repository (Codex runs only in
  * one), CODEX_HOME holds the login and CODEX_JUDGE_CONFIG, and HOME is a
  * scratch directory. The scratch directory is removed afterwards.
  */
-export async function gradeInIsolation(judges, input, module) {
+export async function gradeInIsolation(
+  judges,
+  input,
+  module,
+  { allowUnsandboxed = false } = {},
+) {
   const scratch = mkdtempSync(join(tmpdir(), "factory-plan-judge-"));
   const failAll = (error) =>
     judges.map((judge) => ({
@@ -397,7 +422,7 @@ export async function gradeInIsolation(judges, input, module) {
       wallMs: 0,
     }));
   try {
-    assertJudgeIsolation(judges);
+    assertJudgeIsolation(judges, { allowUnsandboxed });
     const work = join(scratch, "work");
     const home = join(scratch, "home");
     const codexHome = join(scratch, "codex-home");
@@ -462,19 +487,27 @@ export async function gradeInIsolation(judges, input, module) {
         ],
         { env: environment, maxBuffer: 16 * 1024 * 1024 },
       );
-    // Claude judges only: they have no tools, so a separate process in an
-    // empty directory is enough, and they keep the operator's own login.
-    else
+    // --allow-unsandboxed-judges only: judges have no tools, so a separate
+    // process in an empty directory with the operator's own login is the
+    // whole isolation. Codex still gets its own CODEX_HOME (tools-off config
+    // and a copy of the login), so the operator's config.toml never applies.
+    else {
+      const codexAuth = logins.find(([, destination]) =>
+        destination.startsWith(codexHome),
+      );
+      if (codexAuth) copyFileSync(codexAuth[0], codexAuth[1]);
       await promisify(execFile)(process.execPath, [worker, request], {
         cwd: work,
         env: sandboxEnvironment({
           HOME: homedir(),
+          CODEX_HOME: codexHome,
           ...(process.env.CLAUDE_CONFIG_DIR
             ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }
             : {}),
         }),
         maxBuffer: 16 * 1024 * 1024,
       });
+    }
     return JSON.parse(readFileSync(join(scratch, "response.json"), "utf8"));
   } catch (error) {
     return failAll(error);

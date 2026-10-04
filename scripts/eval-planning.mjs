@@ -29,36 +29,38 @@ import {
   prepareCheckout,
   repositoryFacts,
 } from "./eval-planning/cases.mjs";
-import {
-  assertJudgeIsolation,
-  gradeInIsolation,
-  judgeInput,
-  loadJudges,
-} from "./eval-planning/judge.mjs";
-import {
+const root = resolve(import.meta.dirname, "..");
+// The eval imports the compiled Factory (dist/), so check it before loading
+// anything that does.
+if (!existsSync(join(root, "dist/index.js"))) {
+  console.error(
+    `dist/ is missing or incomplete: run \`npm run build\` in ${root} first.`,
+  );
+  process.exit(2);
+}
+const { sandboxBinary } = await import("./eval-planning/sandbox.mjs");
+const { assertJudgeIsolation, gradeInIsolation, judgeInput, loadJudges } =
+  await import("./eval-planning/judge.mjs");
+const {
   compareMarkdown,
   compareReports,
   planMarkdown,
   reviewMarkdown,
   summarizePlanRuns,
   summarizeReviewRuns,
-} from "./eval-planning/report.mjs";
-import {
-  loadReviewFixtures,
-  prepareVariants,
-  reviewVariant,
-  variantPlan,
-} from "./eval-planning/review.mjs";
+} = await import("./eval-planning/report.mjs");
+const { loadReviewFixtures, prepareVariants, reviewVariant, variantPlan } =
+  await import("./eval-planning/review.mjs");
 
-const root = resolve(import.meta.dirname, "..");
 const usage = `Usage:
   node scripts/eval-planning.mjs --config FACTORY_CONFIG --output NEW_DIR
     [--cases DIR ...] [--target CHECKOUT] [--case NAME ...] [--repeat N]
     [--parallel N] [--planning-model MODULE] [--judge JUDGE_JSON ...]
-    [--judge-transport MODULE]
+    [--judge-transport MODULE] [--allow-unsandboxed-judges]
   node scripts/eval-planning.mjs --review-only --config FACTORY_CONFIG --output NEW_DIR
     [--fixtures DIR] [--case NAME ...] [--repeat N] [--parallel N]
     [--planning-model MODULE] [--judge JUDGE_JSON ...] [--judge-transport MODULE]
+    [--allow-unsandboxed-judges]
   node scripts/eval-planning.mjs --compare A/report.json B/report.json [--output DIR]`;
 
 function fail(message) {
@@ -101,6 +103,7 @@ function runOne(evalCase, repeat, options) {
         planningModule: options.planningModule,
         judges: options.judges.map((judge) => judge.path),
         judgeTransport: options.judgeTransport,
+        allowUnsandboxedJudges: options.allowUnsandboxedJudges,
         directory,
       },
       null,
@@ -180,7 +183,9 @@ function newOutput(path) {
   const output = resolve(path);
   const existed = existsSync(output);
   if (existed && readdirSync(output).length)
-    fail(`--output ${output} must be a new or empty directory`);
+    fail(
+      `--output ${output} must be a new or empty directory; pick another, for example ${output}-2`,
+    );
   return { output, existed };
 }
 
@@ -206,6 +211,52 @@ function judgeSummaries(common) {
       ? { transportModule: common.judgeTransport }
       : {}),
   }));
+}
+
+/** How the judges were isolated; null when there are no judges. */
+function judgeIsolation(common) {
+  if (!common.judges.length) return {};
+  return {
+    judgeIsolation: sandboxBinary()
+      ? "bubblewrap"
+      : "none (--allow-unsandboxed-judges)",
+  };
+}
+
+const shellQuote = (value) =>
+  /^[\w@%+=:,./-]+$/.test(value)
+    ? value
+    : `'${value.replaceAll("'", "'\\''")}'`;
+
+/**
+ * Tell the operator how to repeat the failed part: the same command with a
+ * fresh --output and only the cases (or fixtures) that errored.
+ */
+function printFailures(common, failed, details) {
+  const args = process.argv.slice(2);
+  const kept = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === "--output" || arg === "--case") index++;
+    else if (!arg.startsWith("--output=") && !arg.startsWith("--case="))
+      kept.push(arg);
+  }
+  const rerun = [
+    "node",
+    shellQuote(relative(process.cwd(), process.argv[1]) || process.argv[1]),
+    ...kept.map(shellQuote),
+    "--output",
+    shellQuote(`${common.output}-rerun`),
+    ...[...failed].flatMap((name) => ["--case", shellQuote(name)]),
+  ].join(" ");
+  console.error(
+    `${[
+      "Errors:",
+      ...details.map((line) => `  ${line}`),
+      "Rerun only the failed ones with a new output directory:",
+      `  ${rerun}`,
+    ].join("\n")}`,
+  );
 }
 
 function write(output, report, markdown) {
@@ -251,6 +302,7 @@ async function planMode(values, common) {
     ...(common.config.autonomy ? { autonomy: common.config.autonomy } : {}),
     ...(common.planningModule ? { planningModule: common.planningModule } : {}),
     judges: judgeSummaries(common),
+    ...judgeIsolation(common),
     repeat: common.repeat,
     parallel: common.parallel,
     summary,
@@ -259,6 +311,27 @@ async function planMode(values, common) {
   };
   write(common.output, report, planMarkdown(report));
   const { errors, judgeErrors } = summary.overall;
+  const judgeFailed = (run) =>
+    (run.judges ?? []).filter((grade) => grade.verdict === "error");
+  const broken = runs.filter(
+    (run) => run.outcome === "error" || judgeFailed(run).length,
+  );
+  if (broken.length)
+    printFailures(
+      common,
+      new Set(broken.map((run) => run.case)),
+      broken.flatMap((run) => [
+        ...(run.outcome === "error"
+          ? [
+              `${run.case} #${run.repeat}: ${(run.error ?? "unknown").split("\n")[0]} (log: ${join(common.output, "runs", `${run.case}-${run.repeat}`, "worker.log")})`,
+            ]
+          : []),
+        ...judgeFailed(run).map(
+          (grade) =>
+            `${run.case} #${run.repeat}: judge ${grade.judge}: ${(grade.error ?? "unknown").split("\n")[0]}`,
+        ),
+      ]),
+    );
   console.log(
     `Planning eval: ${runs.filter((run) => run.outcome === "plan").length}/${runs.length} clean plans, ${errors} errors, ${judgeErrors} judge errors; wrote ${join(common.output, "report.json")} and summary.md`,
   );
@@ -359,6 +432,7 @@ async function reviewMode(values, common) {
         common.judges,
         judgeInput(variantPlan(variant), entry.facts),
         common.judgeTransport,
+        { allowUnsandboxed: common.allowUnsandboxedJudges },
       );
     });
   const refusals = prepared.flatMap((entry) =>
@@ -379,6 +453,7 @@ async function reviewMode(values, common) {
     config: { path: common.configPath, planning: common.config.planning },
     ...(common.planningModule ? { planningModule: common.planningModule } : {}),
     judges: judgeSummaries(common),
+    ...judgeIsolation(common),
     repeat: common.repeat,
     parallel: common.parallel,
     summary,
@@ -386,6 +461,29 @@ async function reviewMode(values, common) {
     runs,
   };
   write(common.output, report, reviewMarkdown(report));
+  const reviewBroken = runs.filter(
+    (run) =>
+      run.review === "error" ||
+      (run.judges ?? []).some((grade) => grade.verdict === "error"),
+  );
+  if (reviewBroken.length)
+    printFailures(
+      common,
+      new Set(reviewBroken.map((run) => run.fixture)),
+      reviewBroken.flatMap((run) => [
+        ...(run.review === "error"
+          ? [
+              `${run.fixture}/${run.variant} #${run.repeat}: ${(run.error ?? "unknown").split("\n")[0]}`,
+            ]
+          : []),
+        ...(run.judges ?? [])
+          .filter((grade) => grade.verdict === "error")
+          .map(
+            (grade) =>
+              `${run.fixture}/${run.variant} #${run.repeat}: judge ${grade.judge}: ${(grade.error ?? "unknown").split("\n")[0]}`,
+          ),
+      ]),
+    );
   console.log(
     `Review eval: ${runs.length} reviews of ${prepared.length} fixtures, ${summary.errors} errors, ${summary.judgeErrors} judge errors; wrote ${join(common.output, "report.json")} and summary.md`,
   );
@@ -435,6 +533,7 @@ async function main() {
       "planning-model": { type: "string" },
       judge: { type: "string", multiple: true, default: [] },
       "judge-transport": { type: "string" },
+      "allow-unsandboxed-judges": { type: "boolean" },
       "review-only": { type: "boolean" },
       compare: { type: "boolean" },
       help: { type: "boolean" },
@@ -460,6 +559,8 @@ async function main() {
   const judgeTransportModule = moduleOption("judge-transport");
   if (judgeTransportModule && !values.judge.length)
     fail("--judge-transport needs --judge");
+  if (values["allow-unsandboxed-judges"] && !values.judge.length)
+    fail("--allow-unsandboxed-judges needs --judge");
   let judges;
   try {
     judges = loadJudges(values.judge);
@@ -467,11 +568,16 @@ async function main() {
     fail(error instanceof Error ? error.message : String(error));
   }
   // Refuse before any model call when a judge cannot run in this environment.
+  const allowUnsandboxedJudges = Boolean(values["allow-unsandboxed-judges"]);
   try {
-    assertJudgeIsolation(judges);
+    assertJudgeIsolation(judges, { allowUnsandboxed: allowUnsandboxedJudges });
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
+  if (judges.length && !sandboxBinary())
+    console.error(
+      "WARNING: judges run WITHOUT the sandbox (--allow-unsandboxed-judges). They have no tools but use your own HOME and provider configuration; the report records this.",
+    );
   const common = {
     configPath,
     config,
@@ -480,6 +586,7 @@ async function main() {
     planningModule,
     judges,
     judgeTransport: judgeTransportModule,
+    allowUnsandboxedJudges,
     repeat: positiveInteger(values.repeat, "repeat"),
     parallel: positiveInteger(values.parallel, "parallel"),
   };

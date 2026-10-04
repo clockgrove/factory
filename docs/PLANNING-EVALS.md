@@ -24,19 +24,20 @@ node scripts/eval-planning.mjs --review-only --config factory.json \
 node scripts/eval-planning.mjs --compare out/a/report.json out/b/report.json
 ```
 
-| Option                     | Meaning                                                                                                                      |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `--config FILE`            | A Factory configuration. Its `planning` block picks provider and models; `autonomy` bounds revisions. `checkout` is ignored. |
-| `--output DIR`             | New or empty directory for `report.json` and `summary.md`.                                                                   |
-| `--cases DIR`              | Case directory. Repeatable. Default `evals/cases`.                                                                           |
-| `--case NAME`              | Run only this case (or review fixture). Repeatable.                                                                          |
-| `--target CHECKOUT`        | Checkout for private cases that name only a commit.                                                                          |
-| `--repeat N`               | Runs per case. Use at least 5 for a decision. Default 1.                                                                     |
-| `--parallel N`             | Concurrent runs. Default: available parallelism / 4.                                                                         |
-| `--judge FILE`             | Grade each plan with this frozen judge. Repeatable: several judges form a panel.                                             |
-| `--fixtures DIR`           | Review fixtures for `--review-only`. Default `evals/review`.                                                                 |
-| `--planning-model MODULE`  | Module exporting `createPlanningModel({ config, directory })`, replacing the configured planner and reviewer.                |
-| `--judge-transport MODULE` | Testing only: module exporting `createJudgeTransport({ judge })`. The report records it.                                     |
+| Option                       | Meaning                                                                                                                      |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `--config FILE`              | A Factory configuration. Its `planning` block picks provider and models; `autonomy` bounds revisions. `checkout` is ignored. |
+| `--output DIR`               | New or empty directory for `report.json` and `summary.md`.                                                                   |
+| `--cases DIR`                | Case directory. Repeatable. Default `evals/cases`.                                                                           |
+| `--case NAME`                | Run only this case (or review fixture). Repeatable.                                                                          |
+| `--target CHECKOUT`          | Checkout for private cases that name only a commit.                                                                          |
+| `--repeat N`                 | Runs per case. Use at least 5 for a decision. Default 1.                                                                     |
+| `--parallel N`               | Concurrent runs. Default: available parallelism / 4.                                                                         |
+| `--judge FILE`               | Grade each plan with this frozen judge. Repeatable: several judges form a panel.                                             |
+| `--fixtures DIR`             | Review fixtures for `--review-only`. Default `evals/review`.                                                                 |
+| `--planning-model MODULE`    | Module exporting `createPlanningModel({ config, directory })`, replacing the configured planner and reviewer.                |
+| `--allow-unsandboxed-judges` | Run judges without the sandbox when the host cannot create one. See Frozen judges. The report records it.                    |
+| `--judge-transport MODULE`   | Testing only: module exporting `createJudgeTransport({ judge })`. The report records it.                                     |
 
 Runs use your provider login: the Codex login for `codex-sdk`, the Claude Code login for `claude-agent-sdk`.
 
@@ -51,8 +52,8 @@ Errors are counted but carry no quality metrics. They are left out of every rate
 Exit codes:
 
 - 0: every run and judge call completed, whatever the plans' quality.
-- 1: at least one run or judge call errored. The report is still written.
-- 2: an invalid case, judge, config or option, or a Codex judge on a host without the judge sandbox, caught before any model call. The output directory is left empty.
+- 1: at least one run or judge call errored. The report is still written. The eval prints each errored run's `worker.log` path and a rerun command with a new `--output` and only the failed cases.
+- 2: an invalid case, judge, config or option, a missing `dist/` (run `npm run build`), or any judge on a host without the judge sandbox and without `--allow-unsandboxed-judges`, caught before any model call. The output directory is left empty.
 
 Each run records the host-dependent planning inputs (`host.localExecutables`, `host.capacity`), so runs on different machines can be told apart.
 
@@ -112,7 +113,7 @@ Judges run in a separate process inside a bubblewrap mount namespace (Linux, wit
 
 Everything else does not exist inside, including `/home`, `/tmp`, the eval's output, sibling runs' plans and checkouts. The working directory is an empty Git repository. `HOME` is in the scratch directory. `CODEX_HOME` holds the login and the judge's own `config.toml`, which turns off shell, file, web, app, plugin and agent tools; the operator's `config.toml` and `AGENTS.md` never apply. Only an allowlist of environment variables passes in. Claude judges also run with no tools, MCP servers, agents, plugins or settings.
 
-A Codex judge is refused, with exit 2 before any model call, when the sandbox is unavailable. A Claude judge then runs in a plain child process. In plan mode, judges grade after the checkout is removed and before the plan reaches disk. In review-only mode, they grade after every review. The scratch directory is deleted afterwards.
+Without the sandbox, every judge (Claude included) is refused with exit 2 before any model call. The refusal prints the install commands (`sudo apt install bubblewrap`), the Ubuntu 24.04 AppArmor note and the alternatives. Install bubblewrap, use a Linux host where `bwrap --unshare-all --ro-bind / / true` works, drop `--judge`, or pass `--allow-unsandboxed-judges`. With the flag, each judge runs in a plain child process in an empty directory with your own `HOME` and Claude login. A Codex judge still gets its own `CODEX_HOME` with the tools-off `config.toml` and a copy of the login. The eval prints a warning, `report.json` records `judgeIsolation: "none (--allow-unsandboxed-judges)"` and `summary.md` repeats it. A report from an unsandboxed host is not evidence that the sandbox works. In plan mode, judges grade after the checkout is removed and before the plan reaches disk. In review-only mode, they grade after every review. The scratch directory is deleted afterwards.
 
 - Never edit a frozen judge in a prompt PR, because a judge tuned with the prompt it grades measures nothing. Add a new judge file with a new name instead.
 - A judge is never the production reviewer prompt, because the reviewer cannot grade itself.
@@ -129,7 +130,7 @@ A judge's digest covers:
 
 The test suite pins each digest, so a change to any of these fails CI.
 
-The sandbox tests (plan and review runs with the Codex judge, and the isolation probe) skip, with the reason in the test output, when the host cannot run bubblewrap with unprivileged user namespaces: macOS, Windows, containers, and Ubuntu 24.04 runners, which restrict user namespaces through AppArmor. CI does not install bubblewrap or enable user namespaces today, so these tests skip there. Enabling them in CI is the repository owner's decision (#655). Until then, run `node --test test/planning-eval.test.mjs` on a Linux host with user namespaces before changing the judge sandbox.
+The sandbox tests (plan and review runs with judges, and the isolation probe) skip, with the reason in the test output, when the host cannot run bubblewrap with unprivileged user namespaces: macOS, Windows, containers, and Ubuntu 24.04 runners, which restrict user namespaces through AppArmor. CI does not install bubblewrap or enable user namespaces today, so these tests skip there. Enabling them in CI is the repository owner's decision (#705). Until then, run `node --test test/planning-eval.test.mjs` on a Linux host with user namespaces before changing the judge sandbox.
 
 ## Cases
 

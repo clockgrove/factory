@@ -67,9 +67,9 @@ const root = resolve(import.meta.dirname, "..");
  */
 const FROZEN_JUDGES = {
   "strict-rubric-v1-claude":
-    "67e2905f15a5a41a87ca35de2d91fa813551bc28bf071f4c8fc61677be20c30c",
+    "a77ab59477059969990bcb988b8a8be89275c79f61e8541c1ece87171316a1c2",
   "strict-rubric-v1-codex":
-    "e9388e9240f3517faf890bbedb91643f040b25616703c5fee74aef3a2142d997",
+    "86b546ee233c50e2b0d120f5e107164656eba2fa784b1567d7fb8481a74fc819",
 };
 
 /** Fixture commits are the same on every machine. */
@@ -864,7 +864,18 @@ test("compare pairs units on identical inputs, tests them exactly and adjusts se
       unit("moved", "new", 1, 1, 1, 90),
     ],
   };
-  const result = compareReports(a, b, { iterations: 500 });
+  const result = compareReports(
+    {
+      ...a,
+      summary: { overall: { errors: 2, judgeErrors: 1 } },
+    },
+    { ...b, summary: { overall: { errors: 0, judgeErrors: 3 } } },
+    { iterations: 500 },
+  );
+  assert.deepEqual(result.errors, {
+    a: { runs: 2, judges: 1 },
+    b: { runs: 0, judges: 3 },
+  });
   assert.equal(result.units, 6);
   assert.deepEqual(result.onlyInA, ["only-a"]);
   // A unit whose Objective or commit changed is not a pair.

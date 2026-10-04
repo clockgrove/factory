@@ -137,6 +137,7 @@ if (plan && spec.judges?.length)
     loadJudges(spec.judges),
     judgeInput(plan, facts),
     spec.judgeTransport,
+    { allowUnsandboxed: Boolean(spec.allowUnsandboxedJudges) },
   );
 if (plan) {
   result.findings = plan.review.findings.map(({ detail, question }) => ({

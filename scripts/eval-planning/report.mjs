@@ -331,6 +331,16 @@ function fixtureUnits(list) {
  * Metrics with fewer than MIN_COMPARE_UNITS paired units are marked
  * insufficient and get no interval or p-value.
  */
+/** Errored runs and judge calls in a report; they are excluded from every rate. */
+function errorCounts(report) {
+  const summary =
+    report.mode === "review" ? report.summary : report.summary?.overall;
+  return {
+    runs: summary?.errors ?? 0,
+    judges: summary?.judgeErrors ?? 0,
+  };
+}
+
 export function compareReports(a, b, options = {}) {
   if (a.mode !== b.mode)
     throw new Error(
@@ -423,6 +433,7 @@ export function compareReports(a, b, options = {}) {
     onlyInA: [...left.keys()].filter((id) => !right.has(id)),
     onlyInB: [...right.keys()].filter((id) => !left.has(id)),
     mismatched,
+    errors: { a: errorCounts(a), b: errorCounts(b) },
     notes,
     rows,
   };
@@ -442,6 +453,9 @@ function header(report, unit) {
     report.judges.length
       ? `Judges: ${report.judges.map((judge) => `\`${judge.name}\` (${judge.model.kind} ${judge.model.model}/${judge.model.reasoningEffort}, digest \`${judge.digest.slice(0, 12)}\`)`).join(", ")}.`
       : "No judge.",
+    ...(report.judges.length && report.judgeIsolation
+      ? [`Judge isolation: ${report.judgeIsolation}.`]
+      : []),
     `Repeat ${report.repeat}, ${report.startedAt} to ${report.finishedAt}.`,
     "",
     `Rates show the rate, a 95% interval clustered by ${unit}, the run count and the number of units (${unit}s). Repeats of one ${unit} are not independent, so the interval is the wider of a ${unit}-level bootstrap and a Wilson interval on the ${unit} count.`,
@@ -592,6 +606,11 @@ export function compareMarkdown(comparison, a, b) {
     `B: \`${b}\``,
     "",
     `Paired over ${comparison.units} shared units, clustered by ${comparison.clusteredBy} (${comparison.mode} mode). Delta is mean(B − A) per unit, with a paired-bootstrap 95% interval and an exact sign-flip p-value. Primary metrics are marked *; the others are Holm-adjusted. A metric with fewer than ${MIN_COMPARE_UNITS} paired units is insufficient and gets no interval or p-value. p floor is the smallest p-value the number of units allows.`,
+    ...(comparison.errors
+      ? [
+          `\nErrored and excluded from every rate: A ${comparison.errors.a.runs} runs, ${comparison.errors.a.judges} judge calls; B ${comparison.errors.b.runs} runs, ${comparison.errors.b.judges} judge calls.`,
+        ]
+      : []),
     ...comparison.notes.map((note) => `\n${note}`),
     ...(comparison.onlyInA.length
       ? [`\nOnly in A (ignored): ${comparison.onlyInA.join(", ")}`]

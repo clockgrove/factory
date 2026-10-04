@@ -725,6 +725,7 @@ export async function runNativeGraph(args: {
               signal,
               pause: args.pause,
               cancelled: args.cancelled,
+              diagnostics: args.diagnostics,
               review: (retry) => ({
                 ...retry,
                 model: args.planningModel,
@@ -770,21 +771,8 @@ export async function runNativeGraph(args: {
                 },
               }),
             });
-          const reviewed = args.diagnostics
-            ? await args.diagnostics.span(
-                {
-                  runId: state.runId,
-                  itemId: item.id,
-                  attemptId: work.attempt,
-                  operation: "acceptance-review",
-                  metadata: { treeSha: work.treeSha! },
-                },
-                review,
-                (outcome) => ({
-                  criteria: outcome.evidence?.criteria?.length ?? 0,
-                }),
-              )
-            : await review();
+          // The review step records its own span per ask.
+          const reviewed = await review();
           if (reviewed.pending) {
             phases.release(item.id);
             work.status = "waiting";

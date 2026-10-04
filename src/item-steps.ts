@@ -187,34 +187,52 @@ export function validateItem(
 /**
  * Independent review of the exact result: a paid step. A lost answer is
  * asked again; an invalid one is asked again once with its validation
- * error, and an answer still invalid becomes the operator's decision on
- * that criterion (`factory decide-result`), within the paid bound.
+ * error (kept in the step's record, so a restart still sends it), and an
+ * answer still invalid becomes the operator's decision on that criterion
+ * (`factory decide-result`), within the paid bound. Each ask is one
+ * `acceptance-review` span.
  */
 export function reviewItem(
   args: ItemStep & {
     cancelled?: () => boolean;
+    diagnostics?: DiagnosticEmitter;
     review: (retry: {
       previousInvalid?: string;
       onInvalid: (detail: string) => void;
     }) => Parameters<typeof reviewOutcome>[0];
   },
 ): Promise<ReviewOutcome> {
-  let previousInvalid: string | undefined;
+  const work = args.state.work[args.item.id]!;
   return step(
     args.state,
     { scope: scopeOf(args), name: "review", paid: true },
     (ctx) => {
       if (stopped(args)) throw cancelledFault();
-      return ctx.paid(() =>
-        reviewOutcome(
-          args.review({
-            ...(previousInvalid ? { previousInvalid } : {}),
-            onInvalid: (detail) => {
-              previousInvalid = detail;
+      const previousInvalid = ctx.previousInvalid();
+      const ask = () =>
+        ctx.paid(() =>
+          reviewOutcome(
+            args.review({
+              ...(previousInvalid ? { previousInvalid } : {}),
+              onInvalid: (detail) => ctx.invalid(detail),
+            }),
+          ),
+        );
+      return args.diagnostics
+        ? args.diagnostics.span(
+            {
+              runId: args.state.runId,
+              itemId: args.item.id,
+              attemptId: work.attempt,
+              operation: "acceptance-review",
+              metadata: { treeSha: work.treeSha! },
             },
-          }),
-        ),
-      );
+            ask,
+            (outcome) => ({
+              criteria: outcome.evidence?.criteria?.length ?? 0,
+            }),
+          )
+        : ask();
     },
     { save: args.save, signal: args.signal, pause: args.pause },
   );

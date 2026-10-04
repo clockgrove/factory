@@ -7,7 +7,8 @@
  *    "not visible yet" a `transient` StepFault. Anything unclassified is a `defect`.
  * 4. `ctx.progress()` after each successful poll or sub-call; `ctx.pending(wait)` for "not yet" (CI, capacity).
  * 5. A paid step wraps its model turn or worker start in `ctx.paid(() => ...)` and reports a worker the driver
- *    confirmed dead with `ctx.paidLost(detail)`; only those faults count toward the bound.
+ *    confirmed dead with `ctx.paidLost(detail)`; only those faults count toward the bound. An answer it
+ *    refuses is recorded with `ctx.invalid(detail)`; the next ask reads `ctx.previousInvalid()`.
  * 6. Never rotate the attempt inside a step. Records are keyed by item, so rotation alone never resets the
  *    paid bound; work and defect end the step and reset it (repair allowances bound those).
  * 7. `step` returns only on success. On a throw, first `StepPaused` (pause, drain or handoff ended a wait
@@ -110,6 +111,14 @@ export interface StepContext {
    * driver confirmed stopped): counts toward the paid bound and repeats.
    */
   paidLost(detail: string): never;
+  /**
+   * Why the last answer of this paid step was invalid, if it was. Saved in
+   * the step's record, so the ask after a restart still carries it; the
+   * record ends with the step.
+   */
+  previousInvalid(): string | undefined;
+  /** Record why an answer was invalid; the next ask carries it. */
+  invalid(detail: string): void;
 }
 
 /** Time for backoff. Tests inject one so nothing waits in real time. */
@@ -504,8 +513,23 @@ async function repeat<T>(
       throw lost;
     };
 
+    const previousInvalid = () => record().invalid;
+    const invalid = (detail: string) => {
+      if (!spec.paid)
+        throw new Error(`Step ${name} is not paid but had an invalid answer`);
+      write({ ...record(), invalid: detail });
+      save();
+    };
+
     try {
-      const result = await fn({ progress, paid, pending, paidLost });
+      const result = await fn({
+        progress,
+        paid,
+        pending,
+        paidLost,
+        previousInvalid,
+        invalid,
+      });
       done = true;
       if (state.repeats?.[key] || owned()) {
         write({});

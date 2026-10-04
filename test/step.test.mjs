@@ -441,6 +441,53 @@ test("a crash during a paid call counts as a paid fault on restart", async () =>
   assert.deepEqual(restarted.state.repeats["objective/plan"], { paid: 4 });
 });
 
+test("an invalid answer's error survives a restart and goes with the step (#593)", async () => {
+  const h = harness();
+  const review = { scope: { item: "one" }, name: "review", paid: true };
+  const asks = [];
+  // The first answer is invalid; the process dies during the backoff.
+  const controller = new AbortController();
+  h.clock.sleep = async (_ms, signal) => {
+    controller.abort(new Error("process died"));
+    signal?.throwIfAborted();
+  };
+  await caught(
+    step(
+      h.state,
+      review,
+      (ctx) => {
+        asks.push(ctx.previousInvalid());
+        return ctx.paid(async () => {
+          ctx.invalid("criterion 2 has no evidence");
+          throw lost("Independent review answer was invalid");
+        });
+      },
+      { ...h.options, signal: controller.signal },
+    ),
+  );
+  const crashed = structuredClone(h.disk.at(-1));
+  assert.equal(
+    crashed.repeats["item/one/review"].invalid,
+    "criterion 2 has no evidence",
+  );
+  assert.doesNotThrow(() => assertRepeats(crashed.repeats, "repeats"));
+  // The restarted process asks again with the saved error.
+  const restarted = harness(crashed);
+  const answer = await step(
+    restarted.state,
+    review,
+    (ctx) => {
+      asks.push(ctx.previousInvalid());
+      return ctx.paid(async () => "reviewed");
+    },
+    restarted.options,
+  );
+  assert.equal(answer, "reviewed");
+  assert.deepEqual(asks, [undefined, "criterion 2 has no evidence"]);
+  // Success ends the step and its record.
+  assert.equal(restarted.state.repeats, undefined);
+});
+
 test("a paid call in a step not declared paid is a defect", async () => {
   const h = harness();
   const error = await caught(

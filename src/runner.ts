@@ -430,12 +430,16 @@ async function cancelRecordedSubprocesses(
   state: ContinuationState,
 ): Promise<void> {
   for (const subprocess of state.coordinator?.processes ?? []) {
-    if (!processGroupExists(subprocess.pid)) continue;
     const identity = linuxProcessIdentity(subprocess.pid);
-    if (
-      identity?.startTime !== subprocess.startTime ||
-      identity.group !== subprocess.pid
-    )
+    // Another process now has the pid. The kernel reuses a pid only once no
+    // process belongs to the group it led, so ours is gone; the process
+    // group there now is foreign and is never signalled.
+    if (identity && identity.startTime !== subprocess.startTime) continue;
+    if (!processGroupExists(subprocess.pid)) continue;
+    // No process has the pid but its group remains (a reused pid's group
+    // whose leader also exited looks the same), or our leader moved to
+    // another group: ownership of the group is unproven.
+    if (identity?.group !== subprocess.pid)
       throw new Error(
         "Subprocess owner identity is unresolved; operator direction required",
       );

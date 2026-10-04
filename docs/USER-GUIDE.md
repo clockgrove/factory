@@ -377,7 +377,7 @@ completed QA evidence remains distinct. Missing or stale capture is missing proo
 not proof that no proposal was submitted. Missing or mismatched evidence cannot
 pass a required discovery or amendment criterion.
 
-An operator can submit the same structured discovery to a running owner:
+An operator can submit the same structured discovery to a running owner, or while the Objective is stopped (no owner running). A stopped Objective takes only an in-scope amendment: Factory records it under the state lock after the same graph-digest check, and the next `factory run` reviews, charges and projects it. A backlog discovery needs a running owner.
 
 ```sh
 factory propose-amendment --objective 123 --proposal /absolute/path/proposal.json

@@ -491,9 +491,15 @@ export async function controlObjective(
     if (!state) throw new Error("Objective has no Factory state");
     if (request.action === "status") return state.coordinator;
     if (request.action === "propose-amendment") {
-      if (state.schemaVersion !== 7 || !request.input?.replacement)
+      // Every stop names this command, so it works while the Objective is
+      // stopped: it records the pending amendment under the lock (the same
+      // checks, review and charges as an owner's) and the next run compiles,
+      // reviews and projects it.
+      if (state.schemaVersion !== 7)
+        throw new Error("Planning has no active graph to amend");
+      if (request.input?.scope !== "in-scope")
         throw new Error(
-          "Only diagnosed rejected-amendment replacement is supported without an active owner",
+          "Only an in-scope amendment can be proposed while the Objective is stopped; a backlog discovery needs a running owner",
         );
       if (state.configDigest !== factoryConfigDigest(config))
         throw new Error("Objective differs from this Factory installation");

@@ -544,7 +544,7 @@ export async function diagnoseWorkRepair(args: {
     failure.continuation = "operator-decision";
     failure.predecessor = blame;
     return stop(
-      `${blame.path} is owned by ${owner}, which is merged; ${item.id} did not cause this failure and a repair of ${item.id} cannot fix it. ${diagnosis} Fix ${blame.item}: propose an amendment that adds a Work Item after ${blame.item} owning ${blame.path} (\`factory propose-amendment --objective ${state.objective}\`), then run \`${retry}\` once it is merged: that starts a new attempt on the integrated head`,
+      `${blame.path} is owned by ${owner}, which is merged; ${item.id} did not cause this failure and a repair of ${item.id} cannot fix it. ${diagnosis} Fix ${blame.item} in this order: (1) \`factory propose-amendment --objective ${state.objective} --proposal FILE\` with an in-scope proposal that adds a Work Item depending on ${blame.item} and owning ${blame.path}; it works while the Objective is stopped. (2) \`factory run --objective ${state.objective}\` until that Work Item merges. (3) \`${retry}\`, which starts a new attempt on the integrated head. (4) \`factory run --objective ${state.objective}\` again`,
     );
   }
   const correction = answer;

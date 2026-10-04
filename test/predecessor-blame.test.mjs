@@ -1,17 +1,32 @@
 // A failure caused by a merged predecessor is not repaired on the dependent (#672).
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { graphDigest } from "../dist/graph-amendments.js";
 import { assertRepairLedger, consumption } from "../dist/repair-policy.js";
+import { readContinuation, readState } from "../dist/state-store.js";
 import {
   applyWorkCorrection,
   CandidateValidationFailure,
   diagnoseWorkRepair,
   recordWorkFailure,
 } from "../dist/work-repair.js";
+import {
+  createTarget,
+  factoryConfig,
+  makeApplication,
+  ScriptedPlanningModel,
+} from "./support/integration-fixture.mjs";
 
 const autonomy = {
   allowances: {
@@ -60,6 +75,7 @@ const cli = workItem(
   ["lib"],
   'test "$(sh live/p2c/hello.sh)" = "hello, world"',
 );
+const execFileAsync = promisify(execFile);
 const git = (cwd, ...args) =>
   execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 
@@ -357,3 +373,315 @@ test("diagnosis evidence lists the failing item's files first and skips only wha
     "the budget bounds the evidence",
   );
 });
+
+// The stop's named commands, run as written, fix the predecessor (#672).
+const bodyWith = (command) =>
+  `## Acceptance\n- result.txt exists\n\n## Commands\n- \`test -s result.txt\`\n- \`${command}\`\n\n## Final validation\n- \`test -s result.txt\`\n`;
+const fileItem = (id, file, dependencies, command) => ({
+  id,
+  title: id,
+  kind: "work",
+  goal: `Write ${file}`,
+  brief: `Write ${file}`,
+  acceptance: [`${file} exists`],
+  nonGoals: ["No unrelated changes"],
+  citations: [{ path: "OBJECTIVE", heading: "Acceptance" }],
+  dependencies,
+  ownedPaths: [file],
+  resources: [],
+  validation: [{ command, provenance: "source-declared", source: "OBJECTIVE" }],
+  sourceAssets: [],
+  expectedOutputRoles: [],
+  minimumAssetSets: 0,
+  requiredLfsRoles: [],
+});
+const delay = (ms) =>
+  new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+async function until(check) {
+  for (let n = 0; n < 3000; n++) {
+    if (check()) return;
+    await delay(10);
+  }
+  throw new Error("Fixture condition not reached");
+}
+const NEXT_CHECK = 'test "$(cat result.txt)" = good';
+
+/**
+ * result merges bad content; next (after result) cannot pass on it and is
+ * blamed on result. `held` adds an independent item whose PR waits for CI,
+ * which keeps the owner alive through the stop.
+ */
+async function blameFixture(name, { held = false } = {}, run) {
+  const root = mkdtempSync(join(tmpdir(), "factory-blame-fix-"));
+  const previous = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  try {
+    const target = createTarget(root);
+    const config = {
+      ...factoryConfig(
+        target.checkout,
+        `example/blame-fix-${name}`,
+        "regular",
+        held ? 2 : 1,
+      ),
+      autonomy,
+    };
+    const graph = {
+      objective: 1,
+      baseSha: target.baseSha,
+      items: [
+        fileItem("result", "result.txt", [], "test -s result.txt"),
+        fileItem("next", "next.txt", ["result"], NEXT_CHECK),
+        ...(held
+          ? [fileItem("other", "other.txt", ["result"], "test -s result.txt")]
+          : []),
+      ],
+    };
+    const fakeRoot = join(root, "fake");
+    const scripted = new ScriptedPlanningModel(
+      graph,
+      join(fakeRoot, "planning.ndjson"),
+    );
+    let first;
+    let amendments = 0;
+    const planningModel = Object.create(scripted);
+    planningModel.generateStructured = async (request) => {
+      if (request.purpose === "diagnosis")
+        return {
+          decision: "predecessor",
+          diagnosis: "result.txt holds the wrong content",
+          correction: "",
+          predecessor: "result",
+          path: "result.txt",
+        };
+      if (!request.compileContext?.immutableItemIds)
+        return (first = await scripted.generateStructured(request));
+      amendments++;
+      const amended = structuredClone(first);
+      // The fix takes over result.txt, which the merged result item owns.
+      amended.items.push(
+        fileItem("fix", "result.txt", ["result"], "test -s result.txt"),
+      );
+      return amended;
+    };
+    const setup = makeApplication({
+      config,
+      graph,
+      objectiveBody: bodyWith(NEXT_CHECK),
+      fakeRoot,
+      planningModel,
+      actions: {
+        result: { files: [{ path: "result.txt", text: "bad\n" }] },
+        fix: { files: [{ path: "result.txt", text: "good\n" }] },
+        next: { files: [{ path: "next.txt", text: "done\n" }] },
+        other: { files: [{ path: "other.txt", text: "done\n" }] },
+      },
+    });
+    // The first PR (result) passes its checks; later ones wait for the test.
+    const { github } = setup;
+    const publish = github.publish.bind(github);
+    let published = 0;
+    github.publish = async (request) => {
+      const result = await publish(request);
+      if (++published > 1)
+        github.update((state) => {
+          state.pullRequests[result.number].checks = "pending";
+        });
+      return result;
+    };
+    const checks = (number, value) =>
+      github.update((state) => {
+        state.pullRequests[number].checks = value;
+      });
+    const configPath = join(root, "factory.json");
+    writeFileSync(configPath, JSON.stringify(config));
+    const proposalPath = join(root, "proposal.json");
+    writeFileSync(
+      proposalPath,
+      JSON.stringify({
+        scope: "in-scope",
+        reason: "result.txt holds the wrong content",
+        evidence: ["next cannot pass on the merged result.txt"],
+        ownership: ["result.txt"],
+        acceptance: ["result.txt holds good content"],
+        dependencies: ["result"],
+        actor: "operator",
+      }),
+    );
+    // Run one of the decision's commands exactly as it names it.
+    const command = (text) => {
+      const [, verb, ...args] = text.replace("FILE", proposalPath).split(" ");
+      if (verb === "run") return setup.application.runObjective(1);
+      return execFileAsync(
+        process.execPath,
+        [
+          resolve(import.meta.dirname, "../dist/cli.js"),
+          verb,
+          ...args,
+          "--config",
+          configPath,
+        ],
+        { encoding: "utf8" },
+      ).then(({ stdout }) => stdout);
+    };
+    const proposal = (live) => {
+      const state = live
+        ? readContinuation(config.repository, 1)
+        : readState(config.repository, 1);
+      return {
+        ...JSON.parse(readFileSync(proposalPath, "utf8")),
+        expectedGraphDigest: graphDigest(state.graph),
+      };
+    };
+    await run({
+      ...setup,
+      config,
+      checks,
+      command,
+      proposalPath,
+      amendments: () => amendments,
+      prepare: (live) =>
+        writeFileSync(proposalPath, JSON.stringify(proposal(live))),
+      stateOf: () => readState(config.repository, 1),
+    });
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+/** The commands the decision names, in order, as written. */
+const namedCommands = (decision) =>
+  [...decision.matchAll(/`(factory [^`]+)`/g)].map((match) => match[1]);
+
+test("the stop's named commands, run as written while stopped, fix the predecessor and complete the Objective", async () =>
+  blameFixture("stopped", {}, async (f) => {
+    await f.application.runObjective(1).catch(() => undefined);
+    const stopped = f.stateOf();
+    assert.equal(stopped.work.result.status, "done");
+    assert.equal(stopped.work.next.status, "failed");
+    const commands = namedCommands(stopped.work.next.recovery.failure.decision);
+    assert.deepEqual(
+      commands.map((text) => text.split(" ")[1]),
+      ["propose-amendment", "run", "retry", "run"],
+    );
+    const [amend, runFix, retry, runAgain] = commands;
+    // No owner is running: the command is accepted offline.
+    f.prepare(false);
+    const accepted = JSON.parse(await f.command(amend));
+    assert.equal(accepted.phase, "ready");
+    assert.equal(f.stateOf().pendingAmendment.phase, "ready");
+
+    // The next run compiles, reviews and projects it, and merges the fix.
+    const fixRun = f.command(runFix);
+    await until(() => {
+      const fix = readContinuation(f.config.repository, 1)?.work?.fix;
+      return fix?.status === "published";
+    });
+    f.checks(f.stateOf().work.fix.pullRequest, "passing");
+    await fixRun.catch(() => undefined);
+    const fixed = f.stateOf();
+    assert.equal(f.amendments(), 1);
+    assert.equal(fixed.work.fix.status, "done");
+    assert.equal(fixed.work.next.status, "failed");
+
+    // The blamed item starts over on the integrated head and passes.
+    assert.match(await f.command(retry), /attempt/);
+    const finished = f.command(runAgain);
+    await until(() => {
+      const next = readContinuation(f.config.repository, 1)?.work?.next;
+      return next?.status === "published";
+    });
+    const retried = f.stateOf();
+    assert.equal(retried.work.next.baseSha, retried.work.fix.integratedSha);
+    f.checks(retried.work.next.pullRequest, "passing");
+    const final = await finished;
+    assert.equal(final.work.next.status, "done");
+    assert.equal(final.finalValidation.passed, true);
+    assert.equal(consumption(final).implementationRepairs, 0);
+    // The fix owns the path the done predecessor owns.
+    assert.deepEqual(
+      final.graph.items
+        .filter((entry) => entry.ownedPaths.includes("result.txt"))
+        .map((entry) => entry.id),
+      ["result", "fix"],
+    );
+  }));
+
+test("the same commands work while an owner is running", async () =>
+  blameFixture("live", { held: true }, async (f) => {
+    const running = f.application.runObjective(1);
+    // other waits for CI, which keeps the owner alive; next is blamed.
+    await until(() => {
+      const state = readContinuation(f.config.repository, 1);
+      return (
+        state?.work?.next?.status === "failed" &&
+        state.work.other?.status === "published" &&
+        state.work.next.recovery?.failure?.predecessor
+      );
+    });
+    const [amend, , retry, runAgain] = namedCommands(
+      readContinuation(f.config.repository, 1).work.next.recovery.failure
+        .decision,
+    );
+    f.prepare(true);
+    const accepted = JSON.parse(await f.command(amend));
+    assert.equal(accepted.phase, "ready");
+
+    // The owner takes the amendment once in-flight delivery settles.
+    f.checks(
+      readContinuation(f.config.repository, 1).work.other.pullRequest,
+      "passing",
+    );
+    await until(
+      () =>
+        readContinuation(f.config.repository, 1)?.work?.fix?.status ===
+        "published",
+    );
+    f.checks(
+      readContinuation(f.config.repository, 1).work.fix.pullRequest,
+      "passing",
+    );
+    await until(
+      () =>
+        readContinuation(f.config.repository, 1)?.work?.fix?.status === "done",
+    );
+    assert.equal(f.amendments(), 1);
+
+    // With nothing left to run, the owner ends; the rest is the stopped path.
+    await running.catch(() => undefined);
+    await f.command(retry);
+    const finished = f.command(runAgain);
+    await until(
+      () =>
+        readContinuation(f.config.repository, 1)?.work?.next?.status ===
+        "published",
+    );
+    const state = readContinuation(f.config.repository, 1);
+    assert.equal(state.work.next.baseSha, state.work.fix.integratedSha);
+    f.checks(state.work.next.pullRequest, "passing");
+    const final = await finished;
+    assert.equal(final.work.next.status, "done");
+    assert.equal(final.finalValidation.passed, true);
+  }));
+
+test("a stopped Objective refuses an out-of-scope amendment with a reason", async () =>
+  blameFixture("backlog", {}, async (f) => {
+    await f.application.runObjective(1).catch(() => undefined);
+    f.prepare(false);
+    const [amend] = namedCommands(
+      f.stateOf().work.next.recovery.failure.decision,
+    );
+    const backlog = { ...JSON.parse(readFileSync(f.proposalPath, "utf8")) };
+    writeFileSync(
+      f.proposalPath,
+      JSON.stringify({ ...backlog, scope: "backlog" }),
+    );
+    await assert.rejects(
+      f.command(amend),
+      /Only an in-scope amendment can be proposed while the Objective is stopped/,
+    );
+    const state = f.stateOf();
+    assert.equal(state.pendingAmendment, undefined);
+    assert.equal(state.backlogDiscoveries, undefined);
+  }));

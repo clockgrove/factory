@@ -59,7 +59,6 @@ import {
   attachFault,
   decision,
   faultDetail,
-  faultOf,
   StepFault,
 } from "./fault.js";
 import {

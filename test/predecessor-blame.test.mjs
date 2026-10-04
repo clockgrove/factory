@@ -43,7 +43,7 @@ const autonomy = {
     implementationRepairs: 2,
     resultRereviews: 2,
   },
-  repairClasses: ["implementation", "validation-environment"],
+  repairClasses: ["implementation"],
   repairPolicy: {
     perPath: {
       planningRevisions: 2,

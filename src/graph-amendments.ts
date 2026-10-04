@@ -1,18 +1,20 @@
 import {
-  allowanceAvailable,
-  allowanceKey,
   amendmentAllowed,
   amendmentsUsedUp,
-  assertRepairClass,
   charge,
   chargeRepair,
   consumption,
   failureDigest,
   objectiveEvent,
-  repairClasses,
-  type RepairClass,
   type RepairCorrection,
 } from "./repair-policy.js";
+export { replacementRefusal } from "./amendment-admission.js";
+import {
+  intakeRefusal,
+  NOT_REPLACEABLE,
+  planningRefusal,
+  rejectionRefusal,
+} from "./amendment-admission.js";
 import { refreshBlameDecisions } from "./blame-decision.js";
 import { preflightObjective } from "./local-preflight.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
@@ -310,12 +312,8 @@ export function submitAmendment(
   state: FactoryState,
   proposal: AmendmentProposal,
 ): PendingAmendment {
-  if (state.objectiveClosure === "complete")
-    throw new Error("Completed Objective discoveries require successor work");
-  if (state.finalAcceptance || state.objectiveClosure === "pending")
-    throw new Error(
-      "Objective closure is busy or awaiting reconciliation; amendment intake is fenced",
-    );
+  const intake = intakeRefusal(state);
+  if (intake) throw new Error(intake);
   assertDiscovery(proposal);
   if (
     !proposal.actor?.trim() ||
@@ -324,12 +322,6 @@ export function submitAmendment(
     throw new Error(
       "Amendment actor or compare-and-set graph identity is invalid",
     );
-  if (
-    state.cancelRequested ||
-    state.cancelledAt ||
-    state.finalValidation?.passed
-  )
-    throw new Error("Amendment requires a nonterminal Objective");
   if (proposal.scope === "backlog") {
     if (proposal.replacement)
       throw new Error("A rejected amendment replacement must remain in scope");
@@ -383,50 +375,14 @@ function validateAmendmentReplacement(
   state: FactoryState,
   proposal: AmendmentProposal,
 ): PendingAmendment {
-  const rejected = state.pendingAmendment;
   const replacement = proposal.replacement!;
   const correction = replacement.correction;
-  if (
-    !rejected ||
-    rejected.id !== replacement.amendmentId ||
-    rejected.phase !== "rejected" ||
-    !rejected.error ||
-    rejected.proposal.graph ||
-    proposal.graph ||
-    (rejected.rejectionStage !== undefined
-      ? ![
-          "compilation",
-          "validation",
-          "review-findings",
-          "projection",
-        ].includes(rejected.rejectionStage)
-      : !!rejected.graph) ||
-    (rejected.rejectionStage === "review-findings" && !rejected.graph) ||
-    // A projection rejection follows a passed review: graph and digest.
-    (rejected.rejectionStage === "projection" &&
-      (!rejected.graph || rejected.reviewDigest === undefined)) ||
-    // A rejection after review may have projected issues; the replacement
-    // finds them again by marker.
-    (rejected.rejectionStage !== "projection" &&
-      (rejected.reviewDigest !== undefined ||
-        !isDeepStrictEqual(rejected.issueByItemId, state.issueByItemId)))
-  )
-    throw new Error(
-      "Replacement requires a known generated amendment rejection",
-    );
-  if (
-    state.coordinator?.mode !== "paused" ||
-    state.coordinator.cancelError ||
-    state.coordinator.processes?.length ||
-    (state.error !== undefined && state.error !== rejected.error) ||
-    Object.values(state.work).some(
-      (work) =>
-        work.status === "running" ||
-        work.status === "published" ||
-        (work.execution && work.status !== "done" && work.step === "execute"),
-    )
-  )
-    throw new Error("Amendment replacement requires paused, settled ownership");
+  const unreplaceable = proposal.graph
+    ? NOT_REPLACEABLE
+    : rejectionRefusal(state, replacement.amendmentId);
+  if (unreplaceable) throw new Error(unreplaceable);
+  const rejected = state.pendingAmendment!;
+  const error = rejected.error!;
   const discovery = (value: AmendmentProposal) => ({
     scope: value.scope,
     reason: value.reason,
@@ -440,7 +396,7 @@ function validateAmendmentReplacement(
     throw new Error("Replacement cannot change the rejected discovery scope");
   if (
     !correction ||
-    correction.failureDigest !== failureDigest(rejected.error) ||
+    correction.failureDigest !== failureDigest(error) ||
     !["planning-output", "planning-evidence", "planning-choice"].includes(
       correction.kind,
     ) ||
@@ -454,7 +410,7 @@ function validateAmendmentReplacement(
         correction.correction) ||
     state.rejectedAmendments?.some(
       (entry) =>
-        entry.error === rejected.error &&
+        entry.error === error &&
         entry.proposal.replacement?.correction.correction ===
           correction.correction,
     )
@@ -463,41 +419,9 @@ function validateAmendmentReplacement(
       "Replacement requires a new diagnosis bound to the rejection",
     );
   // The replacement is charged when it starts; it must fit now.
-  const refusal = replacementRefusal(state, correction.kind);
+  const refusal = planningRefusal(state, correction.kind);
   if (refusal) throw new Error(refusal);
   return rejected;
-}
-
-const PLANNING_CLASSES = repairClasses.filter((kind) =>
-  kind.startsWith("planning-"),
-);
-
-/**
- * Why a replacement of a rejected amendment is refused for lack of a planning
- * class or revision, or undefined when it fits. Without `kind`, whether any
- * planning class would be admitted (status names `factory cancel` when none).
- */
-export function replacementRefusal(
-  state: FactoryState,
-  kind?: RepairClass,
-): string | undefined {
-  const kinds = kind ? [kind] : PLANNING_CLASSES;
-  if (
-    !kinds.some((candidate) => state.autonomy.repairClasses.includes(candidate))
-  )
-    return kind
-      ? `Repair class ${kind} is not enabled; operator decision required`
-      : "No planning repair class is enabled; operator decision required";
-  if (
-    !allowanceAvailable(
-      state,
-      objectiveEvent("amend", "replacement"),
-      "planningRevisions",
-      ["$planning"],
-    )
-  )
-    return "Objective planningRevisions allowance exhausted";
-  return undefined;
 }
 
 export function recordWorkerDiscovery(
@@ -990,11 +914,12 @@ async function advanceAmendment(args: {
     pending.rejectionStage = stage;
     pending.phase = "rejected";
     pending.error = error instanceof Error ? error.message : String(error);
-    refreshBlameDecisions(state, graphDigest(state.graph));
     if (state.coordinator) {
       state.coordinator.mode = "paused";
       state.coordinator.waitReason = pending.error;
     }
+    // After the pause: whether a replacement fits depends on it.
+    refreshBlameDecisions(state, graphDigest(state.graph));
     save();
     // The amendment's result is refused, whatever the call reported.
     throw attachFault(new Error(pending.error, { cause: error }), {

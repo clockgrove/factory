@@ -32,10 +32,11 @@ import type {
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { faultDetail, type Wait } from "./fault.js";
-import { graphDigest, replacementRefusal } from "./graph-amendments.js";
+import { replacementRefusal } from "./amendment-admission.js";
+import { graphDigest } from "./graph-amendments.js";
 import { objectiveCandidate } from "./qa.js";
 import {
-  allowanceAvailable,
+  implementationRepairable,
   consumption,
   failureDigest,
   remaining,
@@ -1298,10 +1299,9 @@ export function statusDocument(
           error: state.pendingAmendment.error
             ? redactDiagnosticDetail(state.pendingAmendment.error, secrets)
             : null,
-          // Whether `factory propose-amendment` would accept a diagnosed
-          // replacement of a rejected amendment: a planning repair class is
-          // enabled and a planning revision fits. Status names it only then;
-          // otherwise `factory cancel`.
+          // Why `factory propose-amendment` would refuse a replacement of a
+          // rejected amendment (the checks submitAmendment applies); null when
+          // it fits. Status names it only then; otherwise `factory cancel`.
           replacementRefusal:
             state.pendingAmendment.phase === "rejected"
               ? (replacementRefusal(state) ?? null)
@@ -1338,11 +1338,9 @@ export function statusDocument(
             // (an event already charged does). Status names `factory repair`
             // only then; otherwise `factory retry`.
             repairable: work.recovery!.failure?.event
-              ? state.autonomy.repairClasses.includes("implementation") &&
-                allowanceAvailable(
+              ? implementationRepairable(
                   state,
                   work.recovery!.failure.event,
-                  "implementationRepairs",
                   repairScopes(state, id),
                 )
               : null,

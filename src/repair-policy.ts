@@ -319,6 +319,21 @@ export function allowanceAvailable(
 ): boolean {
   return charged(state, event, key) || !exhausted(state, key, scopes);
 }
+/**
+ * Whether `factory repair` (a charge of `event` against implementationRepairs)
+ * would be accepted: implementation repair is enabled and an allowance fits.
+ * Status and the recorded decision name `factory repair` only then.
+ */
+export function implementationRepairable(
+  state: RepairLedger,
+  event: string,
+  scopes: string[],
+): boolean {
+  return (
+    state.autonomy.repairClasses.includes("implementation") &&
+    allowanceAvailable(state, event, "implementationRepairs", scopes)
+  );
+}
 /** Whether one more amendment (one planning revision) fits the limit the Objective recorded. */
 export function amendmentAllowed(state: RepairLedger): boolean {
   return allowanceAvailable(

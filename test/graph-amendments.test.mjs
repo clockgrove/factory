@@ -2197,6 +2197,59 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
         assert.throws(() => submitAmendment(altered, input));
         assert.equal(JSON.stringify(altered), unchanged);
       }
+      // Status reads the same checks: every state `submitAmendment` refuses
+      // for its own sake has a refusal status can name (`factory cancel`), and
+      // a state it accepts has none (#567).
+      assert.equal(replacementRefusal(stopped), undefined);
+      for (const mutate of [
+        (s) => {
+          s.pendingAmendment.proposal.graph = structuredClone(s.graph);
+        },
+        (s) => {
+          s.work.result.status = "running";
+        },
+        (s) => {
+          s.work.result.status = "published";
+        },
+        (s) => {
+          s.pendingAmendment.rejectionStage = "review";
+        },
+        (s) => {
+          s.pendingAmendment.reviewDigest = "0".repeat(64);
+        },
+        (s) => {
+          s.pendingAmendment.issueByItemId.qa = 99;
+        },
+        (s) => {
+          s.coordinator.mode = "running";
+        },
+        (s) => {
+          s.coordinator.processes = [{ pid: 1, startTime: "1" }];
+        },
+        (s) => {
+          s.error = "unrelated error";
+        },
+        (s) => {
+          s.cancelRequested = true;
+        },
+        (s) => {
+          s.objectiveClosure = "complete";
+        },
+        (s) => {
+          s.autonomy.repairClasses = [];
+        },
+        (s) => {
+          for (const round of [90, 91])
+            s.charges[`objective/plan/${round}`] = {
+              allowances: ["planningRevisions"],
+              scopes: ["$planning"],
+            };
+        },
+      ]) {
+        const altered = structuredClone(stopped);
+        mutate(altered);
+        assert.ok(replacementRefusal(altered), String(mutate));
+      }
       let running;
       if (transport === "stopped CLI") {
         const proposalPath = join(root, "proposal.json");

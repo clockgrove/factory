@@ -17,6 +17,7 @@ import {
   chargeRepair,
   consumption,
   failureDigest,
+  implementationRepairable,
   itemEvent,
   releaseCharge,
   repairScopes,
@@ -85,8 +86,14 @@ export function recordWorkFailure(
     : fault.kind === "work"
       ? "decision"
       : fault.kind;
+  // `factory repair` is named only while it would be accepted.
+  const repairable =
+    event !== undefined &&
+    implementationRepairable(state, event, repairScopes(state, id));
   const decisions: Record<FailureClass, string> = {
-    implementation: `Supply a concrete diagnosis and correction (\`factory repair --objective ${state.objective} --proposal FILE\`), enable implementation repair in the configured autonomy, or start a new attempt with ${retry}`,
+    implementation: repairable
+      ? `Supply a concrete diagnosis and correction (\`factory repair --objective ${state.objective} --proposal FILE\`), enable implementation repair in the configured autonomy, or start a new attempt with ${retry}`
+      : `Implementation repair is not available (its allowance is used up or the class is not enabled); start a new attempt with ${retry}`,
     "planning-output": detail,
     "planning-evidence": detail,
     "planning-choice": detail,

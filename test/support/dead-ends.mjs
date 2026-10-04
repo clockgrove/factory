@@ -26,7 +26,9 @@
 //   interruption budget, a recorded subprocess that exited or whose pid was
 //   reused, a closure error, repeat and wait records (including a run of
 //   faults over a day old and a step asking the operator), a stopped planning,
-//   a rejected amendment, a cancelled item of a live Objective, spent
+//   a rejected amendment (with and without a planning revision to spare, and
+//   one that carries an operator's graph), a cancelled item of a live
+//   Objective, spent
 //   autonomy allowances and disabled repair classes.
 //   Overlays apply only where Factory could write them (a reservation matches
 //   its step, a settled worker had a handle); the state validators prune the
@@ -68,7 +70,7 @@ const { attachFault } = await import(dist("fault.js"));
 const { parseFactoryState } = await import(dist("state.js"));
 const { readContinuation } = await import(dist("state-store.js"));
 
-const { repairClasses } = await import(dist("repair-policy.js"));
+const { consumption, repairClasses } = await import(dist("repair-policy.js"));
 const repairClassCount = repairClasses.length;
 
 const REPOSITORY = "example/dead-ends";
@@ -605,6 +607,43 @@ const reviewNeedsHuman = (acceptable) => (state) => {
 };
 
 /** Overlay dimensions; each value mutates a state and says if it applies. */
+/** A graph amendment was rejected (see the "rejected amendment" overlays). */
+const rejectAmendment =
+  ({ spare, supplied = false }) =>
+  (state) => {
+    if (state.schemaVersion !== 7 || state.pendingAmendment || state.error)
+      return false;
+    const error = "Injected amendment rejection";
+    state.pendingAmendment = {
+      id: "amendment-1",
+      proposal: {
+        scope: "in-scope",
+        reason: "Discovered a missing step",
+        evidence: ["observed while working"],
+        ownership: ["extra.txt"],
+        acceptance: ["extra.txt exists"],
+        dependencies: [],
+        expectedGraphDigest: state.planGraphDigest,
+        actor: "operator",
+        ...(supplied ? { graph: structuredClone(state.graph) } : {}),
+      },
+      phase: "rejected",
+      issueByItemId: structuredClone(state.issueByItemId),
+      error,
+      rejectionStage: supplied ? "validation" : "compilation",
+    };
+    // Each started amendment is charged one planning revision.
+    spend(state, ["objective/amend/amendment-1"], "planningRevisions", [
+      "$planning",
+    ]);
+    if (spare)
+      state.autonomy.allowances.planningRevisions =
+        consumption(state).planningRevisions + spare;
+    coordinator(state).mode = "paused";
+    coordinator(state).waitReason = error;
+    return true;
+  };
+
 const OVERLAYS = {
   "item event": {
     "a step fails with an unclassified error": failStep(
@@ -659,9 +698,35 @@ const OVERLAYS = {
     // cancel; the items it had cancelled stay cancelled until retried.
     "an item was cancelled and the Objective retried": (state) => {
       if (state.schemaVersion !== 7) return false;
-      const work = state.work[focus(state)];
+      const id = focus(state);
+      const work = state.work[id];
       if (!active(work) && work.status !== "pending") return false;
-      state.work[focus(state)] = { status: "cancelled" };
+      // Nothing that builds on the cancelled item has started again: cancel
+      // stopped every item, and only a retry restarts one, after the items
+      // it depends on.
+      const after = new Set([id]);
+      for (let grew = true; grew; ) {
+        grew = false;
+        for (const item of state.graph.items)
+          if (
+            !after.has(item.id) &&
+            item.dependencies.some((dependency) => after.has(dependency))
+          ) {
+            after.add(item.id);
+            grew = true;
+          }
+      }
+      if (
+        [...after].some(
+          (other) =>
+            other !== id &&
+            ["running", "published", "waiting"].includes(
+              state.work[other].status,
+            ),
+        )
+      )
+        return false;
+      state.work[id] = { status: "cancelled" };
       return true;
     },
     // The driver collected a settled worker with no result: a `work` fault.
@@ -869,36 +934,6 @@ const OVERLAYS = {
       detail: "Injected item prerequisite",
       fix: "Install the missing tool",
     }),
-    "an amendment was rejected": (state) => {
-      if (state.schemaVersion !== 7 || state.pendingAmendment || state.error)
-        return false;
-      const error = "Injected amendment rejection";
-      state.pendingAmendment = {
-        id: "amendment-1",
-        proposal: {
-          scope: "in-scope",
-          reason: "Discovered a missing step",
-          evidence: ["observed while working"],
-          ownership: ["extra.txt"],
-          acceptance: ["extra.txt exists"],
-          dependencies: [],
-          expectedGraphDigest: state.planGraphDigest,
-          actor: "operator",
-        },
-        phase: "rejected",
-        issueByItemId: structuredClone(state.issueByItemId),
-        error,
-        rejectionStage: "compilation",
-      };
-      // Each started amendment is charged one planning revision.
-      spend(state, ["objective/amend/amendment-1"], "planningRevisions", [
-        "$planning",
-      ]);
-      // As runAmendment leaves it: paused with the rejection as the reason.
-      coordinator(state).mode = "paused";
-      coordinator(state).waitReason = error;
-      return true;
-    },
     "planning stopped": (state) => {
       if (state.schemaVersion !== 8 || state.plan) return false;
       state.planningRecovery = {
@@ -910,6 +945,17 @@ const OVERLAYS = {
       return true;
     },
   },
+  // A graph amendment was rejected, as runAmendment leaves it: charged one
+  // planning revision, the coordinator paused with the rejection as the reason.
+  // `spare` planning revisions are left afterwards; a supplied graph is an
+  // operator's candidate, which no replacement can follow.
+  "rejected amendment": {
+    "an amendment was rejected": rejectAmendment({ spare: 0 }),
+    "an amendment was rejected with a planning revision to spare":
+      rejectAmendment({ spare: 1 }),
+    "a supplied graph amendment was rejected with a planning revision to spare":
+      rejectAmendment({ spare: 1, supplied: true }),
+  },
 };
 
 /** Every overlay value, for the guard that each is exercised. */
@@ -920,7 +966,14 @@ export const OVERLAY_VALUES = Object.values(OVERLAYS).flatMap((values) =>
 /** Apply overlay values ({dimension: value}) to a copy of a state. */
 function applyOverlays(state, values) {
   const copy = structuredClone(state);
-  for (const [dimension, value] of Object.entries(values))
+  // The Objective's limits are fixed when it starts, so they come before the
+  // failures recorded under them (a failure names `factory repair` only while
+  // an allowance and the class admit it).
+  const limits = ["repair classes", "allowance"];
+  const ordered = Object.entries(values).sort(
+    ([a], [b]) => Number(limits.includes(b)) - Number(limits.includes(a)),
+  );
+  for (const [dimension, value] of ordered)
     if (!OVERLAYS[dimension][value](copy)) return undefined;
   return copy;
 }
@@ -1310,6 +1363,13 @@ const sightOf = (delivery, report, state) =>
     report.message,
   ]);
 
+/**
+ * Probes of named commands against a live owner, and how many of them the
+ * owner's control socket answered (the rest fell back to the application, as
+ * the CLI does when no owner answers).
+ */
+export const ownerProbes = { run: 0, answered: 0 };
+
 /** Operator commands followed from one state before it counts as stranded. */
 const MAX_COMMANDS = 4;
 /** Named commands besides the next action that one case exercises. */
@@ -1426,6 +1486,8 @@ async function classify(slot, anchor, state) {
     trace,
     ...extra,
   });
+  /** Whether the owner's socket answered the first command applied since it was reset to null. */
+  let answeredByOwner = null;
   /** Apply one command; with a live owner it goes through the owner. */
   const apply = async (command) => {
     const input =
@@ -1433,6 +1495,7 @@ async function classify(slot, anchor, state) {
         ? replacementProposal(snapshot())
         : undefined;
     const applied = await runCommand(world, { ...command, input });
+    answeredByOwner ??= applied.viaOwner === true;
     trace.push(
       `factory ${command.verb}: ${applied.ok ? "applied" : `refused: ${applied.message}`}${owner ? " [via owner]" : ""}`,
     );
@@ -1575,10 +1638,15 @@ async function classify(slot, anchor, state) {
           if (back.outcome !== "idle")
             return `${command.text} (${command.source}): the owner did not come back to the stop (${stopText(back)})`;
         }
+        answeredByOwner = null;
         const outcome = await follow({
           command,
           context: `${context} (named by the ${command.source}: ${command.text}, ${where})`,
         });
+        if (withOwner && command.verb !== "run") {
+          ownerProbes.run++;
+          if (answeredByOwner) ownerProbes.answered++;
+        }
         stopOwner();
         return outcome.kind === "stranded"
           ? `${command.text} (${command.source}, ${where}): ${outcome.reason}`

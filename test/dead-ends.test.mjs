@@ -25,7 +25,12 @@
 import assert from "node:assert/strict";
 import { availableParallelism } from "node:os";
 import { describe, test } from "node:test";
-import { identityName, OVERLAY_VALUES, prepare } from "./support/dead-ends.mjs";
+import {
+  identityName,
+  OVERLAY_VALUES,
+  ownerProbes,
+  prepare,
+} from "./support/dead-ends.mjs";
 
 const has = (identity, ...values) =>
   values.some((value) => identity.slice(2).includes(value));
@@ -37,73 +42,6 @@ const has = (identity, ...values) =>
  * issue (P1 when the Objective has another exit).
  */
 const D = {
-  repairAllowance: {
-    diagnosis:
-      "Status names `factory repair` after the repair allowance is used up (this item's path or the Objective's); repair is refused",
-    issue: "#676, fixed by #567",
-    pattern:
-      /factory repair is refused \((?:Repair path \S+ implementationRepairs allowance exhausted|Objective implementationRepairs allowance exhausted)/,
-    when: (identity) =>
-      has(
-        identity,
-        "this item's repair path is used up",
-        "the Objective's implementation repairs are used up",
-      ),
-  },
-  repairClass: {
-    diagnosis:
-      "Status names `factory repair` when repairClasses omits implementation; repair is refused",
-    issue: "#676, fixed by #567",
-    pattern:
-      /factory repair is refused \(Repair class implementation is not enabled/,
-    when: (identity) =>
-      has(
-        identity,
-        "no repair class is enabled",
-        "only planning repairs are enabled",
-      ),
-  },
-  amendmentPlanningRevision: {
-    diagnosis:
-      "A rejected amendment used the Objective's only planning revision, so its replacement (`factory propose-amendment`) is refused: allowance exhausted",
-    issue: "#715",
-    pattern:
-      /factory propose-amendment is refused \(Objective planningRevisions allowance exhausted\)/,
-    when: (identity) => has(identity, "an amendment was rejected"),
-  },
-  amendmentClass: {
-    diagnosis:
-      "Status names `factory propose-amendment` for a rejected amendment when repairClasses omits the planning classes; the replacement is refused",
-    issue: "#716",
-    pattern:
-      /factory propose-amendment is refused \(Repair class planning-output is not enabled/,
-    when: (identity) =>
-      has(identity, "an amendment was rejected") &&
-      has(
-        identity,
-        "no repair class is enabled",
-        "only planning repairs are enabled",
-      ),
-  },
-  amendmentUnsettled: {
-    diagnosis:
-      "Status names `factory propose-amendment` for a rejected amendment while an item is published or running; the replacement needs settled ownership, and the pending amendment blocks the delivery that would settle it",
-    issue: "#717",
-    pattern:
-      /factory propose-amendment is refused \(Amendment replacement requires paused, settled ownership\)/,
-    when: (identity) =>
-      has(identity, "an amendment was rejected") &&
-      /published|running/.test(identity[1]),
-  },
-  cancelledItem: {
-    diagnosis:
-      "A cancelled item of a live Objective is never retried: status names `factory run` (waiting for a decision nothing offers) or an Objective-wide `factory retry` (no dependency-ready delivery unit); `factory retry --item` would restart it",
-    issue: "#718",
-    pattern:
-      /factory run does not continue after .*Awaiting exact candidate decision|factory retry does not continue after stopped: No dependency-ready delivery unit/,
-    when: (identity) =>
-      has(identity, "an item was cancelled and the Objective retried"),
-  },
   configurationChanged: {
     diagnosis:
       "The installation configuration changed after the Objective started: status names `factory retry`, which is accepted, and the next run stops identically (the state does not match this installation)",
@@ -269,6 +207,35 @@ const FIXED = [
     "draining",
     "a recorded subprocess has exited",
   ],
+  // Rejected amendments (#715, #716, #717): status names cancel unless a
+  // replacement fits, and a supplied graph is never replaced.
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "an amendment was rejected with a planning revision to spare",
+  ],
+  [
+    "native-stack",
+    "alpha published (PR); beta pending",
+    "an amendment was rejected with a planning revision to spare",
+  ],
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "a supplied graph amendment was rejected with a planning revision to spare",
+  ],
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "no repair class is enabled",
+    "an amendment was rejected with a planning revision to spare",
+  ],
+  // A cancelled item of a live Objective (#718).
+  [
+    "native-stack",
+    "alpha pending; beta pending",
+    "an item was cancelled and the Objective retried",
+  ],
   ["native-stack", "alpha published (PR); beta pending", "draining"],
   [
     "regular",
@@ -384,6 +351,20 @@ describe("dead ends", { concurrency: true }, () => {
       OVERLAY_VALUES.filter((value) => !used.has(value)),
       [],
       "No case applies these overlays; they change nothing or apply to no anchor",
+    );
+  });
+
+  // The owner's control socket falls back to the application when it does not
+  // answer, so a harness that never reaches an owner would still pass.
+  test("named commands were applied through a live owner", async () => {
+    for (const testCase of cases) await outcomeOf(testCase);
+    assert.ok(
+      ownerProbes.run > 0,
+      "No stop with a live owner had a named command probed",
+    );
+    assert.ok(
+      ownerProbes.answered > 0,
+      `The owner's socket answered none of ${ownerProbes.run} probes made with an owner running`,
     );
   });
 });

@@ -219,6 +219,9 @@ const application = composeWithLocalHarness(
  * go to the running owner first and fall back to the application, as the CLI
  * does (src/cli.ts).
  */
+// Whether the owner's control socket answered the command, or the application did.
+let handledByOwner = false;
+
 async function command({ verb, options, input }) {
   const item = options.item;
   const viaOwner = async (action, body, apply) => {
@@ -227,6 +230,7 @@ async function command({ verb, options, input }) {
       action,
       input: body,
     });
+    handledByOwner = reply.handled === true;
     return reply.handled ? reply.result : apply();
   };
   switch (verb) {
@@ -284,13 +288,17 @@ async function command({ verb, options, input }) {
     case "resume":
     case "pause":
     case "drain":
-      return controlObjective(config, { objective, action: verb });
+      return viaOwner(verb, undefined, () =>
+        controlObjective(config, { objective, action: verb }),
+      );
     case "propose-amendment":
-      return controlObjective(config, {
-        objective,
-        action: "propose-amendment",
-        input,
-      });
+      return viaOwner("propose-amendment", input, () =>
+        controlObjective(config, {
+          objective,
+          action: "propose-amendment",
+          input,
+        }),
+      );
   }
   throw new Error(`Unsupported operator command: factory ${verb}`);
 }
@@ -298,7 +306,7 @@ async function command({ verb, options, input }) {
 if (descriptor.mode === "command") {
   try {
     await command(descriptor.command);
-    finish({ ok: true, status: status() });
+    finish({ ok: true, status: status(), viaOwner: handledByOwner });
   } catch (error) {
     finish({ ok: false, message: String(error?.message ?? error) });
   }

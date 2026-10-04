@@ -149,6 +149,35 @@ const restart = (state) => JSON.parse(JSON.stringify(state));
 const fail = (state, detail) =>
   recordWorkFailure(state, "result", new CandidateValidationFailure(detail));
 
+test("the recorded decision names factory repair only while repair would be accepted", () => {
+  const available = itemState(2);
+  fail(available, "Validation command failed (1)");
+  assert.match(
+    available.work.result.recovery.failure.decision,
+    /`factory repair --objective 1 --proposal FILE`/,
+  );
+  // The class is off: the same failure names the retry alone.
+  const off = itemState(2);
+  off.autonomy.repairClasses = [];
+  fail(off, "Validation command failed (1)");
+  const decision = off.work.result.recovery.failure.decision;
+  assert.doesNotMatch(decision, /factory repair/);
+  assert.match(decision, /`factory retry --objective 1 --item result`/);
+  // The allowance is used up: likewise.
+  const spent = itemState(1);
+  spent.charges = {
+    "item/result/validate/prior": {
+      allowances: ["implementationRepairs"],
+      scopes: ["$objective", "result"],
+    },
+  };
+  fail(spent, "Validation command failed (1)");
+  assert.doesNotMatch(
+    spent.work.result.recovery.failure.decision,
+    /factory repair/,
+  );
+});
+
 test("a wrong result is charged once, at its failure event, whatever repeats", async () => {
   let state = itemState(2);
   fail(state, "Validation command failed (1)");

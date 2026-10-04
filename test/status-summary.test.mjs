@@ -329,7 +329,8 @@ test("decisions name the exact command with real values", () => {
     exhausted.nextAction.command,
     "factory retry --objective 7 --item A",
   );
-  // The retry line waits while a sibling runs: retry refuses until it settles.
+  // The retry line waits while a sibling runs: retry throws "Finish or cancel
+  // active work before retry" until it settles.
   const sibling = summarizeStatus(
     execution(
       [
@@ -362,12 +363,15 @@ test("decisions name the exact command with real values", () => {
     amendment.nextAction.command,
     "factory propose-amendment --objective 7 --proposal FILE",
   );
-  // No replacement fits (no planning class, or the planning revisions are
-  // used up): `factory propose-amendment` is refused, so name cancel with the
-  // reason (#676).
+  // No replacement fits (the rejection is not one a replacement can follow,
+  // ownership is not settled, no planning class is enabled or the planning
+  // revisions are used up): `factory propose-amendment` is refused, so name
+  // cancel with the reason (#567, #715, #716, #717).
   for (const refusal of [
     "Objective planningRevisions allowance exhausted",
     "No planning repair class is enabled; operator decision required",
+    "Replacement requires a known generated amendment rejection",
+    "Amendment replacement requires paused, settled ownership",
   ]) {
     const refused = summarizeStatus(
       execution([item("A", { status: "running", step: "execute" })], {
@@ -380,10 +384,12 @@ test("decisions name the exact command with real values", () => {
     );
     assert.equal(refused.phase, "needs-decision");
     assert.equal(refused.summary, "graph amendment was rejected");
-    assert.deepEqual(refused.nextAction, {
-      command: "factory cancel --objective 7",
-      reason: `No replacement can be submitted: ${refusal}`,
-    });
+    assert.equal(refused.nextAction.command, "factory cancel --objective 7");
+    assert.ok(
+      refused.nextAction.reason.startsWith(
+        `No replacement can be submitted (${refusal}); cancel, then start a new Objective`,
+      ),
+    );
   }
 });
 
@@ -446,14 +452,15 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
       },
     }),
   );
-  // The reason carries the amendment that fixes it, not only the retry.
-  assert.match(
-    blamed.nextAction.reason,
-    /^Only after lib's lib\.sh is fixed: factory propose-amendment --objective 7 --proposal FILE adds a Work Item after lib that owns it; then this retry starts a new attempt on the integrated head$/,
-  );
+  // The command is the step that works first, the amendment; the retry that
+  // follows the fix is in the reason (a retry before it is blamed again).
   assert.equal(
     blamed.nextAction.command,
-    "factory retry --objective 7 --item A",
+    "factory propose-amendment --objective 7 --proposal FILE",
+  );
+  assert.match(
+    blamed.nextAction.reason,
+    /^Adds a Work Item after lib that owns lib's lib\.sh; then factory retry --objective 7 --item A starts a new attempt on the integrated head/,
   );
   // With no planning revision left, an amendment cannot be taken: cancel.
   const used = summarizeStatus(
@@ -526,6 +533,25 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
     }),
   );
   assert.match(rejected.nextAction.command, /^factory propose-amendment /);
+  // The rejected remedy cannot be replaced (the one revision is spent): cancel.
+  const unreplaceable = summarizeStatus(
+    execution([item("A", { status: "failed" })], {
+      state: "failed",
+      graphDigest: "g1",
+      allowanceRemaining: none,
+      pendingAmendment: {
+        phase: "rejected",
+        error: "bad graph",
+        replacementRefusal: "Objective planningRevisions allowance exhausted",
+      },
+      repairs: blame("g1"),
+    }),
+  );
+  assert.equal(
+    unreplaceable.nextAction.command,
+    "factory cancel --objective 7",
+  );
+  assert.match(unreplaceable.nextAction.reason, /new Objective/);
   const landed = summarizeStatus(
     execution(
       [item("A", { status: "failed" }), item("fix", { status: "done" })],
@@ -561,6 +587,20 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
     ),
   );
   assert.equal(unmerged.nextAction.command, "factory run --objective 7");
+  // An owner that runs is already merging the fix: run would be refused.
+  const unmergedOwned = summarizeStatus(
+    execution(
+      [item("A", { status: "failed" }), item("fix", { status: "published" })],
+      {
+        state: "failed",
+        runActive: true,
+        graphDigest: "g2",
+        allowanceRemaining: none,
+        repairs: blame("g1"),
+      },
+    ),
+  );
+  assert.equal(unmergedOwned.nextAction, null);
   const waitingOnly = summarizeStatus(
     execution(
       [
@@ -734,4 +774,38 @@ test("status documents carry the same phase, summary and next action", () => {
     "Objective #7: needs plan decision — plan review needs a human decision",
   );
   assert.ok(text.includes("Question: Keep [REDACTED]?"));
+});
+
+test("a cancelled item that blocks a live Objective is offered its own retry", () => {
+  const blocked = [
+    item("alpha", { status: "cancelled" }),
+    item("beta", { status: "pending", blockedReason: "dependency:alpha" }),
+  ];
+  for (const state of ["active", "failed"]) {
+    const cancelled = summarizeStatus(
+      execution(blocked, { state, runActive: false }),
+    );
+    assert.equal(
+      cancelled.nextAction.command,
+      "factory retry --objective 7 --item alpha",
+      state,
+    );
+  }
+  // Other work that can progress comes first; running work defers the retry.
+  assert.notEqual(
+    summarizeStatus(
+      execution([...blocked, item("gamma", { status: "pending" })], {
+        runActive: false,
+      }),
+    ).nextAction?.command,
+    "factory retry --objective 7 --item alpha",
+  );
+  assert.notEqual(
+    summarizeStatus(
+      execution([...blocked, item("gamma", { status: "running" })], {
+        runActive: false,
+      }),
+    ).nextAction?.command,
+    "factory retry --objective 7 --item alpha",
+  );
 });

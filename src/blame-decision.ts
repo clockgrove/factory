@@ -1,3 +1,4 @@
+import { replacementRefusal } from "./amendment-admission.js";
 import { amendmentAllowed, amendmentsUsedUp } from "./repair-policy.js";
 import type { FactoryState } from "./state.js";
 
@@ -33,8 +34,13 @@ export function blameDecision(
   const said = JSON.stringify(blame.diagnosis);
   const head = `${blame.path} is owned by ${owner}, which is merged; ${itemId} did not cause this failure and a repair of ${itemId} cannot fix it. The diagnosis said: ${said}.`;
   const pending = state.pendingAmendment;
-  if (pending?.phase === "rejected")
-    return `${head} The amendment that was to fix it was rejected: \`factory propose-amendment --objective ${objective} --proposal FILE\` with a replacement`;
+  if (pending?.phase === "rejected") {
+    // The replacement is refused for the same reasons status reads.
+    const refusal = replacementRefusal(state);
+    return refusal
+      ? `${head} The amendment that was to fix it was rejected and no replacement can be submitted (${refusal}): \`factory cancel --objective ${objective}\`, then start a new Objective (limits are recorded per Objective, so a raised limit applies to a new one)`
+      : `${head} The amendment that was to fix it was rejected: \`factory propose-amendment --objective ${objective} --proposal FILE\` with a replacement`;
+  }
   if (pending && pending.phase !== "backlog")
     return `${head} An amendment is pending: (1) \`${run}\` reviews and projects it and merges its Work Items. (2) \`${retry}\`, which starts a new attempt on the integrated head. (3) \`${run}\` again`;
   // The stored text does not follow the amendment's Work Items as they merge;

@@ -218,8 +218,24 @@ export async function runRegularGraph(args: {
       headSha: deliveredHead(work)!,
       earlierHeads: deliveryEarlierHeads(work),
     };
-    if (pausedWhileWaiting(item))
+    // The CI wait is a safe point: a pause, drain or handoff stops here
+    // with the wait recorded, and the next run polls CI at once.
+    if (args.paused?.()) {
+      if (work.wait?.kind !== "ci") {
+        setWait(
+          state,
+          { item: item.id },
+          {
+            kind: "ci",
+            detail: `Awaiting checks on PR #${published.pullRequest}`,
+          },
+        );
+        save();
+      }
       throw new StepPaused(repeatKey({ item: item.id }, "await-ci"));
+    }
+    // The await-ci step records its own wait from its first poll.
+    if (work.wait?.kind === "ci" && clearWait(state, { item: item.id })) save();
     await reconcile();
     /**
      * Strict protection: GitHub updates the branch with its base from

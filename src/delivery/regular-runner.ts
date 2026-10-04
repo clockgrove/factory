@@ -1,9 +1,9 @@
 import { assertIntegrated, laterIntegration } from "./integration.js";
+import { cancelledFault } from "../fault.js";
 import { deliveryReadiness } from "./readiness.js";
 import { runWorker, stopWorker as stopSharedWorker } from "../item-worker.js";
 import { recordWorkFailure, diagnoseWorkRepair } from "../work-repair.js";
 import {
-  cancelledFault,
   reportCancelled,
   reviewItem,
   staysInPlace,

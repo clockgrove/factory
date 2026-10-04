@@ -106,8 +106,6 @@ export interface WorkState {
    * lagging read accept them.
    */
   replacedHeads?: string[];
-  /** Review answer found invalid once; a second invalid answer is a decision. */
-  reviewInvalid?: string;
   treeSha?: string;
   validation?: ValidationEvidence;
   acceptancePending?: AcceptancePending;
@@ -599,8 +597,6 @@ export function parseFactoryState(
       sha(item.integratedSha, `${id}.integratedSha`);
     if (item.branchUpdateFrom !== undefined && !item.pullRequest)
       throw new Error(`Work Item ${id} branch update lacks a pull request`);
-    if (item.reviewInvalid !== undefined)
-      string(item.reviewInvalid, `${id}.reviewInvalid`);
     if (
       item.startedAt !== undefined &&
       Number.isNaN(Date.parse(string(item.startedAt, `${id}.startedAt`)))

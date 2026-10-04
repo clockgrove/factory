@@ -31,7 +31,6 @@ import {
 import { decideResult } from "../dist/runner.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
 import {
-  AcceptanceDecisionRequired,
   assertPinnedNpmScripts,
   objectiveReviewEvidence,
   PINNED_PNPM_BOOTSTRAP,
@@ -1014,9 +1013,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         },
         invocation: invocation(providerFailureEvents),
       }),
-      (error) =>
-        error.message === "provider unavailable" &&
-        !(error instanceof AcceptanceDecisionRequired),
+      (error) => error.message === "provider unavailable",
     );
     assert.deepEqual(providerFailureEvents, []);
     const malformedEvents = [];
@@ -1118,7 +1115,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
       if (previousStateRoot === undefined) delete process.env.XDG_STATE_HOME;
       else process.env.XDG_STATE_HOME = previousStateRoot;
     }
-    const clean = await reviewAcceptance({
+    const { evidence: clean } = await reviewAcceptance({
       ...request,
       model: {
         async reviewResult(_reviewRequest) {
@@ -1156,7 +1153,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         treeSha,
       },
     ]);
-    const packetGrounded = await reviewAcceptance({
+    const { evidence: packetGrounded } = await reviewAcceptance({
       ...request,
       evidence: resultEvidence,
       criteria: ["result.txt exists", "The declared validation succeeds."],
@@ -1226,53 +1223,48 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
       attempts: [],
       selectedAsset: null,
     });
-    await assert.rejects(
-      reviewAcceptance({
-        ...request,
-        evidence: resultEvidence,
-        criteria: ["result.txt exists", provenanceCriterion],
-        sources: [
-          {
-            path: "OBJECTIVE",
-            content: `result.txt exists\n${provenanceCriterion}`,
-          },
-        ],
-        observations: missingProvenance,
-        model: {
-          async reviewResult(_reviewRequest) {
-            return {
-              packetId: _reviewRequest.reviewPacket.id,
-              findings: resultFindings(_reviewRequest, [
-                {
-                  criterion: "result.txt exists",
-                  verdict: "pass",
-                  source: "Exact Git change packet",
-                  quote: "diff --git a/result.txt b/result.txt\nnew file mode",
-                  detail: "The complete patch adds result.txt.",
-                  question: "",
-                },
-                {
-                  criterion: provenanceCriterion,
-                  verdict: "needs-human",
-                  source: "Delivery observations",
-                  quote: '"attempts":[]',
-                  detail:
-                    "The authoritative observation packet has no attempt provenance.",
-                  question:
-                    "Can you provide the exact attempt and integration timing evidence?",
-                },
-              ]),
-            };
-          },
+    const missingOutcome = await reviewAcceptance({
+      ...request,
+      evidence: resultEvidence,
+      criteria: ["result.txt exists", provenanceCriterion],
+      sources: [
+        {
+          path: "OBJECTIVE",
+          content: `result.txt exists\n${provenanceCriterion}`,
         },
-      }),
-      (error) => {
-        assert.ok(error instanceof AcceptanceDecisionRequired);
-        assert.equal(error.pending.criterion, provenanceCriterion);
-        assert.match(error.pending.detail, /no attempt provenance/);
-        return true;
+      ],
+      observations: missingProvenance,
+      model: {
+        async reviewResult(_reviewRequest) {
+          return {
+            packetId: _reviewRequest.reviewPacket.id,
+            findings: resultFindings(_reviewRequest, [
+              {
+                criterion: "result.txt exists",
+                verdict: "pass",
+                source: "Exact Git change packet",
+                quote: "diff --git a/result.txt b/result.txt\nnew file mode",
+                detail: "The complete patch adds result.txt.",
+                question: "",
+              },
+              {
+                criterion: provenanceCriterion,
+                verdict: "needs-human",
+                source: "Delivery observations",
+                quote: '"attempts":[]',
+                detail:
+                  "The authoritative observation packet has no attempt provenance.",
+                question:
+                  "Can you provide the exact attempt and integration timing evidence?",
+              },
+            ]),
+          };
+        },
       },
-    );
+    });
+    assert.ok(missingOutcome.pending);
+    assert.equal(missingOutcome.pending.criterion, provenanceCriterion);
+    assert.match(missingOutcome.pending.detail, /no attempt provenance/);
     const contradictoryBase = "0".repeat(40);
     const contradictoryProvenance = JSON.stringify({
       objectiveBaseCommitSha: target.baseSha,
@@ -1290,53 +1282,48 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
       ],
       selectedAsset: null,
     });
-    await assert.rejects(
-      reviewAcceptance({
-        ...request,
-        evidence: resultEvidence,
-        criteria: ["result.txt exists", provenanceCriterion],
-        sources: [
-          {
-            path: "OBJECTIVE",
-            content: `result.txt exists\n${provenanceCriterion}`,
-          },
-        ],
-        observations: contradictoryProvenance,
-        model: {
-          async reviewResult(_reviewRequest) {
-            return {
-              packetId: _reviewRequest.reviewPacket.id,
-              findings: resultFindings(_reviewRequest, [
-                {
-                  criterion: "result.txt exists",
-                  verdict: "pass",
-                  source: "Exact Git change packet",
-                  quote: "diff --git a/result.txt b/result.txt\nnew file mode",
-                  detail: "The complete patch adds result.txt.",
-                  question: "",
-                },
-                {
-                  criterion: provenanceCriterion,
-                  verdict: "needs-human",
-                  source: "Delivery observations",
-                  quote: `"executionBaseCommitSha":"${contradictoryBase}"`,
-                  detail:
-                    "The authoritative attempt base contradicts the Objective base.",
-                  question:
-                    "Which exact accepted base should govern this attempt?",
-                },
-              ]),
-            };
-          },
+    const contradicted = await reviewAcceptance({
+      ...request,
+      evidence: resultEvidence,
+      criteria: ["result.txt exists", provenanceCriterion],
+      sources: [
+        {
+          path: "OBJECTIVE",
+          content: `result.txt exists\n${provenanceCriterion}`,
         },
-      }),
-      (error) => {
-        assert.ok(error instanceof AcceptanceDecisionRequired);
-        assert.equal(error.pending.criterion, provenanceCriterion);
-        assert.match(error.pending.detail, /contradicts the Objective base/);
-        return true;
+      ],
+      observations: contradictoryProvenance,
+      model: {
+        async reviewResult(_reviewRequest) {
+          return {
+            packetId: _reviewRequest.reviewPacket.id,
+            findings: resultFindings(_reviewRequest, [
+              {
+                criterion: "result.txt exists",
+                verdict: "pass",
+                source: "Exact Git change packet",
+                quote: "diff --git a/result.txt b/result.txt\nnew file mode",
+                detail: "The complete patch adds result.txt.",
+                question: "",
+              },
+              {
+                criterion: provenanceCriterion,
+                verdict: "needs-human",
+                source: "Delivery observations",
+                quote: `"executionBaseCommitSha":"${contradictoryBase}"`,
+                detail:
+                  "The authoritative attempt base contradicts the Objective base.",
+                question:
+                  "Which exact accepted base should govern this attempt?",
+              },
+            ]),
+          };
+        },
       },
-    );
+    });
+    assert.ok(contradicted.pending);
+    assert.equal(contradicted.pending.criterion, provenanceCriterion);
+    assert.match(contradicted.pending.detail, /contradicts the Objective base/);
     const unsure = {
       async reviewResult(_reviewRequest) {
         return {
@@ -1354,15 +1341,10 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         };
       },
     };
-    await assert.rejects(
-      reviewAcceptance({ ...request, model: unsure }),
-      (error) => {
-        assert.ok(error instanceof AcceptanceDecisionRequired);
-        assert.equal(error.pending.treeSha, treeSha);
-        assert.equal(error.pending.criterion, "result.txt exists");
-        return true;
-      },
-    );
+    const undecided = await reviewAcceptance({ ...request, model: unsure });
+    assert.ok(undecided.pending);
+    assert.equal(undecided.pending.treeSha, treeSha);
+    assert.equal(undecided.pending.criterion, "result.txt exists");
     const decision = {
       criterion: "result.txt exists",
       treeSha,
@@ -1371,19 +1353,20 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
       outcome: "accept",
       reason: "Inspected this exact result",
     };
-    const approved = await reviewAcceptance({
+    const { evidence: approved } = await reviewAcceptance({
       ...request,
       model: unsure,
       decisions: [decision],
     });
     assert.equal(approved.criteria[0].verdict, "human-accept");
-    await assert.rejects(
-      reviewAcceptance({
-        ...request,
-        model: unsure,
-        decisions: [{ ...decision, treeSha: target.baseSha }],
-      }),
-      AcceptanceDecisionRequired,
+    assert.ok(
+      (
+        await reviewAcceptance({
+          ...request,
+          model: unsure,
+          decisions: [{ ...decision, treeSha: target.baseSha }],
+        })
+      ).pending,
     );
     await assert.rejects(
       reviewAcceptance({
@@ -1620,7 +1603,7 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
     assert.doesNotMatch(followUpEvidence.content, /model-generated/);
     const criterion =
       "proof-follow-up.txt contains exactly greenfield pnpm follow-up and follow-up changes no bootstrap-owned path";
-    const accepted = await reviewAcceptance({
+    const { evidence: accepted } = await reviewAcceptance({
       model: {
         async reviewResult(request) {
           assert.deepEqual(
@@ -2272,7 +2255,6 @@ test("large binary results reach independent review as descriptors, and reviewer
       }),
       // The failed call surfaces as itself; the review step decides by its fault.
       (error) => {
-        assert.ok(!(error instanceof AcceptanceDecisionRequired));
         assert.match(error.message, /review context unavailable/);
         return true;
       },
@@ -2361,7 +2343,7 @@ test("a reviewer pass cannot auto-accept truncated result text", async () => {
           /incomplete cited evidence/.test(faultOf(error).detail),
       );
       assert.equal(calls, 1);
-      const accepted = await reviewAcceptance({
+      const { evidence: accepted } = await reviewAcceptance({
         checkout: target.checkout,
         baseSha: target.baseSha,
         commit,

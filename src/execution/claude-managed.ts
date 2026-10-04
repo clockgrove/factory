@@ -1,4 +1,4 @@
-import { classifyFaults } from "../fault.js";
+import { cancelledFault, classifyFaults } from "../fault.js";
 import { executionFault } from "./fault.js";
 import { randomUUID } from "node:crypto";
 import {
@@ -25,12 +25,7 @@ import {
   hasUnresolvedSubprocesses,
   removeWorktree,
 } from "../process.js";
-import {
-  cancelledFault,
-  endAttempt,
-  stoppedFault,
-  transportFailure,
-} from "./attempt.js";
+import { endAttempt, stoppedFault, transportFailure } from "./attempt.js";
 import { collectWorktreeResult } from "./local.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import {

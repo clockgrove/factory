@@ -1,4 +1,4 @@
-import { classifyFaults } from "../fault.js";
+import { cancelledFault, classifyFaults } from "../fault.js";
 import { executionFault } from "./fault.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -21,12 +21,7 @@ import type {
 import { AuthenticationRequiredError } from "../contracts.js";
 import type { JsonValue } from "../config.js";
 import { attachedFault } from "../fault.js";
-import {
-  cancelledFault,
-  endAttempt,
-  stoppedFault,
-  transportFailure,
-} from "./attempt.js";
+import { endAttempt, stoppedFault, transportFailure } from "./attempt.js";
 import { assertDurableValue } from "./checkpoint.js";
 import { collectWorktreeResult } from "./local.js";
 import { prepareManagedBase } from "./managed-base.js";

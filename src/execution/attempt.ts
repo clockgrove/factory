@@ -11,11 +11,6 @@ import { providerRequestFault } from "./fault.js";
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-/** The operator cancelled while the driver worked: the step stops quietly. */
-export function cancelledFault(detail: string): StepFault {
-  return new StepFault({ kind: "cancelled", detail });
-}
-
 /**
  * A provider request that failed in transit: network, an SDK connection
  * error, 408, 429 or 5xx.

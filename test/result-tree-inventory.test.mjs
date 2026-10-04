@@ -142,7 +142,8 @@ for (const inheritedConfig of [false, true])
         });
         if (inheritedConfig)
           await assert.rejects(reviewed, /Acceptance criterion disproved/);
-        else assert.equal((await reviewed).criteria[0].verdict, "pass");
+        else
+          assert.equal((await reviewed).evidence.criteria[0].verdict, "pass");
       }
       assert.equal(calls, 2);
     } finally {
@@ -198,7 +199,7 @@ test("bounded incomplete inventory cannot ground a pass; larger existing budget 
         },
       });
       if (budget === 48_000)
-        assert.equal((await reviewed).criteria[0].verdict, "pass");
+        assert.equal((await reviewed).evidence.criteria[0].verdict, "pass");
       else await assert.rejects(reviewed, invalidReviewAnswer);
     }
   } finally {

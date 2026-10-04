@@ -101,7 +101,7 @@ test("successful real validation supplies exact literal positive observation to 
       const model = reviewer(target.checkout, (actual) => {
         observed = actual;
       });
-      const reviewed = await reviewAcceptance({
+      const { evidence: reviewed } = await reviewAcceptance({
         model,
         reviewPhase,
         checkout: target.checkout,

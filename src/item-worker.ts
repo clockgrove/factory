@@ -12,7 +12,8 @@ import type {
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { workerContext } from "./execution/checkpoint.js";
 import { recordWorkerDiscovery } from "./graph-amendments.js";
-import { cancelledFault, executeItem } from "./item-steps.js";
+import { cancelledFault } from "./fault.js";
+import { executeItem } from "./item-steps.js";
 import { selectedInputsForItem } from "./media.js";
 import type { PhaseAdmission } from "./phase-admission.js";
 import { preflightItemEnvironment } from "./qa-execution.js";

@@ -14,7 +14,7 @@ import { graphDigest } from "./graph-amendments.js";
 import { reviewItem } from "./item-steps.js";
 import { validationLfsMembersForItem } from "./media.js";
 import type { PhaseAdmission } from "./phase-admission.js";
-import { faultOf, StepFault } from "./fault.js";
+import { cancelledFault, faultOf } from "./fault.js";
 import { currentProcessSignal, fetchHead, gitAsync } from "./process.js";
 import { itemCoverage, objectiveCandidate } from "./qa.js";
 import type { FactoryState } from "./state.js";
@@ -92,8 +92,7 @@ export async function runQaItem(args: {
 }): Promise<void> {
   const { state, item, save } = args;
   const signal = args.signal ?? currentProcessSignal();
-  const cancelled = () =>
-    new StepFault({ kind: "cancelled", detail: "Objective cancelled" });
+  const cancelled = cancelledFault;
   const work = state.work[item.id]!;
   const ciWait = () => waitOf(state, { item: item.id })?.kind === "ci";
   const readinessWasWaiting = ciWait();

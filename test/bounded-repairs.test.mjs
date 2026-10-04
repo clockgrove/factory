@@ -26,11 +26,7 @@ import {
   CandidateValidationFailure,
   CandidateEnvironmentFailure,
 } from "../dist/work-repair.js";
-import {
-  compilePlan,
-  objectiveCriteria,
-  CodexPlanningModel,
-} from "../dist/compiler.js";
+import { objectiveCriteria, CodexPlanningModel } from "../dist/compiler.js";
 import { coverageObligations, aggregateAcceptance } from "../dist/qa.js";
 import { faultOf, StepFault } from "../dist/fault.js";
 import { shortPlanDigest } from "../dist/status-summary.js";
@@ -52,6 +48,7 @@ import {
   packetFromPrompt,
   resultFindings,
 } from "./support/review-protocol.mjs";
+import { compilePlan } from "./support/plan.mjs";
 
 const autonomy = () => ({
   allowances: {
@@ -1190,6 +1187,7 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
       return generate(request);
     };
     planner.reviewGraph = async (request) => ({
+      packetId: request.reviewPacket.id,
       findings: [
         {
           evidenceIndices: [0],
@@ -1222,9 +1220,8 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
     const done = await fixture.application.runObjective(1);
     assert.equal(done.finalValidation.passed, true);
     assert.equal(calls, before);
-    // The review never answered validly (no packet ID): it was asked again,
-    // never charged as a revision, then left to the owner.
-    assert.equal(consumption(done).planningRevisions, 0);
+    // The finding's diagnosis was charged once and left to the owner.
+    assert.equal(consumption(done).planningRevisions, 1);
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previous;

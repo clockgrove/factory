@@ -73,6 +73,14 @@ const CASES = [
     }),
   },
   {
+    // Only the plan step bounds it (#644): no second counter re-asks first.
+    name: "plan review: the reviewer's answer is undecodable four times",
+    build: (reference) => ({
+      ...lostModelCalls(reference, "reviewGraph", () => true, "invalid"),
+      answer: OBJECTIVE_ANSWER,
+    }),
+  },
+  {
     name: "result review: alpha's review response is lost four times",
     build: (reference) => ({
       ...lostModelCalls(

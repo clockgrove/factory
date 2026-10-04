@@ -10,11 +10,13 @@ import { composePlanning } from "../dist/application.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
 import {
   compileObjective,
-  compilePlan,
-  PlanValidationError,
+  paidPlanningModel,
+  PlanningNeedsDecision,
   resolvePlan,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
+import { resolveAutonomy } from "../dist/repair-policy.js";
+import { step } from "../dist/step.js";
 import { stateRoot } from "../dist/config.js";
 import { readDiagnostics } from "../dist/diagnostics.js";
 import { statePath } from "../dist/state-store.js";
@@ -24,6 +26,7 @@ import {
   factoryConfig,
   makeApplication,
 } from "./support/integration-fixture.mjs";
+import { compilePlan, planningDiagnosis } from "./support/plan.mjs";
 
 function graph(
   baseSha,
@@ -454,10 +457,12 @@ test("one sourced review finding permits one revision and re-review", async () =
     const model = {
       async generateStructured(request) {
         calls.push({
-          type: "compile",
+          type: request.purpose === "diagnosis" ? "diagnosis" : "compile",
           objective: request.objective,
           invocation: request.invocation,
         });
+        if (request.purpose === "diagnosis")
+          return planningDiagnosis("Missing obligation");
         return withCoverage(request, graph(target.baseSha));
       },
       async reviewGraph(request) {
@@ -492,21 +497,22 @@ test("one sourced review finding permits one revision and re-review", async () =
     assert.equal(candidate.review.revisions, 1);
     assert.deepEqual(
       calls.map((call) => call.type),
-      ["compile", "review", "compile", "review"],
+      ["compile", "review", "diagnosis", "compile", "review"],
     );
-    assert.match(calls[2].objective, /Missing obligation/);
+    assert.match(calls[3].objective, /Missing obligation/);
     assert.deepEqual(
       calls.map((call) => [call.invocation.phase, call.invocation.ordinal]),
       [
         ["compile", 0],
         ["graph-review", 0],
+        ["diagnosis", 1],
         ["compile", 1],
         ["graph-review", 1],
       ],
     );
     assert.equal(
       new Set(calls.map((call) => call.invocation.invocationId)).size,
-      4,
+      5,
     );
   });
 });
@@ -535,6 +541,8 @@ test("graph review identifies the exact supplied section among duplicate paths",
       target.checkout,
       {
         async generateStructured(request) {
+          if (request.purpose === "diagnosis")
+            return planningDiagnosis("Own the later obligation");
           return withCoverage(request, graph(target.baseSha));
         },
         async reviewGraph(request) {
@@ -710,6 +718,8 @@ test("unresolved review asks one human question and records a specific decision"
     let reviewCount = 0;
     const model = {
       async generateStructured(request) {
+        if (request.purpose === "diagnosis")
+          return planningDiagnosis("Name the authorizing source");
         return withCoverage(request, graph(target.baseSha));
       },
       async reviewGraph(request) {
@@ -1027,6 +1037,8 @@ test("graph review asks about a finding without a question from its detail", asy
       {
         async generateStructured(request) {
           requests.push(request);
+          if (request.purpose === "diagnosis")
+            return planningDiagnosis("Name the missing owner.");
           return withCoverage(request, graph(target.baseSha));
         },
         async reviewGraph(request) {
@@ -1048,14 +1060,17 @@ test("graph review asks about a finding without a question from its detail", asy
     );
     assert.equal(candidate.review.status, "clean");
     assert.equal(candidate.review.revisions, 1);
-    assert.equal(requests.length, 2);
-    assert.match(
-      requests[1].compileContext.instructions,
-      /Name the missing owner\./,
+    assert.deepEqual(
+      requests.map((request) => request.purpose),
+      [requests[0].purpose, "diagnosis", requests[0].purpose],
     );
     assert.match(
-      requests[1].compileContext.instructions,
-      /"source":"review".*"question":"How should the plan change to fix this: Name the missing owner\?"/,
+      requests[1].objective,
+      /"question":"How should the plan change to fix this: Name the missing owner\?"/,
+    );
+    assert.match(
+      requests[2].compileContext.instructions,
+      /"source":"diagnosis".*Name the missing owner\./,
     );
   });
 });
@@ -1082,6 +1097,8 @@ test("a plan refused by deterministic validation spends the one revision with th
         {
           async generateStructured(request) {
             requests.push(request);
+            if (request.purpose === "diagnosis")
+              return planningDiagnosis("Use a relative ownership path");
             return withCoverage(
               request,
               requests.length === 1
@@ -1108,18 +1125,25 @@ test("a plan refused by deterministic validation spends the one revision with th
         undefined,
         (event) => observations.push(event),
       );
-      // The first compile is refused; the second receives the refusal as a
-      // finding and is reviewed once. No second revision follows a finding.
-      assert.equal(requests.length, 2);
+      // The first compile is refused; the diagnosis of the refusal corrects
+      // the second, which is reviewed once. No second revision follows.
+      assert.deepEqual(
+        requests.map((request) => request.invocation.phase),
+        ["compile", "diagnosis", "compile"],
+      );
       assert.equal(reviews, 1);
       assert.equal(requests[0].compileContext.instructions, "");
       assert.match(
-        requests[1].compileContext.instructions,
-        /"source":"check","detail":"Work Item one has invalid ownership path .*\/absolute\/one\.txt/,
+        requests[1].objective,
+        /Work Item one has invalid ownership path .*\/absolute\/one\.txt/,
+      );
+      assert.match(
+        requests[2].compileContext.instructions,
+        /"source":"diagnosis".*Use a relative ownership path/,
       );
       assert.deepEqual(
         requests.map((request) => request.invocation.ordinal),
-        [0, 1],
+        [0, 1, 1],
       );
       assert.ok(
         observations.some(
@@ -1148,6 +1172,8 @@ test("a refused plan revision still fails compilation", async () => {
     await assert.rejects(
       compilePlan(1, body, target.baseSha, target.checkout, {
         async generateStructured(request) {
+          if (request.purpose === "diagnosis")
+            return planningDiagnosis("Use a relative ownership path");
           generated++;
           const value = graph(target.baseSha);
           value.items[0].ownedPaths = ["/absolute/one.txt"];
@@ -1159,8 +1185,8 @@ test("a refused plan revision still fails compilation", async () => {
         },
       }),
       (error) =>
-        error instanceof PlanValidationError &&
-        /\/absolute\/one\.txt/.test(error.message),
+        error instanceof PlanningNeedsDecision &&
+        /Unchanged planning failure/.test(error.message),
     );
     assert.equal(generated, 2);
     assert.equal(reviews, 0);
@@ -1196,9 +1222,13 @@ test("a base-observed command the plan itself creates is revision feedback befor
       {
         async generateStructured(request) {
           requests.push(request);
+          if (request.purpose === "diagnosis")
+            return planningDiagnosis(
+              "Use a source-declared command, not one the plan creates",
+            );
           return withCoverage(
             request,
-            requests.length === 1
+            requests.filter((r) => r.purpose !== "diagnosis").length === 1
               ? creating(target.baseSha)
               : graph(target.baseSha),
           );
@@ -1209,14 +1239,21 @@ test("a base-observed command the plan itself creates is revision feedback befor
         },
       },
     );
-    // Refused before review and revised once; the review never sees it.
-    assert.equal(requests.length, 2);
+    // Refused before review; the diagnosis of the refusal corrects the second
+    // compile, and the review never sees the refused plan.
+    assert.deepEqual(
+      requests.map((request) => request.invocation.phase),
+      ["compile", "diagnosis", "compile"],
+    );
     assert.equal(reviews, 1);
     assert.match(
-      requests[1].compileContext.instructions,
-      /"source":"check","detail":"Work Item one marks .*bash scripts\/cli\.sh.* base-observed/,
+      requests[1].objective,
+      /Work Item one marks .*bash scripts\/cli\.sh.* base-observed/,
     );
-    assert.equal(candidate.review.revisions, 1);
+    assert.match(
+      requests[2].compileContext.instructions,
+      /"source":"diagnosis".*Use a source-declared command/,
+    );
     assert.equal(candidate.review.status, "clean");
   });
 });
@@ -1332,7 +1369,7 @@ test("compiler rejects wildcard ownership before independent review with actiona
     let reviews = 0;
     for (const path of ["packages/example/**", "src/?.ts"]) {
       await assert.rejects(
-        compilePlan(1, body, target.baseSha, target.checkout, {
+        compileObjective(1, body, target.baseSha, target.checkout, {
           async generateStructured(request) {
             assert.match(
               compilerWire(request, compilerCitationChoices(request.sources))
@@ -1398,5 +1435,61 @@ test("the planner packet labels each correction with its real source", async () 
     assert.match(instructions, /check \(a deterministic Factory refusal\)/);
     assert.match(instructions, /diagnosis \(an analysis of the last failure\)/);
     assert.doesNotMatch(instructions, /independent review|Factory check/);
+  });
+});
+
+test("invalid reviews after a revision are bounded by the plan step's paid count alone", async () => {
+  await fixture("invalid-after-revision", async (root) => {
+    const target = createTarget(root, {
+      "docs/plan.md": "# Plan\n\n## Wave 0\nCanonical obligation\n",
+    });
+    let reviews = 0;
+    const model = {
+      async generateStructured(request) {
+        if (request.purpose === "diagnosis")
+          return planningDiagnosis("Own the missing obligation");
+        return withCoverage(request, graph(target.baseSha));
+      },
+      async reviewGraph(request) {
+        reviews++;
+        // The first review is valid with a finding; every later one is not.
+        return reviews === 1
+          ? {
+              packetId: request.reviewPacket.id,
+              findings: [
+                {
+                  evidenceIndices: [0],
+                  detail: "Missing obligation",
+                  question: "Which requirement owns this obligation?",
+                },
+              ],
+            }
+          : { packetId: request.reviewPacket.id, findings: null };
+      },
+    };
+    const state = { autonomy: resolveAutonomy() };
+    await assert.rejects(
+      step(
+        state,
+        { scope: "objective", name: "plan", paid: true },
+        (context) =>
+          compilePlan(
+            1,
+            body,
+            target.baseSha,
+            target.checkout,
+            paidPlanningModel(model, context),
+            undefined,
+            undefined,
+            undefined,
+            { state, save() {} },
+          ),
+        { save() {}, clock: { now: () => 0, sleep: async () => {} } },
+      ),
+      /plan failed 4 times with an unknown outcome/,
+    );
+    // The valid review does not count; the invalid ones are the step's four
+    // paid faults, not the earlier count of all reviews of the round.
+    assert.equal(reviews, 5);
   });
 });

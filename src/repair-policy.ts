@@ -153,7 +153,7 @@ export interface RepairLedger {
    */
   charges?: Record<string, Charge>;
 }
-/** Paid calls (planning diagnoses, reviews) asked per failure event before the operator decides. */
+/** Paid calls (planning diagnoses) asked per failure event before the operator decides. */
 export const PAID_ATTEMPTS = 3;
 /**
  * What a failed attempt was: a repair class for a wrong result, else the

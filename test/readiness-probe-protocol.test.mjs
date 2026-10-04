@@ -7,7 +7,6 @@ import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import {
   CodexPlanningModel,
-  compilePlan,
   compilerCitationChoices,
   validateCommandProvenance,
   validateGraph,
@@ -21,6 +20,8 @@ import {
 } from "./support/compiler-wire.mjs";
 import { compilerWire } from "../dist/compiler-wire.js";
 import { createTarget } from "./support/integration-fixture.mjs";
+import { compilePlan, planningDiagnosis } from "./support/plan.mjs";
+import { consumption, resolveAutonomy } from "../dist/repair-policy.js";
 
 const require = createRequire(import.meta.url);
 const Ajv = require("ajv");
@@ -266,17 +267,19 @@ test("Codex decoder rejects prose, invalid selectors, unknown owners and old or 
 });
 
 for (const phase of ["provider", "invalid-probe"]) {
-  test(`failed sole revision at ${phase} retains the original graph, findings and cause with exactly three calls`, async (t) => {
+  // A provider error is the step's to repeat; an answer that fails the plan's
+  // checks is a failed revision, which stops for a decision.
+  test(`failed sole revision at ${phase} leaves the finding and cause with the next owner`, async (t) => {
     const target = await fixture(t);
     const calls = [];
-    let original;
     const model = {
-      async generateStructured() {
-        calls.push("compile");
-        if (calls.length === 1) {
-          original = graph(target.baseSha);
-          return original;
+      async generateStructured(request) {
+        if (request.purpose === "diagnosis") {
+          calls.push("diagnosis");
+          return planningDiagnosis("Choose an approved readiness command");
         }
+        calls.push("compile");
+        if (calls.length === 1) return graph(target.baseSha);
         if (phase === "provider")
           throw new Error("Exact readiness revision failure");
         const changed = graph(target.baseSha);
@@ -308,43 +311,35 @@ for (const phase of ["provider", "invalid-probe"]) {
         };
       },
     };
-    const candidate = await compilePlan(
-      1,
-      body,
-      target.baseSha,
-      target.checkout,
-      model,
-    );
-    assert.deepEqual(calls, ["compile", "review", "compile"]);
-    assert.equal(candidate.review.revisions, 1);
-    assert.equal(candidate.review.status, "needs-human");
-    assert.deepEqual(candidate.graph, original);
-    assert.equal(candidate.review.findings.length, 1);
-    assert.equal(
-      candidate.review.findings[0].detail,
-      "The original graph needs an explicit readiness decision",
-    );
-    assert.equal(
-      candidate.review.findings[0].question,
-      "Which approved readiness command is required?",
-    );
-    const cause =
+    const state = { autonomy: resolveAutonomy() };
+    await assert.rejects(
+      compilePlan(
+        1,
+        body,
+        target.baseSha,
+        target.checkout,
+        model,
+        undefined,
+        undefined,
+        undefined,
+        { state, save() {} },
+      ),
       phase === "provider"
         ? /Exact readiness revision failure/
-        : /Environment probe lacks command authority/;
-    assert.match(candidate.review.failure.detail, cause);
-    assert.match(candidate.review.failure.question, cause);
-    assert.equal(candidate.commands[0].command, command);
-    assert.throws(
-      () =>
-        verifyPlanCandidate(
-          candidate,
-          1,
-          body,
-          target.baseSha,
-          target.checkout,
-        ),
-      /review|accept|decision/i,
+        : /allowance is exhausted/,
     );
+    assert.deepEqual(calls, ["compile", "review", "diagnosis", "compile"]);
+    assert.equal(
+      state.planningRecovery.phase,
+      phase === "provider" ? "submitted" : "stopped",
+    );
+    assert.equal(state.plan, undefined);
+    assert.equal(consumption(state).planningRevisions, 1);
+    const [round] = state.planningRecovery.history;
+    assert.match(
+      round.detail,
+      /The original graph needs an explicit readiness decision/,
+    );
+    assert.equal(round.invocations.length, 3);
   });
 }

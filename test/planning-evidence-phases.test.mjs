@@ -8,7 +8,6 @@ import { Codex } from "@openai/codex-sdk";
 import {
   CodexPlanningModel,
   commandAuthority,
-  compilePlan,
   objectiveCriteria,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
@@ -20,6 +19,7 @@ import {
   isCompileSchema,
 } from "./support/compiler-wire.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
+import { compilePlan, planningDiagnosis } from "./support/plan.mjs";
 
 const image = readFileSync(
   new URL("./fixtures/disposable-target/assets/source.png", import.meta.url),
@@ -134,7 +134,9 @@ test("rendered compiler and plan reviewer carry the source commands and stop uns
       const compile = isCompileSchema(options?.outputSchema);
       prompts.push({ prompt, compile });
       let response;
-      if (compile) {
+      if (options.outputSchema.properties.correction) {
+        response = planningDiagnosis(question);
+      } else if (compile) {
         response = withCoverage(
           {
             coverageObligations: coverageObligations(
@@ -199,7 +201,8 @@ test("rendered compiler and plan reviewer carry the source commands and stop uns
     candidate.graph.items[0].validation.map((entry) => entry.command),
     [size, hash],
   );
-  assert.equal(prompts.length, 4);
+  // Compile and review, the diagnosis of the finding, then both again.
+  assert.equal(prompts.length, 5);
   assert.ok(
     prompts.every(({ prompt, compile }) =>
       compile

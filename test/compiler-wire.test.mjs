@@ -12,9 +12,9 @@ import {
   CodexPlanningModel,
   MalformedPlannerOutput,
   PlanValidationError,
+  PlanningNeedsDecision,
   compilerCitationChoices,
   compileObjective,
-  compilePlan,
   hydrateWorkerInputSources,
   objectiveCriteria,
   verifyPlanCandidate,
@@ -37,6 +37,7 @@ import {
 import { decodeGraphReview, reviewPacket } from "../dist/review-evidence.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
+import { compilePlan, planningDiagnosis } from "./support/plan.mjs";
 const Ajv = createRequire(import.meta.url)("ajv");
 const body =
   '# Objective\n\n## Acceptance\n- Source-defined result exists.\n\n## Validation\n- `test -d .`\n\n## Worker implementation\nUse node:assert/strict and assert process.versions.node.split(".")[0] equals "24".\n\n## Required checks\n- required-check\n- quality\n';
@@ -1660,11 +1661,17 @@ test("CI checks are chosen by index from known names, so an invented name cannot
   });
   let indices = [];
   const prompts = [];
+  const diagnoses = [];
   let reviews = 0;
   t.mock.method(Codex.prototype, "startThread", () => ({
     async runStreamed(prompt, options) {
       let response;
-      if (options.outputSchema.properties.contextId) {
+      if (options.outputSchema.properties.correction) {
+        diagnoses.push(prompt);
+        response = planningDiagnosis(
+          "Choose a checkIndex from the known names",
+        );
+      } else if (options.outputSchema.properties.contextId) {
         prompts.push(prompt);
         const choices = JSON.parse(
           prompt.split("\nCompiler choices (JSON data):\n")[1],
@@ -1727,8 +1734,11 @@ test("CI checks are chosen by index from known names, so an invented name cannot
     candidate.graph.requiredPreIntegrationChecks[0].checkName,
     "lint",
   );
-  assert(prompts[1].includes(JSON.stringify('"source":"check"').slice(1, -1)));
-  assert.match(prompts[1], /Planner checkIndex is invalid/);
+  assert.equal(diagnoses.length, 1);
+  assert.match(diagnoses[0], /Planner checkIndex is invalid/);
+  assert(
+    prompts[1].includes(JSON.stringify('"source":"diagnosis"').slice(1, -1)),
+  );
   verifyPlanCandidate(candidate, 17, body, target.baseSha, target.checkout);
 
   // Admission re-checks a canonical graph's names against the same sources.
@@ -1765,15 +1775,15 @@ test("CI checks are chosen by index from known names, so an invented name cannot
     /"Lint" is not a job/,
   );
 
-  // Refused twice: the plan fails and is never reviewed.
+  // Refused twice: planning stops for a decision and is never reviewed.
   indices = [7, 7];
   prompts.length = 0;
   reviews = 0;
   await assert.rejects(
     compilePlan(17, body, target.baseSha, target.checkout, model),
     (error) =>
-      error instanceof PlanValidationError &&
-      /checkIndex is invalid/.test(error.message),
+      error instanceof PlanningNeedsDecision &&
+      /Unchanged planning failure/.test(error.message),
   );
   assert.equal(prompts.length, 2);
   assert.equal(reviews, 0);
@@ -2167,7 +2177,7 @@ test("complete SDK responses reject malformed native item primitives and collect
     ],
   ]) {
     await assert.rejects(
-      compilePlan(17, body, target.baseSha, target.checkout, model),
+      compileObjective(17, body, target.baseSha, target.checkout, model),
       (error) => {
         assert(error instanceof MalformedPlannerOutput);
         assert.match(error.message, /Work Item|Planner source.?asset/i);

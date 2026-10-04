@@ -13,8 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  compilePlan,
-  PlanValidationError,
+  PlanningNeedsDecision,
   objectiveCriteria,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
@@ -58,6 +57,7 @@ import {
 import { resultFindings } from "./support/review-protocol.mjs";
 import { defaultAutonomy } from "../dist/index.js";
 import { graphDigest } from "../dist/graph-amendments.js";
+import { compilePlan } from "./support/plan.mjs";
 
 function item(baseSha, validation) {
   return {
@@ -173,12 +173,13 @@ test("preview blocks invented and mismatched commands, and admits exact pinned b
           source: "package.json",
         },
       ]);
-      // A base-observed command absent at the base is refused with revision
-      // feedback before review; a planner that repeats it fails the plan.
+      // A base-observed command absent at the base is refused before review
+      // and revised through a diagnosis; a planner that repeats it leaves the
+      // plan to a decision.
       await assert.rejects(
         compilePlan(1, body, target.baseSha, target.checkout, model),
         (error) =>
-          error instanceof PlanValidationError &&
+          error instanceof PlanningNeedsDecision &&
           /npm run invented.*does not exist at base/.test(error.message),
       );
 

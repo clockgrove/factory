@@ -9,7 +9,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { compilePlan } from "../dist/compiler.js";
 import {
   assertPinnedNpmScripts,
   validateWorkItem,
@@ -20,6 +19,7 @@ import {
 } from "../dist/workspace-membership.js";
 import { withCoverage } from "./support/coverage.mjs";
 import { createTarget, git } from "./support/integration-fixture.mjs";
+import { compilePlan } from "./support/plan.mjs";
 
 const workspace =
   "packages:\n  - packages/core\n  - packages/util\nminimumReleaseAge: 1440\n";

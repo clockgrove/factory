@@ -993,10 +993,15 @@ test("late secret and commit failures never return completed collection observat
               : "safe\n",
           );
           if (failure === "commit") {
-            // Factory runs no repository hooks; a signing program that
-            // fails still makes its commit fail.
-            git(worktree, "config", "commit.gpgSign", "true");
-            git(worktree, "config", "gpg.program", "false");
+            // Another process holds the worktree's HEAD lock, so Factory's
+            // commit fails after collection checks pass.
+            writeFileSync(
+              join(
+                git(worktree, "rev-parse", "--absolute-git-dir"),
+                "HEAD.lock",
+              ),
+              "",
+            );
           }
         },
         {
@@ -1071,10 +1076,15 @@ for (const failure of [
                 : "safe\n",
             );
           if (failure === "commit") {
-            // Factory runs no repository hooks; a signing program that
-            // fails still makes its commit fail.
-            git(worktree, "config", "commit.gpgSign", "true");
-            git(worktree, "config", "gpg.program", "false");
+            // Another process holds the worktree's HEAD lock, so Factory's
+            // commit fails after collection checks pass.
+            writeFileSync(
+              join(
+                git(worktree, "rev-parse", "--absolute-git-dir"),
+                "HEAD.lock",
+              ),
+              "",
+            );
           }
         },
         {

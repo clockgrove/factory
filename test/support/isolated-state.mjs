@@ -16,6 +16,10 @@ process.env.HOME = join(root, "home");
 process.env.XDG_STATE_HOME = join(root, "state");
 process.env.XDG_CONFIG_HOME = join(root, "config");
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+// Fixtures serve origin from local bare repositories, which Factory's remote
+// commands otherwise refuse (file:// transport, unbound origin). Tests of
+// that refusal clear this.
+process.env.FACTORY_TEST_LOCAL_ORIGINS = "1";
 process.env.GIT_CONFIG_NOSYSTEM = "1";
 for (const name of Object.keys(process.env))
   if (

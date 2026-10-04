@@ -77,7 +77,7 @@ status=$?
 # Like git-remote-http after a connection reset: a transport helper that
 # outlives the command in its process group.
 if [ "$sub" = "$FACTORY_TEST_LINGER" ]; then
-  sleep 30 >/dev/null 2>&1 &
+  sleep 30 &
   echo $! >"$FACTORY_TEST_DIR/lingering"
 fi
 exit $status
@@ -500,10 +500,18 @@ test("Factory's git never runs repository hooks", async () => {
   assert.equal(existsSync(marker), true);
 });
 
-test("a locked fetch bounds SSH stalls unless the operator chose the SSH command", async () => {
-  const { root, checkout } = fixture();
+test("fetches bound SSH stalls unless the operator chose the SSH command", async () => {
+  const { root, checkout, worktree } = fixture();
   await withShim(root, "none", async () => {
     const used = () => readFileSync(join(root, "ssh-command"), "utf8");
+    await fetchHead(checkout, "main");
+    assert.equal(used(), SSH_KEEPALIVE_COMMAND);
+    // A pinned fetch, such as a sandbox result import, also gets the bound.
+    const result = worktree("result");
+    await pinnedGitAsync(checkout, "fetch", "--no-tags", result, "HEAD");
+    assert.equal(used(), SSH_KEEPALIVE_COMMAND);
+    // The repository's own SSH command is not the operator's choice.
+    run(checkout, "config", "core.sshCommand", "ssh -F repository-config");
     await fetchHead(checkout, "main");
     assert.equal(used(), SSH_KEEPALIVE_COMMAND);
     process.env.GIT_SSH_COMMAND = "ssh -i operator-key";
@@ -513,9 +521,16 @@ test("a locked fetch bounds SSH stalls unless the operator chose the SSH command
     } finally {
       delete process.env.GIT_SSH_COMMAND;
     }
-    run(checkout, "config", "core.sshCommand", "ssh -F operator-config");
-    await fetchHead(checkout, "main");
-    assert.equal(used(), "");
+    const global = join(root, "operator-gitconfig");
+    writeFileSync(global, "[core]\n\tsshCommand = ssh -F operator-config\n");
+    const saved = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = global;
+    try {
+      await fetchHead(checkout, "main");
+      assert.equal(used(), "ssh -F operator-config");
+    } finally {
+      process.env.GIT_CONFIG_GLOBAL = saved;
+    }
   });
 });
 

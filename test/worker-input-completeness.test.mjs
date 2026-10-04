@@ -6,7 +6,6 @@ import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import {
   CodexPlanningModel,
-  compilePlan,
   objectiveCriteria,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
@@ -19,6 +18,7 @@ import {
 } from "./support/compiler-wire.mjs";
 import { isGraphReviewSchema } from "./support/review-protocol.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
+import { compilePlan, planningDiagnosis } from "./support/plan.mjs";
 
 // Scripted SDK responses exercise the real planning/revision/prompt boundary,
 // not live model judgment. No worker or source-declared command is executed.
@@ -106,7 +106,9 @@ test -s GUIDE.md
   t.mock.method(Codex.prototype, "startThread", () => ({
     async runStreamed(prompt, options) {
       let response;
-      if (isCompileSchema(options?.outputSchema)) {
+      if (options?.outputSchema?.properties?.correction) {
+        response = planningDiagnosis(finding.detail);
+      } else if (isCompileSchema(options?.outputSchema)) {
         compilePrompts.push(prompt);
         if (compilePrompts.length === 2)
           assert.ok(prompt.includes(finding.detail));

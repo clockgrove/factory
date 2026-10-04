@@ -9,7 +9,6 @@ import {
   CodexPlanningModel,
   MalformedPlannerOutput,
   PlanningNeedsDecision,
-  compilePlan,
 } from "../dist/compiler.js";
 import { consumption } from "../dist/repair-policy.js";
 import {
@@ -19,6 +18,7 @@ import {
   isCompileSchema,
 } from "./support/compiler-wire.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
+import { compilePlan } from "./support/plan.mjs";
 
 const body =
   "# Objective\n\n## Acceptance\n- Source-defined result exists.\n\n## Validation\n- `test -d .`\n";

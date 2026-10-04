@@ -136,6 +136,7 @@ export function observeModelInvocation(
  * The planning model with its calls made as its step's paid calls (see
  * src/step.ts), so only the model's own faults count toward the bound. A
  * diagnosis is bounded per failure by PAID_ATTEMPTS instead, never by both.
+ * A plan step uses paidPlanningModel, which also counts an invalid review.
  */
 export function paidModel(
   model: PlanningModel,
@@ -151,6 +152,36 @@ export function paidModel(
     ...(reviewResult && {
       reviewResult: (request) => step.paid(() => reviewResult(request)),
     }),
+  };
+}
+
+/**
+ * The planning model for the plan step: paidModel, and a review answer that
+ * does not decode is a fault of its paid call, so the step's paid bound alone
+ * decides how often it is asked again before the operator is.
+ */
+export function paidPlanningModel(
+  model: PlanningModel,
+  step: Pick<StepContext, "paid">,
+): PlanningModel {
+  const paid = paidModel(model, step);
+  return {
+    ...paid,
+    reviewGraph: (request) =>
+      step.paid(async () => {
+        const response = await model.reviewGraph(request);
+        try {
+          decodeGraphReview(
+            response,
+            request.reviewPacket ??
+              reviewPacket([], planningReviewEvidence(request)),
+          );
+        } catch (error) {
+          observeInvalidReview(request.invocation);
+          throw invalidOutput(error);
+        }
+        return response;
+      }),
   };
 }
 
@@ -1839,13 +1870,6 @@ export type PlanCorrection = {
   evidence?: ResolvedGraphFinding["evidence"];
 };
 
-function reviewCorrections(findings: ResolvedGraphFinding[]): PlanCorrection[] {
-  return findings.map((finding) => ({
-    source: "review",
-    ...finding,
-  }));
-}
-
 /** The model returned a plan that Factory's deterministic checks refused. */
 export class PlanValidationError extends CompletedModelInvocationError {
   override readonly name = "PlanValidationError";
@@ -2087,6 +2111,16 @@ export function planningReviewEvidence(
   ];
 }
 
+function observeInvalidReview(invocation?: ModelInvocationContext): void {
+  observeModelInvocation(invocation, {
+    type: "response-invalid",
+    failureClass: "review-protocol",
+    failureField: "findings",
+    failureReason: "invalid",
+    detail: "Graph review rejected findings: invalid",
+  });
+}
+
 /** The production plan review: one reviewer call, decoded and bound to its packet. */
 export async function checkedPlanReview(
   model: PlanningModel,
@@ -2135,17 +2169,7 @@ export async function checkedPlanReview(
     // invalid answer, or an unclassified provider error, is a plan question.
     const fault = responseReceived ? undefined : attachedFault(error);
     if (fault && fault.kind !== "work" && fault.kind !== "defect") throw error;
-    if (responseReceived) {
-      const rejections = [{ field: "findings", reason: "invalid" }];
-      for (const rejection of rejections)
-        observeModelInvocation(invocation, {
-          type: "response-invalid",
-          failureClass: "review-protocol",
-          failureField: rejection.field,
-          failureReason: rejection.reason,
-          detail: `Graph review rejected ${rejection.field}: ${rejection.reason}`,
-        });
-    }
+    if (responseReceived) observeInvalidReview(invocation);
     const detail = error instanceof Error ? error.message : String(error);
     return {
       findings: [],
@@ -2221,7 +2245,12 @@ export interface PlanningRecoveryContext {
   save: () => void;
   stopped?: () => boolean;
 }
-async function compileRecoverablePlan(
+/**
+ * The one planning path: compile, review independently, and revise against
+ * the allowance, recording each model call in `context.state` so a repeat
+ * (a step's, a restart's) never pays again for a call that completed.
+ */
+export async function compilePlan(
   objective: number,
   body: string,
   baseSha: string,
@@ -2435,18 +2464,9 @@ async function compileRecoverablePlan(
         save();
         return candidate;
       }
-      // A review that did not answer validly is asked again, never charged
-      // as a revision; after PAID_ATTEMPTS the operator decides the plan.
-      if (!review.findings.length) {
-        const asked = (record.invocations ?? []).filter(
-          (entry) => entry.phase === "graph-review",
-        ).length;
-        if (asked < PAID_ATTEMPTS) {
-          delete record.review.response;
-          save();
-          continue;
-        }
-      }
+      // A review that did not answer validly is not a revision. A paid step
+      // sees it as a fault of its paid call and re-asks within its bound
+      // (paidPlanningModel); without a step it is kept for the operator.
       failure = JSON.stringify(review);
     } catch (error) {
       // Only an answered plan (refused or invalid) is revised against the
@@ -2609,146 +2629,6 @@ async function compileRecoverablePlan(
   }
 }
 
-export async function compilePlan(
-  objective: number,
-  body: string,
-  baseSha: string,
-  checkout: string,
-  model: PlanningModel,
-  configDigest = digest("unbound-test-configuration"),
-  observe?: (observation: ModelInvocationObservation) => void,
-  executionProfiles?: ExecutionProfileChoices,
-  recovery?: PlanningRecoveryContext,
-  prerequisites?: PlanningPrerequisites,
-  localExecutables?: PlanningLocalExecutables,
-  executionBounds?: PlanningExecutionBounds,
-): Promise<PlanCandidate> {
-  if (recovery)
-    return compileRecoverablePlan(
-      objective,
-      body,
-      baseSha,
-      checkout,
-      model,
-      configDigest,
-      observe,
-      executionProfiles,
-      recovery,
-      prerequisites,
-      localExecutables,
-      executionBounds,
-    );
-  const invocation = (
-    phase: ModelInvocationPhase,
-    ordinal: number,
-  ): ModelInvocationContext => ({
-    invocationId: randomUUID(),
-    phase,
-    ordinal,
-    observe,
-  });
-  const sources = planningSources(body, baseSha, checkout);
-  const compile = (corrections: PlanCorrection[], ordinal: number) =>
-    compileObjective(
-      objective,
-      body,
-      baseSha,
-      checkout,
-      model,
-      [],
-      corrections,
-      invocation("compile", ordinal),
-      executionProfiles,
-      undefined,
-      prerequisites,
-      localExecutables,
-      executionBounds,
-    );
-  // A plan refused by a deterministic check spends the one revision on that
-  // error, like a review finding, instead of failing the Objective.
-  let revisions = 0;
-  let graph: WorkGraph;
-  try {
-    graph = await compile([], 0);
-  } catch (error) {
-    if (!(error instanceof PlanValidationError)) throw error;
-    revisions = 1;
-    graph = await compile([{ source: "check", detail: error.message }], 1);
-  }
-  let packet = planReviewPacket(
-    body,
-    baseSha,
-    sources,
-    graph,
-    checkout,
-    executionProfiles,
-    prerequisites,
-    localExecutables,
-    executionBounds,
-  );
-  let review = await checkedPlanReview(
-    model,
-    packet,
-    invocation("graph-review", 0),
-  );
-  const findings = review.findings;
-  if (findings.length && !review.failure && revisions === 0) {
-    revisions = 1;
-    try {
-      const revisedGraph = await compile(reviewCorrections(findings), 1);
-      const revisedPacket = planReviewPacket(
-        body,
-        baseSha,
-        sources,
-        revisedGraph,
-        checkout,
-        executionProfiles,
-        prerequisites,
-        localExecutables,
-        executionBounds,
-      );
-      const revisedReview = await checkedPlanReview(
-        model,
-        revisedPacket,
-        invocation("graph-review", 1),
-      );
-      graph = revisedGraph;
-      packet = revisedPacket;
-      review = revisedReview;
-    } catch (error) {
-      // A lost, limited, cancelled or misconfigured call is the amend step's
-      // fault to repeat or wait on; only a failed revision is a plan question.
-      const fault = attachedFault(error);
-      if (fault && fault.kind !== "work" && fault.kind !== "defect")
-        throw error;
-      if (
-        error instanceof Error &&
-        error.message.includes("Complete planning source packet exceeds")
-      )
-        throw error;
-      const detail = `Graph revision failed: ${error instanceof Error ? error.message : String(error)}`;
-      review = {
-        ...review,
-        failure: {
-          detail,
-          question: `${detail}. The original unaccepted graph and review are retained; inspect this failure before resolving the original plan.`,
-        },
-      };
-    }
-  }
-  return buildPlanCandidate(
-    objective,
-    body,
-    baseSha,
-    configDigest,
-    executionProfiles,
-    sources,
-    graph,
-    packet,
-    review,
-    revisions,
-  );
-}
 function buildPlanCandidate(
   objective: number,
   body: string,

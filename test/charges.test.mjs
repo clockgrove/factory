@@ -4,11 +4,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import {
-  compilePlan,
-  MalformedPlannerOutput,
-  paidModel,
-} from "../dist/compiler.js";
+import { MalformedPlannerOutput, paidModel } from "../dist/compiler.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
 import { attachFault, faultOf, StepFault, transient } from "../dist/fault.js";
 import {
@@ -35,6 +31,7 @@ import {
   readEvents,
 } from "./support/integration-fixture.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
+import { compilePlan } from "./support/plan.mjs";
 
 const autonomy = (limit = 2) => ({
   allowances: {

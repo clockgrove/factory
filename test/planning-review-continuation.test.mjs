@@ -9,12 +9,14 @@ import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import {
   CodexPlanningModel,
-  compilePlan,
+  paidPlanningModel,
   planReviewPacket,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
+import { step } from "../dist/step.js";
 import { decodeGraphReview } from "../dist/review-evidence.js";
 import { createTarget } from "./support/integration-fixture.mjs";
+import { compilePlan } from "./support/plan.mjs";
 
 const Ajv = createRequire(import.meta.url)("ajv");
 const body =
@@ -199,19 +201,40 @@ async function fixture(
     undefined,
     undefined,
   ];
-  const initial = compilePlan(
-    ...args,
-    { state, save, stopped: () => paused },
-    undefined,
-    undefined,
-    executionBounds,
-  );
-  // With a planning allowance a finding stops before the paused diagnosis;
-  // a malformed review stops before it is asked again.
-  if (pauseBeforeReview || (rejected && limit) || malformed)
-    await assert.rejects(initial, /paused or cancelled/);
-  else await initial;
+  // A malformed review is planned as the run does: inside the plan step,
+  // whose paid bound alone decides how often it is asked again.
+  let planned;
+  if (malformed)
+    planned = await step(
+      state,
+      { scope: "objective", name: "plan", paid: true },
+      (context) =>
+        compilePlan(
+          ...args.slice(0, 4),
+          paidPlanningModel(model, context),
+          ...args.slice(5),
+          { state, save, stopped: () => paused },
+          undefined,
+          undefined,
+          executionBounds,
+        ),
+      { save, clock: { now: () => 0, sleep: async () => {} } },
+    );
+  else {
+    const initial = compilePlan(
+      ...args,
+      { state, save, stopped: () => paused },
+      undefined,
+      undefined,
+      executionBounds,
+    );
+    // With a planning allowance a finding stops before the paused diagnosis.
+    if (pauseBeforeReview || (rejected && limit))
+      await assert.rejects(initial, /paused or cancelled/);
+    else await initial;
+  }
   return {
+    planned,
     target,
     state,
     retained,
@@ -332,24 +355,50 @@ test("changed reviewed context, damaged request and old missing binding refuse b
   }
 });
 
-test("a malformed completed review is asked again, keeps its receipt and is never charged", async (t) => {
+test("a malformed review is asked again by the plan step, keeps its receipts and is never charged", async (t) => {
   const f = await fixture(t, { malformed: true, limit: 0 });
-  const state = structuredClone(f.retained);
-  const original = structuredClone(state.planningRecovery.review);
-  assert.throws(
-    () => decodeGraphReview(original.response, original.packet),
-    /invalid/,
+  assert.equal(f.planned.review.status, "clean");
+  assert.equal(f.state.planningRecovery.phase, "complete");
+  // The compile was asked once; the review twice, the first answer invalid.
+  assert.equal(f.emitted.length, 3);
+  const phases = f.state.planningRecovery.invocations.map(
+    (entry) => entry.phase,
   );
-  const receipts = structuredClone(state.planningRecovery.invocations);
-  const calls = f.emitted.length;
-  const candidate = await compilePlan(...f.args, { state, save() {} });
-  assert.equal(candidate.review.status, "clean");
-  assert.equal(f.emitted.length, calls + 1);
-  assert.deepEqual(state.planningRecovery.review.packet, original.packet);
-  assert.deepEqual(
-    state.planningRecovery.invocations.slice(0, receipts.length),
-    receipts,
+  assert.deepEqual(phases, ["compile", "graph-review", "graph-review"]);
+  assert.equal(consumption(f.state).planningRevisions, 0);
+  // The step's repeat record ends with the step.
+  assert.equal(f.state.repeats, undefined);
+});
+
+test("a review that stays malformed is the plan step's decision, not a second counter", async (t) => {
+  const f = await fixture(t, { limit: 0 });
+  const state = { autonomy: f.state.autonomy };
+  let asked = 0;
+  const malformedModel = {
+    generateStructured: (request) => f.model.generateStructured(request),
+    reviewGraph: async () => {
+      asked++;
+      return { packetId: "wrong", findings: [] };
+    },
+  };
+  await assert.rejects(
+    step(
+      state,
+      { scope: "objective", name: "plan", paid: true },
+      (context) =>
+        compilePlan(
+          ...f.args.slice(0, 4),
+          paidPlanningModel(malformedModel, context),
+          ...f.args.slice(5),
+          { state, save() {} },
+        ),
+      { save() {}, clock: { now: () => 0, sleep: async () => {} } },
+    ),
+    /plan failed 4 times with an unknown outcome/,
   );
+  // Every ask is a paid fault of the step, so its bound of three repeats is
+  // the only one: four asks, not the three of a second counter.
+  assert.equal(asked, 4);
   assert.equal(consumption(state).planningRevisions, 0);
 });
 

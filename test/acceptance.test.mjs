@@ -13,7 +13,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  compilePlan,
   PlanValidationError,
   objectiveCriteria,
   verifyPlanCandidate,
@@ -58,6 +57,7 @@ import {
 import { resultFindings } from "./support/review-protocol.mjs";
 import { defaultAutonomy } from "../dist/index.js";
 import { graphDigest } from "../dist/graph-amendments.js";
+import { compilePlan } from "./support/plan.mjs";
 
 function item(baseSha, validation) {
   return {

@@ -1350,7 +1350,7 @@ test("native successor review receives its exact predecessor result head", async
   });
 });
 
-test("an explicitly accepted malformed graph review runs the same pinned graph without re-review", async () => {
+test("an explicitly accepted unresolved graph review runs the same pinned graph without re-review", async () => {
   await fixture("malformed-graph-integration", async (root) => {
     const target = createTarget(root);
     const command = 'test "$(cat alpha.txt)" = alpha';
@@ -1362,6 +1362,13 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
     let reviewCount = 0;
     const planningModel = {
       async generateStructured(request) {
+        // The owner decides what the review asked, not a correction.
+        if (request.purpose === "diagnosis")
+          return {
+            kind: "operator",
+            diagnosis: "The owner decides",
+            correction: "",
+          };
         return withCoverage(request, structuredClone(graph));
       },
       async reviewGraph(request) {
@@ -1370,9 +1377,8 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
           packetId: request.reviewPacket.id,
           findings: [
             {
-              source: "invented",
-              quote: "not in any pinned source",
-              detail: "Malformed source citation",
+              evidenceIndices: [0],
+              detail: "Source needs an owner interpretation",
               question: "Approve?",
             },
           ],
@@ -1415,14 +1421,12 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
     assert.equal(preparing.plan.review.status, "needs-human");
     assert.match(preparing.coordinator.waitReason, /^Plan needs a decision: /);
     assert.equal(Object.keys(github.state().issues).length, 0);
-    // An invalid review is asked again (never charged as a revision), then
-    // the plan waits for a decision.
-    assert.equal(reviewCount, 3);
-    assert.equal(preparing.charges, undefined);
+    // The finding is reviewed once, then the plan waits for a decision.
+    assert.equal(reviewCount, 1);
     // A rerun resumes the persisted plan: no planning call, still waiting.
     const again = await application.runObjective(objective);
     assert.equal(again.schemaVersion, 8);
-    assert.equal(reviewCount, 3);
+    assert.equal(reviewCount, 1);
     assert.equal(Object.keys(github.state().issues).length, 0);
     // The persisted plan stays bound to the configuration it was planned with.
     config.planning.reviewer.reasoningEffort = "high";
@@ -1457,10 +1461,10 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
       readContinuation(config.repository, objective).plan.review.status,
       "human-accepted",
     );
-    assert.equal(reviewCount, 3);
+    assert.equal(reviewCount, 1);
     const completed = await application.runObjective(objective);
     assert.equal(completed.finalValidation.passed, true);
-    assert.equal(reviewCount, 3);
+    assert.equal(reviewCount, 1);
   });
 });
 
@@ -1485,6 +1489,12 @@ test("preview planning stays read-only and a refused plan is planned again", asy
     let findings = [];
     const planningModel = {
       async generateStructured(request) {
+        if (request.purpose === "diagnosis")
+          return {
+            kind: "operator",
+            diagnosis: "The owner decides",
+            correction: "",
+          };
         generationCount += 1;
         return withCoverage(request, structuredClone(graph));
       },
@@ -1531,9 +1541,8 @@ test("preview planning stays read-only and a refused plan is planned again", asy
 
     findings = [
       {
-        source: "invented",
-        quote: "not in any pinned source",
-        detail: "Malformed source citation",
+        evidenceIndices: [0],
+        detail: "Source needs an owner interpretation",
         question: "Approve?",
       },
     ];

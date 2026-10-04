@@ -16,11 +16,7 @@ import test from "node:test";
 import { Octokit } from "@octokit/core";
 import { Codex } from "@openai/codex-sdk";
 import { composeWithLocalProfiles } from "../dist/application.js";
-import {
-  CodexPlanningModel,
-  compilePlan,
-  verifyPlanCandidate,
-} from "../dist/compiler.js";
+import { CodexPlanningModel, verifyPlanCandidate } from "../dist/compiler.js";
 import { factoryConfigDigest, validateConfig } from "../dist/config.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import {
@@ -46,6 +42,7 @@ import {
 } from "./support/integration-fixture.mjs";
 import { projectionClient } from "./support/projection-client.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
+import { compilePlan } from "./support/plan.mjs";
 
 const capabilities = {
   protocolVersion: 1,

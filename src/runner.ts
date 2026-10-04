@@ -30,7 +30,7 @@ import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import {
   assertObjectiveCriteria,
   compilePlan,
-  paidModel,
+  paidPlanningModel,
   finalObjectiveCommands,
   objectiveCriteria,
   type PlanCandidate,
@@ -1333,7 +1333,7 @@ async function runObjectivePass(
                     issue.body,
                     baseSha,
                     config.checkout,
-                    paidModel(planningModel, context),
+                    paidPlanningModel(planningModel, context),
                     installationConfigDigest,
                     diagnostics.modelObserver({ scopeId: planningScopeId }),
                     executionProfileChoices(config),

@@ -7,7 +7,6 @@ import test from "node:test";
 import {
   commandAuthority,
   compileObjective,
-  compilePlan,
   objectiveCriteria,
   planningSources,
   validateCommandProvenance,
@@ -34,6 +33,7 @@ import {
   readEvents,
 } from "./support/integration-fixture.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
+import { compilePlan, planningDiagnosis } from "./support/plan.mjs";
 
 /** The run's snapshot once planning is done; undefined while it prepares. */
 function runSnapshot(repository) {
@@ -817,7 +817,9 @@ test("independent review blocks inadequate negative controls and unauthorized go
       target.baseSha,
       target.checkout,
       {
-        async generateStructured() {
+        async generateStructured(request) {
+          if (request.purpose === "diagnosis")
+            return planningDiagnosis("State the baseline and threshold");
           return graph(target.baseSha);
         },
         async reviewGraph(request) {

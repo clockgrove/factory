@@ -320,7 +320,15 @@ export async function runQaItem(args: {
     save();
     // The slot frees once closure is durable, so dependents start after it.
     try {
-      await closeWorkItem(state, item.id, args.github, save, false);
+      await closeWorkItem(
+        state,
+        item.id,
+        args.github,
+        save,
+        false,
+        signal,
+        args.pause,
+      );
     } finally {
       args.phases?.release(item.id);
     }

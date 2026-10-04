@@ -370,6 +370,8 @@ interface LocalOwner {
   deadlineAt?: string;
   cancellation?: Promise<void>;
   waitForWake: () => Promise<void>;
+  /** The pass's observing save: emits each item's state change, terminal ones included. */
+  save?: (state: FactoryState) => void;
 }
 const owners = new Map<string, LocalOwner>();
 const ownerKey = (config: FactoryConfig, objective: number) =>
@@ -829,11 +831,13 @@ export async function runObjective(
         if (!state.coordinator?.cancelError) {
           state.cancelledAt = new Date().toISOString();
           clearAllRepeats(state);
-          if (state.schemaVersion === 7)
+          if (state.schemaVersion === 7) {
             for (const work of Object.values(state.work))
               if (work.status === "pending" || work.status === "running")
                 work.status = "cancelled";
-          persist();
+            if (owner.save) owner.save(state);
+            else persist();
+          } else persist();
         }
         throw new StepFault({
           kind: "cancelled",
@@ -1002,6 +1006,7 @@ async function runObjectivePass(
       );
     }
   };
+  owner.save = save;
   const active = new Map<string, Promise<void>>();
   const {
     driver,
@@ -1589,6 +1594,10 @@ async function runObjectivePass(
         reconcile,
         cancelled: cancellationRequested,
         signal: owner.abort.signal,
+        // Read at each step: resume replaces the controller.
+        get pause() {
+          return owner.pause.signal;
+        },
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
         diagnostics,
@@ -1612,6 +1621,10 @@ async function runObjectivePass(
         reconcile,
         cancelled: cancellationRequested,
         signal: owner.abort.signal,
+        // Read at each step: resume replaces the controller.
+        get pause() {
+          return owner.pause.signal;
+        },
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
         diagnostics,
@@ -2098,7 +2111,8 @@ async function runObjectivePass(
       } else {
         current.error = error instanceof Error ? error.message : String(error);
       }
-      saveState(path, current);
+      if (current.schemaVersion === 7) save(current);
+      else saveState(path, current);
     }
     throw error;
   }

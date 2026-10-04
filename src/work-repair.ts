@@ -7,7 +7,7 @@ import {
   installedControllerCapabilities,
   CONTROLLER_CAPABILITIES_DIGEST,
 } from "./controller-capabilities.js";
-import type { FactoryState, WorkState } from "./state.js";
+import type { FactoryState } from "./state.js";
 import {
   archiveAttempt,
   chargeRepair,

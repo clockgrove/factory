@@ -39,7 +39,8 @@
 //   required checks. GraphQL `viewer` still names the bot (without the
 //   `[bot]` suffix REST shows).
 // - `classicLinearHistory` makes classic protection require linear history
-//   on a branch: the protection route answers {enabled: true} (404
+//   on a branch: GET /branches/{branch}/protection answers
+//   required_linear_history.enabled true (404
 //   unprotected, 403 for an App token) and a merge commit is refused (405).
 // - Unknown routes are 404 and recorded as `unhandled`.
 //
@@ -114,11 +115,7 @@ const ROUTES = [
     "/branches/:branch/protection/required_status_checks",
     "requiredStatusChecks",
   ],
-  [
-    "GET",
-    "/branches/:branch/protection/required_linear_history",
-    "requiredLinearHistory",
-  ],
+  ["GET", "/branches/:branch/protection", "branchProtection"],
   ["GET", "/stacks", "listStacks"],
   ["POST", "/stacks", "createStack"],
 ].map(([method, pattern, handler]) => ({
@@ -1830,21 +1827,31 @@ export class GitHubHttpFake {
     };
   }
 
-  /** Classic protection's linear-history requirement; admin read only. */
-  requiredLinearHistory(s, { params }) {
+  /** Classic branch protection as a whole; admin read only. */
+  branchProtection(s, { params }) {
     const branch = decodeURIComponent(params.branch);
-    if (
-      !this.options.classicLinearHistory?.(branch) &&
-      !this.options.protectionChecks?.(branch)
-    )
-      throw new HttpError(404, "Branch not protected");
+    const checks = this.options.protectionChecks?.(branch);
+    const linear = Boolean(this.options.classicLinearHistory?.(branch));
+    if (!linear && !checks) throw new HttpError(404, "Branch not protected");
     if (this.options.appToken)
       throw new HttpError(403, "Resource not accessible by integration");
+    const url = `${API}/repos/${this.repository}/branches/${params.branch}/protection`;
     return {
       status: 200,
       data: {
-        url: `${API}/repos/${this.repository}/branches/${params.branch}/protection/required_linear_history`,
-        enabled: Boolean(this.options.classicLinearHistory?.(branch)),
+        url,
+        required_linear_history: {
+          url: `${url}/required_linear_history`,
+          enabled: linear,
+        },
+        ...(checks && {
+          required_status_checks: {
+            url: `${url}/required_status_checks`,
+            strict: Boolean(this.options.strict),
+            contexts: checks,
+            checks: checks.map((context) => ({ context, app_id: null })),
+          },
+        }),
       },
     };
   }

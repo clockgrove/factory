@@ -266,7 +266,7 @@ test("regular merge sends the exact expected head and verifies integrated identi
     calls.push({ ...options, path });
     if (path === "/repos/a/b") return json(repository);
     if (path === "/repos/a/b/rules/branches/main") return json([]);
-    if (path === "/repos/a/b/branches/main/protection/required_linear_history")
+    if (path === "/repos/a/b/branches/main/protection")
       return json({ message: "Not Found" }, 404);
     if (options.method !== "PUT") return json(merged ? mergedPull : openPull);
     merged = true;
@@ -285,7 +285,7 @@ test("regular merge sends the exact expected head and verifies integrated identi
       "GET /repos/a/b/pulls/4",
       "GET /repos/a/b",
       "GET /repos/a/b/rules/branches/main",
-      "GET /repos/a/b/branches/main/protection/required_linear_history",
+      "GET /repos/a/b/branches/main/protection",
       "PUT /repos/a/b/pulls/4/merge",
       "GET /repos/a/b/pulls/4",
     ],
@@ -538,9 +538,7 @@ test("regular merge rejects unsuccessful acknowledgement and changed current PR 
       const path = new URL(url).pathname;
       if (path === "/repos/a/b") return json(repository);
       if (path === "/repos/a/b/rules/branches/main") return json([]);
-      if (
-        path === "/repos/a/b/branches/main/protection/required_linear_history"
-      )
+      if (path === "/repos/a/b/branches/main/protection")
         return json({ message: "Not Found" }, 404);
       if (path === "/repos/a/b/issues/4/timeline")
         return json([{ event: "merged", commit_id: integratedSha }]);

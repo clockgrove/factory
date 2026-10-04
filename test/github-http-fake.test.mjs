@@ -789,6 +789,34 @@ test("classic linear history is read before a merge is sent (#614)", async (t) =
   );
 });
 
+test("branch protection serves GitHub's shape: linear history enabled, off, or unknown (#614)", async (t) => {
+  const route = "repos/example/target/branches/main/protection";
+  const enabled = await setup(t, { classicLinearHistory: () => true });
+  const on = await enabled.client.request("GET", route);
+  assert.equal(on.required_linear_history.enabled, true);
+  assert.equal(on.required_status_checks, undefined);
+
+  const off = await setup(t, { protectionChecks: () => ["ci"] });
+  const read = await off.client.request("GET", route);
+  assert.equal(read.required_linear_history.enabled, false);
+  assert.deepEqual(read.required_status_checks.contexts, ["ci"]);
+
+  // Unprotected is 404 and an App token is 403: unknown, so the merge decides.
+  const none = await setup(t, {});
+  const missing = await none.client
+    .request("GET", route)
+    .catch((caught) => caught);
+  assert.equal(missing.status, 404);
+  const app = await setup(t, {
+    appToken: true,
+    classicLinearHistory: () => true,
+  });
+  const refused = await app.client
+    .request("GET", route)
+    .catch((caught) => caught);
+  assert.equal(refused.status, 403);
+});
+
 test("classic linear history that an App token cannot read leaves the merge to decide (#614)", async (t) => {
   const { fake, client, gateway, pushBranch } = await setup(t, {
     appToken: true,

@@ -429,13 +429,16 @@ export class RealGitHubGateway implements GitHubGateway {
       )
     )
       throw forbidden();
-    // Classic branch protection can require linear history too. Reading it
-    // needs admin: 404 is unprotected, 403 is a login that cannot see it
-    // (an App token), and then the merge itself is the only test left.
-    const path = `branches/${encodeURIComponent(branch)}/protection/required_linear_history`;
-    let classic: { enabled?: unknown } | undefined;
+    // Classic branch protection can require linear history too. It is part
+    // of the branch protection read, which needs admin: 404 is unprotected,
+    // 403 is a login that cannot see it (an App token). Either is unknown,
+    // and then the merge itself is the only test left.
+    const path = `branches/${encodeURIComponent(branch)}/protection`;
+    let classic:
+      | { required_linear_history?: { enabled?: unknown } }
+      | undefined;
     try {
-      classic = await this.client.request<{ enabled?: unknown }>(
+      classic = await this.client.request<typeof classic>(
         "GET",
         this.route(path),
       );
@@ -449,7 +452,7 @@ export class RealGitHubGateway implements GitHubGateway {
       )
         throw attachFault(error, gitHubFault(error, { method: "GET", path }));
     }
-    if (classic?.enabled === true) throw forbidden();
+    if (classic?.required_linear_history?.enabled === true) throw forbidden();
   }
 
   async objective(number: number): Promise<ObjectiveIssue> {

@@ -44,7 +44,7 @@ const repository = () =>
 // commits. A scenario's own routes override it.
 const MERGE_RULES = {
   "GET /repos/a/b/rules/branches/main": () => json([]),
-  "GET /repos/a/b/branches/main/protection/required_linear_history": () =>
+  "GET /repos/a/b/branches/main/protection": () =>
     json({ message: "Not Found" }, 404),
 };
 

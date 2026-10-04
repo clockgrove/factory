@@ -179,7 +179,7 @@ test("service requires private configuration and matching continuation", () =>
     saveState(statePath(config.repository, 1), state);
     await assert.rejects(
       install(configPath),
-      /Continuation configuration differs/,
+      /continuation was written with a different configuration/,
     );
   }));
 
@@ -242,14 +242,14 @@ test("the service pins its mode, needs the background setup and refuses unknown 
     delete value.watch;
     writeFileSync(path, JSON.stringify(value));
     assert.throws(
-      () => checkIntakeServiceState(config),
+      () => checkIntakeServiceState(config, "/c.json"),
       /run `factory setup --background`/,
     );
     value.watch = true;
     value.futureAuthority = true;
     writeFileSync(path, JSON.stringify(value));
     assert.throws(
-      () => checkIntakeServiceState(config),
+      () => checkIntakeServiceState(config, "/c.json"),
       (error) =>
         error.message.includes(path) &&
         /unsupported field futureAuthority.*delete it/.test(error.message),
@@ -258,11 +258,11 @@ test("the service pins its mode, needs the background setup and refuses unknown 
     delete value.futureAuthority;
     value.serviceConsent = { actor: "x", reason: "y", consent: true };
     writeFileSync(path, JSON.stringify(value));
-    assert.throws(() => checkIntakeServiceState(config), /unsupported field/);
+    assert.throws(() => checkIntakeServiceState(config, "/c.json"), /unsupported field/);
     // The fix it names: delete the file, and the service check says to set up the background service.
     rmSync(path);
     assert.throws(
-      () => checkIntakeServiceState(config),
+      () => checkIntakeServiceState(config, "/c.json"),
       /run `factory setup --background`/,
     );
   }));
@@ -485,6 +485,7 @@ test("a service bound to one Objective by an earlier version is refused for reus
       evidenceRetained: true,
     });
     assert.equal(existsSync(path), false);
+@@NEWTESTS@@
   }));
 
 test("uninstalling a service an earlier version bound to one Objective hands off its running owner", () =>
@@ -790,7 +791,7 @@ test("the background setup covers queued Objectives and leaves their continuatio
     await enqueueIntake(config, github, [1]);
     saveState(statePath(config.repository, 1), state);
     const before = readFileSync(statePath(config.repository, 1));
-    checkIntakeServiceState(config);
-    checkServiceState(config, 1);
+    checkIntakeServiceState(config, "/c.json");
+    checkServiceState(config, 1, "/c.json");
     assert.deepEqual(readFileSync(statePath(config.repository, 1)), before);
   }));

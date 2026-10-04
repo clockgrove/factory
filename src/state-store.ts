@@ -164,8 +164,9 @@ function assertCurrentVersion(
 ): void {
   if (currentVersion(value)) return;
   const found = earlierVersionDirectories(repository);
+  const directories = found.length ? found : [dirname(path)];
   throw new Error(
-    `State from an earlier Factory version: ${(found.length ? found : [dirname(path)]).join(", ")}. v0.2.0 starts fresh: stop and uninstall any old Factory service with the old version (factory supervisor uninstall), then delete those directories, or finish them with the old version first`,
+    `State from an earlier Factory version: ${directories.join(", ")}. v0.2.0 starts fresh: run \`factory supervisor uninstall\` (add \`--config PATH\` unless it is the default configuration), then \`rm -r ${directories.map((directory) => (/^[\w@%+=:,./-]+$/.test(directory) ? directory : `'${directory.replaceAll("'", "'\\''")}'`)).join(" ")}\` (this leaves worktrees and open PRs from that state in place), or finish them with the old version first`,
   );
 }
 

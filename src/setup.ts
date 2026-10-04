@@ -139,6 +139,7 @@ export async function setupTarget(
         config: string;
         credentials?: { name: string; file: string }[];
       };
+      bindingHealth?: { diagnostics: { code: string; action: string }[] };
     };
     const legacy = service.bindingHealth?.diagnostics.find(({ code }) =>
       code.startsWith("legacy-"),

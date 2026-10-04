@@ -142,7 +142,7 @@ Remote execution providers still need an API key. In the foreground Factory read
 
 The default delivery mode is regular pull requests. Add `--delivery native-stack` at installation to choose native linear stacks on a target that supports them. Independent work remains dependency-aware; target branch protection and required checks still govern integration.
 
-The default network policy is `host`; `--network off` selects the supported offline worker policy for the Codex path. GitHub operations and planning still need their own service access. Review the chosen harness's boundaries before selecting a policy. Local work consumes your provider account usage; unavailable usage is never zero. Managed agents and sandboxes are configured separately in [remote execution](REMOTE-EXECUTION.md); automatic provider fallback is not available.
+The default network policy is `host`; `--network off` selects the supported offline worker policy for the Codex path. GitHub operations and planning still need their own service access. Review the chosen harness's boundaries before selecting a policy. Local work consumes your provider account usage; unavailable usage is never zero. Managed agents are configured separately in [remote execution](REMOTE-EXECUTION.md); automatic provider fallback is not available.
 
 ## Limit unattended work
 

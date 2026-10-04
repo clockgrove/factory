@@ -1,4 +1,3 @@
-import { validateDaytonaConfig } from "./execution/daytona.js";
 import { validateClaudeManagedConfig } from "./execution/claude-managed.js";
 import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
 import { execFileSync } from "node:child_process";
@@ -126,14 +125,6 @@ export type ExecutionConfig =
       concurrency?: number;
       provider: "openai-agents" | "claude-managed-agents";
       config: { [key: string]: JsonValue };
-    }
-  | {
-      kind: "sandbox";
-      concurrency?: number;
-      provider: string;
-      config?: { [key: string]: JsonValue };
-      harness: Extract<LocalHarnessConfig, { kind: "registered" }>;
-      argv: string[];
     };
 
 export interface ClaudeModelSelection {
@@ -537,6 +528,10 @@ export function validateScheduling(
   }
 }
 
+/** The sandbox (Daytona) backend was removed in #720; the tag keeps its last source. */
+const SANDBOX_REMOVED =
+  'execution.kind "sandbox" is no longer supported: use "local" (Codex, Claude or GitHub Copilot on this host) or "managed-agent" (provider "claude-managed-agents" or "openai-agents")';
+
 export function validateConfig(value: unknown): FactoryConfig {
   assertObject(value, "configuration");
   if (value.schemaVersion !== 1)
@@ -553,11 +548,12 @@ export function validateConfig(value: unknown): FactoryConfig {
   assertObject(value.execution, "execution");
   if (
     value.execution.kind !== "local" &&
-    value.execution.kind !== "managed-agent" &&
-    value.execution.kind !== "sandbox"
+    value.execution.kind !== "managed-agent"
   ) {
     throw new Error(
-      `Execution mode ${String(value.execution.kind)} is not implemented; select local`,
+      value.execution.kind === "sandbox"
+        ? SANDBOX_REMOVED
+        : `Execution mode ${String(value.execution.kind)} is not implemented; select local`,
     );
   }
   if (
@@ -569,33 +565,7 @@ export function validateConfig(value: unknown): FactoryConfig {
       "execution.concurrency must be a positive integer, or omitted to size from this host",
     );
   }
-  if (value.execution.kind === "sandbox") {
-    assertOnlyKeys(
-      value.execution,
-      ["kind", "concurrency", "provider", "config", "harness", "argv"],
-      "execution",
-    );
-    if (
-      typeof value.execution.provider !== "string" ||
-      !value.execution.provider.trim()
-    )
-      throw new Error("Sandbox provider identity required");
-    if (value.execution.provider === "daytona")
-      validateDaytonaConfig(value.execution.config);
-    else if (value.execution.config !== undefined)
-      throw new Error("Only Daytona accepts sandbox provider configuration");
-    validateLocalHarness(value.execution.harness);
-    if (value.execution.harness.kind !== "registered")
-      throw new Error("Sandbox requires the installed registered harness seam");
-    if (
-      !Array.isArray(value.execution.argv) ||
-      !value.execution.argv.length ||
-      !value.execution.argv.every(
-        (x) => typeof x === "string" && x.length && !x.includes("\0"),
-      )
-    )
-      throw new Error("Sandbox requires installed invocation argv");
-  } else if (value.execution.kind === "managed-agent") {
+  if (value.execution.kind === "managed-agent") {
     assertOnlyKeys(
       value.execution,
       ["kind", "concurrency", "provider", "config"],

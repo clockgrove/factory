@@ -1,4 +1,3 @@
-import { DaytonaSandboxProvider } from "./execution/daytona.js";
 import {
   executionCredential,
   resolveProviderCredential,
@@ -7,8 +6,6 @@ import {
   ClaudeManagedExecutionDriver,
   validateClaudeManagedConfig,
 } from "./execution/claude-managed.js";
-import { SandboxExecutionDriver } from "./execution/sandbox.js";
-import type { SandboxProvider } from "./contracts.js";
 import {
   OpenAIManagedExecutionDriver,
   validateOpenAIManagedConfig,
@@ -498,21 +495,6 @@ export function compose(
       executionCredential(config)!,
       serviceCredentials,
     );
-  if (
-    config.execution.kind === "sandbox" &&
-    config.execution.provider === "daytona"
-  )
-    return composeWithSandbox(
-      config,
-      {
-        identity: "daytona",
-        provider: new DaytonaSandboxProvider(
-          config.execution.config,
-          executionKey(),
-        ),
-      },
-      { planningModel },
-    );
   if (config.execution.kind === "managed-agent") {
     const apiKey = executionKey();
     const root = stateRoot(config.repository);
@@ -547,10 +529,6 @@ export function compose(
       reportRunStatus: (message) => console.error(message),
     });
   }
-  if (config.execution.kind !== "local")
-    throw new Error(
-      `Execution mode ${config.execution.kind} is not implemented`,
-    );
   if (config.execution.profiles)
     return composeWithLocalProfiles(config, {}, { planningModel });
   const harness = config.execution.harness!;
@@ -560,46 +538,4 @@ export function compose(
     harness.kind === "codex-sdk" ? harness.kind : harness.adapter,
     { planningModel },
   );
-}
-
-/** Provider infrastructure stays in the controller; the configured harness is constructed only by the installed sandbox entrypoint. */
-export function composeWithSandbox(
-  input: FactoryConfig,
-  registration: { identity: string; provider: SandboxProvider },
-  options: LocalHarnessCompositionOptions = {},
-): FactoryApplication {
-  const config = cloneAndValidateConfig(input);
-  if (config.execution.kind !== "sandbox")
-    throw new Error("Sandbox execution configuration required");
-  if (config.execution.provider !== registration.identity)
-    throw new Error("Sandbox provider registration mismatch");
-  const root = stateRoot(config.repository);
-  const contentStore = new LocalContentStore(join(root, "content"));
-  const github =
-    options.github ??
-    new RealGitHubGateway(
-      config.repository,
-      new NativeStackDelivery(config.repository),
-    );
-  return createApplication(config, {
-    planningModel: options.planningModel ?? composePlanningModel(config),
-    driver: new SandboxExecutionDriver({
-      repository: config.repository,
-      checkout: config.checkout,
-      workRoot: join(root, "sandboxes"),
-      contentStore,
-      providerIdentity: registration.identity,
-      provider: registration.provider,
-      harness: {
-        identity: config.execution.harness.adapter,
-        config: config.execution.harness.config,
-      },
-      argv: config.execution.argv,
-      concurrency: resolveCapacity(config).concurrency,
-    }),
-    github,
-    delivery: new RegularDelivery(config.checkout, github),
-    contentStore,
-    reportRunStatus: (message) => console.error(message),
-  });
 }

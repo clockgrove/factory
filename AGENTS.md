@@ -8,7 +8,7 @@ Read [the architecture](docs/ARCHITECTURE.md) and the relevant [project](https:/
 
 Factory is a general-purpose open-source tool. No adopter is its design center, and adopter-specific behavior does not belong in its source.
 
-Keep the trunk path working: Objective → Work Item DAG → local execution → exact validation → GitHub delivery → Objective final validation. Trunk includes native linear PR stacks, media assets, Git LFS, restart/cancel/status, and packaging. Managed execution (#7), sandbox execution (#8) and their providers are branches built on the same contracts; keep provider-specific APIs and configuration inside adapters. A declared interface or scripted fixture does not qualify a real provider.
+Keep the trunk path working: Objective → Work Item DAG → local execution → exact validation → GitHub delivery → Objective final validation. Trunk includes native linear PR stacks, media assets, Git LFS, restart/cancel/status, and packaging. Managed execution (#7) and its provider are branches built on the same contracts; keep provider-specific APIs and configuration inside the adapter. A declared interface or scripted fixture does not qualify a real provider.
 
 ## Working process
 
@@ -51,7 +51,7 @@ Label each issue `trunk`, `branch`, `leaf` or `release-gate` by delivery scope, 
 
 ## Design
 
-Define narrow contracts for the named variation points: PlanningModel, ExecutionDriver, AgentHarness, SandboxProvider, DeliveryStrategy, ContentStore, and GitHubGateway. Compose only implementations a feature needs. Do not abstract the state store, scheduler, lifecycle, validator, runner, Git model, or controller host.
+Define narrow contracts for the named variation points: PlanningModel, ExecutionDriver, AgentHarness, DeliveryStrategy, ContentStore, and GitHubGateway. Compose only implementations a feature needs. Do not abstract the state store, scheduler, lifecycle, validator, runner, Git model, or controller host.
 
 Use one atomic local snapshot for continuation state. Do not add operational event journals, recovery journals, custom state refs, provider ranking or fallback chains. [Diagnostics](docs/ARCHITECTURE.md#state-and-recovery) record correlated local observations but never reconstruct or control lifecycle state. The configured AgentHarness owns model and tool execution; media reenters ordinary validation and delivery.
 

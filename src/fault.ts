@@ -1,7 +1,7 @@
 /**
  * One fault model for every adapter (recovery v2.2, #515). Only adapters
  * classify: the GitHub gateway, the git wrapper, each model adapter, and each
- * execution driver and sandbox provider. They attach a `Fault` to the error
+ * execution driver. They attach a `Fault` to the error
  * they already throw; runners read it with `faultOf`, and anything nobody
  * classified is a `defect`.
  */

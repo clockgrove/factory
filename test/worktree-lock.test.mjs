@@ -557,7 +557,7 @@ test("fetches bound SSH stalls unless the operator chose the SSH command", async
     const used = () => readFileSync(join(root, "ssh-command"), "utf8");
     await fetchHead(checkout, "main");
     assert.equal(used(), SSH_KEEPALIVE_COMMAND);
-    // A pinned fetch, such as a sandbox result import, also gets the bound.
+    // A pinned fetch, such as a result import into a worktree, also gets the bound.
     const result = worktree("result");
     await pinnedGitAsync(checkout, "fetch", "--no-tags", result, "HEAD");
     assert.equal(used(), SSH_KEEPALIVE_COMMAND);

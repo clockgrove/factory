@@ -13,8 +13,6 @@ Factory ships three harnesses, plus a `registered` seam for your own adapter:
 | Other flags          | —                                                                         | `--claude-permission acceptEdits\|dontAsk` (default `acceptEdits`), `--claude-tool`, `--claude-allow-tool`, `--claude-setting-source`                             | `--copilot-tool`                                                                                                      |
 | Login                | Codex local login                                                         | Claude local profile, or `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_PROFILE`, `ANTHROPIC_CONFIG_DIR`, `CLAUDE_CONFIG_DIR` | Copilot local profile, or `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_API_URL`, `COPILOT_PROVIDER_*` |
 
-To run a harness in a remote sandbox instead of locally, see [remote execution](REMOTE-EXECUTION.md).
-
 ## Choose a harness
 
 Codex is used when `--harness` is omitted. Select another when you set up:

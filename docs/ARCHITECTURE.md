@@ -62,9 +62,8 @@ An `ExecutionDriver` starts, observes, cancels and collects one attempt. Three k
 | ------- | --------------------------------------------------------- | ----------------------------------------- |
 | Local   | A Factory-owned worktree on this machine                  | Supported                                 |
 | Managed | A provider's hosted agent (OpenAI Agents, Claude Managed) | Implemented; hosted qualification pending |
-| Sandbox | A `SandboxProvider` machine, such as Daytona              | Implemented; hosted qualification pending |
 
-Local and sandbox drivers run an `AgentHarness`: Codex SDK by default, with optional Claude Agent SDK and GitHub Copilot SDK harnesses, or a registered third-party adapter. **Execution profiles** let the planner assign each Work Item one of several configured harness/model choices.
+The local driver runs an `AgentHarness`: Codex SDK by default, with optional Claude Agent SDK and GitHub Copilot SDK harnesses, or a registered third-party adapter. **Execution profiles** let the planner assign each Work Item one of several configured harness/model choices.
 
 The harness works only inside its worktree, must not move `HEAD`, and never receives Factory's GitHub credentials. Factory collects the changed files itself, checks ownership and scans for secrets. _Because_ the controller alone publishes, an agent cannot push, merge or change another item's work.
 
@@ -125,15 +124,14 @@ An exhausted allowance or an undelegated decision stops for the operator.
 
 Seven interfaces in `src/contracts.ts` are the only planned variation points:
 
-| Interface          | Purpose                                        | Implementations                          |
-| ------------------ | ---------------------------------------------- | ---------------------------------------- |
-| `PlanningModel`    | Compile, review plans and review results       | Codex SDK, Claude Agent SDK              |
-| `ExecutionDriver`  | Run one Work Item attempt                      | Local, managed, sandbox                  |
-| `AgentHarness`     | The coding agent inside a local or sandbox run | Codex, Claude Agent, Copilot, registered |
-| `SandboxProvider`  | Machines for sandbox execution                 | Daytona                                  |
-| `DeliveryStrategy` | Publish and merge                              | Regular, native stack                    |
-| `ContentStore`     | Immutable bytes by digest                      | Local                                    |
-| `GitHubGateway`    | Issues, PRs, checks, merges                    | Octokit                                  |
+| Interface          | Purpose                                  | Implementations                          |
+| ------------------ | ---------------------------------------- | ---------------------------------------- |
+| `PlanningModel`    | Compile, review plans and review results | Codex SDK, Claude Agent SDK              |
+| `ExecutionDriver`  | Run one Work Item attempt                | Local, managed                           |
+| `AgentHarness`     | The coding agent inside a local run      | Codex, Claude Agent, Copilot, registered |
+| `DeliveryStrategy` | Publish and merge                        | Regular, native stack                    |
+| `ContentStore`     | Immutable bytes by digest                | Local                                    |
+| `GitHubGateway`    | Issues, PRs, checks, merges              | Octokit                                  |
 
 The runner, scheduler, validator, state store and Git model are deliberately concrete. Add an implementation behind an interface; do not add a new abstraction layer.
 
@@ -153,7 +151,7 @@ The runner, scheduler, validator, state store and Git model are deliberately con
 
 - Planning and review: Codex SDK or Claude Agent SDK (`planning.kind`).
 - Linux x64 only; workers run under your OS account and are not a security boundary against hostile code.
-- Managed and sandbox execution are implemented but not yet qualified against live providers.
+- Managed execution is implemented but not yet qualified against live providers.
 
 ## History
 

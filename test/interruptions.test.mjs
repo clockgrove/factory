@@ -133,7 +133,7 @@ test("provider request failures in transit are transient; refusals are not", () 
   for (const code of [400, 401, 403, 404, 409, 422])
     assert.equal(transient(status(code)), false, String(code));
   assert.equal(
-    transient(Object.assign(new Error("daytona"), { statusCode: 502 })),
+    transient(Object.assign(new Error("provider"), { statusCode: 502 })),
     true,
   );
   assert.equal(

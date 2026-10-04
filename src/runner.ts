@@ -1045,8 +1045,7 @@ async function runObjectivePass(
   validateTarget(config.repository, config.checkout);
   if (
     config.execution.kind !== "local" &&
-    config.execution.kind !== "managed-agent" &&
-    config.execution.kind !== "sandbox"
+    config.execution.kind !== "managed-agent"
   )
     throw new Error("Execution mode is not implemented");
   const root = stateRoot(config.repository);

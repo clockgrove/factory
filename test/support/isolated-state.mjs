@@ -31,7 +31,7 @@ for (const name of Object.keys(process.env))
     /^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|CLAUDE_CODE_OAUTH_TOKEN)$/.test(
       name,
     ) ||
-    /^(ANTHROPIC|OPENAI|DAYTONA)_/.test(name)
+    /^(ANTHROPIC|OPENAI)_/.test(name)
   )
     delete process.env[name];
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));

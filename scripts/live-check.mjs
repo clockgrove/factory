@@ -138,17 +138,54 @@ export function all(path) {
   return pages.flat();
 }
 
-function args(argv) {
+/** The options each command accepts; anything else is refused, never ignored. */
+export const OPTIONS = {
+  setup: [],
+  run: ["tag", "kills", "delivery", "objective"],
+  assert: ["objective", "work"],
+  reset: ["objective"],
+};
+
+/** `--name value` or `--name=value`; `--` ends the options. Names are checked per command. */
+export function parseArgs(argv) {
   const out = { _: [], rest: [] };
+  const given = [];
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--") {
+    const arg = argv[i];
+    if (arg === "--") {
       out.rest = argv.slice(i + 1);
       break;
     }
-    if (argv[i].startsWith("--")) out[argv[i].slice(2)] = argv[++i];
-    else out._.push(argv[i]);
+    if (!arg.startsWith("--")) {
+      out._.push(arg);
+      continue;
+    }
+    const equals = arg.indexOf("=");
+    const name = arg.slice(2, equals < 0 ? undefined : equals);
+    if (name === "_" || name === "rest")
+      throw new Error(`Unknown option --${name}`);
+    let value;
+    if (equals >= 0) value = arg.slice(equals + 1);
+    else {
+      value = argv[++i];
+      if (value === undefined || value.startsWith("--"))
+        throw new Error(`--${name} needs a value`);
+    }
+    out[name] = value;
+    given.push(name);
   }
-  return out;
+  return Object.defineProperty(out, "given", { value: given });
+}
+
+/** Refuse an option the command does not take (`--objective=5` must not become a global reset). */
+export function checkOptions(command, options) {
+  for (const name of options.given)
+    if (!OPTIONS[command]?.includes(name))
+      throw new Error(
+        `Unknown option --${name} for ${command}${OPTIONS[command]?.length ? ` (takes ${OPTIONS[command].map((option) => `--${option}`).join(", ")})` : ""}`,
+      );
+  if (options.rest.length && command !== "run")
+    throw new Error(`${command} takes no arguments after --`);
 }
 
 // ---------------------------------------------------------------- fixture
@@ -163,21 +200,24 @@ jobs:
       - run: for f in $(git ls-files '*.sh'); do sh -n "$f"; done
 `;
 
-function setup() {
+export function setup(call = api) {
   const path = `repos/${REPO}/contents/.github/workflows/ci.yml`;
-  if (api("GET", path).status === 404) {
-    const put = api("PUT", path, {
+  const existing = call("GET", path).status;
+  if (existing !== 200 && existing !== 404)
+    throw new Error(`workflow lookup: ${existing}`);
+  if (existing === 404) {
+    const put = call("PUT", path, {
       message: "Add live-check CI",
       content: Buffer.from(WORKFLOW).toString("base64"),
     });
     if (put.status !== 201) throw new Error(`workflow: ${put.status}`);
   }
-  const listed = api("GET", `repos/${REPO}/rulesets`);
+  const listed = call("GET", `repos/${REPO}/rulesets`);
   if (listed.status !== 200 || !Array.isArray(listed.data))
     throw new Error(`rulesets: ${listed.status}`);
   const rulesets = listed.data;
   if (!rulesets.some((rule) => rule.name === "live-check")) {
-    const created = api("POST", `repos/${REPO}/rulesets`, {
+    const created = call("POST", `repos/${REPO}/rulesets`, {
       name: "live-check",
       target: "branch",
       enforcement: "active",
@@ -347,12 +387,20 @@ async function launch(work, objective, point, index) {
   };
 }
 
-async function run(options) {
+export async function run(options) {
   const tag = options.tag ?? `t${Date.now().toString(36)}`;
   // The tag names a local directory and a path in the repository.
   if (!/^[A-Za-z0-9_-]+$/.test(tag))
     throw new Error(`--tag must be letters, digits, - or _: ${tag}`);
   const work = join(tmpdir(), `live-check-${tag}`);
+  // Resuming an Objective reuses its work dir: without --tag the dir is a
+  // fresh name that does not exist, and the run would fail late with ENOENT.
+  if (options.objective !== undefined) {
+    if (options.tag === undefined)
+      throw new Error("--objective needs --tag, the tag of its work dir");
+    if (!existsSync(work))
+      throw new Error(`No work dir ${work} for --tag ${tag}`);
+  }
   const kills = (options.kills ?? DEFAULT_KILLS.join(","))
     .split(",")
     .filter(Boolean);
@@ -474,7 +522,11 @@ function status(work, objective) {
 // ---------------------------------------------------------------- verdict
 
 /** Count what GitHub itself holds for the Objective; Factory state is only used for the planned item set. */
-function count(objective, work) {
+export function count(
+  objective,
+  work,
+  { all: list = all, api: call = api } = {},
+) {
   let planned;
   const statePath = work
     ? join(
@@ -495,7 +547,7 @@ function count(objective, work) {
   const marker = new RegExp(
     `<!-- factory:objective=${objective};item=([^ ]+) -->`,
   );
-  const issues = all(`repos/${REPO}/issues?state=all&per_page=100`).filter(
+  const issues = list(`repos/${REPO}/issues?state=all&per_page=100`).filter(
     (issue) => !issue.pull_request,
   );
   const byItem = {};
@@ -504,14 +556,14 @@ function count(objective, work) {
     if (item) (byItem[item] ??= []).push(issue);
   }
   const prefix = `factory/objective-${objective}/`;
-  const pulls = all(`repos/${REPO}/pulls?state=all&per_page=100`).filter(
+  const pulls = list(`repos/${REPO}/pulls?state=all&per_page=100`).filter(
     (pull) => pull.head.ref.startsWith(prefix),
   );
   const byBranch = {};
   for (const pull of pulls) (byBranch[pull.head.ref] ??= []).push(pull);
   const mergedEvents = {};
   for (const pull of pulls)
-    mergedEvents[pull.number] = all(
+    mergedEvents[pull.number] = list(
       `repos/${REPO}/issues/${pull.number}/timeline?per_page=100`,
     )
       .filter((event) => event.event === "merged")
@@ -520,24 +572,26 @@ function count(objective, work) {
   const duplicateComments = {};
   for (const [item, found] of Object.entries(byItem))
     for (const issue of found) {
-      const bodies = all(
+      const bodies = list(
         `repos/${REPO}/issues/${issue.number}/comments?per_page=100`,
       ).map((comment) => comment.body);
       const dups = bodies.length - new Set(bodies).size;
       if (dups) duplicateComments[item] = dups;
     }
   // The Objective's completion comment is an effect too (objective-comment).
-  const objectiveBodies = all(
+  const objectiveBodies = list(
     `repos/${REPO}/issues/${objective}/comments?per_page=100`,
   ).map((comment) => comment.body);
   const objectiveDups = objectiveBodies.length - new Set(objectiveBodies).size;
   if (objectiveDups) duplicateComments.objective = objectiveDups;
-  const subIssues = all(
+  const subIssues = list(
     `repos/${REPO}/issues/${objective}/sub_issues?per_page=100`,
   ).map((issue) => issue.number);
-  const objectiveIssue = api("GET", `repos/${REPO}/issues/${objective}`).data;
+  const objectiveIssue = call("GET", `repos/${REPO}/issues/${objective}`).data;
   const items = planned ?? Object.keys(byItem).sort();
   const checks = {
+    // Without the planned set, "every item" is whatever GitHub happens to hold.
+    plannedKnown: planned !== undefined,
     oneIssuePerMarker:
       items.length > 0 &&
       items.every((item) => byItem[item]?.length === 1) &&
@@ -587,17 +641,17 @@ function count(objective, work) {
 }
 
 /** The gh login: the author of everything this harness creates. */
-function viewer() {
-  const login = api("GET", "user").data?.login;
+function viewer(call = api) {
+  const login = call("GET", "user").data?.login;
   if (!login) throw new Error("cannot read the gh login");
   return login;
 }
 
 /** The live-check Objectives in the repository (any state), by number. */
-function liveObjectives() {
-  const login = viewer();
+function liveObjectives(io = { all, api }) {
+  const login = viewer(io.api);
   const found = new Map();
-  for (const issue of all(`repos/${REPO}/issues?state=all&per_page=100`)) {
+  for (const issue of io.all(`repos/${REPO}/issues?state=all&per_page=100`)) {
     const tag = /^Live check ([A-Za-z0-9_-]+)$/.exec(issue.title)?.[1];
     if (
       tag &&
@@ -613,56 +667,83 @@ function liveObjectives() {
 /**
  * Close open live-check Objectives, their Work Items and PRs, and delete
  * their branches; with `objective`, only that Objective's. Nothing else in
- * the repository is touched, so a stray issue or branch survives.
+ * the repository is touched, so a stray issue or branch survives. A write
+ * GitHub refuses (403, rate limit) is counted and reported, and fails the
+ * reset: leftovers would otherwise look cleaned up.
  */
-function reset(objective) {
+export function reset(objective, io = { all, api }) {
   if (objective !== undefined && !/^[1-9]\d*$/.test(objective))
     throw new Error(`--objective must be an issue number: ${objective}`);
-  const live = liveObjectives();
+  const live = liveObjectives(io);
   if (objective !== undefined && !live.has(Number(objective)))
     throw new Error(`#${objective} is not a live-check Objective in ${REPO}`);
   const ours = new Set(objective ? [Number(objective)] : live.keys());
-  const login = viewer();
+  const login = viewer(io.api);
+  const failures = [];
+  const write = (what, method, path, body, expected) => {
+    const { status } = io.api(method, path, body);
+    if (status !== expected) failures.push(`${what}: ${status}`);
+  };
   const marked = (text) => {
     const found = /<!-- factory:objective=(\d+);item=/.exec(text ?? "");
     return found ? Number(found[1]) : undefined;
   };
-  for (const issue of all(`repos/${REPO}/issues?state=open&per_page=100`))
+  for (const issue of io.all(`repos/${REPO}/issues?state=open&per_page=100`))
     if (
       !issue.pull_request &&
       (ours.has(issue.number) ||
         (issue.user?.login === login && ours.has(marked(issue.body))))
     )
-      api("PATCH", `repos/${REPO}/issues/${issue.number}`, {
-        state: "closed",
-        state_reason: "not_planned",
-      });
+      write(
+        `close issue #${issue.number}`,
+        "PATCH",
+        `repos/${REPO}/issues/${issue.number}`,
+        { state: "closed", state_reason: "not_planned" },
+        200,
+      );
   const branchOf = (ref) => {
     const found = /^factory\/objective-(\d+)\//.exec(ref);
     return found && ours.has(Number(found[1]));
   };
-  for (const pull of all(`repos/${REPO}/pulls?state=open&per_page=100`))
+  for (const pull of io.all(`repos/${REPO}/pulls?state=open&per_page=100`))
     if (
       pull.head.repo?.full_name?.toLowerCase() === REPO &&
       pull.user?.login === login &&
       branchOf(pull.head.ref)
     )
-      api("PATCH", `repos/${REPO}/pulls/${pull.number}`, { state: "closed" });
-  for (const ref of all(
+      write(
+        `close PR #${pull.number}`,
+        "PATCH",
+        `repos/${REPO}/pulls/${pull.number}`,
+        { state: "closed" },
+        200,
+      );
+  for (const ref of io.all(
     `repos/${REPO}/git/matching-refs/heads/factory/objective-`,
   ))
     if (branchOf(ref.ref.replace(/^refs\/heads\//, "")))
-      api("DELETE", `repos/${REPO}/git/${ref.ref}`);
-  log(
-    `reset ${REPO}: Objectives ${[...ours].map((n) => `#${n}`).join(", ") || "(none)"}: issues and PRs closed, branches deleted`,
-  );
+      write(
+        `delete ${ref.ref}`,
+        "DELETE",
+        `repos/${REPO}/git/${ref.ref}`,
+        undefined,
+        204,
+      );
+  const named = `Objectives ${[...ours].map((n) => `#${n}`).join(", ") || "(none)"}`;
+  if (failures.length)
+    throw new Error(
+      `reset ${REPO}: ${named}: ${failures.length} write(s) failed: ${failures.join("; ")}`,
+    );
+  log(`reset ${REPO}: ${named}: issues and PRs closed, branches deleted`);
 }
 
-const options = args(process.argv.slice(2));
 const command =
   process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
-    ? options._[0]
+    ? parseArgs(process.argv.slice(2))._[0]
     : "library";
+const options =
+  command === "library" ? undefined : parseArgs(process.argv.slice(2));
+if (options && Object.hasOwn(OPTIONS, command)) checkOptions(command, options);
 if (command === "setup") setup();
 else if (command === "run") await run(options);
 else if (command === "assert") {

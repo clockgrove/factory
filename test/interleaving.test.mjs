@@ -23,6 +23,7 @@ import { workItem } from "./support/fault-harness.mjs";
 import {
   checkInvariants,
   explore,
+  fixedPinProblems,
   runInterleaving,
 } from "./support/interleave.mjs";
 import { DIAGNOSES, PINNED } from "./support/interleave-known.mjs";
@@ -157,9 +158,18 @@ describe("interleavings of two Work Items", {
         const result = await run(family, pinned.schedule);
         t.diagnostic(report(pinned.schedule, result));
         const known = judge(pinned.name, pinned.schedule, result, reference);
-        // A fixed race stays pinned: every invariant must hold.
+        // A fixed race stays pinned: every invariant must hold, whether or
+        // not a known race would explain a failure, and the crash must fire.
         if (!pinned.known) {
-          if (known.size) t.diagnostic(`known race ${[...known].join(", ")}`);
+          const problems = fixedPinProblems(
+            checkInvariants(result, reference),
+            pinned.schedule,
+            result,
+          );
+          if (problems.length)
+            assert.fail(
+              `Fixed race ${pinned.fixed} is not shown fixed: ${problems.join("; ")}\n${report(pinned.schedule, result)}`,
+            );
           return;
         }
         const { diagnosis } = DIAGNOSES[pinned.known];

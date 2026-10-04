@@ -1084,6 +1084,26 @@ export function explore(reference, items, { samples = 8, seed = 515 } = {}) {
 // ---- invariants ------------------------------------------------------------
 
 /**
+ * What keeps a fixed race's pinned schedule from proving it fixed. The
+ * schedule must hold every invariant, so a failure fails it even when a known
+ * race explains the failure (that is for the explored schedules); and a
+ * scheduled crash that never fired exercised nothing, so it cannot pass.
+ */
+export function fixedPinProblems(failures, schedule, result) {
+  const problems = failures
+    .filter((failure) => !failure.consequence)
+    .map(
+      (failure) =>
+        `a fixed race must hold every invariant; ${failure.invariant}: ${failure.message}`,
+    );
+  if (schedule.crash && !result.crashed)
+    problems.push(
+      `the crash at ${schedule.crash.at} never fired, so the schedule exercised nothing`,
+    );
+  return problems;
+}
+
+/**
  * Every invariant a run breaks, as {invariant, message, consequence}. The
  * invariants are the fault matrix's end state (judged from GitHub and the
  * repository), no operator stop or hung run, and nothing ambiguous,

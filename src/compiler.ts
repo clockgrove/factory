@@ -1474,25 +1474,19 @@ function exactLine(content: string, command: string): boolean {
 
 /**
  * Whether an Acceptance bullet's text is a command with authority beyond the
- * bullet itself: a command the plan runs with authority, a Final validation
- * command, a package script at the base, or an exact command line declared
- * elsewhere in the pinned sources.
+ * bullet itself: a Final validation command, a package script at the base, or
+ * an exact command line declared elsewhere in the pinned sources. Authority
+ * comes from the Objective and its sources only. The plan under check never
+ * contributes, or dropping a command from the plan would turn its criterion
+ * into a semantic obligation.
  */
 export function commandAuthority(
-  graph: WorkGraph,
-  sources: PlanningSource[],
   body: string,
+  sources: PlanningSource[],
   baseSha: string,
   checkout: string,
 ): (command: string, backticked: boolean) => boolean {
-  const planned = new Set([
-    ...graph.items.flatMap((item) =>
-      item.validation
-        .filter((check) => authorizedCommand(check, baseSha, sources, checkout))
-        .map((check) => normalizedCommand(check.command)),
-    ),
-    ...finalObjectiveCommands(body).map(normalizedCommand),
-  ]);
+  const finals = new Set(finalObjectiveCommands(body).map(normalizedCommand));
   // Planning sources and Required checks list files and check names.
   let declarations = body;
   for (const section of ["Planning sources", "Required checks"])
@@ -1507,7 +1501,7 @@ export function commandAuthority(
     ).length;
   return (command, backticked) =>
     Boolean(command.trim()) &&
-    (planned.has(normalizedCommand(command)) ||
+    (finals.has(normalizedCommand(command)) ||
       (packageScriptInvocation(command) !== undefined &&
         authorizedCommand(
           { command, provenance: "base-observed", source: "package.json" },
@@ -1907,7 +1901,7 @@ export async function compileObjective(
       sources,
       coverageObligations(body, objectiveCriteria(body)),
       finalObjectiveCommands(body),
-      commandAuthority(graph, sources, body, baseSha, checkout),
+      commandAuthority(body, sources, baseSha, checkout),
     );
     validateGraphSources(graph, sources, checkout, body, baseSha);
   } catch (error) {
@@ -2896,13 +2890,7 @@ export function verifyPlanCandidate(
     candidate.sources,
     coverageObligations(body, objectiveCriteria(body)),
     candidate.finalCommands,
-    commandAuthority(
-      candidate.graph,
-      candidate.sources,
-      body,
-      baseSha,
-      checkout,
-    ),
+    commandAuthority(body, candidate.sources, baseSha, checkout),
   );
   validateCitations(candidate.graph, candidate.sources);
   assertWorkerInputSources(candidate.graph, candidate.sources);

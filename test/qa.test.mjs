@@ -469,25 +469,9 @@ test("a backticked bullet is a command only with authority beyond itself", async
       "",
     ].join("\n");
     const sources = planningSources(objective, target.baseSha, target.checkout);
-    const plan = (commands) => ({
-      objective: 1,
-      baseSha: target.baseSha,
-      items: [
-        {
-          ...work("unit"),
-          validation: commands.map((command) => ({
-            command,
-            provenance: "source-declared",
-            source: "OBJECTIVE",
-          })),
-        },
-      ],
-      coverage: [],
-    });
     const isCommand = commandAuthority(
-      plan([]),
-      sources,
       objective,
+      sources,
       target.baseSha,
       target.checkout,
     );
@@ -501,20 +485,11 @@ test("a backticked bullet is a command only with authority beyond itself", async
     ])
       assert(isCommand(command, true), command);
     // A bullet that only declares itself, or a line repeated as prose or as a
-    // planning source, is a semantic obligation.
+    // planning source, is a semantic obligation. A plan that runs it gives it
+    // no authority: commandAuthority never sees the plan.
     for (const command of ["README.md", "echo only-here", "npm run missing"])
       assert(!isCommand(command, true), command);
     assert(!isCommand("test -s docs.txt", false));
-    // Once the plan runs it with authority, it is a command obligation.
-    assert(
-      commandAuthority(
-        plan(["echo only-here"]),
-        sources,
-        objective,
-        target.baseSha,
-        target.checkout,
-      )("echo only-here", true),
-    );
   }));
 
 for (const delivery of ["regular", "native"])

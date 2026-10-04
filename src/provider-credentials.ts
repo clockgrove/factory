@@ -6,15 +6,6 @@ const VARIABLE_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
 /** The controller credential the configured execution provider needs, if any. */
 export function executionCredential(config: FactoryConfig): string | undefined {
-  if (
-    config.execution.kind === "sandbox" &&
-    config.execution.provider === "daytona"
-  ) {
-    const name = config.execution.config?.apiKeyEnv;
-    if (typeof name !== "string" || !VARIABLE_NAME.test(name))
-      throw new Error("Invalid Daytona credential variable name");
-    return name;
-  }
   if (config.execution.kind !== "managed-agent") return undefined;
   const name =
     config.execution.provider === "claude-managed-agents"

@@ -51,7 +51,7 @@ Label each issue `trunk`, `branch`, `leaf` or `release-gate` by delivery scope, 
 
 ## Design
 
-Define narrow contracts for the named variation points: PlanningModel, ExecutionDriver, AgentHarness, SandboxProvider, DeliveryStrategy, ContentStore, and GitHubGateway. Compose only implementations a feature needs. Do not abstract the state store, scheduler, lifecycle, validator, runner, Git model, or controller host.
+Define narrow contracts for the named variation points: PlanningModel, ExecutionDriver, AgentHarness, DeliveryStrategy, ContentStore, and GitHubGateway. Compose only implementations a feature needs. Do not abstract the state store, scheduler, lifecycle, validator, runner, Git model, or controller host.
 
 Use one atomic local snapshot for continuation state. Do not add operational event journals, recovery journals, custom state refs, provider ranking or fallback chains. [Diagnostics](docs/ARCHITECTURE.md#state-and-recovery) record correlated local observations but never reconstruct or control lifecycle state. The configured AgentHarness owns model and tool execution; media reenters ordinary validation and delivery.
 

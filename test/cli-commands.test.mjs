@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { validateConfig } from "../dist/config.js";
 import { statusDocument } from "../dist/diagnostics.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import { defaultAutonomy } from "../dist/index.js";
@@ -433,4 +434,46 @@ test("status without an Objective names the command that answers each service an
     ).join("\n"),
     /Queue: running; queued #4; #4 running/,
   );
+});
+
+test("a config naming the removed sandbox backend is refused by every command, naming the backends to use", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-cli-sandbox-"));
+  try {
+    const target = createTarget(root);
+    const config = factoryConfig(target.checkout, "example/cli-sandbox");
+    config.execution = {
+      kind: "sandbox",
+      provider: "daytona",
+      harness: { kind: "registered", adapter: "installed", config: {} },
+      argv: ["installed-harness"],
+    };
+    const configPath = join(root, "config.json");
+    writeFileSync(configPath, JSON.stringify(config));
+    for (const args of [
+      ["run", "--objective", "1"],
+      ["status", "--objective", "1"],
+    ]) {
+      const result = spawnSync(
+        process.execPath,
+        [cli, ...args, "--config", configPath],
+        { encoding: "utf8", env: { ...process.env } },
+      );
+      assert.equal(result.status, 1, args[0]);
+      assert.equal(result.stdout, "", args[0]);
+      for (const alternative of ['"local"', '"managed-agent"'])
+        assert.ok(
+          result.stderr.includes(alternative),
+          `${args[0]} names ${alternative}`,
+        );
+    }
+    // The backends it names still validate.
+    config.execution = {
+      kind: "local",
+      harness: factoryConfig(target.checkout, "example/cli-sandbox").execution
+        .harness,
+    };
+    assert.equal(validateConfig(config).execution.kind, "local");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

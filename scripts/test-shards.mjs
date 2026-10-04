@@ -17,10 +17,7 @@ import { join } from "node:path";
 
 const root = join(import.meta.dirname, "..");
 const DEFAULT_SECONDS = 5;
-const INSTALLED = [
-  "test/package-smoke.test.mjs",
-  "test/sandbox-installed.test.mjs",
-];
+const INSTALLED = ["test/package-smoke.test.mjs"];
 
 /** Every test file, as `test/<name>.test.mjs`, sorted. */
 function testFiles() {

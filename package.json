@@ -64,7 +64,6 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
-    "@daytonaio/sdk": "0.220.0",
     "@types/node": "^24.5.2",
     "ajv": "^8.20.0",
     "pnpm": "10.34.5",
@@ -94,13 +93,5 @@
     "@anthropic-ai/claude-agent-sdk": "0.3.281",
     "@github/copilot-sdk": "1.0.13",
     "zod": "4.6.5"
-  },
-  "peerDependencies": {
-    "@daytonaio/sdk": "0.220.0"
-  },
-  "peerDependenciesMeta": {
-    "@daytonaio/sdk": {
-      "optional": true
-    }
   }
 }

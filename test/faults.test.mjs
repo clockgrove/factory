@@ -11,14 +11,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import Anthropic from "@anthropic-ai/sdk";
-import {
-  DaytonaAuthenticationError,
-  DaytonaConnectionError,
-  DaytonaInternalServerError,
-  DaytonaNotFoundError,
-  DaytonaRateLimitError,
-  DaytonaSpotEvictedError,
-} from "@daytonaio/sdk";
 import { Octokit } from "@octokit/core";
 import { Codex } from "@openai/codex-sdk";
 import { ClaudePlanningModel } from "../dist/claude-planning.js";
@@ -28,9 +20,8 @@ import { AuthenticationRequiredError } from "../dist/contracts.js";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { verifyHydratedAssets } from "../dist/media.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
-import { DaytonaSandboxProvider } from "../dist/execution/daytona.js";
 import { earlierHeads } from "../dist/repair-policy.js";
-import { daytonaFault, executionFault } from "../dist/execution/fault.js";
+import { executionFault } from "../dist/execution/fault.js";
 import { AgentsApiError } from "../dist/execution/openai-managed.js";
 import {
   assertRepeats,
@@ -1919,7 +1910,7 @@ for (const [name, model, type, expected] of reviewCases)
     assertFault(faultOf(error), expected, name);
   });
 
-// ------------------------------------------ execution drivers and sandboxes
+// ------------------------------------------ execution drivers
 
 const anthropic429 = Anthropic.APIError.generate(
   429,
@@ -1994,114 +1985,6 @@ test("execution driver errors classify by type, status and method", () => {
       expected,
       name,
     );
-});
-
-const daytonaCases = [
-  [
-    "rate limited",
-    new DaytonaRateLimitError("Too many requests", 429, { "retry-after": "5" }),
-    "create",
-    { kind: "transient", outcomeUnknown: false, retryIn: [0, 5_000] },
-  ],
-  [
-    "server error on create",
-    new DaytonaInternalServerError("boom", 500),
-    "create",
-    { kind: "transient", outcomeUnknown: true },
-  ],
-  [
-    "connection lost while observing",
-    new DaytonaConnectionError("socket hang up"),
-    "observe",
-    { kind: "transient", outcomeUnknown: false },
-  ],
-  [
-    "bad API key",
-    new DaytonaAuthenticationError("Unauthorized", 401),
-    "find",
-    { kind: "config" },
-  ],
-  [
-    "sandbox evicted",
-    new DaytonaSpotEvictedError("evicted"),
-    "observe",
-    { kind: "transient", outcomeUnknown: true },
-  ],
-  [
-    "sandbox gone",
-    new DaytonaNotFoundError("Sandbox not found", 404),
-    "download",
-    { kind: "transient", outcomeUnknown: true },
-  ],
-  [
-    "SDK missing",
-    Object.assign(new Error("Daytona SDK 0.220.0 unavailable"), {
-      code: "DAYTONA_SDK_UNAVAILABLE",
-    }),
-    "create",
-    { kind: "config" },
-  ],
-];
-
-test("Daytona SDK errors classify by class and status", () => {
-  for (const [name, error, method, expected] of daytonaCases)
-    assertFault(daytonaFault(error, method) ?? faultOf(error), expected, name);
-});
-
-test("a decorated provider rethrows the same error with its fault", async () => {
-  const notFound = new DaytonaNotFoundError("Sandbox not found", 404);
-  const unauthorized = new DaytonaAuthenticationError("Unauthorized", 401);
-  const provider = new DaytonaSandboxProvider(
-    {
-      snapshot: "s",
-      target: "us",
-      apiKeyEnv: "DAYTONA_API_KEY",
-      timeoutSeconds: 60,
-      factoryRoot: "/opt/factory",
-    },
-    "key",
-    {
-      get: async () => {
-        throw notFound;
-      },
-      list: () => ({
-        [Symbol.asyncIterator]: () => ({
-          next: async () => {
-            throw unauthorized;
-          },
-        }),
-      }),
-      create: async () => assert.fail("no create"),
-    },
-  );
-  const handle = {
-    identity: "sandbox-1",
-    attemptId: "attempt-1",
-    workspace: "/tmp/factory/attempt-1",
-    data: { owner: "0".repeat(8) + "-0000-0000-0000-" + "0".repeat(12) },
-  };
-  const process = {
-    identity: "command-1",
-    sandboxIdentity: "sandbox-1",
-    attemptId: "attempt-1",
-    data: { session: handle.data.owner },
-  };
-  await assert.rejects(
-    provider.observe(handle, process),
-    (error) =>
-      error === notFound &&
-      faultOf(error).kind === "transient" &&
-      faultOf(error).outcomeUnknown === true,
-  );
-  await assert.rejects(
-    provider.find({ attemptId: "attempt-1" }),
-    (error) => error === unauthorized && faultOf(error).kind === "config",
-  );
-  // Its own validation errors stay unclassified defects.
-  await assert.rejects(
-    provider.find({ attemptId: "../escape" }),
-    (error) => faultOf(error).kind === "defect",
-  );
 });
 
 // ------------------------------------------------------- state records

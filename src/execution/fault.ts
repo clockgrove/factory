@@ -62,29 +62,3 @@ export function providerRequestFault(
     return transient(error.message, outcomeUnknown);
   return requestFault(error, { outcomeUnknown, fix: CREDENTIAL_FIX });
 }
-
-/** Daytona SDK errors by class name, then the shared execution rules. */
-export function daytonaFault(
-  error: unknown,
-  method: string,
-): Fault | undefined {
-  const name = error instanceof Error ? error.name : "";
-  const detail = error instanceof Error ? error.message : String(error);
-  if (
-    (error as { code?: unknown } | undefined)?.code ===
-    "DAYTONA_SDK_UNAVAILABLE"
-  )
-    return {
-      kind: "config",
-      detail,
-      fix: "Do what the message says on the controller host, then `factory run`",
-    };
-  // The provider removed the sandbox: its processes are gone with it.
-  if (
-    name === "DaytonaSpotEvictedError" ||
-    name === "DaytonaQueueTimeoutError" ||
-    (name === "DaytonaNotFoundError" && method !== "find")
-  )
-    return transient(`Daytona sandbox is gone: ${detail}`, true);
-  return executionFault(error, method);
-}

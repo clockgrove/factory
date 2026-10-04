@@ -9,6 +9,7 @@ import {
   applyPendingAmendment,
   assertGraphRevisions,
   graphDigest,
+  replacementRefusal,
   submitAmendment,
   validateAmendment,
 } from "../dist/graph-amendments.js";
@@ -2059,6 +2060,8 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
       assert.doesNotMatch(JSON.stringify(rejectedDocument), /coverage/);
       const rejectedStatus = rejectedDocument.pendingAmendment;
       assert.equal(rejectedStatus.phase, "rejected");
+      // A planning revision is left: a replacement fits.
+      assert.equal(rejectedStatus.replacementRefusal, null);
       assert.match(rejectedStatus.error, /\[REDACTED\]/);
       assert.doesNotMatch(rejectedStatus.error, /coverage/);
       assert.equal(
@@ -2236,6 +2239,7 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
       assert.equal(readyStatus.phase, "ready");
       assert.equal(readyStatus.error, null);
       assert.equal(readyStatus.failureDigest, null);
+      assert.equal(readyStatus.replacementRefusal, null);
       assert.doesNotThrow(() => checkServiceState(config, 1));
       for (const mutate of [
         (s) => {
@@ -2294,6 +2298,18 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
         assert.equal(consumption(refused, "$planning").planningRevisions, 2);
         assert.equal(compilations, 3);
         assert.equal(graphReviews, 3);
+        // Status exposes that no replacement fits (it names cancel).
+        assert.match(
+          status().pendingAmendment.replacementRefusal,
+          /planningRevisions allowance exhausted/,
+        );
+        // A configuration without planning classes refuses the same way.
+        const unplanned = structuredClone(refused);
+        unplanned.autonomy.repairClasses = ["implementation"];
+        assert.match(
+          replacementRefusal(unplanned),
+          /No planning repair class is enabled/,
+        );
         const next = {
           ...proposal,
           replacement: {

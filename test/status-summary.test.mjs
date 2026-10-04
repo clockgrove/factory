@@ -291,6 +291,66 @@ test("decisions name the exact command with real values", () => {
     command: "factory repair --objective 7 --proposal FILE",
     reason: "Narrow the fix",
   });
+  // An allowance is left: a supplied correction is accepted.
+  const left = summarizeStatus(
+    execution([item("A", { status: "failed", lastError: "tests failed" })], {
+      repairs: {
+        A: {
+          phase: "stopped",
+          failureClass: "implementation",
+          failureEvent: "item/A/execute/0",
+          repairable: true,
+          nextDecision: "Narrow the fix",
+        },
+      },
+    }),
+  );
+  assert.equal(
+    left.nextAction.command,
+    "factory repair --objective 7 --proposal FILE",
+  );
+  // The allowance is used up: `factory repair` is refused, a new attempt
+  // continues (#676).
+  const exhausted = summarizeStatus(
+    execution([item("A", { status: "failed", lastError: "tests failed" })], {
+      repairs: {
+        A: {
+          phase: "stopped",
+          failureClass: "implementation",
+          failureEvent: "item/A/execute/1",
+          repairable: false,
+          nextDecision: "allowance exhausted; start a new attempt",
+        },
+      },
+    }),
+  );
+  assert.equal(exhausted.summary, "repair decision for A");
+  assert.equal(
+    exhausted.nextAction.command,
+    "factory retry --objective 7 --item A",
+  );
+  // The retry line waits while a sibling runs: retry refuses until it settles.
+  const sibling = summarizeStatus(
+    execution(
+      [
+        item("A", { status: "failed", lastError: "tests failed" }),
+        item("B", { status: "running", step: "execute" }),
+      ],
+      {
+        repairs: {
+          A: {
+            phase: "stopped",
+            failureClass: "implementation",
+            failureEvent: "item/A/execute/1",
+            repairable: false,
+            nextDecision: "allowance exhausted; start a new attempt",
+          },
+        },
+      },
+    ),
+  );
+  assert.equal(sibling.phase, "running");
+  assert.doesNotMatch(sibling.nextAction?.command ?? "", /factory retry/);
   const amendment = summarizeStatus(
     execution([item("A", { status: "running", step: "execute" })], {
       pendingAmendment: { phase: "rejected", error: "coverage gap" },
@@ -298,6 +358,33 @@ test("decisions name the exact command with real values", () => {
   );
   assert.equal(amendment.phase, "needs-decision");
   assert.equal(amendment.nextAction.reason, "coverage gap");
+  assert.equal(
+    amendment.nextAction.command,
+    "factory propose-amendment --objective 7 --proposal FILE",
+  );
+  // No replacement fits (no planning class, or the planning revisions are
+  // used up): `factory propose-amendment` is refused, so name cancel with the
+  // reason (#676).
+  for (const refusal of [
+    "Objective planningRevisions allowance exhausted",
+    "No planning repair class is enabled; operator decision required",
+  ]) {
+    const refused = summarizeStatus(
+      execution([item("A", { status: "running", step: "execute" })], {
+        pendingAmendment: {
+          phase: "rejected",
+          error: "coverage gap",
+          replacementRefusal: refusal,
+        },
+      }),
+    );
+    assert.equal(refused.phase, "needs-decision");
+    assert.equal(refused.summary, "graph amendment was rejected");
+    assert.deepEqual(refused.nextAction, {
+      command: "factory cancel --objective 7",
+      reason: `No replacement can be submitted: ${refusal}`,
+    });
+  }
 });
 
 test("failures point at retry, logs, authentication or diagnostics", () => {

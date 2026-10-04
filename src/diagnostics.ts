@@ -32,9 +32,10 @@ import type {
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { faultDetail, type Wait } from "./fault.js";
-import { graphDigest } from "./graph-amendments.js";
+import { graphDigest, replacementRefusal } from "./graph-amendments.js";
 import { objectiveCandidate } from "./qa.js";
 import {
+  allowanceAvailable,
   consumption,
   failureDigest,
   remaining,
@@ -1297,6 +1298,14 @@ export function statusDocument(
           error: state.pendingAmendment.error
             ? redactDiagnosticDetail(state.pendingAmendment.error, secrets)
             : null,
+          // Whether `factory propose-amendment` would accept a diagnosed
+          // replacement of a rejected amendment: a planning repair class is
+          // enabled and a planning revision fits. Status names it only then;
+          // otherwise `factory cancel`.
+          replacementRefusal:
+            state.pendingAmendment.phase === "rejected"
+              ? (replacementRefusal(state) ?? null)
+              : null,
         }
       : null,
     allowanceConsumption: consumption(state),
@@ -1324,6 +1333,19 @@ export function statusDocument(
             blamedPath: work.recovery!.failure?.predecessor?.path ?? null,
             blamedGraphDigest:
               work.recovery!.failure?.predecessor?.graphDigest ?? null,
+            // Whether `factory repair` would be accepted for the failure
+            // event: implementation repair is enabled and an allowance fits
+            // (an event already charged does). Status names `factory repair`
+            // only then; otherwise `factory retry`.
+            repairable: work.recovery!.failure?.event
+              ? state.autonomy.repairClasses.includes("implementation") &&
+                allowanceAvailable(
+                  state,
+                  work.recovery!.failure.event,
+                  "implementationRepairs",
+                  repairScopes(state, id),
+                )
+              : null,
             continuation: work.recovery!.failure?.continuation ?? null,
             unfinishedEdits: work.recovery!.failure?.unfinishedEdits ?? null,
             priorAttempts: work.recovery!.history?.length ?? 0,

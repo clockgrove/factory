@@ -9,6 +9,8 @@ import {
   consumption,
   failureDigest,
   objectiveEvent,
+  repairClasses,
+  type RepairClass,
   type RepairCorrection,
 } from "./repair-policy.js";
 import { refreshBlameDecisions } from "./blame-decision.js";
@@ -461,17 +463,41 @@ function validateAmendmentReplacement(
       "Replacement requires a new diagnosis bound to the rejection",
     );
   // The replacement is charged when it starts; it must fit now.
-  assertRepairClass(state, correction.kind);
+  const refusal = replacementRefusal(state, correction.kind);
+  if (refusal) throw new Error(refusal);
+  return rejected;
+}
+
+const PLANNING_CLASSES = repairClasses.filter((kind) =>
+  kind.startsWith("planning-"),
+);
+
+/**
+ * Why a replacement of a rejected amendment is refused for lack of a planning
+ * class or revision, or undefined when it fits. Without `kind`, whether any
+ * planning class would be admitted (status names `factory cancel` when none).
+ */
+export function replacementRefusal(
+  state: FactoryState,
+  kind?: RepairClass,
+): string | undefined {
+  const kinds = kind ? [kind] : PLANNING_CLASSES;
+  if (
+    !kinds.some((candidate) => state.autonomy.repairClasses.includes(candidate))
+  )
+    return kind
+      ? `Repair class ${kind} is not enabled; operator decision required`
+      : "No planning repair class is enabled; operator decision required";
   if (
     !allowanceAvailable(
       state,
       objectiveEvent("amend", "replacement"),
-      allowanceKey(correction.kind),
+      "planningRevisions",
       ["$planning"],
     )
   )
-    throw new Error("Objective planningRevisions allowance exhausted");
-  return rejected;
+    return "Objective planningRevisions allowance exhausted";
+  return undefined;
 }
 
 export function recordWorkerDiscovery(

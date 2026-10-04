@@ -145,7 +145,12 @@ export interface ExecutionStatusView extends WaitView {
   state: "active" | "waiting" | "complete" | "failed" | "cancelled";
   runActive: boolean | null;
   coordinator: CoordinatorView | null;
-  pendingAmendment: { phase: string; error: string | null } | null;
+  pendingAmendment: {
+    phase: string;
+    error: string | null;
+    /** Why `factory propose-amendment` would refuse a replacement of a rejected amendment; null when it fits. */
+    replacementRefusal?: string | null;
+  } | null;
   /** The digest of the accepted graph now; an amendment that lands changes it. */
   graphDigest?: string;
   /** What is left of each allowance; an amendment takes a planning revision. */
@@ -161,6 +166,8 @@ export interface ExecutionStatusView extends WaitView {
       blamedPath?: string | null;
       /** The graph digest when it was blamed. */
       blamedGraphDigest?: string | null;
+      /** False when `factory repair` would be refused: no allowance fits, or implementation repair is off. */
+      repairable?: boolean | null;
       nextDecision: string | null;
     }
   >;
@@ -414,30 +421,50 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
       repair.failureEvent !== null &&
       ["failed", "waiting"].includes(status(id)),
   );
-  if (stopped)
-    return {
-      phase: "needs-decision",
-      summary: `repair decision for ${stopped[0]}`,
-      nextAction: {
-        command: `factory repair --objective ${objective} --proposal FILE`,
-        reason: short(
-          stopped[1].nextDecision ?? "Inspect the retained recovery failure",
-          160,
-        ),
-      },
-    };
-  if (view.pendingAmendment?.phase === "rejected")
+  if (stopped) {
+    const reason = short(
+      stopped[1].nextDecision ?? "Inspect the retained recovery failure",
+      160,
+    );
+    // `factory repair` is refused once the allowance is used up or
+    // implementation repair is off; a new attempt is the command that
+    // continues. Retry refuses while other work runs, so that line waits
+    // for the work to settle (see failedItem).
+    const retry = stopped[1].repairable === false;
+    if (!retry || !view.work.some((item) => item.status === "running"))
+      return {
+        phase: "needs-decision",
+        summary: `repair decision for ${stopped[0]}`,
+        nextAction: {
+          command: retry
+            ? retryCommand(objective, stopped[0])
+            : `factory repair --objective ${objective} --proposal FILE`,
+          reason,
+        },
+      };
+  }
+  if (view.pendingAmendment?.phase === "rejected") {
+    // `factory propose-amendment` refuses a replacement when no planning
+    // repair class is enabled or no planning revision is left; cancelling is
+    // then the way forward.
+    const refusal = view.pendingAmendment.replacementRefusal;
     return {
       phase: "needs-decision",
       summary: "graph amendment was rejected",
-      nextAction: {
-        command: `factory propose-amendment --objective ${objective} --proposal FILE`,
-        reason: short(
-          view.pendingAmendment.error ?? "Submit a diagnosed replacement",
-          160,
-        ),
-      },
+      nextAction: refusal
+        ? {
+            command: `factory cancel --objective ${objective}`,
+            reason: short(`No replacement can be submitted: ${refusal}`, 160),
+          }
+        : {
+            command: `factory propose-amendment --objective ${objective} --proposal FILE`,
+            reason: short(
+              view.pendingAmendment.error ?? "Submit a diagnosed replacement",
+              160,
+            ),
+          },
     };
+  }
   return undefined;
 }
 

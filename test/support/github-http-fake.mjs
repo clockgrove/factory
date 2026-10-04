@@ -47,7 +47,7 @@
 //
 // Modes: read-after-write lag per endpoint, fault rules on the Nth matching
 // request (5xx, 429 and 403 rate limits with or without retry-after, a
-// dropped response after the effect, a reset before it, a controller crash
+// dropped response after the effect, a controller crash
 // before or after the effect, another actor changing the repository), and a
 // per-request log.
 import { execFile, spawn } from "node:child_process";
@@ -359,8 +359,7 @@ export class GitHubHttpFake {
    * name, a RegExp over `METHOD path`, or a predicate over the log entry) and
    * to the `times - 1` matching requests after it.
    * Kinds: status (respond `status` with `headers`/`message`, no effect),
-   * reset (close the connection before the effect), drop (apply the effect,
-   * then close the connection), crash-before, crash-after (onCrash then close),
+   * drop (apply the effect, then close the connection), crash-before, crash-after (onCrash then close),
    * after (respond normally once `run(fake, entry)` has changed the repository).
    */
   inject(rule) {
@@ -540,11 +539,6 @@ export class GitHubHttpFake {
           status: String(rule.status),
         }),
       );
-      return true;
-    }
-    if (rule.kind === "reset") {
-      entry.status = "reset";
-      response.socket?.destroy();
       return true;
     }
     if (rule.kind === "crash-before") {

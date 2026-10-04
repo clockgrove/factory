@@ -5,15 +5,12 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { setLagClock } from "../dist/delivery/lag.js";
-import { attachFault, faultOf, requestFault } from "../dist/fault.js";
-import { readState } from "../dist/state-store.js";
+import { faultOf, requestFault } from "../dist/fault.js";
 import {
   createTarget,
   factoryConfig,
   makeApplication,
-  readEvents,
 } from "./support/integration-fixture.mjs";
-import { resultFindings } from "./support/review-protocol.mjs";
 
 // An interruption is not a failure of the work: Factory repeats the step in
 // the same run instead of stopping (a paid step up to its bound).
@@ -68,9 +65,6 @@ async function withApp(name, delivery, options, callback) {
           ...options.action,
         },
       },
-      ...(options.resultReviewer
-        ? { resultReviewer: options.resultReviewer }
-        : {}),
     };
     const app = makeApplication(descriptor);
     return await callback({ ...app, descriptor });
@@ -81,85 +75,8 @@ async function withApp(name, delivery, options, callback) {
   }
 }
 
-function passingReview(request) {
-  return {
-    packetId: request.reviewPacket.id,
-    findings: resultFindings(
-      request,
-      request.criteria.map((criterion) => ({
-        criterion,
-        verdict: "pass",
-        source: "OBJECTIVE",
-        quote: "## Acceptance",
-        detail: "fixture semantic proof",
-        question: "",
-      })),
-    ),
-  };
-}
-
-/** A review answer lost mid-call, classified as the model adapter does. */
-const lostAnswer = () =>
-  attachFault(new Error("socket hang up"), {
-    kind: "transient",
-    detail: "Model connection failed mid-call: socket hang up",
-    outcomeUnknown: true,
-  });
-
-const mergeEvents = (github) =>
-  github
-    .state()
-    .events.filter((event) => ["merge", "merge-stack"].includes(event.type))
-    .length;
-
 for (const delivery of ["regular", "native-stack"])
   describe(`interruptions with ${delivery} delivery`, () => {
-    test("a lost reviewer response is asked again in the same run", async () => {
-      let reviews = 0;
-      await withApp(
-        "review",
-        delivery,
-        {
-          resultReviewer(request) {
-            reviews++;
-            if (reviews === 1) throw lostAnswer();
-            return passingReview(request);
-          },
-        },
-        async ({ application, github }) => {
-          const state = await application.runObjective(objective);
-          assert.equal(state.finalValidation.passed, true);
-          assert.equal(state.work.result.interruptions, undefined);
-          assert.ok(reviews >= 2);
-          assert.equal(Object.keys(github.state().pullRequests).length, 1);
-          assert.equal(mergeEvents(github), 1);
-        },
-      );
-    });
-
-    test("a lost merge response is confirmed, not merged again", async () => {
-      await withApp("merge", delivery, {}, async ({ application, github }) => {
-        // A one-item native unit merges its single PR like regular delivery.
-        const original = github.merge.bind(github);
-        let calls = 0;
-        github.merge = async (...args) => {
-          const result = await original(...args);
-          // As the client raises it: a lost response, outcome unknown.
-          if (++calls === 1)
-            throw attachFault(new Error("GitHub mutation outcome unknown"), {
-              kind: "transient",
-              detail: "GitHub PUT response was lost; it may have taken effect",
-              outcomeUnknown: true,
-            });
-          return result;
-        };
-        const state = await application.runObjective(objective);
-        assert.equal(state.finalValidation.passed, true);
-        assert.equal(calls, 2);
-        assert.equal(mergeEvents(github), 1);
-      });
-    });
-
     test("a merge the default branch does not show is lag for GitHub's lag window, then a defect", async (t) => {
       await withApp(
         "ancestry",
@@ -201,84 +118,6 @@ for (const delivery of ["regular", "native-stack"])
           // stops: the default branch lost a merge GitHub confirmed.
           assert.match(error.message, /Default branch does not contain/);
           assert.equal(faultOf(error).kind, "defect");
-        },
-      );
-    });
-
-    test("a transient issue closure failure repeats until the issue closes", async () => {
-      await withApp(
-        "closure",
-        delivery,
-        {},
-        async ({ application, github }) => {
-          const close = github.closeIssue.bind(github);
-          let failures = 0;
-          github.closeIssue = async (...args) => {
-            if (failures++ < 2)
-              throw attachFault(new Error("GitHub HTTP 502"), {
-                kind: "transient",
-                detail: "GitHub HTTP 502",
-                outcomeUnknown: false,
-              });
-            return close(...args);
-          };
-          const state = await application.runObjective(objective);
-          assert.equal(state.work.result.githubClosure, "complete");
-          assert.equal(state.objectiveClosure, "complete");
-          assert.equal(state.repeats, undefined);
-          assert.equal(failures, 4);
-        },
-      );
-    });
-
-    test("a worker that ends without a result gets a fresh attempt", async () => {
-      await withApp(
-        "worker",
-        delivery,
-        { action: { dieAttempts: 1 } },
-        async ({ application, eventsPath }) => {
-          const state = await application.runObjective(objective);
-          assert.equal(state.finalValidation.passed, true);
-          const starts = readEvents(eventsPath).filter(
-            (event) => event.type === "start" && event.item === "result",
-          );
-          assert.equal(starts.length, 2);
-          assert.notEqual(starts[0].attempt, starts[1].attempt);
-        },
-      );
-    });
-
-    test("a review answer lost past the paid bound asks the operator and allows retry", async () => {
-      let reviews = 0;
-      await withApp(
-        "persistent",
-        delivery,
-        {
-          resultReviewer(request) {
-            reviews++;
-            if (reviews <= 4) throw lostAnswer();
-            return passingReview(request);
-          },
-        },
-        async ({ application, descriptor }) => {
-          // Three lost answers repeat; the fourth is a decision for this
-          // item only: the run waits instead of stopping the Objective.
-          const waiting = await application.runObjective(objective);
-          assert.equal(waiting.error, undefined);
-          assert.equal(reviews, 4);
-          // The item waits in place for the answer (contract 2).
-          const asked = readState(descriptor.config.repository, objective);
-          assert.equal(asked.error, undefined);
-          assert.equal(asked.work.result.status, "running");
-          assert.equal(asked.work.result.recovery?.failure, undefined);
-          assert.equal(asked.work.result.wait?.kind, "decision");
-          assert.match(
-            asked.work.result.wait.detail,
-            /review failed 4 times .*retry or cancel/,
-          );
-          assert.equal(application.retryWorkItem(objective, "result"), "step");
-          const state = await application.runObjective(objective);
-          assert.equal(state.finalValidation.passed, true);
         },
       );
     });

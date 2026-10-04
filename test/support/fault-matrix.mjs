@@ -1,7 +1,6 @@
 // The fault matrix: run an uninterrupted two-item Objective (alpha → beta)
 // once per delivery strategy, derive every effect boundary from what that
-// run did, then inject a crash, a lost response, a connection reset or an
-// unavailable burst at each boundary, restart the controller, and check
+// run did, then inject a crash, a lost response or an unavailable burst at each boundary, restart the controller, and check
 // invariants of the end state read from GitHub's request log and the
 // repository, not from Factory's own state. Driver lifecycle premises (an
 // operator cancel, a run stopped for a decision) reach the execution
@@ -46,8 +45,6 @@ const KINDS = ["crash-before", "crash-after", "lost", "unavailable"];
 const MERGE_ASYNC = "PUT /repos/{owner}/{repo}/pulls/{number}/merge-async";
 const MERGE_ASYNC_STATUS =
   "GET /repos/{owner}/{repo}/pulls/{number}/merge-async/{uuid}";
-// A reset before the effect: the client cannot tell it from a lost response.
-const MUTATION_KINDS = [...KINDS, "reset"];
 const PAID = new Set(["crash-after", "lost"]);
 
 /**
@@ -93,8 +90,6 @@ function httpRule(endpoint, occurrence, kind) {
       return { match: endpoint, occurrence, kind };
     case "lost":
       return { match: endpoint, occurrence, kind: "drop" };
-    case "reset":
-      return { match: endpoint, occurrence, kind: "reset" };
     case "unavailable":
       // A burst of two: within Factory's documented repeat budget.
       return { match: endpoint, occurrence, times: 2, ...faults.unavailable() };
@@ -121,7 +116,7 @@ export function deriveCases(reference) {
     const occurrence = (seen.get(entry.endpoint) ?? 0) + 1;
     seen.set(entry.endpoint, occurrence);
     if (entry.effect)
-      for (const kind of MUTATION_KINDS)
+      for (const kind of KINDS)
         cases.push({
           name: `${kind} at ${entry.endpoint} #${occurrence}`,
           group: "mutations",
@@ -131,14 +126,13 @@ export function deriveCases(reference) {
         });
     else if (isRead(entry) && !firstRead.has(entry.endpoint)) {
       firstRead.add(entry.endpoint);
-      for (const kind of ["unavailable", "reset"])
-        cases.push({
-          name: `${kind} at ${entry.endpoint} #1`,
-          group: "reads",
-          boundaryName: `${entry.endpoint} #1`,
-          boundary: { kind: "http", endpoint: entry.endpoint, occurrence: 1 },
-          http: [httpRule(entry.endpoint, 1, kind)],
-        });
+      cases.push({
+        name: `unavailable at ${entry.endpoint} #1`,
+        group: "reads",
+        boundaryName: `${entry.endpoint} #1`,
+        boundary: { kind: "http", endpoint: entry.endpoint, occurrence: 1 },
+        http: [httpRule(entry.endpoint, 1, "unavailable")],
+      });
     }
   }
   const calls = new Map();

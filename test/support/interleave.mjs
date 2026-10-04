@@ -14,9 +14,11 @@
 // fault-controller process (through NODE_OPTIONS, which runScenario passes
 // on), it installs the yield points before the controller starts.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -273,7 +275,8 @@ ask() {
   shift "$count"
   curl -sS --fail --max-time 900 "$FACTORY_INTERLEAVE_URL/git" \
     --data-urlencode "scenario=$FACTORY_INTERLEAVE_SCENARIO" \
-    --data-urlencode "pid=$PPID" --data-urlencode "phase=$phase" \
+    --data-urlencode "pid=$PPID" --data-urlencode "self=$$" \
+    --data-urlencode "phase=$phase" \
     --data-urlencode "id=$id" --data-urlencode "failed=$failed" "$@"
 }
 invalid() {
@@ -409,6 +412,35 @@ const isMutation = (effect) =>
 
 // ---- test side: the scheduler ----------------------------------------------
 
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a child process of `pid` other than `excluded` is alive (Linux
+ * /proc; Factory supports Linux only).
+ */
+function liveDescendants(pid, excluded) {
+  for (const name of readdirSync("/proc")) {
+    if (!/^\d+$/.test(name) || excluded.has(Number(name))) continue;
+    let stat;
+    try {
+      stat = readFileSync(`/proc/${name}/stat`, "utf8");
+    } catch {
+      continue;
+    }
+    // The command name may hold spaces and parentheses; fields follow it.
+    const [state, parent] = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    if (state !== "Z" && Number(parent) === pid) return true;
+  }
+  return false;
+}
+
 /**
  * One scenario's yield points. Each effect is labelled `<item> <key> #<n>`:
  * the n-th effect with that key for that Work Item in that controller run,
@@ -417,7 +449,7 @@ const isMutation = (effect) =>
  * controller run; restarts run unscheduled.
  */
 class Exploration {
-  constructor(schedule = {}, { quietMs = 5_000, holdTimeoutMs = 30_000 } = {}) {
+  constructor(schedule = {}, { quietMs = 5_000 } = {}) {
     this.holds = (schedule.holds ?? []).map((hold) => ({
       at: "start",
       phase: "done",
@@ -427,7 +459,6 @@ class Exploration {
     this.models = new Set(schedule.models ?? []);
     this.crash = schedule.crash && { phase: "start", ...schedule.crash };
     this.quietMs = quietMs;
-    this.holdTimeoutMs = holdTimeoutMs;
     this.runs = new Map();
     this.trace = [];
     this.waiting = [];
@@ -440,6 +471,7 @@ class Exploration {
     if (!this.runs.has(pid))
       this.runs.set(pid, {
         index: this.runs.size,
+        pid,
         counts: new Map(),
         work: {},
         reached: new Set(),
@@ -475,31 +507,37 @@ class Exploration {
             item ??= itemOfBranch(side);
           for (const [identity, owner] of this.identities)
             if (arg.includes(identity)) item ??= owner;
-          for (const pull of Object.values(this.fake?.state.pulls ?? {}))
-            if (pull.mergeSha && arg === pull.mergeSha)
-              item ??= itemOfBranch(pull.head?.ref);
         }
         // The default-branch fetch and FETCH_HEAD reads after a merge belong
         // to the Work Item being integrated (regular delivery merges one at a
-        // time); the final Objective validation's belong to none.
-        if (key === "git fetch" || key.endsWith("FETCH_HEAD"))
+        // time); the final Objective validation's (whose worktree is at the
+        // last merge) belong to none.
+        if (key === "git fetch" || key.endsWith("FETCH_HEAD")) {
+          for (const pull of Object.values(this.fake?.state.pulls ?? {}))
+            if (pull.mergeSha && event.args.includes(pull.mergeSha))
+              item ??= itemOfBranch(pull.head?.ref);
           item ??= run.integrating;
+        }
         if (item)
           for (const arg of event.args.slice(2))
             if (arg.startsWith("/")) this.identities.set(arg, item);
         return { key, item };
       }
       case "state": {
-        const changed = Object.keys(event.work).filter(
-          (id) => event.work[id] !== run.work[id],
-        );
+        const changed = Object.keys(event.work)
+          .filter((id) => event.work[id] !== run.work[id])
+          .sort();
         run.work = event.work;
         for (const id of changed)
           if (id === run.integrating && event.work[id].startsWith("done/"))
             run.integrating = undefined;
-        return changed.length === 1
-          ? { key: `state ${event.work[changed[0]]}`, item: changed[0] }
-          : { key: "state", item: undefined };
+        // One save can carry two Work Items' transitions; each gets its own
+        // label, so a transition is labelled the same however saves batch.
+        const [first, ...others] = changed.map((id) => ({
+          key: `state ${event.work[id]}`,
+          item: id,
+        }));
+        return { ...(first ?? { key: "state", item: undefined }), others };
       }
     }
     return { key: event.kind, item: undefined };
@@ -509,18 +547,23 @@ class Exploration {
   async request(event) {
     const run = this.run(event.pid);
     let entry;
-    if (event.phase === "start") {
-      const { key, item } = await this.describe(event, run);
+    const label = ({ key, item }) => {
       const base = `${item ?? "*"} ${key}`;
       const n = (run.counts.get(base) ?? 0) + 1;
       run.counts.set(base, n);
+      return `${base} #${n}`;
+    };
+    if (event.phase === "start") {
+      const { key, item, others = [] } = await this.describe(event, run);
       entry = {
         id: this.nextId++,
-        label: `${base} #${n}`,
+        label: label({ key, item }),
         key,
         item,
         kind: event.kind,
         args: event.args,
+        process: event.self,
+        others: others.map((other) => ({ ...other, label: label(other) })),
         run,
       };
       this.open.set(entry.id, entry);
@@ -550,19 +593,22 @@ class Exploration {
       for (const hold of this.holds)
         if (hold.hold === entry.label && hold.at === event.phase)
           await this.wait(run, hold, entry);
-    if (this.crashed?.pid === event.pid) return { action: "crash" };
+    if (this.crashed?.pid === event.pid || run.dead) return { action: "crash" };
     if (crashHere && !this.crashed) return this.kill(run, event, entry);
-    this.trace.push({
-      run: run.index,
-      label: entry.label,
-      phase: event.phase,
-      item: entry.item,
-      key: entry.key,
-      kind: entry.kind,
-      args: event.phase === "start" ? entry.args : undefined,
-      failed: event.failed,
-      at: performance.now(),
-    });
+    for (const effect of [entry, ...entry.others]) {
+      if (effect !== entry) this.arrive(run, `${effect.label}@${event.phase}`);
+      this.trace.push({
+        run: run.index,
+        label: effect.label,
+        phase: event.phase,
+        item: effect.item,
+        key: effect.key,
+        kind: entry.kind,
+        args: event.phase === "start" ? entry.args : undefined,
+        failed: event.failed,
+        at: performance.now(),
+      });
+    }
     return {
       action: "go",
       id: entry.id,
@@ -612,27 +658,51 @@ class Exploration {
 
   /**
    * A hold the controller cannot satisfy (the awaited effect waits for the
-   * held one) is released as infeasible once every open effect of the run is
-   * held and nothing happened for quietMs, or after holdTimeoutMs.
+   * held one) is released as infeasible once the run is quiet for quietMs:
+   * every open effect is held (or is a driver call waiting on them), no
+   * process the controller started is alive apart from held git shims
+   * (workers, validation commands and their git count as activity), and
+   * nothing but GitHub reads happened. There is no other timeout; runScenario's run timeout reports a hold that never
+   * resolves as a hung run.
    */
   checkQuiet() {
     const now = performance.now();
-    for (const waiter of [...this.waiting]) {
-      const { run } = waiter;
+    const runs = new Set(this.waiting.map((waiter) => waiter.run));
+    for (const run of runs) {
+      if (!alive(run.pid)) {
+        this.abandon(run);
+        continue;
+      }
       const held = new Set(
         this.waiting.filter((w) => w.run === run).map((w) => w.entry),
       );
-      const busy = [...this.open.values()].some(
-        (entry) => entry.run === run && !held.has(entry),
-      );
-      if (
-        now - waiter.since > this.holdTimeoutMs ||
-        (!busy && now - run.activity > this.quietMs)
-      ) {
-        waiter.release("infeasible");
+      // A driver call is not itself busy: it waits on its git commands and
+      // worker processes, which count on their own (and may be held).
+      const busy =
+        [...this.open.values()].some(
+          (entry) =>
+            entry.run === run && entry.kind !== "driver" && !held.has(entry),
+        ) ||
+        liveDescendants(
+          run.pid,
+          new Set([...held].map((entry) => entry.process).filter(Boolean)),
+        );
+      if (busy) run.activity = now;
+      else if (now - run.activity > this.quietMs) {
+        this.waiting.find((w) => w.run === run).release("infeasible");
         return;
       }
     }
+  }
+
+  /**
+   * The controller is gone (killed for a hung run, or the scenario ended):
+   * its held effects never run, so their git shims exit instead of waiting.
+   */
+  abandon(run) {
+    run.dead = true;
+    for (const waiter of [...this.waiting])
+      if (waiter.run === run) waiter.release("abandoned");
   }
 
   kill(run, { pid, phase, failed }, entry) {
@@ -666,6 +736,10 @@ class Scheduler {
   explorations = new Map();
 
   async start() {
+    if (spawnSync("curl", ["--version"]).status !== 0)
+      throw new Error(
+        "The interleaving explorer needs curl on PATH: its git shim asks the scheduler through curl",
+      );
     this.shimDirectory = mkdtempSync(join(tmpdir(), "factory-interleave-"));
     writeFileSync(join(this.shimDirectory, "git"), SHIM);
     chmodSync(join(this.shimDirectory, "git"), 0o755);
@@ -720,6 +794,7 @@ class Scheduler {
         kind: "git",
         scenario: form.get("scenario"),
         pid: Number(form.get("pid")),
+        self: Number(form.get("self")),
         phase: form.get("phase"),
         id: Number(form.get("id")),
         failed: form.get("failed") === "true",
@@ -747,7 +822,8 @@ let scheduler;
  * - holds: [{hold, at, until, phase}] keeps effect `hold` at its `at` yield
  *   (start, mid or done) until effect `until` reached `phase` (start, mid or
  *   done). Outcomes: applied, already (no reordering was needed),
- *   infeasible (the awaited effect never came; released), crashed.
+ *   infeasible (the awaited effect never came; released), crashed (the
+ *   scheduled crash released it), abandoned (the controller died otherwise).
  * - models: labels of git commands the shim models (see SHIM).
  * - crash: {at, phase} kills the controller at that yield of `at`: phase
  *   start is before the effect, done after it, before its caller sees it.
@@ -776,29 +852,36 @@ export async function runInterleaving({ name, schedule, ...options }) {
       crashed: exploration.crashed,
     };
   } finally {
+    for (const run of exploration.runs.values()) exploration.abandon(run);
     scheduler.explorations.delete(prefix);
   }
 }
 
 // ---- exploration -----------------------------------------------------------
 
-/** First-run effects of a trace, in the order they started. */
-function effectsOf(result) {
-  const effects = new Map();
-  result.trace.forEach((event, index) => {
-    if (event.run !== 0) return;
-    if (event.phase === "start")
-      effects.set(event.label, {
-        label: event.label,
-        item: event.item,
-        key: event.key,
-        kind: event.kind,
-        start: index,
-      });
-    else if (event.phase === "done" && effects.has(event.label))
-      effects.get(event.label).done = index;
-  });
-  return [...effects.values()];
+/**
+ * Each Work Item's effects in the first controller run, in that Work Item's
+ * own order. Labels count per Work Item and key, so this does not depend on
+ * how the two Work Items' effects happened to interleave.
+ */
+function sequences(reference) {
+  const byItem = new Map();
+  const seen = new Set();
+  for (const event of reference.trace) {
+    if (event.run !== 0 || event.phase !== "start" || !event.item) continue;
+    if (seen.has(event.label)) continue;
+    seen.add(event.label);
+    const list = byItem.get(event.item) ?? [];
+    list.push({
+      label: event.label,
+      item: event.item,
+      key: event.key,
+      kind: event.kind,
+      index: list.length,
+    });
+    byItem.set(event.item, list);
+  }
+  return byItem;
 }
 
 /** FNV-1a over the seed and a schedule name. */
@@ -813,21 +896,21 @@ function score(seed, name) {
 
 /**
  * The `count` schedules with the lowest seeded hash of their names: a fixed
- * seed picks the same schedules on every runner, and a schedule the
- * reference adds or drops does not reshuffle the others.
+ * seed picks the same schedules on every runner.
  */
 function sample(entries, count, seed) {
-  return [...new Map(entries.map((entry) => [entry.name, entry])).values()]
+  return entries
     .map((entry) => ({ entry, rank: score(seed, entry.name) }))
-    .sort((a, b) => a.rank - b.rank)
+    .sort((a, b) => a.rank - b.rank || (a.entry.name < b.entry.name ? -1 : 1))
     .slice(0, count)
     .map(({ entry }) => entry);
 }
 
+const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+
 /**
- * Schedules around each pair of conflicting effects of two Work Items in a
- * reference trace (a run under the empty schedule), in four classes. Two
- * are systematic over the effects that share a git resource:
+ * Schedules around each pair of conflicting effects of two Work Items, in
+ * four classes. Two are systematic over effects that share a git resource:
  * - registry: a worktree removal of one Work Item lands inside another
  *   Work Item's fetch or worktree removal in the same checkout (modelled).
  * - fetch-head: another fetch replaces FETCH_HEAD between a Work Item's
@@ -836,123 +919,123 @@ function sample(entries, count, seed) {
  * continuation snapshot; together they are sampled to `samples` schedules
  * with the fixed `seed`:
  * - checkpoint: one Work Item stops right after a state transition (its next
- *   effect is held) while the other crashes before, or after, one of its
- *   mutations: the first transition after the mutation (one delay), or the
- *   one before it when that needs the stop.
- * - crash: a crash right after each Work Item state transition and before
- *   and after each of its git effects, boundaries the fault matrix (which
- *   crashes at GitHub, model and driver calls) does not reach.
+ *   effect is held) while the other crashes before, or after, a mutation.
+ * - crash: a crash right after each state transition and before and after
+ *   each git effect, boundaries the fault matrix (which crashes at GitHub,
+ *   model and driver calls) does not reach.
+ *
+ * Schedules derive from each Work Item's own effect sequence in `reference`
+ * (a run under the empty schedule) and the dependencies in `items`, never
+ * from how the reference interleaved them, so the same graph gives the same
+ * schedules on every runner. Of two dependent Work Items, the dependent one
+ * runs only after the other's release: the last transition the other made
+ * before the dependent started running.
  */
-export function explore(reference, { samples = 12, seed = 515 } = {}) {
-  const effects = effectsOf(reference);
-  const items = [...new Set(effects.map((effect) => effect.item))].filter(
-    Boolean,
-  );
-  const of = (item, predicate) =>
-    effects.filter((effect) => effect.item === item && predicate(effect));
-  const transitions = (item) => of(item, (effect) => effect.kind === "state");
-  // Work Item `y` can act while `effect` runs when y's life (first state
-  // transition to last effect) overlaps the effect's phase (between its Work
-  // Item's transitions around it). This keeps schedules to orderings the
-  // Work Item graph allows: a dependent Work Item cannot run before the one
-  // it depends on is done.
-  const overlaps = (effect, y) => {
-    const own = transitions(effect.item);
-    const from = own.filter((t) => t.start <= effect.start).at(-1)?.start;
-    const to = own.find((t) => t.start > effect.start)?.start ?? Infinity;
-    const life = of(y, () => true);
-    const born = transitions(y)[0]?.start ?? Infinity;
-    return born < to && (life.at(-1)?.start ?? -1) > (from ?? -Infinity);
+export function explore(reference, items, { samples = 8, seed = 515 } = {}) {
+  const sequence = sequences(reference);
+  const ids = items.map((item) => item.id).sort();
+  const of = (id, predicate) =>
+    (sequence.get(id) ?? []).filter((effect) => predicate(effect));
+  const transitions = (id) => of(id, (effect) => effect.kind === "state");
+  const dependsOn = (y, x) =>
+    items.find((item) => item.id === y)?.dependencies.includes(x);
+  const release = (x, y) => {
+    const first = reference.trace.find(
+      (event) =>
+        event.run === 0 &&
+        event.item === y &&
+        event.key.startsWith("state running/"),
+    );
+    const label = reference.trace
+      .slice(0, first ? reference.trace.indexOf(first) : 0)
+      .filter(
+        (event) =>
+          event.run === 0 && event.item === x && event.kind === "state",
+      )
+      .at(-1)?.label;
+    return transitions(x).find((effect) => effect.label === label)?.index;
   };
-  const schedules = [];
-  const add = (family, name, schedule) =>
-    schedules.push({ family, name, schedule });
+  // Effect a of one Work Item and effect b of the other can be in flight
+  // together unless a dependency orders them.
+  const concurrent = (a, b) =>
+    dependsOn(b.item, a.item)
+      ? a.index > (release(a.item, b.item) ?? Infinity)
+      : dependsOn(a.item, b.item)
+        ? b.index > (release(b.item, a.item) ?? Infinity)
+        : true;
+  const systematic = [];
+  const pool = [];
 
-  for (const x of items)
-    for (const y of items) {
+  for (const x of ids)
+    for (const y of ids) {
       if (x === y) continue;
-      const removals = of(
-        y,
-        (effect) => effect.key === "git worktree remove" && overlaps(effect, x),
-      );
       for (const walker of of(
         x,
         (effect) =>
-          (effect.key === "git fetch" ||
-            effect.key === "git worktree remove") &&
-          overlaps(effect, y),
+          effect.key === "git fetch" || effect.key === "git worktree remove",
       ))
-        for (const removal of removals)
-          add("registry", `${removal.label} lands inside ${walker.label}`, {
-            holds: [
-              // The walk lists the registry when it starts, so it only sees
-              // a worktree added before then (add #n pairs with remove #n).
-              {
-                hold: walker.label,
-                until: removal.label.replace(" remove #", " add #"),
-              },
-              { hold: removal.label, until: walker.label, phase: "mid" },
-              { hold: walker.label, at: "mid", until: removal.label },
-            ],
-            models: [walker.label],
+        for (const removal of of(
+          y,
+          (effect) =>
+            effect.key === "git worktree remove" && concurrent(walker, effect),
+        ))
+          systematic.push({
+            family: "registry",
+            name: `${removal.label} lands inside ${walker.label}`,
+            schedule: {
+              holds: [
+                // The walk lists the registry when it starts, so it sees only
+                // a worktree added before then (add #n pairs with remove #n).
+                {
+                  hold: walker.label,
+                  until: removal.label.replace(" remove #", " add #"),
+                },
+                { hold: removal.label, until: walker.label, phase: "mid" },
+                { hold: walker.label, at: "mid", until: removal.label },
+              ],
+              models: [walker.label],
+            },
           });
       // Factory reads FETCH_HEAD synchronously right after its fetch, so only
       // a fetch already running can replace it: hold the Work Item's own
       // fetch from returning until the other fetch finished.
-      const fetches = of(
-        y,
-        (effect) => effect.key === "git fetch" && overlaps(effect, x),
-      );
       for (const reader of of(x, (effect) =>
         effect.key.endsWith("FETCH_HEAD"),
       )) {
         const own = of(
           x,
-          (effect) => effect.key === "git fetch" && effect.start < reader.start,
+          (effect) => effect.key === "git fetch" && effect.index < reader.index,
         ).at(-1);
-        if (!own || !overlaps(own, y)) continue;
-        for (const fetch of fetches)
-          add(
-            "fetch-head",
-            `${fetch.label} replaces FETCH_HEAD between ${own.label} and ${reader.label}`,
-            {
+        if (!own) continue;
+        for (const fetch of of(
+          y,
+          (effect) => effect.key === "git fetch" && concurrent(own, effect),
+        ))
+          systematic.push({
+            family: "fetch-head",
+            name: `${fetch.label} replaces FETCH_HEAD between ${own.label} and ${reader.label}`,
+            schedule: {
               holds: [
                 { hold: fetch.label, until: own.label, phase: "start" },
                 { hold: own.label, at: "done", until: fetch.label },
               ],
             },
-          );
+          });
       }
-    }
 
-  // Crash consistency: every pair conflicts on the one continuation
-  // snapshot, so these are sampled.
-  const pool = [];
-  for (const x of items)
-    for (const y of items) {
-      if (x === y) continue;
-      const ys = transitions(y);
-      for (const mutation of of(
-        x,
-        (effect) => isMutation(effect) && overlaps(effect, y),
-      )) {
-        const before = ys.filter((s) => s.start < mutation.start).at(-1);
-        const after = ys.find((s) => s.start > mutation.start);
-        for (const transition of [before, after]) {
-          if (!transition) continue;
-          // Y's next asynchronous effect: holding a state save or a
-          // synchronous FETCH_HEAD read would stop the whole controller.
-          const next = effects.find(
+      for (const mutation of of(x, isMutation))
+        for (const transition of transitions(y)) {
+          if (!concurrent(mutation, transition)) continue;
+          // Y's next effect after the transition that is neither a state
+          // save nor a synchronous FETCH_HEAD read (holding those stops the
+          // whole controller) nor a read (polling makes their count vary).
+          const next = of(
+            y,
             (effect) =>
-              effect.item === y &&
-              effect.start > transition.start &&
-              effect.kind !== "state" &&
+              effect.index > transition.index &&
+              (isMutation(effect) || effect.kind === "model") &&
               !effect.key.endsWith("FETCH_HEAD"),
-          );
-          // Y already stopped there on its own: a plain crash at the
-          // mutation, which the fault matrix and the crash class cover.
-          if (transition === before && !(next?.start < mutation.start))
-            continue;
+          )[0];
           for (const phase of ["start", "done"]) {
             const holds = [
               { hold: mutation.label, at: phase, until: transition.label },
@@ -970,11 +1053,10 @@ export function explore(reference, { samples = 12, seed = 515 } = {}) {
             });
           }
         }
-      }
     }
-  for (const item of items)
+  for (const id of ids)
     for (const effect of of(
-      item,
+      id,
       (effect) => effect.kind === "state" || effect.kind === "git",
     ))
       for (const phase of effect.kind === "state"
@@ -985,125 +1067,133 @@ export function explore(reference, { samples = 12, seed = 515 } = {}) {
           name: `crash ${phase === "start" ? "before" : "after"} ${effect.label}`,
           schedule: { crash: { at: effect.label, phase } },
         });
-  schedules.push(...sample(pool, samples, seed));
-  return schedules;
+  return [
+    ...systematic.sort(byName),
+    ...sample(pool, samples, seed).sort(byName),
+  ];
 }
 
 // ---- invariants ------------------------------------------------------------
 
 /**
- * The matrix's end state (judged from GitHub and the repository), no
- * operator stop, and nothing ambiguous, uncertain or stranded after a
- * restart: no run reports an ambiguous or uncertain Work Item, every Work
- * Item ends done, and every worktree a run added was removed.
+ * Every invariant a run breaks, as {invariant, message, consequence}. The
+ * invariants are the fault matrix's end state (judged from GitHub and the
+ * repository), no operator stop or hung run, and nothing ambiguous,
+ * uncertain or stranded after a restart: no run reports an ambiguous or
+ * uncertain Work Item, every Work Item ends done, and every worktree a run
+ * added is removed. When a run stopped, an unfinished end state (a missing
+ * merge, an open issue, a worktree kept as evidence) is a `consequence` of
+ * that stop; duplicates, refusals and repeated attempts never are.
  */
-export function assertInvariants(result, reference) {
+export function checkInvariants(result, reference) {
   const { fake, items, repository } = result;
-  const context = () =>
-    JSON.stringify(
-      {
-        runs: result.runs,
-        holds: result.holds,
-        crashed: result.crashed,
-        counts: fake.counts(),
-      },
-      null,
-      1,
-    );
-  const stops = result.runs
-    .filter((run) => !["complete", "crashed"].includes(run.outcome))
-    .map(
-      (run) =>
-        `${run.outcome}: ${run.message ?? run.stderr ?? ""} ${JSON.stringify(run.work ?? {})}`,
-    );
+  const failures = [];
+  const stopped =
+    result.final.outcome !== "complete" ||
+    result.runs.some((run) => !["complete", "crashed"].includes(run.outcome));
+  const fail = (invariant, message, consequence = false) =>
+    failures.push({ invariant, message, consequence: consequence && stopped });
+  const unfinished = (invariant, message) => fail(invariant, message, true);
+
   for (const [index, run] of result.runs.entries()) {
-    const text = `${run.message ?? ""} ${JSON.stringify(run.work ?? {})}`;
+    const text = `${run.message ?? run.stderr ?? ""} ${JSON.stringify(run.work ?? {})}`;
+    if (run.outcome === "hung") fail("hung", `run ${index} timed out: ${text}`);
+    else if (!["complete", "crashed"].includes(run.outcome))
+      fail("stop", `run ${index} ${run.outcome}: ${text}`);
     if (/ambiguous|uncertain/i.test(text))
-      assert.fail(`run ${index} is ambiguous or uncertain: ${text}`);
+      fail("ambiguous", `run ${index} is ambiguous or uncertain: ${text}`);
   }
-  assert.deepEqual(stops, [], `operator stops: ${stops.join(" | ")}`);
-  assert.equal(result.final.outcome, "complete", context());
+  if (result.final.outcome !== "complete")
+    unfinished("complete", `the last run ended ${result.final.outcome}`);
   for (const [id, work] of Object.entries(result.final.work ?? {}))
-    assert.equal(work.status, "done", `${id} stranded at ${work.step}`);
+    if (work.status !== "done")
+      unfinished("done", `${id} stranded at ${work.status}/${work.step}`);
+
   const objective = fake.issue(OBJECTIVE);
-  assert.equal(objective.state, "closed", `Objective closed\n${context()}`);
-  assert.equal(fake.commentsOn(OBJECTIVE).length, 1, "Objective comments");
+  if (objective.state !== "closed")
+    unfinished("objective", "the Objective is open");
+  const objectiveComments = fake.commentsOn(OBJECTIVE).length;
+  if (objectiveComments > 1)
+    fail("objective", `${objectiveComments} Objective completion comments`);
+  else if (objectiveComments < 1)
+    unfinished("objective", "no Objective completion comment");
+
   const issueOf = {};
   for (const item of items) {
     const issues = fake.issuesWithMarker(marker(item.id));
-    assert.equal(issues.length, 1, `issues for ${item.id}\n${context()}`);
+    if (issues.length > 1)
+      fail("issues", `${issues.length} issues for ${item.id}`);
+    if (!issues.length) {
+      unfinished("issues", `no issue for ${item.id}`);
+      continue;
+    }
     issueOf[item.id] = issues[0].number;
-    assert.equal(issues[0].state, "closed", `issue for ${item.id} closed`);
-    assert.equal(
-      fake.commentsOn(issues[0].number).length,
-      1,
-      `completion comments on ${item.id}`,
-    );
+    if (issues[0].state !== "closed")
+      unfinished("issues", `${item.id}'s issue is open`);
+    const comments = fake.commentsOn(issues[0].number).length;
+    if (comments > 1)
+      fail("issues", `${comments} completion comments on ${item.id}`);
+    else if (comments < 1)
+      unfinished("issues", `no completion comment on ${item.id}`);
   }
-  assert.equal(
-    Object.keys(fake.state.issues).length,
-    1 + items.length * 2,
-    `issue and PR numbers\n${context()}`,
-  );
+  const numbers = Object.keys(fake.state.issues).length;
+  const expected = 1 + items.length * 2;
+  if (numbers > expected)
+    fail("numbers", `${numbers} issue and PR numbers, expected ${expected}`);
+  else if (numbers < expected)
+    unfinished("numbers", `${numbers} issue and PR numbers of ${expected}`);
+
   for (const item of items) {
     const pulls = fake.pullsForBranch(branch(item.id));
-    assert.equal(pulls.length, 1, `PRs for ${item.id}\n${context()}`);
-    assert.equal(pulls[0].merges ?? 0, 1, `merges of ${item.id}'s PR`);
-    assert.equal(
-      repository.merges[pulls[0].number],
-      true,
-      `${item.id}'s merge commit is on the default branch`,
-    );
-    assert.equal(
-      repository.files[`${item.id}.txt`],
-      `${item.id}\n`,
-      `${item.id}.txt on the default branch`,
-    );
-    assert.deepEqual(
-      [...(fake.state.blockedBy[issueOf[item.id]] ?? [])].sort(),
-      item.dependencies.map((id) => issueOf[id]).sort(),
-      `dependencies of ${item.id}`,
-    );
-    assert.equal(
-      fake.state.parent[issueOf[item.id]],
-      OBJECTIVE,
-      `parent of ${item.id}`,
-    );
-  }
-  const mutations = (run) =>
-    [
-      ...new Set(
-        run.fake.log
-          .filter((entry) => entry.effect && !entry.endpoint.startsWith("GIT "))
-          .map((entry) => entry.endpoint),
-      ),
+    if (pulls.length > 1) fail("pulls", `${pulls.length} PRs for ${item.id}`);
+    if (!pulls.length) unfinished("pulls", `no PR for ${item.id}`);
+    for (const pull of pulls) {
+      if ((pull.merges ?? 0) > 1)
+        fail("pulls", `${item.id}'s PR merged ${pull.merges} times`);
+      else if (!pull.merges) unfinished("pulls", `${item.id}'s PR unmerged`);
+      else if (repository.merges[pull.number] !== true)
+        fail("pulls", `${item.id}'s merge commit is not on the default branch`);
+    }
+    if (repository.files[`${item.id}.txt`] !== `${item.id}\n`)
+      unfinished("files", `${item.id}.txt is not on the default branch`);
+    if (issueOf[item.id] === undefined) continue;
+    const dependencies = [
+      ...(fake.state.blockedBy[issueOf[item.id]] ?? []),
     ].sort();
-  assert.deepEqual(
-    mutations(result),
-    mutations(reference),
-    "kinds of mutation",
-  );
-  assert.deepEqual(
-    fake.log
-      .filter(
-        (entry) =>
-          [405, 409, 422].includes(entry.status) || entry.unhandled === true,
-      )
-      .map((entry) => `${entry.endpoint} → ${entry.status}`),
-    [],
-    context(),
-  );
+    const declared = item.dependencies.map((id) => issueOf[id]).sort();
+    if (JSON.stringify(dependencies) !== JSON.stringify(declared))
+      unfinished(
+        "topology",
+        `${item.id} is blocked by ${dependencies}, not ${declared}`,
+      );
+    if (fake.state.parent[issueOf[item.id]] !== OBJECTIVE)
+      unfinished("topology", `${item.id}'s issue is not under the Objective`);
+  }
+
+  const mutations = (run) =>
+    new Set(
+      run.fake.log
+        .filter((entry) => entry.effect && !entry.endpoint.startsWith("GIT "))
+        .map((entry) => entry.endpoint),
+    );
+  const made = mutations(result);
+  const usual = mutations(reference);
+  for (const endpoint of made)
+    if (!usual.has(endpoint)) fail("mutations", `unexpected ${endpoint}`);
+  for (const endpoint of usual)
+    if (!made.has(endpoint)) unfinished("mutations", `no ${endpoint}`);
+  for (const entry of fake.log)
+    if ([405, 409, 422].includes(entry.status) || entry.unhandled === true)
+      fail("refused", `${entry.endpoint} → ${entry.status}`);
   const starts = result.harness.filter((event) => event.type === "start");
-  assert.equal(
-    new Set(starts.map((event) => event.attempt)).size,
-    starts.length,
-    "an attempt started twice",
-  );
+  if (new Set(starts.map((event) => event.attempt)).size !== starts.length)
+    fail("attempts", "an attempt started twice");
+
   // Worktrees registered in the checkout: an add that ran (a crash may stop
   // its caller from seeing it) and did not fail, not undone by a removal
   // that succeeded.
   const paths = new Map();
-  const added = new Set();
+  const added = new Map();
   for (const event of result.trace) {
     const key = `${event.run} ${event.label}`;
     if (event.phase === "start" && event.args)
@@ -1111,10 +1201,29 @@ export function assertInvariants(result, reference) {
     const path = paths.get(key);
     const ended = ["done", "crash-after"].includes(event.phase);
     if (event.key === "git worktree add")
-      if (event.phase === "start") added.add(path);
+      if (event.phase === "start") added.set(path, "never removed");
       else if (ended && event.failed) added.delete(path);
-    if (event.key === "git worktree remove" && ended && !event.failed)
-      added.delete(path);
+    if (event.key === "git worktree remove" && ended && added.has(path))
+      if (event.failed) added.set(path, "removal failed");
+      else added.delete(path);
   }
-  assert.deepEqual([...added], [], `stranded worktrees\n${context()}`);
+  for (const [path, cause] of added)
+    unfinished("worktrees", `stranded worktree ${path} (${cause})`);
+  return failures;
+}
+
+/** Throw one error naming every broken invariant (see checkInvariants). */
+export function assertInvariants(result, reference) {
+  const failures = checkInvariants(result, reference);
+  if (!failures.length) return;
+  const error = new assert.AssertionError({
+    message: failures
+      .map(
+        (failure) =>
+          `${failure.invariant}${failure.consequence ? " (after a stop)" : ""}: ${failure.message}`,
+      )
+      .join("\n"),
+  });
+  error.failures = failures;
+  throw error;
 }

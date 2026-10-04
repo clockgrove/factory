@@ -817,6 +817,19 @@ export class StatefulGitHubFake {
       );
       if (existing) {
         assert.equal(existing.base, request.base);
+        // An open PR follows its branch: a leased push of a new attempt
+        // moved its head, and its checks run again on that head.
+        if (existing.state === "open" && existing.headSha !== headSha) {
+          existing.headSha = headSha;
+          existing.treeSha = request.treeSha;
+          existing.checks = "passing";
+          state.events.push({
+            type: "republish",
+            number: existing.number,
+            ...request,
+            headSha,
+          });
+        }
         assert.equal(existing.headSha, headSha);
         return { number: existing.number, branch: request.branch, headSha };
       }

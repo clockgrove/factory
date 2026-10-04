@@ -1532,6 +1532,69 @@ test("a lost diagnosis is reissued once charged; ambiguous publication never aut
   assert.equal(calls, 2);
 });
 
+test("a failure while paused or an amendment is pending is diagnosed once the run goes on", async () => {
+  const { diagnoseWorkRepair, resumeDiagnoses } = await import(
+    "../dist/work-repair.js"
+  );
+  const work = {
+    status: "failed",
+    step: "validate",
+    attempt: "first",
+    baseSha: "a".repeat(40),
+    changeRef: "b".repeat(40),
+    treeSha: "c".repeat(40),
+  };
+  const state = {
+    autonomy: autonomy(),
+    graph: { items: [item()] },
+    work: { result: work },
+    baseSha: "a".repeat(40),
+    runId: "r",
+  };
+  assert.equal(
+    recordWorkFailure(
+      state,
+      "result",
+      new CandidateValidationFailure("failed command"),
+    ),
+    true,
+  );
+  let calls = 0;
+  const planner = model({ items: [item()] }, () => {
+    calls++;
+    return {
+      decision: "repair",
+      diagnosis: "The result file was left empty by the worker",
+      correction: "Write non-empty content to result.txt",
+    };
+  });
+  // The Objective is paused (or an amendment is pending) when the item fails.
+  assert.equal(
+    await diagnoseWorkRepair({
+      state,
+      item: item(),
+      model: planner,
+      save: () => {},
+      stopped: () => true,
+    }),
+    false,
+  );
+  assert.equal(calls, 0);
+  // The diagnosis is due, not dropped: the next pass asks it.
+  assert.equal(work.recovery.phase, "diagnosing");
+  const charged = consumption(state).implementationRepairs;
+  await resumeDiagnoses({
+    state,
+    model: planner,
+    save: () => {},
+    stopped: () => false,
+  });
+  assert.equal(calls, 1);
+  assert.equal(state.work.result.status, "pending");
+  assert.equal(state.work.result.recovery.phase, "ready");
+  assert.equal(consumption(state).implementationRepairs, charged);
+});
+
 test("real structured adapter uses a diagnosis request rather than a graph-compilation prompt", async (t) => {
   const { Codex } = await import("@openai/codex-sdk");
   const { CodexPlanningModel } = await import("../dist/compiler.js");

@@ -259,6 +259,10 @@ export async function runQaItem(args: {
       state,
       item,
       save,
+      // The run's cancel and pause reach the paid review step (#570).
+      cancelled: args.cancelled,
+      ...(signal && { signal }),
+      ...(args.pause && { pause: args.pause }),
       review: (retry) => ({
         ...retry,
         model: args.model,

@@ -1107,3 +1107,76 @@ test("native handoff retains a known published layer and resumes its pending suc
     },
   );
 });
+
+test("an item's defect stops only that item; a healthy sibling worker runs on uncancelled and uncharged", async () => {
+  await fixture(
+    "sibling-defect",
+    async ({ application, config, driver, eventsPath, root }) => {
+      const barrier = join(root, "barrier", "go");
+      const started = (item) =>
+        readEvents(eventsPath).some(
+          (event) => event.type === "start" && event.item === item,
+        );
+      const collect = driver.collect.bind(driver);
+      driver.collect = async (handle, context) => {
+        const owner = Object.entries(
+          readState(config.repository, 1)?.work ?? {},
+        ).find(([, work]) => work.execution?.identity === handle.identity);
+        if (owner?.[0] === "result") {
+          await until(() => started("other"));
+          // An unclassified error: a defect of this item only.
+          throw new Error("Selected AssetSet or captured change is missing");
+        }
+        return collect(handle, context);
+      };
+      const running = application.runObjective(1).catch((error) => error);
+      // The sibling finishes only after the defective item stopped.
+      await until(
+        () => readState(config.repository, 1)?.work.result.status === "failed",
+      );
+      mkdirSync(join(root, "barrier"), { recursive: true });
+      writeFileSync(barrier, "go");
+      await running;
+      const state = readState(config.repository, 1);
+      assert.equal(state.work.result.status, "failed");
+      assert.equal(state.work.result.recovery.failure.classification, "defect");
+      // The sibling was not cancelled, failed, charged or diagnosed.
+      assert.equal(
+        readEvents(eventsPath).some(
+          (event) => event.type === "cancel" && event.item === "other",
+        ),
+        false,
+      );
+      assert.notEqual(state.work.other.status, "failed");
+      assert.equal(state.work.other.recovery, undefined);
+      assert.equal(state.charges, undefined);
+      assert.equal(state.coordinator.cancelError, undefined);
+    },
+    undefined,
+    (descriptor) => {
+      const [first] = descriptor.graph.items;
+      descriptor.graph.items.push({
+        ...first,
+        id: "other",
+        title: "Other",
+        goal: "Write other.txt",
+        brief: "Write other.txt",
+        acceptance: ["other.txt exists"],
+        ownedPaths: ["other.txt"],
+        validation: [
+          {
+            command: "test -s other.txt",
+            provenance: "source-declared",
+            source: "OBJECTIVE",
+          },
+        ],
+      });
+      descriptor.objectiveBody =
+        "## Acceptance\n- `test -s result.txt`\n- `test -s other.txt`\n\n## Final validation\n- `test -s result.txt`\n";
+      descriptor.actions.other = {
+        barrier: join(descriptor.fakeRoot, "..", "barrier", "go"),
+        files: [{ path: "other.txt", text: "done\n" }],
+      };
+    },
+  );
+});

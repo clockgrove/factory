@@ -2050,54 +2050,10 @@ async function runObjectivePass(
       saveState(path, current);
       throw error;
     }
-    if (
-      active.size &&
-      current?.schemaVersion === 7 &&
-      !cancellationRequested()
-    ) {
-      for (const work of Object.values(current.work)) {
-        if (!work.execution || work.status !== "running") continue;
-        try {
-          await driver.cancel(
-            structuredClone(work.execution),
-            executionContext(work, () => saveState(path, current)),
-          );
-        } catch (cancelError) {
-          current.coordinator!.cancelError = String(cancelError);
-        }
-      }
-      await Promise.allSettled(active.values());
-    }
-    if (current?.schemaVersion === 7 && !cancellationRequested()) {
-      for (const work of Object.values(current.work)) {
-        if (
-          !work.execution ||
-          work.step !== "execute" ||
-          work.status === "done"
-        )
-          continue;
-        try {
-          // Anything short of a complete result may still hold a live remote
-          // worker (an interrupted or unresolved attempt reports "failed"),
-          // so cancel it; cancelling a settled handle is a no-op.
-          const observed = await driver
-            .observe(
-              structuredClone(work.execution),
-              executionContext(work, () => saveState(path, current)),
-            )
-            .catch(() => undefined);
-          if (observed?.state !== "complete")
-            await driver.cancel(
-              structuredClone(work.execution),
-              executionContext(work, () => saveState(path, current)),
-            );
-        } catch (cessationError) {
-          current.coordinator!.cancelError = `Owned worker cessation unresolved: ${String(cessationError)}`;
-          current.coordinator!.waitReason =
-            "Operator direction required before retry";
-        }
-      }
-    }
+    // A failure stops only its own item (its runner stops its worker); only
+    // cancel stops other items' workers. Other items run on to their own
+    // stopping points.
+    if (!cancellationRequested()) await Promise.allSettled(active.values());
     if (current) {
       if (cancellationRequested()) {
         await owner.cancellation;
@@ -2265,6 +2221,12 @@ function retryStep(
   }
 }
 
+/** The attempt failed with a wrong result: a new attempt corrects it. */
+function wrongResult(work: WorkState): boolean {
+  const failure = work.recovery?.failure;
+  return failure?.classification === "implementation" && !!failure.event;
+}
+
 /**
  * `factory retry`: answers a step's decision or config fix when one awaits
  * the operator (Objective without an item), else starts a new attempt of a
@@ -2314,9 +2276,13 @@ export function retryWorkItem(
     // and validation: a published item keeps its PR (publish leases against
     // the recorded head), and an unpublished one repeats publish, which finds
     // its PR by head. In a native unit every such item of the unit resumes.
+    // A wrong result (a failed required check, a conflict) is not resumed:
+    // the same head would fail the same way. It gets a new attempt that
+    // republishes the branch with a lease, as a repair does.
     const delivering = (entry: WorkState | undefined): boolean =>
       !!entry &&
       (entry.status === "failed" || entry.status === "cancelled") &&
+      !wrongResult(entry) &&
       (!!entry.pullRequest || (entry.step === "deliver" && !!entry.validation));
     const resumed = (
       nativeUnit?.items.map((item) => item.id) ?? [itemId]
@@ -2358,11 +2324,12 @@ export function retryWorkItem(
       nativeUnit.items.findIndex((item) => item.id === itemId) + 1,
     );
     if (
-      work.step === "deliver" ||
-      above?.some((item) => state.work[item.id]?.pullRequest) ||
-      (nativeUnit &&
-        (state.stackNumbers?.[nativeUnit.id] ||
-          state.stackMerges?.[nativeUnit.id]))
+      !wrongResult(work) &&
+      (work.step === "deliver" ||
+        above?.some((item) => state.work[item.id]?.pullRequest) ||
+        (nativeUnit &&
+          (state.stackNumbers?.[nativeUnit.id] ||
+            state.stackMerges?.[nativeUnit.id])))
     )
       throw new Error(
         `Work Item ${itemId} is part of a delivery that cannot start again; retry the published item of its unit, or factory cancel --objective ${objective}`,

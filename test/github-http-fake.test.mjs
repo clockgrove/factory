@@ -288,18 +288,22 @@ test("the gateway refuses two open PRs for one branch and an existing PR with an
       base: { ref: "main", sha },
     },
   );
+  const publication = (headSha) => ({
+    branch: "factory/objective-1/alpha",
+    base: "main",
+    headSha,
+    title: "Alpha",
+    body: "b",
+  });
   await assert.rejects(
-    gateway.findOpenPullRequest(
-      "factory/objective-1/alpha",
-      "main",
-      "a".repeat(40),
-    ),
-    /changed head or base/,
+    gateway.publish(publication("a".repeat(40))),
+    /changed head/,
   );
-  assert.deepEqual(
-    await gateway.findOpenPullRequest("factory/objective-1/alpha", "main", sha),
-    { number, branch: "factory/objective-1/alpha", headSha: sha },
-  );
+  assert.deepEqual(await gateway.publish(publication(sha)), {
+    number,
+    branch: "factory/objective-1/alpha",
+    headSha: sha,
+  });
   // Another actor opened a second PR from the same head into another base.
   const second = fake.state.nextNumber;
   fake.createIssueRecord(
@@ -311,10 +315,7 @@ test("the gateway refuses two open PRs for one branch and an existing PR with an
       base: { ref: "release", sha },
     },
   );
-  await assert.rejects(
-    gateway.findOpenPullRequest("factory/objective-1/alpha", "main", sha),
-    /Multiple open PRs/,
-  );
+  await assert.rejects(gateway.publish(publication(sha)), /Multiple open PRs/);
 });
 
 test("stacks: listing fields, a nonexistent PR is 422, and merge-async follows the documented statuses", async (t) => {

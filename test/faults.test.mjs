@@ -173,8 +173,18 @@ const repo = "GET /repos/a/b";
 const lost = () => {
   throw new TypeError("fetch failed");
 };
+/** A PR create, after the lookup by head found none. */
+const publication = {
+  branch: "factory/one",
+  base: "main",
+  headSha,
+  title: "t",
+  body: "b",
+};
+const noPulls = { "GET /repos/a/b/pulls": () => json([]) };
 const readyPull = {
   "GET /repos/a/b/pulls/5": () => json(pull()),
+  [repo]: () => json({ default_branch: "main", allow_merge_commit: true }),
 };
 
 const gitHubCases = [
@@ -239,9 +249,11 @@ const gitHubCases = [
   ],
   [
     "5xx on a create",
-    (g) =>
-      g.publish({ branch: "factory/one", base: "main", title: "t", body: "b" }),
-    { "POST /repos/a/b/pulls": () => json({ message: "Server Error" }, 502) },
+    (g) => g.publish(publication),
+    {
+      ...noPulls,
+      "POST /repos/a/b/pulls": () => json({ message: "Server Error" }, 502),
+    },
     { kind: "transient", outcomeUnknown: true },
   ],
   [
@@ -252,9 +264,8 @@ const gitHubCases = [
   ],
   [
     "network failure on a create",
-    (g) =>
-      g.publish({ branch: "factory/one", base: "main", title: "t", body: "b" }),
-    { "POST /repos/a/b/pulls": lost },
+    (g) => g.publish(publication),
+    { ...noPulls, "POST /repos/a/b/pulls": lost },
     { kind: "transient", outcomeUnknown: true },
   ],
   [
@@ -348,9 +359,9 @@ const gitHubCases = [
   ],
   [
     "422 PR already exists",
-    (g) =>
-      g.publish({ branch: "factory/one", base: "main", title: "t", body: "b" }),
+    (g) => g.publish(publication),
     {
+      ...noPulls,
       "POST /repos/a/b/pulls": () =>
         json(
           {
@@ -437,6 +448,21 @@ const gitHubCases = [
     { kind: "config", fix: /merge commits/ },
   ],
   [
+    "a repository that allows no merge method",
+    (g) => g.merge(identity, headSha),
+    {
+      ...readyPull,
+      [repo]: () =>
+        json({
+          default_branch: "main",
+          allow_merge_commit: false,
+          allow_squash_merge: false,
+          allow_rebase_merge: false,
+        }),
+    },
+    { kind: "config", fix: /merge/ },
+  ],
+  [
     "405 not mergeable",
     (g) => g.merge(identity, headSha),
     {
@@ -444,7 +470,8 @@ const gitHubCases = [
       "PUT /repos/a/b/pulls/5/merge": () =>
         json({ message: "Pull Request is not mergeable" }, 405),
     },
-    { kind: "decision" },
+    // Observed again (readiness first) within GitHub's lag window.
+    { kind: "transient", outcomeUnknown: false },
   ],
   [
     "405 repository rule",
@@ -460,7 +487,7 @@ const gitHubCases = [
           405,
         ),
     },
-    { kind: "decision" },
+    { kind: "transient", outcomeUnknown: false },
   ],
   [
     "409 head mismatch on Factory's head",
@@ -609,8 +636,8 @@ for (const [name, call, routes, expected] of gitHubCases)
   });
 
 test("a lost mutation is still GitHubOutcomeUnknown, now carrying its fault", async () => {
-  const error = await gateway({ "POST /repos/a/b/pulls": lost })
-    .publish({ branch: "factory/one", base: "main", title: "t", body: "b" })
+  const error = await gateway({ ...noPulls, "POST /repos/a/b/pulls": lost })
+    .publish(publication)
     .catch((caught) => caught);
   assert.ok(error instanceof GitHubOutcomeUnknown);
   assert.equal(faultOf(error).outcomeUnknown, true);
@@ -845,6 +872,17 @@ const gitCases = [
     { kind: "defect" },
   ],
   [
+    ["push", "--force-with-lease=refs/heads/f:", "origin", "x:refs/heads/f"],
+    " ! [remote rejected] x -> f (reference already exists)",
+    // A create-only lease lost to the branch appearing: observed again at the push site.
+    { kind: "defect" },
+  ],
+  [
+    ["ls-remote", "origin", "refs/heads/f"],
+    "fatal: unable to access 'https://github.com/a/b.git/': Empty reply from server",
+    { kind: "transient", outcomeUnknown: false },
+  ],
+  [
     ["push", "origin", "x:refs/heads/main"],
     "remote: error: GH006: Protected branch update failed for refs/heads/main.\n ! [remote rejected] x -> main (protected branch hook declined)",
     { kind: "config" },
@@ -910,7 +948,7 @@ test("the git wrappers attach faults to the errors they already throw", async ()
   );
 });
 
-/** A target checkout with a bare origin; the branch holds `remoteHead`. */
+/** A target checkout with a bare origin, and a gateway that records publications. */
 function pushFixture(t) {
   const root = mkdtempSync(join(tmpdir(), "factory-push-faults-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -931,10 +969,13 @@ function pushFixture(t) {
   };
   const base = commit("base");
   run(checkout, "push", "-q", "origin", "main");
+  const published = [];
   const delivery = new RegularDelivery(checkout, {
     defaultBranch: async () => "main",
-    findOpenPullRequest: async () => undefined,
-    publish: async () => assert.fail("publish follows only a successful push"),
+    publish: async (request) => {
+      published.push(request);
+      return { number: 7, branch: request.branch, headSha: request.headSha };
+    },
   });
   const publish = (changeRef, earlierHeads) =>
     delivery.publish({
@@ -946,10 +987,12 @@ function pushFixture(t) {
       baseBranch: "main",
       ...(earlierHeads && { earlierHeads }),
     });
-  return { root, run, checkout, commit, base, publish };
+  const remote = () =>
+    run(origin, "rev-parse", "--verify", "-q", "refs/heads/factory/one");
+  return { root, run, checkout, commit, base, publish, published, remote };
 }
 
-test("a push rejected by an earlier attempt's recorded head is transient", async (t) => {
+test("a branch holding an earlier attempt's recorded head is pushed over with a lease", async (t) => {
   const f = pushFixture(t);
   const earlier = f.commit("earlier attempt");
   f.run(
@@ -961,17 +1004,16 @@ test("a push rejected by an earlier attempt's recorded head is transient", async
   );
   f.run(f.checkout, "reset", "-q", "--hard", f.base);
   const retry = f.commit("retry");
-  const error = await f.publish(retry, [earlier]).catch((caught) => caught);
-  assert.match(error.message, /\[rejected\]/);
-  assertFault(
-    faultOf(error),
-    { kind: "transient", outcomeUnknown: false },
-    "earlier head",
-  );
-  // Without the record the same head is someone else's, in neutral words.
-  const unknown = await f.publish(retry).catch((caught) => caught);
-  assert.equal(faultOf(unknown).kind, "decision");
-  assert.match(faultOf(unknown).question, /has no record of/);
+  const result = await f.publish(retry, [earlier]);
+  assert.equal(f.remote(), retry);
+  assert.deepEqual(result, {
+    branch: "factory/one",
+    pullRequest: 7,
+    headSha: retry,
+    earlierHeads: [earlier],
+  });
+  assert.equal(f.published[0].headSha, retry);
+  assert.deepEqual(f.published[0].earlierHeads, [earlier]);
 });
 
 test("earlier attempt heads come from the archived attempt history", () => {
@@ -993,7 +1035,7 @@ test("earlier attempt heads come from the archived attempt history", () => {
   assert.deepEqual(earlierHeads({ status: "pending" }), []);
 });
 
-test("a push rejected by a foreign branch head is a decision", async (t) => {
+test("a branch holding a head Factory has no record of is a decision, not pushed over", async (t) => {
   const f = pushFixture(t);
   const foreign = f.commit("foreign");
   f.run(
@@ -1006,22 +1048,23 @@ test("a push rejected by a foreign branch head is a decision", async (t) => {
   f.run(f.checkout, "reset", "-q", "--hard", f.base);
   const ours = f.commit("ours");
   const error = await f.publish(ours).catch((caught) => caught);
-  assert.match(error.message, /\[rejected\]/);
   assertFault(faultOf(error), { kind: "decision" }, "foreign head");
+  assert.match(faultOf(error).question, /has no record of/);
+  assert.equal(f.remote(), foreign);
+  assert.deepEqual(f.published, []);
 });
 
-test("a push rejected while the remote already holds Factory's commit is lag", async (t) => {
+test("a branch already holding Factory's commit is not pushed again", async (t) => {
   const f = pushFixture(t);
   const ours = f.commit("ours");
   f.run(f.checkout, "push", "-q", "origin", `${ours}:refs/heads/factory/one`);
-  // A push whose acknowledgement was lost: the remote reports a rejection
-  // although the branch already holds the commit.
+  // Any push now would be refused: the observation must make it unneeded.
   const bin = join(f.root, "bin");
   mkdirSync(bin);
   const real = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
   writeFileSync(
     join(bin, "git"),
-    `#!/bin/sh\ncase " $* " in\n  *" push origin "*) echo " ! [rejected]        x -> factory/one (fetch first)" >&2; exit 1 ;;\nesac\nexec '${real}' "$@"\n`,
+    `#!/bin/sh\ncase " $* " in\n  *" push "*) echo " ! [rejected]        x -> factory/one (stale info)" >&2; exit 1 ;;\nesac\nexec '${real}' "$@"\n`,
   );
   chmodSync(join(bin, "git"), 0o755);
   const path = process.env.PATH;
@@ -1029,11 +1072,27 @@ test("a push rejected while the remote already holds Factory's commit is lag", a
   t.after(() => {
     process.env.PATH = path;
   });
-  const error = await f.publish(ours).catch((caught) => caught);
+  await f.publish(ours);
+  assert.equal(f.published.length, 1);
+  // A refusal although the branch did not move: the remote refuses the
+  // lease itself, and no repeat changes that.
+  const next = f.commit("next");
+  const refused = await f.publish(next, [ours]).catch((caught) => caught);
+  assert.match(refused.message, /\[rejected\]/);
+  assertFault(faultOf(refused), { kind: "config" }, "lease refused in place");
+  // A branch that moved between the observation and the push is observed
+  // again on the repeat: the lease refusal is transient.
+  const moved = f.commit("moved");
+  writeFileSync(
+    join(bin, "git"),
+    `#!/bin/sh\ncase " $* " in\n  *" push "*) '${real}' -C '${f.checkout}' push -q -f origin ${moved}:refs/heads/factory/one; echo " ! [rejected]        x -> factory/one (stale info)" >&2; exit 1 ;;\nesac\nexec '${real}' "$@"\n`,
+  );
+  const error = await f.publish(next, [ours]).catch((caught) => caught);
+  assert.match(error.message, /\[rejected\]/);
   assertFault(
     faultOf(error),
     { kind: "transient", outcomeUnknown: false },
-    "own head",
+    "lease refused after a move",
   );
 });
 

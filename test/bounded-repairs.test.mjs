@@ -16,6 +16,7 @@ import {
   consumption,
   repairScopes,
   assertRepairLedger,
+  earlierHeads,
   failureDigest,
 } from "../dist/repair-policy.js";
 import {
@@ -33,6 +34,7 @@ import {
   CodexPlanningModel,
 } from "../dist/compiler.js";
 import { coverageObligations, aggregateAcceptance } from "../dist/qa.js";
+import { StepFault } from "../dist/fault.js";
 import { shortPlanDigest } from "../dist/status-summary.js";
 import {
   validateTree,
@@ -233,11 +235,55 @@ test("exact candidate recovery retains failure and rejects ambiguity and unchang
     () => applyWorkCorrection(state, "result", correction),
     /Unchanged/,
   );
-  work.pullRequest = 1;
+  work.integratedSha = "a".repeat(40);
   assert.throws(
     () => applyWorkCorrection(state, "result", correction),
     /unsettled/,
   );
+});
+test("a published result that fails a required check is repaired by a new attempt that republishes it", () => {
+  const head = "b".repeat(40);
+  const work = {
+    status: "failed",
+    attempt: "first",
+    baseSha: "a".repeat(40),
+    changeRef: head,
+    treeSha: "c".repeat(40),
+    pullRequest: 7,
+  };
+  const state = {
+    autonomy: autonomy(),
+    graph: { items: [item()] },
+    work: { result: work },
+  };
+  const failure = new StepFault({
+    kind: "work",
+    evidence: { detail: "Required checks failed on PR #7: quality" },
+  });
+  assert.equal(recordWorkFailure(state, "result", failure), true);
+  assert.equal(work.recovery.failure.classification, "implementation");
+  applyWorkCorrection(state, "result", {
+    kind: "implementation",
+    failureDigest: work.recovery.failure.digest,
+    actor: "fixture",
+    diagnosis: "The quality check rejects the formatting",
+    correction: "Format the result as the quality check requires",
+  });
+  const next = state.work.result;
+  assert.equal(next.status, "pending");
+  assert.equal(next.pullRequest, undefined);
+  // The new attempt pushes over the published head with a lease.
+  assert.deepEqual(earlierHeads(next), [head]);
+  assert.equal(next.recovery.history[0].work.pullRequest, 7);
+  // Once integrated, the result is no longer the attempt's to repair.
+  const merged = {
+    ...structuredClone(work),
+    status: "failed",
+    integratedSha: "d".repeat(40),
+  };
+  delete merged.recovery;
+  const integrated = { ...state, work: { result: merged } };
+  assert.equal(recordWorkFailure(integrated, "result", failure), false);
 });
 test("settled failures ignore sibling processes while correction still requires global quiescence", () => {
   for (const [error, classification] of [
@@ -286,7 +332,7 @@ test("settled failures ignore sibling processes while correction still requires 
     );
     assert.equal(state.charges, undefined);
     for (const guard of [
-      { work: { pullRequest: 1 } },
+      { work: { integratedSha: "a".repeat(40) } },
       { coordinator: { cancelError: "owned cancellation unresolved" } },
     ]) {
       const uncertain = structuredClone(state);

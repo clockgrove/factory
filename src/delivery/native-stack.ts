@@ -1,11 +1,15 @@
-import { attachFault, decision, transient } from "../fault.js";
+import { setTimeout as sleep } from "node:timers/promises";
+import { attachFault, decision } from "../fault.js";
 import {
   classifiedGitHubCall,
   type GitHubClient,
   type GitHubCall,
+  GitHubRequestError,
   sharedGitHubClient,
   timelineMergeCommit,
 } from "../github-client.js";
+import { currentProcessSignal } from "../process.js";
+import { notYet, settled } from "./lag.js";
 
 /** The stack no longer matches what Factory recorded; ownership is not checked. */
 function foreignChange(message: string): Error {
@@ -67,30 +71,44 @@ export class NativeStackDelivery {
     return this.api<Pull>(`repos/${this.repository}/pulls/${number}`);
   }
 
+  /** A layer's merge: shown on the PR, and its commit on the timeline. */
   private async mergedSha(layer: StackLayer): Promise<string> {
     const detail = await this.pull(layer.pullRequest);
+    const key = `stack-layer:${layer.pullRequest}:${layer.headSha}`;
     if (
       detail.state !== "closed" ||
       detail.merged !== true ||
       detail.head.sha !== layer.headSha ||
       detail.head.ref !== layer.branch
     )
-      throw attachFault(
-        new Error(
-          `Native stack PR #${layer.pullRequest} has no matching integrated head`,
-        ),
-        transient(
-          `Native stack PR #${layer.pullRequest} does not show its merge yet`,
-          false,
-        ),
+      throw notYet(
+        key,
+        `Native stack PR #${layer.pullRequest} does not show its merge yet`,
       );
-    return classifiedGitHubCall(
+    const sha = await classifiedGitHubCall(
       this.client,
       this.repository,
       { method: "GET", path: `issues/${layer.pullRequest}/timeline` },
       () =>
         timelineMergeCommit(this.client, this.repository, layer.pullRequest),
     );
+    if (!sha)
+      throw notYet(
+        key,
+        `Native stack PR #${layer.pullRequest} merge is not on its timeline yet`,
+      );
+    settled(key);
+    return sha;
+  }
+
+  /** The one merge commit of a stack whose layers all merged. */
+  private async stackMergeCommit(layers: StackLayer[]): Promise<string> {
+    const merged = await Promise.all(
+      layers.map((layer) => this.mergedSha(layer)),
+    );
+    if (new Set(merged).size !== 1)
+      throw new Error("Native stack layers have different merge commits");
+    return merged[0]!;
   }
 
   private async assertLayers(
@@ -150,26 +168,27 @@ export class NativeStackDelivery {
     return created.number;
   }
 
+  /**
+   * Merge the stack through its top PR, observing first: a merged stack is
+   * confirmed, and a merge request already pending (recorded, or named by
+   * GitHub's 409 after a lost response) is polled instead of sent again.
+   */
   async mergeStack(
     layers: StackLayer[],
     baseBranch: string,
     expectedStack: number,
     options: {
       resumeUuid?: string;
-      beforeMerge?: () => void;
       onPending: (uuid: string) => void;
-      cancelled: () => boolean;
+      progress?: () => void;
+      queued: (detail: string) => never;
+      requireMergeCommits: () => Promise<void>;
     },
   ): Promise<string> {
     const already = await Promise.all(
       layers.map((layer) => this.pull(layer.pullRequest)),
     );
-    if (
-      already.every(
-        (pull) =>
-          pull.state === "closed" && pull.merged === true && pull.merged_at,
-      )
-    ) {
+    if (already.every((pull) => pull.state === "closed" && pull.merged)) {
       for (const [index, pull] of already.entries())
         if (
           pull.head.ref !== layers[index]!.branch ||
@@ -178,12 +197,7 @@ export class NativeStackDelivery {
           throw foreignChange(
             "Merged native stack head changed; operator direction required",
           );
-      const merged = await Promise.all(
-        layers.map((layer) => this.mergedSha(layer)),
-      );
-      if (new Set(merged).size !== 1)
-        throw new Error("Native stack layers have different merge commits");
-      return merged[0]!;
+      return this.stackMergeCommit(layers);
     }
     if (
       !options.resumeUuid &&
@@ -195,27 +209,31 @@ export class NativeStackDelivery {
       status: string;
       details: { uuid?: string; sha?: string; message?: string };
     };
+    const route = `repos/${this.repository}/pulls/${top.pullRequest}/merge-async`;
     let uuid = options.resumeUuid;
     let observed: AsyncResult;
     // A merge submitted in this call may not be readable by its UUID yet.
     let submittedAt: number | undefined;
-    if (uuid) {
-      observed = await this.api(
-        `repos/${this.repository}/pulls/${top.pullRequest}/merge-async/${uuid}`,
-      );
-    } else {
-      options.beforeMerge?.();
-      observed = await this.api<AsyncResult>(
-        `repos/${this.repository}/pulls/${top.pullRequest}/merge-async`,
-        "PUT",
-        {
-          sha: top.headSha,
-          merge_method: "merge",
-          merge_action: "default",
-        },
-        // ensureStack has just confirmed every layer holds Factory's head.
-        { head: "ours" },
-      );
+    if (uuid) observed = await this.api<AsyncResult>(`${route}/${uuid}`);
+    else {
+      await options.requireMergeCommits();
+      try {
+        observed = await this.api<AsyncResult>(
+          route,
+          "PUT",
+          {
+            sha: top.headSha,
+            merge_method: "merge",
+            merge_action: "default",
+          },
+          // ensureStack has just confirmed every layer holds Factory's head.
+          { head: "ours" },
+        );
+      } catch (error) {
+        if (!(error instanceof GitHubRequestError && error.pendingMerge))
+          throw error;
+        observed = { status: "pending", details: { uuid: error.pendingMerge } };
+      }
       if (observed.status === "pending" && observed.details.uuid) {
         submittedAt = Date.now();
         uuid = observed.details.uuid;
@@ -223,24 +241,20 @@ export class NativeStackDelivery {
       }
     }
     while (observed.status === "pending" || observed.status === "queued") {
-      if (options.cancelled())
-        throw new Error("Objective cancelled during native merge observation");
-      await new Promise<void>((resolve) => setTimeout(resolve, 500));
-      if (uuid)
-        observed = await this.api(
-          `repos/${this.repository}/pulls/${top.pullRequest}/merge-async/${uuid}`,
-          "GET",
-          undefined,
-          { createdAt: submittedAt },
+      // Queued without a request to poll: a CI wait; the repeat observes the
+      // layers first and confirms the merge once it lands.
+      if (!uuid)
+        options.queued(
+          `Native stack PR #${top.pullRequest} is queued to merge`,
         );
-      else {
-        const pull = await this.pull(top.pullRequest);
-        if (pull.state === "closed" && pull.merged === true)
-          observed = {
-            status: "merged",
-            details: { sha: await this.mergedSha(top) },
-          };
-      }
+      await sleep(500, undefined, { signal: currentProcessSignal() });
+      observed = await this.api<AsyncResult>(
+        `${route}/${uuid}`,
+        "GET",
+        undefined,
+        { createdAt: submittedAt },
+      );
+      options.progress?.();
     }
     if (observed.status !== "merged" || !observed.details.sha)
       throw attachFault(
@@ -252,25 +266,7 @@ export class NativeStackDelivery {
           `merge-async ended ${observed.status}: ${observed.details.message ?? "no detail"}`,
         ),
       );
-    for (;;) {
-      if (options.cancelled())
-        throw new Error("Objective cancelled during native merge observation");
-      const pulls = await Promise.all(
-        layers.map((layer) => this.pull(layer.pullRequest)),
-      );
-      if (
-        pulls.every(
-          (pull) =>
-            pull.state === "closed" && pull.merged === true && pull.merged_at,
-        )
-      )
-        break;
-      await new Promise<void>((resolve) => setTimeout(resolve, 500));
-    }
-    const merged = await Promise.all(
-      layers.map((layer) => this.mergedSha(layer)),
-    );
-    if (new Set(merged).size !== 1 || merged[0] !== observed.details.sha)
+    if ((await this.stackMergeCommit(layers)) !== observed.details.sha)
       throw new Error(
         "Native stack merge commit differs from the async result",
       );

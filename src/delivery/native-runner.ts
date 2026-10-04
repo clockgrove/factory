@@ -1,4 +1,5 @@
-import { assertDeliveryReady, DeliveryReadinessPending } from "./readiness.js";
+import { assertIntegrated, laterIntegration } from "./integration.js";
+import { deliveryReadiness } from "./readiness.js";
 import { workerContext } from "../execution/checkpoint.js";
 import {
   recordWorkFailure,
@@ -15,6 +16,7 @@ import { closeWorkItem } from "../completion.js";
 import type { FactoryConfig } from "../config.js";
 import type {
   ContentStore,
+  DeliveryResult,
   DeliveryStrategy,
   ExecutionDriver,
   ExecutionHandle,
@@ -29,13 +31,14 @@ import {
   selectedInputsForItem,
   validationLfsMembersForItem,
 } from "../media.js";
-import { attachFault, transient } from "../fault.js";
+import { faultOf, StepFault } from "../fault.js";
 import { earlierHeads } from "../repair-policy.js";
-import { fetchHead, git } from "../process.js";
+import { currentProcessSignal } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { itemsConflict, rankPending } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
+import { type StepContext, step } from "../step.js";
 import {
   AcceptanceDecisionRequired,
   reviewAcceptance,
@@ -79,7 +82,60 @@ export async function runNativeGraph(args: {
   } = args;
   const phases = phaseAdmission(state, save, args.cancelled);
   const branchFor = (id: string) => `factory/objective-${objective}/${id}`;
-  const defaultBranch = await github.defaultBranch();
+  /** What a diagnostics span records for one try of a delivery step. */
+  interface Span<T> {
+    itemId?: string;
+    operation: string;
+    metadata: Record<string, string | number>;
+    summarize: (result: T) => Record<string, string | number>;
+  }
+  /** Run one delivery step of an item; its span records each try. */
+  const itemStep = <T>(
+    id: string,
+    name: "publish" | "await-ci" | "stack" | "merge",
+    fn: (context: StepContext) => Promise<T>,
+    span?: Span<T>,
+  ): Promise<T> =>
+    step(
+      state,
+      { scope: { item: id }, name },
+      (context) =>
+        args.diagnostics && span
+          ? args.diagnostics.span(
+              {
+                runId: state.runId,
+                ...(span.itemId
+                  ? {
+                      itemId: span.itemId,
+                      attemptId: state.work[span.itemId]!.attempt,
+                    }
+                  : {}),
+                operation: span.operation,
+                metadata: span.metadata,
+              },
+              () => fn(context),
+              span.summarize,
+            )
+          : fn(context),
+      { save, signal: currentProcessSignal() },
+    );
+  /** A unit's CI wait, stack and merge steps belong to its top item. */
+  const unitStep = <T>(
+    unit: (typeof units)[number],
+    name: "await-ci" | "stack" | "merge",
+    fn: (context: StepContext) => Promise<T>,
+    span?: Span<T>,
+  ): Promise<T> => itemStep(unit.items.at(-1)!.id, name, fn, span);
+  /**
+   * A delivery step that stopped without failing the attempt: it waits for
+   * the operator (a decision or a configuration fix; `factory retry` or the
+   * next run repeats it), or it was cancelled, or the owner paused while it
+   * waited for CI. The item keeps its place.
+   */
+  const stopped = (error: unknown): boolean => {
+    const { kind } = faultOf(error);
+    return ["decision", "config", "cancelled"].includes(kind);
+  };
   const units = linearDeliveryUnits(state.graph);
   let preparationFailure: unknown;
   // Admit independent roots whenever their predecessor units have integrated.
@@ -458,6 +514,8 @@ export async function runNativeGraph(args: {
         throw new Error(
           `Work Item ${item.id} has ambiguous active state; operator direction required`,
         );
+      // Set when a delivery step waits for the operator.
+      let waiting = false;
       const perform = async (): Promise<void> => {
         if (work.step === "approve-asset") {
           await phases.reserve(item.id, "validation");
@@ -721,48 +779,59 @@ export async function runNativeGraph(args: {
           delete work.acceptancePending;
           if (args.cancelled()) throw new Error("Objective cancelled");
         }
-        await phases.reserve(item.id, "delivery");
         work.step = "deliver";
         save();
-        const publish = () =>
-          delivery.publish({
-            item,
-            baseSha: itemBase,
-            treeSha: work.treeSha!,
-            changeRef: work.changeRef!,
-            branch: branchFor(item.id),
-            lfs: Boolean(work.selectedAssetSet),
-            earlierHeads: earlierHeads(work),
-            baseBranch: previous
-              ? branchFor(unit.items[index - 1]!.id)
-              : defaultBranch,
-          });
+      };
+      // Publication repeats itself: it runs outside the interruption repeat.
+      const publishLayer = async (): Promise<void> => {
+        if (work.status !== "running" || work.step !== "deliver") return;
+        await phases.reserve(item.id, "delivery");
         await args.reconcile?.();
-        const published = args.diagnostics
-          ? await args.diagnostics.span(
-              {
-                runId: state.runId,
-                itemId: item.id,
-                attemptId: work.attempt,
-                operation: "github-publication",
-                metadata: {
-                  baseSha: itemBase,
-                  treeSha: work.treeSha!,
-                  headSha: work.changeRef!,
-                },
+        let published: DeliveryResult;
+        try {
+          published = await itemStep(
+            item.id,
+            "publish",
+            async () =>
+              delivery.publish({
+                item,
+                baseSha: itemBase,
+                treeSha: work.treeSha!,
+                changeRef: work.changeRef!,
+                branch: branchFor(item.id),
+                lfs: Boolean(work.selectedAssetSet),
+                earlierHeads: earlierHeads(work),
+                baseBranch: previous
+                  ? branchFor(unit.items[index - 1]!.id)
+                  : await github.defaultBranch(),
+              }),
+            {
+              itemId: item.id,
+              operation: "github-publication",
+              metadata: {
+                baseSha: itemBase,
+                treeSha: work.treeSha!,
+                headSha: work.changeRef!,
               },
-              publish,
-              (result) => ({ pullRequest: result.pullRequest }),
-            )
-          : await publish();
+              summarize: (result) => ({ pullRequest: result.pullRequest }),
+            },
+          );
+        } catch (error) {
+          if (!stopped(error)) throw error;
+          waiting = true;
+          phases.release(item.id);
+          save();
+          return;
+        }
         work.pullRequest = published.pullRequest;
         phases.release(item.id);
         work.status = "published";
         delete work.step;
         save();
       };
-      const task = repeatInterrupted(work, save, perform).catch(
-        async (error: unknown) => {
+      const task = repeatInterrupted(work, save, perform)
+        .then(publishLayer)
+        .catch(async (error: unknown) => {
           if (error instanceof AcceptanceDecisionRequired) {
             phases.release(item.id);
             work.status = "waiting";
@@ -815,14 +884,14 @@ export async function runNativeGraph(args: {
           if (work.phaseReservation !== "coding") phases.release(item.id);
           save();
           throw error;
-        },
-      );
+        });
       active.set(item.id, task);
       try {
         await task;
       } finally {
         active.delete(item.id);
       }
+      if (waiting) return settlePrepared();
       if (
         state.work[item.id]?.status === "pending" ||
         state.work[item.id]?.status === "running"
@@ -833,12 +902,13 @@ export async function runNativeGraph(args: {
       if (state.work[item.id]?.status === "failed") continue unitLoop;
       if (state.work[item.id]?.status === "waiting") return settlePrepared();
     }
-    const readinessWasWaiting = Boolean(
-      state.work[unit.items.at(-1)!.id]?.waitingReason,
-    );
-    if (args.paused?.() && readinessWasWaiting && !state.stackMerges?.[unit.id])
+    const top = unit.items.at(-1)!;
+    const topWork = state.work[top.id]!;
+    /** The owner paused while this unit waits for CI: stop polling. */
+    const pausedWhileWaiting = () =>
+      Boolean(args.paused?.()) && topWork.wait?.kind === "ci";
+    if (pausedWhileWaiting() && !state.stackMerges?.[unit.id])
       return settlePrepared();
-    await phases.reserve(unit.items.at(-1)!.id, "delivery");
     const layers: NativeStackLayer[] = unit.items.map((item) => {
       const work = state.work[item.id]!;
       if (work.status !== "published" || !work.pullRequest || !work.changeRef)
@@ -850,200 +920,209 @@ export async function runNativeGraph(args: {
       };
     });
     const pendingMerge = state.stackMerges?.[unit.id];
-    const observations = await Promise.all(
-      layers.map((layer, index) =>
-        github.observe({
-          number: layer.pullRequest,
-          branch: layer.branch,
-          headSha: layer.headSha,
-          baseBranch: index ? layers[index - 1]!.branch : defaultBranch,
-        }),
-      ),
-    );
-    const allMerged = observations.every(
-      (observation) => observation.state === "merged",
-    );
-    if (!pendingMerge && !allMerged) {
-      const observedBefore = await fetchHead(config.checkout, defaultBranch);
-      if (observedBefore !== state.work[unit.items[0]!.id]!.baseSha)
-        throw new Error(
-          `Default branch moved before native unit ${unit.id}; operator direction required`,
-        );
-      try {
-        // Check every layer before choosing a wait: another layer's genuine failure must still stop.
-        for (const observation of observations)
-          if (
-            observation.state !== "open" ||
-            observation.checks === "failing" ||
-            observation.mergeReadiness === "blocked"
-          )
-            assertDeliveryReady(observation);
-        for (const [index, observation] of observations.entries())
-          assertDeliveryReady(
-            observation,
-            (state.graph.requiredPreIntegrationChecks ?? []).map(
-              (check) => check.checkName,
-            ),
-            layers[index]!.headSha,
-          );
-      } catch (error) {
-        if (!(error instanceof DeliveryReadinessPending)) throw error;
-        state.work[unit.items.at(-1)!.id]!.waitingReason = error.message;
-        phases.release(unit.items.at(-1)!.id);
-        save();
-        return settlePrepared();
-      }
-      delete state.work[unit.items.at(-1)!.id]!.waitingReason;
-      for (const [index, observation] of observations.entries())
-        state.work[unit.items[index]!.id]!.preIntegrationChecks =
-          observation.namedChecks ?? [];
-      save();
-    }
-    let integratedSha: string;
-    const mergeOperation = {
-      runId: state.runId,
-      operation: layers.length === 1 ? "github-merge" : "github-stack-merge",
-      metadata: {
-        unit: unit.id,
-        topPullRequest: layers.at(-1)!.pullRequest,
-        headSha: layers.at(-1)!.headSha,
-      },
-    };
-    const topWork = state.work[unit.items.at(-1)!.id]!;
-    await args.reconcile?.();
-    if (args.cancelled()) throw new Error("Objective cancelled");
-    if (args.paused?.() && readinessWasWaiting && !pendingMerge) {
-      phases.release(unit.items.at(-1)!.id);
-      return settlePrepared();
-    }
-    // Merging an already merged PR or stack is confirmed by the gateway, so a
-    // restart simply asks again.
-    if (layers.length === 1) {
-      const layer = layers[0]!;
-      const merge = () =>
-        repeatInterrupted(
-          topWork,
-          save,
-          async () =>
-            (
-              await github.merge(
-                {
-                  number: layer.pullRequest,
-                  branch: layer.branch,
-                  headSha: layer.headSha,
-                },
-                layer.headSha,
-              )
-            ).integratedSha,
-        );
-      integratedSha = args.diagnostics
-        ? await args.diagnostics.span(mergeOperation, merge, (headSha) => ({
-            integratedSha: headSha,
-          }))
-        : await merge();
-    } else {
-      state.stackNumbers ??= {};
-      const ensureStack = () =>
-        repeatInterrupted(topWork, save, () =>
-          github.ensureNativeStack(layers, defaultBranch),
-        );
-      const stackNumber =
-        state.stackNumbers[unit.id] ??
-        (args.diagnostics
-          ? await args.diagnostics.span(
-              {
-                runId: state.runId,
-                operation: "github-stack",
-                metadata: { unit: unit.id, layerCount: layers.length },
-              },
-              ensureStack,
-              (number) => ({ stack: number }),
-            )
-          : await ensureStack());
-      if (
-        state.stackNumbers[unit.id] &&
-        state.stackNumbers[unit.id] !== stackNumber
-      )
-        throw new Error(
-          "Native stack number changed; operator direction required",
-        );
-      state.stackNumbers[unit.id] = stackNumber;
-      save();
-      const pending = pendingMerge;
-      if (
-        pending &&
-        (pending.topPullRequest !== layers.at(-1)!.pullRequest ||
-          pending.expectedHeadSha !== layers.at(-1)!.headSha)
-      )
-        throw new Error(
-          "Pending native merge identity changed; operator direction required",
-        );
-      const mergeStack = () =>
-        repeatInterrupted(topWork, save, () =>
-          github.mergeNativeStack(layers, defaultBranch, stackNumber, {
-            // A repeat resumes the async merge recorded by an earlier call.
-            resumeUuid: state.stackMerges?.[unit.id]?.uuid ?? pending?.uuid,
-            beforeMerge: () => {
-              if (args.cancelled()) throw new Error("Objective cancelled");
-              if (args.paused?.() && readinessWasWaiting)
-                throw new DeliveryReadinessPending();
-            },
-            onPending: (uuid) => {
-              state.stackMerges ??= {};
-              state.stackMerges[unit.id] = {
-                topPullRequest: layers.at(-1)!.pullRequest,
-                expectedHeadSha: layers.at(-1)!.headSha,
-                uuid,
-              };
-              save();
-            },
-            cancelled: args.cancelled,
+    if (
+      pendingMerge &&
+      (pendingMerge.topPullRequest !== layers.at(-1)!.pullRequest ||
+        pendingMerge.expectedHeadSha !== layers.at(-1)!.headSha)
+    )
+      throw new Error(
+        "Pending native merge identity changed; operator direction required",
+      );
+    let merged: { merge: string; integrated: string };
+    // The layer whose published result is wrong, when one is.
+    let failedLayer: number | undefined;
+    /** Observe every layer; return them when the unit may merge, else wait for CI. */
+    const ready = async (context: StepContext) => {
+      // If the default branch moved, the layers' checks and mergeability
+      // decide; a move is not a fault.
+      const defaultBranch = await github.defaultBranch();
+      const observations = await Promise.all(
+        layers.map((layer, index) =>
+          github.observe({
+            number: layer.pullRequest,
+            branch: layer.branch,
+            headSha: layer.headSha,
+            earlierHeads: earlierHeads(state.work[unit.items[index]!.id]!),
+            baseBranch: index ? layers[index - 1]!.branch : defaultBranch,
           }),
+        ),
+      );
+      context.progress();
+      // Every layer is judged before any wait: another layer's failure must
+      // still surface, and it is that layer's.
+      const pending = observations
+        .map((observation, index) => {
+          try {
+            return deliveryReadiness(
+              layers[index]!.pullRequest,
+              observation,
+              (state.graph.requiredPreIntegrationChecks ?? []).map(
+                (check) => check.checkName,
+              ),
+              layers[index]!.headSha,
+            );
+          } catch (error) {
+            if (faultOf(error).kind === "work") failedLayer = index;
+            throw error;
+          }
+        })
+        .find(Boolean);
+      if (pending) context.pending({ kind: "ci", detail: pending });
+      return observations;
+    };
+    try {
+      // A merge already requested is resumed by the merge step.
+      if (!pendingMerge) {
+        const observations = await unitStep(
+          unit,
+          "await-ci",
+          async (context) => {
+            if (pausedWhileWaiting())
+              throw new StepFault({ kind: "cancelled", detail: "paused" });
+            return ready(context);
+          },
+        );
+        for (const [index, observation] of observations.entries())
+          state.work[unit.items[index]!.id]!.preIntegrationChecks =
+            observation.namedChecks ?? [];
+        save();
+      }
+      // The CI wait holds no phase reservation; the merge does.
+      await phases.reserve(top.id, "delivery");
+      await args.reconcile?.();
+      let stackNumber: number | undefined;
+      if (layers.length > 1) {
+        stackNumber =
+          state.stackNumbers?.[unit.id] ??
+          (await unitStep(
+            unit,
+            "stack",
+            async () =>
+              github.ensureNativeStack(layers, await github.defaultBranch()),
+            {
+              operation: "github-stack",
+              metadata: { unit: unit.id, layerCount: layers.length },
+              summarize: (number) => ({ stack: number }),
+            },
+          ));
+        state.stackNumbers ??= {};
+        state.stackNumbers[unit.id] = stackNumber;
+        save();
+      }
+      // Merging an already merged PR or stack is confirmed, so a repeat or
+      // a restart simply asks again.
+      const merge = () =>
+        unitStep(
+          unit,
+          "merge",
+          async (context) => {
+            // Readiness can change after await-ci (a conflict, a failed
+            // check): judge it again unless a merge is already requested.
+            if (!state.stackMerges?.[unit.id]) await ready(context);
+            const defaultBranch = await github.defaultBranch();
+            const sha =
+              stackNumber === undefined
+                ? (
+                    await github.merge(
+                      {
+                        number: layers[0]!.pullRequest,
+                        branch: layers[0]!.branch,
+                        headSha: layers[0]!.headSha,
+                        earlierHeads: earlierHeads(topWork),
+                      },
+                      layers[0]!.headSha,
+                    )
+                  ).integratedSha
+                : await github.mergeNativeStack(
+                    layers,
+                    defaultBranch,
+                    stackNumber,
+                    {
+                      resumeUuid: state.stackMerges?.[unit.id]?.uuid,
+                      onPending: (uuid) => {
+                        state.stackMerges ??= {};
+                        state.stackMerges[unit.id] = {
+                          topPullRequest: layers.at(-1)!.pullRequest,
+                          expectedHeadSha: layers.at(-1)!.headSha,
+                          uuid,
+                        };
+                        save();
+                      },
+                      progress: context.progress,
+                      queued: (detail) =>
+                        context.pending({ kind: "ci", detail }),
+                    },
+                  );
+            // Other work may have merged since; the unit's merge only needs to
+            // be on the default branch.
+            await assertIntegrated(
+              config.checkout,
+              defaultBranch,
+              sha,
+              `native unit ${unit.id}`,
+            );
+            return {
+              merge: sha,
+              integrated: await laterIntegration(
+                config.checkout,
+                state.integratedSha,
+                sha,
+              ),
+            };
+          },
+          {
+            operation:
+              layers.length === 1 ? "github-merge" : "github-stack-merge",
+            metadata: {
+              unit: unit.id,
+              topPullRequest: layers.at(-1)!.pullRequest,
+              headSha: layers.at(-1)!.headSha,
+            },
+            summarize: (result) => ({ integratedSha: result.merge }),
+          },
         );
       try {
-        integratedSha = args.diagnostics
-          ? await args.diagnostics.span(
-              mergeOperation,
-              mergeStack,
-              (headSha) => ({ integratedSha: headSha }),
-            )
-          : await mergeStack();
+        merged = await merge();
       } catch (error) {
-        if (!(error instanceof DeliveryReadinessPending)) throw error;
-        topWork.waitingReason = error.message;
-        phases.release(unit.items.at(-1)!.id);
+        // A failed merge request is not resumed: answering the decision
+        // requests the merge anew.
+        if (
+          faultOf(error).kind !== "cancelled" &&
+          state.stackMerges?.[unit.id]
+        ) {
+          delete state.stackMerges[unit.id];
+          save();
+        }
+        throw error;
+      }
+    } catch (error) {
+      if (stopped(error)) {
+        phases.release(top.id);
         save();
         return settlePrepared();
       }
+      // A published layer is wrong (a failed check, a conflict): that
+      // layer's item fails with the evidence; independent units continue.
+      if (faultOf(error).kind === "work") {
+        const failed = unit.items[failedLayer ?? unit.items.length - 1]!;
+        const work = state.work[failed.id]!;
+        work.status = "failed";
+        work.error = error instanceof Error ? error.message : String(error);
+        recordWorkFailure(state, failed.id, error);
+        phases.release(top.id);
+        save();
+        continue;
+      }
+      throw error;
     }
-    const defaultHead = await fetchHead(config.checkout, defaultBranch);
-    // Other work may have merged since; the unit's merge only needs to be on
-    // the default branch.
-    try {
-      git(
-        config.checkout,
-        "merge-base",
-        "--is-ancestor",
-        integratedSha,
-        defaultHead,
-      );
-    } catch (cause) {
-      // Read-after-merge lag until the step's window passes (#515).
-      const message = `Default branch does not contain the merge of native unit ${unit.id} (${integratedSha})`;
-      throw attachFault(
-        new Error(message, { cause }),
-        transient(message, false),
-      );
-    }
-    const observedAfter = integratedSha;
-    state.integratedSha = observedAfter;
+    state.integratedSha = merged.integrated;
     for (const item of unit.items) {
       const work = state.work[item.id]!;
       work.status = "done";
-      work.integratedSha = observedAfter;
+      work.integratedSha = merged.merge;
       work.completedAt = new Date().toISOString();
     }
-    phases.release(unit.items.at(-1)!.id);
+    phases.release(top.id);
     save();
     for (const item of unit.items)
       await closeWorkItem(state, item.id, github, save, true);

@@ -825,6 +825,9 @@ export async function runObjective(
         },
       ).catch((error: unknown) => {
         const current = owner.snapshot;
+        // A pass stopped by the cancel request (a step answers `cancelled`):
+        // the loop records the cancellation.
+        if (current?.cancelRequested && !owner.handoff) return undefined;
         // Planning stops at a pause or drain; the owner keeps serving control until resume.
         if (
           current?.schemaVersion === 8 &&
@@ -837,6 +840,8 @@ export async function runObjective(
       });
       if (!result) continue;
       owner.snapshot = result;
+      // A pass that stopped for the cancel request: the loop records it.
+      if (result.cancelRequested && !owner.handoff) continue;
       // A preparation comes back only when its plan needs a human decision.
       if (
         result.schemaVersion === 8 ||
@@ -867,15 +872,21 @@ export async function runObjective(
             work.recovery?.phase === "diagnosing") &&
           ["failed", "waiting"].includes(work.status),
       );
+      // A step's question or configuration fix names what to answer.
+      const asked = Object.entries(result.work).find(([, work]) =>
+        awaitsOperator(work.wait),
+      );
       result.coordinator!.waitReason = result.githubClosureError
         ? "GitHub closure acknowledgement unresolved; resume to reconcile"
         : result.coordinator!.mode === "draining"
           ? "Drained; no owned attempts remain"
           : stoppedRepair
             ? `Work Item ${stoppedRepair[0]}: ${stoppedRepair[1].recovery!.failure?.decision ?? "Inspect the retained recovery failure"}`
-            : hasReadinessWait(result)
-              ? "Awaiting exact published checks or target protection readiness"
-              : "Awaiting exact candidate decision or resume";
+            : asked
+              ? `Work Item ${asked[0]}: ${asked[1].wait!.detail}${asked[1].wait!.fix ? `. ${asked[1].wait!.fix}` : ""}`
+              : hasReadinessWait(result)
+                ? "Awaiting exact published checks or target protection readiness"
+                : "Awaiting exact candidate decision or resume";
       persist();
       // Nothing automatic remains: the Objective needs a human decision.
       if (result.coordinator?.mode === "running" && !hasReadinessWait(result))

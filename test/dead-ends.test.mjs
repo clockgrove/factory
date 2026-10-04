@@ -66,6 +66,12 @@ const D = {
 /** Stranded states by diagnosis: [delivery, anchor shape, ...overlays]. */
 const KNOWN = {
   [D.START_AMBIGUOUS.diagnosis]: [
+    [
+      "regular",
+      "alpha running/execute; beta pending",
+      "paused",
+      "a recorded subprocess's pid was reused",
+    ],
     ["regular", "alpha running/execute; beta pending"],
     [
       "regular",
@@ -87,6 +93,12 @@ const KNOWN = {
     ],
   ],
   [D.CANCEL_WITHOUT_HANDLE.diagnosis]: [
+    [
+      "regular",
+      "alpha running/execute; beta pending",
+      "a step fails with an unclassified error",
+      "cancellation is unresolved",
+    ],
     [
       "regular",
       "alpha running/execute; beta pending",
@@ -196,6 +208,24 @@ const KNOWN = {
   [D.RETRY_REFUSED.diagnosis]: [
     [
       "regular",
+      "alpha running/deliver (handle); beta pending",
+      "a step fails with an unclassified error",
+      "a recorded subprocess's pid was reused",
+    ],
+    [
+      "regular",
+      "alpha published (handle, PR); beta pending",
+      "a step fails with an unclassified error",
+      "review phase reserved",
+    ],
+    [
+      "native-stack",
+      "alpha published (PR); beta pending",
+      "a step exhausts its interruptions",
+      "review phase reserved",
+    ],
+    [
+      "regular",
       "alpha published (handle, PR); beta pending",
       "a step fails with an unclassified error",
       "a recorded subprocess has exited",
@@ -281,6 +311,30 @@ const KNOWN = {
   ],
   [D.STOPPED_WITHOUT_EXIT.diagnosis]: [
     [
+      "regular",
+      "alpha running/execute (handle); beta pending",
+      "an error stops the Objective outside any Work Item step",
+      "interruptions exhausted",
+    ],
+    [
+      "regular",
+      "alpha running/execute; beta pending",
+      "an error stops the Objective outside any Work Item step",
+      "validation phase reserved",
+    ],
+    [
+      "regular",
+      "alpha published (handle, PR); beta pending",
+      "an error stops the Objective outside any Work Item step",
+      "delivery phase reserved",
+    ],
+    [
+      "native-stack",
+      "alpha published (PR); beta pending",
+      "an error stops the Objective outside any Work Item step",
+      "delivery phase reserved",
+    ],
+    [
       "native-stack",
       "alpha pending; beta pending",
       "an error stops the Objective outside any Work Item step",
@@ -328,6 +382,24 @@ const KNOWN = {
     ],
   ],
   [D.DRAINED.diagnosis]: [
+    [
+      "native-stack",
+      "alpha waiting/approve-result (pending criterion); beta pending",
+      "a step exhausts its interruptions",
+      "draining",
+    ],
+    [
+      "native-stack",
+      "alpha published (PR); beta pending",
+      "draining",
+      "delivery phase reserved",
+    ],
+    [
+      "native-stack",
+      "alpha running/execute; beta pending",
+      "a step fails with an unclassified error",
+      "draining",
+    ],
     [
       "regular",
       "alpha pending; beta pending",

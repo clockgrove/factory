@@ -1,5 +1,5 @@
-import { assertDeliveryReady } from "./readiness.js";
-import { DeliveryReadinessPending } from "./readiness.js";
+import { assertIntegrated, laterIntegration } from "./integration.js";
+import { deliveryReadiness } from "./readiness.js";
 import { workerContext } from "../execution/checkpoint.js";
 import {
   recordWorkFailure,
@@ -30,13 +30,14 @@ import {
   selectedInputsForItem,
   validationLfsMembersForItem,
 } from "../media.js";
-import { attachFault, transient } from "../fault.js";
+import { faultOf, StepFault } from "../fault.js";
 import { earlierHeads } from "../repair-policy.js";
-import { fetchHead, git } from "../process.js";
+import { currentProcessSignal } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { readyItems } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
+import { type StepContext, step } from "../step.js";
 import {
   AcceptanceDecisionRequired,
   reviewAcceptance,
@@ -81,148 +82,194 @@ export async function runRegularGraph(args: {
   const baseSha = state.baseSha;
   let failure: unknown;
   let mergeTail: Promise<void> = Promise.resolve();
-  const integratePublished = async (
+  /** What a diagnostics span records for one try of a delivery step. */
+  interface Span<T> {
+    operation: string;
+    metadata: Record<string, string | number>;
+    summarize: (result: T) => Record<string, string | number>;
+  }
+  /** Run one delivery step of an item; its span records each try. */
+  const deliveryStep = <T>(
     item: WorkItem,
-    published: DeliveryResult,
-  ): Promise<void> => {
-    const work = state.work[item.id]!;
-    const readinessWasWaiting = Boolean(work.waitingReason);
-    if (args.paused?.() && readinessWasWaiting) return;
-    await phases.reserve(item.id, "delivery");
-    const integrate = mergeTail.then(async () => {
-      const merge = async () => {
-        if (args.cancelled()) throw new Error("Objective cancelled");
-        await args.reconcile?.();
-        const merged = await delivery.merge(published, (observation) => {
-          assertDeliveryReady(
-            observation,
-            (state.graph.requiredPreIntegrationChecks ?? []).map(
-              (check) => check.checkName,
-            ),
-            published.headSha,
-          );
-          if (args.cancelled()) throw new Error("Objective cancelled");
-          if (args.paused?.() && readinessWasWaiting)
-            throw new DeliveryReadinessPending();
-          work.preIntegrationChecks = observation.namedChecks ?? [];
-          delete work.waitingReason;
-          save();
-        });
-        const defaultHead = await fetchHead(
-          config.checkout,
-          await github.defaultBranch(),
-        );
-        // Other work may have merged since; the merge commit only needs to
-        // be part of the default branch.
-        try {
-          git(
-            config.checkout,
-            "merge-base",
-            "--is-ancestor",
-            merged.integratedSha,
-            defaultHead,
-          );
-        } catch (cause) {
-          // Read-after-merge lag until the step's window passes (#515).
-          const message = `Default branch does not contain the merge of PR #${published.pullRequest} (${merged.integratedSha})`;
-          throw attachFault(
-            new Error(message, { cause }),
-            transient(message, false),
-          );
-        }
-        return merged.integratedSha;
-      };
-      const observedHead = args.diagnostics
-        ? await args.diagnostics.span(
-            {
-              runId: state.runId,
-              itemId: item.id,
-              attemptId: work.attempt,
-              operation: "github-merge",
-              metadata: {
-                pullRequest: published.pullRequest,
-                headSha: work.changeRef!,
+    name: "publish" | "await-ci" | "merge",
+    fn: (context: StepContext) => Promise<T>,
+    span?: Span<T>,
+  ): Promise<T> =>
+    step(
+      state,
+      { scope: { item: item.id }, name },
+      (context) =>
+        args.diagnostics && span
+          ? args.diagnostics.span(
+              {
+                runId: state.runId,
+                itemId: item.id,
+                attemptId: state.work[item.id]!.attempt,
+                operation: span.operation,
+                metadata: span.metadata,
               },
-            },
-            merge,
-            (headSha) => ({ integratedSha: headSha }),
-          )
-        : await merge();
-      state.integratedSha = observedHead;
-      work.integratedSha = observedHead;
-      work.status = "done";
-      work.completedAt = new Date().toISOString();
-      delete work.step;
-      delete work.waitingReason;
-      save();
-    });
-    mergeTail = integrate.then(
-      () => undefined,
-      () => undefined,
+              () => fn(context),
+              span.summarize,
+            )
+          : fn(context),
+      { save, signal: currentProcessSignal() },
     );
-    await integrate;
+  /**
+   * A delivery step that stopped without failing the attempt: it waits for
+   * the operator (a decision or a configuration fix; `factory retry` or the
+   * next run repeats it), or it was cancelled, or the owner paused while it
+   * waited for CI. The item keeps its place. Returns whether `error` was
+   * such a stop.
+   */
+  const stopped = (item: WorkItem, error: unknown): boolean => {
+    const { kind } = faultOf(error);
+    if (!["decision", "config", "cancelled"].includes(kind)) return false;
     phases.release(item.id);
-    await closeWorkItem(state, item.id, github, save, false);
-  };
-  // Publication finds an existing open PR for the deterministic branch
-  // before creating one, so a restart at "deliver" simply runs this again.
-  const deliverReviewed = async (
-    item: WorkItem,
-    itemBase: string,
-  ): Promise<void> => {
-    const work = state.work[item.id]!;
-    await phases.reserve(item.id, "delivery");
-    work.step = "deliver";
     save();
+    return true;
+  };
+  /** The owner paused while this item waits for CI: stop polling. */
+  const pausedWhileWaiting = (item: WorkItem): boolean =>
+    Boolean(args.paused?.()) && state.work[item.id]!.wait?.kind === "ci";
+  /**
+   * Publish a reviewed item, wait for its CI, merge it. Every effect is
+   * observed before it is made, so a restart at any point runs the steps
+   * again: publish (unless published), await-ci, merge.
+   */
+  const deliver = async (item: WorkItem, itemBase: string): Promise<void> => {
+    const work = state.work[item.id]!;
     const branch = `factory/objective-${objective}/${item.id}`;
-    const publish = () =>
-      delivery.publish({
-        item,
-        baseSha: itemBase,
-        treeSha: work.treeSha!,
-        changeRef: work.changeRef!,
-        branch,
-        lfs: Boolean(work.selectedAssetSet),
-        earlierHeads: earlierHeads(work),
-      });
-    await args.reconcile?.();
-    const published = args.diagnostics
-      ? await args.diagnostics.span(
+    try {
+      if (work.status !== "published") {
+        await phases.reserve(item.id, "delivery");
+        work.step = "deliver";
+        save();
+        await args.reconcile?.();
+        const published = await deliveryStep(
+          item,
+          "publish",
+          () =>
+            delivery.publish({
+              item,
+              baseSha: itemBase,
+              treeSha: work.treeSha!,
+              changeRef: work.changeRef!,
+              branch,
+              lfs: Boolean(work.selectedAssetSet),
+              earlierHeads: earlierHeads(work),
+            }),
           {
-            runId: state.runId,
-            itemId: item.id,
-            attemptId: work.attempt,
             operation: "github-publication",
             metadata: {
               baseSha: itemBase,
               treeSha: work.treeSha!,
               headSha: work.changeRef!,
             },
+            summarize: (result) => ({ pullRequest: result.pullRequest }),
           },
-          publish,
-          (result) => ({ pullRequest: result.pullRequest }),
-        )
-      : await publish();
-    work.pullRequest = published.pullRequest;
-    work.status = "published";
-    delete work.step;
-    save();
-    await integratePublished(item, published);
+        );
+        work.pullRequest = published.pullRequest;
+        work.status = "published";
+        delete work.step;
+        phases.release(item.id);
+        save();
+      }
+      const published: DeliveryResult = {
+        branch,
+        pullRequest: work.pullRequest!,
+        headSha: work.changeRef!,
+        earlierHeads: earlierHeads(work),
+      };
+      if (pausedWhileWaiting(item)) return;
+      await args.reconcile?.();
+      /** Observe the PR; return it when it may merge, else wait for CI. */
+      const ready = async (context: StepContext) => {
+        const observation = await delivery.observe(published);
+        context.progress();
+        const pending = deliveryReadiness(
+          published.pullRequest,
+          observation,
+          (state.graph.requiredPreIntegrationChecks ?? []).map(
+            (check) => check.checkName,
+          ),
+          published.headSha,
+        );
+        if (pending) context.pending({ kind: "ci", detail: pending });
+        return observation;
+      };
+      // The CI wait holds no phase reservation; the merge does.
+      const observation = await deliveryStep(
+        item,
+        "await-ci",
+        async (context) => {
+          if (pausedWhileWaiting(item))
+            throw new StepFault({ kind: "cancelled", detail: "paused" });
+          return ready(context);
+        },
+      );
+      work.preIntegrationChecks = observation.namedChecks ?? [];
+      save();
+      await phases.reserve(item.id, "delivery");
+      // Merges run one at a time, so each sees the last one's result.
+      const merged = mergeTail.then(() =>
+        deliveryStep(
+          item,
+          "merge",
+          async (context) => {
+            // Readiness can change after await-ci (a conflict, a failed
+            // check): judge it again before the merge is sent.
+            await ready(context);
+            const merged = await delivery.merge(published);
+            await assertIntegrated(
+              config.checkout,
+              await github.defaultBranch(),
+              merged.integratedSha,
+              `PR #${published.pullRequest}`,
+            );
+            return {
+              merge: merged.integratedSha,
+              integrated: await laterIntegration(
+                config.checkout,
+                state.integratedSha,
+                merged.integratedSha,
+              ),
+            };
+          },
+          {
+            operation: "github-merge",
+            metadata: {
+              pullRequest: published.pullRequest,
+              headSha: published.headSha,
+            },
+            summarize: (result) => ({ integratedSha: result.merge }),
+          },
+        ),
+      );
+      mergeTail = merged.then(
+        () => undefined,
+        () => undefined,
+      );
+      const result = await merged;
+      state.integratedSha = result.integrated;
+      work.integratedSha = result.merge;
+      work.status = "done";
+      work.completedAt = new Date().toISOString();
+      delete work.step;
+      save();
+    } catch (error) {
+      if (stopped(item, error)) return;
+      throw error;
+    }
+    phases.release(item.id);
+    await closeWorkItem(state, item.id, github, save, false);
   };
   const runStep = async (
     item: WorkItem,
     itemBase: string,
     existingHandle?: NonNullable<FactoryState["work"][string]["execution"]>,
-  ): Promise<void> => {
+  ): Promise<"deliver" | undefined> => {
     const work = state.work[item.id]!;
-    if (work.status === "published") {
-      await integratePublished(item, {
-        branch: `factory/objective-${objective}/${item.id}`,
-        pullRequest: work.pullRequest!,
-        headSha: work.changeRef!,
-      });
-      return;
-    }
+    if (work.status === "published") return "deliver";
     if (item.kind === "qa" || item.kind === "aggregate") {
       if (args.paused?.() && work.waitingReason) return;
       await runQaItem({
@@ -242,10 +289,7 @@ export async function runRegularGraph(args: {
       });
       return;
     }
-    if (work.step === "deliver" && work.validation) {
-      await deliverReviewed(item, itemBase);
-      return;
-    }
+    if (work.step === "deliver" && work.validation) return "deliver";
     if (!existingHandle && work.step === "execute") {
       await phases.reserve(item.id, "validation");
       await preflightItemEnvironment({
@@ -474,27 +518,23 @@ export async function runRegularGraph(args: {
       : await reviewResult();
     delete work.acceptancePending;
     if (args.cancelled()) throw new Error("Objective cancelled");
-    await deliverReviewed(item, itemBase);
+    return "deliver";
   };
   const execute = async (item: WorkItem, itemBase: string): Promise<void> => {
     const work = state.work[item.id]!;
     // A repeated step reattaches to the recorded attempt. A settled dead
     // worker's handle was cleared, so it starts a fresh attempt.
     try {
-      await repeatInterrupted(work, save, () =>
+      const next = await repeatInterrupted(work, save, () =>
         runStep(
           item,
           itemBase,
           work.step === "execute" ? work.execution : undefined,
         ),
       );
+      // Delivery steps repeat themselves: they run outside that repeat.
+      if (next === "deliver") await deliver(item, itemBase);
     } catch (error) {
-      if (error instanceof DeliveryReadinessPending) {
-        work.waitingReason = error.message;
-        phases.release(item.id);
-        save();
-        return;
-      }
       if (error instanceof AcceptanceDecisionRequired) {
         phases.release(item.id);
         work.status = "waiting";

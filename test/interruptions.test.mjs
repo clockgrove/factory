@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { execFileSync } from "node:child_process";
+import { setLagClock } from "../dist/delivery/lag.js";
 import { attachFault, faultOf } from "../dist/fault.js";
 import { GitHubOutcomeUnknown } from "../dist/github-client.js";
 import { readState } from "../dist/state-store.js";
@@ -136,7 +137,13 @@ for (const delivery of ["regular", "native-stack"])
         let calls = 0;
         github.merge = async (...args) => {
           const result = await original(...args);
-          if (++calls === 1) throw new GitHubOutcomeUnknown();
+          // As the client raises it: a lost response, outcome unknown.
+          if (++calls === 1)
+            throw attachFault(new GitHubOutcomeUnknown(), {
+              kind: "transient",
+              detail: "GitHub PUT response was lost; it may have taken effect",
+              outcomeUnknown: true,
+            });
           return result;
         };
         const state = await application.runObjective(objective);
@@ -146,12 +153,18 @@ for (const delivery of ["regular", "native-stack"])
       });
     });
 
-    test("a merge the default branch does not show yet is classified as lag", async () => {
+    test("a merge the default branch does not show is lag for GitHub's lag window, then a defect", async (t) => {
       await withApp(
         "ancestry",
         delivery,
         {},
         async ({ application, github, descriptor }) => {
+          // GitHub's two-minute lag window passes in a fraction of a second.
+          const started = Date.now();
+          const restore = setLagClock(
+            () => started + (Date.now() - started) * 1_000,
+          );
+          t.after(restore);
           const checkout = descriptor.config.checkout;
           // A commit GitHub reports as merged but the fetched default
           // branch does not contain yet.
@@ -177,11 +190,10 @@ for (const delivery of ["regular", "native-stack"])
           const error = await application
             .runObjective(objective)
             .catch((caught) => caught);
+          // The merge step repeats while GitHub may lag (two minutes), then
+          // stops: the default branch lost a merge GitHub confirmed.
           assert.match(error.message, /Default branch does not contain/);
-          assert.deepEqual(
-            [faultOf(error).kind, faultOf(error).outcomeUnknown],
-            ["transient", false],
-          );
+          assert.equal(faultOf(error).kind, "defect");
         },
       );
     });

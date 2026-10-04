@@ -26,9 +26,26 @@ export class GitHubRequestError extends Error {
   constructor(
     readonly status: number,
     readonly refusal?: GitHubRefusal,
+    /** A 409 to merge-async names the merge request already pending. */
+    readonly pendingMerge?: string,
   ) {
     super(`GitHub request failed (HTTP ${status})`);
   }
+}
+
+/** The pending merge request a 409 to merge-async answers with, if any. */
+function pendingMerge(status: number, data: unknown): string | undefined {
+  const body = data as
+    | { status?: unknown; details?: { uuid?: unknown } | null }
+    | null
+    | undefined;
+  const uuid = body?.details?.uuid;
+  return status === 409 &&
+    body?.status === "pending" &&
+    typeof uuid === "string" &&
+    /^[A-Za-z0-9-]{1,64}$/.test(uuid)
+    ? uuid
+    : undefined;
 }
 
 /** GitHub's documented minimum wait when a limit gives no reset time. */
@@ -83,6 +100,17 @@ export interface GitHubCall {
   head?: "ours" | "foreign";
 }
 
+/**
+ * Factory integrates with merge commits: its integration evidence binds
+ * the delivered head as the merge commit's second parent.
+ */
+export const MERGE_COMMITS_REQUIRED: Extract<Fault, { kind: "config" }> = {
+  kind: "config",
+  detail:
+    "The repository does not allow merge commits, which Factory needs to bind each delivered head into the default branch",
+  fix: "Allow merge commits in the repository settings (Settings → General → Pull Requests), then `factory run`",
+};
+
 const GITHUB_PERMISSION_FIX =
   "Give the GitHub login write access to the repository's contents, issues and pull requests, then `factory run`";
 
@@ -136,11 +164,7 @@ export function gitHubFault(
     case 405:
       if (!merge) return undefined;
       if (error.refusal === "merge-method-not-allowed")
-        return {
-          kind: "config",
-          detail: "The repository does not allow merge commits",
-          fix: "Allow merge commits in the repository settings, then `factory run`",
-        };
+        return MERGE_COMMITS_REQUIRED;
       // Re-observe and repeat with the same head.
       if (error.refusal === "base-modified")
         return transient(`The base branch moved during ${what}`, false);
@@ -150,6 +174,9 @@ export function gitHubFault(
       );
     case 409:
       if (!merge) return undefined;
+      // A merge request already pending (its response was lost): poll it.
+      if (error.pendingMerge)
+        return transient(`A merge is already requested (${what})`, false);
       return call.head === "foreign"
         ? decision(
             "The pull request head differs from what Factory recorded. Inspect it, then retry or cancel.",
@@ -511,6 +538,7 @@ export class GitHubClient {
           const rejection = new GitHubRequestError(
             error.status,
             refusal(error.status, error.response?.data),
+            pendingMerge(error.status, error.response?.data),
           );
           throw attachFault(
             rejection,
@@ -555,13 +583,14 @@ export const sharedGitHubClient = new GitHubClient();
 
 /**
  * The merge commit of a merged pull request, read from its issue timeline.
- * PR responses in the pinned API version omit `merge_commit_sha`.
+ * PR responses in the pinned API version omit `merge_commit_sha`. Undefined
+ * while the timeline does not show the merge yet.
  */
 export async function timelineMergeCommit(
   client: GitHubClient,
   repository: string,
   pullRequest: number,
-): Promise<string> {
+): Promise<string | undefined> {
   const events = await client.paginate<{ event?: string; commit_id?: unknown }>(
     `repos/${repository}/issues/${pullRequest}/timeline`,
   );
@@ -575,17 +604,8 @@ export async function timelineMergeCommit(
       throw new Error(`PR #${pullRequest} has malformed merge evidence`);
     commits.add(event.commit_id);
   }
-  if (commits.size !== 1)
-    throw attachFault(
-      new Error(`PR #${pullRequest} has missing or conflicting merge evidence`),
-      // A merge the timeline does not show yet is read-after-write lag; two
-      // merge commits for one PR is a broken invariant.
-      commits.size === 0
-        ? transient(
-            `PR #${pullRequest} merge is not on its timeline yet`,
-            false,
-          )
-        : undefined,
-    );
-  return [...commits][0]!;
+  // Two merge commits for one PR is a broken invariant.
+  if (commits.size > 1)
+    throw new Error(`PR #${pullRequest} has conflicting merge evidence`);
+  return [...commits][0];
 }

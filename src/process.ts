@@ -109,7 +109,7 @@ export function gitFault(args: string[], error: unknown): Fault | undefined {
   // checks it with ls-remote (see RegularDelivery.publish).
   if (push && pushRejected(error)) return undefined;
   if (
-    /Could not resolve host|Temporary failure in name resolution|Connection (timed out|refused|reset)|Operation timed out|Failed to connect|Network is unreachable|early EOF|unexpected disconnect|remote end hung up|Remote side unexpectedly closed|RPC failed|returned error: (5\d\d|429)\b|HTTP (5\d\d|429)\b|gnutls_handshake|SSL_ERROR|SSL_connect|TLS connection|rate limit/i.test(
+    /Could not resolve host|Temporary failure in name resolution|Connection (timed out|refused|reset)|Operation timed out|Failed to connect|Network is unreachable|Empty reply from server|early EOF|unexpected disconnect|remote end hung up|Remote side unexpectedly closed|RPC failed|returned error: (5\d\d|429)\b|HTTP (5\d\d|429)\b|gnutls_handshake|SSL_ERROR|SSL_connect|TLS connection|rate limit/i.test(
       detail,
     )
   )
@@ -119,7 +119,7 @@ export function gitFault(args: string[], error: unknown): Fault | undefined {
 
 /** The remote refused a push because its branch moved. */
 export function pushRejected(error: unknown): boolean {
-  return /\[rejected\]|\(stale info\)|\(fetch first\)|non-fast-forward/.test(
+  return /\[rejected\]|\(stale info\)|\(fetch first\)|non-fast-forward|\(reference already exists\)/.test(
     error instanceof Error ? error.message : String(error),
   );
 }

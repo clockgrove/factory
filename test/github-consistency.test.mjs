@@ -212,6 +212,18 @@ scenarios.push({
   refuses: /does not contain the merge/,
 });
 
+// Factory integrates with merge commits (its evidence binds the delivered
+// head as the second parent): a repository that disallows them waits for
+// the configuration fix before any merge is sent.
+scenarios.push({
+  name: "a repository without merge commits is refused before any merge",
+  deliveries: BOTH,
+  fake: { mergeMethods: ["squash"] },
+  checks: ["refusal"],
+  refuses: /does not allow merge commits/,
+  unsent: [MERGE, MERGE_ASYNC],
+});
+
 const known = KNOWN.consistency;
 const name = (scenario, delivery) => `${delivery}: ${scenario.name}`;
 const checksOf = (scenario) => scenario.checks ?? ["end", "stop", "budget"];
@@ -249,6 +261,7 @@ describe("GitHub consistency, rate limits and other actors", {
           checks: checksOf(scenario),
           foreignIssues: scenario.foreignIssues ?? scenario.earlierIssues ?? 0,
           refuses: scenario.refuses,
+          unsent: scenario.unsent ?? [],
         },
         known,
       );

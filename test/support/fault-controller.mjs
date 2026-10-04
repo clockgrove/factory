@@ -10,6 +10,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Octokit } from "@octokit/core";
 import { stateRoot } from "../../dist/config.js";
+import { setLagClock } from "../../dist/delivery/lag.js";
 import { NativeStackDelivery } from "../../dist/delivery/native-stack.js";
 import { LocalExecutionDriver } from "../../dist/execution/local.js";
 import { attachFault, transient } from "../../dist/fault.js";
@@ -35,6 +36,13 @@ const FAULTED = {
 };
 
 const [descriptorPath] = process.argv.slice(2);
+
+// GitHub's lag window is wall-clock time; scale it like the step sleeps.
+const scale = Number(process.env.FACTORY_TEST_TIME_SCALE ?? "1");
+if (Number.isFinite(scale) && scale > 0 && scale !== 1) {
+  const started = Date.now();
+  setLagClock(() => started + (Date.now() - started) / scale);
+}
 const descriptor = readDescriptor(descriptorPath);
 const { config } = descriptor;
 const callsPath = join(descriptor.fakeRoot, "calls.ndjson");

@@ -34,7 +34,26 @@ export function scenarioConcurrency() {
 }
 
 const KINDS = ["crash-before", "crash-after", "lost", "unavailable"];
+const MERGE_ASYNC = "PUT /repos/{owner}/{repo}/pulls/{number}/merge-async";
 const PAID = new Set(["crash-after", "lost"]);
+
+/**
+ * Whether the log entry at `index` is a merge-async 409 that directly
+ * follows a dropped or crashed merge-async on the same PR: after a lost
+ * response, the 409 naming the pending request is the only way to learn
+ * its uuid.
+ */
+function resumesLostMerge(log, index) {
+  const entry = log[index];
+  if (entry.endpoint !== MERGE_ASYNC || entry.status !== 409) return false;
+  const previous = log
+    .slice(0, index)
+    .findLast((other) => other.endpoint === MERGE_ASYNC);
+  return (
+    previous?.path === entry.path &&
+    ["dropped", "crash"].includes(previous.status)
+  );
+}
 
 /** The run every case is compared with, once per process and delivery. */
 const references = new Map();
@@ -245,8 +264,12 @@ export async function assertEndState(result, { foreignIssues = 0 } = {}) {
   assert.deepEqual(
     fake.log
       .filter(
-        (entry) =>
-          [405, 409, 422].includes(entry.status) || entry.unhandled === true,
+        (entry, index) =>
+          // A refusal the test injected is not Factory's request refused.
+          (entry.fault !== "status" &&
+            [405, 409, 422].includes(entry.status) &&
+            !resumesLostMerge(fake.log, index)) ||
+          entry.unhandled === true,
       )
       .map((entry) => `${entry.endpoint} → ${entry.status}`),
     [],
@@ -318,9 +341,12 @@ export async function assertPlanCompiledOnce(result) {
 /**
  * Factory refused to continue past a fact it must not accept: a run stopped
  * with `refuses`, and neither the Objective nor any Work Item issue was
- * closed as completed.
+ * closed as completed, and none of the `unsent` endpoints was requested.
  */
-export function assertRefusal(result, { refuses }) {
+export function assertRefusal(result, { refuses, unsent = [] }) {
+  // Requests Factory must refuse before sending.
+  for (const endpoint of unsent)
+    assert.equal(result.fake.requests(endpoint).length, 0, `sent ${endpoint}`);
   assert.ok(
     result.runs.some(
       (run) =>

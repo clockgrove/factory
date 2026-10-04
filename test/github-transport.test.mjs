@@ -8,6 +8,7 @@ import {
   GitHubOutcomeUnknown,
   GitHubRequestError,
 } from "../dist/github-client.js";
+import { faultOf } from "../dist/fault.js";
 import { withProcessCancellation } from "../dist/process.js";
 
 const json = (data, status = 200, headers = {}) =>
@@ -196,12 +197,14 @@ const openPull = {
   base: { ref: "main" },
 };
 const mergedPull = { ...openPull, state: "closed", merged: true };
+const repository = { default_branch: "main", allow_merge_commit: true };
 
 test("regular merge sends the exact expected head and verifies integrated identity", async () => {
   const calls = [];
   let merged = false;
-  const client = clientFor(async (_url, options) => {
+  const client = clientFor(async (url, options) => {
     calls.push(options);
+    if (new URL(url).pathname === "/repos/a/b") return json(repository);
     if (options.method !== "PUT") return json(merged ? mergedPull : openPull);
     merged = true;
     return json({ merged: true, sha: integratedSha });
@@ -211,12 +214,13 @@ test("regular merge sends the exact expected head and verifies integrated identi
     await gateway.merge({ number: 4, headSha, branch: "branch" }, headSha),
     { integratedSha },
   );
-  // Look up the PR first, merge it at the exact head, then confirm it.
+  // Look up the PR and the allowed merge method first, merge it at the
+  // exact head, then confirm it.
   assert.deepEqual(
     calls.map((call) => call.method),
-    ["GET", "PUT", "GET"],
+    ["GET", "GET", "PUT", "GET"],
   );
-  assert.deepEqual(JSON.parse(calls[1].body), {
+  assert.deepEqual(JSON.parse(calls[2].body), {
     sha: headSha,
     merge_method: "merge",
   });
@@ -224,7 +228,7 @@ test("regular merge sends the exact expected head and verifies integrated identi
     gateway.merge({ number: 4, headSha, branch: "branch" }, "other"),
     /expected head/,
   );
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.ok(
     calls.every(
       (call) => call.headers["x-github-api-version"] === "2026-03-10",
@@ -271,15 +275,25 @@ test("regular merge refuses a PR already merged at a different head or branch", 
         { number: 4, headSha, branch: "branch" },
         headSha,
       ),
-      /PR #4 was merged at a different head/,
+      /PR #4 was merged at head/,
     );
     assert.deepEqual(methods, ["GET"]);
   }
 });
 
-test("regular merge refuses missing, malformed or conflicting timeline merge evidence", async () => {
+test("regular merge refuses malformed or conflicting timeline merge evidence, and waits for missing evidence", async () => {
+  const lagging = await new RealGitHubGateway(
+    "a/b",
+    {},
+    clientFor(async (url) =>
+      String(url).includes("/timeline") ? json([]) : json(mergedPull),
+    ),
+  )
+    .merge({ number: 4, headSha, branch: "branch" }, headSha)
+    .catch((error) => error);
+  assert.match(lagging.message, /not on its timeline yet/);
+  assert.equal(faultOf(lagging).kind, "transient");
   for (const events of [
-    [],
     [{ event: "merged", commit_id: "not-a-commit" }],
     [
       { event: "merged", commit_id: integratedSha },
@@ -403,7 +417,9 @@ test("native merge resumes its UUID without submitting another mutation", async 
       {
         resumeUuid: "saved-uuid",
         onPending: () => assert.fail("already persisted"),
-        cancelled: () => false,
+        requireMergeCommits: async () =>
+          assert.fail("a resumed merge sends nothing"),
+        queued: () => assert.fail("the request is known"),
       },
     ),
     integratedSha,
@@ -421,21 +437,22 @@ test("regular merge rejects unsuccessful acknowledgement and changed current PR 
     [{ merged: false, sha: integratedSha }, undefined, /did not produce/],
     [{ merged: true }, undefined, /did not produce/],
     [{ merged: true, sha: "not-a-commit" }, undefined, /did not produce/],
-    [{ merged: true, sha: integratedSha }, { state: "open" }, /not confirmed/],
-    [{ merged: true, sha: integratedSha }, { merged: false }, /not confirmed/],
+    [{ merged: true, sha: integratedSha }, { state: "open" }, /yet/],
+    [{ merged: true, sha: integratedSha }, { merged: false }, /yet/],
     [
       { merged: true, sha: integratedSha },
       { head: { sha: "b".repeat(40), ref: "branch" } },
-      /not confirmed/,
+      /yet/,
     ],
     [
       { merged: true, sha: integratedSha },
       { head: { sha: headSha, ref: "changed" } },
-      /not confirmed/,
+      /yet/,
     ],
   ]) {
     const methods = [];
-    const client = clientFor(async (_url, options) => {
+    const client = clientFor(async (url, options) => {
+      if (new URL(url).pathname === "/repos/a/b") return json(repository);
       methods.push(options.method);
       assert.equal(options.headers["x-github-api-version"], "2026-03-10");
       if (options.method === "PUT") return json(result);
@@ -530,12 +547,15 @@ async function nativeMergeFixture(mode, options = {}) {
   const result = await delivery.mergeStack(layers, "main", 10, {
     ...(mode === "resume" ? { resumeUuid: "saved-uuid" } : {}),
     onPending: (uuid) => pending.push(uuid),
-    cancelled: () => false,
+    requireMergeCommits: async () => {},
+    queued: (detail) => {
+      throw Object.assign(new Error(detail), { queued: true });
+    },
   });
   return { result, calls, pending };
 }
 
-for (const mode of ["immediate", "pending", "no-uuid", "resume", "already"])
+for (const mode of ["immediate", "pending", "resume", "already"])
   test(`native ${mode} merge resolves current timeline evidence without obsolete PR fields`, async () => {
     const { result, calls, pending } = await nativeMergeFixture(mode);
     assert.equal(result, integratedSha);
@@ -547,6 +567,13 @@ for (const mode of ["immediate", "pending", "no-uuid", "resume", "already"])
     assert.ok(calls.some((call) => call.path.endsWith("/issues/1/timeline")));
     assert.ok(calls.some((call) => call.path.endsWith("/issues/2/timeline")));
   });
+
+test("a native merge queued without a request to poll waits for CI", async () => {
+  await assert.rejects(
+    nativeMergeFixture("no-uuid"),
+    (error) => error.queued === true && /queued/.test(error.message),
+  );
+});
 
 test("native merge evidence spans every timeline page and ignores unrelated events", async () => {
   const { result, calls } = await nativeMergeFixture("already", {
@@ -568,10 +595,10 @@ test("native merge evidence spans every timeline page and ignores unrelated even
 
 test("native merge refuses missing, malformed, conflicting and disagreeing commit evidence", async () => {
   for (const [events, expected] of [
-    [() => [], /missing or conflicting/],
+    [() => [], /not on its timeline yet/],
     [
       () => [{ event: "closed", commit_id: integratedSha }],
-      /missing or conflicting/,
+      /not on its timeline yet/,
     ],
     [() => [{ event: "merged" }], /malformed/],
     [() => [{ event: "merged", commit_id: null }], /malformed/],
@@ -581,7 +608,7 @@ test("native merge refuses missing, malformed, conflicting and disagreeing commi
         { event: "merged", commit_id: integratedSha },
         { event: "merged", commit_id: "d".repeat(40) },
       ],
-      /missing or conflicting/,
+      /conflicting merge evidence/,
     ],
     [
       (number) => [{ event: "merged", commit_id: String(number).repeat(40) }],
@@ -595,7 +622,7 @@ test("native merge refuses missing, malformed, conflicting and disagreeing commi
   );
   await assert.rejects(
     nativeMergeFixture("resume", { changedHead: true }),
-    /matching integrated head/,
+    /does not show its merge yet/,
   );
   await assert.rejects(
     nativeMergeFixture("already", { changedHead: true }),

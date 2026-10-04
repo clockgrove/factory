@@ -82,7 +82,7 @@ export function bindTarget(checkout, repository) {
       `#!/bin/sh
 for argument in "$@"; do
   case "$argument" in
-    push|fetch|clone|pull|checkout) exec ${quote(process.execPath)} ${quote(helper)} ${quote(realGit)} ${quote(routesFile)} "$@" ;;
+    push|fetch|clone|pull|ls-remote|checkout) exec ${quote(process.execPath)} ${quote(helper)} ${quote(realGit)} ${quote(routesFile)} "$@" ;;
   esac
 done
 exec ${quote(realGit)} "$@"
@@ -909,8 +909,7 @@ export class StatefulGitHubFake {
     });
   }
 
-  async mergeNativeStack(layers, baseBranch, expectedStack, options) {
-    if (options.cancelled()) throw new Error("Objective cancelled");
+  async mergeNativeStack(layers, baseBranch, expectedStack) {
     // Like the real gateway: a stack already merged at these heads is confirmed.
     const pulls = layers.map(
       (layer) => this.state().pullRequests[layer.pullRequest],
@@ -926,7 +925,6 @@ export class StatefulGitHubFake {
       await this.ensureNativeStack(layers, baseBranch),
       expectedStack,
     );
-    options.beforeMerge?.();
     const integratedSha = this.integrate(layers.at(-1).branch);
     this.update((state) => {
       for (const layer of layers) {

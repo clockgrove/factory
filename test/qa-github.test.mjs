@@ -233,7 +233,7 @@ test("PR receipt grouping considers every latest-check page", async () => {
 test("successful repeated-check receipts preserve current protection readiness", async () => {
   for (const [readiness, expected] of [
     ["BLOCKED", "waiting"],
-    ["DIRTY", "blocked"],
+    ["DIRTY", "conflict"],
   ]) {
     const actual = await observeChecks([[run(), run({ id: 72 })]], readiness);
     assert.equal(actual.namedChecks.length, 1);

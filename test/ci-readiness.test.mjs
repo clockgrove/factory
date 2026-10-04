@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { Octokit } from "@octokit/core";
 import { RealGitHubGateway } from "../dist/github.js";
+import { faultOf } from "../dist/fault.js";
 import { GitHubClient, GitHubOutcomeUnknown } from "../dist/github-client.js";
 import { withProcessCancellation } from "../dist/process.js";
 import { controlObjective } from "../dist/runner.js";
@@ -16,7 +17,8 @@ import {
   readState,
 } from "../dist/state-store.js";
 import { stateRoot } from "../dist/config.js";
-import { RegularDelivery } from "../dist/delivery/regular.js";
+import { deliveryReadiness } from "../dist/delivery/readiness.js";
+import { scaleTimers } from "./support/fast-timers.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -24,6 +26,9 @@ import {
   readEvents,
 } from "./support/integration-fixture.mjs";
 import { runWithHeartbeat } from "./support/liveness.mjs";
+
+// CI waits poll from inside the delivery step; run its polls fast.
+scaleTimers(0.02);
 
 const body =
   "## Acceptance\n- result.txt exists\n\n## Commands\n- test -s result.txt\n\n## Final validation\n- test -s result.txt\n";
@@ -197,14 +202,36 @@ async function fixture(route, name, run, chain = false, namedGate = false) {
       assert.equal(work.status, "published");
       assert.equal(identity.number, work.pullRequest);
       assert.equal(expectedHead, work.changeRef);
+      assertGateRecorded(work, expectedHead);
       merges++;
       return merge(identity, expectedHead);
     };
     const mergeStack = github.mergeNativeStack.bind(github);
     github.mergeNativeStack = async (...args) => {
+      const state = readState(config.repository, 1);
+      for (const layer of args[0])
+        assertGateRecorded(
+          Object.values(state.work).find(
+            (work) => work.pullRequest === layer.pullRequest,
+          ),
+          layer.headSha,
+        );
       merges++;
       return mergeStack(...args);
     };
+    /** A gated merge is sent only after the passing gate was recorded. */
+    function assertGateRecorded(work, head) {
+      if (!namedGate) return;
+      assert.ok(
+        work.preIntegrationChecks?.some(
+          (check) =>
+            check.name === "quality" &&
+            check.headSha === head &&
+            check.conclusion === "success",
+        ),
+        "the named check is recorded before the merge",
+      );
+    }
     const ready = () =>
       github.update((state) => {
         for (const pull of Object.values(state.pullRequests))
@@ -252,7 +279,8 @@ const identityOf = (state) => ({
 });
 function assertWait(state) {
   assert.equal(state.work.result.status, "published");
-  assert.match(state.work.result.waitingReason, /Awaiting/);
+  assert.equal(state.work.result.wait?.kind, "ci");
+  assert.match(state.work.result.wait.detail, /Awaiting/);
   assert.equal(state.work.result.recovery, undefined);
   assert.equal(state.error, undefined);
   assert.equal(state.finalValidation, undefined);
@@ -260,7 +288,7 @@ function assertWait(state) {
 /** Start a tracked run and return the exact published wait it reaches. */
 async function startWaiting(
   f,
-  reached = (state) => state.work.result.waitingReason,
+  reached = (state) => state.work.result.wait?.kind === "ci",
 ) {
   const running = f.track(f.application.runObjective(1));
   await until(() => {
@@ -408,9 +436,18 @@ for (const route of ["regular", "native-stack"]) {
         for (const pull of Object.values(state.pullRequests))
           pull.checks = "failing";
       });
-      await assert.rejects(running, /not mergeable/);
+      await running;
       const stopped = readState(f.config.repository, 1);
       assert.deepEqual(identityOf(stopped), identity);
+      assert.equal(stopped.work.result.status, "failed");
+      assert.equal(
+        stopped.work.result.recovery.failure.classification,
+        "implementation",
+      );
+      assert.match(
+        stopped.work.result.recovery.failure.detail,
+        /Checks failed/,
+      );
       assert.equal(f.counts().merges, 0);
       assert.equal(
         readEvents(f.eventsPath).filter((event) => event.type === "start")
@@ -440,8 +477,8 @@ for (const route of ["regular", "native-stack"]) {
           // Each pass reserves a phase, clearing the wait; read it once settled.
           await until(
             () =>
-              readContinuation(f.config.repository, 1)?.work?.result
-                ?.waitingReason,
+              readContinuation(f.config.repository, 1)?.work?.result?.wait
+                ?.kind === "ci",
           );
           const waiting = readState(f.config.repository, 1);
           assertWait(waiting);
@@ -474,7 +511,11 @@ for (const route of ["regular", "native-stack"]) {
         const { running } = await startWaiting(f);
         f.setNamedMode("failed");
         f.ready();
-        await assert.rejects(running, /not mergeable/);
+        await running;
+        assert.equal(
+          readState(f.config.repository, 1).work.result.status,
+          "failed",
+        );
         assert.equal(f.counts().merges, 0);
       },
       false,
@@ -501,7 +542,8 @@ test("intake keeps its ordinary pending-CI Objective owned and finishes it when 
     const running = f.track(f.application.runIntake());
     await until(
       () =>
-        readContinuation(f.config.repository, 1)?.work?.result?.waitingReason,
+        readContinuation(f.config.repository, 1)?.work?.result?.wait?.kind ===
+        "ci",
     );
     assertWait(readState(f.config.repository, 1));
     f.ready();
@@ -534,7 +576,7 @@ test("native multi-layer wait preserves every exact published layer and creates 
         // The stack head carries the wait for the whole unbranched chain.
         (state) =>
           state.work.result.status === "published" &&
-          state.work.next?.waitingReason,
+          state.work.next?.wait?.kind === "ci",
       );
       assert.equal(waiting.work.result.status, "published");
       assert.equal(waiting.work.next.status, "published");
@@ -557,18 +599,12 @@ test("native multi-layer wait preserves every exact published layer and creates 
             identity.head,
           ]),
         );
-        const beforeMerge = args[3].beforeMerge;
-        args[3] = {
-          ...args[3],
-          beforeMerge: () => {
-            beforeMerge();
-            assert.ok(
-              Object.values(
-                readState(f.config.repository, 1).stackNumbers ?? {},
-              ).includes(args[2]),
-            );
-          },
-        };
+        // The stack is recorded before it is merged.
+        assert.ok(
+          Object.values(
+            readState(f.config.repository, 1).stackNumbers ?? {},
+          ).includes(args[2]),
+        );
         return mergeStack(...args);
       };
       f.ready();
@@ -658,23 +694,7 @@ test("check registration waits on authenticated protection readiness while clean
     const observation = await observedGateway(status).observe(pr);
     assert.equal(observation.checks, "passing");
     assert.equal(observation.mergeReadiness, "waiting");
-    let merges = 0;
-    const github = {
-      defaultBranch: async () => "main",
-      observe: async () => observation,
-      merge: async () => {
-        merges++;
-      },
-    };
-    await assert.rejects(
-      new RegularDelivery("unused", github).merge({
-        pullRequest: 1,
-        branch: pr.branch,
-        headSha: head,
-      }),
-      (error) => error.constructor.name === "DeliveryReadinessPending",
-    );
-    assert.equal(merges, 0);
+    assert.match(deliveryReadiness(1, observation, [], head), /Awaiting/);
   }
   assert.equal(
     (await observedGateway("CLEAN").observe(pr)).mergeReadiness,
@@ -684,10 +704,15 @@ test("check registration waits on authenticated protection readiness while clean
     (await observedGateway("HAS_HOOKS").observe(pr)).mergeReadiness,
     "ready",
   );
-  for (const status of ["DIRTY", "BEHIND", "DRAFT", "UNSTABLE"])
+  for (const [status, readiness] of [
+    ["DIRTY", "conflict"],
+    ["BEHIND", "waiting"],
+    ["DRAFT", "draft"],
+    ["UNSTABLE", "ready"],
+  ])
     assert.equal(
       (await observedGateway(status).observe(pr)).mergeReadiness,
-      "blocked",
+      readiness,
     );
   for (const change of [
     { number: 2 },
@@ -833,25 +858,16 @@ test("public no-registered-check reproduction refuses gated integration while pr
     },
   };
   const gateway = new RealGitHubGateway("example/fixture", false, client);
-  let submitted = 0;
-  gateway.defaultBranch = async () => "main";
-  gateway.merge = async () => {
-    submitted++;
-    return { integratedSha: "b".repeat(40) };
-  };
   assert.deepEqual(await gateway.observe(identity), {
     namedChecks: [],
     mergeReadiness: "ready",
     state: "open",
     checks: "passing",
   });
-  const result = { branch: "work", pullRequest: 1, headSha: head };
-  await new RegularDelivery("/unused", gateway).merge(result);
-  assert.equal(submitted, 1);
-  submitted = 0;
-  const gated = new RegularDelivery("/unused", gateway, ["quality"]);
-  await assert.rejects(gated.merge(result), /Awaiting.*quality/);
-  assert.equal(submitted, 0);
+  const gate = async (required) =>
+    deliveryReadiness(1, await gateway.observe(identity), required, head);
+  assert.equal(await gate([]), undefined);
+  assert.match(await gate(["quality"]), /Awaiting.*quality/);
   const success = {
     id: 1,
     name: "quality",
@@ -868,22 +884,18 @@ test("public no-registered-check reproduction refuses gated integration while pr
     { ...success, conclusion: "skipped" },
   ]) {
     runs = [variant];
-    await assert.rejects(gated.merge(result), /Awaiting/);
-    assert.equal(submitted, 0);
+    assert.match(await gate(["quality"]), /Awaiting/);
   }
   runs = [success, { ...success, id: 2, app: { id: 200 } }];
-  await assert.rejects(gated.merge(result), /Awaiting/);
-  assert.equal(submitted, 0);
+  assert.match(await gate(["quality"]), /Awaiting/);
   runs = [{ ...success, conclusion: "failure" }];
-  await assert.rejects(gated.merge(result), /not mergeable/);
-  assert.equal(submitted, 0);
-  runs = [success];
-  let before;
-  await gated.merge(result, (observation) => {
-    before = observation;
-    assert.equal(submitted, 0);
+  await assert.rejects(gate(["quality"]), (error) => {
+    assert.equal(faultOf(error).kind, "work");
+    return true;
   });
-  assert.equal(submitted, 1);
-  assert.equal(before.namedChecks[0].name, "quality");
-  assert.equal(before.namedChecks[0].headSha, head);
+  runs = [success];
+  assert.equal(await gate(["quality"]), undefined);
+  const observed = await gateway.observe(identity);
+  assert.equal(observed.namedChecks[0].name, "quality");
+  assert.equal(observed.namedChecks[0].headSha, head);
 });

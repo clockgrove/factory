@@ -243,7 +243,8 @@ test("settled dirty refusals retain structured relative tracked, generated, spec
       assert.deepEqual(state.work.result.usage, {
         availability: "unavailable",
       });
-      state.work.result.pullRequest = 1;
+      // Once integrated, a failure is no longer isolated to the attempt.
+      state.work.result.integratedSha = target.baseSha;
       assert.equal(recordWorkFailure(state, "result", failure), false);
       assert.equal(
         state.work.result.recovery.failure.classification,

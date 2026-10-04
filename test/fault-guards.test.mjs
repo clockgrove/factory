@@ -40,34 +40,10 @@ function workOf(work, failures) {
 }
 const objectiveStopped = (message) =>
   `Objective stopped: Objective stopped: ${message}. Use explicit retry or operator direction.. Use explicit retry or operator direction.`;
-const pending = { alpha: "pending", beta: "pending" };
-const published = { alpha: "published", beta: "published" };
 const done = { alpha: "done", beta: "done" };
 
 /** One representative target per diagnosis, as the matrix produces them. */
 const SAMPLES = {
-  GIT_PUSH: stopped(
-    objectiveStopped(
-      `git -C /tmp/t/target push origin ${sha}:refs/heads/factory/objective-1/alpha failed (1): error: RPC failed; HTTP 503`,
-    ),
-    { alpha: "failed@deliver", beta: "pending" },
-  ),
-  GIT_FETCH: stopped(
-    objectiveStopped(
-      "git -C /tmp/t/target fetch --no-tags --no-write-fetch-head --refmap= origin +refs/heads/main:refs/factory/fetch/0f8fad5b-d9cb-469f-a165-70867728950e failed (128): fatal: unable to access 'http://127.0.0.1:1/git/example/r.git/': The requested URL returned error: 503 ",
-    ),
-    published,
-  ),
-  GIT_FETCH_RESET: stopped(
-    objectiveStopped(
-      "git -C /tmp/t/target fetch --no-tags --no-write-fetch-head --refmap= origin +refs/heads/main:refs/factory/fetch/0f8fad5b-d9cb-469f-a165-70867728950e failed (128): fatal: unable to access 'http://127.0.0.1:1/git/example/r.git/': Empty reply from server ",
-    ),
-    { alpha: "failed", beta: "pending" },
-  ),
-  NATIVE_READS: stopped(
-    objectiveStopped("GitHub request failed (HTTP 503)"),
-    published,
-  ),
   PLANNER_STOP: stopped("socket hang up", {}),
   FINAL_REVIEW: stopped(objectiveStopped("socket hang up"), done),
   START_AMBIGUOUS: stopped(
@@ -101,35 +77,7 @@ const SAMPLES = {
     done,
   ),
   READBACK_LAG: stopped("Work Item hierarchy did not reconcile exactly", {}),
-  MERGE_READ_LAG: stopped(
-    objectiveStopped("PR merge has not confirmed the exact integrated commit"),
-    { alpha: "failed", beta: "pending" },
-  ),
-  TIMELINE_LAG: stopped(
-    objectiveStopped("PR #4 has missing or conflicting merge evidence"),
-    published,
-  ),
-  PULL_LIST_LAG: stopped(objectiveStopped("GitHub request failed (HTTP 422)"), {
-    alpha: "failed@deliver",
-    beta: "pending",
-  }),
   ISSUE_LIST_LAG: "Work Item alpha has 2 issues with its marker\n{}",
-  STACK_MERGE_REPEAT: stopped(
-    objectiveStopped("GitHub request failed (HTTP 409)"),
-    published,
-  ),
-  SECONDARY_403: stopped(objectiveStopped("GitHub request failed (HTTP 403)"), {
-    alpha: "failed@deliver",
-    beta: "pending",
-  }),
-  PRIMARY_403: stopped(objectiveStopped("GitHub request failed (HTTP 403)"), {
-    alpha: "failed",
-    beta: "pending",
-  }),
-  BASE_MODIFIED: stopped(objectiveStopped("GitHub request failed (HTTP 405)"), {
-    alpha: "failed",
-    beta: "pending",
-  }),
   PAGE_SHIFT: stopped(
     "Multiple Work Item issues for alpha; operator direction required",
     {},
@@ -189,12 +137,7 @@ test("generic transport text matches only where the run stopped", () => {
       beta: "pending",
     },
   );
-  for (const key of [
-    "PLANNER_STOP",
-    "FINAL_REVIEW",
-    "PROJECTION_STOP",
-    "NATIVE_READS",
-  ]) {
+  for (const key of ["PLANNER_STOP", "FINAL_REVIEW", "PROJECTION_STOP"]) {
     assert.equal(DIAGNOSES[key].pattern.test(midRun), false, key);
     assert.equal(DIAGNOSES[key].pattern.test(midDelivery), false, key);
   }
@@ -246,7 +189,7 @@ test("the target is the run that ended the scenario, or the last stop", () => {
 
 test("racy and inverted entries share one duplicate check", () => {
   assert.throws(
-    () => todos({ GIT_PUSH: ["a"] }, { START_AMBIGUOUS: ["a"] }),
+    () => todos({ PAGE_SHIFT: ["a"] }, { START_AMBIGUOUS: ["a"] }),
     /Duplicate known failure: a/,
   );
   assert.throws(() => todos({ NOT_A_DIAGNOSIS: ["b"] }), /Unknown diagnosis/);

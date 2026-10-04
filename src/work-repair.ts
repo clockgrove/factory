@@ -240,8 +240,10 @@ export function recordWorkFailure(
   const work = state.work[id]!;
   const detail = error instanceof Error ? error.message : String(error);
   const fault = faultOf(error);
+  // A published result that fails (a failed check, a conflict) is repaired
+  // by a new attempt that republishes the branch with a lease.
   const isolated =
-    !work.pullRequest &&
+    !work.integratedSha &&
     !state.coordinator?.cancelError &&
     (fault.kind === "work" ||
       error instanceof SettledAttemptFailure ||
@@ -309,7 +311,6 @@ export function applyWorkCorrection(
   const work = state.work[id];
   if (
     !work ||
-    work.pullRequest ||
     work.integratedSha ||
     state.cancelRequested ||
     state.cancelledAt ||
@@ -317,7 +318,7 @@ export function applyWorkCorrection(
     state.coordinator?.processes?.length
   )
     throw new Error(
-      "Repair cannot cross an unsettled, published or cancelled boundary",
+      "Repair cannot cross an unsettled, integrated or cancelled boundary",
     );
   validateCorrection(work, correction);
   if (work.recovery?.failure?.classification === "uncertain")

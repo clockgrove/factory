@@ -4,26 +4,6 @@
 // (r1 #4) point at the adversarial review behind #515.
 
 const D = {
-  GIT_PUSH: {
-    text: "git push failures (HTTP 503, or a lost response after the ref moved) are plain Errors, never interruptions: the item fails at deliver with state.error, and a restart refuses the stopped Objective (r1 #2)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+git -C \S+ push origin [0-9a-f]{40}:refs\/heads\/factory\/objective-\d+\/\w+ failed .*; work=.*\b\w+:failed@deliver\b/,
-  },
-  GIT_FETCH: {
-    text: "a failing git fetch (regular: right after the PR merged; native: before the stack merge) is a plain Error outside any repeat: the Objective stops with state.error and a restart refuses it (r1 #2, #8)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+git -C \S+ fetch .*origin \+refs\/heads\/main:\S+ failed \(128\): fatal: unable to access '[^']+': The requested URL returned error: 503 .*; work=(alpha:failed,beta:pending|alpha:published,beta:published)(;|$)/,
-  },
-  GIT_FETCH_RESET: {
-    text: "a connection reset during git fetch stops the Objective with state.error as the fetch failure, a plain Error outside any repeat (r1 #2). (A git-remote-http helper outliving git no longer reads as an unknown outcome: subprocessAsync stops leftovers after a grace period.)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )*git -C \S+ fetch .*origin \+refs\/heads\/main:\S+ failed \(128\): fatal: unable to access '[^']+': Empty reply from server.*; work=(alpha:failed,beta:pending|alpha:published,beta:published)(;|$)/,
-  },
-  NATIVE_READS: {
-    text: "native delivery's reads outside a Work Item step (defaultBranch at start; PR, check-run, status and readiness observation before the stack merge) are not repeated: one 5xx or connection reset stops the Objective with state.error and a restart refuses it (r1 #8)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+GitHub request failed \(HTTP 50[03]\)\..*; work=(alpha:pending,beta:pending|alpha:published,beta:published)$/,
-  },
   PLANNER_STOP: {
     text: "a lost or unavailable planner response stops the run; planning is not repeated in the run, only a manual restart compiles again",
     pattern:
@@ -64,44 +44,9 @@ const D = {
     pattern:
       /^outcome=stopped; message=Work Item (hierarchy|dependencies) did not reconcile exactly; work=none$/,
   },
-  MERGE_READ_LAG: {
-    text: "RealGitHubGateway.merge reads the PR right after PUT merge and throws a plain Error ('has not confirmed the exact integrated commit') when that read lags: the item fails after its PR merged, and a restart refuses (r3 #3)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+PR merge has not confirmed the exact integrated commit\..*; work=alpha:failed,beta:pending(;|$)/,
-  },
-  TIMELINE_LAG: {
-    text: "timelineMergeCommit throws a plain Error ('missing or conflicting merge evidence') when the merged event is not on the timeline yet; it is not an interruption, so the item or Objective stops after a successful merge (r3 #3)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+PR #\d+ has missing or conflicting merge evidence\..*; work=(alpha:published,beta:published|alpha:failed,beta:pending)(;|$)/,
-  },
-  PULL_LIST_LAG: {
-    text: "after a lost POST /pulls, findOpenPullRequest relies on the open-PR list; when the list lags, publish posts again, GitHub answers 422 'A pull request already exists', and the item fails at deliver (r3 #5)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+GitHub request failed \(HTTP 422\)\..*; work=alpha:failed@deliver,beta:pending(;|$)/,
-  },
   ISSUE_LIST_LAG: {
     text: "after a lost POST /issues, the marker scan relies on the issue list; when the list lags, projection creates a second issue for the same Work Item (r3 #6)",
     pattern: /^Work Item \w+ has [2-9] issues with its marker\n/,
-  },
-  STACK_MERGE_REPEAT: {
-    text: "a lost merge-async response while the stack merge is still pending: the repeat sends PUT merge-async again, GitHub answers 409 with the pending request's uuid, and Factory treats that as a rejection instead of resuming the pending uuid; the Objective stops (r1 #11)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+GitHub request failed \(HTTP 409\)\..*; work=alpha:published,beta:published$/,
-  },
-  SECONDARY_403: {
-    text: "a 403 secondary rate limit (even with retry-after) is a GitHubRequestError, not an interruption: PR creation fails the item at deliver and a restart refuses (r1 #7)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+GitHub request failed \(HTTP 403\)\..*; work=alpha:failed@deliver,beta:pending(;|$)/,
-  },
-  PRIMARY_403: {
-    text: "a 403 primary rate limit (x-ratelimit-remaining: 0, with a reset) is a GitHubRequestError, not an interruption: PR observation fails the item and a restart refuses (r1 #7)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+GitHub request failed \(HTTP 403\)\..*; work=(alpha:failed,beta:pending|alpha:published,beta:published)(;|$)/,
-  },
-  BASE_MODIFIED: {
-    text: "PUT merge answered 405 'Base branch was modified' (transient on GitHub when merges race) fails the item as a completed rejection instead of repeating the merge (r3 #4)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+GitHub request failed \(HTTP 405\)\..*; work=alpha:failed,beta:pending(;|$)/,
   },
   PAGE_SHIFT: {
     text: "the marker scan pages issues?state=all without deduplicating by id: an issue opened between page reads repeats a boundary row, and a Work Item issue on that boundary stops the run as 'Multiple Work Item issues' (r3 #6)",
@@ -190,28 +135,6 @@ export const KNOWN = {
         "unavailable at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
         "unavailable at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #2 without an operator stop",
       ],
-      GIT_PUSH: [
-        "unavailable at GIT push-advertise #1",
-        "unavailable at GIT push-advertise #1 without an operator stop",
-        "lost at GIT push #1",
-        "lost at GIT push #1 without an operator stop",
-        "lost at GIT push #2",
-        "lost at GIT push #2 without an operator stop",
-        "reset at GIT push-advertise #1",
-        "reset at GIT push-advertise #1 without an operator stop",
-        "unavailable at GIT push #1",
-        "unavailable at GIT push #1 without an operator stop",
-        "unavailable at GIT push #2",
-        "unavailable at GIT push #2 without an operator stop",
-      ],
-      GIT_FETCH: [
-        "unavailable at GIT fetch-advertise #1",
-        "unavailable at GIT fetch-advertise #1 without an operator stop",
-      ],
-      GIT_FETCH_RESET: [
-        "reset at GIT fetch-advertise #1",
-        "reset at GIT fetch-advertise #1 without an operator stop",
-      ],
       CLOSURE_PAUSE: [
         "unavailable at GET /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
         "lost at POST /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
@@ -298,50 +221,6 @@ export const KNOWN = {
       "unavailable at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
       "unavailable at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #2 without an operator stop",
     ],
-    NATIVE_READS: [
-      "unavailable at GET /repos/{owner}/{repo} #1",
-      "unavailable at GET /repos/{owner}/{repo} #1 without an operator stop",
-      "unavailable at GET /repos/{owner}/{repo}/pulls/{number} #1",
-      "unavailable at GET /repos/{owner}/{repo}/pulls/{number} #1 without an operator stop",
-      "unavailable at GET /repos/{owner}/{repo}/commits/{sha}/check-runs #1",
-      "unavailable at GET /repos/{owner}/{repo}/commits/{sha}/check-runs #1 without an operator stop",
-      "unavailable at GET /repos/{owner}/{repo}/commits/{sha}/status #1",
-      "unavailable at GET /repos/{owner}/{repo}/commits/{sha}/status #1 without an operator stop",
-      "unavailable at POST /graphql #1",
-      "unavailable at POST /graphql #1 without an operator stop",
-      "reset at GET /repos/{owner}/{repo} #1",
-      "reset at GET /repos/{owner}/{repo} #1 without an operator stop",
-      "reset at GET /repos/{owner}/{repo}/pulls/{number} #1",
-      "reset at GET /repos/{owner}/{repo}/pulls/{number} #1 without an operator stop",
-      "reset at GET /repos/{owner}/{repo}/commits/{sha}/check-runs #1",
-      "reset at GET /repos/{owner}/{repo}/commits/{sha}/check-runs #1 without an operator stop",
-      "reset at GET /repos/{owner}/{repo}/commits/{sha}/status #1",
-      "reset at GET /repos/{owner}/{repo}/commits/{sha}/status #1 without an operator stop",
-      "reset at POST /graphql #1",
-      "reset at POST /graphql #1 without an operator stop",
-    ],
-    GIT_PUSH: [
-      "unavailable at GIT push-advertise #1",
-      "unavailable at GIT push-advertise #1 without an operator stop",
-      "lost at GIT push #1",
-      "lost at GIT push #1 without an operator stop",
-      "lost at GIT push #2",
-      "lost at GIT push #2 without an operator stop",
-      "reset at GIT push-advertise #1",
-      "reset at GIT push-advertise #1 without an operator stop",
-      "unavailable at GIT push #1",
-      "unavailable at GIT push #1 without an operator stop",
-      "unavailable at GIT push #2",
-      "unavailable at GIT push #2 without an operator stop",
-    ],
-    GIT_FETCH: [
-      "unavailable at GIT fetch-advertise #1",
-      "unavailable at GIT fetch-advertise #1 without an operator stop",
-    ],
-    GIT_FETCH_RESET: [
-      "reset at GIT fetch-advertise #1",
-      "reset at GIT fetch-advertise #1 without an operator stop",
-    ],
     CLOSURE_PAUSE: [
       "unavailable at GET /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
       "lost at POST /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
@@ -390,22 +269,6 @@ export const KNOWN = {
     ],
   }),
   consistency: todos({
-    MERGE_READ_LAG: [
-      "regular: PR state lags one read after a merge",
-      "regular: PR state lags one read after a merge without an operator stop",
-    ],
-    TIMELINE_LAG: [
-      "native-stack: timeline lags one read after a merge",
-      "native-stack: timeline lags one read after a merge without an operator stop",
-      "regular: lost merge response, then the timeline lags one read",
-      "regular: lost merge response, then the timeline lags one read without an operator stop",
-    ],
-    PULL_LIST_LAG: [
-      "regular: lost PR creation, then the open-PR list lags one read",
-      "regular: lost PR creation, then the open-PR list lags one read without an operator stop",
-      "native-stack: lost PR creation, then the open-PR list lags one read",
-      "native-stack: lost PR creation, then the open-PR list lags one read without an operator stop",
-    ],
     ISSUE_LIST_LAG: [
       "regular: lost issue creation, then the issue list lags one read",
       "native-stack: lost issue creation, then the issue list lags one read",
@@ -422,28 +285,8 @@ export const KNOWN = {
       "regular: dependency list lags one read after a dependency is added without an operator stop",
       "native-stack: dependency list lags one read after a dependency is added without an operator stop",
     ],
-    STACK_MERGE_REPEAT: [
-      "native-stack: lost stack merge response while the merge is still pending",
-      "native-stack: lost stack merge response while the merge is still pending without an operator stop",
-    ],
-    SECONDARY_403: [
-      "regular: 403 secondary rate limit with retry-after on PR creation",
-      "regular: 403 secondary rate limit with retry-after on PR creation without an operator stop",
-      "native-stack: 403 secondary rate limit with retry-after on PR creation",
-      "native-stack: 403 secondary rate limit with retry-after on PR creation without an operator stop",
-    ],
     CLOSURE_PAUSE: [
       "regular: 403 secondary rate limit without retry-after on a completion comment without an operator stop",
-    ],
-    PRIMARY_403: [
-      "regular: 403 primary rate limit with a reset on PR observation",
-      "regular: 403 primary rate limit with a reset on PR observation without an operator stop",
-      "native-stack: 403 primary rate limit with a reset on PR observation",
-      "native-stack: 403 primary rate limit with a reset on PR observation without an operator stop",
-    ],
-    BASE_MODIFIED: [
-      "regular: 405 base branch modified on merge",
-      "regular: 405 base branch modified on merge without an operator stop",
     ],
     PAGE_SHIFT: [
       "regular: an issue opened during the marker scan shifts its pages without an operator stop",

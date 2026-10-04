@@ -5,13 +5,15 @@
  */
 import type { Wait } from "./fault.js";
 
-/** A step repeating after transient faults (src/step.ts `outageOf`). */
+/** A step in a run of transient faults (src/step.ts `outageOf`). */
 export interface OutageView {
   step: string;
   since: string;
   tries: number;
   /** Detail of the last fault. */
   last: string;
+  /** 24 hours of running time: the operator may cancel. */
+  escalated: boolean;
 }
 
 /** A structured wait and, for outages, the failing step. */
@@ -163,40 +165,56 @@ type WaitKind =
 
 const WAIT_LABEL: Record<Wait["kind"], WaitKind> = {
   decision: "decision",
-  outage: "outage",
   ci: "CI check",
   capacity: "worker capacity",
   dependency: "dependency",
   prerequisite: "external prerequisite",
 };
 
-const when = (time: string) => `${time.slice(0, 16).replace("T", " ")}Z`;
-
-/** "since … (N tries, last: …)" for a step repeating after transient faults. */
-function outageText(outage: OutageView): string {
-  return `since ${when(outage.since)} (${outage.tries} ${outage.tries === 1 ? "try" : "tries"}, last: ${short(outage.last, 60)})`;
+/** A reason an item or the Objective is not progressing, for display. */
+interface ShownWait {
+  kind: WaitKind;
+  detail: string;
+  /** A step's config fault: what to fix before `factory retry`. */
+  fix?: string;
+  /** An outage of 24 hours' running time: offer cancel. */
+  escalated?: boolean;
 }
 
-/** A structured wait as a display kind and detail. */
-function structuredWait(
-  view: WaitView,
-): { kind: WaitKind; detail: string; fix?: string } | undefined {
-  const wait = view.wait;
-  if (!wait) return undefined;
-  return {
-    kind: WAIT_LABEL[wait.kind],
-    detail:
-      wait.kind === "outage" && view.outage
-        ? outageText(view.outage)
-        : short(wait.detail, 100),
-    ...(wait.fix ? { fix: wait.fix } : {}),
-  };
+const when = (time: string) => `${time.slice(0, 16).replace("T", " ")}Z`;
+
+/** "(step): since … (N tries, last: …)" for a step in a run of faults. */
+function outageText(outage: OutageView): string {
+  return `(${outage.step}): since ${when(outage.since)} (${outage.tries} ${outage.tries === 1 ? "try" : "tries"}, last: ${short(outage.last, 60)})`;
+}
+
+/**
+ * A scope's structured wait: a step's decision, then a step's config fix,
+ * then an outage (with any other wait alongside), then the wait itself.
+ */
+function structuredWait(view: WaitView): ShownWait | undefined {
+  const { wait, outage } = view;
+  if (wait?.kind === "decision")
+    return { kind: "decision", detail: short(wait.detail, 100) };
+  if (wait?.fix)
+    return {
+      kind: "external prerequisite",
+      detail: short(wait.detail, 100),
+      fix: wait.fix,
+    };
+  if (outage)
+    return {
+      kind: "outage",
+      detail: `${outageText(outage)}${wait ? `; also on ${WAIT_LABEL[wait.kind]}: ${short(wait.detail, 60)}` : ""}`,
+      escalated: outage.escalated,
+    };
+  return wait
+    ? { kind: WAIT_LABEL[wait.kind], detail: short(wait.detail, 100) }
+    : undefined;
 }
 
 /** Why an unfinished item is not progressing, or undefined when it is. */
-export function itemWait(
-  item: StatusItemView,
-): { kind: WaitKind; detail: string; fix?: string } | undefined {
+export function itemWait(item: StatusItemView): ShownWait | undefined {
   const structured = structuredWait(item);
   if (structured) return structured;
   if (item.authentication)
@@ -240,64 +258,70 @@ export function itemWait(
   return undefined;
 }
 
-/** A structured decision wait: retry the item or cancel the Objective. */
-function waitDecision(
-  objective: number,
-  view: WaitView,
+/** The command that answers a step's decision or config fix in a scope. */
+const retryCommand = (objective: number, item?: string) =>
+  `factory retry --objective ${objective}${item ? ` --item ${item}` : ""}`;
+
+/** A scope's wait as the status line: label is the item id or "the Objective". */
+function scopeSummary(
+  view: { objective: number; runActive: boolean | null },
+  shown: ShownWait,
+  label: string,
   item?: string,
-): StatusSummary | undefined {
-  if (view.wait?.kind !== "decision") return undefined;
-  const question = short(view.wait.detail, 160);
+): StatusSummary {
+  const objective = view.objective;
+  if (shown.kind === "decision")
+    return {
+      phase: "needs-decision",
+      summary: `decision for ${label}: ${shown.detail}`,
+      nextAction: {
+        command: retryCommand(objective, item),
+        reason: `Retry runs the step again${thenRun(view)}; or factory cancel --objective ${objective}`,
+      },
+    };
+  const summary =
+    shown.kind === "outage"
+      ? `on outage for ${label} ${shown.detail}`
+      : `on ${shown.kind} for ${label}${shown.detail === shown.kind ? "" : `: ${shown.detail}`}`;
   return {
-    phase: "needs-decision",
-    summary: `decision${item ? ` for ${item}` : ""}: ${short(view.wait.detail, 80)}`,
-    nextAction: item
+    phase: "waiting",
+    summary,
+    nextAction: shown.fix
       ? {
-          command: `factory retry --objective ${objective} --item ${item}`,
-          reason: `${question}; or factory cancel --objective ${objective}`,
+          command: retryCommand(objective, item),
+          reason: `First: ${short(shown.fix, 160)}${thenRun(view)}`,
         }
-      : {
-          command: `factory cancel --objective ${objective}`,
-          reason: `${question}; or ${run(objective)} to try again`,
-        },
+      : shown.escalated
+        ? {
+            command: `factory cancel --objective ${objective}`,
+            reason: `Failing for over 24 hours; Factory keeps retrying until you cancel${view.runActive === true ? "" : `, or ${run(objective)} to keep retrying`}`,
+          }
+        : view.runActive === false
+          ? {
+              command: run(objective),
+              reason: "No run is active; this resumes it",
+            }
+          : null,
   };
 }
 
-/** A structured wait on the Objective itself, other than a decision. */
+/** The Objective's own structured wait as the status line. */
 function objectiveWait(
   view: ExecutionStatusView | PreparingStatusView,
 ): StatusSummary | undefined {
-  const wait = structuredWait(view);
-  if (!wait || wait.kind === "decision") return undefined;
-  return {
-    phase: "waiting",
-    summary:
-      wait.kind === "outage"
-        ? `outage ${wait.detail}${view.outage ? ` in ${view.outage.step}` : ""}`
-        : `on ${wait.kind}: ${wait.detail}`,
-    nextAction: wait.fix
-      ? {
-          command: run(view.objective),
-          reason: `First: ${short(wait.fix, 160)}`,
-        }
-      : view.runActive === false
-        ? {
-            command: run(view.objective),
-            reason: "No run is active; this resumes it",
-          }
-        : null,
-  };
+  const shown = structuredWait(view);
+  return shown && scopeSummary(view, shown, "the Objective");
 }
 
 function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
   const objective = view.objective;
-  const asked = waitDecision(objective, view);
-  if (asked) return asked;
-  for (const item of view.work) {
-    if (["done", "failed", "cancelled"].includes(item.status)) continue;
-    const itemAsked = waitDecision(objective, item, item.id);
-    if (itemAsked) return itemAsked;
-  }
+  if (view.wait?.kind === "decision") return objectiveWait(view);
+  for (const item of view.work)
+    if (
+      item.wait?.kind === "decision" &&
+      !["done", "cancelled"].includes(item.status)
+    )
+      return scopeSummary(view, itemWait(item)!, item.id, item.id);
   for (const item of view.work) {
     if (item.status !== "waiting") continue;
     if (item.step === "approve-result" && item.acceptancePending)
@@ -403,9 +427,23 @@ function progress(view: ExecutionStatusView): StatusSummary {
     view.runActive === false
       ? { command: run(objective), reason: "No run is active; this resumes it" }
       : null;
+  const withCounts = (summary: StatusSummary): StatusSummary => ({
+    ...summary,
+    summary: `${summary.summary}; ${counts}`,
+  });
+  // An outage of 24 hours' running time is shown even while other work runs.
+  if (view.outage?.escalated) return withCounts(objectiveWait(view)!);
+  const escalated = view.work.find(
+    (item) =>
+      item.outage?.escalated && !["done", "cancelled"].includes(item.status),
+  );
+  if (escalated)
+    return withCounts(
+      scopeSummary(view, itemWait(escalated)!, escalated.id, escalated.id),
+    );
   if (view.work.length && done === view.work.length) {
     const own = objectiveWait(view);
-    if (own) return { ...own, summary: `${own.summary}; ${counts}` };
+    if (own) return withCounts(own);
     if (!view.finalValidation)
       return {
         phase: "running",
@@ -447,9 +485,8 @@ function progress(view: ExecutionStatusView): StatusSummary {
     };
   }
   const own = objectiveWait(view);
-  if (own) return { ...own, summary: `${own.summary}; ${counts}` };
+  if (own) return withCounts(own);
   const order: WaitKind[] = [
-    "decision",
     "external prerequisite",
     "outage",
     "CI check",
@@ -460,16 +497,7 @@ function progress(view: ExecutionStatusView): StatusSummary {
     (a, b) => order.indexOf(a.kind) - order.indexOf(b.kind),
   )[0];
   if (first)
-    return {
-      phase: "waiting",
-      summary:
-        first.kind === "outage"
-          ? `outage ${first.detail} in ${first.item.id}; ${counts}`
-          : `on ${first.kind} for ${first.item.id}${first.detail === first.kind ? "" : `: ${first.detail}`}; ${counts}`,
-      nextAction: first.fix
-        ? { command: run(objective), reason: `First: ${short(first.fix, 160)}` }
-        : restart,
-    };
+    return withCounts(scopeSummary(view, first, first.item.id, first.item.id));
   return {
     phase: "running",
     summary: view.coordinator?.waitReason
@@ -514,7 +542,7 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
         reason: `Discards the stopped planning; resolve the decision in the Objective, then ${run(objective)} plans again`,
       },
     };
-  const waiting = waitDecision(objective, view) ?? objectiveWait(view);
+  const waiting = objectiveWait(view);
   if (waiting) return waiting;
   if (view.coordinator?.mode === "paused")
     return {

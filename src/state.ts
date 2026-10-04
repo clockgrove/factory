@@ -22,6 +22,7 @@ import { assertGraphRevisions } from "./graph-amendments.js";
 import {
   assertRepeats,
   assertWait,
+  parseRepeatKey,
   type RepeatRecord,
   type Wait,
 } from "./fault.js";
@@ -1039,7 +1040,13 @@ export function parseFactoryState(
     throw new Error("githubClosureError is invalid");
   if (state.error !== undefined && typeof state.error !== "string")
     throw new Error("state.error is invalid");
-  assertRepeats(state.repeats, "repeats", ids);
+  assertRepeats(state.repeats, "repeats");
+  // Records of items no longer in the graph are dropped, not refused.
+  const repeats = state.repeats as Record<string, unknown> | undefined;
+  for (const key of Object.keys(repeats ?? {})) {
+    const item = parseRepeatKey(key)?.item;
+    if (item !== undefined && !ids.has(item)) delete repeats![key];
+  }
   assertWait(state.wait, "wait");
   for (const id of ids)
     assertWait((work[id] as { wait?: unknown }).wait, `work.${id}.wait`);

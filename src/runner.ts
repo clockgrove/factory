@@ -63,6 +63,7 @@ import { runNativeGraph } from "./delivery/native-runner.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { runRegularGraph } from "./delivery/regular-runner.js";
 import { DiagnosticEmitter, StateDiagnostics } from "./diagnostics.js";
+import { awaitsOperator, clearRepeats, waitOf } from "./step.js";
 import { namesPlan, shortPlanDigest } from "./status-summary.js";
 import {
   executionProfileChoices,
@@ -705,9 +706,16 @@ export async function runObjective(
             "Cancellation is in progress; inspect ownership before another action",
           );
         const input = request.input ?? {};
-        if (request.action === "retry")
-          retryWorkItem(config, objective, String(input.item));
-        else if (request.action === "repair")
+        if (request.action === "retry") {
+          const retried = retryWorkItem(
+            config,
+            objective,
+            input.item === undefined ? undefined : String(input.item),
+          );
+          wake();
+          return retried;
+        }
+        if (request.action === "repair")
           repairWorkItem(
             config,
             objective,
@@ -1927,11 +1935,56 @@ export async function cancelObjective(
   }
 }
 
+/**
+ * Answer a step's decision or config fix (src/step.ts): clear the scope's
+ * repeat records and step waits so the step runs again. Allowed while a run
+ * is live and with a published PR. False when no step awaits the operator.
+ */
+function retryStep(
+  config: FactoryConfig,
+  objective: number,
+  itemId: string | undefined,
+): boolean {
+  const lock = join(stateRoot(config.repository), "controller.lock");
+  const lockHandle = mutationLock(config, objective);
+  try {
+    const state =
+      owners.get(ownerKey(config, objective))?.snapshot ??
+      readContinuation(config.repository, objective);
+    if (!state) throw new Error("Objective has no Factory state");
+    if (itemId !== undefined && !("work" in state && state.work[itemId]))
+      return false;
+    const scope = itemId === undefined ? "objective" : { item: itemId };
+    if (!awaitsOperator(waitOf(state, scope))) return false;
+    clearRepeats(state, scope);
+    saveState(statePath(config.repository, objective), state);
+    new DiagnosticEmitter(config.repository, objective).emit({
+      runId: state.runId,
+      ...(itemId === undefined ? {} : { itemId }),
+      operation: "step-retry",
+      outcome: "completed",
+    });
+    return true;
+  } finally {
+    releaseMutationLock(lock, lockHandle);
+  }
+}
+
+/**
+ * `factory retry`: answers a step's decision or config fix when one awaits
+ * the operator (Objective without an item), else starts a new attempt of a
+ * failed or cancelled Work Item.
+ */
 export function retryWorkItem(
   config: FactoryConfig,
   objective: number,
-  itemId: string,
-): void {
+  itemId?: string,
+): "step" | "attempt" {
+  if (retryStep(config, objective, itemId)) return "step";
+  if (itemId === undefined)
+    throw new Error(
+      "No Objective step awaits a decision or configuration fix; name a Work Item with --item",
+    );
   const root = stateRoot(config.repository);
   const lock = join(root, "controller.lock");
   const lockHandle = mutationLock(config, objective);
@@ -1983,6 +2036,7 @@ export function retryWorkItem(
       operation: "work-retry",
       outcome: "completed",
     });
+    return "attempt";
   } finally {
     releaseMutationLock(lock, lockHandle);
   }

@@ -46,10 +46,10 @@ import { normalizeTokenUsage, tokenCategories } from "./usage.js";
 function waitStatus(
   state: StepState,
   wait: Wait | undefined,
-  scope: StepScope | undefined,
+  scope: StepScope,
   secrets: string[],
 ) {
-  const outage = scope ? outageOf(state, scope) : undefined;
+  const outage = outageOf(state, scope);
   return {
     wait: wait
       ? {
@@ -66,6 +66,7 @@ function waitStatus(
           since: outage.since,
           tries: outage.tries,
           last: redactDiagnosticDetail(faultDetail(outage.last), secrets),
+          escalated: outage.escalated,
         }
       : null,
   };
@@ -1217,14 +1218,7 @@ export function statusDocument(
       lastError: current.error
         ? redactDiagnosticDetail(current.error, secrets)
         : null,
-      ...waitStatus(
-        state,
-        current.wait,
-        current.attempt
-          ? { item: item.id, attempt: current.attempt }
-          : undefined,
-        secrets,
-      ),
+      ...waitStatus(state, current.wait, { item: item.id }, secrets),
       authentication: current.authentication
         ? {
             provider: redactDiagnosticDetail(

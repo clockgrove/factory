@@ -15,7 +15,6 @@ import {
   clearWait,
   outageOf,
   repeatKey,
-  setStepClock,
   setWait,
   step,
   waitOf,
@@ -25,6 +24,7 @@ const T0 = Date.parse("2026-10-03T10:00:00.000Z");
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 const HOUR = 60 * MINUTE;
+const at = (time) => new Date(time).toISOString();
 
 /** A clock that never waits: sleep advances time and records the delay. */
 function manualClock(start = T0) {
@@ -43,13 +43,10 @@ function manualClock(start = T0) {
 
 const factoryState = () => ({
   schemaVersion: 6,
-  work: {
-    one: { status: "running", attempt: "a1" },
-    two: { status: "running", attempt: "b1" },
-  },
+  work: { one: { status: "running" }, two: { status: "running" } },
 });
 
-/** Every save writes a JSON copy, as the state file would. */
+/** Every save keeps a JSON copy, as the state file would. */
 function harness(state = factoryState(), clock = manualClock()) {
   const disk = [];
   return {
@@ -63,13 +60,24 @@ function harness(state = factoryState(), clock = manualClock()) {
   };
 }
 
+/** Also record `observe()` at every save. */
+function observing(h, observe) {
+  const seen = [];
+  const save = h.options.save;
+  h.options.save = () => {
+    save();
+    seen.push(observe());
+  };
+  return seen;
+}
+
 const fail = (fault) => attachFault(new Error(fault.detail ?? "failed"), fault);
 const transient = (detail = "fetch failed", extra = {}) =>
   fail({ kind: "transient", detail, outcomeUnknown: false, ...extra });
 const lost = (detail = "response lost") =>
   fail({ kind: "transient", detail, outcomeUnknown: true });
 
-/** fn that throws the given errors in order, then returns "done". */
+/** A body that throws the given errors in order, then returns "done". */
 function scripted(...errors) {
   const calls = { count: 0 };
   const fn = async () => {
@@ -80,17 +88,20 @@ function scripted(...errors) {
   return Object.assign(fn, { calls });
 }
 
-const item = { item: "one", attempt: "a1" };
-const KEY = "one/a1/publish";
+const item = { item: "one" };
+const KEY = "item/one/publish";
+const publish = { scope: item, name: "publish" };
+const caught = (promise) =>
+  promise.then(
+    () => assert.fail("expected a rejection"),
+    (error) => error,
+  );
 
-test("repeat keys name the item attempt or the Objective step", () => {
+test("repeat keys name the item or the Objective step", () => {
   assert.equal(repeatKey(item, "publish"), KEY);
   assert.equal(repeatKey("objective", "plan"), "objective/plan");
-  assert.throws(() => repeatKey(item, "Publish"), /Invalid step name/);
-  assert.throws(
-    () => repeatKey({ item: "one", attempt: "a/1" }, "publish"),
-    /Invalid step scope/,
-  );
+  assert.throws(() => repeatKey(item, "Publish"), /Invalid step/);
+  assert.throws(() => repeatKey({ item: "a/b" }, "publish"), /Invalid step/);
 });
 
 test("backoff doubles from one second to a five-minute cap", () => {
@@ -102,46 +113,38 @@ test("backoff doubles from one second to a five-minute cap", () => {
 
 test("success on the first call writes nothing", async () => {
   const h = harness();
-  assert.equal(
-    await step(
-      h.state,
-      { scope: item, name: "publish" },
-      async () => 7,
-      h.options,
-    ),
-    7,
-  );
+  assert.equal(await step(h.state, publish, async () => 7, h.options), 7);
   assert.equal(h.disk.length, 0);
   assert.equal(h.state.repeats, undefined);
 });
 
-test("transient faults repeat with persisted backoff; success deletes the record", async () => {
+test("transient faults repeat with a persisted backoff; success deletes the record", async () => {
   const h = harness();
   const fn = scripted(...Array.from({ length: 11 }, () => transient()));
-  assert.equal(
-    await step(h.state, { scope: item, name: "publish" }, fn, h.options),
-    "done",
-  );
+  assert.equal(await step(h.state, publish, fn, h.options), "done");
   assert.equal(fn.calls.count, 12);
   assert.deepEqual(
     h.clock.sleeps,
     [1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300].map((s) => s * SECOND),
   );
-  // Each fault was saved before its backoff, with the next time to run.
-  const third = h.disk[2].repeats[KEY];
-  assert.deepEqual(third, {
-    since: new Date(T0).toISOString(),
-    count: 3,
-    last: { kind: "transient", detail: "fetch failed", outcomeUnknown: false },
-    nextAt: new Date(T0 + 3 * SECOND + 4 * SECOND).toISOString(),
+  assert.deepEqual(h.disk[2].repeats[KEY], {
+    nextAt: at(T0 + 7 * SECOND),
+    faults: {
+      since: at(T0),
+      count: 3,
+      last: {
+        kind: "transient",
+        detail: "fetch failed",
+        outcomeUnknown: false,
+      },
+      activeMs: 3 * SECOND,
+    },
   });
-  for (const saved of h.disk)
-    assertRepeats(saved.repeats, "repeats", new Set(["one", "two"]));
+  for (const saved of h.disk) assertRepeats(saved.repeats, "repeats");
   assert.equal(h.state.repeats, undefined);
-  assert.equal(h.state.work.one.wait, undefined);
 });
 
-test("a restart mid-backoff resumes from the persisted record", async () => {
+test("a restart mid-backoff resumes from the record and never counts downtime", async () => {
   const h = harness();
   const sleep = h.clock.sleep;
   h.clock.sleep = async (milliseconds) => {
@@ -149,123 +152,107 @@ test("a restart mid-backoff resumes from the persisted record", async () => {
     await sleep(milliseconds);
   };
   await assert.rejects(
-    step(
-      h.state,
-      { scope: item, name: "publish" },
-      scripted(transient(), transient()),
-      h.options,
-    ),
+    step(h.state, publish, scripted(transient(), transient()), h.options),
     /process killed/,
   );
   const saved = h.disk.at(-1);
-  assert.equal(saved.repeats[KEY].count, 2);
-  assert.equal(
-    saved.repeats[KEY].nextAt,
-    new Date(T0 + 1 * SECOND + 2 * SECOND).toISOString(),
-  );
+  assert.equal(saved.repeats[KEY].faults.count, 2);
+  assert.equal(saved.repeats[KEY].nextAt, at(T0 + 3 * SECOND));
 
-  // A new process starts from the file 500 ms into the 2 s backoff.
-  const clock = manualClock(T0 + 1 * SECOND + 500);
-  const resumed = harness(saved, clock);
-  const fn = scripted(transient());
+  // A new process starts 500 ms into the 2 s backoff.
+  const resumed = harness(saved, manualClock(T0 + 1500));
   assert.equal(
-    await step(
-      resumed.state,
-      { scope: item, name: "publish" },
-      fn,
-      resumed.options,
-    ),
+    await step(resumed.state, publish, scripted(transient()), resumed.options),
     "done",
   );
-  // It waits out the remainder, then the third fault continues the same run.
-  assert.deepEqual(clock.sleeps, [1500, 4 * SECOND]);
-  assert.equal(resumed.disk[0].repeats[KEY].count, 3);
-  assert.equal(resumed.disk[0].repeats[KEY].since, new Date(T0).toISOString());
-  assert.equal(resumed.state.repeats, undefined);
+  assert.deepEqual(resumed.clock.sleeps, [1500, 4 * SECOND]);
+  const third = resumed.disk[0].repeats[KEY].faults;
+  assert.equal(third.count, 3);
+  assert.equal(third.since, at(T0));
+  // 1 s before the crash and 1.5 s after the restart; not the 0.5 s down.
+  assert.equal(third.activeMs, 2500);
 });
 
-test("progress inside the step resets since, so long polls never look like an outage", async () => {
+test("a backwards clock jump cannot stall a backoff", async () => {
+  const h = harness();
+  h.state.repeats = {
+    [KEY]: {
+      nextAt: at(T0 + 24 * HOUR),
+      faults: {
+        since: at(T0),
+        count: 1,
+        last: { kind: "transient", detail: "x", outcomeUnknown: false },
+        activeMs: 0,
+      },
+    },
+  };
+  await step(h.state, publish, scripted(), h.options);
+  assert.deepEqual(h.clock.sleeps, [SECOND]);
+});
+
+test("progress ends a run of faults, so long polls never look like an outage", async () => {
   const h = harness();
   let calls = 0;
-  const fn = async (ctx) => {
-    calls++;
-    if (calls <= 8) throw transient();
-    if (calls === 9) {
-      ctx.progress();
-      throw transient("poll hiccup");
-    }
-    return "done";
-  };
-  const seen = [];
-  h.options.save = () => {
-    seen.push(
-      structuredClone({
-        repeats: h.state.repeats,
-        wait: h.state.work.one.wait,
-      }),
-    );
-  };
-  await step(h.state, { scope: item, name: "await-ci" }, fn, h.options);
-  // Eight faults over two minutes became an outage...
-  const before = seen[7];
-  assert.equal(before.repeats["one/a1/await-ci"].count, 8);
-  assert.deepEqual(before.wait, {
-    kind: "outage",
-    detail: "await-ci: fetch failed",
-  });
-  // ...progress deleted the record and its wait...
-  assert.deepEqual(seen[8], { repeats: undefined, wait: undefined });
-  // ...and the next fault starts a new run with a one-second backoff.
-  assert.equal(seen[9].repeats["one/a1/await-ci"].count, 1);
-  assert.equal(
-    seen[9].repeats["one/a1/await-ci"].since,
-    new Date(h.clock.time - SECOND).toISOString(),
+  const seen = observing(h, () => structuredClone(h.state.repeats));
+  await step(
+    h.state,
+    { scope: item, name: "await-ci" },
+    async (ctx) => {
+      calls++;
+      if (calls <= 8) throw transient();
+      if (calls === 9) {
+        ctx.progress();
+        throw transient("poll hiccup");
+      }
+      return "done";
+    },
+    h.options,
   );
-  assert.equal(seen[9].wait, undefined);
+  assert.equal(seen[7]["item/one/await-ci"].faults.count, 8);
+  assert.equal(seen[8], undefined);
+  assert.equal(seen[9]["item/one/await-ci"].faults.count, 1);
   assert.equal(h.clock.sleeps.at(-1), SECOND);
 });
 
-test("an outage wait appears after a minute and clears on success", async () => {
+test("status shows an outage once it will have lasted a minute", async () => {
   const h = harness();
-  const waits = [];
-  const save = h.options.save;
-  h.options.save = () => {
-    save();
-    waits.push(h.state.work.one.wait);
+  const outages = observing(h, () => outageOf(h.state, item, h.clock.now()));
+  await step(
+    h.state,
+    publish,
+    scripted(...Array.from({ length: 7 }, () => transient("502"))),
+    h.options,
+  );
+  // Faults at 0, 1, 3, 7, 15 s: the next try is within a minute of the first.
+  assert.deepEqual(outages.slice(0, 5), Array(5).fill(undefined));
+  // At 31 s the next try is at 63 s.
+  assert.deepEqual(outages[5], {
+    step: "publish",
+    since: at(T0),
+    tries: 6,
+    last: { kind: "transient", detail: "502", outcomeUnknown: false },
+    escalated: false,
+  });
+  assert.equal(outages.at(-1), undefined);
+
+  // A distant retryAt is an outage at once.
+  const limited = harness();
+  limited.clock.sleep = async () => {
+    throw new Error("stop");
   };
-  await step(
-    h.state,
-    { scope: item, name: "merge" },
-    scripted(...Array.from({ length: 7 }, () => transient("502 Bad Gateway"))),
-    h.options,
+  await caught(
+    step(
+      limited.state,
+      publish,
+      scripted(transient("limit", { retryAt: at(T0 + 5 * HOUR) })),
+      limited.options,
+    ),
   );
-  // Faults at 0, 1, 3, 7, 15, 31 s carry no wait; the one at 63 s does.
-  assert.deepEqual(waits.slice(0, 6), Array(6).fill(undefined));
-  assert.deepEqual(waits[6], {
-    kind: "outage",
-    detail: "merge: 502 Bad Gateway",
-  });
-  assert.equal(h.state.work.one.wait, undefined);
+  assert.equal(outageOf(limited.state, item, T0).tries, 1);
 });
 
-test("a step leaves waits it did not write in place", async () => {
+test("retryAt is honoured and never counts toward the paid bound", async () => {
   const h = harness();
-  setWait(h.state, { item: "one" }, { kind: "ci", detail: "checks pending" });
-  await step(
-    h.state,
-    { scope: item, name: "merge" },
-    scripted(transient()),
-    h.options,
-  );
-  assert.deepEqual(waitOf(h.state, { item: "one" }), {
-    kind: "ci",
-    detail: "checks pending",
-  });
-});
-
-test("retryAt is honoured instead of the backoff", async () => {
-  const h = harness();
-  const retryAt = new Date(T0 + 90 * SECOND).toISOString();
   await step(
     h.state,
     { scope: "objective", name: "plan", paid: true },
@@ -273,137 +260,222 @@ test("retryAt is honoured instead of the backoff", async () => {
       if (h.clock.sleeps.length < 5)
         await ctx.paid(async () => {
           throw transient("usage limit", {
-            retryAt: new Date(h.clock.time + 90 * SECOND).toISOString(),
+            retryAt: at(h.clock.time + 90 * SECOND),
             outcomeUnknown: true,
           });
         });
       return "planned";
     },
-    { ...h.options, save: () => h.disk.push(structuredClone(h.state)) },
+    h.options,
   );
   assert.deepEqual(h.clock.sleeps, Array(5).fill(90 * SECOND));
-  assert.equal(h.disk[0].repeats["objective/plan"].nextAt, retryAt);
-  // A limit with a reset time never counts toward the paid bound.
-  assert.equal(h.disk.at(-2).repeats["objective/plan"].paid, undefined);
-  // A retryAt already in the past falls back to the backoff.
+  const lastFault = h.disk.findLast(
+    (saved) => saved.repeats?.["objective/plan"]?.faults,
+  );
+  assert.equal(lastFault.repeats["objective/plan"].faults.count, 5);
+  assert.equal(lastFault.repeats["objective/plan"].paid, undefined);
+  // A retryAt already past falls back to the backoff.
   const late = harness();
   await step(
     late.state,
-    { scope: item, name: "publish" },
-    scripted(
-      transient("limit", { retryAt: new Date(T0 - SECOND).toISOString() }),
-    ),
+    publish,
+    scripted(transient("limit", { retryAt: at(T0 - SECOND) })),
     late.options,
   );
   assert.deepEqual(late.clock.sleeps, [SECOND]);
 });
 
-test("a distant retryAt is slept in bounded chunks", async () => {
+test("pending shows its wait, polls, survives faults and never counts", async () => {
   const h = harness();
+  const waits = observing(h, () => structuredClone(h.state.work.one.wait));
+  let calls = 0;
   await step(
     h.state,
-    { scope: item, name: "publish" },
-    scripted(
-      transient("limit", { retryAt: new Date(T0 + 5 * HOUR).toISOString() }),
-    ),
-    h.options,
-  );
-  assert.deepEqual(h.clock.sleeps, Array(5).fill(HOUR));
-});
-
-test("a paid step turns the fourth unknown-outcome fault of its paid call into a decision", async () => {
-  const h = harness();
-  let calls = 0;
-  const error = await step(
-    h.state,
-    { scope: item, name: "review", paid: true },
+    { scope: item, name: "merge", paid: true },
     async (ctx) => {
       calls++;
-      ctx.progress();
-      // Free calls inside the step fault without counting...
-      if (calls % 2 === 1) throw lost("GitHub response lost");
-      // ...as do paid faults with a known outcome.
+      if (calls === 1) ctx.pending({ kind: "ci", detail: "PR #5 checks" });
       if (calls === 2)
-        await ctx.paid(async () => {
-          throw transient("model 503");
-        });
-      return ctx.paid(async () => {
-        throw lost("model turn lost");
-      });
+        ctx.pending(
+          { kind: "ci", detail: "PR #5 checks" },
+          at(h.clock.time + 10 * SECOND),
+        );
+      if (calls <= 10) throw lost("GitHub GET failed");
+      return "merged";
     },
     h.options,
-  ).catch((caught) => caught);
-  assert.ok(error instanceof StepFault);
-  assert.deepEqual(faultOf(error), {
-    kind: "decision",
-    question: "review failed 4 times with an unknown outcome; retry or cancel?",
-    evidence: ["model turn lost"],
-  });
-  assert.equal(error.cause.message, "model turn lost");
-  // Free faults 1,3,5,7,9; paid 503 at 2; paid lost at 4,6,8,10.
-  assert.equal(calls, 10);
-  const record = h.state.repeats["one/a1/review"];
-  // Progress at the start of each call reset the run of faults, not the bound.
-  assert.equal(record.count, 1);
-  assert.equal(record.paid, 4);
-  assert.deepEqual(h.state.work.one.wait, {
-    kind: "decision",
-    detail: "review failed 4 times with an unknown outcome; retry or cancel?",
-  });
-  assertRepeats(h.disk.at(-1).repeats, "repeats", new Set(["one"]));
-  // Retry clears the records and the decision.
-  assert.equal(clearRepeats(h.state, { item: "one" }), true);
-  assert.equal(h.state.repeats, undefined);
+  );
+  const ci = { kind: "ci", detail: "PR #5 checks", step: "item/one/merge" };
+  assert.deepEqual(h.clock.sleeps.slice(0, 2), [30 * SECOND, 10 * SECOND]);
+  // Eight faults over more than two minutes leave the pending wait in place.
+  for (const wait of waits.slice(0, -1)) assert.deepEqual(wait, ci);
+  assert.ok(h.clock.time - T0 > 2 * MINUTE);
+  // Free faults in a paid step never count.
+  const lastFault = h.disk.at(-2).repeats["item/one/merge"];
+  assert.equal(lastFault.faults.count, 8);
+  assert.equal(lastFault.paid, undefined);
+  // Success clears the step's own wait and record.
   assert.equal(h.state.work.one.wait, undefined);
+  assert.equal(h.state.repeats, undefined);
 });
 
-test("the paid bound survives a restart", async () => {
+test("a caller's wait survives faults; the step never writes over it", async () => {
   const h = harness();
-  h.state.repeats = {
-    "objective/plan": {
-      since: new Date(T0).toISOString(),
-      count: 0,
-      last: { kind: "transient", detail: "turn lost", outcomeUnknown: true },
-      nextAt: new Date(T0).toISOString(),
-      paid: 3,
-    },
-  };
-  const error = await step(
+  assert.equal(
+    setWait(h.state, item, { kind: "ci", detail: "checks pending" }),
+    true,
+  );
+  await step(
     h.state,
-    { scope: "objective", name: "plan", paid: true },
-    (ctx) =>
-      ctx.paid(async () => {
-        throw lost("turn lost again");
-      }),
+    publish,
+    scripted(...Array.from({ length: 9 }, () => transient())),
     h.options,
-  ).catch((caught) => caught);
+  );
+  assert.deepEqual(waitOf(h.state, item), {
+    kind: "ci",
+    detail: "checks pending",
+  });
+  assert.equal(clearWait(h.state, item), true);
+});
+
+test("the fourth unknown-outcome fault of the paid call is a decision that holds until retry", async () => {
+  const h = harness();
+  let calls = 0;
+  const spec = { scope: item, name: "review", paid: true };
+  const body = async (ctx) => {
+    calls++;
+    ctx.progress();
+    // Free calls fault without counting, as do known-outcome paid faults.
+    if (calls % 2 === 1) throw lost("GitHub response lost");
+    if (calls === 2)
+      await ctx.paid(async () => {
+        throw transient("model 503");
+      });
+    // The caller wraps the paid call's error; it still counts.
+    return ctx
+      .paid(async () => {
+        throw lost("model turn lost");
+      })
+      .catch((error) => {
+        throw new Error("review failed", { cause: error });
+      });
+  };
+  const error = await caught(step(h.state, spec, body, h.options));
+  assert.ok(error instanceof StepFault);
+  const question =
+    "review failed 4 times with an unknown outcome; retry or cancel?";
+  assert.deepEqual(faultOf(error), {
+    kind: "decision",
+    question,
+    evidence: ["model turn lost"],
+  });
+  assert.equal(calls, 10);
+  assert.equal(h.state.repeats["item/one/review"].paid, 4);
+  assert.deepEqual(h.state.work.one.wait, {
+    kind: "decision",
+    detail: question,
+    step: "item/one/review",
+  });
+  assertRepeats(h.disk.at(-1).repeats, "repeats");
+  assertWait(h.disk.at(-1).work.one.wait, "wait");
+
+  // Re-entry re-throws without calling the body; nothing silently clears it.
+  const again = await caught(step(h.state, spec, body, h.options));
+  assert.equal(faultOf(again).question, question);
+  assert.equal(calls, 10);
+  assert.equal(setWait(h.state, item, { kind: "ci", detail: "x" }), false);
+  assert.equal(clearWait(h.state, item), false);
+
+  // The operator's retry clears the bound and the decision.
+  assert.equal(clearRepeats(h.state, item), true);
+  assert.equal(h.state.repeats, undefined);
+  assert.equal(h.state.work.one.wait, undefined);
+  assert.equal(
+    await step(h.state, spec, async () => "reviewed", h.options),
+    "reviewed",
+  );
+});
+
+test("a crash during a paid call counts as a paid fault on restart", async () => {
+  const h = harness();
+  let release;
+  const plan = { scope: "objective", name: "plan", paid: true };
+  const running = step(
+    h.state,
+    plan,
+    (ctx) =>
+      ctx.paid(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      ),
+    h.options,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  // The process dies here: the file holds the in-flight marker.
+  const crashed = structuredClone(h.disk.at(-1));
+  assert.deepEqual(crashed.repeats["objective/plan"], { inFlight: true });
+  release("plan");
+  assert.equal(await running, "plan");
+  assert.equal(h.state.repeats, undefined);
+
+  crashed.repeats["objective/plan"].paid = 3;
+  const restarted = harness(crashed);
+  let called = false;
+  const error = await caught(
+    step(
+      restarted.state,
+      plan,
+      async () => {
+        called = true;
+      },
+      restarted.options,
+    ),
+  );
+  assert.equal(called, false);
   assert.equal(faultOf(error).kind, "decision");
-  assert.equal(h.state.repeats["objective/plan"].paid, 4);
-  assert.equal(h.state.wait.kind, "decision");
+  assert.deepEqual(restarted.state.repeats["objective/plan"], { paid: 4 });
 });
 
 test("a paid call in a step not declared paid is a defect", async () => {
   const h = harness();
-  const error = await step(
-    h.state,
-    { scope: item, name: "publish" },
-    (ctx) => ctx.paid(async () => 1),
-    h.options,
-  ).catch((caught) => caught);
+  const error = await caught(
+    step(h.state, publish, (ctx) => ctx.paid(async () => 1), h.options),
+  );
   assert.equal(faultOf(error).kind, "defect");
   assert.match(error.message, /not paid/);
 });
 
-test("after 24 hours of faults a free step asks retry or cancel and keeps waiting", async () => {
+test("24 hours of running time escalates; downtime between processes does not count", async () => {
+  // A run of faults that began two days ago in a process that then stopped.
+  const old = harness();
+  old.state.repeats = {
+    [KEY]: {
+      nextAt: at(T0 - 47 * HOUR),
+      faults: {
+        since: at(T0 - 48 * HOUR),
+        count: 3,
+        last: { kind: "transient", detail: "x", outcomeUnknown: false },
+        activeMs: HOUR,
+      },
+    },
+  };
+  old.clock.sleep = async () => {
+    throw new Error("stop");
+  };
+  await caught(step(old.state, publish, scripted(transient()), old.options));
+  assert.equal(outageOf(old.state, item, T0).escalated, false);
+
   const h = harness();
-  const waits = [];
-  h.options.save = () => waits.push(h.state.work.one.wait);
-  let calls = 0;
+  const escalated = observing(
+    h,
+    () => outageOf(h.state, item, h.clock.now())?.escalated,
+  );
   const result = await step(
     h.state,
-    { scope: item, name: "publish" },
+    publish,
     async () => {
-      calls++;
       if (h.clock.time < T0 + 25 * HOUR)
         throw transient("api.github.com unreachable");
       return "published";
@@ -411,159 +483,104 @@ test("after 24 hours of faults a free step asks retry or cancel and keeps waitin
     h.options,
   );
   assert.equal(result, "published");
-  const escalation = {
-    kind: "decision",
-    detail: `publish has failed since ${new Date(T0).toISOString()}; retry or cancel?`,
-  };
-  const first = waits.findIndex((wait) => wait?.kind === "decision");
+  const first = escalated.indexOf(true);
   assert.ok(first > 0);
-  assert.equal(waits[first - 1].kind, "outage");
-  // It keeps repeating after asking, at the five-minute cap.
-  for (const wait of waits.slice(first, -1)) assert.deepEqual(wait, escalation);
-  assert.ok(waits.length - 1 - first >= 12);
+  // It keeps repeating after escalating, at the five-minute cap.
+  assert.ok(escalated.slice(first, -1).every((value) => value === true));
+  assert.ok(escalated.length - 1 - first >= 12);
   assert.equal(h.clock.sleeps.at(-1), 5 * MINUTE);
-  // Success clears the question and the record.
-  assert.equal(h.state.work.one.wait, undefined);
   assert.equal(h.state.repeats, undefined);
-  assert.ok(calls > 280);
 });
 
-test("work rethrows the original error and deletes the record", async () => {
-  const h = harness();
-  const work = fail({
-    kind: "work",
-    evidence: { detail: "validation failed" },
-  });
-  const fn = scripted(...Array.from({ length: 7 }, () => transient()), work);
-  const error = await step(
-    h.state,
-    { scope: item, name: "validate" },
-    fn,
-    h.options,
-  ).catch((caught) => caught);
-  assert.equal(error, work);
-  assert.equal(h.state.repeats, undefined);
-  // The outage wait it wrote went with the record.
-  assert.equal(h.disk.at(-2).work.one.wait.kind, "outage");
-  assert.equal(h.state.work.one.wait, undefined);
+test("work and defect end the step: the record, paid count and own wait go", async () => {
+  for (const ending of [
+    fail({ kind: "work", evidence: { detail: "validation failed" } }),
+    new TypeError("undefined is not a function"),
+  ]) {
+    const h = harness();
+    let calls = 0;
+    const error = await caught(
+      step(
+        h.state,
+        { scope: item, name: "execute", paid: true },
+        async (ctx) => {
+          calls++;
+          if (calls === 1)
+            ctx.pending({ kind: "capacity", detail: "worker running" });
+          if (calls === 2)
+            await ctx.paid(async () => {
+              throw lost();
+            });
+          throw ending;
+        },
+        h.options,
+      ),
+    );
+    assert.equal(error, ending);
+    assert.equal(h.disk.at(-2).repeats["item/one/execute"].paid, 1);
+    assert.equal(h.state.repeats, undefined);
+    assert.equal(h.state.work.one.wait, undefined);
+  }
 });
 
-test("config waits with the named fix and ends the run of faults", async () => {
+test("config waits with its fix; the next run tries again and keeps the paid count", async () => {
   const h = harness();
   const config = fail({
     kind: "config",
-    detail: "403 Resource not accessible",
-    fix: "Grant the token contents: write",
+    detail: "401 Bad credentials",
+    fix: "Log in to the model provider",
   });
-  const error = await step(
-    h.state,
-    { scope: item, name: "publish" },
-    scripted(transient(), config),
-    h.options,
-  ).catch((caught) => caught);
+  const spec = { scope: item, name: "execute", paid: true };
+  let calls = 0;
+  const error = await caught(
+    step(
+      h.state,
+      spec,
+      (ctx) =>
+        ctx.paid(async () => {
+          calls++;
+          throw calls === 3 ? config : lost();
+        }),
+      h.options,
+    ),
+  );
   assert.equal(error, config);
   assert.deepEqual(h.state.work.one.wait, {
     kind: "prerequisite",
-    detail: "403 Resource not accessible",
-    fix: "Grant the token contents: write",
+    detail: "401 Bad credentials",
+    fix: "Log in to the model provider",
+    step: "item/one/execute",
   });
-  assertWait(h.disk.at(-1).work.one.wait, "wait");
-  // The service answered, so the earlier fault is not part of a later outage:
-  // after a two-day pause one hiccup is not a 24-hour escalation.
-  assert.equal(h.state.repeats, undefined);
-  delete h.state.work.one.wait;
+  assert.deepEqual(h.state.repeats["item/one/execute"], { paid: 2 });
+  // The service answered, so a two-day pause is not part of an outage.
   h.clock.time += 48 * HOUR;
-  const waits = [];
-  h.options.save = () => waits.push(h.state.work.one.wait);
-  await step(
-    h.state,
-    { scope: item, name: "publish" },
-    scripted(transient()),
-    h.options,
-  );
-  assert.deepEqual(waits, [undefined, undefined]);
+  assert.equal(await step(h.state, spec, async () => "ran", h.options), "ran");
+  assert.equal(h.state.work.one.wait, undefined);
+  assert.equal(h.state.repeats, undefined);
 });
 
-test("a non-transient fault keeps a paid step's bound", async () => {
+test("a decision waits with its question until the operator answers", async () => {
   const h = harness();
-  const config = fail({ kind: "config", detail: "401", fix: "Log in" });
-  let calls = 0;
-  await step(
-    h.state,
-    { scope: item, name: "execute", paid: true },
-    (ctx) =>
-      ctx.paid(async () => {
-        calls++;
-        throw calls === 3 ? config : lost();
-      }),
-    h.options,
-  ).catch((caught) => assert.equal(caught, config));
-  assert.equal(h.state.repeats["one/a1/execute"].paid, 2);
-  assert.equal(h.state.repeats["one/a1/execute"].count, 0);
-  assertRepeats(h.state.repeats, "repeats", new Set(["one"]));
-});
-
-test("decision waits with its question", async () => {
-  const h = harness();
+  const close = { scope: "objective", name: "close" };
   const asked = new StepFault({
     kind: "decision",
     question: "A foreign commit is on the branch; keep it?",
     evidence: ["abc123"],
   });
-  const error = await step(
-    h.state,
-    { scope: "objective", name: "close" },
-    scripted(asked),
-    h.options,
-  ).catch((caught) => caught);
-  assert.equal(error, asked);
+  const fn = scripted(asked);
+  assert.equal(await caught(step(h.state, close, fn, h.options)), asked);
   assert.deepEqual(h.state.wait, {
     kind: "decision",
     detail: "A foreign commit is on the branch; keep it?",
+    step: "objective/close",
   });
-  assert.equal(h.disk.length, 1);
+  await caught(step(h.state, close, fn, h.options));
+  assert.equal(fn.calls.count, 1);
+  assert.equal(clearRepeats(h.state, "objective"), true);
+  assert.equal(await step(h.state, close, fn, h.options), "done");
 });
 
-test("the last fault is saved in the exact persisted shape", async () => {
-  const h = harness();
-  const loose = new StepFault({
-    kind: "transient",
-    detail: "x",
-    outcomeUnknown: false,
-    retryAt: undefined,
-    status: 503,
-  });
-  await step(
-    h.state,
-    { scope: item, name: "publish" },
-    scripted(loose),
-    h.options,
-  );
-  assert.deepEqual(h.disk[0].repeats[KEY].last, {
-    kind: "transient",
-    detail: "x",
-    outcomeUnknown: false,
-  });
-  assertRepeats(h.disk[0].repeats, "repeats", new Set(["one"]));
-});
-
-test("a defect stops at once without a wait", async () => {
-  const h = harness();
-  const bug = new TypeError("undefined is not a function");
-  const error = await step(
-    h.state,
-    { scope: item, name: "publish" },
-    scripted(transient(), bug),
-    h.options,
-  ).catch((caught) => caught);
-  assert.equal(error, bug);
-  assert.equal(faultOf(error).kind, "defect");
-  // The caller stops and reports; the step writes no wait for a defect.
-  assert.equal(h.state.repeats, undefined);
-  assert.equal(h.state.work.one.wait, undefined);
-});
-
-test("cancel aborts a backoff and stops repeating", async () => {
+test("cancel ends a backoff or a try with a cancelled fault, not a defect", async () => {
   const h = harness();
   const controller = new AbortController();
   h.clock.sleep = async (_ms, signal) => {
@@ -571,121 +588,105 @@ test("cancel aborts a backoff and stops repeating", async () => {
     signal.throwIfAborted();
   };
   const fn = scripted(transient(), transient());
-  await assert.rejects(
-    step(h.state, { scope: item, name: "publish" }, fn, {
-      ...h.options,
-      signal: controller.signal,
-    }),
-    /Objective cancelled/,
+  const during = await caught(
+    step(h.state, publish, fn, { ...h.options, signal: controller.signal }),
   );
+  assert.deepEqual(faultOf(during), {
+    kind: "cancelled",
+    detail: "Objective cancelled",
+  });
   assert.equal(fn.calls.count, 1);
-  assert.equal(h.state.repeats[KEY].count, 1);
+
+  const body = harness();
+  const abort = new AbortController();
+  const error = await caught(
+    step(
+      body.state,
+      publish,
+      async () => {
+        abort.abort();
+        throw new Error("The operation was aborted");
+      },
+      { ...body.options, signal: abort.signal },
+    ),
+  );
+  assert.equal(faultOf(error).kind, "cancelled");
+  assert.equal(body.state.repeats, undefined);
 });
 
-test("an item step needs the item's state", async () => {
+test("one step key never runs twice at once", async () => {
   const h = harness();
+  let release;
+  const first = step(
+    h.state,
+    publish,
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    h.options,
+  );
+  const error = await caught(step(h.state, publish, async () => 1, h.options));
+  assert.equal(faultOf(error).kind, "defect");
+  assert.match(error.message, /already running/);
+  release(2);
+  assert.equal(await first, 2);
+  assert.equal(await step(h.state, publish, async () => 3, h.options), 3);
+});
+
+test("Objective steps run on a planning snapshot; item steps need the item", async () => {
+  const preparing = { schemaVersion: 7, kind: "preparing" };
+  const h = harness(preparing);
+  assert.equal(
+    await step(
+      preparing,
+      { scope: "objective", name: "plan" },
+      scripted(transient()),
+      h.options,
+    ),
+    "done",
+  );
+  await assert.rejects(
+    step(preparing, publish, async () => 1, h.options),
+    /one has no state/,
+  );
   await assert.rejects(
     step(
-      h.state,
-      { scope: { item: "three", attempt: "c1" }, name: "publish" },
+      factoryState(),
+      { scope: { item: "three" }, name: "publish" },
       async () => 1,
       h.options,
     ),
     /three has no state/,
   );
-  await assert.rejects(
-    step(
-      { kind: "preparing" },
-      { scope: item, name: "publish" },
-      async () => 1,
-      h.options,
-    ),
-    /one has no state/,
-  );
 });
 
-test("the default clock can be replaced for tests", async () => {
-  const clock = manualClock();
-  const restore = setStepClock(clock);
-  try {
-    const state = factoryState();
-    await step(state, { scope: item, name: "publish" }, scripted(transient()), {
-      save: () => undefined,
-    });
-    assert.deepEqual(clock.sleeps, [SECOND]);
-  } finally {
-    restore();
-  }
-});
-
-test("clearRepeats clears one scope; clearWait clears only the expected wait", () => {
-  const record = (since) => ({
-    since,
-    count: 2,
-    last: { kind: "transient", detail: "x", outcomeUnknown: false },
-    nextAt: since,
-  });
+test("clearRepeats clears one scope's records and step waits", () => {
+  const record = { nextAt: at(T0) };
   const state = factoryState();
   state.repeats = {
-    "one/a1/publish": record("2026-10-03T10:00:00.000Z"),
-    "one/a0/execute": record("2026-10-03T09:00:00.000Z"),
-    "two/b1/publish": record("2026-10-03T08:00:00.000Z"),
-    "objective/plan": record("2026-10-03T07:00:00.000Z"),
+    "item/one/publish": record,
+    "item/one/execute": { paid: 2 },
+    "item/two/publish": record,
+    "objective/plan": record,
   };
-  assert.deepEqual(outageOf(state, item), {
-    step: "publish",
-    since: "2026-10-03T10:00:00.000Z",
-    tries: 2,
-    last: { kind: "transient", detail: "x", outcomeUnknown: false },
-  });
-  assert.equal(outageOf(state, "objective").step, "plan");
-  assert.equal(outageOf(state, { item: "one", attempt: "zz" }), undefined);
-  assert.equal(clearRepeats(state, { item: "one" }), true);
+  state.work.one.wait = {
+    kind: "decision",
+    detail: "x",
+    step: "item/one/execute",
+  };
+  state.work.two.wait = { kind: "ci", detail: "checks" };
+  assert.equal(clearRepeats(state, item), true);
   assert.deepEqual(Object.keys(state.repeats), [
-    "two/b1/publish",
+    "item/two/publish",
     "objective/plan",
   ]);
-  assert.equal(clearRepeats(state, { item: "one" }), false);
+  assert.equal(state.work.one.wait, undefined);
+  assert.equal(clearRepeats(state, item), false);
+  assert.equal(clearRepeats(state, { item: "two" }), true);
+  assert.deepEqual(state.work.two.wait, { kind: "ci", detail: "checks" });
   assert.equal(clearRepeats(state, "objective"), true);
-  assert.deepEqual(Object.keys(state.repeats), ["two/b1/publish"]);
-
-  setWait(state, "objective", { kind: "ci", detail: "checks" });
-  assert.equal(
-    clearWait(state, "objective", { kind: "ci", detail: "other" }),
-    false,
-  );
-  assert.equal(
-    clearWait(state, "objective", { kind: "ci", detail: "checks" }),
-    true,
-  );
-  assert.equal(clearWait(state, "objective"), false);
-});
-
-test("persisted records and waits keep their exact shape", () => {
-  const last = { kind: "transient", detail: "x", outcomeUnknown: true };
-  const at = "2026-10-03T10:00:00.000Z";
-  assertRepeats(
-    { "objective/plan": { since: at, count: 0, last, nextAt: at, paid: 2 } },
-    "repeats",
-  );
-  for (const bad of [
-    { since: at, count: 0, last, nextAt: at },
-    { since: at, count: 1, last, nextAt: at, paid: 0 },
-    { since: at, count: -1, last, nextAt: at, paid: 1 },
-  ])
-    assert.throws(
-      () => assertRepeats({ "objective/plan": bad }, "repeats"),
-      /invalid/,
-    );
-  assertWait(
-    { kind: "prerequisite", detail: "403", fix: "Grant access" },
-    "wait",
-  );
-  for (const bad of [
-    { kind: "outage", detail: "x", fix: "y" },
-    { kind: "prerequisite", detail: "x", fix: "" },
-  ])
-    assert.throws(() => assertWait(bad, "wait"), /wait is invalid/);
+  assert.equal(state.repeats, undefined);
 });
 
 const view = (work, overrides = {}) => ({
@@ -717,18 +718,18 @@ const itemView = (id, overrides = {}) => ({
   authentication: null,
   ...overrides,
 });
+const outage = (overrides = {}) => ({
+  step: "publish",
+  since: "2026-10-03T10:00:00.000Z",
+  tries: 9,
+  last: "fetch failed",
+  escalated: false,
+  ...overrides,
+});
 
-test("status shows an outage with its start, tries and last fault", () => {
+test("status shows an outage per scope, alongside a pending wait", () => {
   const status = view([
-    itemView("one", {
-      wait: { kind: "outage", detail: "publish: fetch failed" },
-      outage: {
-        step: "publish",
-        since: "2026-10-03T10:00:00.000Z",
-        tries: 9,
-        last: "fetch failed",
-      },
-    }),
+    itemView("one", { outage: outage() }),
     itemView("two", {
       status: "pending",
       step: null,
@@ -739,94 +740,112 @@ test("status shows an outage with its start, tries and last fault", () => {
   assert.equal(summary.phase, "waiting");
   assert.equal(
     summary.summary,
-    "outage since 2026-10-03 10:00Z (9 tries, last: fetch failed) in one; 0/2 done",
+    "on outage for one (publish): since 2026-10-03 10:00Z (9 tries, last: fetch failed); 0/2 done",
   );
-  const lines = renderStatusText({ ...status, ...summary });
+  assert.equal(summary.nextAction, null);
   assert.equal(
-    lines[0],
-    "Objective #7: waiting — outage since 2026-10-03 10:00Z (9 tries, last: fetch failed) in one; 0/2 done",
+    renderStatusText({ ...status, ...summary })[0],
+    "Objective #7: waiting — on outage for one (publish): since 2026-10-03 10:00Z (9 tries, last: fetch failed); 0/2 done",
+  );
+  const both = summarizeStatus(
+    view([
+      itemView("one", {
+        outage: outage(),
+        wait: { kind: "ci", detail: "PR #5 checks", step: "item/one/merge" },
+      }),
+    ]),
   );
   assert.match(
-    lines.find((line) => line.includes("one ")),
-    /since 2026-10-03 10:00Z \(9 tries/,
+    both.summary,
+    /\(9 tries, last: fetch failed\); also on CI check: PR #5 checks; 0\/1 done$/,
   );
   // Other active work keeps the Objective running.
   assert.equal(
     summarizeStatus(view([...status.work, itemView("three")])).phase,
     "running",
   );
+  // The Objective's own outage reads the same way.
+  assert.equal(
+    summarizeStatus(
+      view([itemView("one", { status: "done" })], {
+        outage: outage({ step: "close", tries: 1, last: "502" }),
+      }),
+    ).summary,
+    "on outage for the Objective (close): since 2026-10-03 10:00Z (1 try, last: 502); 1/1 done",
+  );
 });
 
-test("status asks for structured decisions and names a config fix", () => {
+test("a 24-hour outage offers cancel and keeps waiting, even beside running work", () => {
+  const escalated = outage({ escalated: true });
+  const live = summarizeStatus(
+    view([itemView("one", { outage: escalated }), itemView("two")]),
+  );
+  assert.equal(live.phase, "waiting");
+  assert.equal(live.nextAction.command, "factory cancel --objective 7");
+  assert.match(live.nextAction.reason, /keeps retrying until you cancel$/);
+  const stopped = summarizeStatus(
+    view([itemView("one", { outage: escalated })], { runActive: false }),
+  );
+  assert.match(
+    stopped.nextAction.reason,
+    /or factory run --objective 7 to keep retrying$/,
+  );
+});
+
+test("a step decision asks for factory retry and hides the outage", () => {
+  const detail =
+    "review failed 4 times with an unknown outcome; retry or cancel?";
   const asked = summarizeStatus(
     view([
       itemView("one", {
-        wait: {
-          kind: "decision",
-          detail:
-            "review failed 4 times with an unknown outcome; retry or cancel?",
-        },
+        wait: { kind: "decision", detail, step: "item/one/review" },
+        outage: outage(),
       }),
     ]),
   );
   assert.equal(asked.phase, "needs-decision");
-  assert.equal(
-    asked.summary,
-    "decision for one: review failed 4 times with an unknown outcome; retry or cancel?",
-  );
-  assert.equal(
-    asked.nextAction.command,
-    "factory retry --objective 7 --item one",
-  );
-  assert.match(asked.nextAction.reason, /or factory cancel --objective 7$/);
-
+  assert.equal(asked.summary, `decision for one: ${detail}`);
+  assert.deepEqual(asked.nextAction, {
+    command: "factory retry --objective 7 --item one",
+    reason: "Retry runs the step again; or factory cancel --objective 7",
+  });
   const objective = summarizeStatus(
     view([itemView("one", { status: "done" })], {
-      wait: {
-        kind: "decision",
-        detail: "close has failed since then; retry or cancel?",
-      },
+      runActive: false,
+      wait: { kind: "decision", detail, step: "objective/close" },
     }),
   );
-  assert.equal(objective.phase, "needs-decision");
-  assert.equal(objective.nextAction.command, "factory cancel --objective 7");
+  assert.equal(objective.summary, `decision for the Objective: ${detail}`);
+  assert.deepEqual(objective.nextAction, {
+    command: "factory retry --objective 7",
+    reason:
+      "Retry runs the step again; then factory run --objective 7; or factory cancel --objective 7",
+  });
+});
 
-  const fix = summarizeStatus(
-    view([
-      itemView("one", {
-        wait: {
-          kind: "prerequisite",
-          detail: "403 Resource not accessible",
-          fix: "Grant the token contents: write",
-        },
-      }),
-    ]),
-  );
-  assert.equal(fix.phase, "waiting");
+test("a config pause names its fix and follows the restart convention", () => {
+  const wait = {
+    kind: "prerequisite",
+    detail: "403 Resource not accessible",
+    fix: "Grant the token contents: write",
+    step: "item/one/publish",
+  };
+  const live = summarizeStatus(view([itemView("one", { wait })]));
+  assert.equal(live.phase, "waiting");
   assert.equal(
-    fix.summary,
+    live.summary,
     "on external prerequisite for one: 403 Resource not accessible; 0/1 done",
   );
-  assert.deepEqual(fix.nextAction, {
-    command: "factory run --objective 7",
+  assert.deepEqual(live.nextAction, {
+    command: "factory retry --objective 7 --item one",
     reason: "First: Grant the token contents: write",
   });
-
-  const closing = summarizeStatus(
-    view([itemView("one", { status: "done" })], {
-      finalValidation: true,
-      wait: { kind: "outage", detail: "close: 502" },
-      outage: {
-        step: "close",
-        since: "2026-10-03T10:00:00.000Z",
-        tries: 1,
-        last: "502",
-      },
-    }),
+  const stopped = summarizeStatus(
+    view([itemView("one", { wait })], { runActive: false }),
   );
   assert.equal(
-    closing.summary,
-    "outage since 2026-10-03 10:00Z (1 try, last: 502) in close; 1/1 done",
+    stopped.nextAction.reason,
+    "First: Grant the token contents: write; then factory run --objective 7",
   );
 });
 
@@ -845,21 +864,23 @@ test("planning status reads the Objective's outage from state, redacted", () => 
       coordinator: {
         mode: "running",
         phase: "planning",
-        phaseStartedAt: new Date(T0).toISOString(),
+        phaseStartedAt: at(T0),
       },
       repeats: {
         "objective/plan": {
-          since: "2026-10-03T10:00:00.000Z",
-          count: 4,
-          last: {
-            kind: "transient",
-            detail: "token secret-value refused",
-            outcomeUnknown: false,
+          nextAt: at(Date.now() + 5 * HOUR),
+          faults: {
+            since: "2026-10-03T10:00:00.000Z",
+            count: 4,
+            last: {
+              kind: "transient",
+              detail: "token secret-value refused",
+              outcomeUnknown: false,
+            },
+            activeMs: 0,
           },
-          nextAt: "2026-10-03T10:00:15.000Z",
         },
       },
-      wait: { kind: "outage", detail: "plan: token secret-value refused" },
     },
     ["secret-value"],
     true,
@@ -867,11 +888,7 @@ test("planning status reads the Objective's outage from state, redacted", () => 
   assert.equal(document.phase, "waiting");
   assert.equal(
     document.summary,
-    "outage since 2026-10-03 10:00Z (4 tries, last: token [REDACTED] refused) in plan",
+    "on outage for the Objective (plan): since 2026-10-03 10:00Z (4 tries, last: token [REDACTED] refused)",
   );
-  assert.deepEqual(document.wait, {
-    kind: "outage",
-    detail: "plan: token [REDACTED] refused",
-  });
   assert.equal(document.outage.tries, 4);
 });

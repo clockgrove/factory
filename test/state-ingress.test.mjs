@@ -1319,27 +1319,53 @@ for (const scope of ["work", "final"])
 
 test("state ingress validates repeat records and structured waits", () => {
   const record = {
-    since: "2026-10-03T00:00:00.000Z",
-    count: 1,
-    last: {
-      kind: "transient",
-      detail: "GitHub HTTP 502",
-      outcomeUnknown: false,
-    },
     nextAt: "2026-10-03T00:00:01.000Z",
+    faults: {
+      since: "2026-10-03T00:00:00.000Z",
+      count: 1,
+      last: {
+        kind: "transient",
+        detail: "GitHub HTTP 502",
+        outcomeUnknown: false,
+      },
+      activeMs: 0,
+    },
   };
   const valid = state();
   valid.repeats = {
     "objective/close": record,
-    "asset/attempt-1/publish": record,
+    "item/asset/publish": { ...record, paid: 2 },
   };
-  valid.wait = { kind: "outage", detail: "GitHub is unavailable" };
+  valid.wait = {
+    kind: "decision",
+    detail: "close failed; retry or cancel?",
+    step: "objective/close",
+  };
   valid.work.asset.wait = { kind: "dependency", detail: "Waiting for one" };
-  parseFactoryState(valid, repository, objective);
+  parseFactoryState(structuredClone(valid), repository, objective);
+  // Records of an item an amendment removed are dropped, not refused.
+  const removed = structuredClone(valid);
+  removed.repeats["item/missing/publish"] = record;
+  assert.deepEqual(
+    Object.keys(parseFactoryState(removed, repository, objective).repeats),
+    ["objective/close", "item/asset/publish"],
+  );
   for (const corrupt of [
-    (bad) => (bad.repeats = { "missing/attempt-1/publish": record }),
-    (bad) => (bad.repeats = { "objective/close": { ...record, last: {} } }),
+    (bad) => (bad.repeats = { "asset/attempt-1/publish": record }),
+    (bad) =>
+      (bad.repeats = {
+        "objective/close": {
+          ...record,
+          faults: { ...record.faults, last: {} },
+        },
+      }),
+    (bad) => (bad.repeats = { "objective/close": {} }),
+    (bad) => (bad.repeats = { "objective/close": { paid: 0 } }),
+    (bad) => (bad.repeats = { "objective/close": { inFlight: false } }),
     (bad) => (bad.wait = { kind: "sleeping", detail: "x" }),
+    (bad) => (bad.wait = { kind: "outage", detail: "x" }),
+    (bad) => (bad.wait = { kind: "ci", detail: "x", step: "close" }),
+    (bad) => (bad.wait = { kind: "ci", detail: "x", fix: "y" }),
     (bad) => (bad.work.asset.wait = "Interrupted, repeating"),
   ]) {
     const bad = structuredClone(valid);

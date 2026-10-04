@@ -283,14 +283,15 @@ export async function diagnoseWorkRepair(args: {
   if (args.stopped()) return false;
   // A paid step: a lost answer is asked again, an invalid one again with
   // its validation error, until the paid bound makes it a decision.
-  let rejected: string | undefined;
   let answer: RepairCorrection | string;
   try {
     answer = await step(
       state,
       { scope: { item: item.id }, name: "diagnose", paid: true },
-      (context) =>
-        context.paid(async () => {
+      (context) => {
+        // The last answer's error, kept in the step's record across a restart.
+        const rejected = context.previousInvalid();
+        return context.paid(async () => {
           const response = await args.model.generateStructured<{
             diagnosis: string;
             correction: string;
@@ -330,13 +331,16 @@ export async function diagnoseWorkRepair(args: {
           try {
             validateCorrection(work, proposed);
           } catch (error) {
-            rejected = error instanceof Error ? error.message : String(error);
+            const detail =
+              error instanceof Error ? error.message : String(error);
+            context.invalid(detail);
             throw new StepFault(
-              transient(`Diagnosis was invalid: ${rejected}`, true),
+              transient(`Diagnosis was invalid: ${detail}`, true),
             );
           }
           return proposed;
-        }),
+        });
+      },
       {
         save,
         ...(args.signal && { signal: args.signal }),

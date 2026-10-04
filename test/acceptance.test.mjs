@@ -14,6 +14,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   compilePlan,
+  PlanValidationError,
   objectiveCriteria,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
@@ -172,24 +173,13 @@ test("preview blocks invented and mismatched commands, and admits exact pinned b
           source: "package.json",
         },
       ]);
-      const invented = await compilePlan(
-        1,
-        body,
-        target.baseSha,
-        target.checkout,
-        model,
-      );
-      assert.equal(invented.commands[0].hostExecution, "blocked");
-      assert.throws(
-        () =>
-          verifyPlanCandidate(
-            invented,
-            1,
-            body,
-            target.baseSha,
-            target.checkout,
-          ),
-        /host execution authority/,
+      // A base-observed command absent at the base is refused with revision
+      // feedback before review; a planner that repeats it fails the plan.
+      await assert.rejects(
+        compilePlan(1, body, target.baseSha, target.checkout, model),
+        (error) =>
+          error instanceof PlanValidationError &&
+          /npm run invented.*does not exist at base/.test(error.message),
       );
 
       graph = item(target.baseSha, [

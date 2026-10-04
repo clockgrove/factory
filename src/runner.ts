@@ -15,6 +15,7 @@ import {
 } from "./work-repair.js";
 import { workerIdentity } from "./item-steps.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
+import { operatorName } from "./operator.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
 import {
   amendmentBlocksDispatch,
@@ -25,7 +26,6 @@ import {
 } from "./graph-amendments.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
-import { userInfo } from "node:os";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import {
   assertObjectiveCriteria,
@@ -68,6 +68,7 @@ import {
 } from "./fault.js";
 import {
   type ControlRequest,
+  ForegroundControllerError,
   requestControl,
   serveControl,
 } from "./coordinator-control.js";
@@ -86,7 +87,7 @@ import {
   type StepState,
   waitOf,
 } from "./step.js";
-import { namesPlan, shortPlanDigest } from "./status-summary.js";
+import { shortPlanDigest } from "./status-summary.js";
 import {
   executionProfileChoices,
   verifyExecutionProfiles,
@@ -247,16 +248,14 @@ export async function planObjective(
 }
 
 /**
- * Decide the plan a run persisted in state. `plan` names the short review digest status showed,
- * so a decision binds to the plan the operator saw. Accepting binds the answer to that exact
- * reviewed plan; refusing discards the unprojected preparation so the next run plans again.
+ * Decide the plan a run persisted in state. Accepting binds the answer to that exact reviewed
+ * plan; refusing discards the unprojected preparation so the next run plans again.
  */
 export async function decidePlan(
   config: FactoryConfig,
   objective: number,
   services: Pick<ApplicationServices, "github">,
   input: {
-    plan?: string;
     actor: string;
     outcome: "accept" | "refuse";
     answer: string;
@@ -281,10 +280,6 @@ export async function decidePlan(
     if (preparation?.schemaVersion !== 8)
       throw new Error(
         "Objective has no persisted plan awaiting a decision; run it first",
-      );
-    if (preparation.plan && !namesPlan(preparation.plan, input.plan))
-      throw new Error(
-        `Decision names plan ${input.plan ?? "(none)"}, but the saved plan is ${shortPlanDigest(preparation.plan)}; inspect status and decide again`,
       );
     if (input.outcome === "refuse") {
       if (!input.actor.trim() || !input.reason.trim())
@@ -339,6 +334,67 @@ export async function decidePlan(
   } finally {
     releaseMutationLock(lockPath, lock);
   }
+}
+
+/** What `factory decide` was asked, before the Objective's state says which decision it is. */
+export interface DecisionInput {
+  /** The Work Item whose result is decided; none for a plan or the final acceptance. */
+  item?: string;
+  actor: string;
+  outcome: "accept" | "refuse";
+  /** The answer to a plan's question; required to accept a plan. */
+  answer?: string;
+  reason: string;
+}
+
+/**
+ * `factory decide`: the Objective's state says what is decided. A saved plan is decided
+ * as the plan (its digest read from state); anything else is a result criterion, for the
+ * Work Item or the final acceptance, against the exact pending tree in state.
+ */
+export async function decideObjective(
+  config: FactoryConfig,
+  objective: number,
+  services: Pick<ApplicationServices, "github">,
+  input: DecisionInput,
+): Promise<"plan-accepted" | "plan-refused" | "result"> {
+  const state = readContinuation(config.repository, objective);
+  if (!state)
+    throw new Error(
+      `Objective #${objective} has no Factory state; run \`factory run --objective ${objective}\` first`,
+    );
+  if (state.schemaVersion === 8) {
+    if (input.item)
+      throw new Error(
+        "--item names a Work Item's result; a plan decision takes none",
+      );
+    if (input.outcome === "accept" && !input.answer)
+      throw new Error("Accepting a plan requires --answer to its question");
+    await decidePlan(config, objective, services, {
+      actor: input.actor,
+      outcome: input.outcome,
+      answer: input.answer ?? "",
+      reason: input.reason,
+    });
+    return input.outcome === "accept" ? "plan-accepted" : "plan-refused";
+  }
+  if (input.answer)
+    throw new Error(
+      "--answer belongs to a plan decision, not a result decision",
+    );
+  const result = {
+    item: input.item,
+    actor: input.actor,
+    outcome: input.outcome,
+    reason: input.reason,
+  };
+  const reply = await requestControl(config.repository, {
+    objective,
+    action: "decide",
+    input: result,
+  });
+  if (!reply.handled) decideResult(config, objective, result);
+  return "result";
 }
 
 export class CoordinatorHandoff extends Error {
@@ -806,7 +862,7 @@ export async function runObjective(
             objective,
             input as Parameters<typeof rereviewWorkItem>[2],
           );
-        else if (request.action === "decide-result")
+        else if (request.action === "decide")
           decideResult(
             config,
             objective,
@@ -2172,7 +2228,7 @@ export async function cancelObjective(
     const current = linuxProcessIdentity(owner.pid);
     if (current?.startTime === owner.startTime && current.state !== "Z") {
       if (owner.objective !== objective)
-        throw new Error(`Controller is running Objective #${owner.objective}`);
+        throw new ForegroundControllerError(owner.objective);
       process.kill(owner.pid, "SIGUSR1");
       return "requested";
     }
@@ -2459,11 +2515,14 @@ export function repairWorkItem(
   }
 }
 
-/** Request validation and automatic review again without deciding a criterion. */
+/**
+ * Request validation and automatic review again without deciding a criterion. The result is
+ * the exact pending one in state; it must still be what the checkout holds.
+ */
 export function rereviewWorkItem(
   config: FactoryConfig,
   objective: number,
-  input: { item: string; treeSha: string; actor: string; reason: string },
+  input: { item: string; actor: string },
 ): void {
   const lock = join(stateRoot(config.repository), "controller.lock");
   const handle = mutationLock(config, objective);
@@ -2507,16 +2566,12 @@ export function rereviewWorkItem(
       "rev-parse",
       `${work.changeRef}^{tree}`,
     );
-    if (
-      input.treeSha !== work.acceptancePending.treeSha ||
-      input.treeSha !== work.treeSha ||
-      observedTree !== input.treeSha
-    )
+    const treeSha = work.acceptancePending.treeSha;
+    if (treeSha !== work.treeSha || observedTree !== treeSha)
       throw new Error(
         "Result re-review tree differs from the pending exact result",
       );
-    if (!input.actor.trim() || !input.reason.trim())
-      throw new Error("Result re-review requires actor and reason");
+    if (!input.actor.trim()) throw new Error("Result re-review requires actor");
     work.recovery = archiveAttempt(work);
     work.status = "running";
     work.step = "validate";
@@ -2528,21 +2583,22 @@ export function rereviewWorkItem(
       attemptId: work.attempt,
       operation: "result-rereview-request",
       outcome: "completed",
-      metadata: { treeSha: input.treeSha, actor: input.actor },
-      detail: input.reason,
+      metadata: { treeSha, actor: input.actor },
     });
   } finally {
     releaseMutationLock(lock, handle);
   }
 }
 
-/** Record one explicit result decision against the exact pending tree. */
+/**
+ * Record one explicit result decision against the exact pending tree in state. The tree must
+ * still be what the checkout holds for the commit it names.
+ */
 export function decideResult(
   config: FactoryConfig,
   objective: number,
   input: {
     item?: string;
-    treeSha: string;
     actor: string;
     outcome: "accept" | "refuse";
     reason: string;
@@ -2580,7 +2636,7 @@ export function decideResult(
       "rev-parse",
       `${commit}^{tree}`,
     );
-    if (pending.treeSha !== input.treeSha || observedTree !== input.treeSha)
+    if (observedTree !== pending.treeSha)
       throw new Error(
         "Result decision tree differs from the pending exact result",
       );
@@ -2632,7 +2688,6 @@ export function decideResult(
 
 type AssetSelectionInput = {
   actor?: string;
-  reason?: string;
   downstreamItems?: string[];
 };
 
@@ -2681,9 +2736,8 @@ async function selectAssetSetWithSurface(
     work.selectedAssetSet = setId;
     work.selectionDigest = assetSelectionDigest(set);
     work.selection = {
-      actor: decision?.actor ?? userInfo().username,
+      actor: decision?.actor ?? operatorName(),
       at: new Date().toISOString(),
-      ...(decision?.reason && { reason: decision.reason }),
       surface,
       destinations: set.members.map((member) => ({
         role: member.role,
@@ -2746,40 +2800,44 @@ export async function selectAssetSetFromCli(
   );
 }
 
-export async function exportAssetSetForReview(
+/** Write every candidate AssetSet of a waiting Work Item to `output/SET_ID/`, for the operator to look at before selecting. */
+export async function exportAssetSetsForReview(
   config: FactoryConfig,
   objective: number,
   itemId: string,
-  setId: string,
   output: string,
   store: ContentStore,
-): Promise<void> {
+): Promise<string[]> {
   const state = mutationState(config, objective);
   const work = state?.work[itemId];
   if (!work || work.status !== "waiting" || work.step !== "approve-asset")
-    throw new Error(`Work Item ${itemId} is not awaiting asset review`);
-  const set = work.assets?.find((candidate) => candidate.id === setId);
-  if (!set) throw new Error(`AssetSet ${setId} is not a captured candidate`);
+    throw new Error(`Work Item ${itemId} is not awaiting asset selection`);
+  const sets = work.assets ?? [];
   if (
     !isAbsolute(output) ||
     existsSync(output) ||
     resolve(output).startsWith(`${resolve(config.checkout)}${sep}`)
   )
     throw new Error(
-      "Review output must be a new absolute directory outside the target checkout",
+      "--output must be a new absolute directory outside the target checkout",
     );
   mkdirSync(output, { recursive: true, mode: 0o700 });
-  for (const member of set.members)
-    await store.materialize(
-      member.ref,
-      join(output, `${member.role}-${basename(member.destination)}`),
-    );
+  for (const set of sets) {
+    const directory = join(output, set.id);
+    mkdirSync(directory, { mode: 0o700 });
+    for (const member of set.members)
+      await store.materialize(
+        member.ref,
+        join(directory, `${member.role}-${basename(member.destination)}`),
+      );
+  }
   new DiagnosticEmitter(config.repository, objective).emit({
     runId: state!.runId,
     itemId,
     attemptId: work.attempt,
     operation: "media-review-export",
     outcome: "completed",
-    metadata: { setId, memberCount: set.members.length },
+    metadata: { setCount: sets.length },
   });
+  return sets.map((set) => set.id);
 }

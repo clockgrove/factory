@@ -152,7 +152,8 @@ test("fresh packed artifact composes a registered harness through the package ro
     const installed = execFileSync(
       cli,
       [
-        "install",
+        "setup",
+        "--config-only",
         "--repository",
         "example/package-smoke",
         "--checkout",
@@ -164,7 +165,9 @@ test("fresh packed artifact composes a registered harness through the package ro
       ],
       { encoding: "utf8", env: environment },
     );
-    assert.match(installed, /Installed Factory for example\/package-smoke/);
+    const setup = JSON.parse(installed);
+    assert.equal(setup.status, "configured");
+    assert.equal(setup.repository, "example/package-smoke");
     const installedConfig = JSON.parse(readFileSync(config, "utf8"));
     assert.deepEqual(installedConfig.planning, {
       kind: "codex-sdk",

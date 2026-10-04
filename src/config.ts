@@ -218,6 +218,8 @@ export interface FactoryConfig {
   autonomy?: AutonomyConfig;
   /** Explicit local sensitive-content opt-in; absent remains disabled. */
   capture?: { enabled: boolean; maxBytesPerInvocation: number };
+  /** How the background service polls GitHub for queued work; omitted uses 30 seconds. */
+  queue?: { pollSeconds: number };
   schemaVersion: 1;
   repository: string;
   checkout: string;
@@ -751,6 +753,16 @@ export function validateConfig(value: unknown): FactoryConfig {
         "capture requires enabled boolean and positive maxBytesPerInvocation",
       );
   }
+  if (value.queue !== undefined) {
+    assertObject(value.queue, "queue");
+    assertOnlyKeys(value.queue, ["pollSeconds"], "queue");
+    if (
+      typeof value.queue.pollSeconds !== "number" ||
+      !Number.isFinite(value.queue.pollSeconds) ||
+      value.queue.pollSeconds <= 0
+    )
+      throw new Error("queue.pollSeconds must be a positive number");
+  }
   if (value.autonomy !== undefined)
     resolveAutonomy(value.autonomy as AutonomyConfig);
   return value as unknown as FactoryConfig;
@@ -891,10 +903,11 @@ export function validateCapacity(value: Capacity): Capacity {
 /**
  * Digest of every declared installation choice, including adapter config; an omitted
  * concurrency stays omitted, so the digest does not follow the host. Autonomy limits are
- * excluded: each Objective snapshots them, and its capacity, when it starts.
+ * excluded: each Objective snapshots them, and its capacity, when it starts. The queue's
+ * polling interval is excluded too: it changes how often the service looks, not what runs.
  */
 export function factoryConfigDigest(config: FactoryConfig): string {
-  const { autonomy: _autonomy, ...bound } = config;
+  const { autonomy: _autonomy, queue: _queue, ...bound } = config;
   assertJsonValue(bound, "configuration");
   return createHash("sha256").update(JSON.stringify(bound)).digest("hex");
 }

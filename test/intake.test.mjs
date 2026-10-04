@@ -77,7 +77,7 @@ const item = (id) => ({
   minimumAssetSets: 0,
   requiredLfsRoles: [],
 });
-async function fixture(fn, autonomy = limits) {
+async function fixture(fn, autonomy = limits, queue = { pollSeconds: 0.01 }) {
   const root = mkdtempSync(join(tmpdir(), "factory-intake-"));
   const previous = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = join(root, "state");
@@ -86,6 +86,7 @@ async function fixture(fn, autonomy = limits) {
     const config = {
       ...factoryConfig(target.checkout, "example/intake"),
       autonomy,
+      queue,
     };
     const plans = [],
       issues = new Map(
@@ -201,7 +202,7 @@ async function fixture(fn, autonomy = limits) {
 
 test("two explicitly authorized Objectives advance with accepted predecessor baseline and no replay on reopen", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives);
     await f.application.runIntake();
     assert.deepEqual(
       f.plans.map((entry) => entry.objective),
@@ -343,7 +344,7 @@ test("sequential planning supplies grounded native acceptance in every rendered 
       request.graph.objective === 2
         ? real.reviewGraph(request)
         : reviewed(request);
-    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives);
     await f.application.runIntake();
     const first = readState(f.config.repository, 1);
     assert.equal(
@@ -407,7 +408,7 @@ test("native planning facts refuse missing, unaccepted, changed and mismatched p
       planObjective(f.config, 2, { github: f.github, planningModel: f.model }),
       /lacks bound accepted/,
     );
-    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
+    await f.application.enqueueIntake([1]);
     await f.application.runIntake();
     const first = readState(f.config.repository, 1);
     const exact = await planningPrerequisites(
@@ -507,7 +508,7 @@ async function activatedSuccessor(
   dependent = true,
   historical = false,
 ) {
-  await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
+  await f.application.enqueueIntake([1]);
   await f.application.runIntake();
   const first = readState(f.config.repository, 1);
   assert.equal(objectiveComplete(first), true);
@@ -826,7 +827,7 @@ test("one intake listener serves entry and terminal return controls under the sa
       }
       return scan(...args);
     };
-    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives);
     const running = f.application.runIntake();
     const ownerPath = join(stateRoot(f.config.repository), "controller.lock");
     try {
@@ -853,7 +854,13 @@ test("one intake listener serves entry and terminal return controls under the sa
         0,
       );
       assert.equal(readControllerOwner(ownerPath).token, owner.token);
-      await intakeControl(f.config, "resume");
+      // Adding to a draining queue is refused with the command that reopens it; run that command.
+      await assert.rejects(f.application.enqueueIntake([2]), (error) => {
+        const named = /`factory queue (resume)`/.exec(error.message);
+        assert.ok(named, error.message);
+        return true;
+      });
+      assert.equal((await intakeControl(f.config, "resume")).mode, "running");
       releaseEntry.resolve();
       await returned.promise;
       assert.equal(objectiveComplete(readState(f.config.repository, 1)), true);
@@ -904,7 +911,7 @@ test("pause after predecessor completion and restart keep accepted work and pres
       if (!args[2].workItem && ++closures === 1)
         await intakeControl(f.config, "pause");
     };
-    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives);
     const running = f.application.runIntake();
     await eventually(
       () =>
@@ -925,7 +932,7 @@ test("pause after predecessor completion and restart keep accepted work and pres
 
 test("changed queued issue and missing predecessor remain precisely ineligible without provider calls", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives);
     f.issues.get(1).body += "Changed requirement\n";
     f.dependencies.set(2, [99]);
     const running = f.application.runIntake();
@@ -942,7 +949,7 @@ test("changed queued issue and missing predecessor remain precisely ineligible w
 
 test("dirty compilation checkout is retained and cannot start planning", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
+    await f.application.enqueueIntake([1]);
     writeFileSync(join(f.config.checkout, "README.md"), "User change\n");
     const running = f.application.runIntake();
     await eventually(() => readIntake(f.config).observation?.reasons[1]);
@@ -953,18 +960,15 @@ test("dirty compilation checkout is retained and cannot start planning", async (
     await running;
   }));
 
-test("configured existing priority reorders only authorized pending Objectives", async () =>
+test("the queue runs Objectives in the order they were added and ignores unqueued issues", async () =>
   fixture(async (f) => {
     f.dependencies.clear();
-    await f.application.enqueueIntake(objectives, {
-      priorityLabels: ["high"],
-      pollSeconds: 0.01,
-    });
-    f.issues.get(2).labels = ["high"];
+    await f.application.enqueueIntake([2, 1]);
+    f.issues.get(1).labels = ["high"];
     f.issues.set(99, {
       state: "open",
       body: body(99),
-      title: "Unapproved",
+      title: "Unqueued",
       labels: ["high"],
     });
     await f.application.runIntake();
@@ -975,9 +979,32 @@ test("configured existing priority reorders only authorized pending Objectives",
     assert.equal(readContinuation(f.config.repository, 99), undefined);
   }));
 
+test("adding is additive: new Objectives go last, a queued one keeps its place and takes the current body, a removed one is queued again", async () =>
+  fixture(async (f) => {
+    const first = await f.application.enqueueIntake([1]);
+    assert.deepEqual(first.objectives, [1]);
+    f.issues.get(1).body += "Edited before it ran";
+    const second = await f.application.enqueueIntake([2, 1]);
+    assert.deepEqual(second.objectives, [1, 2]);
+    assert.notEqual(second.bodyDigests[1], first.bodyDigests[1]);
+    await intakeControl(f.config, "dequeue", 2);
+    assert.deepEqual(readIntake(f.config).dequeued, [2]);
+    const again = await f.application.enqueueIntake([2]);
+    assert.deepEqual(again.objectives, [1, 2]);
+    assert.deepEqual(again.dequeued, []);
+    await assert.rejects(
+      f.application.enqueueIntake([]),
+      /needs at least one Objective/,
+    );
+    await assert.rejects(
+      intakeControl(f.config, "dequeue", 9),
+      /Objective #9 is not in the queue/,
+    );
+  }));
+
 test("discovery omission refreshes exact authorized ID instead of treating work as deleted", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
+    await f.application.enqueueIntake([1]);
     f.github.intakePage = async () => ({ status: 200, data: [] });
     await f.application.runIntake();
     assert.deepEqual(
@@ -989,7 +1016,7 @@ test("discovery omission refreshes exact authorized ID instead of treating work 
 for (const disposition of ["failed", "cancelled"])
   test(`${disposition} predecessor cannot admit its dependent`, async () =>
     fixture(async (f) => {
-      await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
+      await f.application.enqueueIntake(objectives);
       saveState(statePath(f.config.repository, 1), {
         schemaVersion: 8,
         kind: "preparing",
@@ -1028,7 +1055,7 @@ for (const disposition of ["failed", "cancelled"])
 
 test("pause during durable compilation and restart reuse known model output without a second compile", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
+    await f.application.enqueueIntake(objectives);
     const generate = f.model.generateStructured.bind(f.model);
     let entered, release;
     const started = new Promise((resolve) => {
@@ -1050,7 +1077,7 @@ test("pause during durable compilation and restart reuse known model output with
     for (const action of ["status", "cancel", "pause"])
       await assert.rejects(
         controlObjective(f.config, { objective: 2, action }),
-        /Use intake control/,
+        /not the one the service is running; `factory queue list`/,
       );
     assert.equal(
       readContinuation(f.config.repository, 1).cancelRequested,
@@ -1079,7 +1106,7 @@ test("pause during durable compilation and restart reuse known model output with
 
 test("closed selection stays ineligible until explicit dequeue without model calls", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
+    await f.application.enqueueIntake([1]);
     f.issues.get(1).state = "closed";
     const running = f.application.runIntake();
     await eventually(() => readIntake(f.config).observation?.reasons[1]);
@@ -1103,7 +1130,7 @@ const rateHeld = (milliseconds) => {
 
 test("a rate-limited read before compilation waits for GitHub instead of pausing intake (#641)", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
+    await f.application.enqueueIntake([1]);
     const read = f.github.objective;
     const reads = [];
     let held;
@@ -1128,7 +1155,7 @@ test("a rate-limited read before compilation waits for GitHub instead of pausing
 
 test("drain ends an intake wait on a GitHub rate limit at once (#641)", async () =>
   fixture(async (f) => {
-    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
+    await f.application.enqueueIntake([1]);
     f.github.objective = async () => {
       throw rateHeld(3_600_000);
     };
@@ -1146,115 +1173,94 @@ test("drain ends an intake wait on a GitHub rate limit at once (#641)", async ()
     assert.equal(f.plans.length, 0);
   }));
 
-const watcherConsent = {
-  actor: "fixture",
-  reason: "Observe approved target without spending",
-  consent: true,
-};
-
 test("idle intake status does not rescan or race an immediate same-owner refill", async () =>
-  fixture(async (f) => {
-    const { watchIntake } = await import("../dist/intake.js");
-    const firstScan = Promise.withResolvers();
-    const releaseFirst = Promise.withResolvers();
-    const secondScan = Promise.withResolvers();
-    const releaseSecond = Promise.withResolvers();
-    let scans = 0;
-    f.github.intakePage = async () => {
-      scans++;
-      if (scans === 1) {
-        firstScan.resolve();
-        await releaseFirst.promise;
-      } else {
-        secondScan.resolve();
-        await releaseSecond.promise;
+  fixture(
+    async (f) => {
+      const { watchIntake } = await import("../dist/intake.js");
+      const firstScan = Promise.withResolvers();
+      const releaseFirst = Promise.withResolvers();
+      const secondScan = Promise.withResolvers();
+      const releaseSecond = Promise.withResolvers();
+      let scans = 0;
+      f.github.intakePage = async () => {
+        scans++;
+        if (scans === 1) {
+          firstScan.resolve();
+          await releaseFirst.promise;
+        } else {
+          secondScan.resolve();
+          await releaseSecond.promise;
+        }
+        return { status: 200, etag: '"deferred"', data: [] };
+      };
+      await watchIntake(f.config);
+      const running = f.application.runIntake();
+      try {
+        await firstScan.promise;
+        releaseFirst.resolve();
+        // The socket response follows the released scan's microtasks. No polling
+        // or timed retries are needed to reach the first settled boundary.
+        const status = await intakeControl(f.config, "status");
+        assert.equal(status.observation.idleReason, "awaiting-approved-work");
+        assert.equal(status.activeObjective, null);
+        assert.equal(
+          scans,
+          1,
+          "status must preserve the 60-second poll schedule",
+        );
+        const before = readIntake(f.config);
+        const owner = readControllerOwner(
+          join(stateRoot(f.config.repository), "controller.lock"),
+        );
+        assert.deepEqual(await intakeControl(f.config, "status"), status);
+        assert.deepEqual(readIntake(f.config), before);
+        assert.equal(scans, 1);
+        const selected = await f.application.enqueueIntake([1]);
+        assert.deepEqual(selected.objectives, [1]);
+        assert.equal(
+          readControllerOwner(
+            join(stateRoot(f.config.repository), "controller.lock"),
+          ).token,
+          owner.token,
+        );
+        // A mutation still wakes observation. While that second GitHub scan is
+        // deliberately outstanding, adding and watching apply at once and leave
+        // the queue as one record; they neither wait for nor disturb the scan.
+        await secondScan.promise;
+        assert.deepEqual(
+          (await f.application.enqueueIntake([1])).objectives,
+          [1],
+        );
+        assert.deepEqual((await watchIntake(f.config)).objectives, [1]);
+        await intakeControl(f.config, "status");
+        assert.equal(scans, 2);
+        assert.deepEqual(f.plans, []);
+      } finally {
+        // Keep cleanup model-free even if an assertion fails on the old code.
+        f.issues.get(1).state = "closed";
+        releaseFirst.resolve();
+        releaseSecond.resolve();
+        await intakeControl(f.config, "drain");
+        await running;
       }
-      return { status: 200, etag: '"deferred"', data: [] };
-    };
-    await watchIntake(f.config, watcherConsent, { pollSeconds: 60 });
-    const running = f.application.runIntake();
-    try {
-      await firstScan.promise;
-      releaseFirst.resolve();
-      // The socket response follows the released scan's microtasks. No polling
-      // or timed retries are needed to reach the first settled boundary.
-      const status = await intakeControl(f.config, "status");
-      assert.equal(status.observation.idleReason, "awaiting-approved-work");
-      assert.equal(status.activeObjective, null);
-      assert.equal(
-        scans,
-        1,
-        "status must preserve the 60-second poll schedule",
-      );
-      const before = readIntake(f.config);
-      const owner = readControllerOwner(
-        join(stateRoot(f.config.repository), "controller.lock"),
-      );
-      assert.deepEqual(await intakeControl(f.config, "status"), status);
-      assert.deepEqual(readIntake(f.config), before);
-      assert.equal(scans, 1);
-      const selected = await f.application.enqueueIntake([1]);
-      assert.deepEqual(selected.objectives, [1]);
+      assert.deepEqual(f.plans, []);
       assert.equal(
         readControllerOwner(
           join(stateRoot(f.config.repository), "controller.lock"),
-        ).token,
-        owner.token,
+        ),
+        undefined,
       );
-      // A mutation still wakes observation. Its existing refill fence remains
-      // enforced while that second GitHub scan is deliberately outstanding.
-      await secondScan.promise;
-      await assert.rejects(
-        f.application.enqueueIntake([1]),
-        /settled refill boundary/,
-      );
-      await assert.rejects(
-        watchIntake(f.config, watcherConsent, { pollSeconds: 60 }),
-        /settled refill boundary/,
-      );
-      await intakeControl(f.config, "status");
-      assert.equal(scans, 2);
-      assert.deepEqual(f.plans, []);
-    } finally {
-      // Keep cleanup model-free even if an assertion fails on the old code.
-      f.issues.get(1).state = "closed";
-      releaseFirst.resolve();
-      releaseSecond.resolve();
-      await intakeControl(f.config, "drain");
-      await running;
-    }
-    assert.deepEqual(f.plans, []);
-    assert.equal(
-      readControllerOwner(
-        join(stateRoot(f.config.repository), "controller.lock"),
-      ),
-      undefined,
-    );
-  }));
+    },
+    limits,
+    { pollSeconds: 60 },
+  ));
 
 const waitFor = (check) =>
   eventually(check, { message: "intake fixture condition" });
-/** Retry only the transient refill-boundary refusal; other errors fail now. */
-const settledEnqueue = (application, selection) =>
-  eventually(
-    () =>
-      application.enqueueIntake(selection).then(
-        (value) => ({ value }),
-        (error) => {
-          if (String(error).includes("settled refill boundary")) return false;
-          return { error };
-        },
-      ),
-    { message: "settled refill boundary" },
-  ).then((outcome) => {
-    if ("error" in outcome) throw outcome.error;
-    return outcome.value;
-  });
-
 test("consented continuous intake stays model-free while idle and refills through its same owner without reviving completed work", async () =>
   fixture(async (f) => {
     const { watchIntake } = await import("../dist/intake.js");
-    await watchIntake(f.config, watcherConsent, { pollSeconds: 0.05 });
+    await watchIntake(f.config);
     assert.deepEqual(readIntake(f.config).objectives, []);
     const running = f.application.runIntake();
     await waitFor(
@@ -1267,7 +1273,7 @@ test("consented continuous intake stays model-free while idle and refills throug
     const owner = readControllerOwner(
       join(stateRoot(f.config.repository), "controller.lock"),
     );
-    await settledEnqueue(f.application, [1]);
+    await f.application.enqueueIntake([1]);
     await waitFor(() => {
       const state = readContinuation(f.config.repository, 1);
       return (
@@ -1284,7 +1290,7 @@ test("consented continuous intake stays model-free while idle and refills throug
       ).token,
       owner.token,
     );
-    await settledEnqueue(f.application, [1, 2]);
+    await f.application.enqueueIntake([1, 2]);
     await waitFor(() => {
       const state = readContinuation(f.config.repository, 2);
       return (
@@ -1332,8 +1338,8 @@ test("consented continuous intake stays model-free while idle and refills throug
 test("watch retains changed-body fences and reports unavailable observations without candidate body storage or model calls", async () =>
   fixture(async (f) => {
     const { watchIntake } = await import("../dist/intake.js");
-    await watchIntake(f.config, watcherConsent, { pollSeconds: 0.05 });
-    await f.application.enqueueIntake([1], { watch: true, pollSeconds: 0.05 });
+    await watchIntake(f.config);
+    await f.application.enqueueIntake([1]);
     f.issues.get(1).body += "Changed after explicit authorization";
     const running = f.application.runIntake();
     await waitFor(() =>
@@ -1356,18 +1362,10 @@ test("watch retains changed-body fences and reports unavailable observations wit
     await running;
   }));
 
-test("watch and refill preserve failed nonterminal fences and require real service consent", async () =>
+test("watch and add leave a failed nonterminal Objective's state untouched", async () =>
   fixture(async (f) => {
     const { watchIntake } = await import("../dist/intake.js");
-    await assert.rejects(
-      watchIntake(f.config, { ...watcherConsent, consent: false }),
-      /explicit service consent/,
-    );
-    await assert.rejects(
-      f.application.enqueueIntake(objectives, { watch: true }),
-      /explicit service consent/,
-    );
-    await watchIntake(f.config, watcherConsent);
+    await watchIntake(f.config);
     const failed = {
       schemaVersion: 8,
       kind: "preparing",
@@ -1388,14 +1386,9 @@ test("watch and refill preserve failed nonterminal fences and require real servi
       issueByItemId: {},
     };
     saveState(statePath(f.config.repository, 1), failed);
-    await assert.rejects(
-      f.application.enqueueIntake(objectives),
-      /active Objective prevents/,
-    );
-    await assert.rejects(
-      watchIntake(f.config, watcherConsent),
-      /active Objective prevents/,
-    );
+    const queue = await f.application.enqueueIntake(objectives);
+    assert.deepEqual(queue.objectives, objectives);
+    assert.equal(queue.watch, true);
+    assert.equal((await watchIntake(f.config)).watch, true);
     assert.deepEqual(readContinuation(f.config.repository, 1), failed);
-    assert.deepEqual(readIntake(f.config).objectives, []);
   }));

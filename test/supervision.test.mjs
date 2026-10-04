@@ -12,7 +12,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { enqueueIntake } from "../dist/intake.js";
+import { enqueueIntake, watchIntake } from "../dist/intake.js";
+import { checkReadiness } from "../dist/readiness.js";
 import { factoryConfigDigest } from "../dist/config.js";
 import { defaultAutonomy } from "../dist/index.js";
 import { saveState, statePath } from "../dist/state-store.js";
@@ -24,6 +25,12 @@ import {
   supervise,
 } from "../dist/supervision.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
+
+/** Install the service: the queue must already be served by the background setup. */
+async function install(configPath, input) {
+  await watchIntake(JSON.parse(readFileSync(configPath, "utf8")));
+  return supervise("install", configPath, input);
+}
 
 async function fixture(fn) {
   const root = mkdtempSync(join(tmpdir(), "factory-supervision-"));
@@ -98,8 +105,8 @@ esac
 
 test("registers the exact isolated-XDG unit with the manager idempotently without starting work", () =>
   fixture(async ({ root, config, configPath }) => {
-    await supervise("install", configPath, { objective: 1 });
-    await supervise("install", configPath, { objective: 1 });
+    await install(configPath);
+    await install(configPath);
     const path = join(
       process.env.XDG_CONFIG_HOME,
       "systemd/user",
@@ -130,10 +137,10 @@ test("disable and uninstall retain identical continuation and allowances", () =>
   fixture(async ({ config, configPath }) => {
     const stateFile = statePath(config.repository, 1),
       before = readFileSync(stateFile);
-    await supervise("install", configPath, { objective: 1 });
-    await supervise("disable", configPath);
+    await install(configPath);
+    await supervise("stop", configPath, { disable: true });
     assert.equal((await supervise("status", configPath)).enabled, "linked");
-    await supervise("disable", configPath);
+    await supervise("stop", configPath, { disable: true });
     await supervise("uninstall", configPath);
     await supervise("uninstall", configPath);
     assert.deepEqual(readFileSync(stateFile), before);
@@ -142,8 +149,8 @@ test("disable and uninstall retain identical continuation and allowances", () =>
 
 test("a disabled isolated unit remains upgradeable without enabling or starting it", () =>
   fixture(async ({ root, config, configPath }) => {
-    await supervise("install", configPath, { objective: 1 });
-    await supervise("disable", configPath);
+    await install(configPath);
+    await supervise("stop", configPath, { disable: true });
     const candidate = join(root, "compatible-cli.mjs");
     writeFileSync(
       candidate,
@@ -164,7 +171,7 @@ test("a disabled isolated unit remains upgradeable without enabling or starting 
 
 test("incompatible rollback refuses before draining or changing unit", () =>
   fixture(async ({ root, config, configPath }) => {
-    await supervise("install", configPath, { objective: 1 });
+    await install(configPath);
     const path = join(
         process.env.XDG_CONFIG_HOME,
         "systemd/user",
@@ -198,15 +205,14 @@ test("service requires private configuration and matching continuation", () =>
   fixture(async ({ config, configPath, state }) => {
     writeFileSync(configPath, JSON.stringify(config), { mode: 0o644 });
     chmodSync(configPath, 0o644);
-    await assert.rejects(
-      supervise("install", configPath, { objective: 1 }),
-      /owner-private/,
-    );
+    await assert.rejects(install(configPath), /owner-private/);
     chmodSync(configPath, 0o600);
+    // A queued Objective's state must belong to this installation.
+    await enqueueIntake(config, github, [1]);
     state.configDigest = "c".repeat(64);
     saveState(statePath(config.repository, 1), state);
     await assert.rejects(
-      supervise("install", configPath, { objective: 1 }),
+      install(configPath),
       /Continuation configuration differs/,
     );
   }));
@@ -220,10 +226,7 @@ test("unsupported manager reports foreground limit and never registers", () =>
     );
     const status = await supervise("status", configPath);
     assert.equal(status.supported, false);
-    await assert.rejects(
-      supervise("install", configPath, { objective: 1 }),
-      /foreground/,
-    );
+    await assert.rejects(install(configPath), /foreground/);
   }));
 
 test("unit escapes systemd specifiers and command variable expansion", () => {
@@ -232,7 +235,6 @@ test("unit escapes systemd specifiers and command variable expansion", () => {
     node: "/node",
     cli: "/pkg $x%/cli.js",
     config: "/private/config.json",
-    objective: 1,
     stateHome: "/state",
     environment: { PATH: "/tool$literal" },
   });
@@ -247,49 +249,60 @@ test("unit escapes systemd specifiers and command variable expansion", () => {
 const github = {
   objective: async () => ({ body: "Authorized Objective", state: "open" }),
 };
-const consent = {
-  actor: "fixture",
-  reason: "bounded lifecycle",
-  consent: true,
-};
 async function intakePath(config) {
   const { stateRoot } = await import("../dist/config.js");
   return join(stateRoot(config.repository), "intake.json");
 }
-/** A finite batch with recorded service consent; no command records both without watch. */
+/** Queue Objective 1 and mark the queue as served, as `queue add` then `setup --background` do. */
 async function registerIntake(config) {
   rmSync(statePath(config.repository, 1));
   await enqueueIntake(config, github, [1]);
-  const path = await intakePath(config);
-  const value = JSON.parse(readFileSync(path, "utf8"));
-  value.serviceConsent = consent;
-  writeFileSync(path, JSON.stringify(value));
+  await watchIntake(config);
 }
-test("intake service pins its mode, requires consent and refuses unknown authorization fields", () =>
+test("the service pins its mode, needs the background setup and refuses unknown queue fields", () =>
   fixture(async ({ config, configPath }) => {
     await registerIntake(config);
-    await supervise("install", configPath, { intake: true });
+    await install(configPath);
     const unitPath = join(
       process.env.XDG_CONFIG_HOME,
       "systemd/user",
       serviceName(config.repository),
     );
     const unit = readFileSync(unitPath, "utf8");
-    assert.match(unit, /"--intake"/);
-    assert.doesNotMatch(unit, /"--objective"/);
+    assert.match(unit, /"supervisor" "serve" "--config"/);
+    assert.doesNotMatch(unit, /"--intake"|"--objective"/);
     const path = await intakePath(config);
     const value = JSON.parse(readFileSync(path, "utf8"));
-    delete value.serviceConsent;
+    delete value.watch;
     writeFileSync(path, JSON.stringify(value));
-    assert.throws(() => checkIntakeServiceState(config), /service consent/);
-    value.serviceConsent = consent;
+    assert.throws(
+      () => checkIntakeServiceState(config),
+      /run `factory setup --background`/,
+    );
+    value.watch = true;
     value.futureAuthority = true;
     writeFileSync(path, JSON.stringify(value));
-    assert.throws(() => checkIntakeServiceState(config), /Unsupported intake/);
+    assert.throws(
+      () => checkIntakeServiceState(config),
+      (error) =>
+        error.message.includes(path) &&
+        /unsupported field futureAuthority.*delete it/.test(error.message),
+    );
+    // A retired queue record that carried consent text is refused, never migrated.
+    delete value.futureAuthority;
+    value.serviceConsent = { actor: "x", reason: "y", consent: true };
+    writeFileSync(path, JSON.stringify(value));
+    assert.throws(() => checkIntakeServiceState(config), /unsupported field/);
+    // The fix it names: delete the file, and the service check says to set up the background service.
+    rmSync(path);
+    assert.throws(
+      () => checkIntakeServiceState(config),
+      /run `factory setup --background`/,
+    );
   }));
 test("a service run that exits for a human decision is waiting, not failed", () =>
   fixture(async ({ root, config, configPath }) => {
-    await supervise("install", configPath, { objective: 1 });
+    await install(configPath);
     const unit = readFileSync(
       join(
         process.env.XDG_CONFIG_HOME,
@@ -323,22 +336,22 @@ esac
     );
   }));
 
-test("intake service start requires an owner while pending but accepts an exhausted finite batch", () =>
-  fixture(async ({ root, config, configPath, state }) => {
+test("service start requires the exact coordinator owner", () =>
+  fixture(async ({ root, config, configPath }) => {
     await registerIntake(config);
-    await supervise("install", configPath, { intake: true });
+    await install(configPath);
     writeFileSync(
       join(root, "bin/systemctl"),
       '#!/bin/sh\ncase "$2" in is-system-running) echo running;; is-active) echo failed;; esac\n',
       { mode: 0o700 },
     );
-    await assert.rejects(supervise("start", configPath), /has not established/);
-    const { intakeControl } = await import("../dist/intake.js");
-    await intakeControl(config, "dequeue", 1);
-    await supervise("start", configPath);
+    await assert.rejects(
+      supervise("start", configPath),
+      /has not established its exact coordinator owner; inspect `factory status`/,
+    );
   }));
 
-test("managed CLI readiness and fresh supervised starts use loaded private credentials", () =>
+test("managed readiness and fresh supervised starts use loaded private credentials", () =>
   fixture(async ({ root, config, configPath, state }) => {
     const { spawnSync } = await import("node:child_process");
     const { intakeControl } = await import("../dist/intake.js");
@@ -375,18 +388,26 @@ test("managed CLI readiness and fresh supervised starts use loaded private crede
           },
         },
       );
-    const absent = run(["readiness"], "");
-    assert.equal(absent.status, 1);
-    assert.match(absent.stdout, /FACTORY_SERVICE_TEST_KEY/);
-    assert.doesNotMatch(absent.stderr, /outside-directory/);
-    const present = run(["readiness"], "dummy-ambient");
-    assert.equal(present.status, 0);
-    assert.match(present.stdout, /not verified/);
-    assert.doesNotMatch(present.stdout, /dummy-ambient/);
+    // The preflight setup and run share names the missing credential and its fix.
+    const ambient = process.env.FACTORY_SERVICE_TEST_KEY;
+    try {
+      delete process.env.FACTORY_SERVICE_TEST_KEY;
+      const absent = await checkReadiness(config);
+      assert.equal(absent.ready, false);
+      assert.match(JSON.stringify(absent.document), /FACTORY_SERVICE_TEST_KEY/);
+      assert.match(absent.fix, /FACTORY_SERVICE_TEST_KEY/);
+      process.env.FACTORY_SERVICE_TEST_KEY = "dummy-ambient";
+      const present = await checkReadiness(config);
+      assert.equal(present.ready, true);
+      assert.match(JSON.stringify(present.document), /not verified/);
+      assert.doesNotMatch(JSON.stringify(present), /dummy-ambient/);
+    } finally {
+      if (ambient === undefined) delete process.env.FACTORY_SERVICE_TEST_KEY;
+      else process.env.FACTORY_SERVICE_TEST_KEY = ambient;
+    }
     const args = [
       "supervisor",
       "serve",
-      "--intake",
       "--service-credential",
       "FACTORY_SERVICE_TEST_KEY",
     ];
@@ -425,7 +446,7 @@ test("a supervised Claude planning service keeps the Claude login and may bind a
       serviceName(config.repository),
     );
     // No credential is required: the service uses the operator's login.
-    await supervise("install", configPath, { intake: true });
+    await install(configPath);
     let unit = readFileSync(unitFile, "utf8");
     assert.doesNotMatch(unit, /LoadCredential|--service-credential/);
     assert.match(
@@ -440,14 +461,10 @@ test("a supervised Claude planning service keeps the Claude login and may bind a
     const token = join(root, "claude-token");
     writeFileSync(token, "bound-oauth-token", { mode: 0o600 });
     await assert.rejects(
-      supervise("install", configPath, {
-        intake: true,
-        credentialFiles: [`OTHER_KEY=${token}`],
-      }),
+      install(configPath, { credentialFiles: [`OTHER_KEY=${token}`] }),
       /OTHER_KEY is not required/,
     );
-    await supervise("install", configPath, {
-      intake: true,
+    await install(configPath, {
       credentialFiles: [`CLAUDE_CODE_OAUTH_TOKEN=${token}`],
     });
     unit = readFileSync(unitFile, "utf8");
@@ -462,7 +479,7 @@ test("a supervised Claude planning service keeps the Claude login and may bind a
 
 test("a retired single-credential binding is refused for reuse and only removable", () =>
   fixture(async ({ root, config, configPath }) => {
-    await supervise("install", configPath, { objective: 1 });
+    await install(configPath);
     const path = join(
       process.env.XDG_CONFIG_HOME,
       "systemd/user",
@@ -474,16 +491,14 @@ test("a retired single-credential binding is refused for reuse and only removabl
     );
     value.credential = { name: "KEY", file: join(root, "key") };
     writeFileSync(path, renderService(value), { mode: 0o600 });
-    const legacy = /retired single `credential` field.*--credential-file NAME=/;
+    const legacy =
+      /retired single `credential` field.*factory setup --background --credential-file NAME=/;
     await assert.rejects(
       supervise("upgrade", configPath, { cli: process.argv[1] }),
       legacy,
     );
     await assert.rejects(supervise("start", configPath), legacy);
-    await assert.rejects(
-      supervise("install", configPath, { objective: 1 }),
-      legacy,
-    );
+    await assert.rejects(install(configPath), legacy);
     assert.match(readFileSync(path, "utf8"), /"credential":/);
     const status = await supervise("status", configPath);
     assert.equal(status.binding, undefined);
@@ -497,8 +512,43 @@ test("a retired single-credential binding is refused for reuse and only removabl
       evidenceRetained: true,
     });
     assert.equal(existsSync(path), false);
-    await supervise("install", configPath, { objective: 1 });
+    await install(configPath);
     assert.doesNotMatch(readFileSync(path, "utf8"), /"credential":/);
+  }));
+
+test("a service bound to one Objective by an earlier version is refused for reuse and only removable", () =>
+  fixture(async ({ config, configPath }) => {
+    await install(configPath);
+    const path = join(
+      process.env.XDG_CONFIG_HOME,
+      "systemd/user",
+      serviceName(config.repository),
+    );
+    const prefix = "# Factory local supervision v1 ";
+    const value = JSON.parse(
+      readFileSync(path, "utf8").split("\n")[0].slice(prefix.length),
+    );
+    value.objective = 1;
+    writeFileSync(path, renderService(value), { mode: 0o600 });
+    const legacy =
+      /bound to one Objective by an earlier Factory version; run `factory supervisor uninstall`, then `factory setup --background`/;
+    await assert.rejects(supervise("start", configPath), legacy);
+    await assert.rejects(
+      supervise("upgrade", configPath, { cli: process.argv[1] }),
+      legacy,
+    );
+    await assert.rejects(install(configPath), legacy);
+    const status = await supervise("status", configPath);
+    assert.equal(status.binding, undefined);
+    assert.equal(
+      status.bindingHealth.diagnostics[0].code,
+      "legacy-service-binding",
+    );
+    assert.deepEqual(await supervise("uninstall", configPath), {
+      stopped: true,
+      evidenceRetained: true,
+    });
+    assert.equal(existsSync(path), false);
   }));
 
 test("supervised install and upgrade retain the caller's nonsecret SQLite path", () =>
@@ -506,7 +556,7 @@ test("supervised install and upgrade retain the caller's nonsecret SQLite path",
     process.env.CODEX_HOME = join(root, "codex-home");
     process.env.CODEX_SQLITE_HOME = join(root, "sqlite-home");
     process.env.GITHUB_TOKEN = "excluded-publication-token";
-    await supervise("install", configPath, { objective: 1 });
+    await install(configPath);
     const installed = (await supervise("status", configPath)).binding;
     assert.equal(installed.environment.CODEX_HOME, process.env.CODEX_HOME);
     assert.equal(
@@ -559,8 +609,8 @@ async function cliStatus(configPath) {
     process.execPath,
     [
       new URL("../dist/cli.js", import.meta.url).pathname,
-      "supervisor",
       "status",
+      "--json",
       "--config",
       configPath,
     ],
@@ -568,7 +618,9 @@ async function cliStatus(configPath) {
   );
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, "");
-  return JSON.parse(result.stdout);
+  const { service, queue } = JSON.parse(result.stdout);
+  assert.ok(queue);
+  return service;
 }
 
 test("CLI status separates usable stopped and disabled bindings from registration and manager observations", () =>
@@ -577,7 +629,7 @@ test("CLI status separates usable stopped and disabled bindings from registratio
     const before = readFileSync(stateFile);
     let status = await cliStatus(configPath);
     assert.equal(status.bindingHealth.status, "unregistered");
-    await supervise("install", configPath, { objective: 1 });
+    await install(configPath);
     status = await cliStatus(configPath);
     assert.equal(status.registered, true);
     assert.equal(status.active, "inactive");
@@ -589,7 +641,7 @@ test("CLI status separates usable stopped and disabled bindings from registratio
       config: true,
     });
     assert.match(status.bindingHealth.limitation, /ownership are not verified/);
-    await supervise("disable", configPath);
+    await supervise("stop", configPath, { disable: true });
     status = await cliStatus(configPath);
     assert.equal(status.enabled, "linked");
     assert.equal(status.bindingHealth.status, "usable");
@@ -606,7 +658,7 @@ test("CLI status separates usable stopped and disabled bindings from registratio
 
 test("CLI status diagnoses missing CLI, unavailable Node and missing configuration without executing bindings", () =>
   fixture(async ({ root, config, configPath }) => {
-    await supervise("install", configPath, { objective: 1 });
+    await install(configPath);
     const poisoned = join(root, "poisoned-node");
     writeFileSync(poisoned, `#!/bin/sh\ntouch '${root}/executed'\n`, {
       mode: 0o600,
@@ -633,7 +685,7 @@ test("CLI status diagnoses missing CLI, unavailable Node and missing configurati
     );
     assert.match(
       status.bindingHealth.diagnostics[1].action,
-      /supervisor upgrade/,
+      /factory supervisor upgrade --cli/,
     );
     assert.equal(existsSync(join(root, "executed")), false);
     assert.deepEqual(readFileSync(unitFile(config)), before);
@@ -646,7 +698,7 @@ test("CLI status diagnoses missing CLI, unavailable Node and missing configurati
 
 test("CLI status retains observations for malformed and mismatched bindings and redacts arbitrary marker fields", () =>
   fixture(async ({ root, config, configPath }) => {
-    await supervise("install", configPath, { objective: 1 });
+    await install(configPath);
     const original = readFileSync(unitFile(config), "utf8");
     for (const marker of [
       '# Factory local supervision v1 {"secret":"dummy-secret",',
@@ -719,7 +771,7 @@ test("CLI status retains observations for malformed and mismatched bindings and 
 
 test("CLI status preserves local health when the manager is unavailable and keeps invalid config details private", () =>
   fixture(async ({ root, config, configPath }) => {
-    await supervise("install", configPath, { objective: 1 });
+    await install(configPath);
     writeFileSync(
       join(root, "bin/systemctl"),
       '#!/bin/sh\necho "Failed: dummy-secret" >&2\nexit 1\n',
@@ -742,17 +794,16 @@ test("CLI status preserves local health when the manager is unavailable and keep
     assert.doesNotMatch(JSON.stringify(status), /dummy-secret/);
   }));
 
-test("watch service consent covers queued Objectives and leaves their continuation unchanged", () =>
+test("the background setup covers queued Objectives and leaves their continuation unchanged", () =>
   fixture(async ({ config, state, configPath }) => {
-    const { watchIntake } = await import("../dist/intake.js");
     rmSync(statePath(config.repository, 1));
-    await watchIntake(config, consent);
+    await watchIntake(config);
     await enqueueIntake(config, github, [1]);
     saveState(statePath(config.repository, 1), state);
     const before = readFileSync(statePath(config.repository, 1));
     checkIntakeServiceState(config);
     assert.equal(
-      await supervise("check", configPath, { intake: true }),
+      await supervise("check", configPath),
       "factory-supervision-compatible-v1",
     );
     checkServiceState(config, 1);

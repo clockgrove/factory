@@ -7,12 +7,9 @@ import {
 import type { ContinuationState } from "./state.js";
 import {
   readIntake,
-  intakeComplete,
-  intakeServiceConsent,
   intakeSettled,
   resumeWatcherAfterUpgrade,
 } from "./intake.js";
-import { objectiveComplete } from "./completion.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -43,12 +40,10 @@ import { readContinuation, readControllerOwner } from "./state-store.js";
 interface ServiceBinding {
   /** One systemd LoadCredential per credential the configured providers need. */
   credentials?: { name: string; file: string }[];
-  intake?: boolean;
   version: 1;
   node: string;
   cli: string;
   config: string;
-  objective: number;
   stateHome: string;
   environment: Record<string, string>;
 }
@@ -179,7 +174,7 @@ export function supervisorHost(): {
 function requireHost(): void {
   if (!supervisorHost().supported)
     throw new Error(
-      "A running Linux systemd user manager is required; use foreground factory run diagnostics on this host",
+      "A running Linux systemd user manager is required for the background service; use `factory run --objective N` in the foreground on this host",
     );
 }
 function privateFile(path: string): void {
@@ -192,11 +187,14 @@ function privateFile(path: string): void {
     throw new Error(`Expected an owner-private file: ${path}`);
 }
 export const LEGACY_CREDENTIAL_BINDING =
-  "This service binding uses the retired single `credential` field; run `factory supervisor uninstall`, then reinstall the service with --credential-file NAME=ABSOLUTE_PRIVATE_FILE";
+  "This service binding uses the retired single `credential` field; run `factory supervisor uninstall`, then `factory setup --background --credential-file NAME=ABSOLUTE_PRIVATE_FILE`";
+
+export const LEGACY_SERVICE_BINDING =
+  "This service was bound to one Objective by an earlier Factory version; run `factory supervisor uninstall`, then `factory setup --background`";
 
 /**
- * Only stop, disable and uninstall may act on a retired single-credential
- * binding, so an operator can remove it; nothing reuses or rewrites it.
+ * Only stop and uninstall may act on a retired binding (a single credential, or
+ * one bound to an Objective), so an operator can remove it; nothing reuses or rewrites it.
  */
 function decodeBinding(text: string, teardown = false): ServiceBinding {
   if (!text.startsWith(marker))
@@ -204,6 +202,13 @@ function decodeBinding(text: string, teardown = false): ServiceBinding {
   const value = JSON.parse(text.split("\n")[0]!.slice(marker.length));
   if (!teardown && value && typeof value === "object" && "credential" in value)
     throw new Error(LEGACY_CREDENTIAL_BINDING);
+  if (
+    !teardown &&
+    value &&
+    typeof value === "object" &&
+    ("objective" in value || "intake" in value)
+  )
+    throw new Error(LEGACY_SERVICE_BINDING);
   const path = (value: unknown) =>
     typeof value === "string" && isAbsolute(value) && !/[\n\r\0]/.test(value);
   if (
@@ -211,9 +216,6 @@ function decodeBinding(text: string, teardown = false): ServiceBinding {
     typeof value !== "object" ||
     value.version !== 1 ||
     ![value.node, value.cli, value.config, value.stateHome].every(path) ||
-    !Number.isSafeInteger(value.objective) ||
-    (value.intake === true ? value.objective !== 0 : value.objective <= 0) ||
-    (value.intake !== undefined && typeof value.intake !== "boolean") ||
     !value.environment ||
     typeof value.environment !== "object" ||
     Array.isArray(value.environment) ||
@@ -278,7 +280,7 @@ function inspectBinding(
     report(
       "unregistered",
       "No local Factory service unit is registered.",
-      "Use supervisor install after explicit service consent; no work has been started.",
+      "Run `factory setup --background` to install the service; no work has been started.",
     );
     return { bindingHealth: health };
   }
@@ -302,6 +304,12 @@ function inspectBinding(
         "legacy-credential-binding",
         "The unit uses the retired single-credential binding.",
         LEGACY_CREDENTIAL_BINDING,
+      );
+    else if (error instanceof Error && error.message === LEGACY_SERVICE_BINDING)
+      report(
+        "legacy-service-binding",
+        "The unit is bound to one Objective, as earlier Factory versions did.",
+        LEGACY_SERVICE_BINDING,
       );
     else
       report(
@@ -334,7 +342,7 @@ function inspectBinding(
     report(
       "missing-cli",
       "The bound installed CLI is missing or unreadable.",
-      "Use supervisor upgrade --cli ABSOLUTE_INSTALLED_CLI with a compatible durable installation; the supported upgrade drains the owner and validates state.",
+      "Run `factory supervisor upgrade --cli ABSOLUTE_INSTALLED_CLI` with a compatible durable installation; the supported upgrade drains the owner and validates state.",
     );
   if (!health.checks.config)
     report(
@@ -373,9 +381,7 @@ function inspectBinding(
     node: value.node,
     cli: value.cli,
     config: value.config,
-    objective: value.objective,
     stateHome: value.stateHome,
-    ...(value.intake === undefined ? {} : { intake: value.intake }),
     ...(value.credentials === undefined
       ? {}
       : {
@@ -409,7 +415,6 @@ export function renderService(value: ServiceBinding): string {
       "--service-credential",
       name,
     ]),
-    ...(value.intake ? ["--intake"] : ["--objective", String(value.objective)]),
   ];
   return `${marker}${JSON.stringify(value)}\n[Unit]\nDescription=Factory local Objective coordinator\n[Service]\nType=exec\nUMask=0077\nExecStart=${args.map((value) => quoted(value)).join(" ")}\n${Object.entries(
     { ...value.environment, XDG_STATE_HOME: value.stateHome },
@@ -431,7 +436,7 @@ function checkServiceContinuationFields(state: ContinuationState): void {
         `This artifact cannot validate continuation field ${field}; use the Factory version that wrote the state`,
       );
 }
-/** Installing a service for an Objective is its service consent; state must match this installation. */
+/** Continuation state an Objective already has must match this installation and be readable by this artifact. */
 export function checkServiceState(
   config: FactoryConfig,
   objective: number,
@@ -454,20 +459,20 @@ function hasOwner(config: FactoryConfig): boolean {
 }
 export function checkIntakeServiceState(config: FactoryConfig): void {
   const intake = readIntake(config);
-  if (!intake || !intakeServiceConsent(intake))
+  if (!intake?.watch)
     throw new Error(
-      "Intake background operation requires explicit service consent",
+      "The background service is not set up; run `factory setup --background`",
     );
   for (const id of intake.objectives) checkServiceState(config, id);
 }
 
+/** Ask the service to drain and release the installation; the queue is objective 0. */
 export async function handoffService(
   config: FactoryConfig,
-  objective: number,
   timeoutMs = 30_000,
 ): Promise<void> {
   const reply = await requestControl(config.repository, {
-    objective,
+    objective: 0,
     action: "handoff",
   });
   if (!reply.handled) return;
@@ -475,7 +480,7 @@ export async function handoffService(
   while (hasOwner(config)) {
     if (Date.now() >= deadline)
       throw new Error(
-        "Drain is not yet quiescent; service and evidence retained. Inspect status before another stop or upgrade",
+        "Drain is not yet quiescent; service and evidence retained. Inspect `factory status` before another stop or upgrade",
       );
     await pause(100);
   }
@@ -489,56 +494,33 @@ function awaitsDecision(name: string): boolean {
 }
 async function verifyServiceOwner(
   config: FactoryConfig,
-  objective: number,
   name: string,
-): Promise<"owner" | "settled" | "needs-decision"> {
+): Promise<"owner" | "needs-decision"> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const owner = readControllerOwner(
       join(stateRoot(config.repository), "controller.lock"),
     );
     const pid = Number(inspect("show", name, "--property=MainPID", "--value"));
-    if (
-      owner?.pid === pid &&
-      (owner.objective === objective || (objective === 0 && owner.intake)) &&
-      hasOwner(config)
-    ) {
+    if (owner?.pid === pid && owner.intake && hasOwner(config)) {
       const reply = await requestControl(config.repository, {
-        objective,
+        objective: 0,
         action: "status",
       });
       if (reply.handled) return "owner";
     }
-    const intake = objective === 0 ? readIntake(config) : undefined;
-    if (intake && !intake.watch && intakeComplete(config, intake))
-      return "settled";
-    const current = readContinuation(config.repository, objective);
-    if (
-      current?.cancelledAt ||
-      (current?.schemaVersion === 7 && objectiveComplete(current))
-    )
-      return "settled";
     if (awaitsDecision(name)) return "needs-decision";
     if (inspect("is-active", name) === "failed") break;
     await pause(100);
   }
   throw new Error(
-    "Service has not established its exact coordinator owner; inspect supervisor status and retained evidence",
+    `Service has not established its exact coordinator owner; inspect \`factory status\` and retained evidence${readIntake(config)?.mode === "draining" ? "; the queue is draining, so `factory queue resume` is needed before the service stays up" : ""}`,
   );
 }
 function validateArtifact(value: ServiceBinding): void {
   const result = command(
     value.node,
-    [
-      value.cli,
-      "supervisor",
-      "check",
-      "--config",
-      value.config,
-      ...(value.intake
-        ? ["--intake"]
-        : ["--objective", String(value.objective)]),
-    ],
+    [value.cli, "supervisor", "check", "--config", value.config],
     undefined,
     { ...process.env, ...value.environment, XDG_STATE_HOME: value.stateHome },
   );
@@ -557,17 +539,16 @@ export async function supervise(
   action: string,
   configPath: string,
   input: {
-    objective?: number;
-    intake?: boolean;
     cli?: string;
+    /** `stop` also stops the service from starting again at login. */
+    disable?: boolean;
     /** `NAME=ABSOLUTE_PRIVATE_FILE` for each required provider credential. */
     credentialFiles?: string[];
   } = {},
 ): Promise<unknown> {
   const config = readConfig(configPath);
   if (action === "check") {
-    if (input.intake) checkIntakeServiceState(config);
-    else checkServiceState(config, input.objective!);
+    checkIntakeServiceState(config);
     return "factory-supervision-compatible-v1";
   }
   const path = unitPath(config),
@@ -588,11 +569,6 @@ export async function supervise(
   }
   requireHost();
   if (action === "install") {
-    if (
-      !input.intake &&
-      (!Number.isSafeInteger(input.objective) || input.objective! <= 0)
-    )
-      throw new Error("supervisor install requires --objective N");
     const configFile = realpathSync(configPath);
     privateFile(configFile);
     const environment: Record<string, string> = {};
@@ -608,15 +584,12 @@ export async function supervise(
       node: realpathSync(process.execPath),
       cli: realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url))),
       config: configFile,
-      objective: input.intake ? 0 : input.objective!,
-      ...(input.intake ? { intake: true } : {}),
       stateHome: resolve(
         process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
       ),
       environment,
     };
-    if (value.intake) checkIntakeServiceState(config);
-    else checkServiceState(config, value.objective);
+    checkIntakeServiceState(config);
     if (existsSync(path)) {
       if (JSON.stringify(binding(config)) !== JSON.stringify(value))
         throw new Error(
@@ -629,12 +602,9 @@ export async function supervise(
     systemctl("enable", realpathSync(path));
     return { registered: name, started: false, ...supervisorHost() };
   }
-  if (!existsSync(path) && ["disable", "uninstall", "stop"].includes(action))
+  if (!existsSync(path) && ["uninstall", "stop"].includes(action))
     return { registered: false };
-  const value = binding(
-    config,
-    ["stop", "disable", "uninstall"].includes(action),
-  );
+  const value = binding(config, ["stop", "uninstall"].includes(action));
   if (action === "start") {
     const required = requiredProviderCredentials(config);
     const optional = optionalProviderCredentials(config);
@@ -644,7 +614,7 @@ export async function supervise(
       bound.some((name) => !required.includes(name) && !optional.includes(name))
     )
       throw new Error(
-        `Service credential bindings differ from the configured providers (${required.join(", ") || "none"}); reinstall with --credential-file NAME=ABSOLUTE_PRIVATE_FILE`,
+        `Service credential bindings differ from the configured providers (${required.join(", ") || "none"}); run \`factory setup --background --credential-file NAME=ABSOLUTE_PRIVATE_FILE\``,
       );
     for (const { name, file } of value.credentials ?? [])
       validateCredentialFile(config, name, file);
@@ -653,14 +623,19 @@ export async function supervise(
       throw new Error(
         "An existing foreground owner must hand off before service start",
       );
+    // A stopped service leaves its queue draining, and a draining queue ends the service at once.
+    if (!hasOwner(config) && readIntake(config)?.mode === "draining")
+      throw new Error(
+        "The queue is draining, so a started service would exit at once; run `factory queue resume`, then `factory supervisor start`",
+      );
     systemctl("start", name);
-    const outcome = await verifyServiceOwner(config, value.objective, name);
+    const outcome = await verifyServiceOwner(config, name);
     return {
       active: inspect("is-active", name),
       ...(outcome === "needs-decision" ? { waitingFor: "human-decision" } : {}),
     };
   }
-  if (["stop", "disable", "uninstall", "upgrade"].includes(action)) {
+  if (["stop", "uninstall", "upgrade"].includes(action)) {
     let candidate: ServiceBinding | undefined;
     if (action === "upgrade") {
       if (!input.cli || !isAbsolute(input.cli))
@@ -669,14 +644,13 @@ export async function supervise(
       validateArtifact(candidate);
     }
     const wasActive = inspect("is-active", name) === "active";
-    const beforeIntake =
-      candidate && value.intake ? readIntake(config) : undefined;
+    const beforeIntake = candidate ? readIntake(config) : undefined;
     const resumeIdleWatcher =
       wasActive &&
       beforeIntake?.watch &&
       beforeIntake.mode === "running" &&
       intakeSettled(config);
-    await handoffService(config, value.objective);
+    await handoffService(config);
     systemctl("stop", name);
     if (candidate) {
       validateArtifact(candidate);
@@ -687,7 +661,7 @@ export async function supervise(
         : wasActive;
       if (restart) {
         systemctl("start", name);
-        await verifyServiceOwner(config, value.objective, name);
+        await verifyServiceOwner(config, name);
       }
       return {
         artifact: candidate.cli,
@@ -695,10 +669,11 @@ export async function supervise(
         ...(wasActive && !restart ? { resumeRequired: true } : {}),
       };
     }
-    if (action !== "stop") systemctl("disable", name);
+    if (action !== "stop" || input.disable) systemctl("disable", name);
     // Disable removes external-unit links too. Keep the owned unit discoverable
     // for explicit start, upgrade and uninstall, without enabling future starts.
-    if (action === "disable") systemctl("link", realpathSync(path));
+    if (action === "stop" && input.disable)
+      systemctl("link", realpathSync(path));
     if (action === "uninstall") {
       rmSync(path);
       systemctl("daemon-reload");

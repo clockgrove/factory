@@ -96,7 +96,7 @@ export interface PreparingStatusView extends WaitView {
   /** Whether a controller process owns this installation; null when unknown. */
   runActive: boolean | null;
   coordinator: CoordinatorView | null;
-  /** `digest` is the short review digest `decide --plan` must name. */
+  /** The plan under review; `factory decide` reads its digest from state. */
   planReview: {
     status: string;
     /** False when Factory refuses the plan: only `refuse` can answer it. */
@@ -174,21 +174,8 @@ export function shortPlanDigest(plan: { reviewDigest: string }): string {
   return plan.reviewDigest.slice(0, 12);
 }
 
-/** Whether a decision names this plan: any prefix of its review digest, at least the short form. */
-export function namesPlan(
-  plan: { reviewDigest: string },
-  named: string | undefined,
-): boolean {
-  return (
-    named !== undefined &&
-    /^[0-9a-f]{12,64}$/.test(named) &&
-    plan.reviewDigest.startsWith(named)
-  );
-}
-
 const REASON = '"WHY"';
 const ANSWER = '"ANSWER"';
-const ACTOR = '"$USER"';
 
 function short(text: string, limit = 100): string {
   const line = text.replace(/\s+/g, " ").trim();
@@ -367,7 +354,7 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
         phase: "needs-decision",
         summary: `criterion decision for ${item.id} at tree ${item.acceptancePending.treeSha.slice(0, 12)}`,
         nextAction: {
-          command: `factory decide-result --objective ${objective} --item ${item.id} --tree ${item.acceptancePending.treeSha} --outcome accept|refuse --actor ${ACTOR} --reason ${REASON}`,
+          command: `factory decide --objective ${objective} --item ${item.id} --outcome accept|refuse --reason ${REASON}`,
           reason: `Answer the question below${thenRun(view)}`,
         },
       };
@@ -378,7 +365,7 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
         summary: `asset selection for ${item.id} (${sets.length} candidate set${sets.length === 1 ? "" : "s"})`,
         nextAction: {
           command: `factory select --objective ${objective} --item ${item.id} --set ${sets.length === 1 ? sets[0] : "SET_ID"}`,
-          reason: `Review with factory review --objective ${objective} --item ${item.id} --set SET_ID --output ABSOLUTE_NEW_DIRECTORY; add --bind for each dependent that consumes the set${thenRun(view)}`,
+          reason: `Look at the candidates with factory select --objective ${objective} --item ${item.id} --output ABSOLUTE_NEW_DIRECTORY; add --bind for each dependent that consumes the set${thenRun(view)}`,
         },
       };
     }
@@ -388,7 +375,7 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
       phase: "needs-decision",
       summary: `final acceptance decision at tree ${view.finalAcceptancePending.treeSha.slice(0, 12)}`,
       nextAction: {
-        command: `factory decide-result --objective ${objective} --tree ${view.finalAcceptancePending.treeSha} --outcome accept|refuse --actor ${ACTOR} --reason ${REASON}`,
+        command: `factory decide --objective ${objective} --outcome accept|refuse --reason ${REASON}`,
         reason: `Answer the question below${thenRun(view)}`,
       },
     };
@@ -612,7 +599,7 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
       phase: "needs-plan-decision",
       summary: `Factory cannot accept this plan${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
       nextAction: {
-        command: `factory decide --objective ${objective} --plan ${view.planReview.digest} --outcome refuse --reason ${REASON}`,
+        command: `factory decide --objective ${objective} --outcome refuse --reason ${REASON}`,
         reason: `Discards the plan; ${run(objective)} plans again`,
       },
     };
@@ -621,7 +608,7 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
       phase: "needs-plan-decision",
       summary: "plan review needs a human decision",
       nextAction: {
-        command: `factory decide --objective ${objective} --plan ${view.planReview.digest} --outcome accept|refuse --answer ${ANSWER} --reason ${REASON}`,
+        command: `factory decide --objective ${objective} --outcome accept|refuse --answer ${ANSWER} --reason ${REASON}`,
         reason: `Answer the question below; then ${run(objective)}`,
       },
     };
@@ -719,7 +706,7 @@ export function summarizeStatus(view: StatusView): StatusSummary {
       },
     };
   // An Objective stopped outside any Work Item: inspect, then run it again.
-  // A pending decision waits until then, since decide-result refuses a
+  // A pending decision waits until then, since decide refuses a
   // stopped Objective; a failed item's retry or repair answers the stop.
   if (view.state === "failed" && !failedItem(view))
     return {
@@ -823,12 +810,81 @@ export function renderStatusText(view: StatusView & StatusSummary): string[] {
       lines.push(
         "",
         `${item.id}: ${item.lastError ?? "failed"}`,
-        `  Evidence: factory logs --objective ${view.objective} --item ${item.id}`,
+        `  Evidence: factory diagnostics --objective ${view.objective} --logs ${item.id}`,
       );
   }
   if (view.finalAcceptancePending)
     question("Objective:", view.finalAcceptancePending);
   if (view.state === "failed" && view.lastError)
     lines.push("", `Error: ${view.lastError}`);
+  return lines;
+}
+
+/** What `factory status` without `--objective` reports: the background service and its queue. */
+export interface ServiceStatusDocument {
+  service: {
+    supported?: boolean;
+    unit?: string;
+    registered?: boolean;
+    active?: string;
+    enabled?: string;
+    waitingFor?: string;
+    bindingHealth?: { diagnostics: { message: string; action: string }[] };
+  };
+  queue: {
+    objectives?: number[];
+    dequeued?: number[];
+    watch?: true;
+    mode?: string;
+    activeObjective?: number | null;
+    observation?: { error?: string; needsDecision?: number };
+  };
+}
+
+/** The service and queue as text lines, each problem followed by the command that answers it. */
+export function renderServiceStatus(document: ServiceStatusDocument): string[] {
+  const { service, queue } = document;
+  const lines: string[] = [];
+  if (service.supported === false)
+    lines.push(
+      "Service: unavailable on this host (no running systemd user manager); `factory run --objective N` runs an Objective in the foreground",
+    );
+  else if (!service.registered)
+    lines.push("Service: not set up; `factory setup --background` sets it up");
+  else {
+    lines.push(
+      `Service: ${service.active ?? "unknown"}, ${service.enabled ?? "unknown"}${service.unit ? ` (${service.unit})` : ""}`,
+    );
+    for (const problem of service.bindingHealth?.diagnostics ?? [])
+      lines.push(`  ${problem.message} ${problem.action}`);
+    if (service.waitingFor === "human-decision")
+      lines.push(
+        queue.observation?.needsDecision
+          ? `  Waiting for a decision on Objective #${queue.observation.needsDecision}: \`factory status --objective ${queue.observation.needsDecision}\` names the command; then \`factory queue resume\` and \`factory supervisor start\``
+          : "  Waiting for a decision; `factory queue list` names the Objective",
+      );
+    else if (service.active !== "active")
+      lines.push("  Not running; `factory supervisor start` starts it");
+  }
+  const queued = (queue.objectives ?? []).filter(
+    (id) => !(queue.dequeued ?? []).includes(id),
+  );
+  const parts = [
+    queue.mode ?? "running",
+    queued.length
+      ? `queued ${queued.map((id) => `#${id}`).join(", ")}`
+      : "empty",
+    ...(queue.activeObjective ? [`#${queue.activeObjective} running`] : []),
+  ];
+  lines.push(`Queue: ${parts.join("; ")}`);
+  if (queue.mode === "paused")
+    lines.push("  Paused; `factory queue resume` continues it");
+  else if (queue.mode === "draining")
+    lines.push(
+      "  Draining; `factory queue resume` continues it, then `factory supervisor start` if the service stopped",
+    );
+  if (!queued.length) lines.push("  `factory queue add N` queues an Objective");
+  if (queue.observation?.error)
+    lines.push(`  Last error: ${short(queue.observation.error, 160)}`);
   return lines;
 }

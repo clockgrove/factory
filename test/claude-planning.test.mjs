@@ -812,7 +812,7 @@ test("configuration validates Claude planning and composition needs no API key",
   }
 });
 
-test("install writes explicit Claude planning selections", () => {
+test("setup writes explicit Claude planning selections and a first run checks the login", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-claude-install-"));
   try {
     const { checkout } = createTarget(root);
@@ -823,7 +823,8 @@ test("install writes explicit Claude planning selections", () => {
         process.execPath,
         [
           cli,
-          "install",
+          "setup",
+          "--config-only",
           "--repository",
           "example/claude-install",
           "--checkout",
@@ -841,9 +842,14 @@ test("install writes explicit Claude planning selections", () => {
           env: { ...process.env, XDG_STATE_HOME: join(root, "state") },
         },
       );
+    // Setup reports a refused choice as a blocked document on stdout.
     assert.throws(
       () => install(join(root, "missing.json"), []),
-      /requires --planning-model and --review-model/,
+      (error) =>
+        error.status === 1 &&
+        /requires --planning-model and --review-model/.test(
+          JSON.parse(error.stdout.toString()).blocked.detail,
+        ),
     );
     const configPath = join(root, "factory.json");
     install(configPath, [
@@ -861,12 +867,12 @@ test("install writes explicit Claude planning selections", () => {
       reviewer: { model: "claude-sonnet-5-5", reasoningEffort: "xhigh" },
     });
 
-    // Readiness asks the pinned runtime, model-free, whether a login exists.
+    // A first run asks the pinned runtime, model-free, whether a login exists.
     const emptyLogin = join(root, "claude-config");
     mkdirSync(emptyLogin);
-    const readiness = spawnSync(
+    const first = spawnSync(
       process.execPath,
-      [cli, "readiness", "--config", configPath],
+      [cli, "run", "--objective", "1", "--config", configPath],
       {
         encoding: "utf8",
         env: {
@@ -878,11 +884,13 @@ test("install writes explicit Claude planning selections", () => {
         },
       },
     );
-    assert.equal(readiness.status, 1, readiness.stderr);
-    const report = JSON.parse(readiness.stdout);
-    assert.equal(report.status, "missing");
-    assert.equal(report.planning.status, "missing");
-    assert.match(report.planning.detail, /claude auth login/);
+    assert.equal(first.status, 2, first.stderr);
+    assert.match(
+      first.stdout,
+      /Objective #1 waits before it starts: .*claude auth login/,
+    );
+    assert.match(first.stdout, /\nFix: Run `claude auth login` on this host/);
+    assert.match(first.stdout, /run `factory run --objective 1` again/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

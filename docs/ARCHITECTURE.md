@@ -103,7 +103,7 @@ One controller owns an Objective at a time, through a lock and a private control
 - **Real decisions still stop:** an edited or closed Objective, a PR changed by someone else, failing required checks, or a criterion the reviewer could not decide.
 - **Interruptions repeat; failures stop.** Work Item execution, validation, review and diagnosis are steps (`src/step.ts`): a transient fault repeats with a persisted backoff. A dead worker, a lost model answer and an invalid model answer (asked again with its validation error) may have been paid for, so a step repeats three of them and then asks the operator to retry or cancel. Publication and merge still repeat a lost GitHub response or server error twice per attempt. A real failure (validation failed, a criterion refused, the worker reported failure) keeps its evidence; a new attempt needs `factory retry` or a remaining repair allowance.
 
-Diagnostics (`factory diagnostics`, `logs`, `analyze`) are a private timeline of observations. They never drive lifecycle decisions.
+Diagnostics (`factory diagnostics`, with its `--logs`, `--captures` and `--analyze` modes) are a private timeline of observations. They never drive lifecycle decisions.
 
 ## Media and large files
 

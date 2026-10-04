@@ -1,86 +1,38 @@
 #!/usr/bin/env node
-import {
-  credentialFileBindings,
-  executionCredential,
-  loadServiceLoginCredentials,
-  optionalProviderCredentials,
-  requiredProviderCredentials,
-  resolveProviderCredential,
-} from "./provider-credentials.js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { userInfo } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
-import { runAnalysisCommand } from "./analysis-cli.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { runCaptureExportCommand } from "./capture-export-cli.js";
-import { readInteractionContent, readInteractionMetadata } from "./capture.js";
-import type { PlanCandidate } from "./compiler.js";
-import { probeClaudeLogin } from "./claude-planning.js";
-import {
-  CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
-  configPath,
-  DEFAULT_PLANNER_MODEL_SELECTION,
-  DEFAULT_REVIEWER_MODEL_SELECTION,
-  DEFAULT_WORKER_MODEL_SELECTION,
-  GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
-  readConfig,
-  stateRoot,
-  validateConfig,
-} from "./config.js";
+import { assertKnownFlags, option } from "./cli-flags.js";
+import { configPath, readConfig, stateRoot } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
 import { requestControl } from "./coordinator-control.js";
+import { runDiagnosticsCommand } from "./diagnostics-cli.js";
 import {
-  readAgentTimeline,
-  readUsageSummaryEvents,
   continuationStatusDocument,
-  readWorkerOutput,
   redactDiagnosticDetail,
-  summarizeDiagnosticUsage,
 } from "./diagnostics.js";
-import { probeCodexReadiness } from "./harness-readiness.js";
-import { compose, composePlanning, composeIntake } from "./index.js";
-import {
-  CoordinatorHandoff,
-  controlObjective,
-  selectAssetSetFromCli,
-} from "./runner.js";
-import {
-  type IntakeAuthorization,
-  intakeControl,
-  watchIntake,
-} from "./intake.js";
-import { assertKnownFlags } from "./cli-flags.js";
-import { setupTarget } from "./setup.js";
+import { compose, composeIntake, composePlanning } from "./index.js";
+import { type IntakeAuthorization, intakeControl } from "./intake.js";
+import { operatorName } from "./operator.js";
 import { linuxProcessIdentity } from "./process.js";
-import {
-  readContinuation,
-  readPreState,
-  readControllerOwner,
-  readState,
-} from "./state-store.js";
-import { renderStatusText } from "./status-summary.js";
+import { loadServiceLoginCredentials } from "./provider-credentials.js";
+import { checkReadiness } from "./readiness.js";
+import { controlObjective, selectAssetSetFromCli } from "./runner.js";
 import {
   AwaitingBeforeState,
   awaitingOutcome,
   intakeExitCode,
   runOutcome,
 } from "./run-outcome.js";
+import { setupTarget } from "./setup.js";
 import type { ContinuationState } from "./state.js";
 import {
-  checkServiceState,
-  checkIntakeServiceState,
-  supervise,
-} from "./supervision.js";
-
-function option(args: string[], name: string): string | undefined {
-  const index = args.indexOf(`--${name}`);
-  return index < 0 ? undefined : args[index + 1];
-}
-
-function options(args: string[], name: string): string[] {
-  return args.flatMap((arg, index) =>
-    arg === `--${name}` && args[index + 1] ? [args[index + 1]!] : [],
-  );
-}
+  readContinuation,
+  readControllerOwner,
+  readPreState,
+} from "./state-store.js";
+import { renderServiceStatus, renderStatusText } from "./status-summary.js";
+import { checkIntakeServiceState, supervise } from "./supervision.js";
 
 /** Whether a live controller owns this Objective; null when the lock is unreadable. */
 function controllerActive(
@@ -103,9 +55,212 @@ function controllerActive(
   }
 }
 
+const INSTALL_OPTIONS =
+  "[--repository OWNER/REPO --checkout ABSOLUTE_PATH] [--concurrency N] [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning codex-sdk|claude-agent-sdk] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...]";
+
 function help(): void {
   console.log(
-    `Factory CLI\n\nCommands:\n  setup --background --service-consent --actor NAME --reason TEXT --retain-package [--objective N ...] [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [INSTALL_OPTIONS] [--config PATH]\n  setup --config-only [INSTALL_OPTIONS] [--config PATH]\n  intake watch --service-consent --actor NAME --reason TEXT [--poll-seconds N] [--config PATH]\n  intake enqueue --objective N [--objective N ...] [--priority-label LABEL ...] [--poll-seconds N] [--watch] [--config PATH]\n  intake run|status|pause|resume|drain [--config PATH]\n  intake dequeue --objective N [--config PATH]\n  readiness [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...] [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--config PATH] (outside default: home directory)\n  supervisor install|status|start|stop|disable|uninstall|upgrade [--intake | --objective N] [--cli ABSOLUTE_INSTALLED_CLI] [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...] [--config PATH]\n  install --repository OWNER/REPO --checkout ABSOLUTE_PATH [--concurrency N] [--capture-content --capture-max-bytes N] [--delivery regular|native-stack] [--network host|off] [--planning codex-sdk|claude-agent-sdk] [--planning-model MODEL] [--planning-reasoning EFFORT] [--review-model MODEL] [--review-reasoning EFFORT] [--harness codex-sdk|claude-agent-sdk|github-copilot-sdk] [--worker-model MODEL] [--worker-reasoning EFFORT] [--claude-max-turns N] [--claude-permission acceptEdits|dontAsk] [--claude-setting-source SOURCE ...] [--claude-tool TOOL ...] [--claude-allow-tool TOOL ...] [--copilot-timeout-seconds N] [--copilot-tool TOOL ...] [--config PATH]\n  run --objective N [--deadline ISO_TIMESTAMP] [--config PATH]\n  decide --objective N --plan DIGEST --outcome accept --answer TEXT --reason TEXT [--actor NAME] [--config PATH]\n  decide --objective N [--plan DIGEST] --outcome refuse --reason TEXT [--actor NAME] [--config PATH]\n  plan --objective N [--output ABSOLUTE_NEW_FILE] [--config PATH]   (read-only preview)\n  status --objective N [--json] [--config PATH]\n  analyze --objective N [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE] [--config PATH]\n  diagnostics --objective N [--follow|--summary] [--config PATH]\n  export-captures --objective N --endpoint HTTPS_OTLP_BASE_URL --content metadata|retained [--run ID ...] [--invocation ID ...] [--send --authorize PREVIEW_DIGEST] [--config PATH]\n  captures --objective N [--content RECORD_ID] [--config PATH]\n  logs --objective N --item ID [--follow] [--config PATH]\n  rereview --objective N --item ID --tree SHA --actor NAME --reason TEXT [--config PATH]\n  decide-result --objective N [--item ID] --tree SHA --outcome accept|refuse --actor NAME --reason TEXT [--config PATH]\n  review --objective N --item ID --set SET_ID --output ABSOLUTE_NEW_DIRECTORY [--config PATH]\n  select --objective N --item ID --set SET_ID [--actor NAME] [--reason TEXT] [--bind DEPENDENT_ITEM ...] [--config PATH]\n  propose-amendment --objective N --proposal FILE [--config PATH]\n  pause|drain|resume --objective N [--config PATH]\n  cancel --objective N [--config PATH]\n  repair --objective N --proposal FILE [--config PATH]\n  retry --objective N [--item ID] [--config PATH]   (answers a step decision or config fix; else a new attempt)`,
+    [
+      "Factory CLI",
+      "",
+      "Commands (every command also takes [--config PATH]):",
+      `  setup --config-only ${INSTALL_OPTIONS}`,
+      "      Write the configuration (first run) or verify it against the options given",
+      `  setup --background ${INSTALL_OPTIONS} [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...]`,
+      "      Configure if needed, check readiness, then install and start the background service that runs the queue (this command is the consent)",
+      "  run --objective N [--deadline ISO_TIMESTAMP]",
+      "      Plan if needed and run the Objective until it is done or needs you; the first run checks readiness",
+      "  queue add N [N ...] | list | remove N | pause | resume | drain",
+      "      The Objectives the background service runs, in order",
+      "  supervisor start | stop [--disable] | upgrade --cli ABSOLUTE_INSTALLED_CLI | uninstall",
+      "      Control the background service (stop drains and keeps state; --disable also stops it starting at login)",
+      "  status [--objective N] [--json]",
+      "      With --objective: the phase and the exact next command. Without: the service and the queue",
+      "  decide --objective N [--item ITEM] --outcome accept|refuse [--answer TEXT] --reason TEXT",
+      "      Decide a plan (--answer is required to accept one) or a result criterion (--item names the Work Item; without it, the final acceptance)",
+      "  retry --objective N [--item ITEM] [--rereview]",
+      "      Answer a step's decision or configuration fix, start a failed Work Item's new attempt, or (--item --rereview) run validation and review again on a pending result",
+      "  repair --objective N --proposal FILE",
+      "      Record a diagnosed correction for a failed Work Item",
+      "  propose-amendment --objective N --proposal FILE",
+      "      Submit a graph amendment (or a replacement for a rejected one)",
+      "  diagnostics --objective N [--follow | --summary | --analyze | --logs ITEM [--follow] | --captures [--content RECORD_ID]]",
+      "      The one observation command: agent timeline by default. --analyze takes [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE]",
+      "  export-captures --objective N --endpoint HTTPS_OTLP_BASE_URL --content metadata|retained [--run ID ...] [--invocation ID ...] [--send --authorize PREVIEW_DIGEST]",
+      "      Preview, then send, retained captures off this host",
+      "  select --objective N --item ITEM --output ABSOLUTE_NEW_DIRECTORY",
+      "      Write the candidate AssetSets of a waiting Work Item to look at",
+      "  select --objective N --item ITEM --set SET_ID [--bind DEPENDENT_ITEM ...]",
+      "      Record the pick",
+      "  pause|drain|resume|cancel --objective N",
+    ].join("\n"),
+  );
+}
+
+/** The words of `factory queue ...`: the action, then Objective numbers. `--config PATH` is read elsewhere. */
+function queueWords(args: string[]): string[] {
+  const words: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "--config") index++;
+    else if (arg.startsWith("--"))
+      throw new Error(
+        `Unknown option ${arg} for factory queue; see factory help`,
+      );
+    else words.push(arg);
+  }
+  return words;
+}
+
+/** Objective numbers: positive integers. */
+function objectiveNumbers(words: string[]): number[] {
+  return words.map((word) => {
+    const value = Number(word);
+    if (!/^\d+$/.test(word) || !Number.isSafeInteger(value) || value <= 0)
+      throw new Error(`${word} is not an Objective number`);
+    return value;
+  });
+}
+
+/** `factory queue`: the Objectives the background service runs. */
+async function queueCommand(args: string[], path: string): Promise<void> {
+  const [action, ...rest] = queueWords(args);
+  const config = readConfig(path);
+  const numbers = [...new Set(objectiveNumbers(rest))];
+  if (action === "add") {
+    if (!numbers.length)
+      throw new Error(
+        "queue add requires Objective numbers: queue add N [N ...]",
+      );
+    const record = await composeIntake(config).enqueueIntake(numbers);
+    console.log(
+      JSON.stringify(
+        record.watch
+          ? record
+          : {
+              ...record,
+              note: "The background service is not set up; `factory setup --background` starts it and runs this queue",
+            },
+        null,
+        2,
+      ),
+    );
+  } else if (action === "remove") {
+    if (!numbers.length)
+      throw new Error(
+        "queue remove requires Objective numbers: queue remove N",
+      );
+    let record: unknown;
+    for (const id of numbers)
+      record = await intakeControl(config, "dequeue", id);
+    console.log(JSON.stringify(record, null, 2));
+  } else if (
+    action === "list" ||
+    action === "pause" ||
+    action === "resume" ||
+    action === "drain"
+  ) {
+    if (numbers.length)
+      throw new Error(`queue ${action} takes no Objective numbers`);
+    console.log(
+      JSON.stringify(
+        await intakeControl(config, action === "list" ? "status" : action),
+        null,
+        2,
+      ),
+    );
+  } else
+    throw new Error(
+      `Unknown queue action ${action ?? "(none)"}; use add, list, remove, pause, resume or drain`,
+    );
+}
+
+/** `factory supervisor`: control the background service `setup --background` installed. */
+async function supervisorCommand(args: string[], path: string): Promise<void> {
+  // The action comes first, before any option; `--config PATH` may precede it.
+  const [action] = args[0] === "--config" ? args.slice(2) : args;
+  const moved: Record<string, string> = {
+    install: "factory setup --background",
+    status: "factory status",
+    disable: "factory supervisor stop --disable",
+  };
+  if (action && moved[action])
+    throw new Error(
+      `factory supervisor ${action} was removed; use ${moved[action]}`,
+    );
+  if (action === "serve") {
+    const config = readConfig(path);
+    // A service reads only the credentials systemd loaded for it.
+    const loaded = args.flatMap((arg, index) =>
+      arg === "--service-credential" && args[index + 1]
+        ? [args[index + 1]!]
+        : [],
+    );
+    loadServiceLoginCredentials(config, loaded);
+    checkIntakeServiceState(config);
+    reportIntake(await compose(config, loaded).runIntake());
+    return;
+  }
+  if (
+    !action ||
+    !["start", "stop", "upgrade", "uninstall", "check"].includes(action)
+  )
+    throw new Error(
+      `Unknown supervisor action ${action ?? "(none)"}; use start, stop, upgrade or uninstall`,
+    );
+  if (args.includes("--disable") && action !== "stop")
+    throw new Error("--disable belongs to factory supervisor stop");
+  if (args.includes("--cli") && action !== "upgrade")
+    throw new Error("--cli belongs to factory supervisor upgrade");
+  const result = await supervise(action, path, {
+    cli: option(args, "cli"),
+    disable: args.includes("--disable"),
+  });
+  console.log(
+    typeof result === "string" ? result : JSON.stringify(result, null, 2),
+  );
+}
+
+/** `factory status` without an Objective: the service and the queue. */
+async function serviceStatus(path: string, json: boolean): Promise<void> {
+  const config = readConfig(path);
+  const service = (await supervise("status", path)) as ServiceStatus["service"];
+  const queue = (await intakeControl(
+    config,
+    "status",
+  )) as ServiceStatus["queue"];
+  if (json) console.log(JSON.stringify({ service, queue }));
+  else
+    for (const line of renderServiceStatus({ service, queue }))
+      console.log(line);
+}
+type ServiceStatus = Parameters<typeof renderServiceStatus>[0];
+
+/** `factory decide`: the plan a run saved, or a result criterion, read from the Objective's state. */
+async function decideCommand(
+  config: ReturnType<typeof readConfig>,
+  objective: number,
+  args: string[],
+): Promise<void> {
+  const outcome = option(args, "outcome");
+  const reason = option(args, "reason");
+  const item = option(args, "item");
+  if (!reason || (outcome !== "accept" && outcome !== "refuse"))
+    throw new Error("decide requires --outcome accept|refuse and --reason");
+  const decided = await composePlanning(config).decide(objective, {
+    item,
+    actor: operatorName(),
+    outcome,
+    answer: option(args, "answer"),
+    reason,
+  });
+  const run = `\`factory run --objective ${objective}\``;
+  console.log(
+    decided === "plan-accepted"
+      ? `Accepted the plan for Objective #${objective}; run ${run} to continue`
+      : decided === "plan-refused"
+        ? `Refused and discarded the plan for Objective #${objective}; the next run plans again`
+        : `Recorded ${outcome} for the ${item ? `pending criterion of Work Item ${item}` : "pending final acceptance"}; ${run} continues it`,
   );
 }
 
@@ -120,391 +275,17 @@ async function main(): Promise<void> {
     if (result.status === "blocked") process.exitCode = 1;
     return;
   }
-  if (command === "readiness") {
-    const config = readConfig(path);
-    // Service bindings are checked as files; foreground runs use the environment.
-    const credentialFiles = options(args, "credential-file");
-    const required = requiredProviderCredentials(config);
-    let bindings: { name: string; file: string }[] = [];
-    try {
-      if (credentialFiles.length)
-        bindings = credentialFileBindings(config, credentialFiles);
-      else for (const name of required) resolveProviderCredential(config, name);
-    } catch (error) {
-      console.log(
-        JSON.stringify({
-          status: "missing",
-          credentials: required,
-          detail: String(error),
-          accountAccess: "not verified",
-        }),
-      );
-      process.exitCode = 1;
-      return;
-    }
-    // Claude planning needs a login the Agent SDK resolves; check it model-free.
-    let planning: Record<string, unknown> | undefined;
-    if (config.planning.kind === "claude-agent-sdk") {
-      const optional = optionalProviderCredentials(config);
-      const login = await probeClaudeLogin(
-        Object.fromEntries(
-          bindings
-            .filter(({ name }) => optional.includes(name))
-            .map(({ name, file }) => [name, readFileSync(file, "utf8").trim()]),
-        ),
-      );
-      if (login.status !== "present") {
-        console.log(
-          JSON.stringify({ status: "missing", planning: login }, null, 2),
-        );
-        process.exitCode = 1;
-        return;
-      }
-      planning = { ...login, accountAccess: "not verified" };
-    }
-    // Remote execution has no local harness to probe beyond its credential.
-    if (executionCredential(config)) {
-      console.log(
-        JSON.stringify({
-          status: "present",
-          credentials: required,
-          ...(planning && { planning }),
-          source: credentialFiles.length
-            ? "owner-private service credential"
-            : "controller environment",
-          accountAccess: "not verified",
-        }),
-      );
-      return;
-    }
-    const outsideDirectory = option(args, "outside-directory");
-    const harness =
-      config.execution.kind === "local"
-        ? (config.execution.profiles?.[config.execution.defaultProfile ?? ""]
-            ?.harness ?? config.execution.harness)
-        : undefined;
-    if (harness?.kind !== "codex-sdk") {
-      console.log(
-        JSON.stringify({
-          status: "unavailable",
-          ...(planning && { planning }),
-          detail:
-            "This model-free readiness probe supports the configured default local Codex harness only",
-          controllerValidation: "not assessed",
-        }),
-      );
-      process.exitCode = 1;
-      return;
-    }
-    const credentials = join(stateRoot(config.repository), "empty-gh-config");
-    mkdirSync(credentials, { recursive: true, mode: 0o700 });
-    const result = await probeCodexReadiness({
-      workspace: config.checkout,
-      outsideDirectory,
-      credentialDirectory: credentials,
-      network: config.policy.network,
-      allowedSecretNames: config.policy.allowedSecretNames,
-    });
-    console.log(
-      JSON.stringify(
-        {
-          ...result,
-          ...(planning && { planning }),
-          scope: "configured default implementation harness",
-          controllerValidation:
-            "not assessed; run source-declared acceptance commands in their declared environment",
-        },
-        null,
-        2,
-      ),
-    );
-    if (result.status !== "ready") process.exitCode = 1;
-    return;
-  }
-  if (command === "intake") {
-    const action = args[0] ?? "status";
-    const config = readConfig(path);
-    if (action === "watch") {
-      if (!args.includes("--service-consent"))
-        throw new Error("intake watch requires explicit --service-consent");
-      console.log(
-        JSON.stringify(
-          await watchIntake(
-            config,
-            {
-              actor: option(args, "actor")!,
-              reason: option(args, "reason")!,
-              consent: true,
-            },
-            option(args, "poll-seconds")
-              ? { pollSeconds: Number(option(args, "poll-seconds")) }
-              : {},
-          ),
-          null,
-          2,
-        ),
-      );
-    } else if (action === "enqueue") {
-      const objectives = options(args, "objective").map(Number);
-      if (!objectives.length)
-        throw new Error("intake enqueue requires --objective N");
-      console.log(
-        JSON.stringify(
-          await composeIntake(config).enqueueIntake(objectives, {
-            priorityLabels: options(args, "priority-label"),
-            ...(option(args, "poll-seconds")
-              ? { pollSeconds: Number(option(args, "poll-seconds")) }
-              : {}),
-            ...(args.includes("--watch") ? { watch: true } : {}),
-          }),
-          null,
-          2,
-        ),
-      );
-    } else if (action === "run") {
-      reportIntake(await compose(config).runIntake());
-    } else if (
-      ["status", "pause", "resume", "drain", "dequeue"].includes(action)
-    ) {
-      console.log(
-        JSON.stringify(
-          await intakeControl(
-            config,
-            action as "status" | "pause" | "resume" | "drain" | "dequeue",
-            Number(option(args, "objective")) || undefined,
-          ),
-          null,
-          2,
-        ),
-      );
-    } else throw new Error("Unknown intake action");
-    return;
-  }
-  if (command === "supervisor") {
-    const action = args[0] ?? "status";
-    const input = {
-      objective: Number(option(args, "objective")),
-      intake: args.includes("--intake"),
-      cli: option(args, "cli"),
-      credentialFiles: options(args, "credential-file"),
-    };
-    if (action === "serve") {
-      const config = readConfig(path);
-      // A service reads only the credentials systemd loaded for it.
-      const loaded = options(args, "service-credential");
-      loadServiceLoginCredentials(config, loaded);
-      if (input.intake) {
-        checkIntakeServiceState(config);
-        reportIntake(await compose(config, loaded).runIntake());
-        return;
-      }
-      checkServiceState(config, input.objective);
-      try {
-        reportRun(
-          await compose(config, loaded)
-            .runObjective(input.objective)
-            .catch(waitBeforeState),
-        );
-      } catch (error) {
-        if (!(error instanceof CoordinatorHandoff)) throw error;
-      }
-    } else {
-      const result = await supervise(action, path, input);
-      console.log(
-        typeof result === "string" ? result : JSON.stringify(result, null, 2),
-      );
-    }
-    return;
-  }
-  if (command === "install") {
-    const repository = option(args, "repository");
-    const checkout = option(args, "checkout");
-    if (!repository || !checkout)
-      throw new Error("install requires --repository and --checkout");
-    // An explicit worker ceiling is the operator's whole choice; otherwise every run sizes from its host.
-    const concurrency = option(args, "concurrency")
-      ? Number(option(args, "concurrency"))
-      : undefined;
-    const harness = option(args, "harness") ?? "codex-sdk";
-    if (
-      harness !== "codex-sdk" &&
-      harness !== "claude-agent-sdk" &&
-      harness !== "github-copilot-sdk"
-    )
-      throw new Error(
-        "install --harness must be codex-sdk, claude-agent-sdk, or github-copilot-sdk",
-      );
-    if (
-      harness === "claude-agent-sdk" &&
-      (!option(args, "worker-model") || !option(args, "claude-max-turns"))
-    )
-      throw new Error(
-        "Claude installation requires --worker-model and --claude-max-turns",
-      );
-    if (
-      harness === "github-copilot-sdk" &&
-      (!option(args, "worker-model") ||
-        !option(args, "copilot-timeout-seconds"))
-    )
-      throw new Error(
-        "GitHub Copilot installation requires --worker-model and --copilot-timeout-seconds",
-      );
-    const planning = option(args, "planning") ?? "codex-sdk";
-    if (planning !== "codex-sdk" && planning !== "claude-agent-sdk")
-      throw new Error(
-        "install --planning must be codex-sdk or claude-agent-sdk",
-      );
-    if (
-      planning === "claude-agent-sdk" &&
-      (!option(args, "planning-model") || !option(args, "review-model"))
-    )
-      throw new Error(
-        "Claude planning installation requires --planning-model and --review-model",
-      );
-    const claudeTools = options(args, "claude-tool");
-    const claudeAllowedTools = options(args, "claude-allow-tool");
-    const defaultClaudeTools = ["Read", "Edit", "Write", "Glob", "Grep"];
-    const copilotTools = options(args, "copilot-tool");
-    const defaultCopilotTools = [
-      "view",
-      "create",
-      "edit",
-      "apply_patch",
-      "grep",
-      "glob",
-    ];
-    const config = {
-      schemaVersion: 1,
-      repository,
-      checkout,
-      planning:
-        planning === "claude-agent-sdk"
-          ? {
-              kind: "claude-agent-sdk",
-              maxOutputTokens: 64000,
-              planner: {
-                model: option(args, "planning-model"),
-                reasoningEffort: option(args, "planning-reasoning") ?? "high",
-              },
-              reviewer: {
-                model: option(args, "review-model"),
-                reasoningEffort: option(args, "review-reasoning") ?? "high",
-              },
-            }
-          : {
-              kind: "codex-sdk",
-              planner: {
-                model:
-                  option(args, "planning-model") ??
-                  DEFAULT_PLANNER_MODEL_SELECTION.model,
-                reasoningEffort:
-                  option(args, "planning-reasoning") ??
-                  DEFAULT_PLANNER_MODEL_SELECTION.reasoningEffort,
-              },
-              reviewer: {
-                model:
-                  option(args, "review-model") ??
-                  DEFAULT_REVIEWER_MODEL_SELECTION.model,
-                reasoningEffort:
-                  option(args, "review-reasoning") ??
-                  DEFAULT_REVIEWER_MODEL_SELECTION.reasoningEffort,
-              },
-            },
-      execution: {
-        kind: "local",
-        ...(concurrency === undefined ? {} : { concurrency }),
-        harness:
-          harness === "claude-agent-sdk"
-            ? {
-                kind: "claude-agent-sdk",
-                adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
-                model: option(args, "worker-model"),
-                reasoningEffort: option(args, "worker-reasoning") ?? "medium",
-                permissionMode:
-                  option(args, "claude-permission") ?? "acceptEdits",
-                session: "new-per-attempt",
-                settingSources: options(args, "claude-setting-source"),
-                tools: claudeTools.length ? claudeTools : defaultClaudeTools,
-                allowedTools: claudeAllowedTools.length
-                  ? claudeAllowedTools
-                  : claudeTools.length
-                    ? claudeTools
-                    : defaultClaudeTools,
-                maxTurns: Number(option(args, "claude-max-turns")),
-                authentication: "local",
-              }
-            : harness === "github-copilot-sdk"
-              ? {
-                  kind: "github-copilot-sdk",
-                  adapter: GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
-                  model: option(args, "worker-model"),
-                  reasoningEffort: option(args, "worker-reasoning") ?? "medium",
-                  session: "new-per-attempt",
-                  availableTools: copilotTools.length
-                    ? copilotTools
-                    : defaultCopilotTools,
-                  permissionKinds: ["read", "write"],
-                  timeoutSeconds: Number(
-                    option(args, "copilot-timeout-seconds"),
-                  ),
-                  authentication: "local",
-                }
-              : {
-                  kind: "codex-sdk",
-                  model:
-                    option(args, "worker-model") ??
-                    DEFAULT_WORKER_MODEL_SELECTION.model,
-                  reasoningEffort:
-                    option(args, "worker-reasoning") ??
-                    DEFAULT_WORKER_MODEL_SELECTION.reasoningEffort,
-                },
-      },
-      delivery: { kind: option(args, "delivery") ?? "regular" },
-      contentStore: { kind: "local" },
-      ...(args.includes("--capture-content")
-        ? {
-            capture: {
-              enabled: true,
-              maxBytesPerInvocation: Number(
-                option(args, "capture-max-bytes") ?? 8388608,
-              ),
-            },
-          }
-        : {}),
-      policy: {
-        network: option(args, "network") ?? "host",
-        allowedSecretNames: [],
-        deployments: "denied",
-      },
-    };
-    validateConfig(config);
-    if (existsSync(path) || existsSync(stateRoot(repository))) {
-      throw new Error(
-        "Factory installation requires an empty configuration and state root",
-      );
-    }
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, {
-      flag: "wx",
-      mode: 0o600,
-    });
-    console.log(
-      `Installed Factory for ${repository} at ${path} with ${concurrency === undefined ? "concurrency and scheduling sized from the host at run time" : `concurrency ${concurrency}`}`,
-    );
-    return;
-  }
+  if (command === "queue") return queueCommand(args, path);
+  if (command === "supervisor") return supervisorCommand(args, path);
+  if (command === "status" && option(args, "objective") === undefined)
+    return serviceStatus(path, args.includes("--json"));
   if (
     ![
-      "plan",
       "decide",
       "run",
       "status",
       "diagnostics",
-      "analyze",
-      "captures",
       "export-captures",
-      "logs",
-      "review",
       "select",
       "cancel",
       "propose-amendment",
@@ -513,68 +294,17 @@ async function main(): Promise<void> {
       "resume",
       "retry",
       "repair",
-      "decide-result",
-      "rereview",
     ].includes(command)
   )
-    throw new Error(`Unknown command: ${command}`);
+    throw new Error(`Unknown command: ${command}; see factory help`);
   const config = readConfig(path);
   const objective = Number(option(args, "objective"));
   if (!Number.isSafeInteger(objective) || objective <= 0)
     throw new Error(`${command} requires --objective N`);
-  const savePlan = (output: string, candidate: PlanCandidate): void => {
-    if (!output.startsWith("/"))
-      throw new Error("Plan output requires an absolute file path");
-    const target = resolve(config.checkout);
-    const destination = resolve(output);
-    if (destination === target || destination.startsWith(`${target}${sep}`))
-      throw new Error("Plan output must stay outside the target checkout");
-    mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
-    writeFileSync(destination, `${JSON.stringify(candidate, null, 2)}\n`, {
-      flag: "wx",
-      mode: 0o600,
-    });
-  };
-  if (command === "plan") {
-    const candidate = await composePlanning(config).planObjective(objective);
-    const output = option(args, "output");
-    const json = `${JSON.stringify(candidate, null, 2)}\n`;
-    if (output) {
-      savePlan(output, candidate);
-      console.log(
-        `Plan for Objective #${objective}: ${candidate.review.status}; saved ${output}`,
-      );
-      if (candidate.review.failure)
-        console.log(candidate.review.failure.question);
-      else if (candidate.review.findings.length)
-        console.log(candidate.review.findings[0]!.question);
-    } else console.log(json.trimEnd());
-    return;
-  } else if (command === "decide") {
-    const outcome = option(args, "outcome");
-    const reason = option(args, "reason");
-    const answer = option(args, "answer");
-    if (!reason || (outcome !== "accept" && outcome !== "refuse"))
-      throw new Error("decide requires --outcome accept|refuse and --reason");
-    if (outcome === "accept" && !answer)
-      throw new Error("Accepting a plan requires --answer to its question");
-    const decided = await composePlanning(config).decidePlan(objective, {
-      plan: option(args, "plan"),
-      actor: option(args, "actor") ?? userInfo().username,
-      outcome,
-      answer: answer ?? "",
-      reason,
-    });
-    console.log(
-      outcome === "accept"
-        ? `Accepted the plan for Objective #${objective}; run \`factory run --objective ${objective}\` to continue`
-        : `Refused and discarded the plan for Objective #${decided.objective}; the next run plans again`,
-    );
-    return;
-  }
   let application: ReturnType<typeof compose> | undefined;
   const requireApplication = (): ReturnType<typeof compose> =>
     (application ??= compose(config));
+  if (command === "decide") return decideCommand(config, objective, args);
   if (command === "propose-amendment") {
     const proposalPath = option(args, "proposal");
     if (!proposalPath)
@@ -621,95 +351,8 @@ async function main(): Promise<void> {
     const result = await runCaptureExportCommand(config, objective, args);
     console.log(JSON.stringify(result, null, 2));
     if (!["preview", "accepted"].includes(result.status)) process.exitCode = 1;
-  } else if (command === "captures") {
-    const records = readInteractionMetadata(config.repository, objective);
-    const id = option(args, "content");
-    if (id) {
-      const record = records.find((record) => record.recordId === id);
-      if (!record?.content.reference)
-        throw new Error("Captured content unavailable for this record");
-      console.log(
-        readInteractionContent(config.repository, record.content.reference),
-      );
-    } else for (const record of records) console.log(JSON.stringify(record));
-  } else if (command === "analyze") {
-    process.stdout.write(runAnalysisCommand(config, objective, args));
   } else if (command === "diagnostics") {
-    if (args.includes("--follow") && args.includes("--summary"))
-      throw new Error("diagnostics accepts only one of --follow or --summary");
-    if (args.includes("--summary")) {
-      const continuation = readContinuation(config.repository, objective);
-      console.log(
-        JSON.stringify(
-          summarizeDiagnosticUsage(
-            readUsageSummaryEvents(
-              config.repository,
-              objective,
-              continuation?.schemaVersion === 7 ? continuation : undefined,
-            ),
-          ),
-        ),
-      );
-      return;
-    }
-    const seen = new Set<string>();
-    const printNew = () => {
-      const continuation = readContinuation(config.repository, objective);
-      const timeline = readAgentTimeline(
-        config.repository,
-        objective,
-        continuation?.schemaVersion === 7 ? continuation : undefined,
-      );
-      for (const event of timeline) {
-        const json = JSON.stringify(event);
-        if (!seen.has(json)) console.log(json);
-        seen.add(json);
-      }
-    };
-    printNew();
-    if (args.includes("--follow")) {
-      await new Promise<void>((resolve) => {
-        const interval = setInterval(printNew, 250);
-        const stop = () => {
-          clearInterval(interval);
-          resolve();
-        };
-        process.once("SIGINT", stop);
-        process.once("SIGTERM", stop);
-      });
-    }
-  } else if (command === "logs") {
-    const item = option(args, "item");
-    const state = readState(config.repository, objective);
-    const attempt = item && state?.work[item]?.attempt;
-    if (!attempt)
-      throw new Error("logs requires a Work Item with a recorded attempt");
-    let lines = 0;
-    const show = () => {
-      const complete = readWorkerOutput(config.repository, attempt).split("\n");
-      complete.pop();
-      for (const line of complete.slice(lines))
-        console.log(
-          redactDiagnosticDetail(
-            line,
-            config.policy.allowedSecretNames
-              .map((name) => process.env[name])
-              .filter((value): value is string => Boolean(value)),
-          ),
-        );
-      lines = complete.length;
-    };
-    show();
-    if (args.includes("--follow"))
-      await new Promise<void>((resolve) => {
-        const interval = setInterval(show, 250);
-        const stop = () => {
-          clearInterval(interval);
-          resolve();
-        };
-        process.once("SIGINT", stop);
-        process.once("SIGTERM", stop);
-      });
+    await runDiagnosticsCommand(config, objective, args);
   } else if (command === "cancel") {
     const reply = await requestControl(config.repository, {
       objective,
@@ -735,6 +378,21 @@ async function main(): Promise<void> {
     console.log("Diagnosed repair recorded within the configured allowance");
   } else if (command === "retry") {
     const item = option(args, "item");
+    if (args.includes("--rereview")) {
+      if (!item) throw new Error("retry --rereview requires --item");
+      const input = { item, actor: operatorName() };
+      const reply = await requestControl(config.repository, {
+        objective,
+        action: "rereview",
+        input,
+      });
+      if (!reply.handled)
+        requireApplication().rereviewWorkItem(objective, input);
+      console.log(
+        `Work Item ${item} is ready for validation and automatic review; \`factory run --objective ${objective}\` continues it`,
+      );
+      return;
+    }
     const reply = await requestControl(config.repository, {
       objective,
       action: "retry",
@@ -748,76 +406,35 @@ async function main(): Promise<void> {
         ? `The ${item === undefined ? "Objective" : `Work Item ${item}`} step will run again; ${reply.handled ? "the active run continues it" : `factory run --objective ${objective} continues it`}`
         : `Work Item ${item} is pending for a new explicit attempt`,
     );
-  } else if (command === "rereview") {
-    const item = option(args, "item");
-    const treeSha = option(args, "tree");
-    const actor = option(args, "actor");
-    const reason = option(args, "reason");
-    if (!item || !treeSha || !actor || !reason)
-      throw new Error(
-        "rereview requires --item, --tree, --actor, and --reason",
-      );
-    const rereviewInput = {
-      item,
-      treeSha,
-      actor,
-      reason,
-    };
-    const reply = await requestControl(config.repository, {
-      objective,
-      action: "rereview",
-      input: rereviewInput,
-    });
-    if (!reply.handled)
-      requireApplication().rereviewWorkItem(objective, rereviewInput);
-    console.log(
-      `Work Item ${item} is ready for validation and automatic review; use run to continue`,
-    );
-  } else if (command === "decide-result") {
-    const treeSha = option(args, "tree");
-    const actor = option(args, "actor");
-    const reason = option(args, "reason");
-    const outcome = option(args, "outcome");
-    if (
-      !treeSha ||
-      !actor ||
-      !reason ||
-      (outcome !== "accept" && outcome !== "refuse")
-    )
-      throw new Error(
-        "decide-result requires --tree, --outcome, --actor, and --reason",
-      );
-    const decisionInput = {
-      item: option(args, "item"),
-      treeSha,
-      actor,
-      reason,
-      outcome: outcome as "accept" | "refuse",
-    };
-    const reply = await requestControl(config.repository, {
-      objective,
-      action: "decide-result",
-      input: decisionInput,
-    });
-    if (!reply.handled)
-      requireApplication().decideResult(objective, decisionInput);
-    console.log(
-      `Recorded ${outcome} for the exact pending criterion at ${treeSha}`,
-    );
   } else if (command === "select") {
     const item = option(args, "item");
     const set = option(args, "set");
-    if (!item || !set) throw new Error("select requires --item and --set");
+    const output = option(args, "output");
+    if (!item) throw new Error("select requires --item");
+    if (!set) {
+      if (!output || args.includes("--bind"))
+        throw new Error(
+          "select without --set writes the candidates for review and requires --output ABSOLUTE_NEW_DIRECTORY; select --set SET_ID records the pick",
+        );
+      const sets = await requireApplication().exportAssetSetsForReview(
+        objective,
+        item,
+        output,
+      );
+      console.log(
+        `Wrote ${sets.length} candidate AssetSet${sets.length === 1 ? "" : "s"} (${sets.join(", ")}) to ${output}; choose with factory select --objective ${objective} --item ${item} --set SET_ID`,
+      );
+      return;
+    }
+    if (output)
+      throw new Error("--output writes the candidates; omit --set to use it");
+    const downstreamItems = args.flatMap((arg, index) =>
+      arg === "--bind" && args[index + 1] ? [args[index + 1]!] : [],
+    );
     const reply = await requestControl(config.repository, {
       objective,
       action: "select",
-      input: {
-        item,
-        set,
-        actor: option(args, "actor"),
-        reason: option(args, "reason"),
-        downstreamItems: options(args, "bind"),
-      },
+      input: { item, set, downstreamItems },
     });
     if (!reply.handled)
       await selectAssetSetFromCli(
@@ -826,29 +443,20 @@ async function main(): Promise<void> {
         item,
         set,
         new LocalContentStore(join(stateRoot(config.repository), "content")),
-        {
-          actor: option(args, "actor"),
-          reason: option(args, "reason"),
-          downstreamItems: options(args, "bind"),
-        },
+        { downstreamItems },
       );
     console.log(
       `Selected AssetSet ${set} for Work Item ${item}; run the Objective to continue`,
     );
-  } else if (command === "review") {
-    const item = option(args, "item");
-    const set = option(args, "set");
-    const output = option(args, "output");
-    if (!item || !set || !output)
-      throw new Error("review requires --item, --set, and --output");
-    await requireApplication().exportAssetSetForReview(
-      objective,
-      item,
-      set,
-      output,
-    );
-    console.log(`Exported AssetSet ${set} to ${output} for review`);
   } else {
+    // A first run checks what the Objective will need before it plans.
+    if (!readContinuation(config.repository, objective)) {
+      const ready = await checkReadiness(config);
+      if (!ready.ready)
+        return reportRun(
+          new AwaitingBeforeState(objective, ready.detail!, ready.fix),
+        );
+    }
     reportRun(
       await requireApplication()
         .runObjective(objective, { deadlineAt: option(args, "deadline") })
@@ -857,7 +465,7 @@ async function main(): Promise<void> {
   }
 }
 
-/** Print the intake record and set the documented exit code. */
+/** Print the queue record and set the documented exit code. */
 function reportIntake(record: IntakeAuthorization): void {
   console.log(JSON.stringify(record, null, 2));
   process.exitCode = intakeExitCode(record);

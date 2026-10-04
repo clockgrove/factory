@@ -29,7 +29,6 @@ import {
 import { objectiveCriteria, CodexPlanningModel } from "../dist/compiler.js";
 import { coverageObligations, aggregateAcceptance } from "../dist/qa.js";
 import { faultOf, StepFault } from "../dist/fault.js";
-import { shortPlanDigest } from "../dist/status-summary.js";
 import {
   validateTree,
   workItemReviewEvidence,
@@ -1210,7 +1209,6 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
     assert.equal(waiting.schemaVersion, 8);
     assert.equal(waiting.plan.review.status, "needs-human");
     await fixture.application.decidePlan(1, {
-      plan: shortPlanDigest(waiting.plan),
       actor: "fixture-owner",
       outcome: "accept",
       reason: "Answer applies to this exact reviewed packet",

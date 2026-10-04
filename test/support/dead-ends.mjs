@@ -331,7 +331,7 @@ function controllerProcess(world, extra, onLine, timeoutMs = 120_000) {
 
 // ---- trajectories --------------------------------------------------------------
 
-const DECISIONS = new Set(["decide-result", "decide"]);
+const DECISIONS = new Set(["decide"]);
 
 /**
  * Run the scripted Objective in a fresh root and capture the first snapshot
@@ -833,7 +833,7 @@ function operatorCommand(text) {
   return { verb: words[1], options };
 }
 
-const INSPECTION = new Set(["diagnostics", "logs", "status", "review"]);
+const INSPECTION = new Set(["diagnostics", "status"]);
 /** How a stop reads to the operator, to tell two stops apart. */
 const stopOf = (report) =>
   JSON.stringify([

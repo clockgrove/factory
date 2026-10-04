@@ -2442,18 +2442,21 @@ test("operator decision records criterion and exact tree before resuming validat
           },
         },
       ];
+      // A pending result whose tree is not the one its commit holds is refused.
+      state.work.one.acceptancePending.treeSha = target.baseSha;
       saveState(statePath(config.repository, 1), state);
       assert.throws(
         () =>
           decideResult(config, 1, {
             item: "one",
-            treeSha: target.baseSha,
             actor: "owner",
             outcome: "accept",
             reason: "Reviewed",
           }),
         /tree differs/,
       );
+      state.work.one.acceptancePending.treeSha = treeSha;
+      saveState(statePath(config.repository, 1), state);
       const stillWaiting = readState(config.repository, 1).work.one;
       assert.equal(stillWaiting.status, "waiting");
       assert.equal(
@@ -2462,7 +2465,6 @@ test("operator decision records criterion and exact tree before resuming validat
       );
       decideResult(config, 1, {
         item: "one",
-        treeSha,
         actor: "owner",
         outcome: "accept",
         reason: "Reviewed the exact result",

@@ -81,7 +81,7 @@ export function recordWorkFailure(
       ? "decision"
       : fault.kind;
   const decisions: Record<FailureClass, string> = {
-    implementation: `Supply a concrete diagnosis and correction (\`factory repair\`), enable implementation repair in the configured autonomy, or start a new attempt with ${retry}`,
+    implementation: `Supply a concrete diagnosis and correction (\`factory repair --objective ${state.objective} --proposal FILE\`), enable implementation repair in the configured autonomy, or start a new attempt with ${retry}`,
     "planning-output": detail,
     "planning-evidence": detail,
     "planning-choice": detail,
@@ -91,7 +91,7 @@ export function recordWorkFailure(
         : `The result failed after it was integrated or while the Objective was cancelling; inspect it, then ${retry} or cancel`,
     config: `${fault.kind === "config" ? fault.fix : detail}; then ${retry}`,
     transient: `Interrupted outside a repeatable step; check the provider, network or GitHub status, then ${retry}`,
-    defect: `Factory hit a defect; report it with \`factory logs\`, then start a new attempt with ${retry}`,
+    defect: `Factory hit a defect; report it (evidence: \`factory diagnostics --objective ${state.objective} --logs ${id}\`), then start a new attempt with ${retry}`,
     cancelled: "Cancelled by the operator",
   };
   const failure: FailureDisposition = {
@@ -326,7 +326,7 @@ export async function diagnoseWorkRepair(args: {
     if (fault.kind === "cancelled") return false;
     if (fault.kind === "decision")
       return stop(
-        `${fault.question} Supply a correction (\`factory repair\`) or start a new attempt with \`${retry}\``,
+        `${fault.question} Supply a correction (\`factory repair --objective ${state.objective} --proposal FILE\`) or start a new attempt with \`${retry}\``,
       );
     if (fault.kind === "config") {
       failure.decision = `${fault.fix}; then \`factory run --objective ${state.objective}\` asks the diagnosis again`;

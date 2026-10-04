@@ -50,7 +50,8 @@ test("Copilot default tools expose the model's native editor and preserve worktr
       process.execPath,
       [
         resolve(import.meta.dirname, "../dist/cli.js"),
-        "install",
+        "setup",
+        "--config-only",
         "--repository",
         "example/copilot-tools",
         "--checkout",

@@ -180,18 +180,9 @@ async function command({ verb, options }) {
       return;
     case "retry":
       return application.retryWorkItem(objective, item);
-    case "decide-result":
-      return application.decideResult(objective, {
-        item,
-        treeSha: options.tree,
-        actor: "operator",
-        outcome: "accept",
-        reason: "Accepted by the dead-end finder",
-      });
     case "select":
       return application.selectAssetSet(objective, item, options.set, {
         actor: "operator",
-        reason: "Selected by the dead-end finder",
       });
     case "repair": {
       // The operator writes the proposal: a diagnosed implementation correction.
@@ -214,11 +205,12 @@ async function command({ verb, options }) {
       });
     }
     case "decide":
-      return application.decidePlan(objective, {
-        plan: options.plan,
+      // The state says whether this is a plan or a result; only a plan takes an answer.
+      return application.decide(objective, {
+        item,
         actor: "operator",
-        outcome: options.plan ? "accept" : "refuse",
-        answer: "Proceed",
+        outcome: options.outcome === "refuse" ? "refuse" : "accept",
+        answer: options.answer ? "Proceed" : undefined,
         reason: "Decided by the dead-end finder",
       });
     case "cancel":

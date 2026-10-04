@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,7 +10,6 @@ import {
 } from "../dist/completion.js";
 import { submitAmendment, graphDigest } from "../dist/graph-amendments.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
-import { supervise } from "../dist/supervision.js";
 import { statusDocument } from "../dist/diagnostics.js";
 import {
   createTarget,
@@ -255,52 +254,5 @@ test("remote default advancement during final review validates and reviews the n
     assert.deepEqual(state.finalHead.heads, [head]);
     assert.equal(state.finalAcceptance.commit, head);
     assert.equal(state.objectiveClosure, "complete");
-  });
-});
-
-test("supervisor owner verification distinguishes pending closure from completed acceptance", async () => {
-  await fixture("service-closure", async (args) => {
-    const setup = setupFixture(args);
-    const completed = await setup.application.runObjective(1);
-    const previousPath = process.env.PATH;
-    const previousConfig = process.env.XDG_CONFIG_HOME;
-    process.env.XDG_CONFIG_HOME = join(args.root, "user-config");
-    const bin = join(args.root, "service-bin");
-    mkdirSync(bin);
-    writeFileSync(
-      join(bin, "systemctl"),
-      '#!/bin/sh\ncase "$2" in is-system-running) echo running;; is-active) echo failed;; is-enabled) echo enabled;; show) echo 0;; esac\n',
-      { mode: 0o700 },
-    );
-    writeFileSync(join(bin, "loginctl"), "#!/bin/sh\necho no\n", {
-      mode: 0o700,
-    });
-    process.env.PATH = `${bin}:${process.env.PATH}`;
-    const configPath = join(args.root, "factory.json");
-    writeFileSync(configPath, JSON.stringify(args.config), { mode: 0o600 });
-    try {
-      const pending = structuredClone(completed);
-      pending.objectiveClosure = "pending";
-      saveState(statePath(args.config.repository, 1), pending);
-      await supervise("install", configPath, { objective: 1 });
-      await assert.rejects(
-        supervise("start", configPath),
-        /has not established its exact coordinator owner/,
-      );
-      assert.equal(
-        readState(args.config.repository, 1).objectiveClosure,
-        "pending",
-      );
-      saveState(statePath(args.config.repository, 1), completed);
-      await supervise("start", configPath);
-      assert.equal(
-        objectiveComplete(readState(args.config.repository, 1)),
-        true,
-      );
-    } finally {
-      process.env.PATH = previousPath;
-      if (previousConfig === undefined) delete process.env.XDG_CONFIG_HOME;
-      else process.env.XDG_CONFIG_HOME = previousConfig;
-    }
   });
 });

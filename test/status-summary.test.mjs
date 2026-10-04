@@ -142,7 +142,7 @@ test("preparation reports planning, a plan decision, pause and failure", () => {
   assert.equal(decision.phase, "needs-plan-decision");
   assert.equal(
     decision.nextAction.command,
-    'factory decide --objective 7 --plan 0123456789ab --outcome accept|refuse --answer "ANSWER" --reason "WHY"',
+    'factory decide --objective 7 --outcome accept|refuse --answer "ANSWER" --reason "WHY"',
   );
   // Planning that stopped before producing a plan names the way out.
   const stopped = summarizeStatus(
@@ -254,7 +254,7 @@ test("decisions name the exact command with real values", () => {
   );
   assert.equal(
     criterion.nextAction.command,
-    `factory decide-result --objective 7 --item A --tree ${tree} --outcome accept|refuse --actor "$USER" --reason "WHY"`,
+    'factory decide --objective 7 --item A --outcome accept|refuse --reason "WHY"',
   );
   const asset = summarizeStatus(
     execution([
@@ -279,7 +279,7 @@ test("decisions name the exact command with real values", () => {
   );
   assert.equal(
     final.nextAction.command,
-    `factory decide-result --objective 7 --tree ${tree} --outcome accept|refuse --actor "$USER" --reason "WHY"`,
+    'factory decide --objective 7 --outcome accept|refuse --reason "WHY"',
   );
   const repair = summarizeStatus(
     execution([item("A", { status: "failed", lastError: "tests failed" })], {
@@ -434,10 +434,7 @@ test("text leads with the phase line, the next command, then the item table", ()
     lines[0],
     `Objective #7: needs decision — criterion decision for B at tree ${"a".repeat(12)}`,
   );
-  assert.match(
-    lines[1],
-    /^Next: factory decide-result --objective 7 --item B /,
-  );
+  assert.match(lines[1], /^Next: factory decide --objective 7 --item B /);
   assert.equal(lines[2], "      Answer the question below");
   assert.deepEqual(lines.slice(4, 8), [
     "  ITEM  STATUS                    PR   REASON",
@@ -490,7 +487,7 @@ test("status documents carry the same phase, summary and next action", () => {
   assert.equal(prepared.phase, "needs-plan-decision");
   assert.equal(prepared.planReview.question, "Keep [REDACTED]?");
   assert.equal(prepared.planReview.digest, "e".repeat(12));
-  assert.match(prepared.nextAction.command, /--plan eeeeeeeeeeee /);
+  assert.doesNotMatch(prepared.nextAction.command, /--plan/);
   const text = renderStatusText(prepared);
   assert.equal(
     text[0],

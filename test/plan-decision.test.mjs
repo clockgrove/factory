@@ -7,7 +7,6 @@ import test from "node:test";
 import { planReviewPacket } from "../dist/compiler.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
 import { readContinuation, saveState, statePath } from "../dist/state-store.js";
-import { shortPlanDigest } from "../dist/status-summary.js";
 import { withCoverage } from "./support/coverage.mjs";
 import { writeStateFile } from "./support/state-file.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
@@ -132,13 +131,9 @@ async function fixture(name, callback, options = {}) {
   }
 }
 
-/** Decide on the plan currently saved, as the status command names it. */
+/** Decide on the plan currently saved, as the decide command does. */
 function decideSaved(application, config, input) {
-  const plan = readContinuation(config.repository, 1)?.plan;
-  return application.decidePlan(1, {
-    ...(plan ? { plan: shortPlanDigest(plan) } : {}),
-    ...input,
-  });
+  return application.decidePlan(1, input);
 }
 
 const accept = {

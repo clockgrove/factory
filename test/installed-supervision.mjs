@@ -64,7 +64,8 @@ const run = (...args) =>
     timeout: 45_000,
   });
 run(
-  "install",
+  "setup",
+  "--config-only",
   "--repository",
   "example/factory-supervision-fixture",
   "--checkout",
@@ -80,36 +81,16 @@ const { factoryConfigDigest, stateRoot } = await import(
 const { saveState, statePath } = await import(
   pathToFileURL(join(installation, "dist/state-store.js"))
 );
+const { defaultAutonomy } = await import(
+  pathToFileURL(join(installation, "dist/index.js"))
+);
+const { watchIntake } = await import(
+  pathToFileURL(join(installation, "dist/intake.js"))
+);
+const { supervise } = await import(
+  pathToFileURL(join(installation, "dist/supervision.js"))
+);
 const config = JSON.parse(readFileSync(configPath, "utf8"));
-const admissionBase = {
-  schemaVersion: 1,
-  repository: config.repository,
-  objective: 1,
-  baseSha,
-  configDigest: factoryConfigDigest(config),
-  authority: {
-    schemaVersion: 1,
-    actor: "model-free installed lifecycle fixture",
-    reason: "Paused owner only; no provider, GitHub or target work",
-    executionConsent: true,
-    serviceConsent: true,
-    objectives: [1],
-    allowances: {
-      planningRevisions: 0,
-      implementationRepairs: 0,
-      resultRereviews: 0,
-    },
-    repairClasses: [],
-    resources: { maxConcurrency: 1 },
-    requiredEnvironment: [],
-  },
-};
-const admission = {
-  ...admissionBase,
-  digest: createHash("sha256")
-    .update(JSON.stringify(admissionBase))
-    .digest("hex"),
-};
 const state = {
   schemaVersion: 8,
   kind: "preparing",
@@ -119,7 +100,8 @@ const state = {
   configDigest: factoryConfigDigest(config),
   baseSha,
   objectiveBodyDigest: "a".repeat(64),
-  admission,
+  autonomy: defaultAutonomy,
+  capacity: { concurrency: 1 },
   issueByItemId: {},
   coordinator: {
     mode: "paused",
@@ -132,7 +114,7 @@ const snapshot = () =>
   JSON.parse(readFileSync(statePath(config.repository, 1), "utf8"));
 const report = {
   scenario:
-    "Installed model-free paused coordinator lifecycle; synthetic admission and local public fixture. No model-backed Objective acceptance claimed.",
+    "Installed model-free paused coordinator lifecycle; synthetic paused Objective state and local public fixture. No model-backed Objective acceptance claimed.",
   installation,
   cliSha256: createHash("sha256").update(readFileSync(cli)).digest("hex"),
   checks: [],
@@ -165,10 +147,26 @@ writeFileSync(
 );
 let installed = false;
 try {
-  run("supervisor", "install", "--objective", "1");
+  // `factory setup --background` needs GitHub; this proof marks the queue as served and
+  // installs the service through the same library steps, with no network. The synthetic
+  // Objective is queued and the queue is paused, so the service keeps it without observing GitHub.
+  await watchIntake(config);
+  const intakeFile = join(stateRoot(config.repository), "intake.json");
+  const queue = JSON.parse(readFileSync(intakeFile, "utf8"));
+  writeFileSync(
+    intakeFile,
+    JSON.stringify({
+      ...queue,
+      objectives: [1],
+      bodyDigests: { 1: state.objectiveBodyDigest },
+      mode: "paused",
+    }),
+    { mode: 0o600 },
+  );
+  await supervise("install", configPath);
   installed = true;
-  run("supervisor", "install", "--objective", "1");
-  const status = JSON.parse(run("supervisor", "status"));
+  await supervise("install", configPath);
+  const status = JSON.parse(run("status", "--json")).service;
   assert.equal(status.registered, true);
   assert.equal(status.enabled, "enabled");
   const fragment = execFileSync(
@@ -221,6 +219,15 @@ try {
   execFileSync("systemctl", ["--user", "restart", status.unit], {
     timeout: 45_000,
   });
+  // The manager's stop left the queue draining, so the restarted service ends at once, and
+  // `supervisor start` says which command continues it. `queue pause` keeps this proof model-free
+  // (`queue resume` would make the service observe GitHub).
+  for (let wait = 0; wait < 150; wait++) {
+    if (JSON.parse(run("status", "--json")).service.active !== "active") break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.throws(() => run("supervisor", "start"), /factory queue resume/);
+  run("queue", "pause");
   run("supervisor", "start");
   const second = JSON.parse(
     readFileSync(join(stateRoot(config.repository), "controller.lock"), "utf8"),
@@ -228,41 +235,42 @@ try {
   assert.notEqual(second.pid, first.pid);
   assert.equal(snapshot().runId, state.runId);
   assert.deepEqual(snapshot().issueByItemId, {});
-  assert.deepEqual(snapshot().admission, state.admission);
   report.checks.push(
-    "ordinary manager restart preserves paused continuation, admission and run identity",
+    "ordinary manager restart preserves paused continuation and run identity",
   );
   const incompatible = join(evidence, "old-cli.mjs");
   writeFileSync(incompatible, 'console.log("unsupported command")');
   assert.throws(() => run("supervisor", "upgrade", "--cli", incompatible));
-  assert.equal(JSON.parse(run("supervisor", "status")).active, "active");
+  assert.equal(JSON.parse(run("status", "--json")).service.active, "active");
   report.checks.push(
     "incompatible artifact refuses before stopping live owner",
   );
   run("supervisor", "upgrade", "--cli", cli);
   assert.equal(snapshot().runId, state.runId);
   report.checks.push("compatible exact-artifact handoff and restart");
-  run("supervisor", "disable");
-  const disabled = JSON.parse(run("supervisor", "status"));
+  run("supervisor", "stop", "--disable");
+  const disabled = JSON.parse(run("status", "--json")).service;
   assert.equal(disabled.registered, true);
   assert.notEqual(disabled.enabled, "enabled");
   assert.notEqual(disabled.enabled, "not-found");
   run("supervisor", "upgrade", "--cli", cli);
-  assert.notEqual(JSON.parse(run("supervisor", "status")).enabled, "enabled");
-  run("supervisor", "disable");
+  assert.notEqual(
+    JSON.parse(run("status", "--json")).service.enabled,
+    "enabled",
+  );
+  run("supervisor", "stop", "--disable");
   assert.equal(
     existsSync(join(stateRoot(config.repository), "controller.lock")),
     false,
   );
   run("supervisor", "uninstall");
   installed = false;
-  const final = JSON.parse(run("supervisor", "status"));
+  const final = JSON.parse(run("status", "--json")).service;
   assert.equal(final.registered, false);
-  assert.deepEqual(snapshot().admission, state.admission);
   assert.equal(snapshot().cancelledAt, undefined);
   assert.equal(snapshot().cancelRequested, undefined);
   report.checks.push(
-    "disable/uninstall retain authority, snapshot and evidence without cancellation",
+    "disable/uninstall retain the snapshot and evidence without cancellation",
   );
   report.passed = true;
 } finally {

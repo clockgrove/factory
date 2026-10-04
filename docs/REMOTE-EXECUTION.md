@@ -49,8 +49,8 @@ Any other failure stops the remote resource first, then fails the attempt as an 
 
 Each provider config names an environment variable holding the controller's API key. The key never enters the config, model input or sandbox, and local CLI logins do not supply it.
 
-- **Foreground:** set the variable in the controller shell. `factory readiness --config /absolute/config.json` checks that it is present. It makes no provider call, so it does not verify account access, billing or hosted support.
-- **Background service:** put only the key in a `0600` file outside the target checkout and install with `factory supervisor install ... --credential-file NAME=/absolute/private/file`, one per credential. This uses systemd `LoadCredential`, so it needs a Linux user systemd. The key is read at service start; restart to rotate it. A missing key stops execution, with no fallback to ambient variables.
+- **Foreground:** set the variable in the controller shell. The first `factory run --objective N` (and `factory setup --background`) checks that it is present. It makes no provider call, so it does not verify account access, billing or hosted support.
+- **Background service:** put only the key in a `0600` file outside the target checkout and set up with `factory setup --background ... --credential-file NAME=/absolute/private/file`, one per credential. This uses systemd `LoadCredential`, so it needs a Linux user systemd. The key is read at service start; restart to rotate it. A missing key stops execution, with no fallback to ambient variables.
 
 ## Claude Managed Agents
 

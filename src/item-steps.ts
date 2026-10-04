@@ -184,7 +184,7 @@ export function validateItem(
  * asked again; an invalid one is asked again once with its validation
  * error (kept in the step's record, so a restart still sends it), and an
  * answer still invalid becomes the operator's decision on that criterion
- * (`factory decide-result`), within the paid bound. Each ask is one
+ * (`factory decide`), within the paid bound. Each ask is one
  * `acceptance-review` span.
  */
 export function reviewItem(

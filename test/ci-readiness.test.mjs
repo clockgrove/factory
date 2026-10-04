@@ -100,6 +100,7 @@ async function fixture(route, name, run, chain = false, namedGate = false) {
         1,
       ),
       autonomy,
+      queue: { pollSeconds: 0.01 },
     };
     const objectiveBody =
       (chain ? body + "- test -s next.txt\n" : body) +
@@ -747,7 +748,7 @@ test("intake keeps its ordinary pending-CI Objective owned and finishes it when 
       data: page === 1 ? [{ number: 1, state: "open", labels: [] }] : [],
     });
     f.github.objectiveDependencies = async () => [];
-    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
+    await f.application.enqueueIntake([1]);
     const running = f.track(f.application.runIntake());
     await until(
       () =>

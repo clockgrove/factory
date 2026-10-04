@@ -177,7 +177,8 @@ test("install writes concurrency only when the operator passes --concurrency", (
         process.execPath,
         [
           resolve(import.meta.dirname, "../dist/cli.js"),
-          "install",
+          "setup",
+          "--config-only",
           "--repository",
           "example/host-install",
           "--checkout",
@@ -191,14 +192,20 @@ test("install writes concurrency only when the operator passes --concurrency", (
           env: { ...process.env, XDG_STATE_HOME: join(root, name, "state") },
         },
       );
-      return { output, config: JSON.parse(readFileSync(configPath, "utf8")) };
+      return {
+        output: JSON.parse(output),
+        config: JSON.parse(readFileSync(configPath, "utf8")),
+      };
     };
     const sized = install("sized");
     assert.equal(sized.config.execution.concurrency, undefined);
     assert.equal(sized.config.scheduling, undefined);
-    assert.match(sized.output, /sized from the host at run time/);
+    assert.equal(sized.output.status, "configured");
+    assert.ok(sized.output.capacity.sizedFromHost.cpus > 0);
     const explicit = install("explicit", "--concurrency", "2");
     assert.equal(explicit.config.execution.concurrency, 2);
+    assert.equal(explicit.output.capacity.concurrency, 2);
+    assert.equal(explicit.output.capacity.sizedFromHost, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

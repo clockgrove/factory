@@ -7,7 +7,7 @@ Factory records metadata for every model invocation and can also keep prompts an
 Content capture is off by default because prompts contain private source. Turn it on per repository:
 
 ```sh
-factory install ... --capture-content --capture-max-bytes 8388608
+factory setup --config-only ... --capture-content --capture-max-bytes 8388608
 ```
 
 Or set it in the installation config, beside `repository` and `execution`:
@@ -39,8 +39,8 @@ Usage records keep allowlisted token counters; missing counters stay unknown, ne
 ## Inspect captures
 
 ```sh
-factory captures --objective 123                      # metadata only
-factory captures --objective 123 --content RECORD_ID  # one content record
+factory diagnostics --objective 123 --captures                      # metadata only
+factory diagnostics --objective 123 --captures --content RECORD_ID  # one content record
 factory diagnostics --objective 123 --summary         # usage, no transcripts
 ```
 
@@ -48,12 +48,12 @@ A truncated content record can be incomplete JSON. The package root exports the 
 
 ## Analyze
 
-`factory analyze` summarizes recorded metadata. It makes no provider calls and reads no captured content.
+`factory diagnostics --analyze` summarizes recorded metadata. It makes no provider calls and reads no captured content.
 
 ```sh
-factory analyze --objective 123
-factory analyze --objective 123 --group-by provider --group-by model
-factory analyze --objective 123 --filter phase=implementation --json
+factory diagnostics --objective 123 --analyze
+factory diagnostics --objective 123 --analyze --group-by provider --group-by model
+factory diagnostics --objective 123 --analyze --filter phase=implementation --json
 ```
 
 - Grouping defaults to `phase`. Repeat `--group-by` to combine fields.
@@ -70,7 +70,7 @@ To compare across Objectives, call the exported `analyzeInteractions`.
 ### Gantt timeline
 
 ```sh
-factory analyze --objective 123 --filter runId=RUN_ID --gantt \
+factory diagnostics --objective 123 --analyze --filter runId=RUN_ID --gantt \
   --output /home/alex/factory-reports/objective-123.svg
 ```
 

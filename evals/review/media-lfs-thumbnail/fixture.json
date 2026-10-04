@@ -1,0 +1,128 @@
+{
+  "case": "../../cases/media-lfs-thumbnail",
+  "native": false,
+  "graph": {
+    "items": [
+      {
+        "id": "lfs-policy",
+        "title": "Track thumbnails with Git LFS",
+        "goal": "Add the thumbs/*.png LFS rule to .gitattributes.",
+        "acceptance": [
+          ".gitattributes keeps the assets/*.png rule and adds thumbs/*.png filter=lfs diff=lfs merge=lfs -text."
+        ],
+        "nonGoals": ["Images, gallery.json and a global binary rule."],
+        "citations": [
+          {
+            "path": "docs/MEDIA.md",
+            "heading": "Thumbnails"
+          }
+        ],
+        "dependencies": [],
+        "ownedPaths": [".gitattributes"],
+        "validation": [
+          {
+            "command": "git check-attr filter -- thumbs/source.png | grep -qx 'thumbs/source.png: filter: lfs'",
+            "provenance": "source-declared",
+            "source": "OBJECTIVE"
+          }
+        ],
+        "brief": "Append the thumbs/*.png LFS rule from the cited section to .gitattributes, keeping the existing rule."
+      },
+      {
+        "id": "thumbnail",
+        "title": "Generate and list the reference thumbnail",
+        "goal": "Produce two candidate thumbnail sets for assets/source.png and list the selected thumbnail in gallery.json.",
+        "acceptance": [
+          "Two complete candidate sets each bind an image role to thumbs/source.png and a metadata role to thumbs/source.json whose source is assets/source.png.",
+          "gallery.json gives assets/source.png the thumb thumbs/source.png."
+        ],
+        "nonGoals": [
+          "Changing assets/source.png or committing candidate bytes directly."
+        ],
+        "citations": [
+          {
+            "path": "docs/MEDIA.md",
+            "heading": "Thumbnails"
+          },
+          {
+            "path": "docs/MEDIA.md",
+            "heading": "Gallery manifest"
+          }
+        ],
+        "dependencies": ["lfs-policy"],
+        "ownedPaths": [
+          "thumbs/source.png",
+          "thumbs/source.json",
+          "gallery.json"
+        ],
+        "sourceAssets": [
+          {
+            "kind": "repository",
+            "path": "assets/source.png",
+            "role": "reference",
+            "mediaType": "image/png",
+            "visibility": "repository"
+          }
+        ],
+        "expectedOutputRoles": ["image", "metadata"],
+        "minimumAssetSets": 2,
+        "requiredLfsRoles": ["image"],
+        "validation": [
+          {
+            "command": "node scripts/check-gallery.mjs thumbs",
+            "provenance": "source-declared",
+            "source": "OBJECTIVE"
+          },
+          {
+            "command": "node scripts/check-gallery.mjs manifest",
+            "provenance": "source-declared",
+            "source": "OBJECTIVE"
+          }
+        ],
+        "brief": "Stage two candidate sets under .factory-media/ from the reference asset: a PNG of at most 64x64 for thumbs/source.png and a JSON sidecar thumbs/source.json naming source and generator. Add the thumb field to gallery.json."
+      }
+    ],
+    "coverage": [
+      {
+        "criterion": 0,
+        "itemId": "lfs-policy",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
+      },
+      {
+        "criterion": 1,
+        "itemId": "thumbnail",
+        "proof": {
+          "kind": "result-semantic",
+          "acceptanceIndex": 0
+        }
+      },
+      {
+        "criterion": 2,
+        "itemId": "thumbnail",
+        "proof": {
+          "kind": "result-semantic",
+          "acceptanceIndex": 1
+        }
+      },
+      {
+        "criterion": 3,
+        "itemId": "thumbnail",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
+      },
+      {
+        "criterion": 4,
+        "itemId": "thumbnail",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 1
+        }
+      }
+    ]
+  }
+}

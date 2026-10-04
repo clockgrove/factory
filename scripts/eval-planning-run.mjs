@@ -1,7 +1,8 @@
 // One planning eval run, started by scripts/eval-planning.mjs in its own
-// process with private XDG state. It plans one local Objective body against an
-// isolated checkout at the pinned commit and writes result.json.
-import { execFileSync } from "node:child_process";
+// process with private XDG state. It plans one local Objective body through
+// the same planObjective path `factory run` uses, against an isolated checkout
+// at the pinned commit, computes judge-free metrics, optionally asks the
+// frozen judge panel in isolation, and writes result.json.
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -9,7 +10,21 @@ import {
   readDiagnosticMetadata,
   summarizeModelInvocations,
 } from "../dist/diagnostics.js";
+import { commandAuthority, PlanningNeedsDecision } from "../dist/compiler.js";
+import { resolveCapacity } from "../dist/config.js";
 import { composePlanning, validateConfig } from "../dist/index.js";
+import { preflightObjective } from "../dist/local-preflight.js";
+import { prepareCheckout, repositoryFacts } from "./eval-planning/cases.mjs";
+import {
+  gradeInIsolation,
+  judgeInput,
+  loadJudges,
+} from "./eval-planning/judge.mjs";
+import {
+  expectation,
+  firstTry,
+  planMetrics,
+} from "./eval-planning/metrics.mjs";
 
 const spec = JSON.parse(readFileSync(process.argv[2], "utf8"));
 const checkout = join(spec.directory, "checkout");
@@ -46,39 +61,32 @@ function evalGateway() {
   });
 }
 
-/** An isolated checkout at the pinned commit, bound to the case repository. */
-function prepareCheckout() {
-  const git = (...args) =>
-    execFileSync("git", args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, GIT_LFS_SKIP_SMUDGE: "1" },
-    });
-  git("clone", "--quiet", "--shared", "--no-checkout", spec.target, checkout);
-  git("-C", checkout, "checkout", "--quiet", "--detach", spec.commit);
-  git(
-    "-C",
-    checkout,
-    "remote",
-    "set-url",
-    "origin",
-    `https://github.com/${spec.repository}.git`,
-  );
-}
-
 function reviewOutcome(review) {
   if (review.failure) return "question";
   return review.findings.length ? "findings" : "clean";
 }
 
-const result = { planned: false, wallMs: 0, error: null };
+// outcome: "plan" (clean), "question" (stopped for an operator: a plan
+// waiting for a decision, or the controller's PlanningNeedsDecision), or
+// "error" (crash, timeout, provider or harness failure; no quality metrics).
+const result = { outcome: "error", planned: false, wallMs: 0, error: null };
 let started;
+let plan;
+let facts;
 try {
-  prepareCheckout();
+  prepareCheckout(spec, checkout);
   const config = validateConfig({
     ...spec.config,
     repository: spec.repository,
     checkout,
   });
+  // Host-dependent planning inputs, recorded so runs on different machines
+  // can be told apart.
+  result.host = {
+    localExecutables:
+      preflightObjective(config, spec.body, spec.commit) ?? null,
+    capacity: resolveCapacity(config),
+  };
   const planningModel = spec.planningModule
     ? await (
         await import(pathToFileURL(spec.planningModule).href)
@@ -89,13 +97,49 @@ try {
     planningModel,
   });
   started = performance.now();
-  const plan = await application.planObjective(spec.objective);
+  // The production path: the same recoverable planning `factory run` uses,
+  // bounded by the configuration's autonomy allowances.
+  try {
+    plan = await application.planObjective(spec.objective);
+  } catch (error) {
+    if (!(error instanceof PlanningNeedsDecision)) throw error;
+    result.outcome = "question";
+    result.stop = error.message;
+  }
   result.wallMs = Math.round(performance.now() - started);
-  result.planned = true;
-  result.review = reviewOutcome(plan.review);
-  result.findingCount = plan.review.findings.length;
-  result.revisions = plan.review.revisions;
-  result.workItems = plan.graph.items.length;
+  if (plan) {
+    result.planned = true;
+    result.outcome = plan.review.status === "clean" ? "plan" : "question";
+    result.reviewStatus = plan.review.status;
+    result.review = reviewOutcome(plan.review);
+    result.findingCount = plan.review.findings.length;
+    result.revisions = plan.review.revisions;
+    result.workItems = plan.graph.items.length;
+    facts = repositoryFacts(checkout, spec.commit);
+    result.metrics = planMetrics(
+      plan,
+      facts,
+      commandAuthority(spec.body, plan.sources, spec.commit, checkout),
+    );
+  }
+} catch (error) {
+  if (started && !result.wallMs)
+    result.wallMs = Math.round(performance.now() - started);
+  result.outcome = "error";
+  result.error = error instanceof Error ? error.message : String(error);
+} finally {
+  rmSync(checkout, { recursive: true, force: true });
+}
+// Judges run before the plan or production findings reach disk, with the
+// checkout already gone.
+if (plan && spec.judges?.length)
+  result.judges = await gradeInIsolation(
+    loadJudges(spec.judges),
+    judgeInput(plan, facts),
+    spec.judgeTransport,
+    { allowUnsandboxed: Boolean(spec.allowUnsandboxedJudges) },
+  );
+if (plan) {
   result.findings = plan.review.findings.map(({ detail, question }) => ({
     detail,
     question,
@@ -103,21 +147,10 @@ try {
   if (plan.review.failure) result.failure = plan.review.failure;
   result.plan = join(spec.directory, "plan.json");
   writeFileSync(result.plan, `${JSON.stringify(plan, null, 2)}\n`);
-} catch (error) {
-  if (started) result.wallMs = Math.round(performance.now() - started);
-  const message = error instanceof Error ? error.message : String(error);
-  // Planning that stopped for the operator is a question, not an error.
-  if (error?.name === "PlanningNeedsDecision") {
-    result.review = "question";
-    result.failure = { question: message };
-  } else result.error = message;
-} finally {
-  rmSync(checkout, { recursive: true, force: true });
 }
 try {
-  const usage = summarizeModelInvocations(
-    readDiagnosticMetadata(spec.repository, spec.objective),
-  );
+  const events = readDiagnosticMetadata(spec.repository, spec.objective);
+  const usage = summarizeModelInvocations(events);
   result.invocations = {
     total: usage.objective.invocationCount,
     completed: usage.objective.completedCount,
@@ -131,9 +164,13 @@ try {
     ),
   };
   result.tokens = usage.objective.tokenTotals;
+  if (result.outcome !== "error")
+    result.firstTry = firstTry(events, result.outcome === "plan");
 } catch (error) {
+  result.outcome = "error";
   result.error ??= `Diagnostics unreadable: ${error instanceof Error ? error.message : String(error)}`;
 }
+result.expectation = expectation(spec.expect, result, plan?.graph);
 writeFileSync(
   join(spec.directory, "result.json"),
   `${JSON.stringify(result, null, 2)}\n`,

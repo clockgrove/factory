@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "name": "strict-rubric-v1-claude",
+  "description": "Seven pass/fail plan dimensions graded against the Objective. Independent of the production reviewer prompt.",
+  "model": {
+    "kind": "claude-agent-sdk",
+    "model": "claude-opus-5-5",
+    "reasoningEffort": "high",
+    "maxOutputTokens": 32000
+  },
+  "prompt": "strict-rubric-v1.md",
+  "promptSha256": "b0a69152425c2de71fc2c0fa4bb9d59ad7450e9e59d337a60247b9554b012f48"
+}

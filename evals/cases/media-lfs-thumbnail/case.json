@@ -1,0 +1,7 @@
+{
+  "fixture": "../../targets/media-site",
+  "tags": ["media", "lfs", "dependencies"],
+  "expect": {
+    "outcome": "plan"
+  }
+}

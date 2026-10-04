@@ -1,0 +1,8 @@
+{
+  "fixture": "../../targets/media-site",
+  "tags": ["media", "single-item"],
+  "expect": {
+    "outcome": "plan",
+    "maxWorkItems": 1
+  }
+}

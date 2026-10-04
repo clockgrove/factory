@@ -1,0 +1,7 @@
+{
+  "fixture": "../../targets/node-lib",
+  "tags": ["predecessor", "ask-operator"],
+  "expect": {
+    "outcome": "question"
+  }
+}

@@ -23,9 +23,12 @@
 // The GitHub points use scripts/live-check-hook.mjs (a --import preload that
 // wraps fetch); Factory has no test hook. Needs `gh` logged in with repo
 // admin, and the planner/worker logins Factory's install defaults use.
-// Run `npm run build` first. `reset --objective N` limits reset to one
-// Objective, so it leaves another agent's live run alone. Workers are detached by design and survive a
-// controller kill; Factory must reattach them.
+// Run `npm run build` first. `reset` closes only what this harness made: Objectives
+// titled `Live check TAG` with this fixture's body and the gh login as author, their Work
+// Item issues, their `factory/objective-N/*` PRs and branches. `reset --objective N` limits
+// it to one Objective (refused unless N is one), so it leaves another agent's live run
+// alone. Workers are detached by design and survive a controller kill; Factory must
+// reattach them.
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -38,6 +41,12 @@ export const REPO = "clockgrove/factory-smoke";
 if (process.env.LIVE_CHECK_REPO && process.env.LIVE_CHECK_REPO !== REPO)
   throw new Error(`live-check only runs against ${REPO}`);
 const API_VERSION = "2026-03-10";
+const REPO_PATH = new RegExp(`^repos/${REPO}(?:[/?]|$)`, "i");
+/** Every REST path goes through here: the scratch repository, or the login lookup. */
+function onlyRepo(path) {
+  if (path !== "user" && !REPO_PATH.test(path))
+    throw new Error(`live-check only touches ${REPO}: ${path}`);
+}
 const KILLS = {
   "issue-created": { method: "POST", path: "^/repos/[^/]+/[^/]+/issues$" },
   "pr-created": { method: "POST", path: "^/repos/[^/]+/[^/]+/pulls$" },
@@ -85,6 +94,7 @@ export function gh(args, input) {
 
 /** One REST call; never throws on an HTTP error, returns status and body. */
 export function api(method, path, body) {
+  onlyRepo(path);
   const args = ["api", "-i", "-X", method, path];
   args.push("-H", `X-GitHub-Api-Version: ${API_VERSION}`);
   if (body !== undefined) args.push("--input", "-");
@@ -114,6 +124,7 @@ export function api(method, path, body) {
 }
 
 export function all(path) {
+  onlyRepo(path);
   const pages = JSON.parse(
     gh([
       "api",
@@ -161,7 +172,10 @@ function setup() {
     });
     if (put.status !== 201) throw new Error(`workflow: ${put.status}`);
   }
-  const rulesets = api("GET", `repos/${REPO}/rulesets`).data;
+  const listed = api("GET", `repos/${REPO}/rulesets`);
+  if (listed.status !== 200 || !Array.isArray(listed.data))
+    throw new Error(`rulesets: ${listed.status}`);
+  const rulesets = listed.data;
   if (!rulesets.some((rule) => rule.name === "live-check")) {
     const created = api("POST", `repos/${REPO}/rulesets`, {
       name: "live-check",
@@ -186,11 +200,15 @@ function setup() {
   log(`fixture ready on ${REPO}: ci.yml job "check" required on main`);
 }
 
+/** What marks an Objective as this fixture's; `reset` requires it. */
+const signature = (tag) =>
+  `under \`live/${tag}/\` for Factory's live crash-restart check`;
+
 function objectiveBody(tag) {
   const dir = `live/${tag}`;
   return `## Outcome
 
-Add a tiny POSIX shell greeting under \`${dir}/\` for Factory's live crash-restart check. Plan exactly three Work Items:
+Add a tiny POSIX shell greeting ${signature(tag)}. Plan exactly three Work Items:
 
 1. \`lib\`: create \`${dir}/lib.sh\` defining a POSIX \`greet\` function that prints \`hello, $1\`.
 2. \`cli\`: depends on \`lib\`; create \`${dir}/hello.sh\` that sources \`lib.sh\` from its own directory and runs \`greet world\`.
@@ -227,6 +245,7 @@ async function launch(work, objective, point, index) {
   if (kill?.method)
     env.LIVE_CHECK_KILL = JSON.stringify({
       ...kill,
+      repo: REPO,
       path: kill.path.replace("{objective}", String(objective)),
       nth: 1,
     });
@@ -250,11 +269,17 @@ async function launch(work, objective, point, index) {
     stream.on("data", (chunk) => {
       text += chunk;
     });
+  // Never signal a group after its leader is gone: the pid may be reused.
+  let alive = true;
   const exited = new Promise((resolve) =>
-    child.on("exit", (code, signal) => resolve({ code, signal })),
+    child.on("exit", (code, signal) => {
+      alive = false;
+      resolve({ code, signal });
+    }),
   );
   let killedAt;
   const killGroup = (why) => {
+    if (!alive) return;
     killedAt ??= why;
     try {
       process.kill(-child.pid, "SIGKILL");
@@ -333,7 +358,25 @@ async function run(options) {
     .filter(Boolean);
   for (const point of kills)
     if (!KILLS[point]) throw new Error(`Unknown kill point ${point}`);
+  // `merge` also matches merge-async, so after it the stack is already merged
+  // and `stack-merge` would never be reached.
+  if (kills.includes("merge") && kills.includes("stack-merge"))
+    throw new Error(
+      "Use merge or stack-merge, not both: they match the same request",
+    );
+  // Install arguments may not point Factory at another repository or config file.
+  for (const flag of ["--repository", "--checkout", "--config", "--delivery"])
+    if (options.rest.some((arg) => arg === flag || arg.startsWith(`${flag}=`)))
+      throw new Error(
+        `${flag} is set by live-check; pass --delivery before --`,
+      );
+  if (!existsSync(join(ROOT, "dist", "cli.js")))
+    throw new Error("dist/cli.js is missing; run `npm run build` first");
   let objective = Number(options.objective);
+  if (options.objective !== undefined && !liveObjectives().has(objective))
+    throw new Error(
+      `#${options.objective} is not a live-check Objective in ${REPO}`,
+    );
   if (!objective) {
     // Private: the HTTP log and Factory state hold private repository data.
     mkdirSync(work, { recursive: true, mode: 0o700 });
@@ -499,6 +542,7 @@ function count(objective, work) {
       items.length > 0 &&
       items.every((item) => byItem[item]?.length === 1) &&
       Object.keys(byItem).every((item) => items.includes(item)),
+    prForEveryItem: items.every((item) => byBranch[`${prefix}${item}`]),
     onePrPerBranch:
       pulls.length > 0 &&
       Object.values(byBranch).every((list) => list.length === 1),
@@ -542,33 +586,75 @@ function count(objective, work) {
   };
 }
 
+/** The gh login: the author of everything this harness creates. */
+function viewer() {
+  const login = api("GET", "user").data?.login;
+  if (!login) throw new Error("cannot read the gh login");
+  return login;
+}
+
+/** The live-check Objectives in the repository (any state), by number. */
+function liveObjectives() {
+  const login = viewer();
+  const found = new Map();
+  for (const issue of all(`repos/${REPO}/issues?state=all&per_page=100`)) {
+    const tag = /^Live check ([A-Za-z0-9_-]+)$/.exec(issue.title)?.[1];
+    if (
+      tag &&
+      !issue.pull_request &&
+      issue.user?.login === login &&
+      (issue.body ?? "").includes(signature(tag))
+    )
+      found.set(issue.number, issue);
+  }
+  return found;
+}
+
 /**
- * Close open live-check Objectives, Work Items and PRs, and delete their
- * branches; with `objective`, only that Objective's.
+ * Close open live-check Objectives, their Work Items and PRs, and delete
+ * their branches; with `objective`, only that Objective's. Nothing else in
+ * the repository is touched, so a stray issue or branch survives.
  */
 function reset(objective) {
   if (objective !== undefined && !/^[1-9]\d*$/.test(objective))
     throw new Error(`--objective must be an issue number: ${objective}`);
-  const id = objective ?? "\\d+";
-  const marker = new RegExp(`<!-- factory:objective=${id};item=`);
-  const prefix = objective ? `factory/objective-${objective}/` : "factory/";
-  for (const issue of all(`repos/${REPO}/issues?state=open&per_page=100`)) {
-    const ours = objective
-      ? issue.number === Number(objective) || marker.test(issue.body ?? "")
-      : issue.title.startsWith("Live check ") || marker.test(issue.body ?? "");
-    if (ours && !issue.pull_request)
+  const live = liveObjectives();
+  if (objective !== undefined && !live.has(Number(objective)))
+    throw new Error(`#${objective} is not a live-check Objective in ${REPO}`);
+  const ours = new Set(objective ? [Number(objective)] : live.keys());
+  const login = viewer();
+  const marked = (text) => {
+    const found = /<!-- factory:objective=(\d+);item=/.exec(text ?? "");
+    return found ? Number(found[1]) : undefined;
+  };
+  for (const issue of all(`repos/${REPO}/issues?state=open&per_page=100`))
+    if (
+      !issue.pull_request &&
+      (ours.has(issue.number) ||
+        (issue.user?.login === login && ours.has(marked(issue.body))))
+    )
       api("PATCH", `repos/${REPO}/issues/${issue.number}`, {
         state: "closed",
         state_reason: "not_planned",
       });
-  }
+  const branchOf = (ref) => {
+    const found = /^factory\/objective-(\d+)\//.exec(ref);
+    return found && ours.has(Number(found[1]));
+  };
   for (const pull of all(`repos/${REPO}/pulls?state=open&per_page=100`))
-    if (pull.head.ref.startsWith(prefix))
+    if (
+      pull.head.repo?.full_name?.toLowerCase() === REPO &&
+      pull.user?.login === login &&
+      branchOf(pull.head.ref)
+    )
       api("PATCH", `repos/${REPO}/pulls/${pull.number}`, { state: "closed" });
-  for (const ref of all(`repos/${REPO}/git/matching-refs/heads/${prefix}`))
-    api("DELETE", `repos/${REPO}/git/${ref.ref}`);
+  for (const ref of all(
+    `repos/${REPO}/git/matching-refs/heads/factory/objective-`,
+  ))
+    if (branchOf(ref.ref.replace(/^refs\/heads\//, "")))
+      api("DELETE", `repos/${REPO}/git/${ref.ref}`);
   log(
-    `reset ${REPO}: live-check issues and PRs closed, ${prefix}* branches deleted`,
+    `reset ${REPO}: Objectives ${[...ours].map((n) => `#${n}`).join(", ") || "(none)"}: issues and PRs closed, branches deleted`,
   );
 }
 
@@ -579,11 +665,13 @@ const command =
     : "library";
 if (command === "setup") setup();
 else if (command === "run") await run(options);
-else if (command === "assert")
+else if (command === "assert") {
+  if (!/^[1-9]\d*$/.test(options.objective ?? ""))
+    throw new Error("assert needs --objective N");
   console.log(
     JSON.stringify(count(Number(options.objective), options.work), null, 2),
   );
-else if (command === "reset") reset(options.objective);
+} else if (command === "reset") reset(options.objective);
 else if (command !== "library") {
   console.error(
     readFileSync(fileURLToPath(import.meta.url), "utf8")

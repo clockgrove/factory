@@ -3,8 +3,8 @@
 //
 // - Appends one NDJSON line per GitHub REST/GraphQL request to LIVE_CHECK_LOG
 //   (method, path, status, duration, rate-limit headers, error body).
-// - LIVE_CHECK_KILL = {"method","path" (regex source),"nth"}: once the nth
-//   matching request's response has arrived, and before Factory sees it,
+// - LIVE_CHECK_KILL = {"method","repo","path" (regex source),"nth"}: once the nth
+//   matching request (under /repos/REPO/) response has arrived, and before Factory sees it,
 //   SIGKILL this process group. GitHub applied the effect; the controller
 //   never learned the outcome (a lost response plus a crash).
 //
@@ -56,6 +56,9 @@ if (active) {
     if (
       kill &&
       method === kill.method &&
+      url.pathname
+        .toLowerCase()
+        .startsWith(`/repos/${kill.repo}/`.toLowerCase()) &&
       new RegExp(kill.path).test(url.pathname) &&
       ++seen === kill.nth
     ) {

@@ -1086,8 +1086,12 @@ export function explore(reference, items, { samples = 8, seed = 515 } = {}) {
 /**
  * What keeps a fixed race's pinned schedule from proving it fixed. The
  * schedule must hold every invariant, so a failure fails it even when a known
- * race explains the failure (that is for the explored schedules); and a
- * scheduled crash that never fired exercised nothing, so it cannot pass.
+ * race explains the failure (that is for the explored schedules); a scheduled
+ * crash that never fired exercised nothing; and every hold must have taken
+ * effect: held its effect at the yield (applied, already in order, or
+ * released by the scheduled crash). A hold that never reached its yield, that
+ * Factory made infeasible, or that was abandoned reordered nothing, so the
+ * run says nothing about the race the pin names.
  */
 export function fixedPinProblems(failures, schedule, result) {
   const problems = failures
@@ -1100,8 +1104,21 @@ export function fixedPinProblems(failures, schedule, result) {
     problems.push(
       `the crash at ${schedule.crash.at} never fired, so the schedule exercised nothing`,
     );
+  const scheduled = schedule.holds ?? [];
+  const holds = result.holds ?? [];
+  if (holds.length !== scheduled.length)
+    problems.push(
+      `${scheduled.length} holds were scheduled but the run reported ${holds.length}`,
+    );
+  for (const hold of holds)
+    if (!APPLIED_HOLDS.has(hold.outcome))
+      problems.push(
+        `the hold on ${hold.hold} until ${hold.until} was ${hold.outcome}, so the schedule did not reorder those effects`,
+      );
   return problems;
 }
+
+const APPLIED_HOLDS = new Set(["applied", "already", "crashed"]);
 
 /**
  * Every invariant a run breaks, as {invariant, message, consequence}. The

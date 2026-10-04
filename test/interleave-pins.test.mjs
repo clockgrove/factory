@@ -33,3 +33,30 @@ test("a fixed race pin fails when its scheduled crash never fired", () => {
   assert.equal(problems.length, 1);
   assert.match(problems[0], /never fired/);
 });
+
+const hold = { hold: "alpha git push #1", until: "beta POST /pulls #1" };
+const withHold = (outcome) => ({ holds: [{ ...hold, outcome }] });
+
+test("a fixed race pin passes when its holds took effect", () => {
+  for (const outcome of ["applied", "already", "crashed"])
+    assert.deepEqual(
+      fixedPinProblems([], { holds: [hold] }, withHold(outcome)),
+      [],
+      outcome,
+    );
+});
+
+test("a fixed race pin fails when a hold did not take effect", () => {
+  for (const outcome of ["pending", "infeasible", "abandoned"]) {
+    const problems = fixedPinProblems([], { holds: [hold] }, withHold(outcome));
+    assert.equal(problems.length, 1, outcome);
+    assert.match(problems[0], new RegExp(`was ${outcome}`));
+    assert.match(problems[0], /alpha git push #1/);
+  }
+});
+
+test("a fixed race pin fails when the run reports fewer holds than scheduled", () => {
+  const problems = fixedPinProblems([], { holds: [hold] }, {});
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /1 holds were scheduled but the run reported 0/);
+});

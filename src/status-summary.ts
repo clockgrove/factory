@@ -126,7 +126,9 @@ export interface ExecutionStatusView extends WaitView {
 }
 
 export type StatusView =
-  NotStartedStatusView | PreparingStatusView | ExecutionStatusView;
+  | NotStartedStatusView
+  | PreparingStatusView
+  | ExecutionStatusView;
 
 /** The short identity of the reviewed plan an operator decides on. */
 export function shortPlanDigest(plan: { reviewDigest: string }): string {

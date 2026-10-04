@@ -5,7 +5,8 @@
 // harness are scripted. Model and execution-driver calls can be faulted on
 // their Nth call: crash (SIGKILL) before or after the call, a lost response
 // (the call happened, the caller sees an error), an unavailable burst (the
-// call never happened) or, for model calls, a usage limit with a reset time.
+// call never happened) or, for model calls, a usage limit with a reset time
+// or (reviews) an answer the decoder refuses.
 // An operator action (cancel) can be taken when a driver call for an item
 // begins. With `answer`, a restart first runs the `factory retry` command the
 // status names for the previous run's stop, as the operator would. Prints
@@ -196,6 +197,8 @@ async function intercept(target, method, request, call) {
   const result = await call();
   if (fired?.kind === "crash-after") process.kill(process.pid, "SIGKILL");
   if (fired?.kind === "lost") throw lost(target, method);
+  // An answer the decoder refuses: a review for another packet.
+  if (fired?.kind === "invalid") return { ...result, packetId: "invalid" };
   return result;
 }
 

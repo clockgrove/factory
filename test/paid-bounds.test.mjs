@@ -34,17 +34,23 @@ function occurrenceOf(reference, method, matches) {
   return { occurrence: index + 1, call: calls[index] };
 }
 
-/** A paid model call lost `LOST` times in a row from its first occurrence. */
-function lostModelCalls(reference, method, matches = () => true) {
+/**
+ * A paid model call faulted `LOST` times in a row from its first occurrence:
+ * its response lost, or (`invalid`) answered in a shape the decoder refuses.
+ */
+function lostModelCalls(
+  reference,
+  method,
+  matches = () => true,
+  kind = "lost",
+) {
   const { occurrence, call } = occurrenceOf(reference, method, matches);
   return {
-    inProcess: [
-      { target: "model", method, occurrence, times: LOST, kind: "lost" },
-    ],
+    inProcess: [{ target: "model", method, occurrence, times: LOST, kind }],
     call: {
       target: "model",
       method,
-      kind: "lost",
+      kind,
       ...(call.phase !== undefined && { phase: call.phase }),
       ...(call.item !== undefined && { item: call.item }),
     },
@@ -85,6 +91,19 @@ const CASES = [
         reference,
         "reviewResult",
         (call) => call.phase === "objective-review",
+      ),
+      answer: OBJECTIVE_ANSWER,
+    }),
+  },
+  {
+    // An invalid answer was paid for: it counts toward the bound (#634).
+    name: "final review: the Objective review answer is undecodable four times",
+    build: (reference) => ({
+      ...lostModelCalls(
+        reference,
+        "reviewResult",
+        (call) => call.phase === "objective-review",
+        "invalid",
       ),
       answer: OBJECTIVE_ANSWER,
     }),

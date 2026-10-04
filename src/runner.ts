@@ -1874,57 +1874,60 @@ async function runObjectivePass(
         candidateCommitSha,
         candidateTreeSha: finalTree,
       });
-      // A paid step: only the model call counts toward the bound. A lost
-      // answer is asked again, an invalid one again with its validation
-      // error, until the bound makes it a decision. A criterion the
-      // operator must judge comes back as the pending final acceptance.
+      // A paid step, like item review: the call and the decoding of its
+      // answer count toward the bound together, so a lost answer and an
+      // invalid one are both asked again (the invalid one with its
+      // validation error) until the bound makes it a decision. A criterion
+      // the operator must judge comes back as the pending final acceptance.
       let previousInvalid: string | undefined;
       const reviewFinal = () =>
         objectiveStep(
           state,
           "final-review",
           (context) =>
-            reviewOutcome({
-              beforeSubmit: stopIfCancelled,
-              model: paidModel(planningModel, context),
-              reviewPhase: "objective-review",
-              checkout: config.checkout,
-              baseSha: state.baseSha,
-              commit: candidateCommitSha,
-              evidence: acceptanceEvidence,
-              criteria: objectiveCriteria(issue.body),
-              sources: planningSources(
-                issue.body,
-                state.baseSha,
-                config.checkout,
-              ),
-              evidenceSources: [
-                ...objectiveEvidence.evidence,
-                ...(hydrationReceipt
-                  ? [
-                      {
-                        path: "Controller hydration receipt",
-                        content: JSON.stringify(hydrationReceipt),
-                      },
-                    ]
-                  : []),
-              ],
-              decisions: state.finalAcceptanceDecisions,
-              observations: objectiveEvidence.observations,
-              invocation: {
-                invocationId: randomUUID(),
-                phase: "objective-review",
-                ordinal: 0,
-                observe: diagnostics.modelObserver({
-                  scopeId: state.runId,
-                  runId: state.runId,
-                }),
-              },
-              ...(previousInvalid ? { previousInvalid } : {}),
-              onInvalid: (detail) => {
-                previousInvalid = detail;
-              },
-            }),
+            context.paid(() =>
+              reviewOutcome({
+                beforeSubmit: stopIfCancelled,
+                model: planningModel,
+                reviewPhase: "objective-review",
+                checkout: config.checkout,
+                baseSha: state.baseSha,
+                commit: candidateCommitSha,
+                evidence: acceptanceEvidence,
+                criteria: objectiveCriteria(issue.body),
+                sources: planningSources(
+                  issue.body,
+                  state.baseSha,
+                  config.checkout,
+                ),
+                evidenceSources: [
+                  ...objectiveEvidence.evidence,
+                  ...(hydrationReceipt
+                    ? [
+                        {
+                          path: "Controller hydration receipt",
+                          content: JSON.stringify(hydrationReceipt),
+                        },
+                      ]
+                    : []),
+                ],
+                decisions: state.finalAcceptanceDecisions,
+                observations: objectiveEvidence.observations,
+                invocation: {
+                  invocationId: randomUUID(),
+                  phase: "objective-review",
+                  ordinal: 0,
+                  observe: diagnostics.modelObserver({
+                    scopeId: state.runId,
+                    runId: state.runId,
+                  }),
+                },
+                ...(previousInvalid ? { previousInvalid } : {}),
+                onInvalid: (detail) => {
+                  previousInvalid = detail;
+                },
+              }),
+            ),
           true,
         );
       const reviewed = await diagnostics.span(

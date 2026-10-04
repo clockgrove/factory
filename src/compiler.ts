@@ -2329,6 +2329,7 @@ async function compileRecoverablePlan(
     let graph: WorkGraph | undefined;
     let packet: PlanReviewRequest | undefined;
     let review: Awaited<ReturnType<typeof checkedPlanReview>> | undefined;
+    let reviewing = false;
     let failure: string;
     try {
       graph = await compileObjective(
@@ -2362,6 +2363,7 @@ async function compileRecoverablePlan(
       );
       record.review = retainedPlanningReview(record, packet, configDigest);
       save();
+      reviewing = true;
       review = await checkedPlanReview(
         observedModel,
         packet,
@@ -2404,10 +2406,13 @@ async function compileRecoverablePlan(
     } catch (error) {
       // Only an answered plan (refused or invalid) is revised against the
       // allowance; a transient or configuration fault is never charged.
+      // checkedPlanReview turns every answered review into a finding or a
+      // failure, so whatever escapes it (even invalid output) is the step's.
       const fault = attachedFault(error);
       const answered =
-        error instanceof MalformedPlannerOutput ||
-        error instanceof PlanValidationError;
+        !reviewing &&
+        (error instanceof MalformedPlannerOutput ||
+          error instanceof PlanValidationError);
       if (
         error instanceof PlanningReviewBindingError ||
         context.stopped?.() ||

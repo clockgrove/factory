@@ -4,9 +4,13 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { compilePlan, MalformedPlannerOutput } from "../dist/compiler.js";
+import {
+  compilePlan,
+  MalformedPlannerOutput,
+  paidModel,
+} from "../dist/compiler.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
-import { attachFault, StepFault, transient } from "../dist/fault.js";
+import { attachFault, faultOf, StepFault, transient } from "../dist/fault.js";
 import {
   assertRepairLedger,
   consumption,
@@ -14,6 +18,7 @@ import {
   PAID_ATTEMPTS,
 } from "../dist/repair-policy.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
+import { PAID_FAULT_LIMIT, step } from "../dist/step.js";
 import {
   applyWorkCorrection,
   CandidateEnvironmentFailure,
@@ -489,22 +494,40 @@ test("planning: transient and configuration faults and unanswered reviews are ne
       );
       assert.equal(state.charges, undefined, fault.kind);
     }
-    // A lost or malformed review is asked again in place, without a
-    // revision or a second compile.
+    // A review that did not answer is the plan step's fault: each call
+    // rethrows it for the step to repeat, keeping the compiled plan, so
+    // nothing is compiled again or charged as a revision.
     const asked = planner(target, { reviews: ["lost", "malformed", "clean"] });
     const state = { autonomy: autonomy(2) };
+    await assert.rejects(plan(target, asked, state), /review response lost/);
+    await assert.rejects(plan(target, asked, state), /not JSON/);
     assert.equal((await plan(target, asked, state)).review.status, "clean");
     assert.equal(asked.compiles, 1);
     assert.equal(asked.reviews, 3);
     assert.equal(state.charges, undefined);
-    // A review that never answers validly leaves the plan to the operator.
+    // A review that never answers stops at the plan step's paid bound and
+    // asks the operator; still nothing is charged.
     const silent = planner(target, { reviews: Array(10).fill("lost") });
     const stopped = { autonomy: autonomy(2) };
-    assert.equal(
-      (await plan(target, silent, stopped)).review.status,
-      "needs-human",
+    const clock = {
+      time: Date.parse("2026-01-01T00:00:00Z"),
+      now: () => clock.time,
+      sleep: async (milliseconds) => {
+        clock.time += milliseconds;
+      },
+    };
+    await assert.rejects(
+      step(
+        stopped,
+        { scope: "objective", name: "plan", paid: true },
+        (context) => plan(target, paidModel(silent, context), stopped),
+        { save: () => {}, clock },
+      ),
+      (error) => faultOf(error).kind === "decision",
     );
-    assert.equal(silent.reviews, PAID_ATTEMPTS);
+    assert.equal(stopped.wait?.kind, "decision");
+    assert.equal(silent.compiles, 1);
+    assert.equal(silent.reviews, PAID_FAULT_LIMIT + 1);
     assert.equal(stopped.charges, undefined);
   });
 });

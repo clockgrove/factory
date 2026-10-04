@@ -82,6 +82,10 @@ function status() {
       phase: document.phase,
       summary: document.summary,
       nextAction: document.nextAction,
+      coordinator: continuation?.coordinator && {
+        mode: continuation.coordinator.mode,
+        waitReason: continuation.coordinator.waitReason,
+      },
       // Which criteria wait for a decision, to tell two decisions apart.
       pending: [
         ...Object.entries(continuation?.work ?? {})

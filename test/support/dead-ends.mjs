@@ -14,8 +14,11 @@
 //   fail or an operator can act at any time — a failed step by failure class
 //   (recorded by Factory's own recordWorkFailure), an error outside any Work
 //   Item step, cancel, pause, drain, a held phase reservation, an exhausted
-//   interruption budget, a recorded subprocess, a closure error, repeat and
-//   wait records, a stopped planning. The state validators prune invalid ones.
+//   interruption budget, a recorded subprocess that exited or whose pid was
+//   reused, a closure error, repeat and wait records, a stopped planning.
+//   Overlays apply only where Factory could write them (a reservation matches
+//   its step, a settled worker had a handle); the state validators prune the
+//   rest.
 // Every anchor is checked as persisted, and anchor × overlay candidates are
 // sampled so that every pair of values of the structural dimensions
 // (`dimensionsOf`) that a valid candidate admits is covered.
@@ -413,16 +416,36 @@ async function recordTrajectory(delivery) {
 const active = (work) =>
   ["running", "published", "waiting"].includes(work.status);
 
+const EXITED_PID = 4_194_305;
+/** A live process group leader the test owns, standing in for a reused pid. */
+let reusedPid;
+function startReusedPid() {
+  if (reusedPid) return;
+  const child = spawn("sleep", ["86400"], { detached: true, stdio: "ignore" });
+  child.unref();
+  reusedPid = child.pid;
+  process.on("exit", () => {
+    try {
+      process.kill(-reusedPid, "SIGKILL");
+    } catch {}
+  });
+}
+
 /**
  * A step of the focus item fails with `error` as the runner records it: the
  * item fails (keeping step, handle and PR), recordWorkFailure classifies the
  * failure, and a failure that is not isolated also stops the Objective.
  */
-const failStep = (make, steps) => (state) => {
+const failStep = (make, steps, handle) => (state) => {
   if (state.schemaVersion !== 6) return false;
   const id = focus(state);
   const work = state.work[id];
-  if (!active(work) || (steps && !steps.includes(work.step))) return false;
+  if (
+    !active(work) ||
+    (steps && !steps.includes(work.step)) ||
+    (handle && !work.execution)
+  )
+    return false;
   const error = make();
   work.status = "failed";
   work.error = error.message;
@@ -439,11 +462,31 @@ const coordinator = (state) =>
     phaseStartedAt: new Date().toISOString(),
   });
 
+/** The phases the runner may hold for an item at its status and step. */
+function reservable(work) {
+  if (work.status === "published") return ["delivery"];
+  // A failed item keeps a coding slot; repair diagnosis reserves review.
+  if (work.status === "failed") return ["coding", "review"];
+  if (work.status !== "running") return [];
+  switch (work.step) {
+    case "execute":
+      // Environment preflight holds validation until the worker starts.
+      return work.execution ? ["coding"] : ["validation", "coding"];
+    case "approve-asset":
+      return ["validation"];
+    case "validate":
+      return ["validation", "review"];
+    case "deliver":
+      return ["delivery"];
+    default:
+      return [];
+  }
+}
+
 const reserve = (phase) => (state) => {
   if (state.schemaVersion !== 6) return false;
   const work = state.work[focus(state)];
-  if ((!active(work) && work.status !== "failed") || work.phaseReservation)
-    return false;
+  if (work.phaseReservation || !reservable(work).includes(phase)) return false;
   work.phaseReservation = phase;
   return true;
 };
@@ -457,7 +500,8 @@ const OVERLAYS = {
     "a step exhausts its interruptions": failStep(
       () => new Interruption(new Error("socket hang up")),
     ),
-    // Validation and settled-worker failures come only from their own step.
+    // Validation and settled-worker failures come only from their own step;
+    // a worker settles only through a recorded handle.
     "validation fails": failStep(
       () =>
         new errors.CandidateValidationFailure("Injected validation failure"),
@@ -475,6 +519,7 @@ const OVERLAYS = {
           "implementation",
         ),
       ["execute"],
+      true,
     ),
   },
   "Objective event": {
@@ -489,8 +534,11 @@ const OVERLAYS = {
       coordinator(state).waitReason = "Verifying owned work cessation";
       return true;
     },
+    // A failed driver.cancel records cancelError. A preparation has no
+    // driver work; it reaches cancelError only through its recorded
+    // subprocesses (see "a recorded subprocess's pid was reused").
     "cancellation is unresolved": (state) => {
-      if (state.cancelledAt) return false;
+      if (state.schemaVersion !== 6 || state.cancelledAt) return false;
       state.cancelRequested = true;
       coordinator(state).cancelError = "Injected unresolved cessation";
       coordinator(state).waitReason =
@@ -543,9 +591,16 @@ const OVERLAYS = {
       work.waitingReason = "Interrupted (2/2), repeating: socket hang up";
       return true;
     },
-    "a subprocess was recorded": (state) => {
+    "a recorded subprocess has exited": (state) => {
       // Above the kernel's largest pid_max (2^22), so it never exists.
-      coordinator(state).processes = [{ pid: 4_194_305, startTime: "0" }];
+      coordinator(state).processes = [{ pid: EXITED_PID, startTime: "0" }];
+      return true;
+    },
+    // The recorded pid now leads another process group (pid reuse after a
+    // crash or reboot), so its start time differs.
+    "a recorded subprocess's pid was reused": (state) => {
+      if (!reusedPid) return false;
+      coordinator(state).processes = [{ pid: reusedPid, startTime: "0" }];
       return true;
     },
     "a repeat record is pending": (state) => {
@@ -643,10 +698,14 @@ function dimensionsOf(state) {
         : state.cancelRequested
           ? "requested"
           : "none",
+    "recorded subprocess": !coordinator.processes?.length
+      ? "none"
+      : coordinator.processes.some((process) => process.pid === reusedPid)
+        ? "pid reused"
+        : "exited",
   };
   const single = {
     "observation error": Boolean(coordinator.observationError),
-    "recorded subprocess": Boolean(coordinator.processes?.length),
     "repeat or wait record": Boolean(state.repeats || state.wait),
   };
   if (state.schemaVersion === 7)
@@ -690,11 +749,13 @@ function dimensionsOf(state) {
 /** What a snapshot covers: its paired dimension values and its single values. */
 function coverageOf(state) {
   const { paired, single } = dimensionsOf(state);
+  // Preparations and executing Objectives are covered separately.
+  const family = state.schemaVersion === 7 ? "preparing" : "executing";
   const entries = Object.entries(paired).map(
-    ([name, value]) => `${name}=${value}`,
+    ([name, value]) => `${family} ${name}=${value}`,
   );
   const covers = Object.entries({ ...paired, ...single }).map(
-    ([name, value]) => `${name}=${value}`,
+    ([name, value]) => `${family} ${name}=${value}`,
   );
   for (let i = 0; i < entries.length; i++)
     for (let j = i + 1; j < entries.length; j++)
@@ -720,10 +781,25 @@ function overlayCombinations() {
   return combinations;
 }
 
-const caseName = (anchor, values) =>
-  `${anchor.delivery}: ${anchor.key}${Object.values(values)
-    .map((value) => ` + ${value}`)
-    .join("")}`;
+/**
+ * A case's structural identity: delivery, anchor shape and overlay values in
+ * dimension order. Test names and known dead ends use it.
+ */
+export const identityName = ([delivery, key, ...values]) =>
+  `${delivery}: ${key}${values.map((value) => ` + ${value}`).join("")}`;
+
+const dimensionOf = (value) =>
+  Object.keys(OVERLAYS).find((dimension) => value in OVERLAYS[dimension]);
+
+const identityOf = (anchor, values) => [
+  anchor.delivery,
+  anchor.key,
+  ...Object.keys(OVERLAYS).flatMap((dimension) =>
+    values[dimension] ? [values[dimension]] : [],
+  ),
+];
+
+const caseName = (anchor, values) => identityName(identityOf(anchor, values));
 
 /**
  * The cases to check: every anchor as persisted, then anchor × overlay
@@ -749,6 +825,7 @@ function enumerateCases(anchors) {
   const take = (candidate) => {
     for (const pair of candidate.pairs) covered.add(pair);
     cases.push({
+      identity: identityOf(candidate.anchor, candidate.values),
       name: caseName(candidate.anchor, candidate.values),
       anchor: candidate.anchor,
       values: candidate.values,
@@ -830,15 +907,16 @@ async function classify(slot, anchor, state) {
   const fake = await startFake(join(slot.root, "origin.git"), anchor.fakeState);
   const world = { root: slot.root, fake, descriptor: slot.descriptor };
   const trace = [];
-  // A refused plan discards the preparation; the next run plans again.
-  const current = () =>
+  const snapshot = () =>
     existsSync(statePath(slot.root))
-      ? fingerprint(JSON.parse(readFileSync(statePath(slot.root), "utf8")))
-      : { milestone: 0, items: {} };
+      ? JSON.parse(readFileSync(statePath(slot.root), "utf8"))
+      : undefined;
+  // Progress is judged against the state the last command was given at.
+  let baseline = fingerprint(state);
   const run = async () => {
     const report = await controllerProcess(world, {
       mode: "run",
-      baseline: current(),
+      baseline,
       idleMs: 300,
     });
     trace.push(
@@ -867,7 +945,8 @@ async function classify(slot, anchor, state) {
         return followed || state.cancelRequested
           ? result("terminal")
           : result("stranded", "cancelled without a request");
-      const why = `${report.outcome}: ${report.message?.split("\n")[0] ?? report.status?.summary ?? ""}`;
+      const owner = report.status?.coordinator;
+      const why = `${report.outcome}: ${report.message?.split("\n")[0] ?? report.status?.summary ?? ""} (coordinator ${owner?.mode ?? "none"}${owner?.waitReason ? `: ${owner.waitReason}` : ""})`;
       const stop = stopOf(report);
       if (stops.has(stop))
         return result(
@@ -889,6 +968,8 @@ async function classify(slot, anchor, state) {
       if (stops.size > MAX_COMMANDS)
         return result("stranded", `commands do not converge after ${why}`);
       followed = command;
+      const before = snapshot();
+      if (before) baseline = fingerprint(before);
       if (command.verb === "run") continue;
       const applied = await controllerProcess(world, {
         mode: "command",
@@ -903,6 +984,22 @@ async function classify(slot, anchor, state) {
           `factory ${command.verb} is refused (${applied.message}) after ${why}`,
         );
       if (applied.status?.phase === "cancelled") return result("terminal");
+      // Refusing a plan discards the preparation, and the next run plans
+      // again. That is the decision only when nothing else was pending.
+      if (!snapshot() && before?.schemaVersion === 7) {
+        const lost = [
+          before.cancelRequested && "cancel request",
+          before.coordinator.cancelError && "unresolved cancellation",
+          before.coordinator.mode !== "running" &&
+            `${before.coordinator.mode} mode`,
+        ].filter(Boolean);
+        if (lost.length)
+          return result(
+            "stranded",
+            `factory ${command.verb} discards the preparation with its ${lost.join(" and ")} after ${why}`,
+          );
+        baseline = { milestone: 0, items: {} };
+      }
     }
   } finally {
     await fake.stop();
@@ -914,7 +1011,8 @@ async function classify(slot, anchor, state) {
  * the first slot's anchors, and return a scheduler that runs each case in a
  * slot holding its anchor, one case per slot at a time.
  */
-export async function prepare({ deliveries, slots }) {
+export async function prepare({ deliveries, slots, include = [] }) {
+  startReusedPid();
   const recorded = await Promise.all(
     deliveries.flatMap((delivery) =>
       Array.from({ length: slots }, () => recordTrajectory(delivery)),
@@ -923,12 +1021,42 @@ export async function prepare({ deliveries, slots }) {
   const cases = deliveries.flatMap((delivery) =>
     enumerateCases(recorded.find((slot) => slot.delivery === delivery).anchors),
   );
+  // Named identities (the known dead ends) are checked whether or not the
+  // sample picked them; one that no longer exists is reported as such.
+  const names = new Set(cases.map((testCase) => testCase.name));
+  for (const identity of include) {
+    const name = identityName(identity);
+    if (names.has(name)) continue;
+    names.add(name);
+    const [delivery, key, ...valueNames] = identity;
+    const anchor = recorded
+      .find((slot) => slot.delivery === delivery)
+      ?.anchors.find((candidate) => candidate.key === key);
+    const values = Object.fromEntries(
+      valueNames.map((value) => [dimensionOf(value), value]),
+    );
+    const state =
+      anchor &&
+      valueNames.every(dimensionOf) &&
+      applyOverlays(anchor.state, values);
+    cases.push(
+      state && validSnapshot(structuredClone(state))
+        ? { identity, name, anchor, values, state }
+        : { identity, name, unreachable: true },
+    );
+  }
   const queues = new Map(recorded.map((slot) => [slot, Promise.resolve()]));
   const load = new Map(recorded.map((slot) => [slot, 0]));
   // A case runs in the least loaded slot whose own copy of the anchor yields
   // the same state shape and progress with the same overlays (the slot it
   // was enumerated from always does).
   const schedule = (testCase) => {
+    if (testCase.unreachable)
+      return Promise.resolve({
+        kind: "unreachable",
+        reason: "no such anchor, or its overlays do not apply or validate",
+        trace: [],
+      });
     const choices = recorded.flatMap((slot) => {
       if (slot.delivery !== testCase.anchor.delivery) return [];
       const anchor = slot.anchors.find(

@@ -1,17 +1,16 @@
 import { assertIntegrated, laterIntegration } from "./integration.js";
 import { deliveryReadiness } from "./readiness.js";
-import { workerContext } from "../execution/checkpoint.js";
+import { runWorker, stopWorker as stopSharedWorker } from "../item-worker.js";
 import { recordWorkFailure, diagnoseWorkRepair } from "../work-repair.js";
 import {
   cancelledFault,
-  executeItem,
   reportCancelled,
   reviewItem,
   staysInPlace,
   validateItem,
 } from "../item-steps.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
-import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
+import { graphDigest } from "../graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "../compiler.js";
@@ -28,13 +27,9 @@ import type {
 } from "../contracts.js";
 import { AuthenticationRequiredError } from "../contracts.js";
 import type { DiagnosticEmitter } from "../diagnostics.js";
-import {
-  materializeAssetSet,
-  selectedInputsForItem,
-  validationLfsMembersForItem,
-} from "../media.js";
+import { materializeAssetSet, validationLfsMembersForItem } from "../media.js";
 import { currentProcessSignal } from "../process.js";
-import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
+import { runQaItem } from "../qa-execution.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { readyItems } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
@@ -399,66 +394,24 @@ export async function runRegularGraph(args: {
       return;
     }
     if (work.step === "execute") {
-      if (!work.execution) {
-        await phases.reserve(item.id, "validation");
-        await preflightItemEnvironment({
-          config,
-          root,
-          state,
-          objectiveBody: args.objectiveBody,
-          item,
-          store: contentStore,
-          baseSha: itemBase,
-        });
-      }
-      // A reattached worker keeps the coding slot it holds while it runs remotely.
-      if (work.phaseReservation !== "coding")
-        await phases.reserve(item.id, "coding");
-      const result = await executeItem({
+      // The handle stays as the attempt's actual execution.
+      const result = await runWorker({
         state,
         item,
         driver,
         save,
-        signal,
-        pause: args.pause,
         cancelled: args.cancelled,
         diagnostics: args.diagnostics,
-        request: (attemptId) => ({
-          captureContext: { objective, runId: state.runId },
-          item: work.recovery?.correction
-            ? {
-                ...item,
-                brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
-              }
-            : item,
-          baseSha: itemBase,
-          attemptId,
-          objectiveBody: args.objectiveBody,
-          selectedAssets: selectedInputsForItem(state, item),
-        }),
+        config,
+        root,
+        objective,
+        objectiveBody: args.objectiveBody,
+        store: contentStore,
+        phases,
+        signal,
+        pause: args.pause,
+        baseSha: itemBase,
       });
-      phases.release(item.id);
-      if (result.collection)
-        args.diagnostics?.emit({
-          runId: state.runId,
-          itemId: item.id,
-          attemptId: work.attempt,
-          operation: "collection-ignored-links",
-          outcome: "completed",
-          metadata: {
-            observation: "original-worktree-scan",
-            acceptedIgnoredLinkCount:
-              result.collection.acceptedIgnoredLinks.length,
-            treeSha: result.treeSha,
-            headSha: result.changeRef,
-          },
-          detail: JSON.stringify(result.collection),
-        });
-      if (stopped()) throw cancelledFault();
-      // Recorded once; the handle stays as the attempt's actual execution.
-      recordWorkerDiscovery(state, item.id, result.discovery);
-      work.changeRef = result.changeRef;
-      work.treeSha = result.treeSha;
       if (result.assets?.length) {
         work.assets = result.assets;
         work.status = "waiting";
@@ -621,24 +574,15 @@ export async function runRegularGraph(args: {
     if (stopped()) throw cancelledFault();
     await deliver(item, itemBase);
   };
-  /** Stop the item's own worker after its attempt failed, so a retry never runs beside it. */
-  const stopWorker = async (item: WorkItem): Promise<void> => {
-    const work = state.work[item.id]!;
-    if (!work.execution) return;
-    try {
-      await driver.cancel(
-        structuredClone(work.execution),
-        workerContext(work, save, args.cancelled, args.diagnostics, {
-          runId: state.runId,
-          itemId: item.id,
-        }),
-      );
-      delete work.execution;
-    } catch {
-      // Left recorded: the next attempt starts only once the driver
-      // confirmed it stopped.
-    }
-  };
+  const stopWorker = (item: WorkItem): Promise<void> =>
+    stopSharedWorker({
+      state,
+      item,
+      driver,
+      save,
+      cancelled: args.cancelled,
+      diagnostics: args.diagnostics,
+    });
   const execute = async (item: WorkItem, itemBase: string): Promise<void> => {
     const work = state.work[item.id]!;
     try {

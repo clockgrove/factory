@@ -382,8 +382,18 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     a.phase = "ready";
     this.save(handle, context);
   }
+  /**
+   * Faults are classified once, here at the driver boundary. Collection
+   * reads through `observeActive`, so `endAttempt` sees the raw error.
+   */
   @classifyFaults(executionFault)
   async observe(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionObservation> {
+    return this.observeActive(handle, context);
+  }
+  private async observeActive(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<ExecutionObservation> {
@@ -527,14 +537,14 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     // failure leaves collect, and the step's repeat reattaches here.
     if (a.operation !== "collect") {
       if (!a.harnessStarted) await this.launch(handle, context);
-      let observed = await this.observe(handle, context);
+      let observed = await this.observeActive(handle, context);
       while (observed.state === "running") {
         if (context?.cancelled())
           throw cancelledFault(
             "Sandbox collection cancelled; owned attempt retained",
           );
         await new Promise((resolve) => setTimeout(resolve, 25));
-        observed = await this.observe(handle, context);
+        observed = await this.observeActive(handle, context);
       }
       if (observed.state !== "complete" && observed.authentication)
         throw new AuthenticationRequiredError(

@@ -25,13 +25,17 @@ import {
   hasUnresolvedSubprocesses,
   removeWorktree,
 } from "../process.js";
-import { cancelledFault, endAttempt, stoppedFault } from "./attempt.js";
+import {
+  cancelledFault,
+  endAttempt,
+  stoppedFault,
+  transportFailure,
+} from "./attempt.js";
 import { collectWorktreeResult } from "./local.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import {
   ClaudeManagedClient,
   claudeGone,
-  claudeTransient,
   validateClaudeManagedConfig,
   type ClaudeManagedConfig,
 } from "./claude-managed-client.js";
@@ -400,7 +404,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       await this.advance(handle, context);
     } catch (error) {
       // A transient failure leaves a recorded phase that collection resolves.
-      if (context.cancelled() || this.expired(data) || !claudeTransient(error))
+      if (context.cancelled() || this.expired(data) || !transportFailure(error))
         await this.fail(error, handle, context);
     }
     return handle;
@@ -422,7 +426,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
         const file = await this.client
           .upload(join(data.root, name), this.remaining(data))
           .catch((error: unknown) => {
-            if (claudeTransient(error))
+            if (transportFailure(error))
               context.observeOrphan?.({
                 resource: "file",
                 detail: `Upload of ${name} for attempt ${handle.identity} lost its response at ${new Date().toISOString()}; the provider may hold an unreferenced copy`,
@@ -534,8 +538,18 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       throw new Error("Claude result download is truncated");
     return { bytes: Buffer.concat(chunks), id: file.id };
   }
+  /**
+   * Faults are classified once, here at the driver boundary. Collection
+   * reads through `observeActive`, so `endAttempt` sees the raw error.
+   */
   @classifyFaults(executionFault)
   async observe(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionObservation> {
+    return this.observeActive(handle, context);
+  }
+  private async observeActive(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<ExecutionObservation> {
@@ -941,7 +955,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       // leaves collect and the step's repeat resumes here without repeating
       // a submission blindly.
       await this.advance(handle, context);
-      const observation = await this.observe(handle, context);
+      const observation = await this.observeActive(handle, context);
       if (
         observation.state === "running" &&
         data.phase === "bootstrap-verified"

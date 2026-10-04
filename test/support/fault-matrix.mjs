@@ -501,7 +501,63 @@ export function assertCancelled(result) {
   );
 }
 
+/**
+ * A paid step hit its bound and the operator's answer converged: the first
+ * run made exactly `bound.calls` paid tries of the faulted call (three
+ * transient faults, then the fourth becomes a decision) and stopped for a
+ * decision with the Work Item still in place, not failed; the restart ran the
+ * `factory retry` command the status named (`bound.answer`), and the step
+ * ran again. The end state is checked separately.
+ */
+export function assertBoundAnswered(result, { bound }) {
+  const runs = () => result.runs.map(summarizeRun).join(" | ");
+  const [first, second] = result.runs;
+  assert.equal(first?.outcome, "needs-decision", `first run: ${runs()}`);
+  if (bound.item)
+    assert.notEqual(
+      first.work?.[bound.item]?.status,
+      "failed",
+      `${bound.item} waits in place for the decision: ${runs()}`,
+    );
+  if (bound.call) {
+    const tries = result.calls.filter(
+      (call) =>
+        call.run === 0 &&
+        call.target === bound.call.target &&
+        call.method === bound.call.method &&
+        (bound.call.phase === undefined || call.phase === bound.call.phase) &&
+        (bound.call.item === undefined || call.item === bound.call.item),
+    );
+    assert.deepEqual(
+      tries.map((call) => call.fault ?? "none"),
+      Array(bound.calls).fill(bound.call.kind),
+      `paid tries of ${bound.call.target}.${bound.call.method} before the decision: ${runs()}`,
+    );
+  }
+  if (bound.worker) {
+    const events = (type) =>
+      result.harness.filter(
+        (event) => event.type === type && event.item === bound.worker,
+      ).length;
+    assert.equal(events("died"), bound.calls, `${bound.worker}'s workers died`);
+    assert.equal(
+      events("start"),
+      bound.calls + 1,
+      `${bound.worker}'s workers started: ${runs()}`,
+    );
+  }
+  assert.deepEqual(
+    second?.answered,
+    { command: bound.answer, applied: "step" },
+    `the operator's answer: ${runs()}`,
+  );
+}
+
 export const CHECKS = {
+  bound: {
+    suffix: " stops for a decision that factory retry answers",
+    assert: assertBoundAnswered,
+  },
   cancelled: { suffix: " is cancelled", assert: assertCancelled },
   refusal: { suffix: " is refused", assert: assertRefusal },
   end: { suffix: "", assert: assertEndState },

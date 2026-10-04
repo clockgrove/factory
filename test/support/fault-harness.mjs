@@ -153,7 +153,9 @@ async function repositorySnapshot(origin, fake, items) {
  * driver method begins for an item) apply to the first controller run only.
  * `actions` adds to an item's scripted worker action; `barrier: true` holds
  * its worker until Factory cancels it.
- * `beforeRun(fake, index)` may change GitHub between controller runs.
+ * `beforeRun(fake, index)` may change GitHub between controller runs. With
+ * `answer`, each restart first runs the `factory retry` the status names for
+ * the previous stop (the run reports it as `answered`).
  * A run that crashed, stopped, failed or ended needing a human decision is
  * restarted at most `maxRestarts` times; a complete run ends the scenario.
  */
@@ -164,6 +166,7 @@ export async function runScenario({
   http = [],
   inProcess = [],
   operator,
+  answer = false,
   actions = {},
   fake: fakeOptions = {},
   maxRestarts = 2,
@@ -266,6 +269,7 @@ export async function runScenario({
       writeDescriptor(descriptorPath, {
         ...descriptor,
         run: index,
+        answer,
         faults: index === 0 ? inProcess : [],
         ...(index === 0 && operator && { operator }),
       });

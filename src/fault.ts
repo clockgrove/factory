@@ -87,7 +87,7 @@ export function attachFault<E>(error: E, fault: Fault | undefined): E {
 
 /**
  * The classification an adapter attached to this error, or to the error it
- * wraps (such as an Interruption around a provider failure). Anything no
+ * wraps (such as a driver error around a provider failure). Anything no
  * adapter classified is a defect.
  */
 export function faultOf(error: unknown): Fault {

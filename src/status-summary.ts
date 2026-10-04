@@ -63,8 +63,12 @@ export interface StatusItemView extends WaitView {
   status: string;
   step: string | null;
   requestedPhase: string | null;
+  /**
+   * Why a pending or waiting item is not scheduled, as a code:
+   * `dependency:<id>`, `resource:<id>`, `capacity`, `acceptance-decision`
+   * or `asset-selection`. Steps' waits are on `wait`.
+   */
   blockedReason: string | null;
-  waitingReason: string | null;
   pullRequest: number | null;
   acceptancePending: PendingDecisionView | null;
   candidateAssetSets: string[];
@@ -226,7 +230,7 @@ export function itemWait(item: StatusItemView): ShownWait | undefined {
       kind: "external prerequisite",
       detail: `${item.authentication.provider} authentication`,
     };
-  const reason = item.blockedReason ?? item.waitingReason;
+  const reason = item.blockedReason;
   if (item.status === "pending") {
     if (!reason) return undefined;
     if (reason.startsWith("dependency:"))
@@ -239,26 +243,17 @@ export function itemWait(item: StatusItemView): ShownWait | undefined {
         kind: "dependency",
         detail: `shares paths with ${reason.slice("resource:".length)}`,
       };
-    if (reason === "capacity" || /capacity|ceiling/i.test(reason))
+    if (reason === "capacity")
       return { kind: "worker capacity", detail: "worker capacity" };
     return { kind: "external prerequisite", detail: short(reason, 80) };
   }
-  if (item.status === "running" || item.status === "published") {
-    if (
-      item.waitingReason &&
-      /check|readiness|protection/i.test(item.waitingReason)
-    )
-      return { kind: "CI check", detail: short(item.waitingReason, 80) };
-    if (item.requestedPhase && item.waitingReason)
-      return { kind: "worker capacity", detail: short(item.waitingReason, 80) };
-    if (item.status === "published")
-      return {
-        kind: "CI check",
-        detail: item.pullRequest
-          ? `PR #${item.pullRequest} awaiting checks and merge`
-          : "awaiting checks and merge",
-      };
-  }
+  if (item.status === "published")
+    return {
+      kind: "CI check",
+      detail: item.pullRequest
+        ? `PR #${item.pullRequest} awaiting checks and merge`
+        : "awaiting checks and merge",
+    };
   return undefined;
 }
 
@@ -431,15 +426,13 @@ function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
   return {
     phase: "failed",
     summary: `${failed.id} failed${error}`,
-    nextAction: failed.pullRequest
-      ? {
-          command: `factory logs --objective ${objective} --item ${failed.id}`,
-          reason: `PR #${failed.pullRequest} is published, so retry is refused; inspect it and decide`,
-        }
-      : {
-          command: `factory retry --objective ${objective} --item ${failed.id}`,
-          reason: `Starts a new attempt${thenRun(view)}`,
-        },
+    nextAction: {
+      command: `factory retry --objective ${objective} --item ${failed.id}`,
+      // A published item keeps its PR: retry resumes its delivery.
+      reason: failed.pullRequest
+        ? `Resumes delivery of PR #${failed.pullRequest}${thenRun(view)}; or factory cancel --objective ${objective}`
+        : `Starts a new attempt${thenRun(view)}`,
+    },
   };
 }
 

@@ -10,10 +10,13 @@
  *    confirmed dead with `ctx.paidLost(detail)`; only those faults count toward the bound.
  * 6. Never rotate the attempt inside a step. Records are keyed by item, so rotation alone never resets the
  *    paid bound; work and defect end the step and reset it (repair allowances bound those).
- * 7. `step` returns only on success. On a throw, branch on `faultOf(error).kind`: `cancelled` stop quietly;
- *    `work` fail the attempt, then repair or retry; `decision` / `config` leave the scope waiting (the wait
- *    is saved; `factory retry` answers it); `defect` stop and report. Transient faults never leave `step`.
- * 8. Delete the old repeat loop (repeatInterrupted, retryTransient, ...); diagnostics spans go inside the body.
+ * 7. `step` returns only on success. On a throw, first `StepPaused` (pause, drain or handoff ended a wait
+ *    between tries): stop quietly, change nothing; the record stays and the next run resumes the step.
+ *    Otherwise branch on `faultOf(error).kind`: `cancelled` stop quietly; `work` fail the attempt, then
+ *    repair or retry; `decision` / `config` leave the scope waiting (the wait is saved; `factory retry`
+ *    answers it); `defect` stop and report. Transient faults never leave `step`.
+ * 8. Pass the run's cancel signal as `signal` and its pause signal as `pause` on every call. The old
+ *    repeat loops (repeatInterrupted, retryTransient) are gone; diagnostics spans go inside the body.
  */
 /*
  * Worked examples (sketches):
@@ -120,7 +123,25 @@ export interface StepOptions {
   save: () => void;
   /** Cancel: ends a backoff or try with a `cancelled` fault. */
   signal?: AbortSignal;
+  /**
+   * Pause, drain or handoff: ends a backoff or poll wait with `StepPaused`
+   * (not a fault). Nothing is charged or failed; the record stays, so the
+   * next run resumes the step where it waited. A running try is not cut off.
+   */
+  pause?: AbortSignal;
   clock?: StepClock;
+}
+
+/**
+ * The owner paused (or is draining or handing off) while the step waited
+ * between tries. Not a fault: the caller stops quietly and leaves the scope
+ * as it is.
+ */
+export class StepPaused extends Error {
+  constructor(readonly step: string) {
+    super(`Step ${step} paused`);
+    this.name = "StepPaused";
+  }
 }
 
 export const FIRST_BACKOFF_MS = 1_000;
@@ -333,7 +354,7 @@ async function repeat<T>(
   key: string,
   holder: { wait?: Wait },
   fn: (context: StepContext) => Promise<T>,
-  { save, signal, clock = systemClock }: StepOptions,
+  { save, signal, pause, clock = systemClock }: StepOptions,
 ): Promise<T> {
   const { name } = spec;
   const record = (): RepeatRecord => state.repeats?.[key] ?? {};
@@ -398,6 +419,14 @@ async function repeat<T>(
     throw new StepFault(decision(asked));
   }
 
+  // Either signal ends a wait: cancel with a fault, pause without one.
+  const waitSignal =
+    signal && pause ? AbortSignal.any([signal, pause]) : (signal ?? pause);
+  const stopWaiting = (): void => {
+    if (signal?.aborted) throw cancelled();
+    if (pause?.aborted) throw new StepPaused(key);
+  };
+
   // Running time of the current run of faults; downtime is never counted.
   let activeFrom = clock.now();
   for (;;) {
@@ -408,10 +437,14 @@ async function repeat<T>(
       // clock that jumps backwards cannot stall the step.
       const chosen = Date.parse(next.nextAt) - Date.parse(next.scheduledAt);
       const delay = Math.min(Date.parse(next.nextAt) - clock.now(), chosen);
-      if (delay > 0)
-        await clock.sleep(delay, signal).catch((error: unknown) => {
-          throw signal?.aborted ? cancelled() : error;
+      if (delay > 0) {
+        // A wait between tries is a safe point: pause stops here.
+        stopWaiting();
+        await clock.sleep(delay, waitSignal).catch((error: unknown) => {
+          stopWaiting();
+          throw error;
         });
+      }
       if (signal?.aborted) throw cancelled();
     }
 

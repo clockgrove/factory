@@ -65,8 +65,6 @@ export interface WorkState {
   phaseReservation?: import("./config.js").ResourcePhase;
   requestedPhase?: import("./config.js").ResourcePhase;
   graphRevisionDigest?: string;
-  /** Interruptions repeated during the current attempt (see repeatInterrupted). */
-  interruptions?: number;
   discovery?: import("./contracts.js").WorkDiscovery & { attempt: string };
   discoveryDisposition?: "proposed" | "accepted";
   qaChecks?: NamedCheckEvidence[];
@@ -75,7 +73,6 @@ export interface WorkState {
   status: WorkStatus;
   step?: WorkStep;
   attempt?: string;
-  waitingReason?: string;
   execution?: ExecutionHandle;
   /**
    * Workers of this attempt that stopped without a result. The driver's
@@ -104,7 +101,7 @@ export interface WorkState {
   completedAt?: string;
   integratedSha?: string;
   githubClosure?: "pending" | "complete";
-  /** Structured wait; replaces waitingReason once steps use it (#515). */
+  /** Why the item is not progressing: a step's or the scheduler's structured wait. */
   wait?: Wait;
 }
 
@@ -525,10 +522,11 @@ export function parseFactoryState(
     if (!Number.isSafeInteger(projected[id]) || Number(projected[id]) <= 0)
       throw new Error(`Work Item ${id} has no projected Issue identity`);
     const item = record(work[id], `work.${id}`);
-    if (item.pendingEffect !== undefined)
-      throw new Error(
-        `Work Item ${id} has an unsupported pendingEffect field from an older Factory version`,
-      );
+    for (const legacy of ["pendingEffect", "interruptions", "waitingReason"])
+      if (item[legacy] !== undefined)
+        throw new Error(
+          `Work Item ${id} records ${legacy} from an earlier Factory version; start the Objective fresh`,
+        );
     if (!statuses.has(item.status as WorkStatus))
       throw new Error(`Work Item ${id} has an invalid status`);
     for (const field of ["phaseReservation", "requestedPhase"])

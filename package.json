@@ -57,6 +57,7 @@
     "format:check": "biome format . && prettier --check package-lock.json \"**/*.{md,yml,yaml}\"",
     "format": "biome format --write . && prettier --write package-lock.json \"**/*.{md,yml,yaml}\"",
     "test": "npm run build && node --import ./test/support/isolated-state.mjs --test --test-timeout=300000 test/*.test.mjs",
+    "test:fault-boundaries": "npm run build && FACTORY_UPDATE_FAULT_BOUNDARIES=1 node --import ./test/support/isolated-state.mjs --test --test-concurrency=1 --test-name-pattern=\"^uninterrupted run\" test/fault-matrix-regular-1.test.mjs test/fault-matrix-native-1.test.mjs",
     "notices": "node scripts/generate-notices.mjs",
     "notices:check": "node scripts/generate-notices.mjs --check"
   },

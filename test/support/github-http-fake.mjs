@@ -278,6 +278,12 @@ export class GitHubHttpFake {
       this.sockets.add(socket);
       socket.on("close", () => this.sockets.delete(socket));
     });
+    // Never close an idle keep-alive connection during a scenario: a client
+    // reusing a socket the server is closing sees a reset, an unintended
+    // fault on a loaded machine. Faults are only what a test injects.
+    this.server.keepAliveTimeout = 10 * 60_000;
+    this.server.headersTimeout = 10 * 60_000 + 1000;
+    this.server.requestTimeout = 0;
     await new Promise((resolve) => this.server.listen(0, "127.0.0.1", resolve));
     const { port } = this.server.address();
     this.apiUrl = `http://127.0.0.1:${port}`;

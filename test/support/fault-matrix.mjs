@@ -6,12 +6,32 @@
 // Factory's own state. Nothing here names Factory internals, so the matrix
 // survives the recovery redesign.
 import assert from "node:assert/strict";
-import { appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { availableParallelism } from "node:os";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { describe, test } from "node:test";
 import { faults } from "./github-http-fake.mjs";
 import { OBJECTIVE, branch, marker, runScenario } from "./fault-harness.mjs";
+
+/**
+ * Scenarios run concurrently within one test file: every available core by
+ * default, or FACTORY_FAULT_CONCURRENCY to cap a shared machine.
+ */
+export function scenarioConcurrency() {
+  const configured = Number(process.env.FACTORY_FAULT_CONCURRENCY);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : availableParallelism();
+}
 
 const KINDS = ["crash-before", "crash-after", "lost", "unavailable"];
 const PAID = new Set(["crash-after", "lost"]);
@@ -65,6 +85,8 @@ export function deriveCases(reference) {
       for (const kind of KINDS)
         cases.push({
           name: `${kind} at ${entry.endpoint} #${occurrence}`,
+          group: "mutations",
+          boundaryName: `${entry.endpoint} #${occurrence}`,
           boundary: { kind: "http", endpoint: entry.endpoint, occurrence },
           http: [httpRule(entry.endpoint, occurrence, kind)],
         });
@@ -73,6 +95,8 @@ export function deriveCases(reference) {
       for (const kind of ["unavailable", "reset"])
         cases.push({
           name: `${kind} at ${entry.endpoint} #1`,
+          group: "reads",
+          boundaryName: `${entry.endpoint} #1`,
           boundary: { kind: "http", endpoint: entry.endpoint, occurrence: 1 },
           http: [httpRule(entry.endpoint, 1, kind)],
         });
@@ -86,6 +110,8 @@ export function deriveCases(reference) {
     for (const kind of KINDS)
       cases.push({
         name: `${kind} at ${key} #${occurrence}`,
+        group: "calls",
+        boundaryName: `${key} #${occurrence}`,
         boundary: {
           kind: "call",
           target: call.target,
@@ -126,12 +152,27 @@ const compiles = (result) =>
     (call) => call.method === "generateStructured" && call.reached,
   ).length;
 
-/** Every injected fault and lag took effect; otherwise the case proves nothing. */
+/**
+ * Every injected fault and lag took effect, and nothing outside the harness
+ * signalled a controller; otherwise the case proves nothing about Factory.
+ */
 export function assertFaultsFired(result) {
+  const runs = () => result.runs.map(summarizeRun).join(" | ");
+  assert.deepEqual(
+    result.signals ?? [],
+    [],
+    `a controller received a signal from outside the harness (SIGTERM makes Factory drain and release ownership), so the scenario is void, not a Factory result: ${runs()}`,
+  );
   for (const rule of result.fake.rules)
-    assert.ok(rule.fired > 0, `fault never fired: ${String(rule.match)}`);
+    assert.ok(
+      rule.fired > 0,
+      `fault never fired: ${String(rule.match)}; runs: ${runs()}`,
+    );
   for (const rule of result.fake.lag)
-    assert.ok(rule.served > 0, `lag never served a stale read: ${rule.read}`);
+    assert.ok(
+      rule.served > 0,
+      `lag never served a stale read: ${rule.read}; runs: ${runs()}`,
+    );
   for (const fault of result.inProcess)
     assert.ok(
       result.calls.some(
@@ -140,7 +181,7 @@ export function assertFaultsFired(result) {
           call.method === fault.method &&
           call.fault === fault.kind,
       ),
-      `fault never fired: ${fault.kind} at ${fault.target}.${fault.method} #${fault.occurrence}`,
+      `fault never fired: ${fault.kind} at ${fault.target}.${fault.method} #${fault.occurrence}; runs: ${runs()}`,
     );
 }
 
@@ -168,7 +209,11 @@ export async function assertEndState(result, { foreignIssues = 0 } = {}) {
   const issueOf = {};
   for (const item of items) {
     const issues = fake.issuesWithMarker(marker(item.id));
-    assert.equal(issues.length, 1, `issues for ${item.id}\n${context()}`);
+    assert.equal(
+      issues.length,
+      1,
+      `Work Item ${item.id} has ${issues.length} issues with its marker\n${context()}`,
+    );
     issueOf[item.id] = issues[0].number;
     assert.equal(issues[0].state, "closed", `issue for ${item.id} closed`);
     assert.equal(
@@ -235,9 +280,19 @@ export async function assertEndState(result, { foreignIssues = 0 } = {}) {
 
 /** No run stopped for an operator: only injected crashes interrupt it. */
 export function assertNoOperatorStop(result) {
+  // Name each stopped Work Item's recorded failure: a needs-decision summary
+  // alone does not say why the run stopped.
+  const failures = (run) =>
+    Object.entries(run.work ?? {})
+      .filter(([, work]) => work.failure)
+      .map(([id, work]) => ` [${id}: ${work.failure.trim()}]`)
+      .join("");
   const stops = result.runs
     .filter((run) => !["complete", "crashed"].includes(run.outcome))
-    .map((run) => `${run.outcome}: ${run.message ?? run.stderr ?? ""}`);
+    .map(
+      (run) =>
+        `${run.outcome}: ${run.message ?? run.stderr ?? ""}${failures(run)}`,
+    );
   assert.deepEqual(stops, [], `operator stops: ${stops.join(" | ")}`);
 }
 
@@ -308,6 +363,7 @@ function report(name, value) {
       suite: basename(process.argv[1] ?? ""),
       name,
       runs: value.runs,
+      summaries: value.runs.map(summarizeRun),
       crashes: value.crashes,
       refused: value.fake.log
         .filter(
@@ -323,10 +379,56 @@ function report(name, value) {
 }
 
 /**
+ * One controller run as a single line: its outcome, its message, and where
+ * each Work Item stood. Diagnosis patterns anchor on this, so they name where
+ * a run stopped, not just generic transport text.
+ */
+export function summarizeRun(run) {
+  const entries = Object.entries(run.work ?? {}).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  const work = entries.length
+    ? entries
+        .map(
+          ([id, item]) =>
+            `${id}:${item.status}${item.step ? `@${item.step}` : ""}`,
+        )
+        .join(",")
+    : "none";
+  const failures = entries
+    .filter(([, item]) => item.failure)
+    .map(([id, item]) => `; failure[${id}]=${item.failure.trim()}`)
+    .join("");
+  const message = (run.message ?? run.stderr ?? "").replace(/\s+/g, " ").trim();
+  return `outcome=${run.outcome}; message=${message}; work=${work}${failures}`;
+}
+
+/**
+ * What a known failure's pattern must match: the run that ended the scenario
+ * when it did not complete; for the operator-stop check, the last run that
+ * stopped; otherwise the check's own failure message (a fact about the end
+ * state, such as a duplicate issue). Matching one run, not all runs, keeps an
+ * earlier run's message from hiding a later, different failure.
+ */
+export function diagnosisTarget(result, check, error) {
+  const final = result.runs.at(-1);
+  if (final && final.outcome !== "complete") return summarizeRun(final);
+  if (check === "stop") {
+    const stop = result.runs.findLast(
+      (run) => !["complete", "crashed"].includes(run.outcome),
+    );
+    if (stop) return summarizeRun(stop);
+  }
+  return String(error?.message ?? error);
+}
+
+/**
  * Declare one scenario as one test per check over a single run. Every test
  * first requires that each injected fault fired. A known failure is inverted:
- * it passes while the bug reproduces and fails once it is fixed, so its entry
- * must then be removed from the known failures.
+ * it passes only while its check fails with a message matching its
+ * diagnosis pattern, fails naming the reason when the check fails another
+ * way, and fails once the bug is fixed so its entry must be removed. A racy
+ * known failure may also pass.
  */
 export function declareScenario(name, run, options, known) {
   const { checks = ["end", "stop", "budget"], ...context } = options;
@@ -343,26 +445,22 @@ export function declareScenario(name, run, options, known) {
       const value = await once();
       assertFaultsFired(value);
       if (!diagnosis) return CHECKS[check].assert(value, context);
-      // A racy known failure reproduces only when Factory's own scheduling
-      // lines up with the fault; it must pass or fail for its named reason.
-      if (typeof diagnosis === "object") {
-        try {
-          await CHECKS[check].assert(value, context);
-        } catch (error) {
-          if (!diagnosis.pattern.test(String(error?.message ?? error)))
-            throw error;
-          t.diagnostic(`racy known failure: ${diagnosis.diagnosis}`);
-        }
-        return;
-      }
       try {
         await CHECKS[check].assert(value, context);
-      } catch {
-        t.diagnostic(`known failure: ${diagnosis}`);
+      } catch (error) {
+        const target = diagnosisTarget(value, check, error);
+        if (!diagnosis.pattern.test(target))
+          assert.fail(
+            `Known failure ${diagnosis.key} failed for another reason (expected ${diagnosis.pattern} on: ${target.slice(0, 2000)}): ${String(error?.message ?? error).slice(0, 2000)}`,
+          );
+        t.diagnostic(
+          `${diagnosis.racy ? "racy " : ""}known failure ${diagnosis.key}: ${diagnosis.text}`,
+        );
         return;
       }
+      if (diagnosis.racy) return;
       assert.fail(
-        `Known failure no longer reproduces; remove it from test/support/fault-known.mjs: ${diagnosis}`,
+        `Known failure ${diagnosis.key} no longer reproduces; remove it from test/support/fault-known.mjs: ${diagnosis.text}`,
       );
     });
   }
@@ -374,19 +472,130 @@ const checksFor = (testCase) =>
     ? ["end", "stop", "budget", "plan"]
     : ["end", "stop", "budget"];
 
+export const SNAPSHOT = join(import.meta.dirname, "fault-boundaries.json");
+
+/** The delivery modes the matrix derives boundaries for; the snapshot holds exactly these. */
+export const MATRIX_DELIVERIES = ["native-stack", "regular"];
+
+/** Derived boundary names by group, sorted so request interleaving cannot reorder them. */
+export function boundarySnapshot(cases) {
+  const groups = { mutations: new Set(), reads: new Set(), calls: new Set() };
+  for (const testCase of cases)
+    groups[testCase.group].add(testCase.boundaryName);
+  return Object.fromEntries(
+    Object.entries(groups).map(([group, names]) => [group, [...names].sort()]),
+  );
+}
+
 /**
- * Declare part `part` of `parts` of the matrix for one delivery strategy
- * (cases alternate between parts so CI shards balance).
+ * Differences between the committed snapshot and one delivery's derived
+ * boundaries, including deliveries the snapshot holds that the matrix no
+ * longer derives. Empty when they agree.
+ */
+export function snapshotDifferences(committed, delivery, snapshot) {
+  const differences = [];
+  if (!MATRIX_DELIVERIES.includes(delivery))
+    differences.push(`+ delivery ${delivery} is not a matrix delivery`);
+  for (const stale of Object.keys(committed))
+    if (!MATRIX_DELIVERIES.includes(stale))
+      differences.push(`- delivery ${stale} is no longer derived`);
+  const expected = committed[delivery] ?? {};
+  for (const group of new Set([
+    ...Object.keys(snapshot),
+    ...Object.keys(expected),
+  ])) {
+    const now = new Set(snapshot[group] ?? []);
+    const before = new Set(expected[group] ?? []);
+    for (const name of now)
+      if (!before.has(name)) differences.push(`+ ${group}: ${name}`);
+    for (const name of before)
+      if (!now.has(name)) differences.push(`- ${group}: ${name}`);
+  }
+  return differences;
+}
+
+const pause = (ms) =>
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Record one delivery's boundaries in `path` under an exclusive lock, so
+ * concurrent update runs cannot lose each other's write. Deliveries the
+ * matrix no longer derives are dropped.
+ */
+export function updateSnapshot(path, delivery, snapshot) {
+  const lock = `${path}.lock`;
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST" || Date.now() > deadline) throw error;
+      pause(25);
+    }
+  }
+  try {
+    const committed = existsSync(path)
+      ? JSON.parse(readFileSync(path, "utf8"))
+      : {};
+    committed[delivery] = snapshot;
+    const ordered = Object.fromEntries(
+      Object.keys(committed)
+        .filter((key) => MATRIX_DELIVERIES.includes(key))
+        .sort()
+        .map((key) => [key, committed[key]]),
+    );
+    const temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(ordered, null, 2)}\n`);
+    renameSync(temporary, path);
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Compare the derived boundaries with the committed snapshot. A boundary or
+ * delivery added or removed changes what the matrix tests, so it fails until
+ * the snapshot is regenerated deliberately (`npm run test:fault-boundaries`,
+ * which sets FACTORY_UPDATE_FAULT_BOUNDARIES=1).
+ */
+export function checkBoundarySnapshot(delivery, snapshot, path = SNAPSHOT) {
+  if (process.env.FACTORY_UPDATE_FAULT_BOUNDARIES === "1")
+    return updateSnapshot(path, delivery, snapshot);
+  const committed = existsSync(path)
+    ? JSON.parse(readFileSync(path, "utf8"))
+    : {};
+  const differences = snapshotDifferences(committed, delivery, snapshot);
+  if (differences.length)
+    throw new Error(
+      `Fault boundaries for ${delivery} delivery differ from test/support/fault-boundaries.json: boundary added or removed; update the snapshot deliberately with \`npm run test:fault-boundaries\` and review the diff.\n${differences.join("\n")}`,
+    );
+}
+
+/** Stable part (1-based) for a case, independent of every other case. */
+export function partOf(caseName, parts) {
+  const hash = createHash("sha256").update(caseName).digest();
+  return (hash.readUInt32BE(0) % parts) + 1;
+}
+
+/**
+ * Declare part `part` of `parts` of the matrix for one delivery strategy.
+ * Each case goes to the part given by a hash of its name, `<kind> at
+ * <boundary>`, so slow cases (crash-after, closure) spread across files and
+ * CI shards, and adding or removing a boundary moves no other case. Hashing
+ * the boundary alone keeps a boundary's kinds together but, with about 45
+ * boundaries, splits 62/90; hashing the case splits about evenly.
  */
 export async function defineMatrix(delivery, known, part = 1, parts = 2) {
   const reference = await referenceRun(delivery);
   const cases = deriveCases(reference);
+  checkBoundarySnapshot(delivery, boundarySnapshot(cases));
   checkKnown(
     known,
     cases.flatMap((testCase) => testNames(testCase.name, checksFor(testCase))),
   );
   describe(`fault matrix: ${delivery} delivery (${part}/${parts})`, {
-    concurrency: availableParallelism(),
+    concurrency: scenarioConcurrency(),
   }, () => {
     if (part === 1)
       declareScenario(
@@ -396,7 +605,7 @@ export async function defineMatrix(delivery, known, part = 1, parts = 2) {
         {},
       );
     for (const [index, testCase] of cases.entries()) {
-      if (index % parts !== part - 1) continue;
+      if (partOf(testCase.name, parts) !== part) continue;
       declareScenario(
         testCase.name,
         () =>
@@ -411,15 +620,4 @@ export async function defineMatrix(delivery, known, part = 1, parts = 2) {
       );
     }
   });
-}
-
-/** Expand {diagnosis: [test names]} into {test name: diagnosis}. */
-export function todos(groups) {
-  const map = {};
-  for (const [diagnosis, names] of Object.entries(groups))
-    for (const name of names) {
-      if (map[name]) throw new Error(`Duplicate known failure: ${name}`);
-      map[name] = diagnosis;
-    }
-  return map;
 }

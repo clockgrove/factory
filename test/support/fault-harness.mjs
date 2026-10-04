@@ -56,10 +56,13 @@ function readLines(path) {
     .map((line) => JSON.parse(line));
 }
 
-// Scenario roots still present (a run interrupted by a test timeout); the
-// process removes them on exit, so no /tmp/factory-fault-* outlives a run.
+// Scenario roots and controllers still present (a run interrupted by a test
+// timeout); the process removes them on exit, so no /tmp/factory-fault-* or
+// controller outlives a run.
 const liveRoots = new Set();
+const liveControllers = new Set();
 process.on("exit", () => {
+  for (const child of liveControllers) child.kill("SIGKILL");
   for (const root of liveRoots) rmSync(root, { recursive: true, force: true });
 });
 
@@ -70,8 +73,17 @@ function runController(env, descriptorPath, runTimeoutMs, started) {
     const child = spawn(
       process.execPath,
       ["--import", fastTimers, controller, descriptorPath],
-      { env, cwd: repositoryRoot, stdio: ["ignore", "pipe", "pipe"] },
+      // A process group of its own: a signal sent to the test runner's group
+      // (an interrupt, a supervisor stopping the suite) never reaches it. Only
+      // the harness signals a controller, and only with SIGKILL.
+      {
+        env,
+        cwd: repositoryRoot,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      },
     );
+    liveControllers.add(child);
     started(child);
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -81,6 +93,7 @@ function runController(env, descriptorPath, runTimeoutMs, started) {
     child.stdout.on("data", (chunk) => (stdout += chunk));
     child.stderr.on("data", (chunk) => (stderr += chunk));
     child.on("close", (code, signal) => {
+      liveControllers.delete(child);
       clearTimeout(timer);
       const line = stdout.trim().split("\n").at(-1);
       let parsed;
@@ -248,6 +261,8 @@ export async function runScenario({
         runTimeoutMs,
         (started) => {
           child = started;
+          // For tests of the harness itself (another actor signalling it).
+          fake.controllerPid = started.pid;
         },
       );
       child = undefined;
@@ -265,6 +280,7 @@ export async function runScenario({
       inProcess,
       harness: readLines(join(fakeRoot, "harness.ndjson")),
       calls: readLines(join(fakeRoot, "calls.ndjson")),
+      signals: readLines(join(fakeRoot, "signals.ndjson")),
       repository: await repositorySnapshot(target.origin, fake, items),
     };
   } finally {

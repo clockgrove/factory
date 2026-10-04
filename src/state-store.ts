@@ -56,7 +56,7 @@ export function saveState(path: string, state: ContinuationState): void {
 
 const currentVersion = (value: unknown): boolean => {
   const version = (value as { schemaVersion?: unknown } | null)?.schemaVersion;
-  return version === 6 || version === 7;
+  return version === 7 || version === 8;
 };
 
 /** Every Objective (or preparation) directory whose snapshot an earlier version wrote. */
@@ -99,7 +99,7 @@ export function readContinuation(
   if (!existsSync(path)) return undefined;
   const value = JSON.parse(readFileSync(path, "utf8"));
   assertCurrentVersion(repository, path, value);
-  if (value.schemaVersion !== 7) return readState(repository, objective);
+  if (value.schemaVersion !== 8) return readState(repository, objective);
   if (
     value.kind !== "preparing" ||
     value.repository !== repository ||

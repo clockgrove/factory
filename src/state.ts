@@ -138,7 +138,7 @@ export interface PreparationState {
   /** Worker ceiling and scheduling resolved when the Objective started. */
   capacity: import("./config.js").Capacity;
   charges?: import("./repair-policy.js").RepairLedger["charges"];
-  schemaVersion: 7;
+  schemaVersion: 8;
   kind: "preparing";
   repository: string;
   objective: number;
@@ -179,7 +179,7 @@ export interface FactoryState {
   planGraphDigest: string;
   /** Native predecessor facts the plan was made with; absent when it had none. */
   prerequisitesDigest?: string;
-  schemaVersion: 6;
+  schemaVersion: 7;
   repository: string;
   objective: number;
   runId: string;
@@ -422,7 +422,7 @@ export function parseFactoryState(
   const state = record(value, "state");
   assertCoordinator(state.coordinator);
   if (
-    state.schemaVersion !== 6 ||
+    state.schemaVersion !== 7 ||
     state.repository !== repository ||
     state.objective !== objective
   )

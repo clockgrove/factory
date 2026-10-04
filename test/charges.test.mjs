@@ -4,9 +4,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { compilePlan } from "../dist/compiler.js";
+import { compilePlan, MalformedPlannerOutput } from "../dist/compiler.js";
+import { CompletedModelInvocationError } from "../dist/contracts.js";
 import { attachFault } from "../dist/fault.js";
-import { assertRepairLedger, consumption } from "../dist/repair-policy.js";
+import {
+  assertRepairLedger,
+  consumption,
+  failureDigest,
+  PAID_ATTEMPTS,
+} from "../dist/repair-policy.js";
+import { readState } from "../dist/state-store.js";
 import {
   applyWorkCorrection,
   CandidateEnvironmentFailure,
@@ -17,7 +24,13 @@ import {
   SettledAttemptFailure,
 } from "../dist/work-repair.js";
 import { withCoverage } from "./support/coverage.mjs";
-import { createTarget } from "./support/integration-fixture.mjs";
+import {
+  createTarget,
+  factoryConfig,
+  makeApplication,
+  readEvents,
+} from "./support/integration-fixture.mjs";
+import { resultFindings } from "./support/review-protocol.mjs";
 
 const autonomy = (limit = 2) => ({
   allowances: {
@@ -67,32 +80,37 @@ const item = {
   minimumAssetSets: 0,
   requiredLfsRoles: [],
 };
-const failedAttempt = (attempt) => ({
+const body =
+  "# Charges fixture\n## Acceptance\n- result.txt exists\n## Commands\n- test -s result.txt\n## Final validation\n- test -s result.txt\n";
+const failedAttempt = (attempt, step = "validate") => ({
   status: "failed",
-  step: "validate",
+  step,
   attempt,
   baseSha: "a".repeat(40),
   changeRef: "b".repeat(40),
   treeSha: "c".repeat(40),
 });
 const itemState = (limit) => ({
+  objective: 1,
   autonomy: autonomy(limit),
   graph: { items: [item] },
   work: { result: failedAttempt("first") },
   baseSha: "a".repeat(40),
   runId: "run",
 });
-/** A diagnosis model that answers `repair` with a fresh correction each time. */
-function diagnoser() {
+const lostResponse = (detail = "diagnosis response lost") =>
+  attachFault(new Error(detail), {
+    kind: "transient",
+    detail,
+    outcomeUnknown: true,
+  });
+/** A diagnosis model that answers `repair` with a fresh correction, after `lose` lost responses. */
+function diagnoser(lose = 0) {
   const model = {
     calls: 0,
-    lose: 0,
     generateStructured: async () => {
       model.calls++;
-      if (model.lose > 0) {
-        model.lose--;
-        throw new Error("diagnosis response lost");
-      }
+      if (model.calls <= lose) throw lostResponse();
       return {
         decision: "repair",
         diagnosis: `The required file was not written (${model.calls})`,
@@ -112,31 +130,30 @@ const diagnose = (state, model) =>
   });
 /** Persist and restart: the controller only keeps what JSON keeps. */
 const restart = (state) => JSON.parse(JSON.stringify(state));
+const fail = (state, detail) =>
+  recordWorkFailure(state, "result", new CandidateValidationFailure(detail));
 
 test("a wrong result is charged once, at its failure event, whatever repeats", async () => {
   let state = itemState(2);
-  recordWorkFailure(
-    state,
-    "result",
-    new CandidateValidationFailure("Validation command failed (1)"),
-  );
+  fail(state, "Validation command failed (1)");
   const event = state.work.result.recovery.failure.event;
-  assert.equal(event, "first/validate/0");
-  // Recording the same failure again (a repeat before anything was saved)
-  // names the same event.
-  recordWorkFailure(
-    state,
-    "result",
-    new CandidateValidationFailure("Validation command failed (1)"),
-  );
+  assert.equal(event, "item/result/validate/0");
+  // Recording the same failure again names the same event.
+  fail(state, "Validation command failed (1)");
   assert.equal(state.work.result.recovery.failure.event, event);
 
-  // Lost diagnosis response: charged once, the restart reissues it free.
-  const model = diagnoser();
-  model.lose = 1;
-  await assert.rejects(diagnose(state, model), /lost/);
+  // A lost diagnosis response leaves the diagnosis under way, charged once.
+  const model = diagnoser(1);
+  assert.equal(await diagnose(state, model), false);
   assert.equal(state.work.result.recovery.phase, "diagnosing");
-  assert.deepEqual(Object.keys(state.charges), [event]);
+  assert.match(
+    state.work.result.recovery.failure.decision,
+    /run the Objective again/,
+  );
+  assert.deepEqual(state.charges, {
+    [event]: { allowances: ["implementationRepairs"], scopes: ["result"] },
+  });
+  assertRepairLedger(restart(state));
   state = restart(state);
   assert.equal(await diagnose(state, model), true);
   assert.equal(model.calls, 2);
@@ -144,48 +161,59 @@ test("a wrong result is charged once, at its failure event, whatever repeats", a
   assert.equal(consumption(state, "result").implementationRepairs, 1);
   assertRepairLedger(restart(state));
 
-  // A new failure of the new attempt is a new event and is charged again.
+  // A failure of the new attempt is a new event and is charged again.
   state.work.result = {
     ...failedAttempt("second"),
     recovery: state.work.result.recovery,
   };
-  recordWorkFailure(
-    state,
-    "result",
-    new CandidateValidationFailure("Validation command failed (2)"),
+  fail(state, "Validation command failed (2)");
+  assert.equal(
+    state.work.result.recovery.failure.event,
+    "item/result/validate/1",
   );
-  assert.equal(state.work.result.recovery.failure.event, "second/validate/1");
   assert.equal(await diagnose(state, model), true);
   assert.equal(consumption(state).implementationRepairs, 2);
 
-  // The allowance is spent: a third failure stops for the operator without
-  // a model call, and is not charged.
+  // The allowance is spent: the next failure stops without a model call,
+  // is not charged, and names the command that works.
   state.work.result = {
     ...failedAttempt("third"),
     recovery: state.work.result.recovery,
   };
-  recordWorkFailure(
-    state,
-    "result",
-    new CandidateValidationFailure("Validation command failed (3)"),
-  );
+  fail(state, "Validation command failed (3)");
   const calls = model.calls;
   assert.equal(await diagnose(state, model), false);
   assert.equal(model.calls, calls);
   assert.equal(consumption(state).implementationRepairs, 2);
-  assert.equal(state.work.result.status, "failed");
   assert.equal(state.work.result.recovery.phase, "stopped");
-  assert.match(state.work.result.recovery.failure.decision, /exhausted/);
+  assert.match(
+    state.work.result.recovery.failure.decision,
+    /exhausted; start a new attempt with `factory retry --objective 1 --item result`/,
+  );
+});
+
+test("a diagnosis that never answers is asked a bounded number of times", async () => {
+  let state = itemState(2);
+  fail(state, "Validation command failed");
+  const model = diagnoser(Number.POSITIVE_INFINITY);
+  for (let run = 1; run <= PAID_ATTEMPTS; run++) {
+    assert.equal(await diagnose(state, model), false);
+    assert.equal(state.work.result.recovery.phase, "diagnosing");
+    state = restart(state);
+  }
+  assert.equal(await diagnose(state, model), false);
+  assert.equal(model.calls, PAID_ATTEMPTS);
+  assert.equal(state.work.result.recovery.phase, "stopped");
+  assert.match(
+    state.work.result.recovery.failure.decision,
+    /did not answer 3 times/,
+  );
+  assert.equal(consumption(state).implementationRepairs, 1);
 });
 
 test("a correction saved but not applied before a restart is applied without a second charge", async () => {
   const state = itemState(1);
-  recordWorkFailure(
-    state,
-    "result",
-    new CandidateValidationFailure("Validation command failed"),
-  );
-  // Stop the diagnosis at the point where its correction is saved as ready.
+  fail(state, "Validation command failed");
   let snapshot;
   const ready = () => state.work.result.recovery?.phase === "ready";
   await diagnoseWorkRepair({
@@ -199,7 +227,7 @@ test("a correction saved but not applied before a restart is applied without a s
   });
   assert.equal(snapshot.work.result.status, "failed");
   assert.equal(snapshot.work.result.recovery.phase, "ready");
-  assert.equal(consumption(snapshot).implementationRepairs, 1);
+  assertRepairLedger(snapshot);
   applyWorkCorrection(
     snapshot,
     "result",
@@ -209,85 +237,122 @@ test("a correction saved but not applied before a restart is applied without a s
   assert.equal(consumption(snapshot).implementationRepairs, 1);
 });
 
-test("an operator correction of an already diagnosed failure is not charged again", async () => {
-  const state = itemState(2);
-  recordWorkFailure(
-    state,
-    "result",
-    new CandidateValidationFailure("Validation command failed"),
-  );
-  const model = {
+test("an operator correction of a diagnosed failure: same kind free, another kind charges its own allowance", async () => {
+  const operatorAnswer = {
     generateStructured: async () => ({
       decision: "operator",
       diagnosis: "The acceptance needs a product decision",
       correction: "",
     }),
   };
-  assert.equal(await diagnose(state, model), false);
-  assert.equal(consumption(state).implementationRepairs, 1);
-  applyWorkCorrection(state, "result", {
-    kind: "implementation",
+  const correction = (state, kind) => ({
+    kind,
     failureDigest: state.work.result.recovery.failure.digest,
     actor: "operator",
-    diagnosis: "Product decided to keep the plain-text format",
-    correction: "Write result.txt as plain text",
+    diagnosis: "The declared prerequisite was missing",
+    correction: "Provide the declared prerequisite and continue",
   });
-  assert.equal(state.work.result.status, "pending");
-  assert.equal(consumption(state).implementationRepairs, 1);
+  for (const kind of ["implementation", "validation-environment"]) {
+    const state = itemState(2);
+    fail(state, "Validation command failed");
+    assert.equal(await diagnose(state, operatorAnswer), false);
+    assert.equal(consumption(state).implementationRepairs, 1);
+    applyWorkCorrection(state, "result", correction(state, kind));
+    assert.equal(consumption(state).implementationRepairs, 1);
+    assert.equal(
+      consumption(state).resultRereviews,
+      kind === "implementation" ? 0 : 1,
+    );
+    assertRepairLedger(restart(state));
+  }
 });
 
 test("transient and configuration failures are never charged", async () => {
-  for (const [error, kind] of [
-    [new SettledAttemptFailure(new Error("worker exited")), "transient"],
+  for (const [error, decision, kind] of [
+    [
+      new SettledAttemptFailure(new Error("worker exited")),
+      /factory retry --objective 1 --item result/,
+      "implementation",
+    ],
     [
       new CandidateEnvironmentFailure("Validation environment unavailable"),
-      "config",
+      /validation-environment correction/,
+      "validation-environment",
     ],
   ]) {
     const state = itemState(2);
     assert.equal(recordWorkFailure(state, "result", error), true);
     const failure = state.work.result.recovery.failure;
-    assert.equal(failure.event, undefined, kind);
+    assert.equal(failure.event, undefined);
+    assert.match(failure.decision, decision);
     const model = diagnoser();
     assert.equal(await diagnose(state, model), false);
     assert.equal(model.calls, 0);
     // The operator may still correct it; nothing is charged.
     applyWorkCorrection(state, "result", {
-      kind: kind === "config" ? "validation-environment" : "implementation",
+      kind,
       failureDigest: failure.digest,
       actor: "operator",
       diagnosis: "The controller environment is restored",
-      correction: "Run the same attempt again",
+      correction: "Run the same work again",
     });
-    assert.equal(state.charges, undefined, kind);
+    assert.equal(state.charges, undefined);
+    assertRepairLedger(restart(state));
   }
-  // A worker that failed with a result is a wrong result.
-  const state = itemState(2);
-  recordWorkFailure(
-    state,
-    "result",
-    new SettledAttemptFailure(new Error("tests failed"), "implementation"),
+});
+
+test("any work fault is a wrong result: a refused criterion, a refused push", async () => {
+  const refused = attachFault(
+    new CompletedModelInvocationError("Criterion refused: result.txt is empty"),
+    { kind: "work", evidence: { detail: "result.txt is empty" } },
   );
-  assert.equal(state.work.result.recovery.failure.event, "first/validate/0");
+  const state = itemState(2);
+  state.work.result.step = "approve-result";
+  assert.equal(recordWorkFailure(state, "result", refused), true);
+  assert.equal(
+    state.work.result.recovery.failure.event,
+    "item/result/approve-result/0",
+  );
+  assert.equal(
+    state.work.result.recovery.failure.classification,
+    "implementation",
+  );
+  assert.equal(await diagnose(state, diagnoser()), true);
+  assert.equal(state.work.result.status, "pending");
+
+  // The remote refused the pushed content: nothing was published, so a
+  // corrected new attempt may follow.
+  const pushed = itemState(2);
+  pushed.work.result.step = "deliver";
+  const tooLarge = attachFault(new Error("GH001: Large files detected"), {
+    kind: "work",
+    evidence: { detail: "git push refused a file over the size limit" },
+  });
+  assert.equal(recordWorkFailure(pushed, "result", tooLarge), true);
+  assert.equal(await diagnose(pushed, diagnoser()), true);
+  assert.equal(pushed.work.result.status, "pending");
+  assert.equal(consumption(pushed).implementationRepairs, 1);
 });
 
 test("a refused review is charged once per refusal", () => {
-  const pending = () => ({
+  const pending = (detail) => ({
     criterion: "result.txt exists",
     treeSha: "c".repeat(40),
     question: "Inspect the invalid review response",
-    detail: "unknown source",
+    detail,
     reviewRejection: { field: "source", reason: "unknown-source" },
   });
   let state = itemState(2);
   Object.assign(state.work.result, {
     status: "waiting",
     step: "approve-result",
-    acceptancePending: pending(),
+    acceptancePending: pending("unknown source"),
   });
   const before = restart(state);
   assert.equal(prepareEvidenceRecovery(state, "result"), true);
-  assert.deepEqual(Object.keys(state.charges), ["first/approve-result/0"]);
+  assert.deepEqual(Object.keys(state.charges), [
+    "item/result/approve-result/0",
+  ]);
   // The same refusal seen again after a restart that lost the correction.
   const repeated = restart(before);
   repeated.charges = structuredClone(state.charges);
@@ -298,88 +363,126 @@ test("a refused review is charged once per refusal", () => {
   Object.assign(state.work.result, {
     status: "waiting",
     step: "approve-result",
-    acceptancePending: { ...pending(), detail: "unknown source again" },
+    acceptancePending: pending("unknown source again"),
   });
   assert.equal(prepareEvidenceRecovery(state, "result"), true);
   assert.deepEqual(Object.keys(state.charges).sort(), [
-    "first/approve-result/0",
-    "first/approve-result/1",
+    "item/result/approve-result/0",
+    "item/result/approve-result/1",
   ]);
+  assertRepairLedger(restart(state));
 });
 
-test("planning: a lost diagnosis is charged once and a new failed round again", async () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-plan-charges-"));
+/** A planner whose reviews answer `reviews` in turn and whose diagnoses follow `diagnoses`. */
+function planner(target, { reviews, diagnoses = [] }) {
+  const graph = { objective: 1, baseSha: target.baseSha, items: [item] };
+  const model = {
+    compiles: 0,
+    reviews: 0,
+    diagnoses: 0,
+    generateStructured: async (request) => {
+      if (request.purpose !== "diagnosis") {
+        model.compiles++;
+        return withCoverage(request, graph);
+      }
+      const answer = diagnoses[model.diagnoses++] ?? "repair";
+      if (answer === "lost") throw lostResponse();
+      return {
+        kind: "planning-evidence",
+        diagnosis: `Brief omitted a supplied fact (${model.diagnoses})`,
+        correction: `Keep the supplied fact in the brief (${model.diagnoses})`,
+      };
+    },
+    reviewGraph: async (request) => {
+      const answer = reviews[model.reviews++] ?? "clean";
+      if (answer === "lost") throw lostResponse("review response lost");
+      if (answer === "malformed")
+        throw attachFault(new MalformedPlannerOutput("not JSON"), {
+          kind: "transient",
+          detail: "Model output was invalid: not JSON",
+          outcomeUnknown: true,
+        });
+      return {
+        packetId: request.reviewPacket.id,
+        findings:
+          answer === "finding"
+            ? [
+                {
+                  evidenceIndices: [0],
+                  detail: `Brief omitted a supplied fact (${model.reviews})`,
+                  question: "Keep the fact",
+                },
+              ]
+            : [],
+      };
+    },
+  };
+  return model;
+}
+const plan = (target, model, state) =>
+  compilePlan(
+    1,
+    body,
+    target.baseSha,
+    target.checkout,
+    model,
+    undefined,
+    undefined,
+    undefined,
+    { state, save: () => {} },
+  );
+
+async function withTarget(name, run) {
+  const root = mkdtempSync(join(tmpdir(), `factory-charges-${name}-`));
   try {
-    const target = createTarget(root);
-    const graph = { objective: 1, baseSha: target.baseSha, items: [item] };
-    let reviews = 0;
-    let diagnoses = 0;
-    let loseDiagnosis = true;
-    const planner = {
-      generateStructured: async (request) => {
-        if (request.purpose !== "diagnosis")
-          return withCoverage(request, graph);
-        diagnoses++;
-        if (loseDiagnosis) {
-          loseDiagnosis = false;
-          throw new Error("diagnosis response lost");
-        }
-        return {
-          kind: "planning-evidence",
-          diagnosis: `Brief omitted a supplied fact (${diagnoses})`,
-          correction: `Keep the supplied fact in the brief (${diagnoses})`,
-        };
-      },
-      reviewGraph: async (request) => {
-        reviews++;
-        return {
-          packetId: request.reviewPacket.id,
-          findings:
-            reviews <= 2
-              ? [
-                  {
-                    evidenceIndices: [0],
-                    detail: `Brief omitted a supplied fact (${reviews})`,
-                    question: "Keep the fact",
-                  },
-                ]
-              : [],
-        };
-      },
-    };
-    const plan = (state) =>
-      compilePlan(
-        1,
-        "# Charges fixture\n## Acceptance\n- result.txt exists\n## Commands\n- test -s result.txt\n## Final validation\n- test -s result.txt\n",
-        target.baseSha,
-        target.checkout,
-        planner,
-        undefined,
-        undefined,
-        undefined,
-        { state, save: () => {} },
-      );
+    await run(createTarget(root), root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("planning: a lost diagnosis is charged once and a new failed round again", async () => {
+  await withTarget("plan", async (target) => {
+    const model = planner(target, {
+      reviews: ["finding", "finding", "clean"],
+      diagnoses: ["lost"],
+    });
     let state = { autonomy: autonomy(2) };
-    await assert.rejects(plan(state), /lost/);
+    await assert.rejects(plan(target, model, state), /lost/);
     assert.deepEqual(Object.keys(state.charges), ["objective/plan/0"]);
     state = restart(state);
-    const candidate = await plan(state);
+    const candidate = await plan(target, model, state);
     assert.equal(candidate.review.status, "clean");
-    assert.equal(diagnoses, 3);
+    assert.equal(model.diagnoses, 3);
     assert.deepEqual(Object.keys(state.charges).sort(), [
       "objective/plan/0",
       "objective/plan/1",
     ]);
     assert.equal(consumption(state, "$planning").planningRevisions, 2);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+    assertRepairLedger(restart(state));
+  });
 });
 
-test("planning: a transient or configuration fault is never charged", async () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-plan-uncharged-"));
-  try {
-    const target = createTarget(root);
+test("planning: a diagnosis that never answers stops after the paid bound", async () => {
+  await withTarget("plan-bound", async (target) => {
+    const model = planner(target, {
+      reviews: Array(10).fill("finding"),
+      diagnoses: Array(10).fill("lost"),
+    });
+    let state = { autonomy: autonomy(2) };
+    for (let run = 1; run <= PAID_ATTEMPTS; run++) {
+      await assert.rejects(plan(target, model, state), /lost/);
+      state = restart(state);
+    }
+    const candidate = await plan(target, model, state);
+    assert.equal(candidate.review.status, "needs-human");
+    assert.equal(model.diagnoses, PAID_ATTEMPTS);
+    assert.equal(consumption(state).planningRevisions, 1);
+  });
+});
+
+test("planning: transient and configuration faults and unanswered reviews are never charged", async () => {
+  await withTarget("plan-uncharged", async (target) => {
     for (const fault of [
       {
         kind: "transient",
@@ -389,90 +492,265 @@ test("planning: a transient or configuration fault is never charged", async () =
       { kind: "config", detail: "planner login expired", fix: "Log in" },
     ]) {
       const state = { autonomy: autonomy(2) };
-      const planner = {
+      const model = {
         generateStructured: async () => {
           throw attachFault(new Error(fault.detail), fault);
         },
         reviewGraph: async () => assert.fail("no review"),
       };
       await assert.rejects(
-        compilePlan(
-          1,
-          "# Charges fixture\n## Acceptance\n- result.txt exists\n## Commands\n- test -s result.txt\n## Final validation\n- test -s result.txt\n",
-          target.baseSha,
-          target.checkout,
-          planner,
-          undefined,
-          undefined,
-          undefined,
-          { state, save: () => {} },
-        ),
+        plan(target, model, state),
         new RegExp(fault.detail),
       );
       assert.equal(state.charges, undefined, fault.kind);
     }
-    // A plan review that never answered is asked again after a restart,
-    // without a charged revision or a second compile.
-    let compiles = 0;
-    let reviews = 0;
-    const graph = { objective: 1, baseSha: target.baseSha, items: [item] };
-    const planner = {
-      generateStructured: async (request) => {
-        compiles++;
-        return withCoverage(request, graph);
-      },
-      reviewGraph: async (request) => {
-        reviews++;
-        if (reviews === 1)
-          throw attachFault(new Error("review response lost"), {
-            kind: "transient",
-            detail: "review response lost",
-            outcomeUnknown: true,
-          });
-        return { packetId: request.reviewPacket.id, findings: [] };
-      },
-    };
-    let state = { autonomy: autonomy(2) };
-    const plan = () =>
-      compilePlan(
-        1,
-        "# Charges fixture\n## Acceptance\n- result.txt exists\n## Commands\n- test -s result.txt\n## Final validation\n- test -s result.txt\n",
-        target.baseSha,
-        target.checkout,
-        planner,
-        undefined,
-        undefined,
-        undefined,
-        { state, save: () => {} },
-      );
-    await assert.rejects(plan(), /review response lost/);
+    // A lost or malformed review is asked again in place, without a
+    // revision or a second compile.
+    const asked = planner(target, { reviews: ["lost", "malformed", "clean"] });
+    const state = { autonomy: autonomy(2) };
+    assert.equal((await plan(target, asked, state)).review.status, "clean");
+    assert.equal(asked.compiles, 1);
+    assert.equal(asked.reviews, 3);
     assert.equal(state.charges, undefined);
-    state = restart(state);
-    assert.equal((await plan()).review.status, "clean");
-    assert.equal(compiles, 1);
-    assert.equal(reviews, 2);
-    assert.equal(state.charges, undefined);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+    // A review that never answers validly leaves the plan to the operator.
+    const silent = planner(target, { reviews: Array(10).fill("lost") });
+    const stopped = { autonomy: autonomy(2) };
+    assert.equal(
+      (await plan(target, silent, stopped)).review.status,
+      "needs-human",
+    );
+    assert.equal(silent.reviews, PAID_ATTEMPTS);
+    assert.equal(stopped.charges, undefined);
+  });
 });
 
-test("persisted charges are validated against the snapshotted limits", () => {
-  const charge = (allowance, scopes) => ({ allowance, scopes });
+test("persisted charges are validated against limits, failures and earlier versions", () => {
+  const charge = (allowances, scopes = ["result"]) => ({ allowances, scopes });
+  const ledger = (charges, extra = {}) => ({
+    autonomy: autonomy(1),
+    charges,
+    ...extra,
+  });
   assert.doesNotThrow(() =>
-    assertRepairLedger({
-      autonomy: autonomy(1),
-      charges: { "a/validate/0": charge("implementationRepairs", ["result"]) },
-    }),
+    assertRepairLedger(
+      ledger({ "item/result/validate/0": charge(["implementationRepairs"]) }),
+    ),
   );
   for (const charges of [
-    { "not an event": charge("implementationRepairs", ["result"]) },
-    { "a/validate/0": charge("unknown", ["result"]) },
-    { "a/validate/0": charge("implementationRepairs", []) },
+    { "not an event": charge(["implementationRepairs"]) },
+    { "first/validate/0": charge(["implementationRepairs"]) },
+    { "item/result/validate/0": charge(["unknown"]) },
+    { "item/result/validate/0": charge([]) },
+    { "item/result/validate/0": charge(["implementationRepairs"], []) },
     {
-      "a/validate/0": charge("implementationRepairs", ["result"]),
-      "b/validate/0": charge("implementationRepairs", ["result"]),
+      "item/result/validate/0": charge([
+        "implementationRepairs",
+        "implementationRepairs",
+      ]),
+    },
+    {
+      "item/result/validate/0": charge(["implementationRepairs"]),
+      "item/result/validate/1": charge(["implementationRepairs"]),
     },
   ])
-    assert.throws(() => assertRepairLedger({ autonomy: autonomy(1), charges }));
+    assert.throws(() => assertRepairLedger(ledger(charges)));
+  // Counters from an earlier version are refused, never silently reset.
+  assert.throws(
+    () =>
+      assertRepairLedger(
+        ledger(undefined, {
+          allowanceConsumption: {
+            planningRevisions: 1,
+            implementationRepairs: 0,
+            resultRereviews: 0,
+          },
+        }),
+      ),
+    /start the Objective fresh/,
+  );
+  // A wrong result keeps its event, and a diagnosis under way its charge.
+  const state = itemState(2);
+  fail(state, "Validation command failed");
+  state.work.result.recovery.phase = "diagnosing";
+  assert.throws(() => assertRepairLedger(restart(state)), /lacks its charge/);
+  delete state.work.result.recovery.failure.event;
+  assert.throws(
+    () => assertRepairLedger(restart(state)),
+    /does not match its classification/,
+  );
+  // Each accepted planning correction kept its charge.
+  assert.throws(
+    () =>
+      assertRepairLedger({
+        autonomy: autonomy(1),
+        planningRecovery: {
+          phase: "ready",
+          history: [
+            {
+              kind: "planning-evidence",
+              failure: failureDigest("x"),
+              detail: "x",
+              diagnosis: "d",
+              correction: "c",
+              invocations: [],
+            },
+          ],
+        },
+      }),
+    /Planning correction 0 lacks its charge/,
+  );
 });
+
+function reviewer(request) {
+  return {
+    packetId: request.reviewPacket.id,
+    findings: resultFindings(
+      request,
+      request.criteria.map((criterion) => ({
+        criterion,
+        verdict: "pass",
+        source: "OBJECTIVE",
+        quote: "# Charges fixture",
+        detail: "Fixture exact evidence",
+        question: "",
+      })),
+    ),
+  };
+}
+
+async function withApplication(name, delivery, setup, run) {
+  const root = mkdtempSync(join(tmpdir(), `factory-charges-${name}-`));
+  const previous = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  try {
+    const target = createTarget(root);
+    const config = factoryConfig(
+      target.checkout,
+      `example/charges-${name}-${delivery}`,
+      delivery,
+      2,
+    );
+    config.autonomy = autonomy(2);
+    const graph = { objective: 1, baseSha: target.baseSha, items: [item] };
+    const descriptor = {
+      config,
+      graph,
+      objectiveBody: body,
+      fakeRoot: join(root, "fake"),
+      ...setup(graph),
+    };
+    await run({
+      descriptor,
+      config,
+      application: () => makeApplication(descriptor),
+    });
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+for (const delivery of ["regular", "native-stack"]) {
+  test(`${delivery}: a diagnosis interrupted in a run is asked again by the next run and charged once`, async () => {
+    let diagnoses = 0;
+    await withApplication(
+      "diagnosis",
+      delivery,
+      (graph) => ({
+        actions: {
+          result: {
+            failAttempts: 1,
+            files: [{ path: "result.txt", text: "accepted\n" }],
+          },
+        },
+        planningModel: {
+          generateStructured: async (request) => {
+            if (request.purpose !== "diagnosis")
+              return withCoverage(request, graph);
+            diagnoses++;
+            if (diagnoses === 1) throw lostResponse();
+            return {
+              decision: "repair",
+              diagnosis: "The worker did not write the required file",
+              correction: "Write result.txt from the accepted base",
+            };
+          },
+          reviewGraph: async (request) => ({
+            packetId: request.reviewPacket.id,
+            findings: [],
+          }),
+          reviewResult: async (request) => reviewer(request),
+        },
+      }),
+      async ({ application, config }) => {
+        const stopped = await application().application.runObjective(1);
+        assert.equal(stopped.work.result.status, "failed");
+        assert.equal(stopped.work.result.recovery.phase, "diagnosing");
+        assert.match(
+          stopped.coordinator.waitReason,
+          /Work Item result: The diagnosis did not answer/,
+        );
+        assert.deepEqual(Object.keys(stopped.charges), [
+          "item/result/execute/0",
+        ]);
+        const done = await application().application.runObjective(1);
+        assert.equal(done.finalValidation.passed, true);
+        assert.equal(diagnoses, 2);
+        assert.equal(consumption(done).implementationRepairs, 1);
+        assert.deepEqual(
+          readState(config.repository, 1).charges,
+          stopped.charges,
+        );
+      },
+    );
+  });
+
+  test(`${delivery}: a worker that keeps dying stops for retry, uncharged and undiagnosed`, async () => {
+    let diagnoses = 0;
+    await withApplication(
+      "dying",
+      delivery,
+      (graph) => ({
+        actions: {
+          result: {
+            dieAttempts: 3,
+            files: [{ path: "result.txt", text: "accepted\n" }],
+          },
+        },
+        planningModel: {
+          generateStructured: async (request) => {
+            if (request.purpose === "diagnosis") diagnoses++;
+            return withCoverage(request, graph);
+          },
+          reviewGraph: async (request) => ({
+            packetId: request.reviewPacket.id,
+            findings: [],
+          }),
+          reviewResult: async (request) => reviewer(request),
+        },
+      }),
+      async ({ application }) => {
+        const fixture = application();
+        const stopped = await fixture.application.runObjective(1);
+        const work = stopped.work.result;
+        assert.equal(work.status, "failed");
+        assert.equal(work.recovery.failure.event, undefined);
+        assert.match(
+          work.recovery.failure.decision,
+          /factory retry --objective 1 --item result/,
+        );
+        assert.equal(stopped.charges, undefined);
+        assert.equal(diagnoses, 0);
+        fixture.application.retryWorkItem(1, "result");
+        const done = await application().application.runObjective(1);
+        assert.equal(done.finalValidation.passed, true);
+        assert.equal(done.charges, undefined);
+        const starts = readEvents(fixture.eventsPath).filter(
+          (event) => event.type === "start",
+        );
+        assert.equal(starts.length, 4);
+      },
+    );
+  });
+}

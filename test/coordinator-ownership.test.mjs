@@ -483,7 +483,7 @@ test("offline cancellation verifies recorded subprocess cessation and leaves a r
       const target = createTarget(root);
       const config = factoryConfig(target.checkout, "example/offline-cancel");
       saveState(statePath(config.repository, 1), {
-        schemaVersion: 7,
+        schemaVersion: 8,
         kind: "preparing",
         projection: "ready",
         repository: config.repository,
@@ -610,7 +610,7 @@ test("persisted drain reattaches an existing worker and leaves its dependent pen
       await waitForFile(
         () => {
           const state = readContinuation(config.repository, 1);
-          return state?.schemaVersion === 6 && state.work.first.execution;
+          return state?.schemaVersion === 7 && state.work.first.execution;
         },
         path,
         "existing drain worker",

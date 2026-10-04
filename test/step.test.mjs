@@ -42,7 +42,7 @@ function manualClock(start = T0) {
 }
 
 const factoryState = () => ({
-  schemaVersion: 6,
+  schemaVersion: 7,
   work: { one: { status: "running" }, two: { status: "running" } },
 });
 
@@ -639,7 +639,7 @@ test("one step key never runs twice at once", async () => {
 });
 
 test("Objective steps run on a planning snapshot; item steps need the item", async () => {
-  const preparing = { schemaVersion: 7, kind: "preparing" };
+  const preparing = { schemaVersion: 8, kind: "preparing" };
   const h = harness(preparing);
   assert.equal(
     await step(
@@ -958,7 +958,7 @@ test("a config pause names its fix and follows the restart convention", () => {
 test("planning status reads the Objective's outage from state, redacted", () => {
   const document = preparationStatusDocument(
     {
-      schemaVersion: 7,
+      schemaVersion: 8,
       kind: "preparing",
       repository: "example/repo",
       objective: 7,

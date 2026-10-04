@@ -27,7 +27,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
   writeFileSync(configPath, JSON.stringify(config));
   const snapshotPath = statePath(config.repository, 1);
   const preparation = {
-    schemaVersion: 7,
+    schemaVersion: 8,
     kind: "preparing",
     repository: config.repository,
     objective: 1,
@@ -80,7 +80,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
     );
   let expected;
   const execution = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     repository: config.repository,
     objective: 1,
     runId: "execution-run",
@@ -225,7 +225,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
           ),
         );
         assert.ok(document.phase && document.summary);
-      } else if (snapshot.schemaVersion === 7) {
+      } else if (snapshot.schemaVersion === 8) {
         assert.match(
           status.stdout,
           /^Objective #1: failed — planning failed: Preparation failed: \[REDACTED\]\nNext: factory diagnostics --objective 1\n/,

@@ -303,7 +303,7 @@ test("supported Objective cancellation retains the ceased worker failure and con
       },
     };
     const state = {
-      schemaVersion: 6,
+      schemaVersion: 7,
       repository: config.repository,
       objective: 1,
       runId: "failed-run",
@@ -343,15 +343,15 @@ test("supported Objective cancellation retains the ceased worker failure and con
       }),
       charges: {
         "objective/plan/0": {
-          allowance: "planningRevisions",
+          allowances: ["planningRevisions"],
           scopes: ["$planning"],
         },
-        "prior/execute/0": {
-          allowance: "implementationRepairs",
+        "item/worker/execute/0": {
+          allowances: ["implementationRepairs"],
           scopes: ["worker"],
         },
-        "prior/validate/0": {
-          allowance: "resultRereviews",
+        "item/worker/validate/0": {
+          allowances: ["resultRereviews"],
           scopes: ["worker"],
         },
       },

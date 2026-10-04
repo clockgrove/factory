@@ -2210,7 +2210,7 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
           // Spend the rest of the planning allowance on other events.
           for (const round of [90, 91])
             s.charges[`objective/plan/${round}`] = {
-              allowance: "planningRevisions",
+              allowances: ["planningRevisions"],
               scopes: ["$planning"],
             };
         },

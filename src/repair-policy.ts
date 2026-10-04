@@ -135,9 +135,10 @@ export function checkRequiredEnvironment(
       );
   }
 }
-/** One charged failure event: the allowance it used and the scopes it counts against. */
+type Allowance = keyof AllowanceConsumption;
+/** One charged failure event: the allowances its corrections used and the scopes they count against. */
 export interface Charge {
-  allowance: keyof AllowanceConsumption;
+  allowances: Allowance[];
   scopes: string[];
 }
 export interface RepairLedger {
@@ -148,6 +149,8 @@ export interface RepairLedger {
    */
   charges?: Record<string, Charge>;
 }
+/** Paid calls (diagnoses, reviews) asked per failure event before the operator decides. */
+export const PAID_ATTEMPTS = 3;
 export interface FailureDisposition {
   digest: string;
   /**
@@ -155,6 +158,8 @@ export interface FailureDisposition {
    * transient or configuration failure is never charged.
    */
   event?: string;
+  /** Diagnoses sent for this failure; bounded by PAID_ATTEMPTS. */
+  diagnoses?: number;
   classification: RepairClass | "interruption" | "authority" | "uncertain";
   detail: string;
   at: string;
@@ -185,7 +190,7 @@ export interface WorkRecovery {
     correction?: RepairCorrection;
   }[];
 }
-export const emptyConsumption = (): AllowanceConsumption => ({
+const emptyConsumption = (): AllowanceConsumption => ({
   planningRevisions: 0,
   implementationRepairs: 0,
   resultRereviews: 0,
@@ -199,13 +204,16 @@ export function allowanceKey(kind: RepairClass): keyof AllowanceConsumption {
       ? "implementationRepairs"
       : "resultRereviews";
 }
-/** Failure event of a Work Item step; `round` counts the item's earlier attempts and corrections. */
-export const itemEvent = (attempt: string, step: string, round: number) =>
-  `${attempt}/${step}/${round}`;
-/** Failure event of an Objective step: a plan revision or an amendment. */
+/** Failure event of a Work Item step; `round` counts the item's earlier attempts. */
+export const itemEvent = (item: string, step: string, round: number) =>
+  `item/${item}/${step}/${round}`;
+/** Failure event of an Objective step: a plan revision round or an amendment id. */
 export const objectiveEvent = (step: string, round: number | string) =>
   `objective/${step}/${round}`;
-const EVENT = /^[A-Za-z0-9][A-Za-z0-9_-]*\/[a-z][a-z-]*\/[A-Za-z0-9_-]+$/;
+const EVENT =
+  /^(objective|item\/[A-Za-z0-9][A-Za-z0-9_-]*)\/[a-z][a-z-]*\/[A-Za-z0-9_-]+$/;
+/** Failure classes that are wrong results; only their failures carry an event. */
+const CHARGED: readonly string[] = ["implementation", "review-evidence"];
 
 /** Consumption derived from the charged events, Objective-wide or for one scope. */
 export function consumption(
@@ -215,23 +223,44 @@ export function consumption(
   const total = emptyConsumption();
   for (const charge of Object.values(state.charges ?? {}))
     if (scope === undefined || charge.scopes.includes(scope))
-      total[charge.allowance]++;
+      for (const allowance of charge.allowances) total[allowance]++;
   return total;
 }
 /** Per-path limits cap Work Item scopes; planning is one Objective-wide scope under its allowance. */
-export function scopeLimit(
-  autonomy: Autonomy,
-  scope: string,
-  key: keyof AllowanceConsumption,
-): number {
+function scopeLimit(autonomy: Autonomy, scope: string, key: Allowance): number {
   return scope === "$planning"
     ? autonomy.allowances[key]
     : autonomy.repairPolicy.perPath[key];
 }
+/** What is left of each allowance, Objective-wide and for each scope. */
+export function remaining(
+  state: RepairLedger,
+  scopes: string[],
+): {
+  objective: AllowanceConsumption;
+  paths: Record<string, AllowanceConsumption>;
+} {
+  const left = (scope?: string): AllowanceConsumption => {
+    const used = consumption(state, scope);
+    const result = emptyConsumption();
+    for (const key of allowanceKeys)
+      result[key] =
+        (scope === undefined
+          ? state.autonomy.allowances[key]
+          : scopeLimit(state.autonomy, scope, key)) - used[key];
+    return result;
+  };
+  return {
+    objective: left(),
+    paths: Object.fromEntries(scopes.map((scope) => [scope, left(scope)])),
+  };
+}
+const charged = (state: RepairLedger, event: string, key: Allowance) =>
+  Boolean(state.charges?.[event]?.allowances.includes(key));
 /** Why one more charge does not fit, or undefined when it does. */
 function exhausted(
   state: RepairLedger,
-  key: keyof AllowanceConsumption,
+  key: Allowance,
   scopes: string[],
 ): string | undefined {
   if (consumption(state)[key] >= state.autonomy.allowances[key])
@@ -243,41 +272,55 @@ function exhausted(
       return `Repair path ${scope} ${key} allowance exhausted`;
   return undefined;
 }
-/** Whether `event` is already charged or one more charge fits every limit. */
+/** Whether `event` already used `key`, or one more charge fits every limit. */
 export function allowanceAvailable(
   state: RepairLedger,
   event: string,
-  key: keyof AllowanceConsumption,
+  key: Allowance,
   scopes: string[],
 ): boolean {
-  return Boolean(state.charges?.[event]) || !exhausted(state, key, scopes);
+  return charged(state, event, key) || !exhausted(state, key, scopes);
 }
 /**
- * Charge one failure event. Repeating a charged event is free; a new event
+ * Charge one failure event against `key`. Repeating it is free; a correction
+ * of another kind for the same event charges its own allowance. A charge
  * that does not fit throws, which stops for an operator decision.
  */
 export function charge(
   state: RepairLedger,
   event: string,
-  key: keyof AllowanceConsumption,
+  key: Allowance,
   scopes: string[],
 ): void {
-  if (state.charges?.[event]) return;
+  if (charged(state, event, key)) return;
   if (!EVENT.test(event)) throw new Error(`Invalid failure event ${event}`);
   if (!scopes.length || scopes.some((scope) => !scope))
     throw new Error("Repair needs an inherited scope");
-  const unique = [...new Set(scopes)].sort();
+  const prior = state.charges?.[event];
+  const unique = prior?.scopes ?? [...new Set(scopes)].sort();
   const reason = exhausted(state, key, unique);
   if (reason) throw new Error(reason);
   state.charges = {
     ...state.charges,
-    [event]: { allowance: key, scopes: unique },
+    [event]: {
+      allowances: [...(prior?.allowances ?? []), key],
+      scopes: unique,
+    },
   };
 }
+/** Corrections of `kind` must be enabled for this Objective. */
+export function assertRepairClass(
+  state: RepairLedger,
+  kind: RepairClass,
+): void {
+  if (!state.autonomy.repairClasses.includes(kind))
+    throw new Error(
+      `Repair class ${kind} is not enabled; operator decision required`,
+    );
+}
 /**
- * Admit a correction of `kind` and charge its failure event. The class must
- * be enabled. A failure without an event (not a wrong result) is corrected
- * without a charge.
+ * Admit a correction of `kind` and charge its failure event. A failure
+ * without an event (not a wrong result) is corrected without a charge.
  */
 export function chargeRepair(
   state: RepairLedger,
@@ -285,11 +328,7 @@ export function chargeRepair(
   kind: RepairClass,
   scopes: string[],
 ): void {
-  if (event && state.charges?.[event]) return;
-  if (!state.autonomy.repairClasses.includes(kind))
-    throw new Error(
-      `Repair class ${kind} is not enabled; operator decision required`,
-    );
+  assertRepairClass(state, kind);
   if (event) charge(state, event, allowanceKey(kind), scopes);
 }
 /** Original identities remain the scope even when a parent becomes an aggregate. */
@@ -377,6 +416,12 @@ export function assertRepairLedger(
   },
 ): void {
   const autonomy = validateAutonomy(state.autonomy);
+  // Earlier versions kept counters; refuse rather than silently reset them.
+  for (const legacy of ["allowanceConsumption", "repairConsumption"])
+    if (Object.hasOwn(state, legacy))
+      throw new Error(
+        `State records ${legacy} from an earlier Factory version; start the Objective fresh`,
+      );
   if (state.charges !== undefined) {
     if (
       !state.charges ||
@@ -390,8 +435,11 @@ export function assertRepairLedger(
         !EVENT.test(event) ||
         !charge ||
         typeof charge !== "object" ||
-        Object.keys(charge).sort().join(",") !== "allowance,scopes" ||
-        !allowanceKeys.includes(charge.allowance) ||
+        Object.keys(charge).sort().join(",") !== "allowances,scopes" ||
+        !Array.isArray(charge.allowances) ||
+        !charge.allowances.length ||
+        new Set(charge.allowances).size !== charge.allowances.length ||
+        charge.allowances.some((key) => !allowanceKeys.includes(key)) ||
         !Array.isArray(charge.scopes) ||
         !charge.scopes.length ||
         charge.scopes.some((scope) => typeof scope !== "string" || !scope)
@@ -407,6 +455,43 @@ export function assertRepairLedger(
         if (consumption(state, scope)[key] > scopeLimit(autonomy, scope, key))
           throw new Error("Repair path charges exceed the bound allowance");
     }
+  }
+  // A wrong result names its event, and every correction admitted for it
+  // (or a diagnosis under way) was charged.
+  const assertCharged = (
+    failure: FailureDisposition | undefined,
+    key: Allowance | undefined,
+  ): void => {
+    if (!failure) return;
+    if (CHARGED.includes(failure.classification) !== Boolean(failure.event))
+      throw new Error("Failure event does not match its classification");
+    if (
+      failure.event &&
+      key &&
+      !state.charges?.[failure.event]?.allowances.includes(key)
+    )
+      throw new Error(`Failure event ${failure.event} lacks its charge`);
+  };
+  for (const work of Object.values(state.work ?? {})) {
+    const recovery = work.recovery;
+    if (!recovery) continue;
+    const bound = (
+      failure: FailureDisposition | undefined,
+      correction: RepairCorrection | undefined,
+    ) =>
+      correction && correction.failureDigest === failure?.digest
+        ? allowanceKey(correction.kind)
+        : undefined;
+    assertCharged(
+      recovery.failure,
+      recovery.phase === "diagnosing"
+        ? "implementationRepairs"
+        : recovery.phase === "ready"
+          ? bound(recovery.failure, recovery.correction)
+          : undefined,
+    );
+    for (const entry of Array.isArray(recovery.history) ? recovery.history : [])
+      assertCharged(entry.failure, bound(entry.failure, entry.correction));
   }
   for (const work of Object.values(state.work ?? {})) {
     const recovery = work.recovery;
@@ -481,5 +566,13 @@ export function assertRepairLedger(
       )
     )
       throw new Error("Invalid planning recovery disposition");
+    // Each accepted planning correction was charged as its round.
+    for (const round of value.history.keys())
+      if (
+        !state.charges?.[objectiveEvent("plan", round)]?.allowances.includes(
+          "planningRevisions",
+        )
+      )
+        throw new Error(`Planning correction ${round} lacks its charge`);
   }
 }

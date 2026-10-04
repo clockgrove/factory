@@ -20,7 +20,7 @@ for (const invalid of ["unknown-item", "duplicate", "map-without-plan"])
       const target = createTarget(root);
       const config = factoryConfig(target.checkout, "example/decoder");
       const snapshot = {
-        schemaVersion: 7,
+        schemaVersion: 8,
         kind: "preparing",
         repository: config.repository,
         objective: 1,

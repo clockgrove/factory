@@ -1218,15 +1218,16 @@ for (const delivery of ["regular", "native"])
           assert.equal(submissions, 2);
           return;
         }
-        await assert.rejects(
-          application.runObjective(1),
-          /criterion disproved/,
-        );
+        // A refusal is a wrong result of this item only: it is diagnosed
+        // (here the diagnosis leaves it to the operator) and the run stops
+        // for the decision without failing the Objective.
+        const stopped = await application.runObjective(1);
+        assert.equal(stopped.error, undefined);
         const state = readState(repository, 1);
         assert.equal(state.work.qa.status, "failed");
-        await assert.rejects(application.runObjective(1));
+        assert.match(state.work.qa.recovery.failure.event, /^item\/qa\//);
         assert.equal(submissions, 1);
-        // A refusal is a real failure: an explicit retry reviews once more.
+        // An explicit retry reviews once more.
         assert.equal(state.work.qa.execution, undefined);
         application.retryWorkItem(1, "qa");
         const completed = await application.runObjective(1);

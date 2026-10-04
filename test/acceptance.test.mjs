@@ -1503,7 +1503,7 @@ test("final review uses bounded authoritative per-Work-Item Git deltas without p
       acceptance: ["follow-up is exact and preserves bootstrap paths"],
     });
     const state = {
-      schemaVersion: 6,
+      schemaVersion: 7,
       repository: "example/objective-item-deltas",
       objective: 1,
       runId: "delta-review",
@@ -1775,7 +1775,7 @@ test("truncated per-Work-Item evidence cannot ground an automatic pass", async (
     const graph = item(target.baseSha, []);
     graph.items[0].ownedPaths = ["result.txt"];
     const state = {
-      schemaVersion: 6,
+      schemaVersion: 7,
       repository: "example/objective-item-delta-budget",
       objective: 1,
       runId: "delta-budget",
@@ -2027,7 +2027,7 @@ test("final review shares one text budget across ordinary and materialization pa
         },
       });
       const state = {
-        schemaVersion: 6,
+        schemaVersion: 7,
         repository: "example/objective-materialization-budget",
         objective: 1,
         runId: "materialization-budget",
@@ -2423,7 +2423,7 @@ test("operator decision records criterion and exact tree before resuming validat
       const treeSha = git(target.checkout, "rev-parse", "HEAD^{tree}");
       const config = factoryConfig(target.checkout, "example/acceptance");
       const state = {
-        schemaVersion: 6,
+        schemaVersion: 7,
         repository: config.repository,
         objective: 1,
         runId: "acceptance-test",

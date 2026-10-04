@@ -147,20 +147,24 @@ test("disabled repair classes are refused and inherited scopes cannot reset caps
   disabled.repairClasses = [];
   assert.throws(
     () =>
-      chargeRepair({ autonomy: disabled }, "a/execute/0", "implementation", [
-        "parent",
-      ]),
+      chargeRepair(
+        { autonomy: disabled },
+        "item/a/execute/0",
+        "implementation",
+        ["parent"],
+      ),
     /not enabled/,
   );
   const ledger = { autonomy: autonomy() };
-  chargeRepair(ledger, "a/execute/0", "implementation", ["parent"]);
+  chargeRepair(ledger, "item/a/execute/0", "implementation", ["parent"]);
   const restored = JSON.parse(JSON.stringify(ledger));
   assertRepairLedger(restored);
   // A repeat of the charged event is free; a new event on the path is not.
-  chargeRepair(restored, "a/execute/0", "implementation", ["parent"]);
+  chargeRepair(restored, "item/a/execute/0", "implementation", ["parent"]);
   assert.equal(consumption(restored).implementationRepairs, 1);
   assert.throws(
-    () => chargeRepair(restored, "b/execute/0", "implementation", ["parent"]),
+    () =>
+      chargeRepair(restored, "item/b/execute/0", "implementation", ["parent"]),
     /path.*exhausted/,
   );
   const initial = { items: [item("parent")] };
@@ -176,7 +180,7 @@ test("disabled repair classes are refused and inherited scopes cannot reset caps
     () =>
       chargeRepair(
         restored,
-        "c/execute/0",
+        "item/c/execute/0",
         "implementation",
         repairScopes(state, "child"),
       ),
@@ -520,11 +524,11 @@ test("planning allowance survives restart and stops before a new model call", as
       // Two earlier events spent the planning allowance.
       charges: {
         "objective/amend/earlier-1": {
-          allowance: "planningRevisions",
+          allowances: ["planningRevisions"],
           scopes: ["$planning"],
         },
         "objective/amend/earlier-2": {
-          allowance: "planningRevisions",
+          allowances: ["planningRevisions"],
           scopes: ["$planning"],
         },
       },
@@ -615,7 +619,7 @@ for (const delivery of ["regular", "native-stack"])
         objectiveIssue: 1,
       });
       const state = {
-        schemaVersion: 6,
+        schemaVersion: 7,
         repository: config.repository,
         objective: 1,
         runId: "fixture",
@@ -863,7 +867,7 @@ for (const delivery of ["regular", "native-stack"])
         () =>
           chargeRepair(
             structuredClone(done),
-            "next/validate/0",
+            "item/result/validate/9",
             "validation-environment",
             ["result"],
           ),
@@ -988,7 +992,7 @@ for (const delivery of ["regular", "native-stack"])
               checkout: config.checkout,
               delivery,
             }),
-          /retained failure|tree|charged consumption|preservation bindings/,
+          /retained failure|tree|charged consumption|lacks its charge|preservation bindings/,
         );
         assert.throws(
           () =>
@@ -1002,7 +1006,7 @@ for (const delivery of ["regular", "native-stack"])
                 `${broken.integratedSha}^{tree}`,
               ),
             }),
-          /retained failure|tree|charged consumption|preservation bindings/,
+          /retained failure|tree|charged consumption|lacks its charge|preservation bindings/,
         );
       }
       for (const corruption of ["attempt", "execution-base"]) {
@@ -1501,7 +1505,7 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
       planningModel: planner,
     });
     const waiting = await fixture.application.runObjective(1);
-    assert.equal(waiting.schemaVersion, 7);
+    assert.equal(waiting.schemaVersion, 8);
     assert.equal(waiting.plan.review.status, "needs-human");
     await fixture.application.decidePlan(1, {
       plan: shortPlanDigest(waiting.plan),
@@ -1514,7 +1518,9 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
     const done = await fixture.application.runObjective(1);
     assert.equal(done.finalValidation.passed, true);
     assert.equal(calls, before);
-    assert.equal(consumption(done).planningRevisions, 1);
+    // The review never answered validly (no packet ID): it was asked again,
+    // never charged as a revision, then left to the owner.
+    assert.equal(consumption(done).planningRevisions, 0);
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previous;

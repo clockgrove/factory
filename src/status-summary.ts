@@ -107,7 +107,12 @@ export interface ExecutionStatusView extends WaitView {
   pendingAmendment: { phase: string; error: string | null } | null;
   repairs: Record<
     string,
-    { phase: string | null; nextDecision: string | null }
+    {
+      phase: string | null;
+      failureClass?: string | null;
+      failureEvent?: string | null;
+      nextDecision: string | null;
+    }
   >;
   finalValidation: boolean;
   finalAcceptancePending: PendingDecisionView | null;
@@ -354,12 +359,32 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
         reason: `Answer the question below${thenRun(view)}`,
       },
     };
+  const status = (id: string) =>
+    view.work.find((item) => item.id === id)?.status ?? "";
+  const diagnosing = Object.entries(view.repairs).find(
+    ([id, repair]) => repair.phase === "diagnosing" && status(id) === "failed",
+  );
+  if (diagnosing)
+    return {
+      phase: "waiting",
+      summary: `diagnosis of ${diagnosing[0]} did not finish`,
+      nextAction: {
+        command: run(objective),
+        reason: short(
+          diagnosing[1].nextDecision ??
+            "Running again asks the diagnosis again",
+          160,
+        ),
+      },
+    };
+  // A failure that is not a wrong result has nothing to correct; retry it
+  // (see failedItem). An environment failure revalidates the same result.
   const stopped = Object.entries(view.repairs).find(
     ([id, repair]) =>
       repair.phase === "stopped" &&
-      ["failed", "waiting"].includes(
-        view.work.find((item) => item.id === id)?.status ?? "",
-      ),
+      (repair.failureEvent !== null ||
+        repair.failureClass === "validation-environment") &&
+      ["failed", "waiting"].includes(status(id)),
   );
   if (stopped)
     return {

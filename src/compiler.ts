@@ -10,6 +10,7 @@ import {
   consumption,
   failureDigest,
   objectiveEvent,
+  PAID_ATTEMPTS,
   type RepairClass,
   type RepairLedger,
 } from "./repair-policy.js";
@@ -2053,14 +2054,8 @@ async function checkedPlanReview(
     });
     return { findings };
   } catch (error) {
-    // A review that never answered is repeated or fixed, never judged as
-    // an invalid review (which would be charged as a plan revision).
-    const fault = attachedFault(error);
-    if (
-      !responseReceived &&
-      !(error instanceof CompletedModelInvocationError) &&
-      (fault?.kind === "transient" || fault?.kind === "config")
-    )
+    // A configuration fault needs its fix before the review can be asked.
+    if (!responseReceived && attachedFault(error)?.kind === "config")
       throw error;
     if (responseReceived) {
       const rejections = [{ field: "findings", reason: "invalid" }];
@@ -2360,17 +2355,32 @@ async function compileRecoverablePlan(
         save();
         return candidate;
       }
+      // A review that did not answer validly is asked again, never charged
+      // as a revision; after PAID_ATTEMPTS the operator decides the plan.
+      if (!review.findings.length) {
+        const asked = (record.invocations ?? []).filter(
+          (entry) => entry.phase === "graph-review",
+        ).length;
+        if (asked < PAID_ATTEMPTS) {
+          delete record.review.response;
+          save();
+          continue;
+        }
+      }
       failure = JSON.stringify(review);
     } catch (error) {
       // Only an answered plan (refused or invalid) is revised against the
       // allowance; a transient or configuration fault is never charged.
       const fault = attachedFault(error);
+      const answered =
+        error instanceof MalformedPlannerOutput ||
+        error instanceof PlanValidationError;
       if (
         error instanceof PlanningReviewBindingError ||
         context.stopped?.() ||
         String(record.phase) === "submitted" ||
         fault?.kind === "config" ||
-        (fault?.kind === "transient" && record.responseFailure === undefined)
+        (fault?.kind === "transient" && !answered)
       )
         throw error;
       if (record.review)
@@ -2390,8 +2400,14 @@ async function compileRecoverablePlan(
     // One revision is charged per failed round; the round is the number of
     // accepted corrections before it.
     const event = objectiveEvent("plan", record.history.length);
+    const unanswered = Boolean(review && !review.findings.length);
+    const diagnosed = (record.invocations ?? []).filter(
+      (entry) => entry.phase === "diagnosis",
+    ).length;
     if (
       unchanged ||
+      unanswered ||
+      diagnosed >= PAID_ATTEMPTS ||
       !permitted.length ||
       !allowanceAvailable(state, event, "planningRevisions", ["$planning"])
     ) {
@@ -2418,7 +2434,9 @@ async function compileRecoverablePlan(
       throw new Error(
         unchanged
           ? "Unchanged planning failure; operator decision required"
-          : "Planning correction is disabled or its allowance is exhausted",
+          : diagnosed >= PAID_ATTEMPTS
+            ? `Planning diagnosis did not answer ${PAID_ATTEMPTS} times; operator decision required`
+            : "Planning correction is disabled or its allowance is exhausted",
       );
     }
     if (context.stopped?.())

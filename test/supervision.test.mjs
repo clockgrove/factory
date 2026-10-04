@@ -68,7 +68,7 @@ esac
   const configPath = join(root, "factory.json");
   writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
   const state = {
-    schemaVersion: 7,
+    schemaVersion: 8,
     kind: "preparing",
     repository: config.repository,
     objective: 1,

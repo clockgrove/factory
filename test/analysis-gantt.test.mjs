@@ -1,3 +1,4 @@
+import { defaultAutonomy } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import {
   mkdirSync,
@@ -201,6 +202,7 @@ test("StateDiagnostics whole item duration never becomes a delayed closure opera
     repository: "example/target",
     objective: 12,
     runId: "run-one",
+    autonomy: defaultAutonomy,
     graph: {
       items: [{ id: "one", dependencies: [], ownedPaths: [], resources: [] }],
     },

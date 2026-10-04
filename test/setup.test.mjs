@@ -510,7 +510,7 @@ for (const fault of ["refill", "foreign"]) {
       } else {
         const { factoryConfigDigest } = await import("../dist/config.js");
         const snapshot = {
-          schemaVersion: 7,
+          schemaVersion: 8,
           kind: "preparing",
           repository: config.repository,
           objective: 2,
@@ -643,7 +643,7 @@ test("setup reuses an identical Objective selection and refuses replacing it whi
       const { factoryConfigDigest } = await import("../dist/config.js");
       const path = statePath(config.repository, 1);
       saveState(path, {
-        schemaVersion: 7,
+        schemaVersion: 8,
         kind: "preparing",
         repository: config.repository,
         objective: 1,

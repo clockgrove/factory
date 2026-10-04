@@ -1,4 +1,7 @@
 import {
+  allowanceAvailable,
+  allowanceKey,
+  assertRepairClass,
   charge,
   chargeRepair,
   consumption,
@@ -434,13 +437,17 @@ function validateAmendmentReplacement(
     throw new Error(
       "Replacement requires a new diagnosis bound to the rejection",
     );
-  // Check availability without charging the authoritative ledger.
-  chargeRepair(
-    { autonomy: state.autonomy, charges: { ...state.charges } },
-    objectiveEvent("amend", "replacement"),
-    correction.kind,
-    ["$planning"],
-  );
+  // The replacement is charged when it starts; it must fit now.
+  assertRepairClass(state, correction.kind);
+  if (
+    !allowanceAvailable(
+      state,
+      objectiveEvent("amend", "replacement"),
+      allowanceKey(correction.kind),
+      ["$planning"],
+    )
+  )
+    throw new Error("Objective planningRevisions allowance exhausted");
   return rejected;
 }
 

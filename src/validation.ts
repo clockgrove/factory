@@ -1458,9 +1458,14 @@ function retainedRepairProof(
   }
   const key = allowanceKey(correction.kind);
   const scopes = repairScopes(state, item.id);
+  // A wrong result is charged under its event; assertRepairLedger above
+  // refuses a wrong result that lost its event.
   if (
     !state.autonomy.repairClasses.includes(correction.kind) ||
-    (prior.failure.event !== undefined && !state.charges?.[prior.failure.event])
+    (["implementation", "review-evidence"].includes(
+      prior.failure.classification,
+    ) &&
+      !state.charges?.[prior.failure.event ?? ""]?.allowances.includes(key))
   )
     throw new Error(
       `Work Item ${item.id} correction lacks charged consumption`,

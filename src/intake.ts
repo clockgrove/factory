@@ -182,7 +182,7 @@ function continuations(config: FactoryConfig): ContinuationState[] {
 function terminal(state: ContinuationState): boolean {
   return (
     !!state.cancelledAt ||
-    (state.schemaVersion === 6 && objectiveComplete(state))
+    (state.schemaVersion === 7 && objectiveComplete(state))
   );
 }
 export function intakeComplete(
@@ -565,7 +565,7 @@ export async function runIntake(
       )
         return preparing.coordinator;
       if (
-        preparing?.schemaVersion !== 7 ||
+        preparing?.schemaVersion !== 8 ||
         preparing.objective !== request.objective ||
         !record.objectives.includes(request.objective)
       )
@@ -611,7 +611,7 @@ export async function runIntake(
     ) {
       const preparing = continuations(config).find(
         (state): state is PreparationState =>
-          state.schemaVersion === 7 && !terminal(state),
+          state.schemaVersion === 8 && !terminal(state),
       );
       if (preparing) {
         preparing.coordinator.mode = record.mode;
@@ -689,7 +689,7 @@ export async function runIntake(
               const missing = predecessors.find((before) => {
                 const state = readContinuation(config.repository, before);
                 return (
-                  state?.schemaVersion !== 6 ||
+                  state?.schemaVersion !== 7 ||
                   !objectiveComplete(state) ||
                   !state.finalAcceptance
                 );
@@ -745,7 +745,7 @@ export async function runIntake(
             throw new Error(
               "Current Objective is failed or cancelling; explicit supported recovery is required",
             );
-          if (!state || state.schemaVersion === 7) {
+          if (!state || state.schemaVersion === 8) {
             const issue = await services.github.objective(selected);
             if (
               issue.state !== "open" ||

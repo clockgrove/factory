@@ -981,7 +981,7 @@ for (const disposition of ["failed", "cancelled"])
     fixture(async (f) => {
       await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
       saveState(statePath(f.config.repository, 1), {
-        schemaVersion: 7,
+        schemaVersion: 8,
         kind: "preparing",
         repository: f.config.repository,
         objective: 1,
@@ -1207,7 +1207,7 @@ test("consented continuous intake stays model-free while idle and refills throug
     await waitFor(() => {
       const state = readContinuation(f.config.repository, 1);
       return (
-        state?.schemaVersion === 6 &&
+        state?.schemaVersion === 7 &&
         objectiveComplete(state) &&
         readIntake(f.config).observation?.idleReason ===
           "awaiting-approved-work"
@@ -1224,7 +1224,7 @@ test("consented continuous intake stays model-free while idle and refills throug
     await waitFor(() => {
       const state = readContinuation(f.config.repository, 2);
       return (
-        state?.schemaVersion === 6 &&
+        state?.schemaVersion === 7 &&
         objectiveComplete(state) &&
         readIntake(f.config).observation?.idleReason ===
           "awaiting-approved-work"
@@ -1305,7 +1305,7 @@ test("watch and refill preserve failed nonterminal fences and require real servi
     );
     await watchIntake(f.config, watcherConsent);
     const failed = {
-      schemaVersion: 7,
+      schemaVersion: 8,
       kind: "preparing",
       repository: f.config.repository,
       objective: 1,

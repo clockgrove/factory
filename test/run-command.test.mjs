@@ -165,7 +165,7 @@ test("run persists a plan that needs a decision and resumes it without planning 
       planningModel: model(graph, calls, { planFinding: true }),
     });
     const stopped = await application.runObjective(1);
-    assert.equal(stopped.schemaVersion, 7);
+    assert.equal(stopped.schemaVersion, 8);
     assert.deepEqual(stopped.autonomy, defaultAutonomy);
     assert.equal(stopped.plan.review.status, "needs-human");
     assert.match(
@@ -177,7 +177,7 @@ test("run persists a plan that needs a decision and resumes it without planning 
 
     // A rerun reads the persisted plan and its review; no model is asked again.
     const again = await application.runObjective(1);
-    assert.equal(again.schemaVersion, 7);
+    assert.equal(again.schemaVersion, 8);
     assert.deepEqual(again.plan, stopped.plan);
     assert.equal(calls.length, 3);
 
@@ -438,7 +438,7 @@ test("planning that stops without a plan waits for a refusal instead of failing"
       planningModel: model(graph, calls, { malformedCompile: true }),
     });
     const stopped = await application.runObjective(1);
-    assert.equal(stopped.schemaVersion, 7);
+    assert.equal(stopped.schemaVersion, 8);
     assert.equal(stopped.plan, undefined);
     assert.equal(stopped.planningRecovery.phase, "stopped");
     assert.match(
@@ -509,7 +509,7 @@ test("a started Objective names its required environment from its own limits", a
     const again = await application({
       requiredEnvironment: ["FIXTURE_SECRET"],
     }).runObjective(1);
-    assert.equal(again.schemaVersion, 7);
+    assert.equal(again.schemaVersion, 8);
     // A requirement in the snapshot is still checked live on every run.
     const path = statePath(config.repository, 1);
     const snapshot = readContinuation(config.repository, 1);

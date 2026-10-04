@@ -1,3 +1,4 @@
+import { defaultAutonomy } from "../dist/repair-policy.js";
 import { coverageObligations } from "../dist/qa.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -381,7 +382,7 @@ test("regular execution persists authentication requests for status", async () =
     requiredLfsRoles: [],
   };
   const state = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     repository: "example/auth",
     objective: 1,
     runId: "run-auth",
@@ -407,6 +408,7 @@ test("regular execution persists authentication requests for status", async () =
     },
     issueByItemId: { auth: 2 },
     capacity: { concurrency: 1 },
+    autonomy: defaultAutonomy,
     work: { auth: { status: "pending" } },
   };
   const request = { provider: "codex", command: "codex login" };

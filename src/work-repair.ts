@@ -24,6 +24,7 @@ import {
   consumption,
   failureDigest,
   itemEvent,
+  PAID_ATTEMPTS,
   repairScopes,
   validateCorrection,
   type FailureDisposition,
@@ -219,14 +220,17 @@ export class CandidateEnvironmentFailure extends Error {
     attachFault(this, {
       kind: "config",
       detail,
-      fix: "Restore the controller's validation environment, then supply a validation-environment correction",
+      fix: "Restore the controller's validation environment, then revalidate the same candidate with a validation-environment correction (`factory repair`)",
     });
   }
 }
 
+const retryCommand = (state: FactoryState, id: string): string =>
+  `factory retry --objective ${state.objective} --item ${id}`;
+
 /**
  * Record a failed attempt. Only a contained wrong result (a `work` fault)
- * gets a failure event, so only it can be charged for a correction.
+ * gets a failure event, so only it is diagnosed and charged.
  */
 export function recordWorkFailure(
   state: FactoryState,
@@ -235,31 +239,40 @@ export function recordWorkFailure(
 ): boolean {
   const work = state.work[id]!;
   const detail = error instanceof Error ? error.message : String(error);
+  const fault = faultOf(error);
   const isolated =
     !work.pullRequest &&
     !state.coordinator?.cancelError &&
-    (error instanceof SettledAttemptFailure ||
-      error instanceof CandidateValidationFailure ||
+    (fault.kind === "work" ||
+      error instanceof SettledAttemptFailure ||
       error instanceof CandidateEnvironmentFailure);
-  const fault = faultOf(error);
+  const prior = work.recovery?.failure;
   const event =
-    isolated && fault.kind === "work" && work.attempt && work.step
-      ? itemEvent(work.attempt, work.step, work.recovery?.history?.length ?? 0)
+    isolated && fault.kind === "work"
+      ? itemEvent(
+          id,
+          work.step ?? "execute",
+          work.recovery?.history?.length ?? 0,
+        )
       : undefined;
   const failure: FailureDisposition = {
     digest: failureDigest(detail),
     ...(event && { event }),
+    // Recording the same event again keeps its paid diagnoses.
+    ...(event && prior?.event === event && prior.diagnoses
+      ? { diagnoses: prior.diagnoses }
+      : {}),
     detail,
     at: new Date().toISOString(),
-    classification: isolated
-      ? error instanceof SettledAttemptFailure
-        ? error.classification
-        : error instanceof CandidateEnvironmentFailure
+    classification: event
+      ? "implementation"
+      : isolated
+        ? error instanceof CandidateEnvironmentFailure
           ? "validation-environment"
-          : "implementation"
-      : isInterruption(error)
-        ? "interruption"
-        : "uncertain",
+          : "interruption"
+        : isInterruption(error)
+          ? "interruption"
+          : "uncertain",
     continuation:
       error instanceof CandidateEnvironmentFailure
         ? "exact-candidate-revalidation"
@@ -269,12 +282,14 @@ export function recordWorkFailure(
     unfinishedEdits:
       error instanceof SettledAttemptFailure ? "removed" : "unavailable",
     decision: event
-      ? "Supply a concrete diagnosis and correction or enable implementation repair in the configured autonomy"
+      ? `Supply a concrete diagnosis and correction (\`factory repair\`), enable implementation repair in the configured autonomy, or start a new attempt with \`${retryCommand(state, id)}\``
       : fault.kind === "config"
         ? fault.fix
-        : isolated || isInterruption(error)
-          ? "Interrupted repeatedly; check the provider, network or GitHub status, then run again"
-          : "Resolve external outcome or ownership before another attempt",
+        : isolated
+          ? `The worker stopped without a result after repeated attempts; start a new attempt with \`${retryCommand(state, id)}\``
+          : isInterruption(error)
+            ? "Interrupted repeatedly; check the provider, network or GitHub status, then run again"
+            : "Resolve external outcome or ownership before another attempt",
   };
   work.recovery = {
     ...work.recovery,
@@ -310,7 +325,12 @@ export function applyWorkCorrection(
   recovery.correction = correction;
   recovery.phase = "ready";
   if (correction.kind === "implementation") {
-    if (work.status !== "failed" || work.step === "deliver")
+    // A wrong result at delivery (the remote refused its content) published
+    // nothing; any other failure there may have.
+    if (
+      work.status !== "failed" ||
+      (work.step === "deliver" && !work.recovery?.failure?.event)
+    )
       throw new Error(
         "Implementation repair needs an unpublished failed attempt",
       );
@@ -391,12 +411,22 @@ export async function diagnoseWorkRepair(args: {
   // fixed, never diagnosed against an allowance.
   if (!failure?.event || work.status !== "failed" || args.stopped())
     return false;
+  const retry = retryCommand(state, item.id);
   if (work.recovery?.phase === "ready" && work.recovery.correction) {
     applyWorkCorrection(state, item.id, work.recovery.correction);
     save();
     return true;
   }
-  if (!state.autonomy.repairClasses.includes("implementation")) return false;
+  const stop = (decision: string): false => {
+    work.recovery!.phase = "stopped";
+    failure.decision = decision;
+    save();
+    return false;
+  };
+  if ((failure.diagnoses ?? 0) >= PAID_ATTEMPTS)
+    return stop(
+      `The diagnosis did not answer ${PAID_ATTEMPTS} times; supply a correction (\`factory repair\`) or start a new attempt with \`${retry}\``,
+    );
   // The charge is keyed by the failure event, so a diagnosis repeated after
   // a restart or a lost response is not charged again.
   try {
@@ -407,10 +437,11 @@ export async function diagnoseWorkRepair(args: {
       repairScopes(state, item.id),
     );
   } catch (error) {
-    failure.decision = error instanceof Error ? error.message : String(error);
-    save();
-    return false;
+    return stop(
+      `${error instanceof Error ? error.message : String(error)}; start a new attempt with \`${retry}\``,
+    );
   }
+  failure.diagnoses = (failure.diagnoses ?? 0) + 1;
   work.recovery!.phase = "diagnosing";
   save();
   let response;
@@ -440,13 +471,19 @@ export async function diagnoseWorkRepair(args: {
       },
     });
   } catch (error) {
-    if (error instanceof CompletedModelInvocationError) {
-      work.recovery!.phase = "stopped";
-      failure.decision = error.message;
-      save();
-      return false;
-    }
-    throw error;
+    if (error instanceof CompletedModelInvocationError)
+      return stop(error.message);
+    // An unanswered diagnosis stays under way; the next run asks again
+    // (see resumeDiagnoses). A configuration fault was not paid for.
+    const fault = faultOf(error);
+    if (fault.kind !== "transient" && fault.kind !== "config") throw error;
+    if (fault.kind === "config") failure.diagnoses--;
+    failure.decision =
+      fault.kind === "config"
+        ? fault.fix
+        : `The diagnosis did not answer (${failure.diagnoses}/${PAID_ATTEMPTS}); run the Objective again to ask again`;
+    save();
+    return false;
   }
   work.recovery!.phase = "stopped";
   if (response.decision !== "repair") {
@@ -489,16 +526,17 @@ export function prepareEvidenceRecovery(
   const detail = JSON.stringify(work.acceptancePending);
   // A completed review answer whose evidence was refused is corrected like a
   // wrong result: one charge per refused review.
-  const event =
-    work.attempt && work.step
-      ? itemEvent(work.attempt, work.step, work.recovery?.history?.length ?? 0)
-      : undefined;
+  const event = itemEvent(
+    id,
+    work.step ?? "approve-result",
+    work.recovery?.history?.length ?? 0,
+  );
   work.recovery = {
     ...work.recovery,
     scopes: repairScopes(state, id),
     failure: {
       digest: failureDigest(detail),
-      ...(event && { event }),
+      event,
       classification: "review-evidence",
       detail,
       at: new Date().toISOString(),
@@ -509,12 +547,7 @@ export function prepareEvidenceRecovery(
     },
     phase: "stopped",
   };
-  if (
-    !event ||
-    rejection.reason === "source-truncated" ||
-    !state.autonomy.repairClasses.includes("review-evidence")
-  )
-    return false;
+  if (rejection.reason === "source-truncated") return false;
   try {
     applyWorkCorrection(state, id, {
       kind: "review-evidence",
@@ -527,7 +560,21 @@ export function prepareEvidenceRecovery(
     return true;
   } catch (error) {
     work.recovery.failure!.decision =
-      error instanceof Error ? error.message : String(error);
+      `${error instanceof Error ? error.message : String(error)}; decide the result with \`factory decide-result\` or ask for \`factory rereview\``;
     return false;
+  }
+}
+
+/**
+ * Ask again any diagnosis a restart or an unanswered call left under way.
+ * Its event is already charged, so asking again is free.
+ */
+export async function resumeDiagnoses(
+  args: Omit<Parameters<typeof diagnoseWorkRepair>[0], "item">,
+): Promise<void> {
+  for (const item of args.state.graph.items) {
+    const work = args.state.work[item.id];
+    if (work?.status === "failed" && work.recovery?.phase === "diagnosing")
+      await diagnoseWorkRepair({ ...args, item });
   }
 }

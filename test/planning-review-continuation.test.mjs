@@ -156,7 +156,11 @@ async function fixture(
       }
       assert.equal(
         new Ajv({ strict: false }).compile(options.outputSchema)(response),
-        !(malformed && options.outputSchema.properties.packetId),
+        !(
+          malformed &&
+          reviews === 1 &&
+          options.outputSchema.properties.packetId
+        ),
       );
       const raw = JSON.stringify(response);
       emitted.push({ prompt, schema: options.outputSchema, raw });
@@ -202,8 +206,9 @@ async function fixture(
     undefined,
     executionBounds,
   );
-  // With no planning allowance a finding stops before the paused diagnosis.
-  if (pauseBeforeReview || ((rejected || malformed) && limit))
+  // With a planning allowance a finding stops before the paused diagnosis;
+  // a malformed review stops before it is asked again.
+  if (pauseBeforeReview || (rejected && limit) || malformed)
     await assert.rejects(initial, /paused or cancelled/);
   else await initial;
   return {
@@ -327,7 +332,7 @@ test("changed reviewed context, damaged request and old missing binding refuse b
   }
 });
 
-test("genuinely malformed completed review retains its original packet and stops as a protocol refusal for a human decision", async (t) => {
+test("a malformed completed review is asked again, keeps its receipt and is never charged", async (t) => {
   const f = await fixture(t, { malformed: true, limit: 0 });
   const state = structuredClone(f.retained);
   const original = structuredClone(state.planningRecovery.review);
@@ -335,13 +340,17 @@ test("genuinely malformed completed review retains its original packet and stops
     () => decodeGraphReview(original.response, original.packet),
     /invalid/,
   );
+  const receipts = structuredClone(state.planningRecovery.invocations);
   const calls = f.emitted.length;
   const candidate = await compilePlan(...f.args, { state, save() {} });
-  assert.equal(candidate.review.status, "needs-human");
-  assert.ok(candidate.review.failure);
-  assert.equal(state.planningRecovery.phase, "stopped");
-  assert.deepEqual(state.planningRecovery.review, original);
-  assert.equal(f.emitted.length, calls);
+  assert.equal(candidate.review.status, "clean");
+  assert.equal(f.emitted.length, calls + 1);
+  assert.deepEqual(state.planningRecovery.review.packet, original.packet);
+  assert.deepEqual(
+    state.planningRecovery.invocations.slice(0, receipts.length),
+    receipts,
+  );
+  assert.equal(consumption(state).planningRevisions, 0);
 });
 
 test("an interrupted review is reissued, or its retained response reused", async (t) => {

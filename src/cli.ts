@@ -634,7 +634,7 @@ async function main(): Promise<void> {
             readUsageSummaryEvents(
               config.repository,
               objective,
-              continuation?.schemaVersion === 6 ? continuation : undefined,
+              continuation?.schemaVersion === 7 ? continuation : undefined,
             ),
           ),
         ),
@@ -647,7 +647,7 @@ async function main(): Promise<void> {
       const timeline = readAgentTimeline(
         config.repository,
         objective,
-        continuation?.schemaVersion === 6 ? continuation : undefined,
+        continuation?.schemaVersion === 7 ? continuation : undefined,
       );
       for (const event of timeline) {
         const json = JSON.stringify(event);

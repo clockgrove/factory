@@ -231,7 +231,7 @@ test("run persists a plan that needs a decision and binds the exact human answer
         /no persisted plan/,
       );
       const preparing = await application.runObjective(1);
-      assert.equal(preparing.schemaVersion, 7);
+      assert.equal(preparing.schemaVersion, 8);
       assert.equal(preparing.plan.review.status, "needs-human");
       assert.match(
         preparing.coordinator.waitReason,
@@ -240,7 +240,7 @@ test("run persists a plan that needs a decision and binds the exact human answer
       assert.equal(Object.keys(github.state().issues).length, 0);
       const planned = calls.length;
       const again = await application.runObjective(1);
-      assert.equal(again.schemaVersion, 7);
+      assert.equal(again.schemaVersion, 8);
       assert.equal(calls.length, planned, "a rerun never plans again");
       await assert.rejects(
         decideSaved(application, config, { ...accept, answer: " " }),

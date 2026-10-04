@@ -24,11 +24,6 @@ const D = {
     pattern:
       /^outcome=stopped; message=(Objective stopped: )+GitHub request failed \(HTTP 50[03]\)\..*; work=(alpha:pending,beta:pending|alpha:published,beta:published)$/,
   },
-  GRAPH_REVIEW_DECISION: {
-    text: "a lost or unavailable plan (graph) review response is treated as an invalid independent review: the planner compiles a revision, and the persisted plan then waits for a human 'accept despite the invalid independent review' decision on every restart instead of repeating the review",
-    pattern:
-      /^outcome=needs-decision; message=Objective #\d+ plan [0-9a-f]{12} needs a decision: .*Do you accept it despite the invalid independent review\?/,
-  },
   PLANNER_STOP: {
     text: "a lost or unavailable planner response stops the run; planning is not repeated in the run, only a manual restart compiles again",
     pattern:
@@ -237,14 +232,6 @@ export const KNOWN = {
         "lost at model.generateStructured #1 without an operator stop",
         "unavailable at model.generateStructured #1 without an operator stop",
       ],
-      GRAPH_REVIEW_DECISION: [
-        "lost at model.reviewGraph #1",
-        "lost at model.reviewGraph #1 without an operator stop",
-        "lost at model.reviewGraph #1 compiles the plan once",
-        "unavailable at model.reviewGraph #1",
-        "unavailable at model.reviewGraph #1 without an operator stop",
-        "unavailable at model.reviewGraph #1 compiles the plan once",
-      ],
       START_AMBIGUOUS: [
         "crash-before at driver.start #1",
         "crash-before at driver.start #1 without an operator stop",
@@ -374,14 +361,6 @@ export const KNOWN = {
     PLANNER_STOP: [
       "lost at model.generateStructured #1 without an operator stop",
       "unavailable at model.generateStructured #1 without an operator stop",
-    ],
-    GRAPH_REVIEW_DECISION: [
-      "lost at model.reviewGraph #1",
-      "lost at model.reviewGraph #1 without an operator stop",
-      "lost at model.reviewGraph #1 compiles the plan once",
-      "unavailable at model.reviewGraph #1",
-      "unavailable at model.reviewGraph #1 without an operator stop",
-      "unavailable at model.reviewGraph #1 compiles the plan once",
     ],
     START_REPEAT: [
       "lost at driver.start #1",

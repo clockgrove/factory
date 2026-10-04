@@ -16,7 +16,7 @@ export function runOutcome(state: ContinuationState): {
 } {
   const objective = state.objective;
   const rerun = `factory run --objective ${objective}`;
-  if (state.schemaVersion === 7)
+  if (state.schemaVersion === 8)
     return {
       code: EXIT_NEEDS_DECISION,
       message: state.plan

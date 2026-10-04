@@ -166,6 +166,42 @@ export function deriveCases(reference) {
 }
 
 /**
+ * The boundaries two deliveries' reference runs share before either touches
+ * delivery: the leading requests both made in the same order, up to the first
+ * git request (the first Work Item checkout), and the model calls before the
+ * first execution-driver call. A fault there reaches no delivery-specific
+ * code, so running it for the second delivery repeats the first. Measured with
+ * V8 line coverage over 7 case pairs (lost, crash and unavailable at issue,
+ * label and sub-issue creation, the first reads, and the planning calls): the
+ * native-stack case covered no line that the regular case and the native
+ * reference did not.
+ */
+export function sharedBoundaries(reference, other) {
+  const keys = new Set();
+  const seen = new Map();
+  const [a, b] = [reference.fake.log, other.fake.log];
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    if (a[i].endpoint !== b[i].endpoint || a[i].unhandled || b[i].unhandled)
+      break;
+    if (a[i].endpoint.startsWith("GIT ")) break;
+    const occurrence = (seen.get(a[i].endpoint) ?? 0) + 1;
+    seen.set(a[i].endpoint, occurrence);
+    keys.add(`${a[i].endpoint} #${occurrence}`);
+  }
+  const calls = new Map();
+  const [x, y] = [reference.calls, other.calls];
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    const key = `${x[i].target}.${x[i].method}`;
+    if (key !== `${y[i].target}.${y[i].method}` || x[i].target === "driver")
+      break;
+    const occurrence = (calls.get(key) ?? 0) + 1;
+    calls.set(key, occurrence);
+    keys.add(`${key} #${occurrence}`);
+  }
+  return keys;
+}
+
+/**
  * Premises under which a run reaches the execution driver's cancel and
  * observe calls. Each runs once uninterrupted as its own reference; its
  * driver.cancel and driver.observe calls in the first controller run become
@@ -872,6 +908,12 @@ export async function defineMatrix(delivery, known, part = 1, parts = 2) {
     referenceRun(delivery),
     ...VARIANTS.map((variant) => variantReferenceRun(variant, delivery)),
   ]);
+  // Native-stack skips the boundaries it shares with regular delivery (see
+  // sharedBoundaries). The snapshot still lists every boundary.
+  const shared =
+    delivery === "native-stack"
+      ? sharedBoundaries(reference, await referenceRun("regular"))
+      : new Set();
   const cases = [
     ...deriveCases(reference),
     ...VARIANTS.flatMap((variant, index) =>
@@ -913,6 +955,11 @@ export async function defineMatrix(delivery, known, part = 1, parts = 2) {
     }
     for (const [index, testCase] of cases.entries()) {
       if (partOf(testCase.name, parts) !== part) continue;
+      if (
+        ["mutations", "reads", "calls"].includes(testCase.group) &&
+        shared.has(testCase.boundaryName)
+      )
+        continue;
       const premise = testCase.variant?.scenario ?? {};
       declareScenario(
         testCase.name,

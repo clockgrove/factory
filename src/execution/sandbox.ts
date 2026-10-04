@@ -18,14 +18,15 @@ import type {
   SandboxProvider,
   WorkGraph,
 } from "../contracts.js";
-import { AuthenticationRequiredError, Interruption } from "../contracts.js";
+import { AuthenticationRequiredError } from "../contracts.js";
 import type { JsonValue } from "../config.js";
+import { attachedFault } from "../fault.js";
 import {
-  SettledAttemptFailure,
-  failAttempt,
-  retryTransient,
-  transientRequestFailure,
-} from "../work-repair.js";
+  cancelledFault,
+  endAttempt,
+  stoppedFault,
+  transportFailure,
+} from "./attempt.js";
 import { assertDurableValue } from "./checkpoint.js";
 import { collectWorktreeResult } from "./local.js";
 import { prepareManagedBase } from "./managed-base.js";
@@ -234,7 +235,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       // A transient failure in a resumable phase is resolved by collection.
       if (
         context?.cancelled() ||
-        !transientRequestFailure(error) ||
+        !transportFailure(error) ||
         !this.resumable(this.active(handle))
       )
         await this.fail(error, handle, context);
@@ -248,30 +249,32 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       (a.phase === "submitting" && a.operation === "start")
     );
   }
-  /** Ends the attempt for a failed step; see failAttempt. */
+  /** Ends the attempt for a failed step; see endAttempt. */
   private async fail(
     error: unknown,
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<never> {
-    // A transient failure where the launch cannot resume ends the attempt
-    // as an interruption directly, without spending a step interruption.
+    // A transport failure where the launch cannot resume ends the attempt
+    // without a result: the step counts the lost run once.
     if (
       !context?.cancelled() &&
-      transientRequestFailure(error) &&
+      transportFailure(error) &&
       !this.resumable(this.active(handle))
     )
       return this.settle(
         handle,
-        `Sandbox launch was interrupted; repeating with a fresh attempt: ${error instanceof Error ? error.message : String(error)}`,
+        `Sandbox launch was interrupted: ${error instanceof Error ? error.message : String(error)}`,
         true,
         context,
       );
-    return failAttempt(error, {
-      transient: transientRequestFailure,
+    // A provider fault that is transient but not a transport failure means
+    // the sandbox is gone: the attempt ended without a result.
+    const gone = attachedFault(error)?.kind === "transient";
+    return endAttempt(error, {
       expired: false,
       cancelled: context?.cancelled() ?? false,
-      settle: (detail) => this.settle(handle, detail, false, context),
+      settle: (detail) => this.settle(handle, detail, gone, context),
     });
   }
   /**
@@ -455,15 +458,8 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     const a = this.active(handle);
     a.stopped ??= { detail, interrupted };
     this.save(handle, context);
-    try {
-      await this.destroy(handle, a.terminal ?? "failed", context);
-    } catch (error) {
-      throw transientRequestFailure(error) ? new Interruption(error) : error;
-    }
-    throw new SettledAttemptFailure(
-      new Error(a.stopped.detail),
-      a.stopped.interrupted ? "interruption" : "implementation",
-    );
+    await this.destroy(handle, a.terminal ?? "failed", context);
+    throw stoppedFault(a.stopped.detail, a.stopped.interrupted);
   }
   @classifyFaults(executionFault)
   async cancel(
@@ -519,11 +515,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       }
       this.save(handle, context);
     }
-    try {
-      await this.destroy(handle, "complete", context);
-    } catch (error) {
-      throw transientRequestFailure(error) ? new Interruption(error) : error;
-    }
+    await this.destroy(handle, "complete", context);
     return a.result!;
   }
   private async produce(
@@ -531,22 +523,18 @@ export class SandboxExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<ExecutionResult> {
     const a = this.active(handle);
-    // Launch and observe resume from the recorded phase, so a transient
-    // failure is retried in place.
-    const step = <T>(run: () => Promise<T>) =>
-      retryTransient(run, transientRequestFailure);
+    // Launch and observe resume from the recorded phase: a transport
+    // failure leaves collect, and the step's repeat reattaches here.
     if (a.operation !== "collect") {
-      let observed = await step(async () => {
-        if (!a.harnessStarted) await this.launch(handle, context);
-        return this.observe(handle, context);
-      });
+      if (!a.harnessStarted) await this.launch(handle, context);
+      let observed = await this.observe(handle, context);
       while (observed.state === "running") {
         if (context?.cancelled())
-          throw new Error(
-            "Sandbox collection interrupted; owned attempt retained",
+          throw cancelledFault(
+            "Sandbox collection cancelled; owned attempt retained",
           );
         await new Promise((resolve) => setTimeout(resolve, 25));
-        observed = await step(() => this.observe(handle, context));
+        observed = await this.observe(handle, context);
       }
       if (observed.state !== "complete" && observed.authentication)
         throw new AuthenticationRequiredError(
@@ -561,9 +549,7 @@ export class SandboxExecutionDriver implements ExecutionDriver {
           context,
         );
     }
-    const value = (await step(() =>
-      this.invoke(handle, "collect", context),
-    )) as {
+    const value = (await this.invoke(handle, "collect", context)) as {
       files: SandboxFile[];
       result: HarnessResult;
       archive: { path: string; digest: string; bytes: number };

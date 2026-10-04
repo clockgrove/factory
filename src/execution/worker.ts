@@ -8,6 +8,7 @@ import { codexTokenUsage, codexRawTokenUsage } from "../usage.js";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import {
   harnessFailure,
+  ProviderStreamError,
   privateProgress,
   readProducedAssets,
   redact,
@@ -208,7 +209,8 @@ export async function runCodexWorker(
           observeUsage("progress");
         }
         if (event.type === "turn.failed") throw new Error(event.error.message);
-        if (event.type === "error") throw new Error(event.message);
+        if (event.type === "error")
+          throw new ProviderStreamError(event.message);
         if (turnCompleted) break;
       }
       closeStarted = true;

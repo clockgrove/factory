@@ -19,7 +19,12 @@ import type {
   HarnessRequest,
   ProducedAssetSet,
 } from "../contracts.js";
+import { networkFailure } from "../fault.js";
 import { parseProducedAssetSets } from "../media.js";
+import {
+  ProviderTurnIncompleteError,
+  ProviderTurnTimeoutError,
+} from "../provider-turn.js";
 
 export function privateProgress(path: string, event: unknown): void {
   const fd = openSync(
@@ -93,6 +98,25 @@ export function parseAuthenticationRequest(
     : undefined;
 }
 
+/** The provider's event stream reported an unrecoverable error of its own. */
+export class ProviderStreamError extends Error {
+  override readonly name = "ProviderStreamError";
+}
+
+/**
+ * The provider turn broke after the model was reached (stream error, idle
+ * timeout, stream ended early, transport failure): the paid run was lost,
+ * it did not produce a wrong result.
+ */
+function lostTurn(error: unknown): boolean {
+  return (
+    error instanceof ProviderStreamError ||
+    error instanceof ProviderTurnTimeoutError ||
+    error instanceof ProviderTurnIncompleteError ||
+    networkFailure(error)
+  );
+}
+
 export function harnessFailure(
   provider: "codex" | "claude" | "github-copilot",
   error: unknown,
@@ -101,10 +125,13 @@ export function harnessFailure(
   state: "failed";
   error: string;
   authentication?: { provider: string; command: string };
+  lost?: true;
 } {
-  const failure = authenticationFailure(provider, error) ?? {
+  const authentication = authenticationFailure(provider, error);
+  const failure = authentication ?? {
     state: "failed" as const,
     error: error instanceof Error ? error.message : String(error),
+    ...(lostTurn(error) && { lost: true as const }),
   };
   return { ...failure, error: redact(failure.error, secrets) };
 }

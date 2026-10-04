@@ -13,7 +13,10 @@ import os, { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { stateRoot } from "../dist/config.js";
-import { preparationStatusDocument } from "../dist/diagnostics.js";
+import {
+  preparationStatusDocument,
+  statusDocument,
+} from "../dist/diagnostics.js";
 import { defaultAutonomy } from "../dist/index.js";
 import { intakeExitCode, runOutcome } from "../dist/run-outcome.js";
 import {
@@ -22,7 +25,7 @@ import {
   saveState,
   statePath,
 } from "../dist/state-store.js";
-import { shortPlanDigest } from "../dist/status-summary.js";
+import { shortPlanDigest, summarizeStatus } from "../dist/status-summary.js";
 import { withCoverage } from "./support/coverage.mjs";
 import {
   createTarget,
@@ -619,5 +622,110 @@ test("the CLI requires an answer to accept a plan and keeps no admission vocabul
       assert.equal(result.status, 1, args.join(" "));
       assert.match(result.stderr, message);
     }
+  });
+});
+
+test("factory retry runs the command status prints for a step decision", async () => {
+  await fixture("step-retry", async ({ root, config, graph }) => {
+    const { application } = makeApplication({
+      config,
+      graph,
+      objectiveBody: body,
+      fakeRoot: join(root, "fake"),
+      actions: { result: { files: [{ path: "result.txt", text: "done\n" }] } },
+      planningModel: model(graph, []),
+    });
+    await application.runObjective(1);
+    const configPath = join(root, "config.json");
+    writeFileSync(configPath, JSON.stringify(config));
+    /** Run the printed command, as the operator would. */
+    const run = (command) => {
+      const [factory, ...args] = command.split(" ");
+      assert.equal(factory, "factory");
+      return spawnSync(
+        process.execPath,
+        [
+          join(import.meta.dirname, "../dist/cli.js"),
+          ...args,
+          "--config",
+          configPath,
+        ],
+        { encoding: "utf8", env: { ...process.env } },
+      );
+    };
+    const path = statePath(config.repository, 1);
+    const question =
+      "review failed 4 times with an unknown outcome; retry or cancel?";
+
+    // An item step at its paid bound, after its PR was published: the
+    // attempt retry refuses this item, the step retry answers it.
+    const state = readState(config.repository, 1);
+    // Unsealed, so the test may edit the finished Objective's work.
+    delete state.finalAcceptance;
+    state.repeats = {
+      "item/result/review": { paid: 4 },
+      "objective/close": { paid: 1 },
+    };
+    state.work.result.wait = {
+      kind: "decision",
+      detail: question,
+      step: "item/result/review",
+    };
+    saveState(path, state);
+    const document = statusDocument(
+      readState(config.repository, 1),
+      config.repository,
+      1,
+      "regular",
+    );
+    const itemStatus = summarizeStatus({
+      ...document,
+      state: "active",
+      work: document.work.map((work) => ({ ...work, status: "published" })),
+    });
+    assert.equal(itemStatus.phase, "needs-decision");
+    assert.equal(
+      itemStatus.nextAction.command,
+      "factory retry --objective 1 --item result",
+    );
+    const answered = run(itemStatus.nextAction.command);
+    assert.equal(answered.status, 0, answered.stderr);
+    assert.match(answered.stdout, /Work Item result step will run again/);
+    const cleared = readState(config.repository, 1);
+    assert.equal(cleared.work.result.wait, undefined);
+    assert.deepEqual(cleared.repeats, { "objective/close": { paid: 1 } });
+    // Nothing awaits the operator now, so the attempt rules apply again.
+    assert.match(run(itemStatus.nextAction.command).stderr, /already complete/);
+
+    // The Objective's own step: no --item.
+    cleared.wait = {
+      kind: "decision",
+      detail: question,
+      step: "objective/close",
+    };
+    saveState(path, cleared);
+    const objectiveStatus = summarizeStatus({
+      ...statusDocument(
+        readState(config.repository, 1),
+        config.repository,
+        1,
+        "regular",
+      ),
+      state: "active",
+    });
+    assert.equal(
+      objectiveStatus.nextAction.command,
+      "factory retry --objective 1",
+    );
+    const objectiveAnswer = run(objectiveStatus.nextAction.command);
+    assert.equal(objectiveAnswer.status, 0, objectiveAnswer.stderr);
+    assert.match(objectiveAnswer.stdout, /Objective step will run again/);
+    const done = readState(config.repository, 1);
+    assert.equal(done.wait, undefined);
+    assert.equal(done.repeats, undefined);
+    assert.match(
+      run("factory retry --objective 1").stderr,
+      /No Objective step awaits/,
+    );
   });
 });

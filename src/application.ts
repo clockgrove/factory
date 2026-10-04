@@ -92,7 +92,8 @@ export interface FactoryApplication {
     options?: { deadlineAt?: string },
   ): Promise<ContinuationState>;
   cancelObjective(objective: number): Promise<"requested" | "cancelled">;
-  retryWorkItem(objective: number, itemId: string): void;
+  /** Answer a step's decision or config fix, else retry a failed Work Item. */
+  retryWorkItem(objective: number, itemId?: string): "step" | "attempt";
   repairWorkItem(
     objective: number,
     input: Parameters<typeof repairWorkItem>[2],

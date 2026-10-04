@@ -338,6 +338,8 @@ For a failed or cancelled unpublished item, including one whose repair allowance
 factory retry --objective ISSUE_NUMBER --item WORK_ITEM_ID
 ```
 
+The same command answers a step that stopped for the operator: a decision (such as repeated lost model turns) or a configuration fix. Status prints the exact command; leave out `--item` when the Objective's own step is waiting. It works while a run is active and with a published PR. It clears every step record of that item (or of the Objective), so the waiting step runs again with a fresh bound; a decision blocks only the step that asked it. The other answer is `factory cancel`.
+
 If the controller stops for any reason, run the Objective again. Factory re-reads its state and GitHub and repeats the step it was on: planning and reviews are asked again, issues and PRs are found by their markers and branches instead of being created twice, and a merge that already happened is confirmed rather than repeated. A running worker is reattached by its recorded handle.
 
 ## Allow diagnosed repairs

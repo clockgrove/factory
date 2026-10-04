@@ -805,12 +805,31 @@ test("a response-less result review leaves no unknown effect and allows retry", 
         const state = readState(config.repository, 1);
         assert.equal(state.work.result.pendingEffect, undefined);
         assert.equal(state.work.result.acceptancePending, undefined);
+        // A step record and decision left by the failed attempt: retrying a
+        // failed item starts a new attempt without them.
+        state.repeats = {
+          "item/result/review": { paid: 4, inFlight: true },
+          "objective/close": { paid: 1 },
+        };
+        state.work.result.wait = {
+          kind: "decision",
+          detail: "review failed 4 times; retry or cancel?",
+          step: "item/result/review",
+        };
+        saveState(statePath(config.repository, 1), state);
         // Reviews have no side effects; nothing blocks asking again.
-        application.retryWorkItem(1, "result");
-        assert.equal(
-          readState(config.repository, 1).work.result.status,
-          "pending",
-        );
+        assert.equal(application.retryWorkItem(1, "result"), "attempt");
+        const retried = readState(config.repository, 1);
+        assert.equal(retried.work.result.status, "pending");
+        assert.equal(retried.work.result.wait, undefined);
+        assert.deepEqual(retried.repeats, { "objective/close": { paid: 1 } });
+        // Completed cancellation leaves no step to resume.
+        if (delivery === "regular") {
+          assert.equal(await application.cancelObjective(1), "cancelled");
+          const cancelled = readState(config.repository, 1);
+          assert.ok(cancelled.cancelledAt);
+          assert.equal(cancelled.repeats, undefined);
+        }
       },
       undefined,
       (descriptor) => {

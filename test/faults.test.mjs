@@ -1993,55 +1993,82 @@ test("a decorated provider rethrows the same error with its fault", async () => 
 // ------------------------------------------------------- state records
 
 test("repeat records and structured waits are validated", () => {
-  const transient = {
-    kind: "transient",
-    detail: "GitHub HTTP 502",
-    outcomeUnknown: false,
-  };
-  const record = {
+  const faults = {
     since: "2026-10-03T00:00:00.000Z",
     count: 2,
-    last: transient,
-    nextAt: "2026-10-03T00:00:04.000Z",
+    last: {
+      kind: "transient",
+      detail: "GitHub HTTP 502",
+      outcomeUnknown: false,
+    },
+    activeMs: 1000,
   };
-  const items = new Set(["one"]);
+  const nextAt = "2026-10-03T00:00:04.000Z";
+  const scheduledAt = "2026-10-03T00:00:02.000Z";
   assertRepeats(undefined, "repeats");
   assertRepeats(
-    { "objective/plan": record, "one/attempt-1/publish": record },
+    {
+      "objective/plan": { nextAt, scheduledAt, faults },
+      "item/one/publish": { nextAt, scheduledAt },
+      "item/one/execute": { paid: 2, inFlight: true, asked: "Keep it?" },
+    },
     "repeats",
-    items,
   );
   for (const bad of [
-    { "two/attempt-1/publish": record },
-    { "one/publish": record },
-    { "objective/Plan": record },
-    { "objective/plan": { ...record, count: 0 } },
-    { "objective/plan": { ...record, last: { kind: "transient" } } },
-    { "objective/plan": { ...record, nextAt: "later" } },
-    { "objective/plan": { ...record, extra: true } },
+    { "one/attempt-1/publish": { nextAt } },
+    { "item/one": { nextAt } },
+    { "objective/Plan": { nextAt } },
+    { "objective/plan": {} },
+    { "objective/plan": { nextAt: "later", scheduledAt } },
+    { "objective/plan": { nextAt } },
+    { "objective/plan": { scheduledAt } },
+    { "objective/plan": { asked: "" } },
+    { "objective/plan": { faults: { ...faults, count: 0 } } },
+    {
+      "objective/plan": { faults: { ...faults, last: { kind: "transient" } } },
+    },
+    {
+      "objective/plan": {
+        faults: { ...faults, last: { kind: "defect", detail: "x" } },
+      },
+    },
+    { "objective/plan": { paid: 0 } },
+    { "objective/plan": { inFlight: 1 } },
+    { "objective/plan": { nextAt, scheduledAt, extra: true } },
     [],
   ])
-    assert.throws(() => assertRepeats(bad, "repeats", items), /repeats/);
-  // Preparation has no executing items, so only Objective steps may repeat.
-  assert.throws(
-    () => assertRepeats({ "one/attempt-1/publish": record }, "repeats"),
-    /names no known step/,
-  );
+    assert.throws(() => assertRepeats(bad, "repeats"), /repeats/);
   assertWait(undefined, "wait");
   for (const kind of [
     "ci",
     "capacity",
     "dependency",
-    "outage",
     "decision",
     "prerequisite",
   ])
     assertWait({ kind, detail: "x" }, "wait");
+  assertWait(
+    {
+      kind: "prerequisite",
+      detail: "403",
+      fix: "Grant access",
+      step: "item/one/publish",
+    },
+    "wait",
+  );
   for (const bad of [
     { kind: "later", detail: "x" },
+    { kind: "outage", detail: "x" },
     { kind: "ci", detail: "" },
     { kind: "ci", detail: "x", since: "now" },
+    { kind: "ci", detail: "x", fix: "y" },
+    { kind: "prerequisite", detail: "x", fix: "" },
+    { kind: "decision", detail: "x", step: "publish" },
     "ci",
   ])
     assert.throws(() => assertWait(bad, "wait"), /wait is invalid/);
+  assert.equal(
+    isFault({ kind: "cancelled", detail: "Objective cancelled" }),
+    true,
+  );
 });

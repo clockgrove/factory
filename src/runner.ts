@@ -63,6 +63,12 @@ import { runNativeGraph } from "./delivery/native-runner.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { runRegularGraph } from "./delivery/regular-runner.js";
 import { DiagnosticEmitter, StateDiagnostics } from "./diagnostics.js";
+import {
+  awaitsOperator,
+  clearAllRepeats,
+  clearRepeats,
+  waitOf,
+} from "./step.js";
 import { namesPlan, shortPlanDigest } from "./status-summary.js";
 import {
   executionProfileChoices,
@@ -705,9 +711,16 @@ export async function runObjective(
             "Cancellation is in progress; inspect ownership before another action",
           );
         const input = request.input ?? {};
-        if (request.action === "retry")
-          retryWorkItem(config, objective, String(input.item));
-        else if (request.action === "repair")
+        if (request.action === "retry") {
+          const retried = retryWorkItem(
+            config,
+            objective,
+            input.item === undefined ? undefined : String(input.item),
+          );
+          wake();
+          return retried;
+        }
+        if (request.action === "repair")
           repairWorkItem(
             config,
             objective,
@@ -769,6 +782,7 @@ export async function runObjective(
         await owner.cancellation;
         if (!state.coordinator?.cancelError) {
           state.cancelledAt = new Date().toISOString();
+          clearAllRepeats(state);
           if (state.schemaVersion === 6)
             for (const work of Object.values(state.work))
               if (work.status === "pending" || work.status === "running")
@@ -1815,6 +1829,7 @@ async function runObjectivePass(
         await Promise.allSettled(active.values());
         if (!current.coordinator?.cancelError && active.size === 0) {
           current.cancelledAt = new Date().toISOString();
+          clearAllRepeats(current);
           if (current.schemaVersion === 6)
             for (const work of Object.values(current.work))
               if (work.status !== "done" && work.status !== "published")
@@ -1914,6 +1929,7 @@ export async function cancelObjective(
         }
       }
     continuation.cancelledAt = new Date().toISOString();
+    clearAllRepeats(continuation);
     saveState(statePath(config.repository, objective), continuation);
     const state = continuation;
     new DiagnosticEmitter(config.repository, objective).emit({
@@ -1927,11 +1943,64 @@ export async function cancelObjective(
   }
 }
 
+/**
+ * Answer a step's decision or config fix (src/step.ts): clear the scope's
+ * repeat records and step waits so the step runs again. Allowed while a run
+ * is live and with a published PR. False when no step awaits the operator.
+ */
+function retryStep(
+  config: FactoryConfig,
+  objective: number,
+  itemId: string | undefined,
+): boolean {
+  const lock = join(stateRoot(config.repository), "controller.lock");
+  const lockHandle = mutationLock(config, objective);
+  try {
+    const state =
+      owners.get(ownerKey(config, objective))?.snapshot ??
+      readContinuation(config.repository, objective);
+    if (!state) throw new Error("Objective has no Factory state");
+    // A failed or cancelled item's attempt is over: retry starts a new one.
+    const work =
+      itemId === undefined || !("work" in state)
+        ? undefined
+        : state.work[itemId];
+    if (
+      itemId !== undefined &&
+      (!work || work.status === "failed" || work.status === "cancelled")
+    )
+      return false;
+    const scope = itemId === undefined ? "objective" : { item: itemId };
+    if (!awaitsOperator(waitOf(state, scope))) return false;
+    clearRepeats(state, scope);
+    saveState(statePath(config.repository, objective), state);
+    new DiagnosticEmitter(config.repository, objective).emit({
+      runId: state.runId,
+      ...(itemId === undefined ? {} : { itemId }),
+      operation: "step-retry",
+      outcome: "completed",
+    });
+    return true;
+  } finally {
+    releaseMutationLock(lock, lockHandle);
+  }
+}
+
+/**
+ * `factory retry`: answers a step's decision or config fix when one awaits
+ * the operator (Objective without an item), else starts a new attempt of a
+ * failed or cancelled Work Item.
+ */
 export function retryWorkItem(
   config: FactoryConfig,
   objective: number,
-  itemId: string,
-): void {
+  itemId?: string,
+): "step" | "attempt" {
+  if (retryStep(config, objective, itemId)) return "step";
+  if (itemId === undefined)
+    throw new Error(
+      "No Objective step awaits a decision or configuration fix; name a Work Item with --item",
+    );
   const root = stateRoot(config.repository);
   const lock = join(root, "controller.lock");
   const lockHandle = mutationLock(config, objective);
@@ -1972,6 +2041,8 @@ export function retryWorkItem(
           state.stackMerges?.[nativeUnit.id]))
     )
       throw new Error("Published PR requires operator direction before retry");
+    // The new attempt starts without the old one's records or bound.
+    clearRepeats(state, { item: itemId });
     state.work[itemId] = { status: "pending", recovery: archiveAttempt(work) };
     state.cancelRequested = false;
     delete state.cancelledAt;
@@ -1983,6 +2054,7 @@ export function retryWorkItem(
       operation: "work-retry",
       outcome: "completed",
     });
+    return "attempt";
   } finally {
     releaseMutationLock(lock, lockHandle);
   }

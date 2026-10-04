@@ -32,7 +32,9 @@ export type Fault =
   /** Credentials, permissions or installation; resumes after the named fix. */
   | { kind: "config"; detail: string; fix: string }
   /** An invariant broke: stop and report. */
-  | { kind: "defect"; detail: string };
+  | { kind: "defect"; detail: string }
+  /** The operator cancelled while the step ran; not a failure. */
+  | { kind: "cancelled"; detail: string };
 
 export type FaultKind = Fault["kind"];
 
@@ -152,6 +154,7 @@ export function isFault(value: unknown): value is Fault {
         keys === "detail,fix,kind" && text(fault.detail) && text(fault.fix)
       );
     case "defect":
+    case "cancelled":
       return keys === "detail,kind" && text(fault.detail);
     default:
       return false;
@@ -333,25 +336,44 @@ export const decision = (question: string, ...evidence: string[]): Fault => ({
   evidence,
 });
 
-/**
- * A step's persisted repeat record, keyed `${item}/${attempt}/${step}` or
- * `objective/${step}`. Written only by the step primitive (#515).
- */
-export interface RepeatRecord {
-  /** When the step began failing; any progress inside the step resets it. */
+/** A run of transient faults with no progress between them. */
+export interface FaultRun {
+  /** When the run began (wall clock, for the operator). */
   since: string;
-  /** Faults since `since`. */
   count: number;
   last: Fault;
-  /** Earliest time the step runs again. */
-  nextAt: string;
+  /**
+   * Time the run has lasted while a controller was running the step. The
+   * 24-hour escalation reads this, so controller downtime never counts.
+   */
+  activeMs: number;
+}
+
+/**
+ * A step's persisted repeat record, keyed by `repeatKey` (src/step.ts):
+ * `item/<id>/<step>` or `objective/<step>`. Written only by `step`.
+ */
+export interface RepeatRecord {
+  /** Earliest time the step runs again (backoff or a pending poll). */
+  nextAt?: string;
+  /** When `nextAt` was chosen; with it, bounds the sleep if the clock jumps. */
+  scheduledAt?: string;
+  faults?: FaultRun;
+  /**
+   * Paid-call faults that may have been paid for. Progress does not reset
+   * it; success, work, defect and the operator's retry do.
+   */
+  paid?: number;
+  /** A paid call started and has not settled; a restart counts it. */
+  inFlight?: true;
+  /** A decision the step asked and the operator has not answered. */
+  asked?: string;
 }
 
 export type WaitKind =
   | "ci"
   | "capacity"
   | "dependency"
-  | "outage"
   | "decision"
   | "prerequisite";
 
@@ -359,18 +381,42 @@ export type WaitKind =
 export interface Wait {
   kind: WaitKind;
   detail: string;
+  /** On a `prerequisite` from a `config` fault: what the operator must fix. */
+  fix?: string;
+  /** The repeat key of the step that wrote this wait; absent for callers' waits. */
+  step?: string;
 }
 
 const WAIT_KINDS = new Set<string>([
   "ci",
   "capacity",
   "dependency",
-  "outage",
   "decision",
   "prerequisite",
 ]);
 const STEP_NAME = /^[a-z][a-z-]*$/;
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+/** The scope and step a repeat key names, or undefined when it is malformed. */
+export function parseRepeatKey(
+  key: string,
+): { item?: string; step: string } | undefined {
+  const parts = key.split("/");
+  if (
+    parts.length === 2 &&
+    parts[0] === "objective" &&
+    STEP_NAME.test(parts[1]!)
+  )
+    return { step: parts[1]! };
+  if (
+    parts.length === 3 &&
+    parts[0] === "item" &&
+    IDENTITY.test(parts[1]!) &&
+    STEP_NAME.test(parts[2]!)
+  )
+    return { item: parts[1]!, step: parts[2]! };
+  return undefined;
+}
 
 function plainRecord(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -378,38 +424,53 @@ function plainRecord(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+const atLeast = (value: unknown, least: number) =>
+  Number.isSafeInteger(value) && Number(value) >= least;
+
+function validFaultRun(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const run = value as Record<string, unknown>;
+  return (
+    Object.keys(run).sort().join(",") === "activeMs,count,last,since" &&
+    iso(run.since) &&
+    atLeast(run.count, 1) &&
+    atLeast(run.activeMs, 0) &&
+    isFault(run.last) &&
+    run.last.kind === "transient"
+  );
+}
+
 /**
- * Validate persisted repeat records. `items` lists the Work Items whose
- * steps may repeat; without it only Objective steps may.
+ * Validate persisted repeat records. Records of items no longer in the graph
+ * are valid here; the state loader drops them.
  */
-export function assertRepeats(
-  value: unknown,
-  label: string,
-  items: ReadonlySet<string> = new Set(),
-): void {
+export function assertRepeats(value: unknown, label: string): void {
   if (value === undefined) return;
   for (const [key, raw] of Object.entries(plainRecord(value, label))) {
-    const parts = key.split("/");
-    if (
-      !(
-        (parts.length === 2 &&
-          parts[0] === "objective" &&
-          STEP_NAME.test(parts[1]!)) ||
-        (parts.length === 3 &&
-          items.has(parts[0]!) &&
-          IDENTITY.test(parts[1]!) &&
-          STEP_NAME.test(parts[2]!))
-      )
-    )
-      throw new Error(`${label} key ${key} names no known step`);
+    if (!parseRepeatKey(key))
+      throw new Error(`${label} key ${key} names no step`);
     const record = plainRecord(raw, `${label}.${key}`);
+    const keys = Object.keys(record);
     if (
-      Object.keys(record).sort().join(",") !== "count,last,nextAt,since" ||
-      !iso(record.since) ||
-      !iso(record.nextAt) ||
-      !Number.isSafeInteger(record.count) ||
-      Number(record.count) < 1 ||
-      !isFault(record.last)
+      !keys.length ||
+      keys.some(
+        (name) =>
+          ![
+            "nextAt",
+            "scheduledAt",
+            "faults",
+            "paid",
+            "inFlight",
+            "asked",
+          ].includes(name),
+      ) ||
+      (record.nextAt === undefined) !== (record.scheduledAt === undefined) ||
+      (record.nextAt !== undefined &&
+        (!iso(record.nextAt) || !iso(record.scheduledAt))) ||
+      (record.asked !== undefined && !text(record.asked)) ||
+      (record.faults !== undefined && !validFaultRun(record.faults)) ||
+      (record.paid !== undefined && !atLeast(record.paid, 1)) ||
+      (record.inFlight !== undefined && record.inFlight !== true)
     )
       throw new Error(`${label}.${key} is invalid`);
   }
@@ -419,9 +480,15 @@ export function assertWait(value: unknown, label: string): void {
   if (value === undefined) return;
   const wait = plainRecord(value, label);
   if (
-    Object.keys(wait).sort().join(",") !== "detail,kind" ||
+    Object.keys(wait).some(
+      (name) => !["kind", "detail", "fix", "step"].includes(name),
+    ) ||
     !WAIT_KINDS.has(String(wait.kind)) ||
-    !text(wait.detail)
+    !text(wait.detail) ||
+    (wait.fix !== undefined &&
+      (wait.kind !== "prerequisite" || !text(wait.fix))) ||
+    (wait.step !== undefined &&
+      (typeof wait.step !== "string" || !parseRepeatKey(wait.step)))
   )
     throw new Error(`${label} is invalid`);
 }

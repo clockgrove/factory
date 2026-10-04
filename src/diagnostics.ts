@@ -38,7 +38,39 @@ import type {
   WorkState,
 } from "./state.js";
 import { shortPlanDigest, summarizeStatus } from "./status-summary.js";
+import { type StepScope, type StepState, outageOf } from "./step.js";
+import { faultDetail, type Wait } from "./fault.js";
 import { normalizeTokenUsage, tokenCategories } from "./usage.js";
+
+/** A scope's structured wait and failing step, redacted for status. */
+function waitStatus(
+  state: StepState,
+  wait: Wait | undefined,
+  scope: StepScope,
+  secrets: string[],
+) {
+  const outage = outageOf(state, scope);
+  return {
+    wait: wait
+      ? {
+          ...wait,
+          detail: redactDiagnosticDetail(wait.detail, secrets),
+          ...(wait.fix
+            ? { fix: redactDiagnosticDetail(wait.fix, secrets) }
+            : {}),
+        }
+      : null,
+    outage: outage
+      ? {
+          step: outage.step,
+          since: outage.since,
+          tries: outage.tries,
+          last: redactDiagnosticDetail(faultDetail(outage.last), secrets),
+          escalated: outage.escalated,
+        }
+      : null,
+  };
+}
 
 export interface DiagnosticEvent {
   workerUsage?: import("./contracts.js").WorkerUsageObservation;
@@ -1186,6 +1218,7 @@ export function statusDocument(
       lastError: current.error
         ? redactDiagnosticDetail(current.error, secrets)
         : null,
+      ...waitStatus(state, current.wait, { item: item.id }, secrets),
       authentication: current.authentication
         ? {
             provider: redactDiagnosticDetail(
@@ -1270,6 +1303,7 @@ export function statusDocument(
     githubClosureError: state.githubClosureError
       ? redactDiagnosticDetail(state.githubClosureError, secrets)
       : null,
+    ...waitStatus(state, state.wait, "objective", secrets),
     work,
   };
   return { ...summarizeStatus(view), ...view };
@@ -1307,6 +1341,7 @@ export function preparationStatusDocument(
     cancelledAt: preparation.cancelledAt ?? null,
     error: redact(preparation.error),
     waitReason: redact(preparation.coordinator.waitReason),
+    ...waitStatus(preparation, preparation.wait, "objective", secrets),
   };
   return { ...summarizeStatus(view), ...view };
 }

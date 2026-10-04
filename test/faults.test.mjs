@@ -174,6 +174,8 @@ const readyPull = {
   [repo]: () => json({ default_branch: "main", allow_merge_commit: true }),
   // Read before every merge: no ruleset forbids merge commits.
   "GET /repos/a/b/rules/branches/main": () => json([]),
+  "GET /repos/a/b/branches/main/protection": () =>
+    json({ message: "Not Found" }, 404),
   // Read when GitHub says the PR is ready: no classic protection.
   "GET /repos/a/b/branches/main/protection/required_status_checks": () =>
     json({ message: "Not Found" }, 404),

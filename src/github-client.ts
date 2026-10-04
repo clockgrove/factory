@@ -377,6 +377,34 @@ export class GitHubClient {
     return user.login;
   }
 
+  /**
+   * The bot login of an App installation token, as REST shows it on what the
+   * App creates (`slug[bot]`). `GET /user` is 403 for such a token, but
+   * GraphQL's `viewer` still names the actor. Only asked after /user refused.
+   */
+  async appViewer(): Promise<string> {
+    const response = await this.dispatch<{
+      errors?: unknown[];
+      data?: { viewer?: { login?: unknown } | null } | null;
+    }>(
+      "POST",
+      "graphql",
+      { query: "query FactoryViewer { viewer { login } }" },
+      undefined,
+      true,
+    );
+    const login = response.data?.viewer?.login;
+    if (
+      (response.errors !== undefined &&
+        (!Array.isArray(response.errors) || response.errors.length)) ||
+      typeof login !== "string" ||
+      !login
+    )
+      throw new Error("GitHub returned no login for the token's actor");
+    // GraphQL names a bot without the suffix REST puts on its objects.
+    return login.endsWith("[bot]") ? login : `${login}[bot]`;
+  }
+
   /** Fixed repository-scoped observation; callers cannot submit arbitrary GraphQL. */
   async pullRequestReadiness(
     repository: string,

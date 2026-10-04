@@ -36,7 +36,12 @@
 // - With `appToken`, GET /user is 403 (an App installation token has no user)
 //   and what Factory creates is authored by the App's bot login; the classic
 //   protection route is 403 too, and GET /branches/{branch} shows the same
-//   required checks.
+//   required checks. GraphQL `viewer` still names the bot (without the
+//   `[bot]` suffix REST shows).
+// - `classicLinearHistory` makes classic protection require linear history
+//   on a branch: GET /branches/{branch}/protection answers
+//   required_linear_history.enabled true (404
+//   unprotected, 403 for an App token) and a merge commit is refused (405).
 // - Unknown routes are 404 and recorded as `unhandled`.
 //
 // Time: `now` (default Factory's logical clock, src/clock.ts) is the fake's
@@ -110,6 +115,7 @@ const ROUTES = [
     "/branches/:branch/protection/required_status_checks",
     "requiredStatusChecks",
   ],
+  ["GET", "/branches/:branch/protection", "branchProtection"],
   ["GET", "/stacks", "listStacks"],
   ["POST", "/stacks", "createStack"],
 ].map(([method, pattern, handler]) => ({
@@ -271,6 +277,9 @@ export class GitHubHttpFake {
    * @param {string[]} [options.mergeMethods]
    * @param {boolean} [options.strict] required checks are strict: a PR
    *   must contain the base tip before it merges (BEHIND otherwise)
+   * @param {(branch: string) => boolean} [options.classicLinearHistory]
+   *   classic branch protection requires linear history on a branch (rulesets
+   *   are not involved)
    * @param {boolean} [options.appToken] the token is an App installation
    *   token: GET /user is 403 and Factory's objects carry the bot login
    * @param {(entry: object) => void} [options.onCrash] kills the controller
@@ -1497,6 +1506,7 @@ export class GitHubHttpFake {
         405,
         `${body.merge_method ?? "merge"} merges are not allowed on this repository.`,
       );
+    if ((body.merge_method ?? "merge") === "merge") this.refuseIfLinear(pull);
     if ((body.merge_method ?? "merge") !== "merge")
       throw validation("The fake implements merge commits only");
     if (body.sha !== undefined && body.sha !== pull.head.sha)
@@ -1674,6 +1684,7 @@ export class GitHubHttpFake {
     const method = body.merge_method ?? "merge";
     if (!methods.includes(method) || method !== "merge")
       throw validation(`${method} merges are not allowed on this repository`);
+    this.refuseIfLinear(pull);
     // A stale expected head: real GitHub answers 400 with a failed status.
     if (body.sha !== undefined && body.sha !== pull.head.sha)
       throw new HttpError(
@@ -1816,6 +1827,44 @@ export class GitHubHttpFake {
     };
   }
 
+  /** Classic branch protection as a whole; admin read only. */
+  branchProtection(s, { params }) {
+    const branch = decodeURIComponent(params.branch);
+    const checks = this.options.protectionChecks?.(branch);
+    const linear = Boolean(this.options.classicLinearHistory?.(branch));
+    if (!linear && !checks) throw new HttpError(404, "Branch not protected");
+    if (this.options.appToken)
+      throw new HttpError(403, "Resource not accessible by integration");
+    const url = `${API}/repos/${this.repository}/branches/${params.branch}/protection`;
+    return {
+      status: 200,
+      data: {
+        url,
+        required_linear_history: {
+          url: `${url}/required_linear_history`,
+          enabled: linear,
+        },
+        ...(checks && {
+          required_status_checks: {
+            url: `${url}/required_status_checks`,
+            strict: Boolean(this.options.strict),
+            contexts: checks,
+            checks: checks.map((context) => ({ context, app_id: null })),
+          },
+        }),
+      },
+    };
+  }
+
+  /** Classic linear history refuses merge commits at the merge itself. */
+  refuseIfLinear(pull) {
+    if (this.options.classicLinearHistory?.(pull.base.ref))
+      throw new HttpError(
+        405,
+        "Merge commits are not allowed on this repository.",
+      );
+  }
+
   /** A branch with its protection's required checks (readable with read access). */
   async getBranch(s, { params }) {
     const branch = decodeURIComponent(params.branch);
@@ -1924,6 +1973,17 @@ export class GitHubHttpFake {
 
   async graphql(s, { body }) {
     const query = String(body.query ?? "");
+    if (/^\s*query FactoryViewer\b/.test(query))
+      return {
+        status: 200,
+        data: {
+          data: {
+            viewer: {
+              login: this.author.login.replace(/\[bot\]$/, ""),
+            },
+          },
+        },
+      };
     if (!/pullRequest\(number:/.test(query) || !/mergeStateStatus/.test(query))
       return {
         status: 200,

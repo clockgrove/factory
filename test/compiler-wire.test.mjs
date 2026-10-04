@@ -1727,7 +1727,7 @@ test("CI checks are chosen by index from known names, so an invented name cannot
     candidate.graph.requiredPreIntegrationChecks[0].checkName,
     "lint",
   );
-  assert(prompts[1].includes(JSON.stringify("Factory check").slice(1, -1)));
+  assert(prompts[1].includes(JSON.stringify('"source":"check"').slice(1, -1)));
   assert.match(prompts[1], /Planner checkIndex is invalid/);
   verifyPlanCandidate(candidate, 17, body, target.baseSha, target.checkout);
 

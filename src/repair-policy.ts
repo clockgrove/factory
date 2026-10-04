@@ -5,7 +5,6 @@ import type { FactoryState, WorkState } from "./state.js";
 
 export const repairClasses = [
   "implementation",
-  "review-evidence",
   "validation-environment",
   "planning-output",
   "planning-evidence",
@@ -166,7 +165,6 @@ export interface FailureDisposition {
   continuation:
     | "new-attempt-from-accepted-base"
     | "exact-candidate-revalidation"
-    | "exact-result-review"
     | "operator-decision";
   unfinishedEdits: "removed" | "unavailable";
   decision: string;
@@ -215,7 +213,7 @@ export const objectiveEvent = (step: string, round: number | string) =>
 const EVENT =
   /^(objective|item\/[A-Za-z0-9][A-Za-z0-9_-]*)\/[a-z][a-z-]*\/[A-Za-z0-9_-]+$/;
 /** Failure classes that are wrong results; only their failures carry an event. */
-const CHARGED: readonly string[] = ["implementation", "review-evidence"];
+const CHARGED: readonly string[] = ["implementation"];
 
 /** Consumption derived from the charged events, Objective-wide or for one scope. */
 export function consumption(

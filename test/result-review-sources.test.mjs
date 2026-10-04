@@ -15,6 +15,7 @@ import {
   validateTree,
 } from "../dist/validation.js";
 import { withCoverage } from "./support/coverage.mjs";
+import { invalidReviewAnswer } from "./support/review-protocol.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -154,15 +155,7 @@ test("malformed identities fail closed independently and preserve other valid cr
             },
           },
         }),
-        (error) => {
-          assert.ok(error instanceof AcceptanceDecisionRequired);
-          assert.equal(error.pending.criterion, "Second");
-          assert.equal(
-            error.pending.reviewRejection.reason,
-            "invalid-response",
-          );
-          return true;
-        },
+        invalidReviewAnswer,
       );
       assert.equal(evidence.criteria.length, 1);
       assert.equal(evidence.criteria[0].criterion, "First");
@@ -181,7 +174,7 @@ test("malformed identities fail closed independently and preserve other valid cr
         },
       });
       if (run === 0) await promise;
-      else await assert.rejects(promise, AcceptanceDecisionRequired);
+      else await assert.rejects(promise, invalidReviewAnswer);
     }
   });
 });
@@ -231,14 +224,11 @@ test("colliding labels remain disjoint IDs and incomplete cited chunks cannot gr
         if (verdict === "refuse")
           await assert.rejects(promise, /Acceptance criterion disproved/);
         else
-          await assert.rejects(promise, (error) => {
-            assert.ok(error instanceof AcceptanceDecisionRequired);
-            assert.equal(
-              error.pending.reviewRejection?.reason,
-              verdict === "pass" ? "invalid-response" : undefined,
-            );
-            return true;
-          });
+          await assert.rejects(promise, (error) =>
+            verdict === "pass"
+              ? invalidReviewAnswer(error)
+              : error instanceof AcceptanceDecisionRequired,
+          );
       }
       const accepted = await reviewAcceptance({
         ...request,
@@ -502,11 +492,8 @@ test("exact-tree operator decisions remain authoritative when the model returns 
         decisions: decisions.slice(0, 1),
         model,
       }),
-      (error) => {
-        assert.ok(error instanceof AcceptanceDecisionRequired);
-        assert.equal(error.pending.criterion, "Second");
-        return true;
-      },
+      // An unknown criterion cannot grant the undecided one: asked again.
+      invalidReviewAnswer,
     );
   });
 });

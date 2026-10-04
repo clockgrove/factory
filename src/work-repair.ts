@@ -285,11 +285,13 @@ export function recordWorkFailure(
       ? `Supply a concrete diagnosis and correction (\`factory repair\`), enable implementation repair in the configured autonomy, or start a new attempt with \`${retryCommand(state, id)}\``
       : fault.kind === "config"
         ? fault.fix
-        : isolated
-          ? `The worker stopped without a result after repeated attempts; start a new attempt with \`${retryCommand(state, id)}\``
-          : isInterruption(error)
-            ? "Interrupted repeatedly; check the provider, network or GitHub status, then run again"
-            : "Resolve external outcome or ownership before another attempt",
+        : fault.kind === "decision"
+          ? `${fault.question} Start a new attempt with \`${retryCommand(state, id)}\``
+          : isolated
+            ? `The worker stopped without a result after repeated attempts; start a new attempt with \`${retryCommand(state, id)}\``
+            : isInterruption(error)
+              ? "Interrupted repeatedly; check the provider, network or GitHub status, then run again"
+              : "Resolve external outcome or ownership before another attempt",
   };
   // A new failure starts a fresh record: an earlier correction belongs to
   // the attempt it corrected, which the history keeps.
@@ -353,9 +355,7 @@ export function applyWorkCorrection(
     state.work[id] = { status: "pending", recovery };
   } else {
     if (
-      !["review-evidence", "validation-environment"].includes(
-        correction.kind,
-      ) ||
+      correction.kind !== "validation-environment" ||
       !work.changeRef ||
       !work.treeSha ||
       !work.baseSha ||
@@ -365,19 +365,11 @@ export function applyWorkCorrection(
         "Exact candidate is unavailable; only a diagnosed new attempt is supported",
       );
     if (
-      correction.kind === "review-evidence" &&
-      !work.acceptancePending?.reviewRejection
-    )
-      throw new Error(
-        "Semantic review requires its own decision; evidence recovery cannot waive it",
-      );
-    if (
-      correction.kind === "validation-environment" &&
-      (work.status !== "failed" ||
-        work.step !== "validate" ||
-        !["implementation", "validation-environment"].includes(
-          work.recovery!.failure!.classification,
-        ))
+      work.status !== "failed" ||
+      work.step !== "validate" ||
+      !["implementation", "validation-environment"].includes(
+        work.recovery!.failure!.classification,
+      )
     )
       throw new Error(
         "Environment revalidation requires a failed collected-result validation, not a semantic review decision",
@@ -524,56 +516,6 @@ export async function diagnoseWorkRepair(args: {
   applyWorkCorrection(state, item.id, correction);
   save();
   return true;
-}
-
-/** A transport-only review rejection has a precise controller-owned correction. */
-export function prepareEvidenceRecovery(
-  state: FactoryState,
-  id: string,
-): boolean {
-  const work = state.work[id]!;
-  const rejection = work.acceptancePending?.reviewRejection;
-  if (!rejection) return false;
-  const detail = JSON.stringify(work.acceptancePending);
-  // A completed review answer whose evidence was refused is corrected like a
-  // wrong result: one charge per refused review.
-  const event = itemEvent(
-    id,
-    work.step ?? "approve-result",
-    work.recovery?.history?.length ?? 0,
-  );
-  work.recovery = {
-    scopes: repairScopes(state, id),
-    ...(work.recovery?.history && { history: work.recovery.history }),
-    failure: {
-      digest: failureDigest(detail),
-      event,
-      classification: "review-evidence",
-      detail,
-      at: new Date().toISOString(),
-      continuation: "exact-result-review",
-      unfinishedEdits: "unavailable",
-      decision:
-        "Repeat independent review using the supplied source IDs and response schema",
-    },
-    phase: "stopped",
-  };
-  if (rejection.reason === "source-truncated") return false;
-  try {
-    applyWorkCorrection(state, id, {
-      kind: "review-evidence",
-      failureDigest: work.recovery.failure!.digest,
-      actor: "factory-controller",
-      diagnosis: `Review transport rejected ${rejection.field}: ${rejection.reason}`,
-      correction:
-        "Revalidate the preserved exact candidate and rerun independent review against a fresh complete evidence packet; use only supplied source IDs and the required response schema.",
-    });
-    return true;
-  } catch (error) {
-    work.recovery.failure!.decision =
-      `${error instanceof Error ? error.message : String(error)}; decide the result with \`factory decide-result\` or ask for \`factory rereview\``;
-    return false;
-  }
 }
 
 /**

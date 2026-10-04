@@ -26,6 +26,7 @@ import type {
   ContentRef,
   ContentStore,
   ExecutionBinding,
+  ExecutionContext,
   ExecutionDriver,
   ExecutionHandle,
   ExecutionObservation,
@@ -47,7 +48,6 @@ import {
   parseProducedAssetSets,
 } from "../media.js";
 import {
-  addWorktree,
   commandAsync,
   hasUnresolvedSubprocesses,
   linuxProcessIdentity,
@@ -55,8 +55,8 @@ import {
   pinnedGitAsync,
   pinnedGitEnvironment,
   processGroupExists,
-  removeWorktree,
   sanitizedWorkerEnvironment,
+  removeWorktree,
 } from "../process.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
 import { SettledAttemptFailure } from "../work-repair.js";
@@ -359,6 +359,10 @@ async function preserveControllerAssetDestinations(
   return destinations;
 }
 
+const FACTORY_EMAIL = "factory@users.noreply.github.com";
+const collectionMessage = (request: ExecutionRequest) =>
+  `Factory: ${request.item.title}`;
+
 /** Shared exact collection boundary for local work and imported managed bytes. */
 export async function collectWorktreeResult(
   checkout: string,
@@ -391,6 +395,15 @@ export async function collectWorktreeResult(
     )
       throw new Error("Discovery manifest must be untracked private staging");
   }
+  // A collection interrupted after its own commit is undone to the staged
+  // candidate and checked again from the top.
+  if (
+    pinnedGit(worktree, "rev-parse", "HEAD") !== request.baseSha &&
+    pinnedGit(worktree, "rev-parse", "HEAD^") === request.baseSha &&
+    pinnedGit(worktree, "log", "-1", "--format=%ae%n%s") ===
+      `${FACTORY_EMAIL}\n${collectionMessage(request)}`
+  )
+    await pinnedGitAsync(worktree, "reset", "--soft", request.baseSha);
   if (pinnedGit(worktree, "rev-parse", "HEAD") !== request.baseSha) {
     throw new Error(
       "Worker changed HEAD; expected uncommitted changes at exact base",
@@ -468,10 +481,10 @@ export async function collectWorktreeResult(
       "-c",
       "user.name=Factory",
       "-c",
-      "user.email=factory@users.noreply.github.com",
+      `user.email=${FACTORY_EMAIL}`,
       "commit",
       "-m",
-      `Factory: ${request.item.title}`,
+      collectionMessage(request),
     );
   const commit = pinnedGit(worktree, "rev-parse", "HEAD");
   const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
@@ -600,12 +613,36 @@ export class LocalExecutionDriver implements ExecutionDriver {
     return Math.max(0, this.concurrency - this.active.size);
   }
 
+  /**
+   * Starting an attempt is idempotent: a repeat in this process returns the
+   * running attempt, and the handle is checkpointed before start returns. A
+   * worktree left by a start that crashed before its checkpoint is removed
+   * and the attempt reported stopped, so it never starts twice.
+   */
   @classifyFaults(executionFault)
-  async start(request: ExecutionRequest): Promise<ExecutionHandle> {
+  async start(
+    request: ExecutionRequest,
+    context?: ExecutionContext,
+  ): Promise<ExecutionHandle> {
     const harness = this.resolveHarness(request.item);
     const identity = request.attemptId ?? randomUUID();
+    const running = this.active.get(identity);
+    if (running) return { provider: "local", identity, data: running };
     const worktree = join(this.workRoot, identity);
     mkdirSync(this.workRoot, { recursive: true });
+    if (existsSync(worktree)) {
+      await removeWorktree(this.checkout, worktree);
+      const stopped: ExecutionHandle = {
+        provider: "local",
+        identity,
+        data: {
+          stopped: "An earlier start of this attempt was interrupted",
+          worktree,
+        },
+      };
+      context?.checkpoint(stopped);
+      return stopped;
+    }
     const verified = pinnedGit(
       this.checkout,
       "rev-parse",
@@ -614,7 +651,14 @@ export class LocalExecutionDriver implements ExecutionDriver {
     );
     if (verified !== request.baseSha)
       throw new Error("Execution base does not resolve exactly");
-    await addWorktree(this.checkout, worktree, request.baseSha);
+    await pinnedGitAsync(
+      this.checkout,
+      "worktree",
+      "add",
+      "--detach",
+      worktree,
+      request.baseSha,
+    );
     try {
       const sourceAssets = await importSourceAssets(
         this.contentStore,
@@ -703,15 +747,61 @@ export class LocalExecutionDriver implements ExecutionDriver {
         handle,
       };
       this.active.set(identity, active);
-      return { provider: "local", identity, data: active };
+      const started = { provider: "local", identity, data: active };
+      context?.checkpoint(started);
+      return started;
     } catch (error) {
+      this.active.delete(identity);
       await removeWorktree(this.checkout, worktree);
       throw error;
     }
   }
 
+  /**
+   * Stop an attempt whose start was never recorded: a worker this process
+   * still runs is cancelled, and a worktree left by an interrupted start is
+   * removed.
+   */
+  @classifyFaults(executionFault)
+  async cancelUnrecorded(attemptId: string): Promise<void> {
+    const running = this.active.get(attemptId);
+    if (running) {
+      await this.cancel({
+        provider: "local",
+        identity: attemptId,
+        data: running,
+      });
+      this.active.delete(attemptId);
+    }
+    const worktree = join(this.workRoot, attemptId);
+    if (
+      resolve(worktree).startsWith(`${resolve(this.workRoot)}${sep}`) &&
+      existsSync(worktree)
+    )
+      await removeWorktree(this.checkout, worktree);
+  }
+
+  /**
+   * The handle to continue with, or undefined once the attempt is confirmed
+   * stopped without a result (a settled dead worker or an interrupted
+   * start). A collected result, a running worker and a finished worker whose
+   * result is still in its worktree are continued.
+   */
+  @classifyFaults(executionFault)
+  async find(handle: ExecutionHandle): Promise<ExecutionHandle | undefined> {
+    const data = handle.data as Partial<Settled> | undefined;
+    if (data?.result) return handle;
+    if (data?.stopped !== undefined) return undefined;
+    if (this.active.has(handle.identity)) return handle;
+    return existsSync(this.require(handle).worktree) ? handle : undefined;
+  }
+
   @classifyFaults(executionFault)
   async observe(handle: ExecutionHandle): Promise<ExecutionObservation> {
+    const settled = handle.data as Partial<Settled> | undefined;
+    if (settled?.result) return { state: "complete" };
+    if (settled?.stopped !== undefined)
+      return { state: "failed", interrupted: true, detail: settled.stopped };
     const active = this.require(handle);
     return this.resolveHarness(
       active.request.item,
@@ -721,6 +811,9 @@ export class LocalExecutionDriver implements ExecutionDriver {
 
   @classifyFaults(executionFault)
   async cancel(handle: ExecutionHandle): Promise<void> {
+    const settled = handle.data as Partial<Settled> | undefined;
+    // An attempt that ended has nothing left to stop.
+    if (settled?.result || settled?.stopped !== undefined) return;
     const active = this.require(handle);
     await this.resolveHarness(
       active.request.item,
@@ -728,11 +821,26 @@ export class LocalExecutionDriver implements ExecutionDriver {
     ).cancel(active.handle);
   }
 
+  /**
+   * Collect the worker's result. The result is checkpointed into the handle
+   * before the worktree is removed, so a repeated collect returns it; a dead
+   * worker is recorded as stopped before its worktree goes.
+   */
   @classifyFaults(executionFault)
-  async collect(handle: ExecutionHandle): Promise<ExecutionResult> {
+  async collect(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionResult> {
+    const settled = handle.data as Partial<Settled> | undefined;
+    // An ended attempt: its worktree goes if a crash kept it.
+    if (settled?.result || settled?.stopped !== undefined) {
+      if (settled.worktree && existsSync(settled.worktree))
+        await removeWorktree(this.checkout, settled.worktree);
+      if (settled.result) return structuredClone(settled.result);
+      throw new SettledAttemptFailure(new Error(settled.stopped));
+    }
     const active = this.require(handle);
     let collected: ExecutionResult | undefined;
-    let failed = false;
     let collectionError: unknown;
     try {
       const result = await this.resolveHarness(
@@ -747,39 +855,61 @@ export class LocalExecutionDriver implements ExecutionDriver {
         result,
       );
     } catch (error) {
-      failed = true;
       collectionError = error;
     }
-    let failureClassification: "implementation" | "interruption" =
-      "implementation";
-    {
-      const observed = await this.resolveHarness(
-        active.request.item,
-        active.executionBinding,
-      ).observe(active.handle);
-      if (observed.state === "running")
-        throw new Error(
-          "Collection failed while worker remains active; checkout retained",
-        );
-      if (hasUnresolvedSubprocesses())
-        throw new Error(
-          "Collection subprocess ownership unresolved; checkout retained",
-        );
-      failureClassification = observed.interrupted
-        ? "interruption"
-        : "implementation";
-      this.active.delete(handle.identity);
-      if (
-        !failed ||
-        !existsSync(join(active.worktree, ".factory-discovery.json"))
-      )
-        await removeWorktree(this.checkout, active.worktree);
-    }
-    if (failed) {
+    const observed = await this.resolveHarness(
+      active.request.item,
+      active.executionBinding,
+    ).observe(active.handle);
+    if (observed.state === "running")
+      throw new Error(
+        "Collection failed while worker remains active; checkout retained",
+      );
+    if (hasUnresolvedSubprocesses())
+      throw new Error(
+        "Collection subprocess ownership unresolved; checkout retained",
+      );
+    const interrupted = !collected && observed.interrupted === true;
+    if (collected)
+      context?.checkpoint({
+        ...handle,
+        data: { ...active, result: JSON.parse(JSON.stringify(collected)) },
+      });
+    else if (interrupted)
+      context?.checkpoint({
+        ...handle,
+        data: {
+          ...active,
+          stopped:
+            collectionError instanceof Error
+              ? collectionError.message
+              : String(collectionError),
+        },
+      });
+    this.active.delete(handle.identity);
+    if (
+      collected ||
+      !existsSync(join(active.worktree, ".factory-discovery.json"))
+    )
+      await removeWorktree(this.checkout, active.worktree);
+    if (!collected) {
       if (collectionError instanceof AuthenticationRequiredError)
         throw collectionError;
-      throw new SettledAttemptFailure(collectionError, failureClassification);
+      throw new SettledAttemptFailure(
+        collectionError,
+        interrupted ? "interruption" : "implementation",
+      );
     }
-    return collected!;
+    return collected;
   }
+}
+
+/** What a local handle records once its attempt ended (#515). */
+interface Settled {
+  /** The collected result, saved before the worktree was removed. */
+  result: ExecutionResult;
+  /** Why the attempt stopped without a result. */
+  stopped: string;
+  /** The attempt's worktree, removed once the attempt ended. */
+  worktree: string;
 }

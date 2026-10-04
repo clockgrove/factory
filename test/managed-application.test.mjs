@@ -20,6 +20,7 @@ import { OpenAIManagedExecutionDriver } from "../dist/execution/openai-managed.j
 import { LocalContentStore } from "../dist/content/local.js";
 import { readState } from "../dist/state-store.js";
 import { Interruption } from "../dist/contracts.js";
+import { attachFault } from "../dist/fault.js";
 
 for (const delivery of ["regular", "native-stack"])
   for (const outcome of ["complete", "lost-input"])
@@ -259,6 +260,10 @@ for (const delivery of ["regular", "native-stack"])
           context.checkpoint(handle);
           return handle;
         },
+        async find(handle) {
+          return handle;
+        },
+        async cancelUnrecorded() {},
         async observe() {
           calls.push("observe");
           return { state: "failed", interrupted: true, detail: "unresolved" };
@@ -270,8 +275,13 @@ for (const delivery of ["regular", "native-stack"])
           calls.push("collect");
           const work = readState(repository, 1).work.managed;
           reservations.push([work.phaseReservation, work.requestedPhase]);
+          // As the driver classifies a lost response.
           if (reservations.length === 1)
-            throw new Interruption("provider response lost");
+            throw attachFault(new Interruption("provider response lost"), {
+              kind: "transient",
+              detail: "provider response lost",
+              outcomeUnknown: false,
+            });
           throw new Error("remote worker failed");
         },
       };

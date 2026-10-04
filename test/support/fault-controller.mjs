@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { Octokit } from "@octokit/core";
 import { stateRoot } from "../../dist/config.js";
 import { NativeStackDelivery } from "../../dist/delivery/native-stack.js";
+import { executionFault } from "../../dist/execution/fault.js";
 import { LocalExecutionDriver } from "../../dist/execution/local.js";
 import { attachFault, transient } from "../../dist/fault.js";
 import { GitHubClient } from "../../dist/github-client.js";
@@ -60,28 +61,38 @@ process.on("SIGTERM", () => {
     `${JSON.stringify({ signal: "SIGTERM", at: new Date().toISOString() })}\n`,
   );
 });
-
 /**
- * The error a caller sees when the call never reached its service. A model
- * error carries the classification a real model adapter gives it.
+ * The error a caller sees, classified as the adapter whose boundary is
+ * faulted classifies it: the execution driver's classifier, or a model
+ * adapter's (unreached: nothing paid; lost mid-call: maybe paid).
  */
-function unavailable(target) {
+function classified(target, method, error, reached) {
+  const interruption = new Interruption(error);
+  return target === "driver"
+    ? attachFault(interruption, executionFault(interruption, method))
+    : attachFault(
+        error,
+        transient(
+          `Model call ${reached ? "did not complete" : "unreachable"}: ${error.message}`,
+          reached,
+        ),
+      );
+}
+
+/** The error a caller sees when the call never reached its service. */
+function unavailable(target, method) {
   const cause = Object.assign(new Error("503 Service Unavailable"), {
     status: 503,
   });
-  return target === "driver"
-    ? new Interruption(cause)
-    : attachFault(cause, transient(cause.message, false));
+  return classified(target, method, cause, false);
 }
 
 /** The error a caller sees when the call happened but its response was lost. */
-function lost(target) {
+function lost(target, method) {
   const cause = Object.assign(new Error("socket hang up"), {
     code: "ECONNRESET",
   });
-  return target === "driver"
-    ? new Interruption(cause)
-    : attachFault(cause, transient(cause.message, true));
+  return classified(target, method, cause, true);
 }
 
 /** Log the call, apply a due fault, and run `call` unless the fault prevents it. */
@@ -108,10 +119,10 @@ async function intercept(target, method, request, call) {
     reached: !["crash-before", "unavailable"].includes(fired?.kind),
   });
   if (fired?.kind === "crash-before") process.kill(process.pid, "SIGKILL");
-  if (fired?.kind === "unavailable") throw unavailable(target);
+  if (fired?.kind === "unavailable") throw unavailable(target, method);
   const result = await call();
   if (fired?.kind === "crash-after") process.kill(process.pid, "SIGKILL");
-  if (fired?.kind === "lost") throw lost(target);
+  if (fired?.kind === "lost") throw lost(target, method);
   return result;
 }
 

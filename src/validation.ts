@@ -15,9 +15,11 @@ import {
 } from "./work-repair.js";
 import { assertWorkspacePackageChange } from "./workspace-membership.js";
 import { spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   closeSync,
+  readdirSync,
+  existsSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -40,9 +42,10 @@ import type {
   WorkItem,
   WorkDiscovery,
 } from "./contracts.js";
-import { CompletedModelInvocationError, Interruption } from "./contracts.js";
+
 import {
-  attachedFault,
+  StepFault,
+  transient,
   attachFault,
   decision as askOperator,
 } from "./fault.js";
@@ -53,6 +56,7 @@ import {
   localValidationEnvironment,
   localValidationShellArguments,
   pinnedGit,
+  pinnedGitAsync,
   pinnedGitEnvironment,
   pinnedGitRaw,
   removeWorktree,
@@ -468,15 +472,6 @@ export function workItemReviewObservations(
     );
   });
   return JSON.stringify({
-    ...(current.recovery?.correction?.kind === "review-evidence"
-      ? {
-          reviewTransportCorrection: {
-            diagnosis: current.recovery.correction.diagnosis,
-            correction: current.recovery.correction.correction,
-            acceptanceOverride: false,
-          },
-        }
-      : {}),
     objectiveBaseCommitSha: state.baseSha,
     currentIntegratedCommitSha: state.integratedSha ?? null,
     candidateBasis: objectiveCandidate(state)?.basis ?? null,
@@ -1466,9 +1461,7 @@ function retainedRepairProof(
   // refuses a wrong result that lost its event.
   if (
     !state.autonomy.repairClasses.includes(correction.kind) ||
-    (["implementation", "review-evidence"].includes(
-      prior.failure.classification,
-    ) &&
+    (prior.failure.classification === "implementation" &&
       !state.charges?.[prior.failure.event ?? ""]?.allowances.includes(key))
   )
     throw new Error(
@@ -1861,6 +1854,10 @@ export async function reviewAcceptance(args: {
   observations?: string;
   invocation?: ModelInvocationContext;
   beforeSubmit?: () => void;
+  /** Why the previous answer was invalid; the reviewer is asked again with it. */
+  previousInvalid?: string;
+  /** Called with the validation error before an invalid answer is reported. */
+  onInvalid?: (detail: string) => void;
 }): Promise<ValidationEvidence> {
   const { model, checkout, baseSha, commit, evidence, criteria, sources } =
     args;
@@ -1943,34 +1940,42 @@ export async function reviewAcceptance(args: {
     evidence: suppliedEvidence,
     observations: args.observations,
     invocation: args.invocation,
+    ...(args.previousInvalid ? { previousInvalid: args.previousInvalid } : {}),
   };
-  let decoded: ReturnType<typeof decodeReview> | undefined;
-  let reviewFailure: string | undefined;
-  let reviewError: unknown;
-  let responseReceived = false;
+  // Criteria the operator decided on this tree need no reviewer.
+  const undecided = criteria.some(
+    (criterion) =>
+      !args.decisions?.some(
+        (item) =>
+          item.criterion === criterion && item.treeSha === evidence.treeSha,
+      ),
+  );
   args.beforeSubmit?.();
+  if (undecided && !model.reviewResult)
+    throw attachFault(
+      new Error("No independent result reviewer is configured"),
+      {
+        kind: "config",
+        detail: "No independent result reviewer is configured",
+        fix: "Configure a reviewer model, then `factory run`",
+      },
+    );
+  // A failed call keeps the fault its adapter classified: the review step
+  // repeats a lost answer and waits out a limit.
+  const response = undecided
+    ? await model.reviewResult!(request)
+    : { packetId: packet.id, findings: [] };
+  let decoded: ReturnType<typeof decodeReview>;
   try {
-    if (!model.reviewResult)
-      throw attachFault(
-        new CompletedModelInvocationError(
-          "No independent result reviewer is configured",
-        ),
-        {
-          kind: "config",
-          detail: "No independent result reviewer is configured",
-          fix: "Configure a reviewer model, then `factory run`",
-        },
-      );
-    const response = await model.reviewResult(request);
-    responseReceived = true;
     decoded = decodeReview(response, packet);
   } catch (error) {
-    // No completed answer arrived: the review did not happen, so ask again.
-    if (!responseReceived && !(error instanceof CompletedModelInvocationError))
-      throw new Interruption(error);
-    reviewError = error;
-    reviewFailure = error instanceof Error ? error.message : String(error);
+    // The decoder refused the answer's shape: an invalid answer.
+    observeInvalidReview(args.invocation, "finding", "invalid-response");
+    const detail = `Independent review answer was invalid: ${error instanceof Error ? error.message : String(error)}`;
+    args.onInvalid?.(detail);
+    throw new StepFault(transient(detail, true), { cause: error });
   }
+  const invalidAnswers: string[] = [];
   const proven: CriterionEvidence[] = [];
   let pending: AcceptancePending | undefined;
   let refused: string | undefined;
@@ -1993,10 +1998,13 @@ export async function reviewAcceptance(args: {
       });
       continue;
     }
-    const finding = decoded?.findings[index];
-    const invalid = reviewFailure ?? decoded?.errors[index];
-    if (invalid && responseReceived)
+    const finding = decoded.findings[index];
+    const invalid = decoded.errors[index];
+    if (invalid) {
       observeInvalidReview(args.invocation, "finding", "invalid-response");
+      invalidAnswers.push(`criterion ${index}: ${invalid}`);
+      continue;
+    }
     if (finding?.verdict === "pass") {
       proven.push({
         criterion,
@@ -2013,26 +2021,27 @@ export async function reviewAcceptance(args: {
     pending ??= {
       criterion,
       treeSha: evidence.treeSha,
-      detail: invalid
-        ? `Independent review transport was invalid: ${invalid}`
-        : (finding?.detail ?? "Independent review omitted this criterion"),
+      detail: finding?.detail ?? "Independent review omitted this criterion",
       question:
         finding?.question ||
         `Inspect the preserved review for ${criterion}; transport failure is not a substantive product decision or approval.`,
-      ...(invalid
-        ? {
-            reviewRejection: {
-              field: "finding" as const,
-              reason: "invalid-response" as const,
-            },
-          }
-        : {}),
     };
+  }
+  const automaticCriterion = criteria.find(
+    (criterion) =>
+      !proven.some(
+        (item) =>
+          item.criterion === criterion && item.verdict === "human-accept",
+      ),
+  );
+  if (decoded.packetError && automaticCriterion !== undefined) {
+    observeInvalidReview(args.invocation, "finding", "invalid-response");
+    invalidAnswers.unshift(decoded.packetError);
   }
   // Preserve independent valid assessments on existing item evidence; final raw
   // response remains in existing diagnostics rather than a second durable store.
   evidence.criteria = proven;
-  if (decoded) {
+  {
     const protocolInvalid = Boolean(
       decoded.packetError || decoded.errors.some(Boolean),
     );
@@ -2068,38 +2077,38 @@ export async function reviewAcceptance(args: {
 
   // A valid review that refuses a criterion judges the work, not the call.
   if (refused)
-    throw attachFault(new CompletedModelInvocationError(refused), {
-      kind: "work",
-      evidence: { detail: refused },
-    });
-  const automaticCriterion = criteria.find(
-    (criterion) =>
-      !proven.some(
-        (item) =>
-          item.criterion === criterion && item.verdict === "human-accept",
-      ),
-  );
-  if (decoded?.packetError && automaticCriterion !== undefined) {
-    observeInvalidReview(args.invocation, "finding", "invalid-response");
-    pending ??= {
-      criterion: automaticCriterion,
-      treeSha: evidence.treeSha,
-      detail: decoded.packetError,
-      question:
-        "Inspect the invalid review response; an unknown criterion ID cannot grant acceptance.",
-      reviewRejection: { field: "finding", reason: "invalid-response" },
-    };
+    throw new StepFault({ kind: "work", evidence: { detail: refused } });
+  // An invalid answer may have been paid for: the review step asks again
+  // with the validation error, then the operator decides.
+  if (invalidAnswers.length) {
+    const detail = `Independent review answer was invalid: ${invalidAnswers.join("; ")}`;
+    args.onInvalid?.(detail);
+    throw new StepFault(transient(detail, true));
   }
   if (pending)
-    // A failed review call keeps its own fault (configuration, a limit, a
-    // lost response) through `cause`; otherwise the operator decides.
     throw attachFault(
-      new AcceptanceDecisionRequired(pending, { cause: reviewError }),
-      attachedFault(reviewError)
-        ? undefined
-        : askOperator(pending.question, pending.detail),
+      new AcceptanceDecisionRequired(pending),
+      askOperator(pending.question, pending.detail),
     );
   return { ...evidence, criteria: proven };
+}
+
+/** A review either accepts the result or names the criterion a human must decide. */
+export type ReviewOutcome =
+  | { evidence: ValidationEvidence; pending?: undefined }
+  | { pending: AcceptancePending; evidence?: undefined };
+
+/** `reviewAcceptance` with a needed human decision as a value, for the review steps. */
+export async function reviewOutcome(
+  args: Parameters<typeof reviewAcceptance>[0],
+): Promise<ReviewOutcome> {
+  try {
+    return { evidence: await reviewAcceptance(args) };
+  } catch (error) {
+    if (error instanceof AcceptanceDecisionRequired)
+      return { pending: error.pending };
+    throw error;
+  }
 }
 
 function observeInvalidReview(
@@ -2388,7 +2397,10 @@ export async function validateTree(
       `Validation environment unavailable: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  const worktree = join(root, randomUUID());
+  // One validation at a time owns `root`: a worktree left by an interrupted
+  // validation is removed before the repeat adds it again.
+  const worktree = join(root, "worktree");
+  await removeValidationWorktree(checkout, worktree);
   await addWorktree(checkout, worktree, commit);
   try {
     const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
@@ -2504,6 +2516,35 @@ export async function validateTree(
   } finally {
     if (!hasUnresolvedSubprocesses()) await removeWorktree(checkout, worktree);
   }
+}
+
+/**
+ * Remove validation worktrees an interrupted run left under `root`. Only the
+ * controller holding the repository lock calls this, before any validation.
+ */
+export async function sweepValidationWorktrees(
+  checkout: string,
+  root: string,
+): Promise<void> {
+  const owned = [join(root, "final-validation", "worktree")];
+  for (const parent of ["validation", "environment-preflight"]) {
+    const directory = join(root, parent);
+    if (!existsSync(directory)) continue;
+    for (const entry of readdirSync(directory))
+      owned.push(join(directory, entry, "worktree"));
+  }
+  for (const worktree of owned)
+    if (existsSync(worktree)) await removeWorktree(checkout, worktree);
+  await pinnedGitAsync(checkout, "worktree", "prune");
+}
+
+async function removeValidationWorktree(
+  checkout: string,
+  worktree: string,
+): Promise<void> {
+  if (existsSync(worktree)) await removeWorktree(checkout, worktree);
+  // A registration whose directory is gone would refuse the next add.
+  await pinnedGitAsync(checkout, "worktree", "prune");
 }
 
 /** Package managers resolve scripts and lifecycle hooks from the result tree.

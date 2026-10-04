@@ -390,7 +390,13 @@ test("supported Objective cancellation retains the ceased worker failure and con
     assert.equal(after.work.worker.error, state.work.worker.error);
     assert.equal(after.runId, state.runId);
     assert.equal(after.work.worker.attempt, state.work.worker.attempt);
-    assert.deepEqual(after.work.worker.execution, execution);
+    // Settling the dead worker records why it stopped, before its worktree goes.
+    const { stopped, ...settled } = after.work.worker.execution.data;
+    assert.match(stopped, /without a durable result/);
+    assert.deepEqual(
+      { ...after.work.worker.execution, data: settled },
+      execution,
+    );
     assert.deepEqual(after.charges, state.charges);
     assert.equal(after.work.worker.validation, undefined);
     assert.equal(after.finalAcceptance, undefined);

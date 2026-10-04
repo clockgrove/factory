@@ -15,16 +15,6 @@ import { describe, test } from "node:test";
 import { identityName, prepare } from "./support/dead-ends.mjs";
 
 const D = {
-  START_AMBIGUOUS: {
-    diagnosis:
-      "regular delivery: a Work Item persisted at running/execute before its driver handle (the checkpoint just before driver.start) is refused on every restart as 'ambiguous active state at execute; operator direction required', and status names only `factory diagnostics` (the fault matrix's START_AMBIGUOUS, r1 #4)",
-    pattern: /ambiguous active state at execute/,
-  },
-  CANCEL_WITHOUT_HANDLE: {
-    diagnosis:
-      "cancelling while a Work Item sits at execute without a recorded driver handle never finishes, even when that item already failed: cancelKnownWork refuses 'Active attempt has no stable handle; cessation is unknown', and status names `factory cancel`, which refuses the same way",
-    pattern: /factory cancel is refused \(Active attempt has no stable handle/,
-  },
   PLAN_REFUSAL_DISCARDS: {
     diagnosis:
       "planning stopped for a decision while the Objective is paused or draining: status names `factory decide --outcome refuse`, which deletes the whole preparation, so the pause or drain is silently dropped and the next `factory run` plans again",
@@ -55,6 +45,12 @@ const D = {
     pattern:
       /only inspection \(factory diagnostics\) after stopped: Objective stopped:/,
   },
+  PUBLISHED_FAILURE: {
+    diagnosis:
+      "a Work Item that failed at or after publication with an unclassified error keeps its PR: `factory retry` refuses ('Published PR requires operator direction before retry'), or status names only `factory logs`; the delivery steps (A2, #563) make published failures repairable",
+    pattern:
+      /factory retry is refused \(Published PR requires operator direction|only inspection \(factory logs\)/,
+  },
   DRAINED: {
     diagnosis:
       "a drained Objective (`factory drain`, or the SIGTERM handoff) stays 'draining' in the snapshot: a restarted `factory run` waits forever for a control request, and status names `factory run` instead of `factory resume` (it offers resume only when paused)",
@@ -65,57 +61,54 @@ const D = {
 
 /** Stranded states by diagnosis: [delivery, anchor shape, ...overlays]. */
 const KNOWN = {
-  [D.START_AMBIGUOUS.diagnosis]: [
-    ["regular", "alpha running/execute; beta pending"],
+  [D.PUBLISHED_FAILURE.diagnosis]: [
     [
       "regular",
-      "alpha running/execute; beta pending",
-      "paused",
-      "interruptions exhausted",
+      "alpha running/deliver (handle); beta pending",
+      "a step fails with an unclassified error",
+      "a recorded subprocess's pid was reused",
+    ],
+    [
+      "native-stack",
+      "alpha running/deliver (PR); beta pending",
+      "a step fails with an unclassified error",
+      "draining",
     ],
     [
       "regular",
-      "alpha running/execute; beta pending",
-      "coding phase reserved",
+      "alpha running/deliver (handle); beta pending",
+      "a step fails with an unclassified error",
       "a recorded subprocess has exited",
     ],
     [
       "regular",
-      "alpha running/execute; beta pending",
-      "paused",
-      "validation phase reserved",
-    ],
-  ],
-  [D.CANCEL_WITHOUT_HANDLE.diagnosis]: [
-    [
-      "regular",
-      "alpha running/execute; beta pending",
-      "a step exhausts its interruptions",
-      "cancel was requested",
-    ],
-    [
-      "regular",
-      "alpha running/execute; beta pending",
-      "cancellation is unresolved",
-      "validation phase reserved",
-    ],
-    [
-      "native-stack",
-      "alpha running/execute; beta pending",
+      "alpha published (handle, PR); beta pending",
       "a step fails with an unclassified error",
-      "cancellation is unresolved",
+      "review phase reserved",
+    ],
+    [
+      "regular",
+      "alpha published (handle, PR); beta pending",
+      "a step fails with an unclassified error",
+      "coding phase reserved",
     ],
     [
       "native-stack",
-      "alpha running/execute; beta pending",
-      "cancel was requested",
-      "validation phase reserved",
+      "alpha running/deliver (PR); beta pending",
+      "a step fails with an unclassified error",
+      "a recorded subprocess's pid was reused",
     ],
     [
       "native-stack",
-      "alpha running/execute; beta pending",
-      "cancellation is unresolved",
-      "validation phase reserved",
+      "alpha running/deliver (PR); beta pending",
+      "a step fails with an unclassified error",
+      "coding phase reserved",
+    ],
+    [
+      "native-stack",
+      "alpha running/deliver; beta pending",
+      "a step fails with an unclassified error",
+      "review phase reserved",
     ],
   ],
   [D.PLAN_REFUSAL_DISCARDS.diagnosis]: [
@@ -149,6 +142,23 @@ const KNOWN = {
       "regular",
       "alpha done; beta done (handle, PR, closure complete); pending final criterion",
       "an error stops the Objective outside any Work Item step",
+    ],
+    [
+      "native-stack",
+      "alpha done; beta done (PR, closure complete); pending final criterion; stack merge pending",
+      "an error stops the Objective outside any Work Item step",
+      "a recorded subprocess's pid was reused",
+    ],
+    [
+      "regular",
+      "alpha done; beta done (handle, PR, closure complete); pending final criterion",
+      "an error stops the Objective outside any Work Item step",
+      "a recorded subprocess has exited",
+    ],
+    [
+      "regular",
+      "alpha done; beta done (handle, PR, closure complete); pending final criterion",
+      "an error stops the Objective outside any Work Item step",
       "a recorded subprocess's pid was reused",
     ],
     [
@@ -168,6 +178,18 @@ const KNOWN = {
     ],
   ],
   [D.REPAIR_REFUSED.diagnosis]: [
+    [
+      "regular",
+      "alpha running/execute (handle); beta pending",
+      "the worker settles without a result",
+      "an error stops the Objective outside any Work Item step",
+    ],
+    [
+      "native-stack",
+      "alpha running/validate; beta pending",
+      "validation fails",
+      "an error stops the Objective outside any Work Item step",
+    ],
     [
       "regular",
       "alpha running/validate (handle); beta pending",
@@ -199,12 +221,6 @@ const KNOWN = {
       "alpha published (handle, PR); beta pending",
       "a step fails with an unclassified error",
       "a recorded subprocess has exited",
-    ],
-    [
-      "regular",
-      "alpha running/execute (handle); beta pending",
-      "a step fails with an unclassified error",
-      "a recorded subprocess's pid was reused",
     ],
     [
       "regular",
@@ -281,6 +297,53 @@ const KNOWN = {
   ],
   [D.STOPPED_WITHOUT_EXIT.diagnosis]: [
     [
+      "regular",
+      "alpha published (handle, PR); beta pending",
+      "an error stops the Objective outside any Work Item step",
+      "a recorded subprocess's pid was reused",
+    ],
+    [
+      "native-stack",
+      "alpha running/deliver; beta pending",
+      "an error stops the Objective outside any Work Item step",
+      "interruptions exhausted",
+    ],
+    [
+      "native-stack",
+      "alpha running/execute; beta pending",
+      "an error stops the Objective outside any Work Item step",
+      "validation phase reserved",
+    ],
+    [
+      "regular",
+      "alpha published (handle, PR); beta pending",
+      "an error stops the Objective outside any Work Item step",
+      "interruptions exhausted",
+    ],
+    [
+      "regular",
+      "alpha running/execute; beta pending",
+      "an error stops the Objective outside any Work Item step",
+      "validation phase reserved",
+    ],
+    [
+      "native-stack",
+      "alpha published (PR); beta pending",
+      "an error stops the Objective outside any Work Item step",
+      "interruptions exhausted",
+    ],
+    [
+      "native-stack",
+      "alpha running/deliver; beta pending",
+      "an error stops the Objective outside any Work Item step",
+      "a recorded subprocess's pid was reused",
+    ],
+    [
+      "native-stack",
+      "alpha pending; beta pending",
+      "an error stops the Objective outside any Work Item step",
+    ],
+    [
       "native-stack",
       "alpha pending; beta pending",
       "an error stops the Objective outside any Work Item step",
@@ -328,6 +391,82 @@ const KNOWN = {
     ],
   ],
   [D.DRAINED.diagnosis]: [
+    [
+      "regular",
+      "alpha waiting/approve-result (handle, pending criterion); beta pending",
+      "a step fails with an unclassified error",
+      "draining",
+    ],
+    [
+      "regular",
+      "alpha running/execute (handle); beta pending",
+      "a step fails with an unclassified error",
+      "draining",
+    ],
+    [
+      "regular",
+      "alpha done; beta done (handle, PR, closure complete); pending final criterion",
+      "draining",
+      "a recorded subprocess's pid was reused",
+    ],
+    [
+      "regular",
+      "alpha running/execute; beta pending",
+      "a step exhausts its interruptions",
+      "draining",
+    ],
+    [
+      "native-stack",
+      "alpha published (PR); beta pending",
+      "draining",
+      "delivery phase reserved",
+    ],
+    [
+      "regular",
+      "alpha pending; beta pending",
+      "draining",
+      "a recorded subprocess's pid was reused",
+    ],
+    [
+      "regular",
+      "alpha published (handle, PR); beta pending",
+      "draining",
+      "interruptions exhausted",
+    ],
+    [
+      "regular",
+      "alpha done; beta done (handle, PR, closure complete); pending final criterion",
+      "draining",
+    ],
+    [
+      "regular",
+      "alpha running/validate (handle); beta pending",
+      "validation fails",
+      "draining",
+    ],
+    [
+      "native-stack",
+      "alpha pending; beta pending",
+      "draining",
+      "a recorded subprocess's pid was reused",
+    ],
+    [
+      "native-stack",
+      "alpha published (PR); beta pending",
+      "draining",
+      "a recorded subprocess has exited",
+    ],
+    [
+      "native-stack",
+      "alpha running/validate; beta pending",
+      "validation fails",
+      "draining",
+    ],
+    [
+      "native-stack",
+      "alpha done; beta done (PR, closure complete); pending final criterion; stack merge pending",
+      "draining",
+    ],
     [
       "regular",
       "alpha pending; beta pending",
@@ -470,6 +609,86 @@ const KNOWN = {
   ],
 };
 
+/**
+ * Former dead ends (START_AMBIGUOUS, CANCEL_WITHOUT_HANDLE and others), fixed by the
+ * execute step (#515). They stay in the sample, so each must keep an exit.
+ */
+const FIXED = [
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "a step fails with an unclassified error",
+    "a recorded subprocess's pid was reused",
+  ],
+  [
+    "native-stack",
+    "alpha running/execute (handle); beta pending",
+    "a step fails with an unclassified error",
+    "a recorded subprocess has exited",
+  ],
+  [
+    "native-stack",
+    "alpha running/validate; beta pending",
+    "a step fails with an unclassified error",
+    "a recorded subprocess has exited",
+  ],
+  [
+    "regular",
+    "alpha running/execute (handle); beta pending",
+    "a step fails with an unclassified error",
+    "a recorded subprocess's pid was reused",
+  ],
+  ["regular", "alpha running/execute; beta pending"],
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "paused",
+    "interruptions exhausted",
+  ],
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "coding phase reserved",
+    "a recorded subprocess has exited",
+  ],
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "paused",
+    "validation phase reserved",
+  ],
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "a step exhausts its interruptions",
+    "cancel was requested",
+  ],
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "cancellation is unresolved",
+    "validation phase reserved",
+  ],
+  [
+    "native-stack",
+    "alpha running/execute; beta pending",
+    "a step fails with an unclassified error",
+    "cancellation is unresolved",
+  ],
+  [
+    "native-stack",
+    "alpha running/execute; beta pending",
+    "cancel was requested",
+    "validation phase reserved",
+  ],
+  [
+    "native-stack",
+    "alpha running/execute; beta pending",
+    "cancellation is unresolved",
+    "validation phase reserved",
+  ],
+];
+
 const known = new Map();
 for (const [diagnosis, identities] of Object.entries(KNOWN))
   for (const identity of identities) {
@@ -486,7 +705,7 @@ const slots = Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2)));
 const { cases, schedule } = await prepare({
   deliveries: ["regular", "native-stack"],
   slots,
-  include: Object.values(KNOWN).flat(),
+  include: [...Object.values(KNOWN).flat(), ...FIXED],
 });
 
 describe("dead ends", { concurrency: true }, () => {

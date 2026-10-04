@@ -69,29 +69,6 @@ const SAMPLES = {
     published,
   ),
   PLANNER_STOP: stopped("socket hang up", {}),
-  FINAL_REVIEW: stopped(objectiveStopped("socket hang up"), done),
-  START_AMBIGUOUS: stopped(
-    "Objective stopped: Work Item beta has ambiguous active state at execute; operator direction required. Use explicit retry or operator direction.",
-    { alpha: "done", beta: "running@execute" },
-  ),
-  START_REPEAT: stopped(
-    objectiveStopped(
-      `git -C /tmp/t/target worktree add --no-checkout --detach /tmp/t/w ${sha} failed (128): Preparing worktree (detached HEAD abc1234) fatal: '/tmp/t/w' already exists `,
-    ),
-    { alpha: "failed@execute", beta: "pending" },
-  ),
-  COLLECT_REPEAT: summarizeRun({
-    outcome: "needs-decision",
-    message:
-      "Objective #1 needs a human decision: Work Item alpha: Failure requires an operator decision",
-    work: workOf(
-      { alpha: "failed@execute", beta: "pending" },
-      {
-        alpha:
-          "git rev-parse HEAD failed (128): fatal: cannot change to '/tmp/t/w': No such file or directory",
-      },
-    ),
-  }),
   PROJECTION_STOP: stopped(
     "GitHub mutation outcome unknown; reconcile authenticated evidence before retrying",
     {},
@@ -189,12 +166,7 @@ test("generic transport text matches only where the run stopped", () => {
       beta: "pending",
     },
   );
-  for (const key of [
-    "PLANNER_STOP",
-    "FINAL_REVIEW",
-    "PROJECTION_STOP",
-    "NATIVE_READS",
-  ]) {
+  for (const key of ["PLANNER_STOP", "PROJECTION_STOP", "NATIVE_READS"]) {
     assert.equal(DIAGNOSES[key].pattern.test(midRun), false, key);
     assert.equal(DIAGNOSES[key].pattern.test(midDelivery), false, key);
   }
@@ -246,13 +218,13 @@ test("the target is the run that ended the scenario, or the last stop", () => {
 
 test("racy and inverted entries share one duplicate check", () => {
   assert.throws(
-    () => todos({ GIT_PUSH: ["a"] }, { START_AMBIGUOUS: ["a"] }),
+    () => todos({ GIT_PUSH: ["a"] }, { GIT_FETCH: ["a"] }),
     /Duplicate known failure: a/,
   );
   assert.throws(() => todos({ NOT_A_DIAGNOSIS: ["b"] }), /Unknown diagnosis/);
+  // The closure race is fixed: no racy entries remain.
   const racy = Object.values(KNOWN.regular).filter((entry) => entry.racy);
-  assert.equal(racy.length, 8);
-  assert.ok(racy.every((entry) => entry.key === "START_AMBIGUOUS"));
+  assert.equal(racy.length, 0);
 });
 
 test("the snapshot refuses deliveries it no longer derives and boundary changes", () => {

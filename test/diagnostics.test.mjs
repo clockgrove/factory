@@ -225,10 +225,6 @@ test("private diagnostics redact secrets and validation streams command output",
             detail: "Unsupported",
             question: "",
           },
-          reviewRejection: {
-            field: "quote",
-            reason: "quote-not-found",
-          },
         },
       },
       "regular",
@@ -238,10 +234,6 @@ test("private diagnostics redact secrets and validation streams command output",
     const pendingDiagnostic = readDiagnostics("example/diagnostics", 1).find(
       (event) => event.operation === "objective-acceptance-pending",
     );
-    assert.deepEqual(JSON.parse(pendingDiagnostic.detail).reviewRejection, {
-      field: "quote",
-      reason: "quote-not-found",
-    });
     assert.equal(
       JSON.parse(pendingDiagnostic.detail).reviewFinding.quote,
       "missing quote",

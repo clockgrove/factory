@@ -1,7 +1,7 @@
 import { classifyFaults } from "../fault.js";
 import { executionFault } from "./fault.js";
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   ContentStore,
@@ -638,6 +638,27 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<void> {
     await this.stop(handle, "cancelled", context);
+  }
+  /** Start checkpoints before any provider call: only local input files can exist. */
+  @classifyFaults(executionFault)
+  async cancelUnrecorded(attemptId: string): Promise<void> {
+    if (!/^[A-Za-z0-9_-]+$/.test(attemptId))
+      throw new Error("Invalid OpenAI managed attempt identity");
+    rmSync(join(this.args.workRoot, attemptId), {
+      recursive: true,
+      force: true,
+    });
+  }
+  /** A session that stopped without a result is stopped again (idempotent) to confirm it. */
+  @classifyFaults(executionFault)
+  async find(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionHandle | undefined> {
+    const data = this.active(handle);
+    if (data.result || !data.stopped?.interrupted) return handle;
+    await this.stop(handle, "failed", context);
+    return undefined;
   }
   /** Stops the owned turn, if any, and deletes the session. */
   private async stop(

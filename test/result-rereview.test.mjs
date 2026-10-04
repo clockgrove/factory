@@ -34,7 +34,7 @@ for (const delivery of ["regular", "native-stack"]) {
         "example/rereview",
         delivery,
       );
-      // Without automatic repair, a malformed review waits for the operator.
+      // An undecided criterion waits for the operator.
       config.autonomy = { repairClasses: [] };
       const commands = ["test -s first.txt", "test -s second.txt"];
       const items = ["first", "second"].map((id, index) => ({
@@ -73,27 +73,23 @@ for (const delivery of ["regular", "native-stack"]) {
         },
         resultReviewer(request) {
           const current = JSON.parse(request.observations).reviewedItemId;
-          if (current === "second" && ++itemReviews === 1)
-            return {
-              packetId: request.reviewPacket.id,
-              findings: "malformed completed response",
-            };
-          if (!current && ++finalReviews === 1)
-            return {
-              packetId: request.reviewPacket.id,
-              findings: "malformed completed response",
-            };
+          // The first review of `second` and of the Objective cannot decide.
+          const unsure =
+            (current === "second" && ++itemReviews === 1) ||
+            (!current && ++finalReviews === 1);
           return {
             packetId: request.reviewPacket.id,
             findings: resultFindings(
               request,
               request.criteria.map((criterion) => ({
                 criterion,
-                verdict: "pass",
+                verdict: unsure ? "needs-human" : "pass",
                 source: "Command pass evidence",
                 quote: request.commands[0].command,
-                detail: "Exact-tree command passed",
-                question: "",
+                detail: unsure
+                  ? "The reviewer could not decide this criterion"
+                  : "Exact-tree command passed",
+                question: unsure ? "Does the exact result satisfy it?" : "",
               })),
             ),
           };
@@ -103,7 +99,10 @@ for (const delivery of ["regular", "native-stack"]) {
       const waiting = await application.runObjective(1);
       assert.equal(waiting.work.second.status, "waiting");
       assert.equal(waiting.work.second.step, "approve-result");
-      assert.match(waiting.work.second.acceptancePending.detail, /invalid/);
+      assert.match(
+        waiting.work.second.acceptancePending.detail,
+        /could not decide/,
+      );
       assert.equal(
         waiting.work.first.status,
         delivery === "regular" ? "done" : "published",
@@ -217,14 +216,14 @@ for (const delivery of ["regular", "native-stack"]) {
       );
       assert.deepEqual(
         requested.work.second.recovery.history.at(-1).failure,
-        priorRecovery.failure,
+        priorRecovery?.failure,
       );
       const observed = {
         ...requested.work.second,
         recovery: { ...requested.work.second.recovery },
       };
       delete observed.recovery.history;
-      assert.deepEqual(observed, expected);
+      assert.deepEqual(observed, { ...expected, recovery: {} });
       const finalWaiting = await application.runObjective(1);
       assert.equal(itemReviews, 2);
       assert.ok(finalWaiting.finalAcceptancePending);

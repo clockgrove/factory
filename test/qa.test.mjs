@@ -23,7 +23,8 @@ import {
 import { installedControllerCapabilities } from "../dist/controller-capabilities.js";
 import { runQaItem } from "../dist/qa-execution.js";
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
-import { readState } from "../dist/state-store.js";
+import { readContinuation, readState } from "../dist/state-store.js";
+import { attachFault } from "../dist/fault.js";
 import { controlObjective } from "../dist/runner.js";
 import { workItemReviewEvidence } from "../dist/validation.js";
 import {
@@ -33,6 +34,12 @@ import {
   readEvents,
 } from "./support/integration-fixture.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
+
+/** The run's snapshot once planning is done; undefined while it prepares. */
+function runSnapshot(repository) {
+  const state = readContinuation(repository, 1);
+  return state?.kind === "preparing" ? undefined : state;
+}
 
 async function until(check, timeout = 60_000) {
   const deadline = Date.now() + timeout;
@@ -693,7 +700,7 @@ for (const failure of ["missing", "pending", "failure", "stale", "unrelated"])
         // The run stays alive through the readiness wait and polls again.
         const running = application.runObjective(1);
         const waiting = await until(() => {
-          const state = readState(`example/qa-${failure}`, 1);
+          const state = runSnapshot(`example/qa-${failure}`);
           return state?.work.qa.waitingReason ? state : undefined;
         });
         assert.equal(waiting.work.qa.status, "running");
@@ -756,7 +763,7 @@ for (const delivery of ["regular", "native-stack"])
         github.namedCheck = async () => undefined;
         const running = application.runObjective(1);
         const waiting = await until(() => {
-          const state = readState(config.repository, 1);
+          const state = runSnapshot(config.repository);
           return state?.work.qa.waitingReason ? state : undefined;
         });
         assert.equal(waiting.work.qa.status, "running");
@@ -785,7 +792,7 @@ for (const delivery of ["regular", "native-stack"])
             (error) => error.constructor.name === "CoordinatorHandoff",
           );
         const paused = await until(() => {
-          const state = readState(config.repository, 1);
+          const state = runSnapshot(config.repository);
           return acknowledged && state?.coordinator.phase === "waiting"
             ? state
             : undefined;
@@ -1180,7 +1187,11 @@ for (const delivery of ["regular", "native"])
             ) {
               submissions++;
               if (outcome === "unknown" && submissions === 1)
-                throw new Error("QA provider response was lost");
+                throw attachFault(new Error("QA provider response was lost"), {
+                  kind: "transient",
+                  detail: "QA provider response was lost",
+                  outcomeUnknown: true,
+                });
             }
             return {
               packetId: request.reviewPacket.id,

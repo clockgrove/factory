@@ -363,6 +363,8 @@ export interface PlanningModel {
     evidence?: ResultReviewEvidenceSource[];
     observations?: string;
     invocation?: ModelInvocationContext;
+    /** Why the previous answer was invalid; answer again without the error. */
+    previousInvalid?: string;
   }): Promise<{
     packetId: string;
     findings: ResultReviewFinding[];
@@ -445,6 +447,27 @@ export interface ExecutionDriver {
     request: ExecutionRequest,
     context?: ExecutionContext,
   ): Promise<ExecutionHandle>;
+  /**
+   * Adopt a recorded attempt before repeating its step (#515): the handle to
+   * continue with, or undefined once the driver confirmed nothing of the
+   * attempt runs and it left no result, so a new attempt may start. A worker
+   * that failed with a result to report is continued; collect reports it.
+   * `start` and `collect` are idempotent per attempt: a repeated start
+   * returns the running attempt and a repeated collect the saved result.
+   */
+  find(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionHandle | undefined>;
+  /**
+   * Stop whatever an attempt whose handle was never recorded started under
+   * `attemptId`; resolves once nothing of it runs. A driver that checkpoints
+   * before its first effect has nothing to stop.
+   */
+  cancelUnrecorded(
+    attemptId: string,
+    context?: ExecutionContext,
+  ): Promise<void>;
   observe(
     handle: ExecutionHandle,
     context?: ExecutionContext,

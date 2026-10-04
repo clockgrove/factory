@@ -29,26 +29,6 @@ const D = {
     pattern:
       /^outcome=stopped; message=(socket hang up|503 Service Unavailable); work=none$/,
   },
-  FINAL_REVIEW: {
-    text: "a lost or unavailable final Objective review response sets state.error after every Work Item merged: the final review runs outside any repeat, retry needs a failed item and a restart refuses the stopped Objective (r1 #1)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+(socket hang up|503 Service Unavailable)\..*; work=alpha:done,beta:done$/,
-  },
-  START_AMBIGUOUS: {
-    text: "regular delivery: a crash before or after driver.start leaves the item running/execute without a handle, which regular-runner refuses as 'ambiguous active state at execute; operator direction required' (r1 #4)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )*Work Item (\w+) has ambiguous active state at execute; operator direction required.*; work=.*\b\2:running@execute\b/,
-  },
-  START_REPEAT: {
-    text: "driver.start is repeated with the same attempt id after its response was lost (or, native, after a crash): the local driver's `git worktree add` fails because the attempt's worktree exists, and the item fails (r1 #4)",
-    pattern:
-      /^outcome=stopped; message=(Objective stopped: )+git -C \S+ worktree add --no-checkout --detach \S+ [0-9a-f]{40} failed \(128\): .*already exists.*; work=.*\b\w+:failed@execute\b/,
-  },
-  COLLECT_REPEAT: {
-    text: "driver.collect removes the worktree before the runner records the produced commit: a repeated collect after a lost response or crash fails with 'cannot change to <worktree>' and is recorded as an implementation failure of a worker that succeeded (r1 #5)",
-    pattern:
-      /^outcome=(stopped|needs-decision); message=.*; work=.*\b(\w+):failed@execute\b.*; failure\[\2\]=git rev-parse HEAD failed \(128\): fatal: cannot change to '[^']+': No such file or directory/,
-  },
   PROJECTION_STOP: {
     text: "graph projection (labels, issues, dependencies, sub-issues, the marker scan) runs outside any repeat: a lost response, 5xx or 429 stops the run ('GitHub mutation outcome unknown' or 'GitHub request failed') and only a manual restart continues it",
     pattern:
@@ -139,134 +119,81 @@ export function todos(groups, racy = {}) {
   return map;
 }
 
-// Racy known failures: regular-runner calls phases.release(alpha) before
-// `await closeWorkItem(alpha)`, which wakes the scheduler, so beta is
-// checkpointed at running/execute and its driver.start begins while alpha's
-// completion comment and close are in flight. A crash during alpha's closure
-// sometimes lands between beta's checkpoint and its driver handle
-// (START_AMBIGUOUS). The race predates #543 (same code at 3fbea270) and shows
-// on slower CI runners. These tests must pass, or fail for exactly this reason.
-const RACY_CLOSURE_START = ["crash-before", "crash-after"].flatMap((kind) =>
-  [
-    "POST /repos/{owner}/{repo}/issues/{number}/comments #1",
-    "PATCH /repos/{owner}/{repo}/issues/{number} #1",
-  ].flatMap((boundary) =>
-    ["", " without an operator stop"].map(
-      (suffix) => `${kind} at ${boundary}${suffix}`,
-    ),
-  ),
-);
-
 export const KNOWN = {
-  regular: todos(
-    {
-      PROJECTION_STOP: [
-        "unavailable at GET /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
-        "unavailable at GET /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
-        "unavailable at GET /repos/{owner}/{repo}/labels #1 without an operator stop",
-        "lost at POST /repos/{owner}/{repo}/labels #1 without an operator stop",
-        "lost at POST /repos/{owner}/{repo}/labels #2 without an operator stop",
-        "lost at POST /repos/{owner}/{repo}/issues/{number}/labels #1 without an operator stop",
-        "unavailable at GET /repos/{owner}/{repo}/issues #1 without an operator stop",
-        "lost at POST /repos/{owner}/{repo}/issues #1 without an operator stop",
-        "lost at POST /repos/{owner}/{repo}/issues #2 without an operator stop",
-        "lost at POST /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
-        "unavailable at GET /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
-        "unavailable at GET /repos/{owner}/{repo}/issues/{number}/parent #1 without an operator stop",
-        "lost at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
-        "lost at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #2 without an operator stop",
-        "reset at GET /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
-        "reset at GET /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
-        "reset at GET /repos/{owner}/{repo}/labels #1 without an operator stop",
-        "unavailable at POST /repos/{owner}/{repo}/labels #1 without an operator stop",
-        "unavailable at POST /repos/{owner}/{repo}/labels #2 without an operator stop",
-        "unavailable at POST /repos/{owner}/{repo}/issues/{number}/labels #1 without an operator stop",
-        "reset at GET /repos/{owner}/{repo}/issues #1 without an operator stop",
-        "unavailable at POST /repos/{owner}/{repo}/issues #1 without an operator stop",
-        "unavailable at POST /repos/{owner}/{repo}/issues #2 without an operator stop",
-        "unavailable at POST /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
-        "reset at GET /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
-        "reset at GET /repos/{owner}/{repo}/issues/{number}/parent #1 without an operator stop",
-        "unavailable at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
-        "unavailable at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #2 without an operator stop",
-      ],
-      GIT_PUSH: [
-        "unavailable at GIT push-advertise #1",
-        "unavailable at GIT push-advertise #1 without an operator stop",
-        "lost at GIT push #1",
-        "lost at GIT push #1 without an operator stop",
-        "lost at GIT push #2",
-        "lost at GIT push #2 without an operator stop",
-        "reset at GIT push-advertise #1",
-        "reset at GIT push-advertise #1 without an operator stop",
-        "unavailable at GIT push #1",
-        "unavailable at GIT push #1 without an operator stop",
-        "unavailable at GIT push #2",
-        "unavailable at GIT push #2 without an operator stop",
-      ],
-      GIT_FETCH: [
-        "unavailable at GIT fetch-advertise #1",
-        "unavailable at GIT fetch-advertise #1 without an operator stop",
-      ],
-      GIT_FETCH_RESET: [
-        "reset at GIT fetch-advertise #1",
-        "reset at GIT fetch-advertise #1 without an operator stop",
-      ],
-      CLOSURE_PAUSE: [
-        "unavailable at GET /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
-        "lost at POST /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
-        "lost at PATCH /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
-        "lost at POST /repos/{owner}/{repo}/issues/{number}/comments #2 without an operator stop",
-        "lost at PATCH /repos/{owner}/{repo}/issues/{number} #2 without an operator stop",
-        "lost at POST /repos/{owner}/{repo}/issues/{number}/comments #3 without an operator stop",
-        "lost at PATCH /repos/{owner}/{repo}/issues/{number} #3 without an operator stop",
-        "reset at GET /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
-        "unavailable at POST /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
-        "unavailable at PATCH /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
-        "unavailable at POST /repos/{owner}/{repo}/issues/{number}/comments #2 without an operator stop",
-        "unavailable at PATCH /repos/{owner}/{repo}/issues/{number} #2 without an operator stop",
-        "unavailable at POST /repos/{owner}/{repo}/issues/{number}/comments #3 without an operator stop",
-        "unavailable at PATCH /repos/{owner}/{repo}/issues/{number} #3 without an operator stop",
-      ],
-      PLANNER_STOP: [
-        "lost at model.generateStructured #1 without an operator stop",
-        "unavailable at model.generateStructured #1 without an operator stop",
-      ],
-      START_AMBIGUOUS: [
-        "crash-before at driver.start #1",
-        "crash-before at driver.start #1 without an operator stop",
-        "crash-before at driver.start #2",
-        "crash-before at driver.start #2 without an operator stop",
-        "crash-after at driver.start #1",
-        "crash-after at driver.start #1 without an operator stop",
-        "crash-after at driver.start #2",
-        "crash-after at driver.start #2 without an operator stop",
-      ],
-      START_REPEAT: [
-        "lost at driver.start #1",
-        "lost at driver.start #1 without an operator stop",
-        "lost at driver.start #2",
-        "lost at driver.start #2 without an operator stop",
-      ],
-      COLLECT_REPEAT: [
-        "lost at driver.collect #1",
-        "lost at driver.collect #1 without an operator stop",
-        "lost at driver.collect #2",
-        "lost at driver.collect #2 without an operator stop",
-        "crash-after at driver.collect #1",
-        "crash-after at driver.collect #1 without an operator stop",
-        "crash-after at driver.collect #2",
-        "crash-after at driver.collect #2 without an operator stop",
-      ],
-      FINAL_REVIEW: [
-        "lost at model.reviewResult #3",
-        "lost at model.reviewResult #3 without an operator stop",
-        "unavailable at model.reviewResult #3",
-        "unavailable at model.reviewResult #3 without an operator stop",
-      ],
-    },
-    { START_AMBIGUOUS: RACY_CLOSURE_START },
-  ),
+  regular: todos({
+    PROJECTION_STOP: [
+      "unavailable at GET /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
+      "unavailable at GET /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
+      "unavailable at GET /repos/{owner}/{repo}/labels #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/labels #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/labels #2 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/labels #1 without an operator stop",
+      "unavailable at GET /repos/{owner}/{repo}/issues #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues #2 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
+      "unavailable at GET /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
+      "unavailable at GET /repos/{owner}/{repo}/issues/{number}/parent #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #2 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/labels #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/labels #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/labels #2 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/labels #1 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues #2 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues/{number}/parent #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #2 without an operator stop",
+    ],
+    GIT_PUSH: [
+      "unavailable at GIT push-advertise #1",
+      "unavailable at GIT push-advertise #1 without an operator stop",
+      "lost at GIT push #1",
+      "lost at GIT push #1 without an operator stop",
+      "lost at GIT push #2",
+      "lost at GIT push #2 without an operator stop",
+      "reset at GIT push-advertise #1",
+      "reset at GIT push-advertise #1 without an operator stop",
+      "unavailable at GIT push #1",
+      "unavailable at GIT push #1 without an operator stop",
+      "unavailable at GIT push #2",
+      "unavailable at GIT push #2 without an operator stop",
+    ],
+    GIT_FETCH: [
+      "unavailable at GIT fetch-advertise #1",
+      "unavailable at GIT fetch-advertise #1 without an operator stop",
+    ],
+    GIT_FETCH_RESET: [
+      "reset at GIT fetch-advertise #1",
+      "reset at GIT fetch-advertise #1 without an operator stop",
+    ],
+    CLOSURE_PAUSE: [
+      "unavailable at GET /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
+      "lost at PATCH /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/comments #2 without an operator stop",
+      "lost at PATCH /repos/{owner}/{repo}/issues/{number} #2 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/comments #3 without an operator stop",
+      "lost at PATCH /repos/{owner}/{repo}/issues/{number} #3 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
+      "unavailable at PATCH /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/comments #2 without an operator stop",
+      "unavailable at PATCH /repos/{owner}/{repo}/issues/{number} #2 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/comments #3 without an operator stop",
+      "unavailable at PATCH /repos/{owner}/{repo}/issues/{number} #3 without an operator stop",
+    ],
+    PLANNER_STOP: [
+      "lost at model.generateStructured #1 without an operator stop",
+      "unavailable at model.generateStructured #1 without an operator stop",
+    ],
+  }),
   "native-stack": todos({
     PROJECTION_STOP: [
       "unavailable at GET /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
@@ -361,32 +288,6 @@ export const KNOWN = {
     PLANNER_STOP: [
       "lost at model.generateStructured #1 without an operator stop",
       "unavailable at model.generateStructured #1 without an operator stop",
-    ],
-    START_REPEAT: [
-      "lost at driver.start #1",
-      "lost at driver.start #1 without an operator stop",
-      "lost at driver.start #2",
-      "lost at driver.start #2 without an operator stop",
-      "crash-after at driver.start #1",
-      "crash-after at driver.start #1 without an operator stop",
-      "crash-after at driver.start #2",
-      "crash-after at driver.start #2 without an operator stop",
-    ],
-    COLLECT_REPEAT: [
-      "lost at driver.collect #1",
-      "lost at driver.collect #1 without an operator stop",
-      "lost at driver.collect #2",
-      "lost at driver.collect #2 without an operator stop",
-      "crash-after at driver.collect #1",
-      "crash-after at driver.collect #1 without an operator stop",
-      "crash-after at driver.collect #2",
-      "crash-after at driver.collect #2 without an operator stop",
-    ],
-    FINAL_REVIEW: [
-      "lost at model.reviewResult #3",
-      "lost at model.reviewResult #3 without an operator stop",
-      "unavailable at model.reviewResult #3",
-      "unavailable at model.reviewResult #3 without an operator stop",
     ],
   }),
   consistency: todos({

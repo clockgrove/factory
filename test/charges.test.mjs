@@ -19,7 +19,6 @@ import {
   CandidateEnvironmentFailure,
   CandidateValidationFailure,
   diagnoseWorkRepair,
-  prepareEvidenceRecovery,
   recordWorkFailure,
   SettledAttemptFailure,
 } from "../dist/work-repair.js";
@@ -40,7 +39,6 @@ const autonomy = (limit = 2) => ({
   },
   repairClasses: [
     "implementation",
-    "review-evidence",
     "validation-environment",
     "planning-output",
     "planning-evidence",
@@ -332,45 +330,6 @@ test("any work fault is a wrong result: a refused criterion, a refused push", as
   assert.equal(await diagnose(pushed, diagnoser()), true);
   assert.equal(pushed.work.result.status, "pending");
   assert.equal(consumption(pushed).implementationRepairs, 1);
-});
-
-test("a refused review is charged once per refusal", () => {
-  const pending = (detail) => ({
-    criterion: "result.txt exists",
-    treeSha: "c".repeat(40),
-    question: "Inspect the invalid review response",
-    detail,
-    reviewRejection: { field: "source", reason: "unknown-source" },
-  });
-  let state = itemState(2);
-  Object.assign(state.work.result, {
-    status: "waiting",
-    step: "approve-result",
-    acceptancePending: pending("unknown source"),
-  });
-  const before = restart(state);
-  assert.equal(prepareEvidenceRecovery(state, "result"), true);
-  assert.deepEqual(Object.keys(state.charges), [
-    "item/result/approve-result/0",
-  ]);
-  // The same refusal seen again after a restart that lost the correction.
-  const repeated = restart(before);
-  repeated.charges = structuredClone(state.charges);
-  assert.equal(prepareEvidenceRecovery(repeated, "result"), true);
-  assert.equal(consumption(repeated).resultRereviews, 1);
-  // The corrected re-review is refused again: a new event.
-  state = restart(state);
-  Object.assign(state.work.result, {
-    status: "waiting",
-    step: "approve-result",
-    acceptancePending: pending("unknown source again"),
-  });
-  assert.equal(prepareEvidenceRecovery(state, "result"), true);
-  assert.deepEqual(Object.keys(state.charges).sort(), [
-    "item/result/approve-result/0",
-    "item/result/approve-result/1",
-  ]);
-  assertRepairLedger(restart(state));
 });
 
 /** A planner whose reviews answer `reviews` in turn and whose diagnoses follow `diagnoses`. */
@@ -714,7 +673,8 @@ for (const delivery of ["regular", "native-stack"]) {
       (graph) => ({
         actions: {
           result: {
-            dieAttempts: 3,
+            // Three dead workers repeat; the fourth is a decision.
+            dieAttempts: 4,
             files: [{ path: "result.txt", text: "accepted\n" }],
           },
         },
@@ -749,7 +709,7 @@ for (const delivery of ["regular", "native-stack"]) {
         const starts = readEvents(fixture.eventsPath).filter(
           (event) => event.type === "start",
         );
-        assert.equal(starts.length, 4);
+        assert.equal(starts.length, 5);
       },
     );
   });

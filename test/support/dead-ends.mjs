@@ -52,6 +52,8 @@ const repositoryRoot = join(import.meta.dirname, "..", "..");
 const dist = (path) => join(repositoryRoot, "dist", path);
 const errors = await import(dist("work-repair.js"));
 const { Interruption } = await import(dist("contracts.js"));
+const { attachFault } = await import(dist("fault.js"));
+const { executionFault } = await import(dist("execution/fault.js"));
 const { parseFactoryState } = await import(dist("state.js"));
 const { readContinuation } = await import(dist("state-store.js"));
 
@@ -512,12 +514,15 @@ const OVERLAYS = {
         new errors.CandidateEnvironmentFailure("Injected environment failure"),
       ["validate"],
     ),
+    // Classified as the execution driver classifies what collect throws.
     "the worker settles without a result": failStep(
-      () =>
-        new errors.SettledAttemptFailure(
+      () => {
+        const settled = new errors.SettledAttemptFailure(
           new Error("Injected settled failure"),
           "implementation",
-        ),
+        );
+        return attachFault(settled, executionFault(settled, "collect"));
+      },
       ["execute"],
       true,
     ),

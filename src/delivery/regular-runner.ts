@@ -4,9 +4,14 @@ import { workerContext } from "../execution/checkpoint.js";
 import {
   recordWorkFailure,
   diagnoseWorkRepair,
-  prepareEvidenceRecovery,
   repeatInterrupted,
 } from "../work-repair.js";
+import {
+  executeItem,
+  operatorWait,
+  reviewItem,
+  validateItem,
+} from "../item-steps.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
 import { graphDigest, recordWorkerDiscovery } from "../graph-amendments.js";
 import { randomUUID } from "node:crypto";
@@ -38,8 +43,6 @@ import { phaseAdmission } from "../phase-admission.js";
 import { readyItems } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
 import {
-  AcceptanceDecisionRequired,
-  reviewAcceptance,
   validateWorkItem,
   workItemReviewEvidence,
   workItemReviewObservations,
@@ -161,8 +164,13 @@ export async function runRegularGraph(args: {
       () => undefined,
     );
     await integrate;
-    phases.release(item.id);
-    await closeWorkItem(state, item.id, github, save, false);
+    // The delivery slot frees only once closure is durable, so the scheduler
+    // never starts dependent work while this item's issue is closing.
+    try {
+      await closeWorkItem(state, item.id, github, save, false);
+    } finally {
+      phases.release(item.id);
+    }
   };
   // Publication finds an existing open PR for the deterministic branch
   // before creating one, so a restart at "deliver" simply runs this again.
@@ -209,18 +217,24 @@ export async function runRegularGraph(args: {
     save();
     await integratePublished(item, published);
   };
-  const runStep = async (
-    item: WorkItem,
-    itemBase: string,
-    existingHandle?: NonNullable<FactoryState["work"][string]["execution"]>,
-  ): Promise<void> => {
+  // Publication and merge still repeat interruptions (bounded) until the
+  // delivery steps move to `step`.
+  const deliver = (item: WorkItem, itemBase: string): Promise<void> => {
+    const work = state.work[item.id]!;
+    return repeatInterrupted(work, save, () =>
+      work.status === "published"
+        ? integratePublished(item, {
+            branch: `factory/objective-${objective}/${item.id}`,
+            pullRequest: work.pullRequest!,
+            headSha: work.changeRef!,
+          })
+        : deliverReviewed(item, itemBase),
+    );
+  };
+  const runStep = async (item: WorkItem, itemBase: string): Promise<void> => {
     const work = state.work[item.id]!;
     if (work.status === "published") {
-      await integratePublished(item, {
-        branch: `factory/objective-${objective}/${item.id}`,
-        pullRequest: work.pullRequest!,
-        headSha: work.changeRef!,
-      });
+      await deliver(item, itemBase);
       return;
     }
     if (item.kind === "qa" || item.kind === "aggregate") {
@@ -243,28 +257,77 @@ export async function runRegularGraph(args: {
       return;
     }
     if (work.step === "deliver" && work.validation) {
-      await deliverReviewed(item, itemBase);
+      await deliver(item, itemBase);
       return;
     }
-    if (!existingHandle && work.step === "execute") {
-      await phases.reserve(item.id, "validation");
-      await preflightItemEnvironment({
-        config,
-        root,
+    if (work.step === "execute") {
+      if (!work.execution) {
+        await phases.reserve(item.id, "validation");
+        await preflightItemEnvironment({
+          config,
+          root,
+          state,
+          objectiveBody: args.objectiveBody,
+          item,
+          store: contentStore,
+          baseSha: itemBase,
+        });
+      }
+      // A reattached worker keeps the coding slot it holds while it runs remotely.
+      if (work.phaseReservation !== "coding")
+        await phases.reserve(item.id, "coding");
+      const result = await executeItem({
         state,
-        objectiveBody: args.objectiveBody,
         item,
-        store: contentStore,
-        baseSha: itemBase,
+        driver,
+        save,
+        cancelled: args.cancelled,
+        diagnostics: args.diagnostics,
+        request: (attemptId) => ({
+          captureContext: { objective, runId: state.runId },
+          item: work.recovery?.correction
+            ? {
+                ...item,
+                brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
+              }
+            : item,
+          baseSha: itemBase,
+          attemptId,
+          objectiveBody: args.objectiveBody,
+          selectedAssets: selectedInputsForItem(state, item),
+        }),
       });
-    }
-    // A reattached worker keeps the coding slot it holds while it runs remotely.
-    if (work.step !== "execute" || work.phaseReservation !== "coding")
-      await phases.reserve(
-        item.id,
-        work.step === "execute" ? "coding" : "validation",
-      );
-    if (work.step === "approve-asset") {
+      phases.release(item.id);
+      if (result.collection)
+        args.diagnostics?.emit({
+          runId: state.runId,
+          itemId: item.id,
+          attemptId: work.attempt,
+          operation: "collection-ignored-links",
+          outcome: "completed",
+          metadata: {
+            observation: "original-worktree-scan",
+            acceptedIgnoredLinkCount:
+              result.collection.acceptedIgnoredLinks.length,
+            treeSha: result.treeSha,
+            headSha: result.changeRef,
+          },
+          detail: JSON.stringify(result.collection),
+        });
+      if (args.cancelled()) throw new Error("Objective cancelled");
+      // Recorded once; the handle stays as the attempt's actual execution.
+      recordWorkerDiscovery(state, item.id, result.discovery);
+      work.changeRef = result.changeRef;
+      work.treeSha = result.treeSha;
+      if (result.assets?.length) {
+        work.assets = result.assets;
+        work.status = "waiting";
+        work.step = "approve-asset";
+        save();
+        return;
+      }
+    } else if (work.step === "approve-asset") {
+      await phases.reserve(item.id, "validation");
       const selected = work.assets?.find(
         (set) => set.id === work.selectedAssetSet,
       );
@@ -297,167 +360,107 @@ export async function runRegularGraph(args: {
         : await materialize();
       work.changeRef = applied.changeRef;
       work.treeSha = applied.treeSha;
-    } else if (work.step !== "validate") {
-      const handle =
-        (existingHandle ? structuredClone(existingHandle) : undefined) ??
-        (await driver.start(
-          {
-            captureContext: { objective, runId: state.runId },
-            item: work.recovery?.correction
-              ? {
-                  ...item,
-                  brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
-                }
-              : item,
-            baseSha: itemBase,
-            attemptId: work.attempt,
-            objectiveBody: args.objectiveBody,
-            selectedAssets: selectedInputsForItem(state, item),
-          },
-          workerContext(work, save, args.cancelled, args.diagnostics, {
-            runId: state.runId,
-            itemId: item.id,
-          }),
-        ));
-      if (!existingHandle) {
-        work.execution = structuredClone(handle);
-        save();
-      }
-      if (args.cancelled()) {
-        await driver.cancel(
-          handle,
-          workerContext(work, save, args.cancelled, args.diagnostics, {
-            runId: state.runId,
-            itemId: item.id,
-          }),
-        );
-        throw new Error("Objective cancelled");
-      }
-      const result = await driver.collect(
-        handle,
-        workerContext(work, save, args.cancelled, args.diagnostics, {
-          runId: state.runId,
-          itemId: item.id,
-        }),
-      );
-      phases.release(item.id);
-      recordWorkerDiscovery(state, item.id, result.discovery);
-      save();
-      if (result.collection)
-        args.diagnostics?.emit({
-          runId: state.runId,
-          itemId: item.id,
-          attemptId: work.attempt,
-          operation: "collection-ignored-links",
-          outcome: "completed",
-          metadata: {
-            observation: "original-worktree-scan",
-            acceptedIgnoredLinkCount:
-              result.collection.acceptedIgnoredLinks.length,
-            treeSha: result.treeSha,
-            headSha: result.changeRef,
-          },
-          detail: JSON.stringify(result.collection),
-        });
-      if (args.cancelled()) throw new Error("Objective cancelled");
-      work.changeRef = result.changeRef;
-      work.treeSha = result.treeSha;
-      if (result.assets?.length) {
-        work.assets = result.assets;
-        work.status = "waiting";
-        work.step = "approve-asset";
-        save();
-        return;
-      }
     }
     await phases.reserve(item.id, "validation");
     work.step = "validate";
     save();
-    work.validation = await validateWorkItem(
-      config.checkout,
-      join(root, "validation"),
+    work.validation = await validateItem({
+      state,
       item,
-      work.changeRef!,
-      work.treeSha!,
-      state.baseSha,
-      (entry) =>
-        args.diagnostics?.emit({
-          runId: state.runId,
-          itemId: item.id,
-          attemptId: work.attempt,
-          operation: "validation-command",
-          outcome: entry.passed ? "completed" : "failed",
-          durationMs: entry.durationMs,
-          metadata: {
-            commandIndex: entry.index,
-            exitCode: entry.exitCode,
-            treeSha: work.treeSha!,
-          },
-          detail: entry.output,
-        }),
-      (entry) =>
-        args.diagnostics?.emitStream(
-          {
-            runId: state.runId,
-            itemId: item.id,
-            attemptId: work.attempt,
-            operation: "validation-output",
-            outcome: "observed",
-            metadata: { commandIndex: entry.index, stream: entry.stream },
-          },
-          entry.output,
-          entry.final,
+      save,
+      validate: () =>
+        validateWorkItem(
+          config.checkout,
+          join(root, "validation", item.id),
+          item,
+          work.changeRef!,
+          work.treeSha!,
+          state.baseSha,
+          (entry) =>
+            args.diagnostics?.emit({
+              runId: state.runId,
+              itemId: item.id,
+              attemptId: work.attempt,
+              operation: "validation-command",
+              outcome: entry.passed ? "completed" : "failed",
+              durationMs: entry.durationMs,
+              metadata: {
+                commandIndex: entry.index,
+                exitCode: entry.exitCode,
+                treeSha: work.treeSha!,
+              },
+              detail: entry.output,
+            }),
+          (entry) =>
+            args.diagnostics?.emitStream(
+              {
+                runId: state.runId,
+                itemId: item.id,
+                attemptId: work.attempt,
+                operation: "validation-output",
+                outcome: "observed",
+                metadata: { commandIndex: entry.index, stream: entry.stream },
+              },
+              entry.output,
+              entry.final,
+            ),
+          itemBase,
+          validationLfsMembersForItem(
+            state,
+            item,
+            config.checkout,
+            work.changeRef!,
+          ),
+          args.contentStore,
+          workspacePackageAdditions(args.objectiveBody),
         ),
-      itemBase,
-      validationLfsMembersForItem(
+    });
+    await phases.reserve(item.id, "review");
+    const review = () =>
+      reviewItem({
         state,
         item,
-        config.checkout,
-        work.changeRef!,
-      ),
-      args.contentStore,
-      workspacePackageAdditions(args.objectiveBody),
-    );
-    await phases.reserve(item.id, "review");
-    const reviewResult = () =>
-      reviewAcceptance({
-        model: args.planningModel,
-        checkout: config.checkout,
-        baseSha: itemBase,
-        commit: work.changeRef!,
-        evidence: work.validation!,
-        criteria: item.acceptance,
-        sources: planningSources(
-          args.objectiveBody,
-          state.baseSha,
-          config.checkout,
-        ),
-        decisions: work.acceptanceDecisions,
-        evidenceSources: workItemReviewEvidence({
-          state,
-          item,
+        save,
+        review: (retry) => ({
+          ...retry,
+          model: args.planningModel,
           checkout: config.checkout,
-          delivery: "regular",
-        }),
-        observations: workItemReviewObservations(
-          state,
-          item,
-          { kind: "regular" },
-          work.assets?.find((set) => set.id === work.selectedAssetSet),
-        ),
-        invocation: {
-          invocationId: randomUUID(),
-          phase: "result-review",
-          ordinal: 0,
-          observe: args.diagnostics?.modelObserver({
-            scopeId: work.attempt!,
-            runId: state.runId,
-            itemId: item.id,
-            attemptId: work.attempt,
+          baseSha: itemBase,
+          commit: work.changeRef!,
+          evidence: work.validation!,
+          criteria: item.acceptance,
+          sources: planningSources(
+            args.objectiveBody,
+            state.baseSha,
+            config.checkout,
+          ),
+          decisions: work.acceptanceDecisions,
+          evidenceSources: workItemReviewEvidence({
+            state,
+            item,
+            checkout: config.checkout,
+            delivery: "regular",
           }),
-        },
+          observations: workItemReviewObservations(
+            state,
+            item,
+            { kind: "regular" },
+            work.assets?.find((set) => set.id === work.selectedAssetSet),
+          ),
+          invocation: {
+            invocationId: randomUUID(),
+            phase: "result-review",
+            ordinal: 0,
+            observe: args.diagnostics?.modelObserver({
+              scopeId: work.attempt!,
+              runId: state.runId,
+              itemId: item.id,
+              attemptId: work.attempt,
+            }),
+          },
+        }),
       });
-    work.validation = args.diagnostics
+    const reviewed = args.diagnostics
       ? await args.diagnostics.span(
           {
             runId: state.runId,
@@ -466,42 +469,50 @@ export async function runRegularGraph(args: {
             operation: "acceptance-review",
             metadata: { treeSha: work.treeSha! },
           },
-          reviewResult,
-          (result) => ({ criteria: result.criteria?.length ?? 0 }),
-          (error) =>
-            error instanceof AcceptanceDecisionRequired ? "waiting" : "failed",
+          review,
+          (outcome) => ({
+            criteria: outcome.evidence?.criteria?.length ?? 0,
+          }),
         )
-      : await reviewResult();
+      : await review();
+    if (reviewed.pending) {
+      phases.release(item.id);
+      work.status = "waiting";
+      work.step = "approve-result";
+      work.acceptancePending = reviewed.pending;
+      save();
+      return;
+    }
+    work.validation = reviewed.evidence;
     delete work.acceptancePending;
     if (args.cancelled()) throw new Error("Objective cancelled");
-    await deliverReviewed(item, itemBase);
+    await deliver(item, itemBase);
+  };
+  /** Stop the item's own worker after its attempt failed, so a retry never runs beside it. */
+  const stopWorker = async (item: WorkItem): Promise<void> => {
+    const work = state.work[item.id]!;
+    if (!work.execution) return;
+    try {
+      await driver.cancel(
+        structuredClone(work.execution),
+        workerContext(work, save, args.cancelled, args.diagnostics, {
+          runId: state.runId,
+          itemId: item.id,
+        }),
+      );
+      delete work.execution;
+    } catch {
+      // Left recorded: retry refuses until the worker is confirmed stopped.
+    }
   };
   const execute = async (item: WorkItem, itemBase: string): Promise<void> => {
     const work = state.work[item.id]!;
-    // A repeated step reattaches to the recorded attempt. A settled dead
-    // worker's handle was cleared, so it starts a fresh attempt.
     try {
-      await repeatInterrupted(work, save, () =>
-        runStep(
-          item,
-          itemBase,
-          work.step === "execute" ? work.execution : undefined,
-        ),
-      );
+      await runStep(item, itemBase);
     } catch (error) {
       if (error instanceof DeliveryReadinessPending) {
         work.waitingReason = error.message;
         phases.release(item.id);
-        save();
-        return;
-      }
-      if (error instanceof AcceptanceDecisionRequired) {
-        phases.release(item.id);
-        work.status = "waiting";
-        work.step = "approve-result";
-        work.acceptancePending = error.pending;
-        if (!args.cancelled() && !args.paused?.() && !args.amendmentPending?.())
-          prepareEvidenceRecovery(state, item.id);
         save();
         return;
       }
@@ -513,6 +524,8 @@ export async function runRegularGraph(args: {
       )
         work.authentication = error.authentication;
       else delete work.authentication;
+      if (work.status === "failed" && work.step === "execute")
+        await stopWorker(item);
       if (work.phaseReservation !== "coding") phases.release(item.id);
       const isolated = recordWorkFailure(state, item.id, error);
       if (isolated && !args.cancelled()) {
@@ -542,6 +555,9 @@ export async function runRegularGraph(args: {
         return;
       }
       save();
+      // A decision or a configuration fix waits on this item only: the run
+      // goes on, and `factory retry` or the fix continues it.
+      if (operatorWait(error)) return;
       failure ??= error;
       throw error;
     }
@@ -590,7 +606,9 @@ export async function runRegularGraph(args: {
       active.set(item.id, promise);
       continue;
     }
-    if (work.step !== "execute" || !work.execution || !work.baseSha) {
+    // An execute step resumes with or without a recorded handle: the attempt
+    // id was saved before start, and the driver adopts or stops it.
+    if (work.step !== "execute" || !work.attempt || !work.baseSha) {
       throw new Error(
         `Work Item ${item.id} has ambiguous active state at ${work.step ?? "unknown"}; operator direction required`,
       );

@@ -69,6 +69,7 @@ import {
   reviewPacket,
 } from "./review-evidence.js";
 import type { AcceptancePending, FactoryState, WorkState } from "./state.js";
+import { deliveredHead } from "./delivery/branch-update.js";
 
 export interface CriterionEvidence {
   criterion: string;
@@ -1088,6 +1089,8 @@ function assertIntegrationBindings(
     item: WorkItem;
     resultBaseSha: string;
     resultCommitSha: string;
+    /** The PR head that was merged: `resultCommitSha` or GitHub's update of it. */
+    deliveredHeadSha: string;
     integratedCommitSha: string;
   }[],
 ): void {
@@ -1098,11 +1101,17 @@ function assertIntegrationBindings(
     groups.set(record.integratedCommitSha, group);
   }
   for (const [integratedCommitSha, group] of groups) {
+    const top = group.at(-1)!;
     const parents = commitParents(checkout, integratedCommitSha);
-    if (parents.length !== 2 || parents[1] !== group.at(-1)!.resultCommitSha)
+    if (parents.length !== 2 || parents[1] !== top.deliveredHeadSha)
       throw new Error(
         `Integrated commit ${integratedCommitSha} is not bound to the exact delivered result head`,
       );
+    assertBranchUpdateChain(
+      checkout,
+      top.deliveredHeadSha,
+      top.resultCommitSha,
+    );
     if (group.length === 1) continue;
     if (parents[0] !== group[0]!.resultBaseSha)
       throw new Error(
@@ -1113,6 +1122,27 @@ function assertIntegrationBindings(
         throw new Error(
           `Native integration group ${integratedCommitSha} has a non-exact layer base`,
         );
+  }
+}
+
+/**
+ * A delivered head other than the result is GitHub's update of the PR
+ * branch with its base (#576): a chain of two-parent merges whose first
+ * parents lead to the validated result.
+ */
+function assertBranchUpdateChain(
+  checkout: string,
+  deliveredHeadSha: string,
+  resultCommitSha: string,
+): void {
+  let head = deliveredHeadSha;
+  for (let step = 0; head !== resultCommitSha; step++) {
+    const parents = commitParents(checkout, head);
+    if (step >= 100 || parents.length !== 2)
+      throw new Error(
+        `Delivered head ${deliveredHeadSha} is not a branch update of result ${resultCommitSha}`,
+      );
+    head = parents[0]!;
   }
 }
 
@@ -1719,6 +1749,7 @@ export function workItemReviewEvidence(args: {
               item: dependency,
               resultBaseSha: work.baseSha!,
               resultCommitSha: work.changeRef!,
+              deliveredHeadSha: deliveredHead(work)!,
               integratedCommitSha: work.integratedSha,
             },
           ]
@@ -1762,12 +1793,8 @@ export function objectiveReviewEvidence(args: {
     "Final candidate",
   );
   const evidence: ResultReviewEvidenceSource[] = [];
-  const integrationRecords: {
-    item: WorkItem;
-    resultBaseSha: string;
-    resultCommitSha: string;
-    integratedCommitSha: string;
-  }[] = [];
+  const integrationRecords: Parameters<typeof assertIntegrationBindings>[1] =
+    [];
   const textBudget = newReviewTextBudget();
   const work = state.graph.items.map((item) => {
     const current = state.work[item.id];
@@ -1814,6 +1841,7 @@ export function objectiveReviewEvidence(args: {
         item,
         resultBaseSha: current.baseSha,
         resultCommitSha: current.changeRef,
+        deliveredHeadSha: deliveredHead(current)!,
         integratedCommitSha: current.integratedSha!,
       });
     evidence.push(...proof.evidence);

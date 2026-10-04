@@ -1628,6 +1628,7 @@ export class RealGitHubGateway implements GitHubGateway {
       onPending: (uuid: string) => void;
       progress?: () => void;
       queued: (detail: string) => never;
+      failed?: () => Promise<void>;
     },
   ): Promise<string> {
     return this.native.mergeStack(layers, baseBranch, expectedStack, {

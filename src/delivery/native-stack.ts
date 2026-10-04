@@ -173,6 +173,26 @@ export class NativeStackDelivery {
    * confirmed, and a merge request already pending (recorded, or named by
    * GitHub's 409 after a lost response) is polled instead of sent again.
    */
+  /** The stack's merge commit when every layer already merged, else undefined. */
+  private async alreadyMerged(
+    layers: StackLayer[],
+  ): Promise<string | undefined> {
+    const already = await Promise.all(
+      layers.map((layer) => this.pull(layer.pullRequest)),
+    );
+    if (!already.every((pull) => pull.state === "closed" && pull.merged))
+      return undefined;
+    for (const [index, pull] of already.entries())
+      if (
+        pull.head.ref !== layers[index]!.branch ||
+        pull.head.sha !== layers[index]!.headSha
+      )
+        throw foreignChange(
+          "Merged native stack head changed; operator direction required",
+        );
+    return this.stackMergeCommit(layers);
+  }
+
   async mergeStack(
     layers: StackLayer[],
     baseBranch: string,
@@ -182,23 +202,12 @@ export class NativeStackDelivery {
       onPending: (uuid: string) => void;
       progress?: () => void;
       queued: (detail: string) => never;
+      failed?: () => Promise<void>;
       requireMergeCommits: () => Promise<void>;
     },
   ): Promise<string> {
-    const already = await Promise.all(
-      layers.map((layer) => this.pull(layer.pullRequest)),
-    );
-    if (already.every((pull) => pull.state === "closed" && pull.merged)) {
-      for (const [index, pull] of already.entries())
-        if (
-          pull.head.ref !== layers[index]!.branch ||
-          pull.head.sha !== layers[index]!.headSha
-        )
-          throw foreignChange(
-            "Merged native stack head changed; operator direction required",
-          );
-      return this.stackMergeCommit(layers);
-    }
+    const merged = await this.alreadyMerged(layers);
+    if (merged) return merged;
     if (
       !options.resumeUuid &&
       (await this.ensureStack(layers, baseBranch)) !== expectedStack
@@ -230,6 +239,12 @@ export class NativeStackDelivery {
           { head: "ours" },
         );
       } catch (error) {
+        // GitHub refuses to merge layers that already merged (a lost
+        // response): read the layers again and confirm (#627).
+        if (error instanceof GitHubRequestError && error.status === 403) {
+          const sha = await this.alreadyMerged(layers);
+          if (sha) return sha;
+        }
         if (!(error instanceof GitHubRequestError && error.pendingMerge))
           throw error;
         observed = { status: "pending", details: { uuid: error.pendingMerge } };
@@ -256,6 +271,9 @@ export class NativeStackDelivery {
       );
       options.progress?.();
     }
+    // A merge that failed while a required check was still pending waits
+    // for CI instead (#626); `failed` throws that wait.
+    if (observed.status === "failed") await options.failed?.();
     if (observed.status !== "merged" || !observed.details.sha)
       throw attachFault(
         new Error(

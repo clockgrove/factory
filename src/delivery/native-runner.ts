@@ -956,7 +956,7 @@ export async function runNativeGraph(args: {
       // An update already requested is finished before the layers are read:
       // its head is GitHub's merge, not a foreign change.
       for (const [index, item] of unit.items.entries()) {
-        const from = state.work[item.id]!.branchUpdate;
+        const from = state.work[item.id]!.branchUpdateFrom;
         if (from) await updateLayer(context, index, from);
       }
       // If the default branch moved, the layers' checks and mergeability
@@ -1094,6 +1094,13 @@ export async function runNativeGraph(args: {
                       progress: context.progress,
                       queued: (detail) =>
                         context.pending({ kind: "ci", detail }),
+                      // A failed request is not resumed: the repeat judges
+                      // readiness and requests the merge anew.
+                      failed: async () => {
+                        delete state.stackMerges?.[unit.id];
+                        save();
+                        await ready(context);
+                      },
                     },
                   );
             // Other work may have merged since; the unit's merge only needs to

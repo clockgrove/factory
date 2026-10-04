@@ -2,31 +2,6 @@ import type { GitHubGateway, PullRequestIdentity } from "../contracts.js";
 import { earlierHeads } from "../repair-policy.js";
 import type { WorkState } from "../state.js";
 
-declare module "../state.js" {
-  interface WorkState {
-    /**
-     * Strict protection: the PR head GitHub made by updating the branch with
-     * its base (update-branch). Its first-parent chain of GitHub merges
-     * leads to `changeRef`, the validated result. Unset while the PR head is
-     * `changeRef`.
-     */
-    deliveredHead?: string;
-    /**
-     * The PR head GitHub was asked to update. Saved before the request and
-     * cleared once the new head is recorded, so a repeat or a restart adopts
-     * the update instead of reading GitHub's merge as a foreign change
-     * (#576, #620).
-     */
-    branchUpdate?: string;
-    /**
-     * PR heads of this attempt that a later head replaced: GitHub's branch
-     * update, or a replay onto a repaired lower native layer. A lease and a
-     * lagging read accept them.
-     */
-    replacedHeads?: string[];
-  }
-}
-
 /** The head the item's PR delivers: GitHub's update of the result, else the result. */
 export function deliveredHead(work: WorkState): string | undefined {
   return work.deliveredHead ?? work.changeRef;
@@ -62,7 +37,7 @@ export function retireDeliveredHead(work: WorkState): void {
   if (head)
     work.replacedHeads = [...new Set([...(work.replacedHeads ?? []), head])];
   delete work.deliveredHead;
-  delete work.branchUpdate;
+  delete work.branchUpdateFrom;
 }
 
 /**
@@ -81,8 +56,8 @@ export async function updateBehindBranch(args: {
   from: string;
 }): Promise<string> {
   const { github, work, save, identity, from } = args;
-  if (work.branchUpdate !== from) {
-    work.branchUpdate = from;
+  if (work.branchUpdateFrom !== from) {
+    work.branchUpdateFrom = from;
     save();
   }
   const head = await github.updateBranch({
@@ -93,7 +68,7 @@ export async function updateBehindBranch(args: {
   });
   work.replacedHeads = [...new Set([...(work.replacedHeads ?? []), from])];
   work.deliveredHead = head;
-  delete work.branchUpdate;
+  delete work.branchUpdateFrom;
   save();
   return head;
 }

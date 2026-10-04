@@ -249,7 +249,8 @@ export async function runRegularGraph(args: {
     const ready = async (context: StepContext) => {
       // An update already requested is finished before the PR is read: its
       // head is GitHub's merge, not a foreign change.
-      if (work.branchUpdate) await updateBranch(context, work.branchUpdate);
+      if (work.branchUpdateFrom)
+        await updateBranch(context, work.branchUpdateFrom);
       const observation = await delivery.observe(published);
       context.progress();
       if (observation.mergeReadiness === "behind")

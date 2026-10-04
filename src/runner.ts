@@ -2332,9 +2332,14 @@ export function retryWorkItem(
       // Its delivery steps run again, like an answered step.
       return "step";
     }
+    // Only layers above this item were built on its old head (#619); a
+    // published layer below keeps its PR and the new attempt builds on it.
+    const above = nativeUnit?.items.slice(
+      nativeUnit.items.findIndex((item) => item.id === itemId) + 1,
+    );
     if (
       work.step === "deliver" ||
-      nativeUnit?.items.some((item) => state.work[item.id]?.pullRequest) ||
+      above?.some((item) => state.work[item.id]?.pullRequest) ||
       (nativeUnit &&
         (state.stackNumbers?.[nativeUnit.id] ||
           state.stackMerges?.[nativeUnit.id]))

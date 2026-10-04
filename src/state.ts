@@ -87,10 +87,25 @@ export interface WorkState {
   baseSha?: string;
   changeRef?: string;
   /**
-   * Head a GitHub update-branch was requested from. Set before the PUT,
-   * cleared once the updated head is saved as `changeRef`.
+   * Strict protection: the PR head GitHub made by updating the branch with
+   * its base (update-branch). Its first-parent chain of GitHub merges leads
+   * to `changeRef`, the validated result. Unset while the PR head is
+   * `changeRef`.
+   */
+  deliveredHead?: string;
+  /**
+   * The PR head a GitHub update-branch was requested from. Set before the
+   * PUT, cleared once the new head is saved as `deliveredHead`, so a repeat
+   * or a restart adopts the update instead of reading GitHub's merge as a
+   * foreign change (#576, #620).
    */
   branchUpdateFrom?: string;
+  /**
+   * PR heads of this attempt that a later head replaced: GitHub's branch
+   * update, or a replay onto a repaired lower native layer. A lease and a
+   * lagging read accept them.
+   */
+  replacedHeads?: string[];
   /** Review answer found invalid once; a second invalid answer is a decision. */
   reviewInvalid?: string;
   treeSha?: string;
@@ -563,9 +578,18 @@ export function parseFactoryState(
       "executionBaseSha",
       "treeSha",
       "changeRef",
+      "deliveredHead",
       "branchUpdateFrom",
     ])
       if (item[key] !== undefined) sha(item[key], `${id}.${key}`);
+    if (item.replacedHeads !== undefined) {
+      if (!Array.isArray(item.replacedHeads))
+        throw new Error(`Work Item ${id} replacedHeads must be an array`);
+      for (const [index, head] of item.replacedHeads.entries())
+        sha(head, `${id}.replacedHeads[${index}]`);
+    }
+    if (item.deliveredHead !== undefined && !item.pullRequest)
+      throw new Error(`Work Item ${id} delivered head lacks a pull request`);
     if (
       item.integratedShaAtStart !== undefined &&
       item.integratedShaAtStart !== null

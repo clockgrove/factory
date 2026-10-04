@@ -903,6 +903,12 @@ export interface GitHubGateway {
       progress?: () => void;
       /** Queued without a request to poll: wait for CI, then observe again. */
       queued: (detail: string) => never;
+      /**
+       * The merge request ended failed: observe the layers again. Throws a
+       * CI wait while a required check is pending (#626); returns when the
+       * layers are ready, and the failure stands.
+       */
+      failed?: () => Promise<void>;
     },
   ): Promise<string>;
 }

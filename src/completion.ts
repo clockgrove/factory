@@ -5,6 +5,10 @@ import type { GitHubGateway } from "./contracts.js";
 import type { FactoryState } from "./state.js";
 import { attachFault, decision } from "./fault.js";
 import { step } from "./step.js";
+import {
+  deliveredHead,
+  deliveryEarlierHeads,
+} from "./delivery/branch-update.js";
 
 /** Compact bindings into the existing snapshot, not a second copy of its evidence. */
 export interface FinalAcceptance {
@@ -227,7 +231,8 @@ export async function closeWorkItem(
         const observed = await github.observe({
           number: work.pullRequest!,
           branch: `factory/objective-${state.objective}/${itemId}`,
-          headSha: work.changeRef!,
+          headSha: deliveredHead(work)!,
+          earlierHeads: deliveryEarlierHeads(work),
         });
         if (observed.state !== "merged")
           throw attachFault(

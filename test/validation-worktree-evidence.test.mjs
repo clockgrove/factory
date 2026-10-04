@@ -17,7 +17,11 @@ import {
   CandidateValidationFailure,
   recordWorkFailure,
 } from "../dist/work-repair.js";
-import { validateTree, reviewAcceptance } from "../dist/validation.js";
+import {
+  commandPassEvidence,
+  reviewAcceptance,
+  validateTree,
+} from "../dist/validation.js";
 import {
   createTarget,
   git,
@@ -296,6 +300,14 @@ test("validation descendants left running are stopped and the tree they changed 
           assert.equal(
             evidence.worktreeObservation.subprocessOwnership,
             "settled",
+          );
+          assert.equal(evidence.commands[0].stoppedLeftovers, undefined);
+          // One still running after it is stopped, and its receipt says so.
+          const stopped = await validate(["sleep 30 >/dev/null 2>&1 &"]);
+          assert.equal(stopped.commands[0].stoppedLeftovers, 1);
+          assert.match(
+            commandPassEvidence(stopped.commands).content,
+            /"stoppedLeftovers":1/,
           );
           // One still running after it is stopped; the change it made counts.
           await assert.rejects(

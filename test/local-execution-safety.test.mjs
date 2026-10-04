@@ -993,12 +993,10 @@ test("late secret and commit failures never return completed collection observat
               : "safe\n",
           );
           if (failure === "commit") {
-            const hook = join(root, "hooks");
-            mkdirSync(hook);
-            writeFileSync(join(hook, "pre-commit"), "#!/bin/sh\nexit 1\n", {
-              mode: 0o755,
-            });
-            git(worktree, "config", "core.hooksPath", hook);
+            // Factory runs no repository hooks; a signing program that
+            // fails still makes its commit fail.
+            git(worktree, "config", "commit.gpgSign", "true");
+            git(worktree, "config", "gpg.program", "false");
           }
         },
         {
@@ -1073,12 +1071,10 @@ for (const failure of [
                 : "safe\n",
             );
           if (failure === "commit") {
-            const hook = join(root, "hooks");
-            mkdirSync(hook);
-            writeFileSync(join(hook, "pre-commit"), "#!/bin/sh\nexit 1\n", {
-              mode: 0o755,
-            });
-            git(worktree, "config", "core.hooksPath", hook);
+            // Factory runs no repository hooks; a signing program that
+            // fails still makes its commit fail.
+            git(worktree, "config", "commit.gpgSign", "true");
+            git(worktree, "config", "gpg.program", "false");
           }
         },
         {

@@ -286,6 +286,7 @@ test("aligned GitHub binding publishes exact Git objects through the offline tra
   const treeSha = git(checkout, "rev-parse", "HEAD^{tree}");
   const result = await new RegularDelivery(checkout, gateway).publish({
     branch: "factory/bound",
+    baseSha,
     changeRef: baseSha,
     treeSha,
     lfs: true,

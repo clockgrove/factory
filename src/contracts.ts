@@ -326,6 +326,11 @@ export interface ValidationCommandReceipt {
   passed: true;
   exitCode: 0;
   treeSha: string;
+  /**
+   * Processes the command left running that Factory stopped once the
+   * command had exited and its grace period passed. Absent when none.
+   */
+  stoppedLeftovers?: number;
 }
 
 export interface ResultReviewEvidenceSource {

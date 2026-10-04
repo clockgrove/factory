@@ -252,6 +252,7 @@ test("regular delivery finds the PR whose creation response was lost instead of 
   fake.inject({ match: `POST ${repo}/pulls`, kind: "drop" });
   const delivery = new RegularDelivery(target.checkout, gateway);
   const request = {
+    baseSha: git(target.checkout, "rev-parse", "HEAD"),
     changeRef: head,
     treeSha: tree,
     branch: "factory/objective-1/alpha",

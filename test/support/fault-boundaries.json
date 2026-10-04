@@ -24,6 +24,7 @@
     ],
     "reads": [
       "GET /repos/{owner}/{repo} #1",
+      "GET /repos/{owner}/{repo}/branches/{branch}/protection/required_linear_history #1",
       "GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks #1",
       "GET /repos/{owner}/{repo}/commits/{sha}/check-runs #1",
       "GET /repos/{owner}/{repo}/commits/{sha}/status #1",
@@ -85,6 +86,7 @@
     ],
     "reads": [
       "GET /repos/{owner}/{repo} #1",
+      "GET /repos/{owner}/{repo}/branches/{branch}/protection/required_linear_history #1",
       "GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks #1",
       "GET /repos/{owner}/{repo}/commits/{sha}/check-runs #1",
       "GET /repos/{owner}/{repo}/commits/{sha}/status #1",

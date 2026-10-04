@@ -126,7 +126,8 @@ export class RealGitHubGateway implements GitHubGateway {
   /**
    * The token's login, when GitHub tells it. Only consulted until Factory
    * has recorded the author of its first issue; an App token has no user
-   * (403), which is not a permission problem.
+   * (403), which is not a permission problem: its bot is named through
+   * GraphQL instead, so ownership is known before the first create.
    */
   private async viewer(): Promise<string | undefined> {
     if (this.login) return this.login;
@@ -139,8 +140,17 @@ export class RealGitHubGateway implements GitHubGateway {
         error instanceof GitHubRequestError &&
         [403, 404].includes(error.status) &&
         attachedFault(error)?.kind !== "transient"
-      )
-        return undefined;
+      ) {
+        // An App token names its bot through GraphQL, so ownership is known
+        // before the first create. If that is refused too, the first create
+        // records the author, as before.
+        try {
+          this.login = await this.client.appViewer();
+        } catch (fallback) {
+          if (attachedFault(fallback)?.kind === "transient") throw fallback;
+        }
+        return this.login;
+      }
       throw attachFault(
         error,
         gitHubFault(error, { method: "GET", path: "user" }),
@@ -419,6 +429,27 @@ export class RealGitHubGateway implements GitHubGateway {
       )
     )
       throw forbidden();
+    // Classic branch protection can require linear history too. Reading it
+    // needs admin: 404 is unprotected, 403 is a login that cannot see it
+    // (an App token), and then the merge itself is the only test left.
+    const path = `branches/${encodeURIComponent(branch)}/protection/required_linear_history`;
+    let classic: { enabled?: unknown } | undefined;
+    try {
+      classic = await this.client.request<{ enabled?: unknown }>(
+        "GET",
+        this.route(path),
+      );
+    } catch (error) {
+      if (
+        !(
+          error instanceof GitHubRequestError &&
+          [403, 404].includes(error.status) &&
+          attachedFault(error)?.kind !== "transient"
+        )
+      )
+        throw attachFault(error, gitHubFault(error, { method: "GET", path }));
+    }
+    if (classic?.enabled === true) throw forbidden();
   }
 
   async objective(number: number): Promise<ObjectiveIssue> {

@@ -714,3 +714,98 @@ test("an App token has no user; what it creates carries the bot login", async (t
     [created.number],
   );
 });
+
+test("an App token's bot login is known before the first create, so ownership lists by creator (#614)", async (t) => {
+  const { fake, gateway } = await setup(t, {
+    appToken: true,
+    protectionChecks: () => [],
+  });
+  // A stranger's issue that carries this Objective's Work Item marker.
+  fake.openForeignIssue(
+    "Look-alike",
+    "<!-- factory:objective=1;item=one -->\nnot Factory's",
+  );
+  const projected = await gateway.projectGraph({
+    objectiveIssue: 1,
+    graph: {
+      items: [
+        {
+          kind: "work",
+          id: "one",
+          title: "One",
+          goal: "goal",
+          acceptance: [],
+          nonGoals: [],
+          dependencies: [],
+          citations: [],
+          ownedPaths: [],
+          validation: [],
+          brief: "brief",
+        },
+      ],
+    },
+  });
+  const creator = `creator=${encodeURIComponent(fake.author.login)}`;
+  const firstCreate = fake.log.findIndex(
+    (entry) => entry.endpoint === `POST ${repo}/issues`,
+  );
+  assert.ok(firstCreate > 0);
+  assert.ok(
+    fake.log
+      .slice(0, firstCreate)
+      .some(
+        (entry) =>
+          entry.endpoint === `GET ${repo}/issues` &&
+          entry.path.includes(creator),
+      ),
+    "the issue list before the first create is filtered by the bot's login",
+  );
+  assert.equal(projected.issueByItemId.one, 3);
+});
+
+test("classic linear history is read before a merge is sent (#614)", async (t) => {
+  const { fake, client, gateway, pushBranch } = await setup(t, {
+    classicLinearHistory: () => true,
+  });
+  const sha = await pushBranch("feature");
+  const created = await client.request("POST", "repos/example/target/pulls", {
+    head: "feature",
+    base: "main",
+    title: "Feature",
+  });
+  const identity = {
+    number: created.number,
+    headSha: sha,
+    branch: "feature",
+  };
+  const error = await gateway.merge(identity, sha).catch((caught) => caught);
+  assert.match(String(error?.message), /does not allow merge commits/);
+  assert.equal(fake.effects(`PUT ${repo}/pulls/{number}/merge`).length, 0);
+  assert.deepEqual(
+    fake.log
+      .filter((entry) => entry.method === "PUT")
+      .map((entry) => entry.endpoint),
+    [],
+  );
+});
+
+test("classic linear history that an App token cannot read leaves the merge to decide (#614)", async (t) => {
+  const { fake, client, gateway, pushBranch } = await setup(t, {
+    appToken: true,
+    protectionChecks: () => [],
+    classicLinearHistory: () => true,
+  });
+  const sha = await pushBranch("feature");
+  const created = await client.request("POST", "repos/example/target/pulls", {
+    head: "feature",
+    base: "main",
+    title: "Feature",
+  });
+  const error = await gateway
+    .merge({ number: created.number, headSha: sha, branch: "feature" }, sha)
+    .catch((caught) => caught);
+  // 403 on the protection route: unreadable, not a fault of its own. The
+  // merge was sent and GitHub refused it.
+  assert.equal(fake.log.filter((entry) => entry.method === "PUT").length, 1);
+  assert.ok(error instanceof Error);
+});

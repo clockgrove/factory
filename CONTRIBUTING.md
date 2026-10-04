@@ -30,7 +30,18 @@ npm run notices:check
 npm test
 ```
 
-`npm test` type-checks and builds the project with `tsc`, then runs deterministic tests, including temporary Git and LFS repositories. These checks do not require provider credentials or a live GitHub target. The [Quality workflow](.github/workflows/quality.yml) runs the same checks on every pull request and on `main`, except the tests that pack and install the package (`node scripts/test-shards.mjs --installed`), which run on `main` and at release. `npm run lint` applies Biome's recommended rules plus the deviations in `biome.json`, then `scripts/check-ts-directives.mjs` refuses `@ts-nocheck`, `@ts-ignore`, triple-slash references and `@ts-expect-error` without a reason in `src`; `npm run format` applies formatting.
+`npm test` runs `tsc` (type-check and build), then the deterministic tests, including temporary Git and LFS repositories. These checks need no provider credentials or live GitHub target.
+
+The [Quality workflow](.github/workflows/quality.yml) runs these on every pull request and on `main`:
+
+- Setup builds with `tsc`, so a type error fails every job.
+- `checks` runs `npm run lint`, `npm run format:check` and `npm run notices:check`.
+- `tests` runs the test files in 8 shards instead of `npm test`.
+- `installed` packs and installs the package and tests the result (`node scripts/test-shards.mjs --installed`). It runs on `main` and at release, not on pull requests.
+
+`npm run lint` is Biome's recommended rules plus the few deviations in `biome.json`, then `scripts/check-ts-directives.mjs`, which refuses `@ts-nocheck`, `@ts-ignore`, triple-slash references and `@ts-expect-error` without a reason in `src`. `npm run format` applies formatting.
+
+`npm ci` installs a pre-commit hook (`.githooks/pre-commit`). It formats staged `.ts`, `.mts`, `.js`, `.mjs` and `.json` files with Biome, re-stages them, and runs `biome lint` on them. It does not run `tsc`, the directive check, or Prettier (Markdown, YAML, `package-lock.json`), so run the commands above before you push.
 
 During development, run an affected test directly after building:
 

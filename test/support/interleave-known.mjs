@@ -21,40 +21,24 @@ export const DIAGNOSES = {};
 
 /** Deterministic reproductions, one or more per diagnosis, and fixed races kept pinned. */
 export const PINNED = [
+  // CLOSURE_START is fixed by serializing: the regular runner frees alpha's
+  // delivery slot only after its closure is durable, so beta never reaches
+  // its execute checkpoint while alpha closes. A hold that waits for that
+  // cannot be satisfied (the explorer reports it infeasible), so these pins
+  // schedule only the crash in alpha's closure.
   {
     fixed: "CLOSURE_START",
     family: "dependent",
-    name: "crash before alpha's completion comment while beta is between its execute checkpoint and driver.start",
+    name: "crash before alpha's completion comment",
     schedule: {
-      holds: [
-        {
-          hold: "alpha POST /issues/{number}/comments #1",
-          until: "beta state running/execute #1",
-        },
-        {
-          hold: "beta driver.start #1",
-          until: "alpha POST /issues/{number}/comments #1",
-        },
-      ],
       crash: { at: "alpha POST /issues/{number}/comments #1" },
     },
   },
   {
     fixed: "CLOSURE_START",
     family: "dependent",
-    name: "crash after alpha's issue close while beta is between its execute checkpoint and driver.start",
+    name: "crash after alpha's issue close",
     schedule: {
-      holds: [
-        {
-          hold: "alpha PATCH /issues/{number} #1",
-          at: "done",
-          until: "beta state running/execute #1",
-        },
-        {
-          hold: "beta driver.start #1",
-          until: "alpha PATCH /issues/{number} #1",
-        },
-      ],
       crash: { at: "alpha PATCH /issues/{number} #1", phase: "done" },
     },
   },

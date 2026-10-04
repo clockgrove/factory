@@ -20,17 +20,12 @@ import type {
   ExecutionResult,
   ModelInvocationUsage,
 } from "../contracts.js";
-import { Interruption } from "../contracts.js";
 import {
   addWorktree,
   hasUnresolvedSubprocesses,
   removeWorktree,
 } from "../process.js";
-import {
-  SettledAttemptFailure,
-  failAttempt,
-  retryTransient,
-} from "../work-repair.js";
+import { cancelledFault, endAttempt, stoppedFault } from "./attempt.js";
 import { collectWorktreeResult } from "./local.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import {
@@ -193,15 +188,14 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       Date.now()
     );
   }
-  /** Ends the attempt for a failed step; see failAttempt. */
+  /** Ends the attempt for a failed step; see endAttempt. */
   private async fail(
     error: unknown,
     handle: ExecutionHandle,
     context: ExecutionContext,
   ): Promise<never> {
     const data = this.active(handle);
-    return failAttempt(error, {
-      transient: claudeTransient,
+    return endAttempt(error, {
       expired: this.expired(data),
       cancelled: context.cancelled(),
       // The provider no longer has the session: its worker is gone with it,
@@ -220,15 +214,8 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     const data = this.active(handle);
     data.stopped ??= { detail, interrupted };
     this.save(handle, context);
-    try {
-      await this.stop(handle, "failed", context);
-    } catch (error) {
-      throw claudeTransient(error) ? new Interruption(error) : error;
-    }
-    throw new SettledAttemptFailure(
-      new Error(data.stopped.detail),
-      data.stopped.interrupted ? "interruption" : "implementation",
-    );
+    await this.stop(handle, "failed", context);
+    throw stoppedFault(data.stopped.detail, data.stopped.interrupted);
   }
   private async wait(data: Active): Promise<void> {
     await new Promise((resolve) =>
@@ -429,7 +416,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       for (const name of inputs) {
         if (data.files.some((file) => file.name === name)) continue;
         if (context.cancelled())
-          throw new Error("Claude preparation cancelled before upload");
+          throw cancelledFault("Claude preparation cancelled before upload");
         // An upload whose response was lost may leave an unreferenced file
         // that cannot be found; it is recorded for operator cleanup.
         const file = await this.client
@@ -447,7 +434,9 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
         this.save(handle, context);
       }
       if (context.cancelled())
-        throw new Error("Claude preparation cancelled before session creation");
+        throw cancelledFault(
+          "Claude preparation cancelled before session creation",
+        );
       data.createdAfter ??= new Date(Date.now() - clockSkewMs).toISOString();
       data.phase = "create-submitted";
       this.save(handle, context);
@@ -491,7 +480,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     data.resourcesDigest = digest(session.resources);
     this.save(handle, context);
     if (context.cancelled())
-      throw new Error("Claude input cancelled before bootstrap");
+      throw cancelledFault("Claude input cancelled before bootstrap");
     data.phase = "bootstrap-submitted";
     this.save(handle, context);
     const sent = await this.client.send(
@@ -712,7 +701,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       );
     const proof = data.bootstrap;
     if (!context || context.cancelled())
-      throw new Error("Claude implementation cancelled before submission");
+      throw cancelledFault("Claude implementation cancelled before submission");
     await this.client.verifyEnvironment(this.remaining(data));
     const current = await this.client.retrieve(
       data.sessionId,
@@ -730,7 +719,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       );
     const text = this.implementationText(data);
     if (context.cancelled())
-      throw new Error("Claude implementation cancelled before submission");
+      throw cancelledFault("Claude implementation cancelled before submission");
     data.phase = "implementation-submitted";
     this.save(handle, context);
     const sent = await this.client.send(
@@ -937,11 +926,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       data.terminal = "complete";
       this.save(handle, context);
     }
-    try {
-      await this.dispose(handle, context);
-    } catch (error) {
-      throw claudeTransient(error) ? new Interruption(error) : error;
-    }
+    await this.dispose(handle, context);
     return data.result!;
   }
   private async produce(
@@ -950,16 +935,18 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
   ): Promise<ExecutionResult> {
     const data = this.active(handle);
     while (true) {
-      if (context.cancelled()) throw new Error("Claude collection cancelled");
-      // Each pass resolves the recorded phase first, so a transient failure
-      // is retried in place without repeating a submission blindly.
-      const observation = await retryTransient(async () => {
-        await this.advance(handle, context);
-        const observed = await this.observe(handle, context);
-        if (observed.state === "running" && data.phase === "bootstrap-verified")
-          await this.submitImplementation(handle, context);
-        return observed;
-      }, claudeTransient);
+      if (context.cancelled())
+        throw cancelledFault("Claude collection cancelled");
+      // Each pass resolves the recorded phase first, so a transport failure
+      // leaves collect and the step's repeat resumes here without repeating
+      // a submission blindly.
+      await this.advance(handle, context);
+      const observation = await this.observe(handle, context);
+      if (
+        observation.state === "running" &&
+        data.phase === "bootstrap-verified"
+      )
+        await this.submitImplementation(handle, context);
       if (observation.state === "complete") break;
       if (observation.state !== "running")
         await this.settle(

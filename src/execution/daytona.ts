@@ -1,5 +1,5 @@
 import { classifyFaults } from "../fault.js";
-import { daytonaFault } from "./fault.js";
+import { daytonaFault, missingCredential } from "./fault.js";
 import { randomUUID } from "node:crypto";
 import { createWriteStream, readFileSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -105,7 +105,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
   ) {
     this.config = validateDaytonaConfig(config);
     if (!apiKey.trim())
-      throw new Error("Daytona controller API key is unavailable");
+      throw missingCredential("Daytona controller API key is unavailable");
   }
   private client(): Promise<Pick<Daytona, "create" | "get" | "list">> {
     this.clientPromise ??= this.suppliedClient

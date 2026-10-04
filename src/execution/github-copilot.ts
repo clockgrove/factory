@@ -1,13 +1,5 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { GitHubCopilotSdkConfig } from "../config.js";
@@ -25,7 +17,11 @@ import {
   processGroupExists,
   sanitizedWorkerEnvironment,
 } from "../process.js";
-import { parseAuthenticationRequest } from "./harness-support.js";
+import {
+  launchWorker,
+  observeWorker,
+  stopUnrecordedWorker,
+} from "./worker-process.js";
 
 interface GitHubCopilotWorkerHandleData {
   pid: number;
@@ -136,83 +132,46 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
     return value as GitHubCopilotWorkerHandleData;
   }
 
+  private get harnessRoot(): string {
+    return this.root;
+  }
+
+  /**
+   * Start a fresh worker for the attempt identity. Whatever an earlier
+   * unrecorded start of it spawned is stopped first (#585).
+   */
   async start(request: HarnessRequest): Promise<HarnessHandle> {
-    requireCopilotRuntime();
     const identity = request.attemptId ?? randomUUID();
+    requireCopilotRuntime();
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
     const credentialDirectory = join(this.root, "empty-gh-config");
     mkdirSync(credentialDirectory, { recursive: true, mode: 0o700 });
-    const requestPath = join(this.root, `${identity}.request.json`);
-    const resultPath = join(this.root, `${identity}.result.json`);
-    const logPath = join(this.root, `${identity}.log`);
-    writeFileSync(
-      requestPath,
-      `${JSON.stringify(githubCopilotWorkerInput(request, this.config))}\n`,
-      { flag: "wx", mode: 0o600 },
-    );
-    const log = openSync(logPath, "a", 0o600);
-    let pid: number;
-    try {
-      const worker = fileURLToPath(
-        new URL("./github-copilot-worker.js", import.meta.url),
-      );
-      const child = spawn(process.execPath, [worker, requestPath, resultPath], {
-        detached: true,
-        stdio: ["ignore", log, log],
-        env: githubCopilotWorkerEnvironment(credentialDirectory),
-      });
-      if (!child.pid)
-        throw new Error("Failed to launch GitHub Copilot harness worker");
-      pid = child.pid;
-      child.unref();
-    } finally {
-      closeSync(log);
-    }
-    const identityOnHost = linuxProcessIdentity(pid);
-    if (!identityOnHost || identityOnHost.group !== pid)
-      throw new Error(
-        "GitHub Copilot harness worker did not start in its own process group",
-      );
     return {
       identity,
-      data: {
-        pid,
-        startTime: identityOnHost.startTime,
-        requestPath: resolve(requestPath),
-        resultPath: resolve(resultPath),
-        logPath: resolve(logPath),
-      } satisfies GitHubCopilotWorkerHandleData,
+      data: await launchWorker({
+        root: this.harnessRoot,
+        identity,
+        label: "GitHub Copilot harness",
+        script: fileURLToPath(
+          new URL("./github-copilot-worker.js", import.meta.url),
+        ),
+        input: githubCopilotWorkerInput(request, this.config),
+        env: githubCopilotWorkerEnvironment(credentialDirectory),
+      }),
     };
   }
 
+  /** Stop what a start of `identity` spawned before its handle was recorded. */
+  async cancelUnrecorded(identity: string): Promise<void> {
+    await stopUnrecordedWorker(
+      this.harnessRoot,
+      identity,
+      "GitHub Copilot harness",
+    );
+  }
+
   async observe(handle: HarnessHandle): Promise<HarnessObservation> {
-    const data = this.require(handle);
-    if (existsSync(data.resultPath)) {
-      const result = JSON.parse(readFileSync(data.resultPath, "utf8")) as {
-        state: "complete" | "failed";
-        error?: string;
-        authentication?: unknown;
-      };
-      const authentication = parseAuthenticationRequest(result.authentication);
-      return result.state === "complete"
-        ? { state: "complete" }
-        : {
-            state: "failed",
-            detail: result.error,
-            ...(authentication && { authentication }),
-          };
-    }
-    const current = linuxProcessIdentity(data.pid);
-    return current?.startTime === data.startTime &&
-      current.group === data.pid &&
-      current.state !== "Z"
-      ? { state: "running" }
-      : {
-          state: "failed",
-          interrupted: true,
-          detail:
-            "GitHub Copilot worker exited without a durable result; repeating with a fresh attempt",
-        };
+    return observeWorker(this.require(handle), "GitHub Copilot harness");
   }
 
   async cancel(handle: HarnessHandle): Promise<void> {

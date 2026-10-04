@@ -1,18 +1,14 @@
-import { classifyFaults } from "../fault.js";
+import { classifyFaults, StepFault } from "../fault.js";
 import { executionFault } from "./fault.js";
-import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  closeSync,
   createReadStream,
   existsSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
   realpathSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,10 +55,22 @@ import {
   removeWorktree,
 } from "../process.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
-import { SettledAttemptFailure } from "../work-repair.js";
+import { stoppedFault } from "./attempt.js";
 import { assertDurableValue } from "./checkpoint.js";
-import { parseAuthenticationRequest } from "./harness-support.js";
+import {
+  launchWorker,
+  observeWorker,
+  stopUnrecordedWorker,
+} from "./worker-process.js";
 import { checkStagedCandidate } from "./staged-candidate.js";
+
+/**
+ * A harness that can stop what a start of an identity spawned before its
+ * handle was recorded (#585). Optional until AgentHarness declares it.
+ */
+type RecoverableHarness = AgentHarness & {
+  cancelUnrecorded?(identity: string): Promise<void>;
+};
 
 export interface LocalProfileRegistration {
   environment?: ExecutionProfileEnvironment;
@@ -127,90 +135,45 @@ export class CodexHarness implements AgentHarness {
     return value as WorkerHandleData;
   }
 
+  private get harnessRoot(): string {
+    return join(dirname(this.credentialDirectory), "harness");
+  }
+
+  /**
+   * Start a fresh worker for the attempt identity. Whatever an earlier
+   * unrecorded start of it spawned is stopped first (#585).
+   */
   async start(request: HarnessRequest): Promise<HarnessHandle> {
     const identity = request.attemptId ?? randomUUID();
-    const root = join(dirname(this.credentialDirectory), "harness");
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    const requestPath = join(root, `${identity}.request.json`);
-    const resultPath = join(root, `${identity}.result.json`);
-    const logPath = join(root, `${identity}.log`);
-    writeFileSync(
-      requestPath,
-      `${JSON.stringify(
-        codexWorkerInput(
+    return {
+      identity,
+      data: await launchWorker({
+        root: this.harnessRoot,
+        identity,
+        label: "Codex harness",
+        script: fileURLToPath(new URL("./worker.js", import.meta.url)),
+        input: codexWorkerInput(
           request,
           this.network,
           this.allowedSecretNames,
           this.model,
           this.providerTurnIdleTimeoutMs,
         ),
-      )}\n`,
-      { flag: "wx", mode: 0o600 },
-    );
-    const log = openSync(logPath, "a", 0o600);
-    let pid: number;
-    try {
-      const worker = fileURLToPath(new URL("./worker.js", import.meta.url));
-      const child = spawn(process.execPath, [worker, requestPath, resultPath], {
-        detached: true,
-        stdio: ["ignore", log, log],
         env: sanitizedWorkerEnvironment(
           this.credentialDirectory,
           this.allowedSecretNames,
         ),
-      });
-      if (!child.pid) throw new Error("Failed to launch Codex harness worker");
-      pid = child.pid;
-      child.unref();
-    } finally {
-      closeSync(log);
-    }
-    const identityOnHost = linuxProcessIdentity(pid);
-    if (!identityOnHost || identityOnHost.group !== pid) {
-      throw new Error(
-        "Codex harness worker did not start in its own process group",
-      );
-    }
-    return {
-      identity,
-      data: {
-        pid,
-        startTime: identityOnHost.startTime,
-        requestPath,
-        resultPath,
-        logPath,
-      } satisfies WorkerHandleData,
+      }),
     };
   }
 
+  /** Stop what a start of `identity` spawned before its handle was recorded. */
+  async cancelUnrecorded(identity: string): Promise<void> {
+    await stopUnrecordedWorker(this.harnessRoot, identity, "Codex harness");
+  }
+
   async observe(handle: HarnessHandle): Promise<HarnessObservation> {
-    const data = this.require(handle);
-    if (existsSync(data.resultPath)) {
-      const result = JSON.parse(readFileSync(data.resultPath, "utf8")) as {
-        state: "complete" | "failed";
-        error?: string;
-        authentication?: unknown;
-      };
-      const authentication = parseAuthenticationRequest(result.authentication);
-      return result.state === "complete"
-        ? { state: "complete" }
-        : {
-            state: "failed",
-            detail: result.error,
-            ...(authentication && { authentication }),
-          };
-    }
-    const current = linuxProcessIdentity(data.pid);
-    return current?.startTime === data.startTime &&
-      current.group === data.pid &&
-      current.state !== "Z"
-      ? { state: "running" }
-      : {
-          state: "failed",
-          interrupted: true,
-          detail:
-            "Worker exited without a durable result; repeating with a fresh attempt",
-        };
+    return observeWorker(this.require(handle), "Codex harness");
   }
 
   async cancel(handle: HarnessHandle): Promise<void> {
@@ -616,8 +579,10 @@ export class LocalExecutionDriver implements ExecutionDriver {
   /**
    * Starting an attempt is idempotent: a repeat in this process returns the
    * running attempt, and the handle is checkpointed before start returns. A
-   * worktree left by a start that crashed before its checkpoint is removed
-   * and the attempt reported stopped, so it never starts twice.
+   * start that crashed before its checkpoint left a worktree and perhaps a
+   * worker: both are stopped and removed, and the attempt starts fresh in
+   * this same call. The crash was already counted once by the paid step, so
+   * nothing here counts it again (#585).
    */
   @classifyFaults(executionFault)
   async start(
@@ -631,18 +596,14 @@ export class LocalExecutionDriver implements ExecutionDriver {
     const worktree = join(this.workRoot, identity);
     mkdirSync(this.workRoot, { recursive: true });
     if (existsSync(worktree)) {
+      await (harness as RecoverableHarness).cancelUnrecorded?.(identity);
       await removeWorktree(this.checkout, worktree);
-      const stopped: ExecutionHandle = {
-        provider: "local",
-        identity,
-        data: {
-          stopped: "An earlier start of this attempt was interrupted",
-          worktree,
-        },
-      };
-      context?.checkpoint(stopped);
-      return stopped;
     }
+    if (context?.cancelled())
+      throw new StepFault({
+        kind: "cancelled",
+        detail: "Cancelled before the worker started",
+      });
     const verified = pinnedGit(
       this.checkout,
       "rev-parse",
@@ -759,8 +720,8 @@ export class LocalExecutionDriver implements ExecutionDriver {
 
   /**
    * Stop an attempt whose start was never recorded: a worker this process
-   * still runs is cancelled, and a worktree left by an interrupted start is
-   * removed.
+   * still runs is cancelled, a worker a crashed start spawned is found by
+   * its identity and stopped, and the worktree is removed.
    */
   @classifyFaults(executionFault)
   async cancelUnrecorded(attemptId: string): Promise<void> {
@@ -773,12 +734,28 @@ export class LocalExecutionDriver implements ExecutionDriver {
       });
       this.active.delete(attemptId);
     }
+    for (const harness of this.harnesses())
+      await harness.cancelUnrecorded?.(attemptId);
     const worktree = join(this.workRoot, attemptId);
     if (
       resolve(worktree).startsWith(`${resolve(this.workRoot)}${sep}`) &&
       existsSync(worktree)
     )
       await removeWorktree(this.checkout, worktree);
+  }
+
+  /** Every harness this driver can start a worker with. */
+  private harnesses(): RecoverableHarness[] {
+    if (!this.profiles) return [this.harness as RecoverableHarness];
+    return [...this.profiles].map(([id, registration]) => {
+      let harness = this.profileHarnesses.get(id);
+      if (!harness) {
+        harness = registration.createHarness();
+        this.assertCapabilities(harness, registration.binding.adapter);
+        this.profileHarnesses.set(id, harness);
+      }
+      return harness as RecoverableHarness;
+    });
   }
 
   /**
@@ -837,7 +814,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
       if (settled.worktree && existsSync(settled.worktree))
         await removeWorktree(this.checkout, settled.worktree);
       if (settled.result) return structuredClone(settled.result);
-      throw new SettledAttemptFailure(new Error(settled.stopped));
+      throw stoppedFault(settled.stopped!, true);
     }
     const active = this.require(handle);
     let collected: ExecutionResult | undefined;
@@ -895,9 +872,12 @@ export class LocalExecutionDriver implements ExecutionDriver {
     if (!collected) {
       if (collectionError instanceof AuthenticationRequiredError)
         throw collectionError;
-      throw new SettledAttemptFailure(
+      throw stoppedFault(
+        collectionError instanceof Error
+          ? collectionError.message
+          : String(collectionError),
+        interrupted,
         collectionError,
-        interrupted ? "interruption" : "implementation",
       );
     }
     return collected;

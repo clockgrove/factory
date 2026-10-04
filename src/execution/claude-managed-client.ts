@@ -2,7 +2,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { BetaCloudConfig } from "@anthropic-ai/sdk/resources/beta/environments/environments";
 import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
-import { transientRequestFailure } from "../work-repair.js";
+import { transportFailure } from "./attempt.js";
+import { missingCredential } from "./fault.js";
 import type {
   BetaManagedAgentsSession,
   SessionCreateParams,
@@ -193,8 +194,7 @@ export function claudeGone(error: unknown): boolean {
 /** A request that failed in transit; the SDK's connection errors carry no status. */
 export function claudeTransient(error: unknown): boolean {
   return (
-    error instanceof Anthropic.APIConnectionError ||
-    transientRequestFailure(error)
+    error instanceof Anthropic.APIConnectionError || transportFailure(error)
   );
 }
 
@@ -213,7 +213,7 @@ export class ClaudeManagedClient {
   ) {
     const apiKey = options.apiKey ?? process.env[config.credentialEnv];
     if (!apiKey)
-      throw new Error(
+      throw missingCredential(
         `Set ${config.credentialEnv} outside the target repository`,
       );
     this.sdk = new Anthropic({

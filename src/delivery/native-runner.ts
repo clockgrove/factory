@@ -903,15 +903,12 @@ export async function runNativeGraph(args: {
       if (behind >= 0) {
         const layer = layers[behind]!;
         const work = state.work[unit.items[behind]!.id]!;
-        const head = await github.updateBranch(
-          {
-            number: layer.pullRequest,
-            branch: layer.branch,
-            headSha: layer.headSha,
-            earlierHeads: earlierHeads(work),
-          },
-          layer.headSha,
-        );
+        const head = await github.updateBranch({
+          number: layer.pullRequest,
+          branch: layer.branch,
+          headSha: layer.headSha,
+          earlierHeads: earlierHeads(work),
+        });
         context.progress();
         work.changeRef = head;
         layer.headSha = head;

@@ -37,6 +37,7 @@
       "GET /repos/{owner}/{repo}/pulls #1",
       "GET /repos/{owner}/{repo}/pulls/{number} #1",
       "GET /repos/{owner}/{repo}/pulls/{number}/merge-async/{uuid} #1",
+      "GET /repos/{owner}/{repo}/rules/branches/{branch} #1",
       "GET /repos/{owner}/{repo}/stacks #1",
       "GET /user #1",
       "GIT fetch-advertise #1",
@@ -53,6 +54,13 @@
       "model.reviewResult #1",
       "model.reviewResult #2",
       "model.reviewResult #3"
+    ],
+    "cancel-running": [
+      "driver.cancel #1"
+    ],
+    "cancel-starting": [],
+    "stop-running": [
+      "driver.cancel #1"
     ]
   },
   "regular": {
@@ -91,6 +99,7 @@
       "GET /repos/{owner}/{repo}/labels #1",
       "GET /repos/{owner}/{repo}/pulls #1",
       "GET /repos/{owner}/{repo}/pulls/{number} #1",
+      "GET /repos/{owner}/{repo}/rules/branches/{branch} #1",
       "GET /user #1",
       "GIT fetch-advertise #1",
       "GIT push-advertise #1",
@@ -106,6 +115,13 @@
       "model.reviewResult #1",
       "model.reviewResult #2",
       "model.reviewResult #3"
+    ],
+    "cancel-running": [
+      "driver.cancel #1"
+    ],
+    "cancel-starting": [],
+    "stop-running": [
+      "driver.cancel #1"
     ]
   }
 }

@@ -191,15 +191,12 @@ export async function runRegularGraph(args: {
       // Strict protection: bring the branch up to date with its base, from
       // exactly the head Factory published; its checks run again.
       if (observation.mergeReadiness === "behind") {
-        const head = await github.updateBranch(
-          {
-            number: published.pullRequest,
-            branch,
-            headSha: published.headSha,
-            earlierHeads: published.earlierHeads,
-          },
-          published.headSha,
-        );
+        const head = await github.updateBranch({
+          number: published.pullRequest,
+          branch,
+          headSha: published.headSha,
+          earlierHeads: published.earlierHeads,
+        });
         context.progress();
         work.changeRef = head;
         published.headSha = head;

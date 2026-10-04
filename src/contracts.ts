@@ -652,7 +652,7 @@ export interface DeliveryObservation {
    * require; `conflict`: the head conflicts with the base; `draft`: someone
    * made the PR a draft.
    */
-  mergeReadiness?: "ready" | "waiting" | "conflict" | "draft";
+  mergeReadiness?: "ready" | "waiting" | "conflict" | "draft" | "behind";
 }
 export interface MergeResult {
   integratedSha: string;
@@ -852,6 +852,8 @@ export interface NamedCheckEvidence {
 }
 
 export interface GitHubGateway {
+  /** Strict protection: GitHub merges the base into the PR from exactly `identity.headSha`; returns the verified new head. */
+  updateBranch(identity: PullRequestIdentity): Promise<string>;
   intakePage?(page: number, etag?: string): Promise<IntakeIssuePage>;
   objectiveDependencies?(number: number): Promise<number[]>;
   namedCheck?(

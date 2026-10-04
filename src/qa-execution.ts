@@ -1,5 +1,3 @@
-import { workspacePackageAdditions } from "./workspace-membership.js";
-import { graphDigest } from "./graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "./compiler.js";
@@ -11,19 +9,21 @@ import type {
   PlanningModel,
   WorkItem,
 } from "./contracts.js";
-import { reviewItem } from "./item-steps.js";
-import { step } from "./step.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
+import { graphDigest } from "./graph-amendments.js";
+import { reviewItem } from "./item-steps.js";
 import { validationLfsMembersForItem } from "./media.js";
 import type { PhaseAdmission } from "./phase-admission.js";
 import { fetchHead, gitAsync } from "./process.js";
 import { itemCoverage, objectiveCandidate } from "./qa.js";
 import type { FactoryState } from "./state.js";
+import { clearWait, setWait, step, waitOf } from "./step.js";
 import {
   validateWorkItem,
   workItemReviewEvidence,
   workItemReviewObservations,
 } from "./validation.js";
+import { workspacePackageAdditions } from "./workspace-membership.js";
 
 /** Run only source-authorized readiness probes before spending a worker call. */
 export async function preflightItemEnvironment(args: {
@@ -87,10 +87,16 @@ export async function runQaItem(args: {
 }): Promise<void> {
   const { state, item, save } = args;
   const work = state.work[item.id]!;
-  const readinessWasWaiting = Boolean(work.waitingReason);
+  const ciWait = () => waitOf(state, { item: item.id })?.kind === "ci";
+  const readinessWasWaiting = ciWait();
   const retainPausedWait = (): boolean => {
     if (!readinessWasWaiting || !args.paused?.()) return false;
-    work.waitingReason ??= "Awaiting exact named CI before continuing QA";
+    if (!ciWait())
+      setWait(
+        state,
+        { item: item.id },
+        { kind: "ci", detail: "Awaiting exact named CI before continuing QA" },
+      );
     args.phases?.release(item.id);
     save();
     return true;
@@ -129,7 +135,7 @@ export async function runQaItem(args: {
           if (head !== commit)
             throw new Error("Default branch changed before pinned-baseline QA");
         }
-        if (work.waitingReason && work.changeRef !== commit)
+        if (ciWait() && work.changeRef !== commit)
           throw new Error("QA candidate changed while awaiting exact named CI");
         work.status = "running";
         work.step = "validate";
@@ -177,7 +183,14 @@ export async function runQaItem(args: {
               Number.isSafeInteger(check.id) &&
               check.id > 0)
           ) {
-            work.waitingReason = `Awaiting named CI check ${proof.checkName} at ${target.changeRef}`;
+            setWait(
+              state,
+              { item: item.id },
+              {
+                kind: "ci",
+                detail: `Awaiting named CI check ${proof.checkName} at ${target.changeRef}`,
+              },
+            );
             args.phases?.release(item.id);
             save();
             return undefined;
@@ -229,7 +242,7 @@ export async function runQaItem(args: {
     if (retainPausedWait()) return;
     await args.phases?.reserve(item.id, "review");
     if (retainPausedWait()) return;
-    delete work.waitingReason;
+    clearWait(state, { item: item.id });
     const reviewed = await reviewItem({
       state,
       item,

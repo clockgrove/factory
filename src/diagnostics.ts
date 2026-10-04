@@ -1,6 +1,3 @@
-import { objectiveCandidate } from "./qa.js";
-import { objectiveComplete } from "./completion.js";
-import { graphDigest } from "./graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -21,6 +18,7 @@ import {
   CaptureWriter,
   type InteractionMetadata,
 } from "./capture.js";
+import { objectiveComplete } from "./completion.js";
 import { stateRoot } from "./config.js";
 import type {
   ModelInvocationObservation,
@@ -28,6 +26,9 @@ import type {
   ModelInvocationUsage,
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
+import { faultDetail, type Wait } from "./fault.js";
+import { graphDigest } from "./graph-amendments.js";
+import { objectiveCandidate } from "./qa.js";
 import {
   consumption,
   failureDigest,
@@ -43,8 +44,7 @@ import type {
   WorkState,
 } from "./state.js";
 import { shortPlanDigest, summarizeStatus } from "./status-summary.js";
-import { type StepScope, type StepState, outageOf } from "./step.js";
-import { faultDetail, type Wait } from "./fault.js";
+import { outageOf, type StepScope, type StepState, waitOf } from "./step.js";
 import { normalizeTokenUsage, tokenCategories } from "./usage.js";
 
 /** A scope's structured wait and failing step, redacted for status. */
@@ -1122,8 +1122,9 @@ export function statusDocument(
       : Math.max(0, concurrency - activeCount);
   const work = state.graph.items.map((item) => {
     const current = state.work[item.id]!;
+    const waitDetail = waitOf(state, { item: item.id })?.detail;
     let blockedReason: string | undefined = current.requestedPhase
-      ? current.waitingReason
+      ? waitDetail
       : undefined;
     let eligible = false;
     if (current.status === "pending") {
@@ -1150,12 +1151,12 @@ export function statusDocument(
               item.kind !== "aggregate" &&
               configuredSlots === 0
             ? "capacity"
-            : current.waitingReason;
+            : waitDetail;
     } else if (current.status === "waiting")
       blockedReason =
         current.step === "approve-result"
           ? "acceptance-decision"
-          : (current.waitingReason ?? "asset-selection");
+          : (waitDetail ?? "asset-selection");
     return {
       id: item.id,
       issue: state.issueByItemId[item.id],
@@ -1168,8 +1169,8 @@ export function statusDocument(
       // Provider capacity is not persisted in the state snapshot.
       ready: current.status === "pending" && !blockedReason ? null : false,
       blockedReason: blockedReason ?? null,
-      waitingReason: current.waitingReason
-        ? redactDiagnosticDetail(current.waitingReason, secrets)
+      waitingReason: waitDetail
+        ? redactDiagnosticDetail(waitDetail, secrets)
         : null,
       attemptId: current.attempt ?? null,
       ...(item.executionBinding
@@ -1178,8 +1179,7 @@ export function statusDocument(
             actualExecution:
               (
                 current.execution?.data as
-                  | { executionBinding?: unknown }
-                  | undefined
+                  { executionBinding?: unknown } | undefined
               )?.executionBinding ?? null,
           }
         : {}),

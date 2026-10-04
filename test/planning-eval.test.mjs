@@ -23,11 +23,23 @@ const root = resolve(import.meta.dirname, "..");
 const script = join(root, "scripts/eval-planning.mjs");
 const support = (name) => join(root, "test/support", name);
 // Tests that run the Codex judge need bubblewrap with unprivileged user
-// namespaces. Hosts without it (macOS, Windows, containers, CI images that
-// restrict namespaces) skip them with this reason instead of failing.
-const sandboxSkip = sandboxBinary()
-  ? false
-  : "judge sandbox unavailable: bubblewrap with unprivileged user namespaces is not usable on this host";
+// namespaces. Hosts without it (macOS, Windows, containers) skip them with
+// this reason. CI sets FACTORY_REQUIRE_SANDBOX=1 (#705), so there they never
+// skip: a missing sandbox fails the "judge sandbox is required" test below.
+const sandboxRequired = process.env.FACTORY_REQUIRE_SANDBOX === "1";
+const sandboxSkip =
+  sandboxBinary() || sandboxRequired
+    ? false
+    : "judge sandbox unavailable: bubblewrap with unprivileged user namespaces is not usable on this host";
+
+test("judge sandbox is usable where it is required", {
+  skip: sandboxRequired ? false : "FACTORY_REQUIRE_SANDBOX is not set",
+}, () => {
+  assert.ok(
+    sandboxBinary(),
+    "FACTORY_REQUIRE_SANDBOX=1 but bubblewrap with unprivileged user namespaces is not usable",
+  );
+});
 
 function writeConfig(work) {
   const path = join(work, "factory.json");

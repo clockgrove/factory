@@ -130,7 +130,7 @@ A judge's digest covers:
 
 The test suite pins each digest, so a change to any of these fails CI.
 
-The sandbox tests (plan and review runs with judges, and the isolation probe) skip, with the reason in the test output, when the host cannot run bubblewrap with unprivileged user namespaces: macOS, Windows, containers, and Ubuntu 24.04 runners, which restrict user namespaces through AppArmor. CI does not install bubblewrap or enable user namespaces today, so these tests skip there. Enabling them in CI is the repository owner's decision (#705). Until then, run `node --test test/planning-eval.test.mjs` on a Linux host with user namespaces before changing the judge sandbox.
+The sandbox tests (plan and review runs with judges, and the isolation probe) run in CI: the `judge-sandbox` action installs bubblewrap and loads an AppArmor profile that grants unprivileged user namespaces to `/usr/bin/bwrap` only, and sets `FACTORY_REQUIRE_SANDBOX=1`, so a missing sandbox fails CI instead of skipping (#705). On hosts that cannot run bubblewrap with user namespaces (macOS, Windows, containers) they skip, with the reason in the test output; run `node --test test/planning-eval.test.mjs` on a Linux host with user namespaces before changing the judge sandbox.
 
 ## Cases
 

@@ -45,12 +45,7 @@ import {
   GitHubRequestError,
   gitHubFault,
 } from "../dist/github-client.js";
-import {
-  git,
-  gitAsync,
-  gitFault,
-  withProcessCancellation,
-} from "../dist/process.js";
+import { git, gitAsync, gitFault } from "../dist/process.js";
 import {
   ProviderTurnIncompleteError,
   ProviderTurnTimeoutError,
@@ -711,26 +706,36 @@ test("a rate limit without a reset header waits a minute instead of stopping eve
     { kind: "transient", outcomeUnknown: false, retryIn: [55_000, MINUTE] },
     "missing reset",
   );
-  // The gate is finite: the next request waits for it rather than failing
-  // with "rate reset unavailable" for the rest of the process.
-  const controller = new AbortController();
-  const queued = withProcessCancellation(controller.signal, () =>
-    client.request("GET", "repos/a/b/issues/2"),
-  ).then(
-    () => "sent",
-    (caught) => caught,
+  // The gate is finite: the next request is held, unsent, until the default
+  // minute passes rather than failing with "rate reset unavailable" for the
+  // rest of the process; the caller's step waits for its retryAt (#641).
+  const held = await client
+    .request("GET", "repos/a/b/issues/2")
+    .catch((caught) => caught);
+  assert.doesNotMatch(held.message, /rate reset unavailable/);
+  assertFault(
+    faultOf(held),
+    { kind: "transient", outcomeUnknown: false, retryIn: [55_000, MINUTE] },
+    "held by the gate",
   );
-  const early = await Promise.race([
-    queued,
-    new Promise((resolve) => setTimeout(() => resolve("waiting"), 50)),
-  ]);
-  assert.equal(early, "waiting");
-  controller.abort();
-  const settled = await queued;
-  assert.ok(settled instanceof Error);
-  assert.doesNotMatch(settled.message, /rate reset unavailable/);
   assert.equal(calls, 1);
+  await afterGate(faultOf(held).retryAt, () =>
+    client.request("GET", "repos/a/b/issues/3").catch(() => undefined),
+  );
+  assert.equal(calls, 2);
 });
+
+/** Run `fn` with the clock just past `retryAt`, as if the gate had opened. */
+async function afterGate(retryAt, fn) {
+  const now = Date.now;
+  const skew = Date.parse(retryAt) + 1 - now();
+  Date.now = () => now() + skew;
+  try {
+    return await fn();
+  } finally {
+    Date.now = now;
+  }
+}
 
 test("projection treats a missing dependency as lag right after creating the issue", async () => {
   const error = await gateway({
@@ -827,21 +832,20 @@ test("a GraphQL rate limit gates the next request like REST headers do", async (
     }),
   );
   await assert.rejects(client.pullRequestReadiness("a/b", 5));
-  const controller = new AbortController();
-  const queued = withProcessCancellation(controller.signal, () =>
-    client.request("GET", "repos/a/b/issues/2"),
-  ).then(
-    () => "sent",
-    (caught) => caught,
+  // The next REST request is held, unsent, as a transient fault at the gate.
+  const held = await client
+    .request("GET", "repos/a/b/issues/2")
+    .catch((caught) => caught);
+  assertFault(
+    faultOf(held),
+    { kind: "transient", outcomeUnknown: false, retryIn: [55_000, MINUTE] },
+    "held by the GraphQL gate",
   );
-  const early = await Promise.race([
-    queued,
-    new Promise((resolve) => setTimeout(() => resolve("waiting"), 50)),
-  ]);
-  assert.equal(early, "waiting");
-  controller.abort();
-  await queued;
   assert.equal(calls, 1);
+  await afterGate(faultOf(held).retryAt, () =>
+    client.request("GET", "repos/a/b/issues/3").catch(() => undefined),
+  );
+  assert.equal(calls, 2);
 });
 
 test("a 404 on a Factory object is lag only within two minutes of its creation", () => {

@@ -796,6 +796,20 @@ test("fixed read query shares REST rate gate, rejects partial data and never cla
     }),
   );
   await client.request("GET", "repos/example/target/issues/1");
+  // The REST gate holds the GraphQL read, unsent, until its retryAt (#641).
+  const held = await client
+    .pullRequestReadiness("example/target", 1)
+    .catch((error) => error);
+  assert.equal(faultOf(held).kind, "transient");
+  assert.equal(faultOf(held).outcomeUnknown, false);
+  assert.ok(Date.parse(faultOf(held).retryAt) - calls[0].at >= 50);
+  assert.equal(calls.length, 1);
+  await new Promise((resolve) =>
+    setTimeout(
+      resolve,
+      Math.max(Date.parse(faultOf(held).retryAt) - Date.now(), 0) + 5,
+    ),
+  );
   await assert.rejects(
     client.pullRequestReadiness("example/target", 1),
     /unavailable/,

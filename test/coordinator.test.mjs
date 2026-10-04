@@ -15,7 +15,7 @@ import { Octokit } from "@octokit/core";
 import { GitHubClient } from "../dist/github-client.js";
 import { RealGitHubGateway } from "../dist/github.js";
 import { withProcessCancellation } from "../dist/process.js";
-import { attachFault, decision, transient } from "../dist/fault.js";
+import { attachFault, decision, faultOf, transient } from "../dist/fault.js";
 import { stateRoot } from "../dist/config.js";
 import { defaultAutonomy } from "../dist/index.js";
 import { requestControl } from "../dist/coordinator-control.js";
@@ -246,6 +246,19 @@ test("compound: after an interrupted projection, read-only observations keep the
     abort.abort();
     await assert.rejects(queued);
     assert.equal(reads.length, 1);
+    // While the gate is closed the read is held, unsent, as a transient fault
+    // whose retryAt is the gate; the caller's step waits there (#641).
+    const held = await github.objective(1).catch((error) => error);
+    assert.equal(faultOf(held).kind, "transient");
+    assert.equal(faultOf(held).outcomeUnknown, false);
+    assert.ok(Date.parse(faultOf(held).retryAt) - reads[0] >= 90);
+    assert.equal(reads.length, 1);
+    await new Promise((resolve) =>
+      setTimeout(
+        resolve,
+        Math.max(Date.parse(faultOf(held).retryAt) - Date.now(), 0) + 5,
+      ),
+    );
     await github.objective(1);
     assert.equal(reads.length, 2);
     assert.ok(reads[1] - reads[0] >= 90);

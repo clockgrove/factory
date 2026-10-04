@@ -629,6 +629,7 @@ test("actual planning packets carry presence without executing acceptance, and b
         decodeGraphReview(
           { packetId: "stale-packet", findings: [] },
           reviewPacket,
+          [],
         ),
       /exact packetId/,
     );

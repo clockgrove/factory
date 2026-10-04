@@ -622,7 +622,11 @@ export function applyPendingAmendment(
               const response = await args.model.reviewGraph(request);
               try {
                 if (request.reviewPacket)
-                  decodeGraphReview(response, request.reviewPacket);
+                  decodeGraphReview(
+                    response,
+                    request.reviewPacket,
+                    request.graph.items.map((item) => item.id),
+                  );
               } catch (error) {
                 throw new StepFault(
                   transient(
@@ -863,7 +867,11 @@ async function advanceAmendment(args: {
       });
       calling = undefined;
       // The answer decoded inside the paid call (applyPendingAmendment).
-      const findings = decodeGraphReview(response, evidence);
+      const findings = decodeGraphReview(
+        response,
+        evidence,
+        pending.graph!.items.map((item) => item.id),
+      );
       if (findings.length) {
         // Only a complete packet-bound decoded finding permits diagnosed correction.
         stage = "review-findings";

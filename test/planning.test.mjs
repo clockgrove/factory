@@ -473,6 +473,7 @@ test("one sourced review finding permits one revision and re-review", async () =
             calls.filter((call) => call.type === "review").length === 1
               ? [
                   {
+                    itemIds: ["one"],
                     evidenceIndices: [
                       request.reviewPacket.evidence.findIndex(
                         (e) => e.path === "OBJECTIVE",
@@ -500,6 +501,8 @@ test("one sourced review finding permits one revision and re-review", async () =
       ["compile", "review", "diagnosis", "compile", "review"],
     );
     assert.match(calls[3].objective, /Missing obligation/);
+    // The revision packet shows the reviewed items beside each finding.
+    assert.match(calls[3].objective, /"itemIds":\["one"\]/);
     assert.deepEqual(
       calls.map((call) => [call.invocation.phase, call.invocation.ordinal]),
       [
@@ -824,6 +827,44 @@ test("unresolved review asks one human question and records a specific decision"
         ),
       /differs from the current Objective/,
     );
+  });
+});
+
+test("a graph review finding naming an item outside the graph is an invalid review", async () => {
+  await fixture("review-unknown-item", async (root) => {
+    const target = createTarget(root, {
+      "docs/plan.md": "# Plan\n\n## Wave 0\nCanonical obligation\n",
+    });
+    let generationCount = 0;
+    const candidate = await compilePlan(
+      1,
+      body,
+      target.baseSha,
+      target.checkout,
+      {
+        async generateStructured(request) {
+          generationCount += 1;
+          return withCoverage(request, graph(target.baseSha));
+        },
+        async reviewGraph(request) {
+          return {
+            packetId: request.reviewPacket.id,
+            findings: [
+              {
+                itemIds: ["no-such-item"],
+                evidenceIndices: [0],
+                detail: "Defect in an invented item",
+                question: "Approve this?",
+              },
+            ],
+          };
+        },
+      },
+    );
+    assert.equal(candidate.review.status, "needs-human");
+    assert.equal(candidate.review.findings.length, 0);
+    assert.match(candidate.review.failure.detail, /item ids/);
+    assert.equal(generationCount, 1);
   });
 });
 

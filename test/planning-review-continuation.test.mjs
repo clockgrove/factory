@@ -132,6 +132,7 @@ async function fixture(
             (rejected || malformed) && reviews === 1
               ? [
                   {
+                    itemIds: [],
                     evidenceIndices: [malformed ? 999 : 0],
                     detail:
                       "The generated task does not retain the complete result criterion.",
@@ -146,6 +147,7 @@ async function fixture(
         const resolved = decodeGraphReview(
           retained.planningRecovery.review.response,
           retained.planningRecovery.review.packet,
+          [],
         );
         assert(prompt.includes(JSON.stringify(resolved)));
         assert(!prompt.includes("could not be validated"));
@@ -276,7 +278,7 @@ test("known rejected review keeps exact resolved identities across pause and one
   const f = await fixture(t, { rejected: true });
   const state = JSON.parse(JSON.stringify(f.retained));
   const original = structuredClone(state.planningRecovery.review);
-  const resolved = decodeGraphReview(original.response, original.packet);
+  const resolved = decodeGraphReview(original.response, original.packet, []);
   const candidate = await compilePlan(...f.args, { state, save() {} });
   assert.equal(candidate.review.status, "clean");
   assert.equal(consumption(state).planningRevisions, 1);
@@ -425,6 +427,7 @@ test("exhausted allowance and repeated failures keep real findings for a human d
     const findings = decodeGraphReview(
       state.planningRecovery.review.response,
       state.planningRecovery.review.packet,
+      [],
     );
     if (repeated)
       state.planningRecovery.history.push({
@@ -448,6 +451,7 @@ test("exhausted allowance and repeated failures keep real findings for a human d
       decodeGraphReview(
         state.planningRecovery.review.response,
         state.planningRecovery.review.packet,
+        [],
       ),
       findings,
     );

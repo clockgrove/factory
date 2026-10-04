@@ -275,7 +275,7 @@ test("planning wire retains one whole compound proof and substantive review refu
     controllerCapabilitiesDigest: input.controllerCapabilitiesDigest,
     reviewPacket: packet,
   });
-  assert.equal(decodeGraphReview(refusal, packet).length, 1);
+  assert.equal(decodeGraphReview(refusal, packet, []).length, 1);
   assert.deepEqual(refusal.findings, [finding]);
   response = { diagnosis: finding.detail };
   await model.generateStructured({
@@ -2059,7 +2059,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
     request.reviewPacket = reviewPacket([], planningReviewEvidence(request));
     const refusal = await model.reviewGraph(request);
     assert.equal(
-      decodeGraphReview(refusal, request.reviewPacket).length,
+      decodeGraphReview(refusal, request.reviewPacket, []).length,
       1,
       "Substantive grounded refusals stay refusals through the actual SDK contract",
     );

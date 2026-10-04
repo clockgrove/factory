@@ -312,6 +312,30 @@ describe("dead ends", { concurrency: true }, () => {
     });
   }
 
+  // The owner's control socket falls back to the application when it does not
+  // answer, so a harness that never reaches an owner would still pass. Only a
+  // parked owner (paused or draining) is a live owner at a stop, so wait for
+  // those cases, in order, until one has had a command answered by its owner.
+  test("named commands were applied through a live owner", {
+    timeout: 3_600_000,
+  }, async () => {
+    const parked = cases.filter((testCase) =>
+      has(testCase.identity, "paused", "draining"),
+    );
+    for (const testCase of parked) {
+      await outcomeOf(testCase);
+      if (ownerProbes.answered > 0) break;
+    }
+    assert.ok(
+      ownerProbes.run > 0,
+      "No stop with a live owner had a named command probed",
+    );
+    assert.ok(
+      ownerProbes.answered > 0,
+      `The owner's socket answered none of ${ownerProbes.run} probes made with an owner running`,
+    );
+  });
+
   for (const testCase of cases) {
     test(testCase.name, { timeout: 3_600_000 }, async () => {
       const outcome = await outcomeOf(testCase);
@@ -351,20 +375,6 @@ describe("dead ends", { concurrency: true }, () => {
       OVERLAY_VALUES.filter((value) => !used.has(value)),
       [],
       "No case applies these overlays; they change nothing or apply to no anchor",
-    );
-  });
-
-  // The owner's control socket falls back to the application when it does not
-  // answer, so a harness that never reaches an owner would still pass.
-  test("named commands were applied through a live owner", async () => {
-    for (const testCase of cases) await outcomeOf(testCase);
-    assert.ok(
-      ownerProbes.run > 0,
-      "No stop with a live owner had a named command probed",
-    );
-    assert.ok(
-      ownerProbes.answered > 0,
-      `The owner's socket answered none of ${ownerProbes.run} probes made with an owner running`,
     );
   });
 });

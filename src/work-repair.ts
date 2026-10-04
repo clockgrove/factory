@@ -17,6 +17,8 @@ import {
   failureDigest,
   itemEvent,
   releaseCharge,
+  amendmentAllowed,
+  amendmentsUsedUp,
   repairScopes,
   validateCorrection,
   type FailureClass,
@@ -228,6 +230,31 @@ function mergedPredecessors(
   });
 }
 
+/**
+ * The merged predecessor that last took over `path`. A new item that takes a
+ * done item's file depends on it, so the latest owner is the one no other
+ * owner of the path is built on; among independent owners, the one added last.
+ */
+function latestOwner(
+  state: FactoryState,
+  predecessors: { item: WorkItem; pullRequest?: number }[],
+  path: string,
+): { item: WorkItem; pullRequest?: number } | undefined {
+  const owners = predecessors.filter((entry) =>
+    ownsPath(path, entry.item.ownedPaths),
+  );
+  const builtOn = new Set<string>();
+  for (const owner of owners)
+    for (const other of mergedPredecessors(state, owner.item))
+      builtOn.add(other.item.id);
+  const order = (entry: { item: WorkItem }) =>
+    state.graph.items.findIndex((candidate) => candidate.id === entry.item.id);
+  return owners
+    .filter((entry) => !builtOn.has(entry.item.id))
+    .sort((a, b) => order(a) - order(b))
+    .at(-1);
+}
+
 /** The regular files of a result tree: path, with the blob size, from `git ls-tree -l`. */
 function treeFiles(
   checkout: string,
@@ -266,9 +293,16 @@ function blamedPredecessor(
   checkout: string | undefined,
 ): Blame {
   const path = answer.path?.trim() ?? "";
-  const owner = mergedPredecessors(state, item).find(
+  const predecessors = mergedPredecessors(state, item);
+  const named = predecessors.find(
     (entry) => entry.item.id === answer.predecessor,
   );
+  // A file a later item took over is that item's now: it is the one to build
+  // on, even when the answer names the earlier owner.
+  const owner =
+    named && ownsPath(path, named.item.ownedPaths)
+      ? (latestOwner(state, predecessors, path) ?? named)
+      : named;
   if (!owner)
     throw new Error(
       `${answer.predecessor || "(none)"} is not a merged predecessor of ${item.id}`,
@@ -303,6 +337,8 @@ function blamedPredecessor(
   };
 }
 
+/** The most of the model's diagnosis a decision quotes. */
+const DIAGNOSIS_QUOTE_CHARS = 400;
 const EVIDENCE_FILE_BYTES = 16_000;
 const EVIDENCE_TOTAL_BYTES = 64_000;
 /** A larger blob is not read at all: it is not source a diagnosis can use. */
@@ -321,43 +357,56 @@ function diagnosisFiles(
 ): { path: string; heading: string; content: string }[] {
   const treeSha = state.work[item.id]?.treeSha;
   if (!checkout || !treeSha) return [];
-  const owners = [
-    { item, label: `owned by ${item.id} (the failing item)` },
-    ...mergedPredecessors(state, item).map((entry) => ({
-      item: entry.item,
-      label: `owned by ${entry.item.id} (merged)`,
-    })),
-  ];
+  const predecessors = mergedPredecessors(state, item);
   const files: { path: string; heading: string; content: string }[] = [];
   let total = 0;
   try {
     const listed = treeFiles(checkout, treeSha);
-    for (const owner of owners) {
-      for (const { path, size } of listed) {
-        // The first owner that owns it: a file is shown once.
-        if (
-          owners.find((entry) => ownsPath(path, entry.item.ownedPaths)) !==
-          owner
-        )
-          continue;
-        // Check the size before reading the blob.
-        if (size > EVIDENCE_READ_BYTES) continue;
-        let content: string;
-        try {
-          content = new TextDecoder("utf-8", { fatal: true }).decode(
-            pinnedGitRaw(checkout, "show", `${treeSha}:${path}`),
-          );
-        } catch {
-          continue;
-        }
-        if (content.length > EVIDENCE_FILE_BYTES)
-          content = `${content.slice(0, EVIDENCE_FILE_BYTES)}\n[truncated]`;
-        // One file too large for what is left does not hide the smaller
-        // ones after it.
-        if (total + content.length > EVIDENCE_TOTAL_BYTES) continue;
-        total += content.length;
-        files.push({ path, heading: owner.label, content });
+    // The failing item's files first, so the budget never goes to a
+    // predecessor before them.
+    const rank = (path: string): number =>
+      ownsPath(path, item.ownedPaths) ? 0 : 1;
+    const owned = listed
+      .map((file) => ({
+        ...file,
+        owner: ownsPath(file.path, item.ownedPaths)
+          ? undefined
+          : latestOwner(state, predecessors, file.path),
+      }))
+      .filter((file) => rank(file.path) === 0 || file.owner)
+      .sort((a, b) => rank(a.path) - rank(b.path));
+    for (const { path, size, owner } of owned) {
+      // The budget is spent: nothing more is read.
+      if (total >= EVIDENCE_TOTAL_BYTES) break;
+      // Check the size before reading the blob. A character takes at most
+      // three bytes, so this bounds what is read from below.
+      if (
+        size > EVIDENCE_READ_BYTES ||
+        total + Math.min(Math.ceil(size / 3), EVIDENCE_FILE_BYTES) >
+          EVIDENCE_TOTAL_BYTES
+      )
+        continue;
+      let content: string;
+      try {
+        content = new TextDecoder("utf-8", { fatal: true }).decode(
+          pinnedGitRaw(checkout, "show", `${treeSha}:${path}`),
+        );
+      } catch {
+        continue;
       }
+      if (content.length > EVIDENCE_FILE_BYTES)
+        content = `${content.slice(0, EVIDENCE_FILE_BYTES)}\n[truncated]`;
+      // One file too large for what is left does not hide the smaller
+      // ones after it.
+      if (total + content.length > EVIDENCE_TOTAL_BYTES) continue;
+      total += content.length;
+      files.push({
+        path,
+        heading: owner
+          ? `owned by ${owner.item.id} (merged)`
+          : `owned by ${item.id} (the failing item)`,
+        content,
+      });
     }
   } catch {
     // Evidence is best effort: the diagnosis still runs on the failure record.
@@ -543,8 +592,19 @@ export async function diagnoseWorkRepair(args: {
     failure.classification = "decision";
     failure.continuation = "operator-decision";
     failure.predecessor = blame;
+    // The model's text is quoted and capped: it is evidence, not the
+    // controller's wording, and it must not read as a command.
+    const said = JSON.stringify(
+      diagnosis.length > DIAGNOSIS_QUOTE_CHARS
+        ? `${diagnosis.slice(0, DIAGNOSIS_QUOTE_CHARS)}...`
+        : diagnosis,
+    );
+    const head = `${blame.path} is owned by ${owner}, which is merged; ${item.id} did not cause this failure and a repair of ${item.id} cannot fix it. The diagnosis said: ${said}.`;
+    // An amendment needs a planning revision: name it only while one is left.
     return stop(
-      `${blame.path} is owned by ${owner}, which is merged; ${item.id} did not cause this failure and a repair of ${item.id} cannot fix it. ${diagnosis} Fix ${blame.item} in this order: (1) \`factory propose-amendment --objective ${state.objective} --proposal FILE\` with an in-scope proposal that adds a Work Item depending on ${blame.item} and owning ${blame.path}; it works while the Objective is stopped. (2) \`factory run --objective ${state.objective}\` until that Work Item merges. (3) \`${retry}\`, which starts a new attempt on the integrated head. (4) \`factory run --objective ${state.objective}\` again`,
+      amendmentAllowed(state)
+        ? `${head} Fix ${blame.item} in this order: (1) \`factory propose-amendment --objective ${state.objective} --proposal FILE\` with an in-scope proposal that adds a Work Item depending on ${blame.item} and owning ${blame.path}; it works while the Objective is stopped. (2) If no run is active, \`factory run --objective ${state.objective}\` until that Work Item merges. (3) \`${retry}\`, which starts a new attempt on the integrated head. (4) \`factory run --objective ${state.objective}\` again`
+        : `${head} ${amendmentsUsedUp(state.objective)}`,
     );
   }
   const correction = answer;

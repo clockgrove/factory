@@ -146,6 +146,8 @@ export interface ExecutionStatusView extends WaitView {
   runActive: boolean | null;
   coordinator: CoordinatorView | null;
   pendingAmendment: { phase: string; error: string | null } | null;
+  /** What is left of each allowance; an amendment takes a planning revision. */
+  allowanceRemaining?: { objective: { planningRevisions: number } };
   repairs: Record<
     string,
     {
@@ -154,6 +156,7 @@ export interface ExecutionStatusView extends WaitView {
       failureEvent?: string | null;
       /** The merged predecessor the failure was blamed on, if any. */
       blamedPredecessor?: string | null;
+      blamedPath?: string | null;
       nextDecision: string | null;
     }
   >;
@@ -460,6 +463,7 @@ function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
   // Retry refuses while other work runs; let it settle first.
   if (view.work.some((item) => item.status === "running")) return undefined;
   const blamed = view.repairs[failed.id]?.blamedPredecessor;
+  if (blamed) return blamedItem(view, failed.id, blamed);
   return {
     phase: "failed",
     summary: `${failed.id} failed${error}`,
@@ -471,9 +475,41 @@ function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
       reason:
         failed.pullRequest && !wrongResult(view, failed.id)
           ? `Resumes delivery of PR #${failed.pullRequest}${thenRun(view)}; or factory cancel --objective ${objective}`
-          : blamed
-            ? `Once ${blamed} is fixed, starts a new attempt on the integrated head${thenRun(view)}`
-            : `Starts a new attempt${thenRun(view)}`,
+          : `Starts a new attempt${thenRun(view)}`,
+    },
+  };
+}
+
+/**
+ * An item blamed on a merged predecessor's file: retry cannot pass until that
+ * file is fixed, and the way to fix it is an amendment, which needs a planning
+ * revision. Without one, the Objective can only be cancelled.
+ */
+function blamedItem(
+  view: ExecutionStatusView,
+  id: string,
+  predecessor: string,
+): StatusSummary {
+  const objective = view.objective;
+  const path = view.repairs[id]?.blamedPath;
+  const file = path ? `${predecessor}'s ${path}` : `${predecessor}'s file`;
+  const error = view.work.find((item) => item.id === id)?.lastError;
+  const summary = `${id} failed${error ? `: ${short(error, 80)}` : ""}`;
+  if ((view.allowanceRemaining?.objective.planningRevisions ?? 1) <= 0)
+    return {
+      phase: "failed",
+      summary,
+      nextAction: {
+        command: `factory cancel --objective ${objective}`,
+        reason: `${file} is wrong and the planning revisions are used up, so no amendment can fix it; a higher autonomy.allowances.planningRevisions applies to a new Objective`,
+      },
+    };
+  return {
+    phase: "failed",
+    summary,
+    nextAction: {
+      command: `factory retry --objective ${objective} --item ${id}`,
+      reason: `Only after ${file} is fixed: factory propose-amendment --objective ${objective} --proposal FILE adds a Work Item after ${predecessor} that owns it${view.runActive === true ? "" : `; if no run is active, ${run(objective)} merges it`}; then this retry starts a new attempt on the integrated head`,
     },
   };
 }

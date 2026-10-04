@@ -353,15 +353,40 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
           failureClass: "decision",
           failureEvent: null,
           blamedPredecessor: "lib",
+          blamedPath: "lib.sh",
           nextDecision: null,
         },
       },
     }),
   );
+  // The reason carries the amendment that fixes it, not only the retry.
   assert.match(
     blamed.nextAction.reason,
-    /^Once lib is fixed, starts a new attempt on the integrated head\b/,
+    /^Only after lib's lib\.sh is fixed: factory propose-amendment --objective 7 --proposal FILE adds a Work Item after lib that owns it; then this retry starts a new attempt on the integrated head$/,
   );
+  assert.equal(
+    blamed.nextAction.command,
+    "factory retry --objective 7 --item A",
+  );
+  // With no planning revision left, an amendment cannot be taken: cancel.
+  const used = summarizeStatus(
+    execution([item("A", { status: "failed" })], {
+      state: "failed",
+      allowanceRemaining: { objective: { planningRevisions: 0 } },
+      repairs: {
+        A: {
+          phase: "stopped",
+          failureClass: "decision",
+          failureEvent: null,
+          blamedPredecessor: "lib",
+          blamedPath: "lib.sh",
+          nextDecision: null,
+        },
+      },
+    }),
+  );
+  assert.equal(used.nextAction.command, "factory cancel --objective 7");
+  assert.doesNotMatch(used.nextAction.reason, /propose-amendment/);
   const authentication = summarizeStatus(
     execution([
       item("A", {

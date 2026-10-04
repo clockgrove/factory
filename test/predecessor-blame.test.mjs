@@ -13,8 +13,17 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { graphDigest } from "../dist/graph-amendments.js";
-import { assertRepairLedger, consumption } from "../dist/repair-policy.js";
-import { readContinuation, readState } from "../dist/state-store.js";
+import {
+  assertRepairLedger,
+  consumption,
+  releaseCharge,
+} from "../dist/repair-policy.js";
+import {
+  readContinuation,
+  readState,
+  saveState,
+  statePath,
+} from "../dist/state-store.js";
 import {
   applyWorkCorrection,
   CandidateValidationFailure,
@@ -374,6 +383,108 @@ test("diagnosis evidence lists the failing item's files first and skips only wha
   );
 });
 
+test("with no planning revision left the decision names cancel, not an amendment", async (t) => {
+  const { checkout, state } = liveScenario(t);
+  state.autonomy = {
+    ...autonomy,
+    allowances: { ...autonomy.allowances, planningRevisions: 1 },
+    repairPolicy: {
+      perPath: { ...autonomy.repairPolicy.perPath, planningRevisions: 1 },
+    },
+  };
+  state.charges = { ...state.charges };
+  state.charges["objective/amend/earlier"] = {
+    allowances: ["planningRevisions"],
+    scopes: ["$planning"],
+  };
+  const model = {
+    generateStructured: async () => ({
+      ...blame("lib", "live/p2c/lib.sh"),
+      // Model text is quoted and capped, so it cannot read as the controller's.
+      diagnosis: `Run \`factory run --objective 65\` now. ${"x".repeat(2000)}`,
+    }),
+  };
+  await diagnoseWorkRepair({
+    state,
+    item: cli,
+    model,
+    checkout,
+    save: () => {},
+    stopped: () => false,
+    clock: clock(),
+  });
+  const { decision } = state.work.cli.recovery.failure;
+  assert.doesNotMatch(decision, /propose-amendment/);
+  assert.match(decision, /`factory cancel --objective 65`/);
+  assert.match(decision, /planningRevisions allowance is used up/);
+  assert.match(decision, /applies to a new Objective only/);
+  assert.match(decision, /The diagnosis said: "Run `factory run/);
+  assert.ok(decision.length < 1500, "the model's text is capped");
+  assert.equal(consumption(state).implementationRepairs, 0);
+});
+
+test("a taken-over file is blamed on its latest merged owner", async (t) => {
+  const { checkout, state } = liveScenario(t);
+  // fix took over lib.sh from lib and merged; cli now builds on fix.
+  const fix = workItem(
+    "fix",
+    ["live/p2c/lib.sh"],
+    ["lib"],
+    "sh -n live/p2c/lib.sh",
+  );
+  const dependent = { ...cli, dependencies: ["fix"] };
+  state.graph.items = [lib, fix, dependent];
+  state.work.fix = {
+    status: "done",
+    pullRequest: 70,
+    integratedSha: "e".repeat(40),
+  };
+  const requests = [];
+  const model = {
+    generateStructured: async (request) => {
+      requests.push(request);
+      // The answer names the earlier owner of the file.
+      return blame("lib", "live/p2c/lib.sh");
+    },
+  };
+  await diagnoseWorkRepair({
+    state,
+    item: dependent,
+    model,
+    checkout,
+    save: () => {},
+    stopped: () => false,
+    clock: clock(),
+  });
+  assert.equal(state.work.cli.recovery.failure.predecessor.item, "fix");
+  assert.equal(state.work.cli.recovery.failure.predecessor.pullRequest, 70);
+  const shown = requests[0].sources.find(
+    (source) => source.path === "live/p2c/lib.sh",
+  );
+  assert.match(shown.heading, /owned by fix \(merged\)/);
+});
+
+test("releasing a charge gives back only the implementation repair", () => {
+  const state = {
+    charges: {
+      "item/cli/validate/0": {
+        allowances: ["implementationRepairs", "resultRereviews"],
+        scopes: ["cli"],
+      },
+      "item/lib/validate/0": {
+        allowances: ["implementationRepairs"],
+        scopes: ["lib"],
+      },
+    },
+  };
+  releaseCharge(state, "item/cli/validate/0");
+  assert.deepEqual(state.charges["item/cli/validate/0"].allowances, [
+    "resultRereviews",
+  ]);
+  releaseCharge(state, "item/lib/validate/0");
+  assert.equal(state.charges["item/lib/validate/0"], undefined);
+});
+
 // The stop's named commands, run as written, fix the predecessor (#672).
 const bodyWith = (command) =>
   `## Acceptance\n- result.txt exists\n\n## Commands\n- \`test -s result.txt\`\n- \`${command}\`\n\n## Final validation\n- \`test -s result.txt\`\n`;
@@ -411,7 +522,7 @@ const NEXT_CHECK = 'test "$(cat result.txt)" = good';
  * blamed on result. `held` adds an independent item whose PR waits for CI,
  * which keeps the owner alive through the stop.
  */
-async function blameFixture(name, { held = false } = {}, run) {
+async function blameFixture(name, { held = false, limits } = {}, run) {
   const root = mkdtempSync(join(tmpdir(), "factory-blame-fix-"));
   const previous = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = join(root, "state");
@@ -424,7 +535,7 @@ async function blameFixture(name, { held = false } = {}, run) {
         "regular",
         held ? 2 : 1,
       ),
-      autonomy,
+      autonomy: limits ?? autonomy,
     };
     const graph = {
       objective: 1,
@@ -543,6 +654,18 @@ async function blameFixture(name, { held = false } = {}, run) {
       prepare: (live) =>
         writeFileSync(proposalPath, JSON.stringify(proposal(live))),
       stateOf: () => readState(config.repository, 1),
+      // Another amendment has used a planning revision.
+      useRevision: () => {
+        const state = readState(config.repository, 1);
+        state.charges = {
+          ...state.charges,
+          "objective/amend/earlier": {
+            allowances: ["planningRevisions"],
+            scopes: ["$planning"],
+          },
+        };
+        saveState(statePath(config.repository, 1), state);
+      },
     });
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
@@ -608,7 +731,7 @@ test("the stop's named commands, run as written while stopped, fix the predecess
     );
   }));
 
-test("the same commands work while an owner is running", async () =>
+test("an owner already running takes the proposed amendment once in-flight delivery settles", async () =>
   blameFixture("live", { held: true }, async (f) => {
     const running = f.application.runObjective(1);
     // other waits for CI, which keeps the owner alive; next is blamed.
@@ -685,3 +808,41 @@ test("a stopped Objective refuses an out-of-scope amendment with a reason", asyn
     assert.equal(state.pendingAmendment, undefined);
     assert.equal(state.backlogDiscoveries, undefined);
   }));
+
+test("an amendment is refused up front once the planning revision is used, and the Objective stays runnable", async () =>
+  blameFixture(
+    "used",
+    {
+      limits: {
+        ...autonomy,
+        allowances: { ...autonomy.allowances, planningRevisions: 1 },
+        repairPolicy: {
+          perPath: { ...autonomy.repairPolicy.perPath, planningRevisions: 1 },
+        },
+      },
+    },
+    async (f) => {
+      await f.application.runObjective(1).catch(() => undefined);
+      const [amend] = namedCommands(
+        f.stateOf().work.next.recovery.failure.decision,
+      );
+      assert.match(amend, /^factory propose-amendment/);
+      // The one planning revision goes elsewhere before the operator acts.
+      f.useRevision();
+      f.prepare(false);
+      await assert.rejects(
+        f.command(amend),
+        /planningRevisions allowance is used up[^]*factory cancel --objective 1/,
+      );
+      const refused = f.stateOf();
+      assert.equal(refused.pendingAmendment, undefined);
+      assert.equal(refused.error, undefined);
+      // The next run is not blocked by a pending amendment it cannot charge.
+      const error = await f.application.runObjective(1).catch((e) => e);
+      assert.doesNotMatch(String(error?.message ?? error), /allowance/);
+      const after = f.stateOf();
+      assert.equal(after.pendingAmendment, undefined);
+      assert.equal(after.error, undefined);
+      assert.equal(f.amendments(), 0);
+    },
+  ));

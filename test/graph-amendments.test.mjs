@@ -1419,13 +1419,18 @@ test("planning consumption survives acceptance and cannot reset for a second rev
       () => assertGraphRevisions(restarted),
       /exceed retained planning charges/,
     );
-    submitAmendment(state, {
-      ...discovery,
-      actor: "operator",
-      expectedGraphDigest: graphDigest(state.graph),
-      graph: state.graph,
-    });
-    await assert.rejects(applyPendingAmendment(args), /allowance exhausted/);
+    // The second revision is refused when proposed, before anything pends.
+    assert.throws(
+      () =>
+        submitAmendment(state, {
+          ...discovery,
+          actor: "operator",
+          expectedGraphDigest: graphDigest(state.graph),
+          graph: state.graph,
+        }),
+      /planningRevisions allowance is used up/,
+    );
+    assert.equal(state.pendingAmendment, undefined);
     assert.equal(consumption(state).planningRevisions, 1);
   });
 });

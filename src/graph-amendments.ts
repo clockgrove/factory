@@ -1,6 +1,8 @@
 import {
   allowanceAvailable,
   allowanceKey,
+  amendmentAllowed,
+  amendmentsUsedUp,
   assertRepairClass,
   charge,
   chargeRepair,
@@ -342,6 +344,10 @@ export function submitAmendment(
     : undefined;
   if (state.pendingAmendment && !rejected)
     throw new Error("An amendment already awaits disposition");
+  // Refuse up front: the run charges a planning revision when it starts the
+  // amendment, and a pending one that cannot be charged fails every run.
+  if (!rejected && !amendmentAllowed(state))
+    throw new Error(amendmentsUsedUp(state.objective));
   if (proposal.worker) {
     const work = state.work[proposal.worker.itemId];
     if (!work || work.attempt !== proposal.worker.attempt)

@@ -17,53 +17,7 @@
 // `independent` is alpha and beta with no dependency, both with regular
 // delivery; `native` is alpha → beta with native-stack delivery.
 
-export const DIAGNOSES = {
-<<<<<<< HEAD
-  START_WINDOW: {
-    diagnosis:
-      "regular-runner checkpoints a Work Item at running/execute before driver.start returns its handle; a crash of that Work Item in between (after the checkpoint, around `git worktree add`, or after driver.start returns) leaves it running/execute without a handle, which a restart refuses as 'ambiguous active state at execute; operator direction required' (fault matrix START_AMBIGUOUS, r1 #4)",
-    match: { ambiguous: AMBIGUOUS, stop: AMBIGUOUS },
-    when: (failure, result) =>
-      ambiguousItem(failure.message) === crashedItem(result),
-  },
-  CLOSURE_START: {
-    diagnosis:
-      "a crash at one Work Item's effect lands in the other's START_WINDOW: regular-runner calls phases.release(alpha) before `await closeWorkItem(alpha)`, so beta is checkpointed at running/execute and its driver.start runs while alpha's completion comment and close are in flight, and a crash there stops every restart with beta 'ambiguous active state at execute' (the racy fault-matrix closure cases); independent Work Items meet it at any effect",
-    match: { ambiguous: AMBIGUOUS, stop: AMBIGUOUS },
-    when: (failure, result) => {
-      const item = ambiguousItem(failure.message);
-      return Boolean(
-        item && crashedItem(result) && item !== crashedItem(result),
-      );
-    },
-  },
-  START_REPEAT: {
-    diagnosis:
-      "native-stack delivery repeats driver.start with the same attempt id after a crash between `git worktree add` and the handle checkpoint; the local driver's `git worktree add` fails because the attempt's worktree exists, and the run stops uncertain (fault matrix START_REPEAT, r1 #4)",
-    match: { ambiguous: REPEATED_ADD, stop: REPEATED_ADD },
-  },
-  COLLECT_WINDOW: {
-    diagnosis:
-      "LocalExecutionDriver.collect commits the worker's result in the attempt worktree and then removes the worktree before the runner records the commit; a crash before the removal makes the repeated collect fail with 'Worker changed HEAD; expected uncommitted changes at exact base', and one after it with \"cannot change to '<attempt worktree>'\", both recorded as implementation failures that need an operator (fault matrix COLLECT_REPEAT, r1 #5)",
-    match: {
-      stop: /Worker changed HEAD; expected uncommitted changes at exact base|git rev-parse HEAD failed \(128\): fatal: cannot change to '[^']*\/worktrees\/[\w-]+'/,
-    },
-  },
-  STRANDED_VALIDATION: {
-    diagnosis:
-      "validation adds a worktree under validation/<uuid> (final validation under final-validation/<uuid>) and removes it when the commands finish; after a crash in between, the restart validates in a fresh worktree and nothing removes or prunes the old one, which stays registered in the checkout",
-    match: {
-      worktrees:
-        /stranded worktree \S+\/(?:validation|final-validation)\/[\w-]+ \(never removed\)/,
-    },
-=======
-  INTEGRATION_ORDER: {
-    diagnosis:
-      "regular-runner sets state.integratedSha to each Work Item's own merge commit when it records the item done; after a crash between beta's merge and its done checkpoint, the restart merges alpha first and then records beta, so state.integratedSha names beta's older merge and final validation stops with 'Default branch changed before final validation' although only Factory merged",
-    match: { stop: /Default branch changed before final validation/ },
->>>>>>> origin/claude/phase-a-3-items
-  },
-};
+export const DIAGNOSES = {};
 
 /** Deterministic reproductions, one or more per diagnosis, and fixed races kept pinned. */
 export const PINNED = [
@@ -113,10 +67,7 @@ export const PINNED = [
     },
   },
   {
-<<<<<<< HEAD
-    known: "COLLECT_WINDOW",
-=======
-    known: "INTEGRATION_ORDER",
+    fixed: "INTEGRATION_ORDER",
     family: "independent",
     name: "crash after beta's post-merge fetch while alpha waits to merge",
     schedule: {
@@ -133,7 +84,6 @@ export const PINNED = [
   },
   {
     fixed: "COLLECT_WINDOW",
->>>>>>> origin/claude/phase-a-3-items
     family: "dependent",
     name: "crash before collect removes alpha's attempt worktree",
     schedule: { crash: { at: "alpha git worktree remove #1" } },

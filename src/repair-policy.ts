@@ -5,7 +5,6 @@ import type { FactoryState, WorkState } from "./state.js";
 
 export const repairClasses = [
   "implementation",
-  "validation-environment",
   "planning-output",
   "planning-evidence",
   "planning-choice",
@@ -177,6 +176,9 @@ const legacyClasses: readonly string[] = [
   "authority",
   "uncertain",
   "review-evidence",
+  // A validation environment fault waits for the fix; `factory retry` then
+  // validates again (step rule 7), so it needs no repair class.
+  "validation-environment",
 ];
 const startFresh = (what: string) =>
   `State records ${what} from an earlier Factory version; start the Objective fresh`;
@@ -190,10 +192,7 @@ export interface FailureDisposition {
   classification: FailureClass;
   detail: string;
   at: string;
-  continuation:
-    | "new-attempt-from-accepted-base"
-    | "exact-candidate-revalidation"
-    | "operator-decision";
+  continuation: "new-attempt-from-accepted-base" | "operator-decision";
   unfinishedEdits: "removed" | "unavailable";
   decision: string;
 }
@@ -228,9 +227,7 @@ export const failureDigest = (detail: string): string =>
 export function allowanceKey(kind: RepairClass): keyof AllowanceConsumption {
   return kind.startsWith("planning-")
     ? "planningRevisions"
-    : kind === "implementation"
-      ? "implementationRepairs"
-      : "resultRereviews";
+    : "implementationRepairs";
 }
 /** Failure event of a Work Item step; `round` counts the item's earlier attempts. */
 export const itemEvent = (item: string, step: string, round: number) =>
@@ -495,6 +492,8 @@ export function assertRepairLedger(
       throw new Error(startFresh(`a ${failure.classification} failure`));
     if (!failureClasses.includes(failure.classification))
       throw new Error("Invalid failure classification");
+    if ((failure.continuation as string) === "exact-candidate-revalidation")
+      throw new Error(startFresh("an exact-candidate revalidation"));
     if (CHARGED.includes(failure.classification) !== Boolean(failure.event))
       throw new Error("Failure event does not match its classification");
     if (

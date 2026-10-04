@@ -41,6 +41,7 @@ import {
   cancelledFault,
   decision,
   StepFault,
+  transient,
 } from "./fault.js";
 import { step, type StepOptions } from "./step.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
@@ -596,8 +597,34 @@ export function applyPendingAmendment(
   return step(
     args.state,
     { scope: "objective", name: "amend", paid: true },
-    (context) =>
-      advanceAmendment({ ...rest, model: paidModel(args.model, context) }),
+    (context) => {
+      const paid = paidModel(args.model, context);
+      return advanceAmendment({
+        ...rest,
+        model: {
+          ...paid,
+          // An answer that does not decode is a lost answer, not a refusal:
+          // it is decoded inside the paid call, so the step asks again and
+          // then the operator. Only findings that decode refuse.
+          reviewGraph: (request) =>
+            context.paid(async () => {
+              const response = await args.model.reviewGraph(request);
+              try {
+                if (request.reviewPacket)
+                  decodeGraphReview(response, request.reviewPacket);
+              } catch (error) {
+                throw new StepFault(
+                  transient(
+                    `Model output was invalid: ${error instanceof Error ? error.message : String(error)}`,
+                    true,
+                  ),
+                );
+              }
+              return response;
+            }),
+        },
+      });
+    },
     { save: args.save, signal, pause, clock },
   );
 }
@@ -824,13 +851,8 @@ async function advanceAmendment(args: {
         },
       });
       calling = undefined;
-      // An answer that does not decode refuses the amendment like findings.
-      let findings: ReturnType<typeof decodeGraphReview>;
-      try {
-        findings = decodeGraphReview(response, evidence);
-      } catch (error) {
-        throw error instanceof Error ? refused(error) : error;
-      }
+      // The answer decoded inside the paid call (applyPendingAmendment).
+      const findings = decodeGraphReview(response, evidence);
       if (findings.length) {
         // Only a complete packet-bound decoded finding permits diagnosed correction.
         stage = "review-findings";

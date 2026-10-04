@@ -25,6 +25,7 @@ import {
   CandidateValidationFailure,
   diagnoseWorkRepair,
   recordWorkFailure,
+  resumeDiagnoses,
 } from "../dist/work-repair.js";
 import { withCoverage } from "./support/coverage.mjs";
 import {
@@ -43,7 +44,6 @@ const autonomy = (limit = 2) => ({
   },
   repairClasses: [
     "implementation",
-    "validation-environment",
     "planning-output",
     "planning-evidence",
     "planning-choice",
@@ -213,6 +213,84 @@ test("a diagnosis that never answers is asked a bounded number of times", async 
   assert.equal(consumption(state).implementationRepairs, 1);
 });
 
+test("a configuration fault in the diagnosis leaves it due; the next run asks again under the same charge", async () => {
+  const state = itemState(1);
+  fail(state, "Validation command failed");
+  const event = state.work.result.recovery.failure.event;
+  let expired = true;
+  const model = {
+    calls: 0,
+    generateStructured: async () => {
+      model.calls++;
+      if (expired)
+        throw attachFault(new Error("Run claude auth login"), {
+          kind: "config",
+          detail: "The model login expired",
+          fix: "Run claude auth login",
+        });
+      return {
+        decision: "repair",
+        diagnosis: "The required file was not written",
+        correction: "Write result.txt from the accepted base",
+      };
+    },
+  };
+  assert.equal(await diagnose(state, model), false);
+  const recovery = state.work.result.recovery;
+  // Not stopped: a run resumes the diagnosis (resumeDiagnoses); the wait
+  // names the fix, and the decision says what runs next.
+  assert.equal(recovery.phase, "diagnosing");
+  assert.equal(state.work.result.wait.kind, "prerequisite");
+  assert.match(recovery.failure.decision, /claude auth login.*factory run/);
+  assert.equal(consumption(state).implementationRepairs, 1);
+  // The operator fixes the login and runs again: the same event is asked
+  // again and applied, with no second charge.
+  expired = false;
+  const resumed = restart(state);
+  await resumeDiagnoses({
+    state: resumed,
+    model,
+    save: () => {},
+    stopped: () => false,
+    clock: simulatedClock(),
+  });
+  assert.equal(resumed.work.result.status, "pending");
+  assert.equal(resumed.work.result.recovery.phase, "ready");
+  assert.deepEqual(Object.keys(resumed.charges), [event]);
+  assert.equal(consumption(resumed).implementationRepairs, 1);
+});
+
+test("an operator repair clears the item's stale diagnose record, so the next failure is diagnosed", async () => {
+  const state = itemState(2);
+  fail(state, "Validation command failed (1)");
+  // The diagnosis never answers: the paid bound leaves a record and stops.
+  assert.equal(
+    await diagnose(state, diagnoser(Number.POSITIVE_INFINITY)),
+    false,
+  );
+  assert.ok(state.repeats["item/result/diagnose"]);
+  assert.equal(state.work.result.recovery.phase, "stopped");
+  // The operator supplies a correction (`factory repair`).
+  applyWorkCorrection(state, "result", {
+    kind: "implementation",
+    failureDigest: state.work.result.recovery.failure.digest,
+    actor: "operator",
+    diagnosis: "The required file was not written",
+    correction: "Write result.txt from the accepted base",
+  });
+  assert.equal(state.repeats?.["item/result/diagnose"], undefined);
+  // The new attempt fails too: it is diagnosed, not stopped by the old record.
+  state.work.result = {
+    ...failedAttempt("second"),
+    recovery: state.work.result.recovery,
+  };
+  fail(state, "Validation command failed (2)");
+  const model = diagnoser();
+  assert.equal(await diagnose(state, model), true);
+  assert.equal(model.calls, 1);
+  assert.equal(consumption(state).implementationRepairs, 2);
+});
+
 test("an invalid diagnosis is asked again with its validation error", async () => {
   const state = itemState(2);
   fail(state, "Validation command failed");
@@ -260,7 +338,7 @@ test("a correction saved but not applied before a restart is applied without a s
   assert.equal(consumption(snapshot).implementationRepairs, 1);
 });
 
-test("an operator correction of a diagnosed failure: same kind free, another kind charges its own allowance", async () => {
+test("an operator correction of a diagnosed failure is free; a validation-environment correction is refused", async () => {
   const operatorAnswer = {
     generateStructured: async () => ({
       decision: "operator",
@@ -275,56 +353,88 @@ test("an operator correction of a diagnosed failure: same kind free, another kin
     diagnosis: "The declared prerequisite was missing",
     correction: "Provide the declared prerequisite and continue",
   });
-  for (const kind of ["implementation", "validation-environment"]) {
+  const state = itemState(2);
+  fail(state, "Validation command failed");
+  assert.equal(await diagnose(state, operatorAnswer), false);
+  assert.equal(consumption(state).implementationRepairs, 1);
+  // The environment is fixed, then `factory retry` validates again: there is
+  // no repair class for it (#616).
+  assert.throws(
+    () =>
+      applyWorkCorrection(
+        state,
+        "result",
+        correction(state, "validation-environment"),
+      ),
+    /Only an implementation correction/,
+  );
+  assert.equal(state.work.result.status, "failed");
+  applyWorkCorrection(state, "result", correction(state, "implementation"));
+  assert.equal(consumption(state).implementationRepairs, 1);
+  assert.equal(consumption(state).resultRereviews, 0);
+  assertRepairLedger(restart(state));
+});
+
+test("persisted validation-environment repair records are refused as start fresh", () => {
+  for (const mutate of [
+    (state) => {
+      state.autonomy.repairClasses.push("validation-environment");
+    },
+    (state) => {
+      fail(state, "Validation command failed");
+      state.work.result.recovery.failure.classification =
+        "validation-environment";
+      delete state.work.result.recovery.failure.event;
+    },
+    (state) => {
+      fail(state, "Validation command failed");
+      state.work.result.recovery.failure.continuation =
+        "exact-candidate-revalidation";
+    },
+  ]) {
     const state = itemState(2);
-    fail(state, "Validation command failed");
-    assert.equal(await diagnose(state, operatorAnswer), false);
-    assert.equal(consumption(state).implementationRepairs, 1);
-    applyWorkCorrection(state, "result", correction(state, kind));
-    assert.equal(consumption(state).implementationRepairs, 1);
-    assert.equal(
-      consumption(state).resultRereviews,
-      kind === "implementation" ? 0 : 1,
+    mutate(state);
+    assert.throws(
+      () => assertRepairLedger(state),
+      /no longer has|start the Objective fresh/,
     );
-    assertRepairLedger(restart(state));
   }
 });
 
 test("transient and configuration failures are never charged", async () => {
-  for (const [error, decision, kind] of [
+  for (const [error, decision] of [
     [
       // A worker the driver confirmed stopped without a result.
       new StepFault(transient("worker exited", false)),
       /factory retry --objective 1 --item result/,
-      undefined,
     ],
     [
       new CandidateEnvironmentFailure("Validation environment unavailable"),
-      /Restore the controller.s validation environment; `factory retry`/,
-      "validation-environment",
+      /Restore the controller.s validation environment; then `factory retry --objective 1 --item result`/,
     ],
   ]) {
     const state = itemState(2);
-    // A wrong result is isolated to its item; a stopped worker is retried.
-    assert.equal(recordWorkFailure(state, "result", error), Boolean(kind));
+    // Only a wrong result is isolated to its item; a stopped worker or an
+    // environment fault is retried.
+    assert.equal(recordWorkFailure(state, "result", error), false);
     const failure = state.work.result.recovery.failure;
     assert.equal(failure.event, undefined);
     assert.match(failure.decision, decision);
     const model = diagnoser();
     assert.equal(await diagnose(state, model), false);
     assert.equal(model.calls, 0);
-    // Only a wrong result is corrected; a stopped worker is retried.
-    // Either way nothing is charged.
-    const correct = () =>
-      applyWorkCorrection(state, "result", {
-        kind: kind ?? "implementation",
-        failureDigest: failure.digest,
-        actor: "operator",
-        diagnosis: "The controller environment is restored",
-        correction: "Run the same work again",
-      });
-    if (kind) correct();
-    else assert.throws(correct, /factory retry --objective 1 --item result/);
+    // Only a wrong result is corrected; anything else is retried.
+    assert.throws(
+      () =>
+        applyWorkCorrection(state, "result", {
+          kind: "implementation",
+          failureDigest: failure.digest,
+          actor: "operator",
+          diagnosis: "The controller environment is restored",
+          correction: "Run the same work again",
+        }),
+      /factory retry --objective 1 --item result/,
+    );
     assert.equal(state.charges, undefined);
     assertRepairLedger(restart(state));
   }

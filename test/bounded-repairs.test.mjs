@@ -31,7 +31,7 @@ import {
   CodexPlanningModel,
 } from "../dist/compiler.js";
 import { coverageObligations, aggregateAcceptance } from "../dist/qa.js";
-import { StepFault } from "../dist/fault.js";
+import { faultOf, StepFault } from "../dist/fault.js";
 import { shortPlanDigest } from "../dist/status-summary.js";
 import {
   validateTree,
@@ -60,7 +60,6 @@ const autonomy = () => ({
   },
   repairClasses: [
     "implementation",
-    "validation-environment",
     "planning-output",
     "planning-evidence",
     "planning-choice",
@@ -185,15 +184,16 @@ test("disabled repair classes are refused and inherited scopes cannot reset caps
     /exhausted/,
   );
 });
-test("exact candidate recovery retains failure and rejects ambiguity and unchanged correction", () => {
-  const work = {
+test("a wrong result retains its failure and rejects ambiguity and unchanged correction", () => {
+  const failedAttempt = () => ({
     status: "failed",
     step: "validate",
     attempt: "first",
     baseSha: "a".repeat(40),
     changeRef: "b".repeat(40),
     treeSha: "c".repeat(40),
-  };
+  });
+  const work = failedAttempt();
   const state = {
     autonomy: autonomy(),
     graph: { items: [item()] },
@@ -205,23 +205,23 @@ test("exact candidate recovery retains failure and rejects ambiguity and unchang
     new CandidateValidationFailure("required command failed"),
   );
   const correction = {
-    kind: "validation-environment",
+    kind: "implementation",
     failureDigest: work.recovery.failure.digest,
     actor: "fixture",
-    diagnosis: "Controller temporary path exceeded the tool limit",
-    correction:
-      "Restore the declared environment using a shorter supported temporary directory",
+    diagnosis: "The result is missing its required content",
+    correction: "Write the required content from the accepted base",
   };
   applyWorkCorrection(state, "result", correction);
-  assert.equal(work.attempt, "first");
-  assert.equal(work.treeSha, "c".repeat(40));
-  assert.equal(work.step, "validate");
-  assert.equal(work.recovery.history[0].work.error, undefined);
+  // The correction starts a new attempt and archives the failed one.
+  const next = state.work.result;
+  assert.equal(next.status, "pending");
+  assert.equal(next.attempt, undefined);
+  assert.equal(next.recovery.history[0].work.attempt, "first");
   assert.equal(
-    work.recovery.history[0].failure.detail,
+    next.recovery.history[0].failure.detail,
     "required command failed",
   );
-  work.status = "failed";
+  state.work.result = { ...failedAttempt(), recovery: next.recovery };
   recordWorkFailure(
     state,
     "result",
@@ -231,7 +231,7 @@ test("exact candidate recovery retains failure and rejects ambiguity and unchang
     () => applyWorkCorrection(state, "result", correction),
     /Unchanged/,
   );
-  work.integratedSha = "a".repeat(40);
+  state.work.result.integratedSha = "a".repeat(40);
   assert.throws(
     () => applyWorkCorrection(state, "result", correction),
     /unsettled/,
@@ -288,10 +288,6 @@ test("settled failures ignore sibling processes while correction still requires 
       "implementation",
     ],
     [
-      new CandidateEnvironmentFailure("temporary path unavailable"),
-      "validation-environment",
-    ],
-    [
       // A worker that settled with a failed result.
       new StepFault({ kind: "work", evidence: { detail: "worker failed" } }),
       "implementation",
@@ -322,7 +318,7 @@ test("settled failures ignore sibling processes while correction still requires 
     assert.throws(
       () =>
         applyWorkCorrection(state, "result", {
-          kind: "validation-environment",
+          kind: "implementation",
           failureDigest: state.work.result.recovery.failure.digest,
           actor: "fixture",
           diagnosis: "Declared prerequisite absent",
@@ -342,9 +338,7 @@ test("settled failures ignore sibling processes while correction still requires 
       // Not isolated: a wrong result past these boundaries is a decision.
       assert.equal(
         uncertain.work.result.recovery.failure.classification,
-        error instanceof CandidateEnvironmentFailure
-          ? "validation-environment"
-          : "decision",
+        "decision",
       );
     }
     assert.equal(
@@ -407,7 +401,7 @@ for (const delivery of ["regular", "native-stack"])
       rmSync(root, { recursive: true, force: true });
     }
   });
-test("validation environment path failure revalidates the byte-identical candidate after correction", async () => {
+test("a validation environment failure is a configuration fault; once restored, the same candidate validates", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-env-repair-"));
   try {
     const target = createTarget(root, { "result.txt": "accepted\n" });
@@ -420,7 +414,11 @@ test("validation environment path failure revalidates the byte-identical candida
         tree,
         ["test -s result.txt"],
       ),
-      CandidateEnvironmentFailure,
+      (error) => {
+        assert.ok(error instanceof CandidateEnvironmentFailure);
+        assert.equal(faultOf(error).kind, "config");
+        return true;
+      },
     );
     const evidence = await validateTree(
       target.checkout,
@@ -872,525 +870,6 @@ test("run's durable planning carries consumed planning allowance into activation
 });
 
 for (const delivery of ["regular", "native-stack"])
-  test(`${delivery}: compound: persisted repair survives restart without resetting allowance`, async () => {
-    const root = mkdtempSync(join(tmpdir(), "factory-env-control-"));
-    const previous = process.env.XDG_STATE_HOME;
-    process.env.XDG_STATE_HOME = join(root, "state");
-    try {
-      const target = createTarget(root);
-      const config = factoryConfig(
-        target.checkout,
-        `example/env-control-${delivery}`,
-        delivery,
-      );
-      const gate = join(root, "readiness");
-      const command = `test -f '${gate}'`;
-      const aggregateCriterion = aggregateAcceptance({ id: "aggregate" })[0];
-      const source = `${body.replace("## Commands", `- The integrated conditional check passes; an actual failure requires diagnosed authorized correction\n- ${aggregateCriterion}\n## Commands`)}\n## Environment\nThe controller requires this already-provisioned environment prerequisite.\n- ${command}\n`;
-      const graph = {
-        objective: 1,
-        baseSha: target.baseSha,
-        items: [
-          {
-            ...item(),
-            validation: [
-              ...item().validation,
-              { command, provenance: "source-declared", source: "OBJECTIVE" },
-            ],
-          },
-          {
-            ...item("qa", ["result"]),
-            kind: "qa",
-            ownedPaths: [],
-            acceptance: [
-              "The integrated conditional check passes; an actual failure requires diagnosed authorized correction",
-            ],
-            validation: [
-              { command, provenance: "source-declared", source: "OBJECTIVE" },
-            ],
-          },
-          {
-            ...item("aggregate", ["qa"]),
-            kind: "aggregate",
-            children: ["qa"],
-            ownedPaths: [],
-            acceptance: [aggregateCriterion],
-            validation: [],
-          },
-        ],
-      };
-      graph.coverage = coverageObligations(
-        source,
-        objectiveCriteria(source),
-      ).map((obligation, index) => ({
-        criterionId: obligation.criterionId,
-        itemId: ["result", "qa", "aggregate"][index],
-        proof:
-          index === 0
-            ? { kind: "final-review" }
-            : { kind: "integrated-semantic", acceptanceIndex: 0 },
-        environment: {
-          kind: "local",
-          readiness: "available",
-          probe: "",
-          preparedBy: "",
-        },
-      }));
-      let reviews = 0;
-      const packets = [];
-      const planner = model(graph);
-      planner.reviewResult = async (request) => {
-        reviews++;
-        packets.push(request);
-        return reviewer(request);
-      };
-      const descriptor = {
-        config,
-        graph,
-        objectiveBody: source,
-        fakeRoot: join(root, "fake"),
-        actions: {
-          result: { files: [{ path: "result.txt", text: "accepted\n" }] },
-        },
-        planningModel: planner,
-      };
-      const policy = autonomy();
-      policy.repairClasses = ["validation-environment"];
-      policy.allowances.implementationRepairs = 0;
-      config.autonomy = policy;
-      const fixture = makeApplication(descriptor);
-      const { readState } = await import("../dist/state-store.js");
-      // The failure needs an operator's diagnosis, so the run stops for it.
-      const failed = await fixture.application.runObjective(1);
-      assert.equal(failed.work.result.status, "failed");
-      writeFileSync(gate, "ready\n");
-      const work = failed.work.result;
-      fixture.application.repairWorkItem(1, {
-        item: "result",
-        treeSha: work.treeSha,
-        correction: {
-          kind: "validation-environment",
-          failureDigest: work.recovery.failure.digest,
-          actor: "fixture",
-          diagnosis: "Declared controller prerequisite was unavailable",
-          correction:
-            "The same declared prerequisite is now provisioned; revalidate the preserved exact candidate",
-        },
-      });
-      const charged = readState(config.repository, 1);
-      assert.equal(consumption(charged).resultRereviews, 1);
-      assert.equal(charged.work.result.attempt, work.attempt);
-      const restarted = makeApplication(descriptor);
-      const done = await restarted.application.runObjective(1);
-      assert.equal(done.runId, charged.runId);
-      assert.throws(
-        () =>
-          chargeRepair(
-            structuredClone(done),
-            "item/result/validate/9",
-            "validation-environment",
-            ["result"],
-          ),
-        /exhausted/,
-      );
-      assert.deepEqual(
-        done.work.result.recovery.history,
-        charged.work.result.recovery.history,
-      );
-      assert.equal(done.finalValidation.passed, true);
-      assert.equal(done.work.result.attempt, work.attempt);
-      assert.equal(done.work.result.treeSha, work.treeSha);
-      assert.equal(
-        readEvents(fixture.eventsPath).filter((event) => event.type === "start")
-          .length,
-        1,
-      );
-      assert.equal(consumption(done).resultRereviews, 1);
-      assert.ok(reviews >= 2);
-      assert.equal(done.work.result.recovery.history[0].work.error, work.error);
-      assert.equal(done.work.qa.status, "done");
-      assert.equal(done.work.aggregate.status, "done");
-      const resultPacket = packets.find((packet) =>
-        packet.evidence.some(
-          (source) => source.path === "Retained repair proof: result",
-        ),
-      );
-      const qaPacket = packets.find((packet) =>
-        packet.criteria.includes(graph.items[1].acceptance[0]),
-      );
-      const aggregatePacket = packets.find((packet) =>
-        packet.criteria.includes(graph.items[2].acceptance[0]),
-      );
-      const finalPacket = packets.find(
-        (packet) => packet.reviewPhase === "objective-review",
-      );
-      const repair = JSON.parse(
-        resultPacket.evidence.find(
-          (source) => source.path === "Retained repair proof: result",
-        ).content,
-      );
-      assert.equal(
-        repair.controllerFacts.failedAttempt.resultCommitSha,
-        work.changeRef,
-      );
-      assert.equal(
-        repair.controllerFacts.failedAttempt.resultTreeSha,
-        work.treeSha,
-      );
-      assert.equal(
-        repair.controllerFacts.failedAttempt.attemptId,
-        work.attempt,
-      );
-      assert.equal(repair.controllerFacts.failedAttempt.phase, "validate");
-      assert.equal(repair.controllerFacts.currentAttemptId, work.attempt);
-      assert.equal(
-        repair.controllerFacts.repairClass,
-        "validation-environment",
-      );
-      const preservation = repair.controllerFacts.candidatePreservation;
-      assert.equal(preservation.preserved, true);
-      assert.equal(preservation.sameAttempt, true);
-      assert.equal(preservation.sameExecutionBase, true);
-      assert.equal(preservation.unchangedOwnedPaths, true);
-      assert.deepEqual(preservation.acceptedOwnedPaths, ["result.txt"]);
-      assert.deepEqual(preservation.ownedPathChanges, []);
-      assert.equal(preservation.failedCandidateChanges[0].path, "result.txt");
-      assert.equal(
-        preservation.failedCandidateChanges[0].newObject,
-        git(config.checkout, "rev-parse", `${work.changeRef}:result.txt`),
-      );
-      assert.equal(
-        repair.declaredCorrection.contentOrigin,
-        "declared-diagnosis-and-correction",
-      );
-      assert.equal(
-        repair.declaredCorrection.failureDigest,
-        work.recovery.failure.digest,
-      );
-      assert.deepEqual(repair.controllerFacts.snapshotConsumption.objective, {
-        consumed: 1,
-        limit: policy.allowances.resultRereviews,
-      });
-      assert.deepEqual(repair.controllerFacts.snapshotConsumption.paths, [
-        { scope: "result", consumed: 1, limit: 1 },
-      ]);
-      for (const packet of [qaPacket, aggregatePacket]) {
-        const dependency = JSON.parse(
-          packet.evidence.find(
-            (source) => source.path === "Completed dependency results",
-          ).content,
-        ).work.find((entry) => entry.id === "result");
-        assert.deepEqual(dependency.repair, repair);
-      }
-      assert.deepEqual(
-        JSON.parse(finalPacket.observations).work.find(
-          (entry) => entry.id === "result",
-        ).repair,
-        repair,
-      );
-      for (const corruption of [
-        "history",
-        "candidate",
-        "candidate-base",
-        "consumption",
-        "autonomy",
-      ]) {
-        const broken = structuredClone(done);
-        if (corruption === "history") broken.work.result.recovery.history = [];
-        if (corruption === "candidate")
-          broken.work.result.recovery.history[0].work.treeSha = "0".repeat(40);
-        if (corruption === "candidate-base")
-          delete broken.work.result.recovery.history[0].work.executionBaseSha;
-        if (corruption === "consumption") delete broken.charges;
-        if (corruption === "autonomy")
-          broken.autonomy.repairClasses = ["implementation"];
-        assert.throws(
-          () =>
-            workItemReviewEvidence({
-              state: broken,
-              item: graph.items[1],
-              checkout: config.checkout,
-              delivery,
-            }),
-          /retained failure|tree|charged consumption|lacks its charge|preservation bindings/,
-        );
-        assert.throws(
-          () =>
-            objectiveReviewEvidence({
-              state: broken,
-              checkout: config.checkout,
-              candidateCommitSha: broken.integratedSha,
-              candidateTreeSha: git(
-                config.checkout,
-                "rev-parse",
-                `${broken.integratedSha}^{tree}`,
-              ),
-            }),
-          /retained failure|tree|charged consumption|lacks its charge|preservation bindings/,
-        );
-      }
-      for (const corruption of ["attempt", "execution-base"]) {
-        const broken = structuredClone(done);
-        const prior = broken.work.result.recovery.history[0].work;
-        if (corruption === "attempt") prior.attempt = "stale-attempt";
-        else prior.executionBaseSha = done.work.result.changeRef;
-        const evidence = () =>
-          workItemReviewEvidence({
-            state: broken,
-            item: done.graph.items.find((entry) => entry.id === "result"),
-            checkout: config.checkout,
-            delivery,
-          });
-        if (corruption === "execution-base") {
-          assert.throws(evidence, /unexpected controller commit identity/);
-          continue;
-        }
-        const proof = JSON.parse(
-          evidence().find(
-            (source) => source.path === "Retained repair proof: result",
-          ).content,
-        );
-        assert.equal(
-          proof.controllerFacts.candidatePreservation.preserved,
-          false,
-        );
-      }
-      git(config.checkout, "checkout", "--detach", done.work.result.changeRef);
-      for (const corruption of ["blob", "mode"]) {
-        if (corruption === "blob")
-          writeFileSync(join(config.checkout, "result.txt"), "changed\n");
-        else {
-          writeFileSync(join(config.checkout, "result.txt"), "accepted\n");
-          chmodSync(join(config.checkout, "result.txt"), 0o755);
-        }
-        git(config.checkout, "add", "result.txt");
-        const changedTree = git(config.checkout, "write-tree");
-        const changedCommit = git(
-          config.checkout,
-          "-c",
-          "user.name=Factory Test",
-          "-c",
-          "user.email=factory-test@example.com",
-          "commit-tree",
-          changedTree,
-          "-p",
-          done.work.result.baseSha,
-          "-m",
-          "Factory: result",
-        );
-        const broken = structuredClone(done);
-        broken.work.result.changeRef = changedCommit;
-        broken.work.result.treeSha = changedTree;
-        const proof = JSON.parse(
-          workItemReviewEvidence({
-            state: broken,
-            item: done.graph.items.find((entry) => entry.id === "result"),
-            checkout: config.checkout,
-            delivery,
-          }).find((source) => source.path === "Retained repair proof: result")
-            .content,
-        );
-        assert.equal(
-          proof.controllerFacts.candidatePreservation.preserved,
-          false,
-        );
-        assert.equal(
-          proof.controllerFacts.candidatePreservation.ownedPathChanges[0].path,
-          "result.txt",
-        );
-        const changed =
-          proof.controllerFacts.candidatePreservation.ownedPathChanges[0];
-        if (corruption === "mode") {
-          assert.equal(changed.oldObject, changed.newObject);
-          assert.notEqual(changed.oldMode, changed.newMode);
-        } else assert.notEqual(changed.oldObject, changed.newObject);
-      }
-    } finally {
-      if (previous === undefined) delete process.env.XDG_STATE_HOME;
-      else process.env.XDG_STATE_HOME = previous;
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-test("regular: diagnosed read-only QA repair retains its selected commit through review and final evidence", async () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-qa-env-control-"));
-  const previous = process.env.XDG_STATE_HOME;
-  process.env.XDG_STATE_HOME = join(root, "state");
-  try {
-    const target = createTarget(root);
-    const config = factoryConfig(target.checkout, "example/qa-env-control");
-    const gate = join(root, "readiness");
-    const command = `test -f '${gate}'`;
-    const qaCriterion =
-      "The integrated conditional check passes; an actual failure requires diagnosed authorized correction";
-    const aggregateCriterion = aggregateAcceptance({ id: "aggregate" })[0];
-    const source = `${body.replace("## Commands", `- ${qaCriterion}\n- ${aggregateCriterion}\n## Commands`)}\n## Environment\nThe controller requires this already-provisioned environment prerequisite.\n- ${command}\n`;
-    const graph = {
-      objective: 1,
-      baseSha: target.baseSha,
-      items: [
-        item(),
-        {
-          ...item("qa", ["result"]),
-          kind: "qa",
-          ownedPaths: [],
-          acceptance: [qaCriterion],
-          validation: [
-            { command, provenance: "source-declared", source: "OBJECTIVE" },
-          ],
-        },
-        {
-          ...item("aggregate", ["qa"]),
-          kind: "aggregate",
-          children: ["qa"],
-          ownedPaths: [],
-          acceptance: [aggregateCriterion],
-          validation: [],
-        },
-      ],
-    };
-    graph.coverage = coverageObligations(source, objectiveCriteria(source)).map(
-      (obligation, index) => ({
-        criterionId: obligation.criterionId,
-        itemId: ["result", "qa", "aggregate"][index],
-        proof:
-          index === 0
-            ? { kind: "final-review" }
-            : { kind: "integrated-semantic", acceptanceIndex: 0 },
-        environment: {
-          kind: "local",
-          readiness: "available",
-          probe: "",
-          preparedBy: "",
-        },
-      }),
-    );
-    const packets = [];
-    const planner = model(graph);
-    planner.reviewResult = async (request) => {
-      packets.push(request);
-      return reviewer(request);
-    };
-    const descriptor = {
-      config,
-      graph,
-      objectiveBody: source,
-      fakeRoot: join(root, "fake"),
-      actions: {
-        result: { files: [{ path: "result.txt", text: "accepted\n" }] },
-      },
-      planningModel: planner,
-    };
-    const policy = autonomy();
-    policy.repairClasses = ["validation-environment"];
-    policy.allowances.implementationRepairs = 0;
-    config.autonomy = policy;
-    const fixture = makeApplication(descriptor);
-    // The failure needs an operator's diagnosis, so the run stops for it.
-    const failed = await fixture.application.runObjective(1);
-    assert.equal(failed.work.qa.status, "failed");
-    const work = failed.work.qa;
-    assert.equal(failed.work.result.status, "done");
-    assert.equal(work.baseSha, work.changeRef);
-    assert.equal(work.executionBaseSha, work.changeRef);
-    assert.equal(work.execution, undefined);
-    assert.equal(work.pullRequest, undefined);
-    writeFileSync(gate, "ready\n");
-    fixture.application.repairWorkItem(1, {
-      item: "qa",
-      treeSha: work.treeSha,
-      correction: {
-        kind: "validation-environment",
-        failureDigest: work.recovery.failure.digest,
-        actor: "fixture",
-        diagnosis: "Declared integrated QA prerequisite was unavailable",
-        correction:
-          "The same prerequisite is provisioned; revalidate the selected integrated commit",
-      },
-    });
-    const done = await makeApplication(descriptor).application.runObjective(1);
-    assert.equal(done.finalValidation.passed, true);
-    assert.equal(done.work.qa.status, "done");
-    assert.equal(done.work.qa.attempt, work.attempt);
-    assert.equal(done.work.qa.changeRef, work.changeRef);
-    assert.equal(done.work.qa.treeSha, work.treeSha);
-    assert.equal(done.work.qa.execution, undefined);
-    assert.equal(done.work.qa.pullRequest, undefined);
-    assert.equal(consumption(done).resultRereviews, 1);
-    assert.equal(consumption(done).implementationRepairs, 0);
-    assert.deepEqual(
-      readEvents(fixture.eventsPath)
-        .filter((event) => event.type === "start")
-        .map((event) => event.item),
-      ["result"],
-    );
-    const qaPacket = packets.find((packet) =>
-      packet.evidence.some(
-        (entry) => entry.path === "Retained repair proof: qa",
-      ),
-    );
-    const repair = JSON.parse(
-      qaPacket.evidence.find(
-        (entry) => entry.path === "Retained repair proof: qa",
-      ).content,
-    );
-    assert.equal(
-      repair.controllerFacts.failedAttempt.resultCommitSha,
-      work.changeRef,
-    );
-    assert.equal(
-      repair.controllerFacts.failedAttempt.resultTreeSha,
-      work.treeSha,
-    );
-    assert.equal(repair.controllerFacts.failedAttempt.attemptId, work.attempt);
-    assert.equal(repair.controllerFacts.currentAttemptId, work.attempt);
-    assert.equal(repair.controllerFacts.currentResultCommitSha, work.changeRef);
-    assert.equal(repair.controllerFacts.candidatePreservation, undefined);
-    assert.equal(repair.controllerFacts.repairClass, "validation-environment");
-    assert.deepEqual(repair.controllerFacts.snapshotConsumption.paths, [
-      { scope: "aggregate", consumed: 1, limit: 1 },
-      { scope: "qa", consumed: 1, limit: 1 },
-    ]);
-    const aggregatePacket = packets.find((packet) =>
-      packet.criteria.includes(aggregateCriterion),
-    );
-    const dependency = JSON.parse(
-      aggregatePacket.evidence.find(
-        (entry) => entry.path === "Completed dependency results",
-      ).content,
-    ).work.find((entry) => entry.id === "qa");
-    assert.equal(dependency.validationPhase, "post-integration-read-only");
-    assert.equal(dependency.selectedIntegratedCommitSha, work.changeRef);
-    assert.deepEqual(dependency.repair, repair);
-    const finalPacket = packets.find(
-      (packet) => packet.reviewPhase === "objective-review",
-    );
-    assert.deepEqual(
-      JSON.parse(finalPacket.observations).work.find(
-        (entry) => entry.id === "qa",
-      ).repair,
-      repair,
-    );
-    const broken = structuredClone(done);
-    broken.work.qa.recovery.history[0].work.executionBaseSha = target.baseSha;
-    assert.throws(
-      () =>
-        workItemReviewEvidence({
-          state: broken,
-          item: done.graph.items.find((entry) => entry.id === "qa"),
-          checkout: config.checkout,
-          delivery: "regular",
-        }),
-      /retained candidate contains a worker or delivery identity/,
-    );
-  } finally {
-    if (previous === undefined) delete process.env.XDG_STATE_HOME;
-    else process.env.XDG_STATE_HOME = previous;
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-for (const delivery of ["regular", "native-stack"])
   test(`${delivery}: an invalid review answer is asked again with its error on the exact worker result`, async () => {
     const root = mkdtempSync(join(tmpdir(), "factory-evidence-repair-"));
     const previous = process.env.XDG_STATE_HOME;
@@ -1761,320 +1240,6 @@ test("pause after known planning response preserves compilation for resume with 
     assert.equal(reviews, 1);
     assert.equal(state.charges, undefined);
   } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("native settled validation failure survives real sibling collection and diagnosed candidate repair", async () => {
-  const root = mkdtempSync(join(tmpdir(), "factory-settled-sibling-"));
-  const previousState = process.env.XDG_STATE_HOME;
-  process.env.XDG_STATE_HOME = join(root, "state");
-  const release = join(root, "release-collection");
-  const alphaRelease = join(root, "alpha-release");
-  let previousPath;
-  let running;
-  let outcome;
-  let fixture;
-  let config;
-  let ownershipReleased = false;
-  try {
-    const target = createTarget(root);
-    config = factoryConfig(
-      target.checkout,
-      "example/settled-sibling",
-      "native-stack",
-      2,
-    );
-    const collectionStarted = join(root, "collection-started");
-    const prerequisite = join(root, "prerequisite");
-    const transportGit = execFileSync("which", ["git"], {
-      encoding: "utf8",
-    }).trim();
-    const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
-    const shim = join(root, "shim");
-    mkdirSync(shim);
-    writeFileSync(
-      join(shim, "git"),
-      `#!/bin/sh
-if [ "$1" = '-C' ] && [ "$3" = 'add' ] && [ -f "$2/alpha.txt" ] && [ ! -f ${quote(collectionStarted)} ]; then
-  : > ${quote(collectionStarted)}
-  while [ ! -f ${quote(release)} ]; do sleep 0.02; done
-fi
-exec ${quote(transportGit)} "$@"
-`,
-    );
-    chmodSync(join(shim, "git"), 0o755);
-    previousPath = process.env.PATH;
-    process.env.PATH = `${shim}:${previousPath}`;
-    // Validation proves it overlaps the sibling's collection. Teardown's
-    // release also ends the wait, so a failed test never strands the run.
-    const check = join(root, "check.mjs");
-    writeFileSync(
-      check,
-      `import {existsSync} from 'node:fs';
-while (!existsSync(${JSON.stringify(collectionStarted)})) {
-  if (existsSync(${JSON.stringify(release)})) throw Error('collection barrier missing');
-  await new Promise(resolve => setTimeout(resolve, 10));
-}
-process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
-`,
-    );
-    const command = `${quote(process.execPath)} ${quote(check)}`;
-    const beta = {
-      ...item("beta"),
-      validation: [
-        ...item("beta").validation,
-        { command, provenance: "source-declared", source: "OBJECTIVE" },
-      ],
-    };
-    const graph = {
-      objective: 1,
-      baseSha: target.baseSha,
-      items: [item("alpha"), beta],
-    };
-    const source = `# Recovery fixture
-## Acceptance
-- alpha.txt exists
-- beta.txt exists
-## Commands
-- test -s alpha.txt
-- test -s beta.txt
-- ${command}
-## Final validation
-- test -s beta.txt
-`;
-    const betaReviewTrees = [];
-    const betaPackets = [];
-    let finalPacket;
-    const planner = model(graph, () => {
-      throw Error("Implementation diagnosis is not authorized");
-    });
-    planner.reviewResult = async (request) => {
-      if (
-        request.reviewPhase === "result-review" &&
-        request.criteria.includes("beta.txt exists")
-      ) {
-        betaReviewTrees.push(request.treeSha);
-        betaPackets.push(request);
-      }
-      if (request.reviewPhase === "objective-review") finalPacket = request;
-      return reviewer(request);
-    };
-    const descriptor = {
-      config,
-      graph,
-      objectiveBody: source,
-      fakeRoot: join(root, "fake"),
-      actions: {
-        alpha: {
-          barrier: alphaRelease,
-          files: [{ path: "alpha.txt", text: "accepted\n" }],
-        },
-        beta: { files: [{ path: "beta.txt", text: "accepted\n" }] },
-      },
-      planningModel: planner,
-    };
-    const policy = autonomy();
-    policy.repairClasses = ["validation-environment"];
-    policy.allowances.implementationRepairs = 0;
-    policy.repairPolicy.perPath.implementationRepairs = 0;
-    config.autonomy = policy;
-    fixture = makeApplication(descriptor);
-    const { readState, statePath } = await import("../dist/state-store.js");
-    running = fixture.application.runObjective(1);
-    outcome = running.then(
-      (state) => ({ state }),
-      (error) => ({ error }),
-    );
-    await waitForFile(
-      () =>
-        readEvents(fixture.eventsPath).some(
-          (event) => event.type === "complete" && event.item === "beta",
-        ),
-      fixture.eventsPath,
-      "beta collection ready",
-    );
-    writeFileSync(alphaRelease, "release alpha worker");
-    const failed = await waitForFile(
-      () => {
-        const state = readState(config.repository, 1);
-        return state?.work.beta.recovery?.failure ? state : undefined;
-      },
-      statePath(config.repository, 1),
-      "beta validation failure with live sibling collection",
-    );
-    assert.equal(
-      failed.work.beta.recovery.failure.classification,
-      "implementation",
-    );
-    assert.ok(failed.coordinator.processes.length > 0);
-    assert.equal(failed.error, undefined);
-    const correction = {
-      kind: "validation-environment",
-      failureDigest: failed.work.beta.recovery.failure.digest,
-      actor: "fixture",
-      diagnosis: "Declared local prerequisite was unavailable",
-      correction:
-        "Restore the same declared prerequisite and revalidate the preserved candidate",
-    };
-    assert.throws(
-      () => applyWorkCorrection(structuredClone(failed), "beta", correction),
-      /unsettled/,
-    );
-    writeFileSync(release, "settle sibling collection");
-    const settled = await waitForFile(
-      () => {
-        const state = readState(config.repository, 1);
-        return state?.work.alpha.status === "done" &&
-          state.coordinator.processes.length === 0
-          ? state
-          : undefined;
-      },
-      statePath(config.repository, 1),
-      "sibling completion and global quiescence",
-    );
-    assert.equal(settled.error, undefined);
-    assert.equal(settled.coordinator.cancelError, undefined);
-    // The failure needs an operator's diagnosis, so the run stops once settled.
-    const stopped = await outcome;
-    assert.equal(stopped.error, undefined);
-    assert.equal(stopped.state.work.beta.status, "failed");
-    ownershipReleased = true;
-    writeFileSync(prerequisite, "ready");
-    const original = settled.work.beta;
-    fixture.application.repairWorkItem(1, {
-      item: "beta",
-      treeSha: original.treeSha,
-      correction,
-    });
-    const repaired = readState(config.repository, 1);
-    assert.equal(repaired.work.beta.attempt, original.attempt);
-    assert.equal(repaired.work.beta.treeSha, original.treeSha);
-    assert.equal(repaired.work.beta.changeRef, original.changeRef);
-    assert.equal(consumption(repaired).implementationRepairs, 0);
-    assert.equal(consumption(repaired).resultRereviews, 1);
-    const done = await makeApplication(descriptor).application.runObjective(1);
-    assert.equal(done.finalValidation.passed, true);
-    assert.equal(done.work.beta.attempt, original.attempt);
-    assert.equal(done.runId, settled.runId);
-    assert.equal(done.work.beta.validation.treeSha, done.work.beta.treeSha);
-    assert.deepEqual(betaReviewTrees, [done.work.beta.treeSha]);
-    assert.equal(
-      done.work.beta.recovery.history[0].work.changeRef,
-      original.changeRef,
-    );
-    assert.deepEqual(
-      done.work.beta.recovery.history[0].work.usage,
-      original.usage,
-    );
-    assert.equal(
-      git(config.checkout, "show", `${done.work.beta.changeRef}:beta.txt`),
-      "accepted",
-    );
-    assert.equal(
-      done.work.beta.recovery.history[0].work.treeSha,
-      original.treeSha,
-    );
-    assert.equal(
-      done.work.beta.recovery.history[0].failure.digest,
-      correction.failureDigest,
-    );
-    assert.equal(consumption(done).resultRereviews, 1);
-    assert.notEqual(done.work.beta.changeRef, original.changeRef);
-    assert.notEqual(done.work.beta.treeSha, original.treeSha);
-    const repair = JSON.parse(
-      betaPackets[0].reviewPacket.evidence.find(
-        (source) => source.path === "Retained repair proof: beta",
-      ).content,
-    );
-    const preservation = repair.controllerFacts.candidatePreservation;
-    assert.equal(preservation.preserved, true);
-    assert.equal(preservation.sameAttempt, true);
-    assert.equal(preservation.sameExecutionBase, true);
-    assert.equal(preservation.failedResultBaseCommitSha, original.baseSha);
-    assert.equal(
-      preservation.currentResultBaseCommitSha,
-      done.work.beta.baseSha,
-    );
-    assert.notEqual(
-      preservation.failedResultBaseCommitSha,
-      preservation.currentResultBaseCommitSha,
-    );
-    assert.deepEqual(preservation.acceptedOwnedPaths, ["beta.txt"]);
-    assert.deepEqual(preservation.ownedPathChanges, []);
-    const failedBlob = preservation.failedCandidateChanges[0];
-    assert.equal(failedBlob.path, "beta.txt");
-    assert.equal(failedBlob.newMode, "100644");
-    assert.equal(
-      failedBlob.newObject,
-      git(config.checkout, "rev-parse", `${done.work.beta.changeRef}:beta.txt`),
-    );
-    assert.equal(repair.controllerFacts.repairClass, "validation-environment");
-    assert.deepEqual(
-      JSON.parse(finalPacket.observations).work.find(
-        (entry) => entry.id === "beta",
-      ).repair,
-      repair,
-    );
-    const wireModel = new CodexPlanningModel(config.checkout);
-    let renderedFinal;
-    wireModel.runStructured = async ({ prompt, schema, defaultPhase }) => {
-      assert.equal(defaultPhase, "objective-review");
-      renderedFinal = packetFromPrompt(prompt);
-      assert.equal(renderedFinal.packetId, finalPacket.reviewPacket.id);
-      assert.equal(schema.properties.packetId.enum[0], renderedFinal.packetId);
-      assert.ok(prompt.includes("do not require whole-tree equality"));
-      assert.ok(
-        prompt.includes(
-          "Controller-origin Work Item Git deltas and retained repair comparisons provide supervisor-generated exact Git evidence",
-        ),
-      );
-      assert.equal(
-        prompt.includes(
-          "Only evidence with origin controller and a Work Item Git delta label",
-        ),
-        false,
-      );
-      assert.ok(
-        prompt.includes(
-          "without inventing a requirement to independently witness every declared host action",
-        ),
-      );
-      return reviewer(finalPacket);
-    };
-    await wireModel.reviewResult(finalPacket);
-    const renderedRepair = JSON.parse(
-      renderedFinal.evidence.find(
-        (entry) => entry.path === "Delivery observations",
-      ).content,
-    ).work.find((entry) => entry.id === "beta").repair;
-    assert.deepEqual(renderedRepair, repair);
-    assert.deepEqual(
-      readEvents(fixture.eventsPath)
-        .filter((event) => event.type === "start")
-        .map((event) => event.item)
-        .sort(),
-      ["alpha", "beta"],
-    );
-  } finally {
-    // Open every sync point so the run settles before ownership is handed off.
-    writeFileSync(alphaRelease, "release cleanup");
-    writeFileSync(release, "release cleanup");
-    if (running && outcome) {
-      if (!ownershipReleased && fixture && config) {
-        const { requestControl } = await import(
-          "../dist/coordinator-control.js"
-        );
-        await requestControl(config.repository, {
-          objective: 1,
-          action: "handoff",
-        }).catch(() => {});
-      }
-      await outcome;
-    }
-    if (previousPath !== undefined) process.env.PATH = previousPath;
-    if (previousState === undefined) delete process.env.XDG_STATE_HOME;
-    else process.env.XDG_STATE_HOME = previousState;
     rmSync(root, { recursive: true, force: true });
   }
 });

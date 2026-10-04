@@ -2449,32 +2449,19 @@ test("actual review provider/protocol failures cannot authorize amendment replac
         return;
       }
       await assert.rejects(applyPendingAmendment(args));
-      // Lost answers repeat within the paid bound, then ask the operator;
-      // a provider refusal (a decision) and protocol failures are not
-      // repeated.
-      assert.equal(reviewed, failure === "unknown" ? 4 : 1);
+      // Lost answers and answers that do not decode repeat within the paid
+      // bound, then ask the operator; a provider refusal (a decision) is not
+      // repeated. Decoded findings reject the amendment (tested above).
+      const asked = ["unknown", "wrong-packet", "incomplete-response"];
+      assert.equal(reviewed, asked.includes(failure) ? 4 : 1);
       assert.equal(projected, 0);
-      // A lost answer or a provider refusal leaves the amendment at its last
-      // completed phase, waiting on the operator's decision. A protocol
-      // failure is a refused result and rejects it.
-      const held = failure === "unknown" || failure === "completed-provider";
-      assert.equal(
-        state.pendingAmendment.phase,
-        held ? "compiled" : "rejected",
-      );
-      assert.equal(
-        state.pendingAmendment.rejectionStage,
-        held ? undefined : "review",
-      );
+      // A lost or undecodable answer or a provider refusal leaves the
+      // amendment at its last completed phase, waiting on the operator's
+      // decision; none is a refused result.
+      assert.equal(state.pendingAmendment.phase, "compiled");
+      assert.equal(state.pendingAmendment.rejectionStage, undefined);
       assert.equal(state.pendingAmendment.reviewDigest, undefined);
-      if (held) assert.equal(state.wait.kind, "decision");
-      else {
-        assert.equal(state.coordinator.mode, "paused");
-        assert.equal(
-          state.coordinator.waitReason,
-          state.pendingAmendment.error,
-        );
-      }
+      assert.equal(state.wait.kind, "decision");
       assert.equal(consumption(state).planningRevisions, 1);
       const correction = {
         ...state.pendingAmendment.proposal,
@@ -2499,20 +2486,15 @@ test("actual review provider/protocol failures cannot authorize amendment replac
         /known generated amendment rejection/,
       );
       assert.equal(JSON.stringify(state), before);
-      if (!held) {
-        await assert.rejects(applyPendingAmendment(args), /cannot be replayed/);
-        assert.equal(reviewed, 1);
-        return;
-      }
       // Until the operator answers, the decision holds without a model call.
       await assert.rejects(applyPendingAmendment(args));
-      assert.equal(reviewed, failure === "unknown" ? 4 : 1);
+      assert.equal(reviewed, asked.includes(failure) ? 4 : 1);
       // The operator's retry repeats only the interrupted review.
       assert.equal(clearRepeats(state, "objective"), true);
       reviewAnswers = true;
       assert.equal(await applyPendingAmendment(args), true);
       assert.equal(compiled, 1);
-      assert.equal(reviewed, failure === "unknown" ? 5 : 2);
+      assert.equal(reviewed, asked.includes(failure) ? 5 : 2);
       assert.equal(state.wait, undefined);
       assert.equal(projected, 1);
       assert.equal(state.pendingAmendment, undefined);

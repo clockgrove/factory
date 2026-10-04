@@ -194,8 +194,7 @@ async function command({ verb, options }) {
         reason: "Selected by the dead-end finder",
       });
     case "repair": {
-      // The operator writes the proposal; try each correction kind a
-      // proposal can name until Factory accepts one.
+      // The operator writes the proposal: a diagnosed implementation correction.
       const state = readContinuation(config.repository, objective);
       const [id, work] =
         Object.entries(state.work ?? {}).find(
@@ -203,24 +202,16 @@ async function command({ verb, options }) {
         ) ?? [];
       if (!work?.recovery?.failure)
         throw new Error("No stopped repair names a failure to correct");
-      const refusals = [];
-      for (const kind of ["implementation", "validation-environment"])
-        try {
-          return application.repairWorkItem(objective, {
-            item: id,
-            treeSha: work.treeSha,
-            correction: {
-              failureDigest: work.recovery.failure.digest,
-              kind,
-              diagnosis: "Diagnosed by the dead-end finder",
-              correction: "Make the scripted change again",
-              actor: "operator",
-            },
-          });
-        } catch (error) {
-          refusals.push(`${kind}: ${error.message}`);
-        }
-      throw new Error(refusals.join("; "));
+      return application.repairWorkItem(objective, {
+        item: id,
+        correction: {
+          failureDigest: work.recovery.failure.digest,
+          kind: "implementation",
+          diagnosis: "Diagnosed by the dead-end finder",
+          correction: "Make the scripted change again",
+          actor: "operator",
+        },
+      });
     }
     case "decide":
       return application.decidePlan(objective, {

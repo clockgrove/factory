@@ -159,7 +159,6 @@ Every run repairs and amends within bounded limits. The optional `autonomy` sect
     },
     "repairClasses": [
       "implementation",
-      "validation-environment",
       "planning-output",
       "planning-evidence",
       "planning-choice"
@@ -343,17 +342,19 @@ If the controller stops for any reason, run the Objective again. Factory re-read
 
 ## Allow diagnosed repairs
 
-Automatic repairs are on within the [configured limits](#limit-unattended-work). The `repairClasses` are `implementation`, `validation-environment`, `planning-output`, `planning-evidence` and `planning-choice`. Children, restart and recompilation cannot reset consumption. Each failure is charged once, however often it repeats; a transient or configuration failure is never charged.
+Automatic repairs are on within the [configured limits](#limit-unattended-work). The `repairClasses` are `implementation`, `planning-output`, `planning-evidence` and `planning-choice`. Children, restart and recompilation cannot reset consumption. Each failure is charged once, however often it repeats; a transient or configuration failure is never charged.
 
 Factory requires a concrete diagnosis and correction before another implementation attempt. The new attempt starts from the accepted base; removed unfinished edits are unavailable. Missing product or security decisions, unknown external outcomes and exhausted limits stop for an explicit decision. `status --json` reports the failure identity, consumed allowances, the charged failure events and the next decision.
 
-When the controller could not prepare validation (a configuration failure), or a validation failed because of an external prerequisite, restore only the already authorized environment and revalidate the same result. Submit a proposal file containing `item`, the preserved `treeSha`, and `correction` with `kind: "validation-environment"`, `failureDigest`, `actor`, `diagnosis` and `correction`:
+When the controller could not prepare validation (a configuration failure), or a validation failed because of an external prerequisite, the Work Item waits. Restore only the already authorized environment, then run `factory retry --objective ISSUE_NUMBER --item ITEM`; the same result is validated again.
+
+To supply a diagnosed correction for a wrong result yourself, submit a proposal file containing `item` and `correction` with `kind: "implementation"`, `failureDigest`, `actor`, `diagnosis` and `correction`:
 
 ```sh
 factory repair --objective ISSUE_NUMBER --proposal /private/repair.json
 ```
 
-The configured limits must permit that class. A correction of a failed validation uses a result rereview; a correction after a configuration failure is not charged. Factory revalidates and independently reviews the retained implementation; this command does not accept it or rerun implementation. Native delivery may replay that implementation onto the independently accepted integrated base, changing commit/tree identities. Retain the original failed objects/history separately and verify exact owned path inventory, modes and blob bytes, the same attempt/execution base, and the actual replay parent/result-base binding. Required commands and full independent result review validate the actual replayed tree; successful authenticated named checks must match its exact published head before integration. Review receives the failed and current Git identities, ownership-scoped committed-byte comparison and the repair limits with finite consumption. Operator diagnosis and host-action declarations remain distinct from verified Git facts and actual successful probe receipts. Unknown accounting stays unknown, and no recovery operation raises a provider or spending limit.
+The configured limits must permit the class. The correction starts a new attempt from the accepted base; it uses the allowance already charged for the failure. Required commands and full independent result review validate the new attempt, and successful authenticated named checks must match its exact published head before integration. Operator diagnosis and host-action declarations remain distinct from verified Git facts and actual successful probe receipts. Unknown accounting stays unknown, and no recovery operation raises a provider or spending limit.
 
 ## Publication and local safety
 

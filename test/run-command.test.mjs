@@ -989,3 +989,55 @@ test("factory retry runs the command status prints for a step decision", async (
     assert.equal(readState(config.repository, 1).error, undefined);
   });
 });
+
+test("a stop after an item defect names the item's retry; a waiting diagnosis names the run", () => {
+  const failure = {
+    classification: "defect",
+    detail: "boom",
+    decision: "Factory hit a defect",
+  };
+  const state = {
+    schemaVersion: 7,
+    objective: 5,
+    error: "boom",
+    coordinator: { mode: "running" },
+    work: {
+      other: { status: "done" },
+      X: { status: "failed", recovery: { failure, phase: "stopped" } },
+    },
+  };
+  const outcome = runOutcome(state);
+  assert.equal(outcome.code, 1);
+  assert.match(outcome.message, /Objective #5 stopped: boom\n/);
+  assert.match(outcome.message, /`factory retry --objective 5 --item X` and/);
+  // A defect outside any item runs the Objective's step again.
+  const objectiveOnly = runOutcome({
+    ...state,
+    work: { other: { status: "done" } },
+  });
+  assert.match(objectiveOnly.message, /`factory retry --objective 5` and/);
+  // A failed item whose diagnosis waits for a fix repeats it on the next run;
+  // a retry would start a new attempt without the diagnosis.
+  const waiting = runOutcome({
+    ...state,
+    error: undefined,
+    work: {
+      X: {
+        status: "failed",
+        recovery: { failure, phase: "diagnosing" },
+        wait: {
+          kind: "prerequisite",
+          detail: "The model login expired",
+          fix: "Run claude auth login",
+          step: "item/X/diagnose",
+        },
+      },
+    },
+  });
+  assert.equal(waiting.code, 2);
+  assert.match(
+    waiting.message,
+    /Fix: Run claude auth login; then `factory run --objective 5` asks the diagnosis again/,
+  );
+  assert.doesNotMatch(waiting.message, /factory retry/);
+});

@@ -1,14 +1,16 @@
+import { basename } from "node:path";
 import { describe } from "node:test";
-import { faults } from "./support/github-http-fake.mjs";
-import { runScenario } from "./support/fault-harness.mjs";
-import { KNOWN } from "./support/fault-known.mjs";
+import { runScenario } from "./fault-harness.mjs";
+import { KNOWN } from "./fault-known.mjs";
 import {
   checkKnown,
   declareScenario,
+  partOf,
   referenceRun,
   scenarioConcurrency,
   testNames,
-} from "./support/fault-matrix.mjs";
+} from "./fault-matrix.mjs";
+import { faults } from "./github-http-fake.mjs";
 
 // Real-GitHub and provider behaviors the fault matrix does not cover:
 // read-after-write lag, rate limits (REST and model usage limits), merge
@@ -367,27 +369,58 @@ scenarios.push({
   unsent: [MERGE, MERGE_ASYNC],
 });
 
-const known = KNOWN.consistency;
-const name = (scenario, delivery) => `${delivery}: ${scenario.name}`;
-const checksOf = (scenario) => scenario.checks ?? ["end", "stop", "budget"];
-checkKnown(
-  known,
-  scenarios.flatMap((scenario) =>
-    scenario.deliveries.flatMap((delivery) =>
-      testNames(name(scenario, delivery), checksOf(scenario)),
-    ),
-  ),
-);
-// The paid-call budget compares with an uninterrupted run of each strategy.
-await Promise.all(BOTH.map((delivery) => referenceRun(delivery)));
+/**
+ * The suite is split across CONSISTENCY_PARTS files,
+ * github-consistency-<part>.test.mjs, so CI shards can spread it. Each file
+ * takes its part from its own name, so the files cover every part exactly
+ * when their names are 1..CONSISTENCY_PARTS, which test/fault-guards checks.
+ */
+export const CONSISTENCY_PARTS = 4;
 
-describe("GitHub consistency, rate limits and other actors", {
-  concurrency: scenarioConcurrency(),
-}, () => {
-  for (const [index, scenario] of scenarios.entries())
-    for (const delivery of scenario.deliveries)
+const known = KNOWN.consistency;
+const checksOf = (scenario) => scenario.checks ?? ["end", "stop", "budget"];
+
+/**
+ * Every scenario run, one per scenario and delivery, with the part it
+ * belongs to. The part hashes the run's name, as the fault matrix does, so
+ * adding a scenario moves no other.
+ */
+export const consistencyCases = () =>
+  scenarios.flatMap((scenario, index) =>
+    scenario.deliveries.map((delivery) => {
+      const name = `${delivery}: ${scenario.name}`;
+      return {
+        name,
+        scenario,
+        delivery,
+        index,
+        part: partOf(name, CONSISTENCY_PARTS),
+      };
+    }),
+  );
+
+export const PART_FILE = /^github-consistency-(\d+)\.test\.mjs$/;
+
+/** Declare the part of the suite that the test file `filename` names. */
+export async function defineConsistency(filename) {
+  const part = Number(PART_FILE.exec(basename(filename))?.[1]);
+  if (!(part >= 1 && part <= CONSISTENCY_PARTS))
+    throw new Error(`${filename} names no part 1..${CONSISTENCY_PARTS}`);
+  const cases = consistencyCases();
+  checkKnown(
+    known,
+    cases.flatMap(({ name, scenario }) => testNames(name, checksOf(scenario))),
+  );
+  // The paid-call budget compares with an uninterrupted run of each strategy.
+  await Promise.all(BOTH.map((delivery) => referenceRun(delivery)));
+
+  describe(`GitHub consistency, rate limits and other actors (${part}/${CONSISTENCY_PARTS})`, {
+    concurrency: scenarioConcurrency(),
+  }, () => {
+    for (const { name, scenario, delivery, index, part: own } of cases) {
+      if (own !== part) continue;
       declareScenario(
-        name(scenario, delivery),
+        name,
         () =>
           runScenario({
             name: `c${index}-${delivery === "regular" ? "r" : "n"}`,
@@ -411,4 +444,6 @@ describe("GitHub consistency, rate limits and other actors", {
         },
         known,
       );
-});
+    }
+  });
+}

@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,6 +20,11 @@ import {
   summarizeRun,
   updateSnapshot,
 } from "./support/fault-matrix.mjs";
+import {
+  CONSISTENCY_PARTS,
+  consistencyCases,
+  PART_FILE,
+} from "./support/github-consistency.mjs";
 
 // The guards that keep the fault matrix an honest scoreboard: a known
 // failure must fail for its own diagnosed reason, judged on the run that
@@ -175,5 +186,25 @@ test("a controller signalled from outside the harness voids the scenario", async
   assert.throws(
     () => assertFaultsFired(result),
     /signal from outside the harness/,
+  );
+});
+
+test("the GitHub consistency part files declare every scenario run exactly once", () => {
+  // Each part file declares the cases whose part is its own name's number.
+  const files = readdirSync(import.meta.dirname)
+    .map((file) => Number(PART_FILE.exec(file)?.[1]))
+    .filter(Number.isInteger)
+    .sort((a, b) => a - b);
+  const parts = Array.from({ length: CONSISTENCY_PARTS }, (_, i) => i + 1);
+  assert.deepEqual(files, parts);
+  const cases = consistencyCases();
+  const declared = parts.flatMap((part) =>
+    cases.filter((testCase) => testCase.part === part),
+  );
+  const names = cases.map((testCase) => testCase.name);
+  assert.equal(new Set(names).size, names.length, "duplicate scenario runs");
+  assert.deepEqual(
+    declared.map((testCase) => testCase.name).sort(),
+    [...names].sort(),
   );
 });

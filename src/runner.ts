@@ -1901,20 +1901,16 @@ async function runObjectivePass(
     if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
       throw new CoordinatorHandoff();
     const current = owner.snapshot;
-    // A step saved its wait (a decision or a prerequisite to fix) on the
-    // Objective or a Work Item: the Objective waits for the operator
-    // instead of failing.
+    // A decision or a prerequisite to fix: the scope waits for the operator
+    // and nothing fails, no worker stops (step.ts rule 7). A handoff stops
+    // the pass; the next controller repeats the step.
     const fault = attachedFault(error);
+    const handedOff =
+      fault?.kind === "cancelled" && !!owner.handoff && !cancellationRequested();
     const waiting =
       !!current &&
-      (fault?.kind === "decision" || fault?.kind === "config") &&
-      (awaitsOperator(waitOf(current, "objective")) ||
-        (current.schemaVersion === 7 &&
-          Object.values(current.work).some((work) =>
-            awaitsOperator(work.wait),
-          ))) &&
-      !active.size &&
-      !cancellationRequested();
+      !cancellationRequested() &&
+      (fault?.kind === "decision" || fault?.kind === "config" || handedOff);
     diagnostics.emit({
       runId: stateForSignal?.runId,
       operation: "objective-run",
@@ -1922,6 +1918,30 @@ async function runObjectivePass(
       detail: error instanceof Error ? error.message : String(error),
     });
     if (waiting && current) {
+      // Other items run on to their own stopping points.
+      await Promise.allSettled(active.values());
+      // A question raised outside a step still names its answer.
+      if (
+        (fault.kind === "decision" || fault.kind === "config") &&
+        !awaitsOperator(waitOf(current, "objective")) &&
+        !(
+          current.schemaVersion === 7 &&
+          Object.values(current.work).some((work) => awaitsOperator(work.wait))
+        )
+      )
+        current.wait =
+          fault.kind === "decision"
+            ? {
+                kind: "decision",
+                detail: fault.question,
+                step: "objective/coordinator",
+              }
+            : {
+                kind: "prerequisite",
+                detail: fault.detail,
+                fix: fault.fix,
+                step: "objective/coordinator",
+              };
       saveState(path, current);
       return current;
     }

@@ -3,6 +3,7 @@ import type { IntakeAuthorization } from "./intake.js";
 import { objectiveCandidate } from "./qa.js";
 import type { ContinuationState } from "./state.js";
 import { shortPlanDigest } from "./status-summary.js";
+import { awaitsOperator } from "./step.js";
 
 /** Process exit codes for run, supervisor serve and intake run. */
 export const EXIT_COMPLETE = 0;
@@ -52,6 +53,26 @@ export function runOutcome(state: ContinuationState): {
     return {
       code: EXIT_FAILED,
       message: `Objective #${objective} was cancelled`,
+    };
+  // A Work Item step waits for the operator: its question or fix names the answer.
+  const asked = Object.entries(state.work).find(([, work]) =>
+    awaitsOperator(work.wait),
+  );
+  if (asked) {
+    const [id, work] = asked;
+    const itemRetry = `${retry} --item ${id}`;
+    return {
+      code: EXIT_NEEDS_DECISION,
+      message:
+        work.wait!.kind === "prerequisite"
+          ? `Objective #${objective} Work Item ${id} waits for a prerequisite: ${work.wait!.detail}\nFix: ${work.wait!.fix ?? "see the detail"}; then \`${itemRetry}\` and \`${rerun}\``
+          : `Objective #${objective} Work Item ${id} needs a decision: ${work.wait!.detail}\nAnswer with \`${itemRetry}\` (the step runs again on \`${rerun}\`), or \`factory cancel --objective ${objective}\``,
+    };
+  }
+  if (state.error)
+    return {
+      code: EXIT_FAILED,
+      message: `Objective #${objective} stopped: ${state.error}\nFix the cause, then \`${retry}\` and \`${rerun}\`; or \`factory cancel --objective ${objective}\``,
     };
   return {
     code: EXIT_NEEDS_DECISION,

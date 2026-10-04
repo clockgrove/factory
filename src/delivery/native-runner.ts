@@ -272,7 +272,8 @@ export async function runNativeGraph(args: {
       );
       delete work.execution;
     } catch {
-      // Left recorded: retry refuses until the worker is confirmed stopped.
+      // Left recorded: the next attempt starts only once the driver
+      // confirmed it stopped.
     }
   };
   // Admit independent roots whenever their predecessor units have integrated.

@@ -10,6 +10,33 @@ export const EXIT_COMPLETE = 0;
 export const EXIT_FAILED = 1;
 export const EXIT_NEEDS_DECISION = 2;
 
+/**
+ * A run stopped on a decision or a prerequisite before the Objective had any
+ * state. Nothing records it, so `factory retry` has nothing to clear: the
+ * operator resolves it and runs the Objective again.
+ */
+export class AwaitingBeforeState extends Error {
+  constructor(
+    readonly objective: number,
+    readonly detail: string,
+    readonly fix?: string,
+  ) {
+    super(`Objective #${objective} waits before it starts: ${detail}`);
+    this.name = "AwaitingBeforeState";
+  }
+}
+
+/** Exit code and message for a run that stopped before any state existed. */
+export function awaitingOutcome(wait: AwaitingBeforeState): {
+  code: number;
+  message: string;
+} {
+  return {
+    code: EXIT_NEEDS_DECISION,
+    message: `Objective #${wait.objective} waits before it starts: ${wait.detail}${wait.fix ? `\nFix: ${wait.fix}` : ""}\nResolve it, then run \`factory run --objective ${wait.objective}\` again`,
+  };
+}
+
 /** How a run ended: the exit code and one message naming the next command. */
 export function runOutcome(state: ContinuationState): {
   code: number;

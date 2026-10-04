@@ -53,11 +53,17 @@ import { setupTarget } from "./setup.js";
 import { linuxProcessIdentity } from "./process.js";
 import {
   readContinuation,
+  readPreState,
   readControllerOwner,
   readState,
 } from "./state-store.js";
 import { renderStatusText } from "./status-summary.js";
-import { intakeExitCode, runOutcome } from "./run-outcome.js";
+import {
+  AwaitingBeforeState,
+  awaitingOutcome,
+  intakeExitCode,
+  runOutcome,
+} from "./run-outcome.js";
 import type { ContinuationState } from "./state.js";
 import {
   checkServiceState,
@@ -294,7 +300,11 @@ async function main(): Promise<void> {
       }
       checkServiceState(config, input.objective);
       try {
-        reportRun(await compose(config, loaded).runObjective(input.objective));
+        reportRun(
+          await compose(config, loaded)
+            .runObjective(input.objective)
+            .catch(waitBeforeState),
+        );
       } catch (error) {
         if (!(error instanceof CoordinatorHandoff)) throw error;
       }
@@ -601,6 +611,7 @@ async function main(): Promise<void> {
       secrets,
       continuation?.capacity.concurrency,
       controllerActive(config.repository, objective),
+      continuation ? undefined : readPreState(config.repository, objective),
     );
     if (args.includes("--json")) console.log(JSON.stringify(document));
     else
@@ -839,9 +850,9 @@ async function main(): Promise<void> {
     console.log(`Exported AssetSet ${set} to ${output} for review`);
   } else {
     reportRun(
-      await requireApplication().runObjective(objective, {
-        deadlineAt: option(args, "deadline"),
-      }),
+      await requireApplication()
+        .runObjective(objective, { deadlineAt: option(args, "deadline") })
+        .catch(waitBeforeState),
     );
   }
 }
@@ -852,9 +863,18 @@ function reportIntake(record: IntakeAuthorization): void {
   process.exitCode = intakeExitCode(record);
 }
 
+/** A run that waits before any state exists is an outcome, not a failure. */
+function waitBeforeState(error: unknown): AwaitingBeforeState {
+  if (error instanceof AwaitingBeforeState) return error;
+  throw error;
+}
+
 /** Print how a run ended and set the documented exit code. */
-function reportRun(state: ContinuationState): void {
-  const outcome = runOutcome(state);
+function reportRun(state: ContinuationState | AwaitingBeforeState): void {
+  const outcome =
+    state instanceof AwaitingBeforeState
+      ? awaitingOutcome(state)
+      : runOutcome(state);
   console.log(outcome.message);
   process.exitCode = outcome.code;
 }

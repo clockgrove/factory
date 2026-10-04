@@ -561,6 +561,11 @@ export function parseFactoryState(
         throw new Error(`Work Item ${id} has an invalid resource phase`);
     if (item.step !== undefined && !steps.has(item.step as WorkStep))
       throw new Error(`Work Item ${id} has an invalid step`);
+    if (
+      item.worker !== undefined &&
+      (!Number.isSafeInteger(item.worker) || Number(item.worker) < 1)
+    )
+      throw new Error(`Work Item ${id} has an invalid worker count`);
     if (item.authentication !== undefined) {
       const authentication = record(
         item.authentication,

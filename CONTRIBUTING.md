@@ -66,9 +66,7 @@ node scripts/live-check.mjs reset --objective N   # close what that run left
 
 ### Nightly run
 
-[`.github/workflows/live-check.yml`](.github/workflows/live-check.yml) runs both deliveries with the scripted worker at 10:07 UTC every day, and on demand from the Actions tab. Runs never overlap (one concurrency group). It resets the fixture afterwards. On failure it opens, or comments on, the one open issue labelled `live-check`, with the per-delivery report in the body and the full reports as the `live-check-reports` workflow artifact. A pass comments on that issue only if one is open; close it once you understand the failure.
-
-The workflow needs one repository secret, `FACTORY_SMOKE_TOKEN`: a fine-grained personal access token whose only repository is `clockgrove/factory-smoke`, with Contents, Issues and Pull requests read/write plus Checks and Commit statuses read. _Because_ the run merges and deletes branches, and nothing else should be reachable if the token leaks. Create it once, put an expiry reminder on it, and run `node scripts/live-check.mjs setup` once by hand (repository admin) to install the fixture's CI workflow and required check. Without the secret the first step fails and the issue says so.
+The maintainer's machine runs the check nightly with a systemd user timer and the local `gh` login (no extra token): both deliveries with the scripted worker, then `reset`. A failure opens, or comments on, the one open issue labelled `live-check` with the log tail. Run it by hand the same way: `npm run build`, then `node scripts/live-check.mjs run --worker scripted --delivery regular` (and `native-stack`). `node scripts/live-check.mjs setup` installs the fixture's CI workflow and required check once (repository admin).
 
 ## Pull requests
 

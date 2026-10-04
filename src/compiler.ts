@@ -131,8 +131,9 @@ export function observeModelInvocation(
 }
 
 /**
- * The planning model with every call made as its step's paid call (see
- * src/step.ts), so only the model's own faults count toward the bound.
+ * The planning model with its calls made as its step's paid calls (see
+ * src/step.ts), so only the model's own faults count toward the bound. A
+ * diagnosis is bounded per failure by PAID_ATTEMPTS instead, never by both.
  */
 export function paidModel(
   model: PlanningModel,
@@ -141,7 +142,9 @@ export function paidModel(
   const reviewResult = model.reviewResult?.bind(model);
   return {
     generateStructured: (request) =>
-      step.paid(() => model.generateStructured(request)),
+      request.purpose === "diagnosis"
+        ? model.generateStructured(request)
+        : step.paid(() => model.generateStructured(request)),
     reviewGraph: (request) => step.paid(() => model.reviewGraph(request)),
     ...(reviewResult && {
       reviewResult: (request) => step.paid(() => reviewResult(request)),

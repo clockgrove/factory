@@ -184,6 +184,7 @@ export async function closeWorkItem(
   github: GitHubGateway,
   save: () => void,
   native: boolean,
+  signal?: AbortSignal,
 ): Promise<void> {
   const work = state.work[itemId]!;
   if (work.githubClosure === "complete") return;
@@ -238,9 +239,10 @@ export async function closeWorkItem(
       }
       await github.closeIssue(state.issueByItemId[itemId]!, comment, {
         workItem: { objective: state.objective, id: itemId },
+        ...(state.issueAuthor ? { author: state.issueAuthor } : {}),
       });
     },
-    { save },
+    { save, signal },
   );
   work.githubClosure = "complete";
   delete work.error;
@@ -253,6 +255,7 @@ export async function closeObjectiveIssue(
   body: string,
   github: GitHubGateway,
   save: () => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (state.objectiveClosure === "complete") return;
   sealFinalAcceptance(state);
@@ -268,9 +271,9 @@ export async function closeObjectiveIssue(
       github.closeIssue(
         state.objective,
         `Factory completed ${state.graph.items.length} Work Items; final validation passed at ${candidate.commitSha} (${candidate.basis}).`,
-        { body },
+        { body, ...(state.issueAuthor ? { author: state.issueAuthor } : {}) },
       ),
-    { save },
+    { save, signal },
   );
   state.objectiveClosure = "complete";
   save();

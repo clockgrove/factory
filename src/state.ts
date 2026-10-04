@@ -151,6 +151,8 @@ export interface PreparationState {
   plan?: import("./compiler.js").PlanCandidate;
   /** Issues already projected; projection reconciles the rest by marker. */
   issueByItemId: Record<string, number>;
+  /** The login that authored Factory's first issue: its GitHub identity. */
+  issueAuthor?: string;
   error?: string;
   cancelRequested?: boolean;
   cancelledAt?: string;
@@ -188,6 +190,8 @@ export interface FactoryState {
   graph: WorkGraph;
   objectiveCommands?: string[];
   issueByItemId: Record<string, number>;
+  /** The login that authored Factory's issues: its GitHub identity. */
+  issueAuthor?: string;
   work: Record<string, WorkState>;
   stackNumbers?: Record<string, number>;
   stackMerges?: Record<
@@ -195,6 +199,12 @@ export interface FactoryState {
     { topPullRequest: number; expectedHeadSha: string; uuid: string }
   >;
   integratedSha?: string;
+  /**
+   * Heads others pushed on top of `integratedSha` that final validation
+   * followed, oldest first; the last is the final candidate. `asked` is a
+   * further head awaiting the operator's answer.
+   */
+  finalHead?: { integratedSha: string; heads: string[]; asked?: string };
   finalValidation?: ValidationEvidence & { passed: boolean; detail?: string };
   finalAcceptancePending?: AcceptancePending;
   finalAcceptanceDecisions?: AcceptanceDecision[];
@@ -538,6 +548,7 @@ export function parseFactoryState(
       throw new Error(`Work Item ${item.id} has an unknown dependency`);
   }
   const projected = record(state.issueByItemId, "issueByItemId");
+  if (state.issueAuthor !== undefined) string(state.issueAuthor, "issueAuthor");
   const work = record(state.work, "work");
   if (new Set(Object.values(projected)).size !== ids.size)
     throw new Error("Projected Work Item Issue identities are not unique");
@@ -957,6 +968,20 @@ export function parseFactoryState(
   }
   if (state.integratedSha !== undefined)
     sha(state.integratedSha, "integratedSha");
+  if (state.finalHead !== undefined) {
+    const followed = record(state.finalHead, "finalHead");
+    const keys = Object.keys(followed).sort().join(",");
+    if (
+      !["heads,integratedSha", "asked,heads,integratedSha"].includes(keys) ||
+      !Array.isArray(followed.heads) ||
+      !followed.heads.length ||
+      new Set(followed.heads).size !== followed.heads.length
+    )
+      throw new Error("Followed final heads are invalid");
+    sha(followed.integratedSha, "finalHead.integratedSha");
+    for (const head of followed.heads) sha(head, "finalHead.heads");
+    if (followed.asked !== undefined) sha(followed.asked, "finalHead.asked");
+  }
   if (state.stackNumbers !== undefined) {
     const numbers = record(state.stackNumbers, "stackNumbers");
     for (const [unit, number] of Object.entries(numbers))
@@ -999,7 +1024,10 @@ export function parseFactoryState(
     if (selections.length) {
       assertHydrationReceipt(
         final.hydrationReceipt,
-        sha(state.integratedSha, "integratedSha"),
+        sha(
+          objectiveCandidate(state as unknown as FactoryState)?.commitSha,
+          "final candidate",
+        ),
         sha(final.treeSha, "finalValidation.treeSha"),
         selections,
       );

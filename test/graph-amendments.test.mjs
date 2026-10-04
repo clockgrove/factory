@@ -43,7 +43,7 @@ import {
 } from "../dist/github-client.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
 import { encodeCompilerWire } from "./support/compiler-wire.mjs";
-import { attachFault, transient } from "../dist/fault.js";
+import { attachFault, decision, transient } from "../dist/fault.js";
 import { clearRepeats } from "../dist/step.js";
 
 // Step backoff runs on a virtual clock, so repeats never sleep in real time.
@@ -1499,6 +1499,8 @@ test("real gateway reconciles reviewed issue bodies, native hierarchy and depend
     async request(method, route, value) {
       calls.push({ method, route, value });
       const n = Number(route.match(/issues\/(\d+)/)?.[1]);
+      if (method === "GET" && /\/issues\?/.test(route))
+        return [...issues.values()].sort((a, b) => b.number - a.number);
       if (method === "GET") {
         if (route.endsWith("/parent")) {
           const parent = [...hierarchy].find(([, children]) =>
@@ -2269,7 +2271,7 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
       );
       await assert.rejects(
         setup.application.proposeAmendment(1, proposal),
-        /known unprojected/,
+        /known generated amendment rejection/,
       );
       assert.equal(
         readFileSync(statePath(config.repository, 1), "utf8"),
@@ -2493,7 +2495,7 @@ test("actual review provider/protocol failures cannot authorize amendment replac
       const before = JSON.stringify(state);
       assert.throws(
         () => submitAmendment(state, correction),
-        /known unprojected/,
+        /known generated amendment rejection/,
       );
       assert.equal(JSON.stringify(state), before);
       if (failure !== "unknown") {
@@ -2515,68 +2517,86 @@ test("actual review provider/protocol failures cannot authorize amendment replac
     });
 });
 
-test("completed-rejection preserves projection history without replay", async () => {
-  await fixture(
-    "projection-completed-rejection",
-    async ({ config, initial }) => {
-      const obligations = coverageObligations(body, objectiveCriteria(body));
-      const graph = withCoverage({ coverageObligations: obligations }, initial);
-      graph.coverage[0].source = obligations[0].source;
-      const state = {
-        graph,
-        objective: 1,
-        baseSha: initial.baseSha,
-        runId: "fixture",
-        issueByItemId: { result: 2 },
-        work: { result: { status: "done", attempt: "preserved" } },
-        autonomy,
-        capacity: { concurrency: config.execution.concurrency },
-        planGraphDigest: graphDigest(graph),
-        coordinator: { mode: "running" },
-      };
-      submitAmendment(state, {
-        ...discovery,
-        actor: "operator",
-        expectedGraphDigest: graphDigest(graph),
-        graph: qaGraph(graph),
-      });
-      let creates = 0;
-      const args = {
-        state,
-        config,
-        body,
-        model: {
-          async reviewGraph(request) {
-            return {
-              packetId: request.reviewPacket.id,
-              findings: [],
-            };
-          },
-        },
-        github: {
-          async projectGraph(request) {
-            request.projected("result", 2);
-            await request.beforeCreate("qa");
-            creates++;
-            throw new GitHubRequestError(422);
-          },
-        },
-        save() {},
-        cancelled: () => false,
-        clock,
-      };
-      await assert.rejects(applyPendingAmendment(args), /GitHub/);
-      assert.equal(state.pendingAmendment.phase, "rejected");
-      assert.equal(state.pendingAmendment.rejectionStage, "projection");
-      assert.ok(state.pendingAmendment.reviewDigest);
-      assert.deepEqual(state.pendingAmendment.issueByItemId, { result: 2 });
-      assert.equal(state.graph.items.length, 1);
-      assert.equal(state.work.result.attempt, "preserved");
-      await assert.rejects(applyPendingAmendment(args), /cannot be replayed/);
-      assert.equal(creates, 1);
-      assert.equal(consumption(state).planningRevisions, 1);
+test("a projection refusal waits for the operator and is never a rejection", async () => {
+  // A foreign change (decision) or a refused permission (config) leaves the
+  // amendment reviewed; the operator's retry projects again.
+  for (const fault of [
+    decision("GitHub rejected a value Factory submitted."),
+    {
+      kind: "config",
+      detail: "GitHub login lacks permission",
+      fix: "Grant it",
     },
-  );
+  ])
+    await fixture(
+      `projection-refusal-${fault.kind}`,
+      async ({ config, initial }) => {
+        const obligations = coverageObligations(body, objectiveCriteria(body));
+        const graph = withCoverage(
+          { coverageObligations: obligations },
+          initial,
+        );
+        graph.coverage[0].source = obligations[0].source;
+        const state = {
+          graph,
+          objective: 1,
+          baseSha: initial.baseSha,
+          runId: "fixture",
+          issueByItemId: { result: 2 },
+          work: { result: { status: "done", attempt: "preserved" } },
+          autonomy,
+          capacity: { concurrency: config.execution.concurrency },
+          planGraphDigest: graphDigest(graph),
+          coordinator: { mode: "running" },
+        };
+        submitAmendment(state, {
+          ...discovery,
+          actor: "operator",
+          expectedGraphDigest: graphDigest(graph),
+          graph: qaGraph(graph),
+        });
+        let creates = 0;
+        let refuse = true;
+        const args = {
+          state,
+          config,
+          body,
+          model: {
+            async reviewGraph(request) {
+              return { packetId: request.reviewPacket.id, findings: [] };
+            },
+          },
+          github: {
+            async projectGraph(request) {
+              request.projected("result", 2);
+              await request.beforeCreate("qa");
+              if (refuse) throw attachFault(new GitHubRequestError(422), fault);
+              creates++;
+              return { issueByItemId: { ...request.knownIssues, qa: 3 } };
+            },
+          },
+          save() {},
+          cancelled: () => false,
+          clock,
+        };
+        await assert.rejects(applyPendingAmendment(args), /GitHub/);
+        assert.equal(state.pendingAmendment.phase, "reviewed");
+        assert.equal(state.pendingAmendment.rejectionStage, undefined);
+        assert.ok(state.pendingAmendment.reviewDigest);
+        assert.equal(
+          state.wait.kind,
+          fault.kind === "decision" ? "decision" : "prerequisite",
+        );
+        assert.equal(state.graph.items.length, 1);
+        refuse = false;
+        assert.equal(clearRepeats(state, "objective"), true);
+        assert.equal(await applyPendingAmendment(args), true);
+        assert.equal(creates, 1);
+        assert.equal(state.wait, undefined);
+        assert.equal(state.work.result.attempt, "preserved");
+        assertAmendmentCompleted(state);
+      },
+    );
 });
 
 test("mutation-unknown projection repeats without duplicate issues", async () => {
@@ -2586,69 +2606,5 @@ test("mutation-unknown projection repeats without duplicate issues", async () =>
       new GitHubOutcomeUnknown(),
       transient("GitHub POST response was lost", true),
     ),
-  );
-});
-
-test("completed-auth-rejection preserves projection history without replay", async () => {
-  await fixture(
-    "projection-completed-auth-rejection",
-    async ({ config, initial }) => {
-      const obligations = coverageObligations(body, objectiveCriteria(body));
-      const graph = withCoverage({ coverageObligations: obligations }, initial);
-      graph.coverage[0].source = obligations[0].source;
-      const state = {
-        graph,
-        objective: 1,
-        baseSha: initial.baseSha,
-        runId: "fixture",
-        issueByItemId: { result: 2 },
-        work: { result: { status: "done", attempt: "preserved" } },
-        autonomy,
-        capacity: { concurrency: config.execution.concurrency },
-        planGraphDigest: graphDigest(graph),
-        coordinator: { mode: "running" },
-      };
-      submitAmendment(state, {
-        ...discovery,
-        actor: "operator",
-        expectedGraphDigest: graphDigest(graph),
-        graph: qaGraph(graph),
-      });
-      let creates = 0;
-      const args = {
-        state,
-        config,
-        body,
-        model: {
-          async reviewGraph(request) {
-            return {
-              packetId: request.reviewPacket.id,
-              findings: [],
-            };
-          },
-        },
-        github: {
-          async projectGraph(request) {
-            request.projected("result", 2);
-            await request.beforeCreate("qa");
-            creates++;
-            throw new GitHubRequestError(403);
-          },
-        },
-        save() {},
-        cancelled: () => false,
-        clock,
-      };
-      await assert.rejects(applyPendingAmendment(args), /GitHub/);
-      assert.equal(state.pendingAmendment.phase, "rejected");
-      assert.equal(state.pendingAmendment.rejectionStage, "projection");
-      assert.ok(state.pendingAmendment.reviewDigest);
-      assert.deepEqual(state.pendingAmendment.issueByItemId, { result: 2 });
-      assert.equal(state.graph.items.length, 1);
-      assert.equal(state.work.result.attempt, "preserved");
-      await assert.rejects(applyPendingAmendment(args), /cannot be replayed/);
-      assert.equal(creates, 1);
-      assert.equal(consumption(state).planningRevisions, 1);
-    },
   );
 });

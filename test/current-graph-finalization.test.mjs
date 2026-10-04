@@ -250,7 +250,9 @@ test("remote default advancement during final review validates and reviews the n
     const state = await setup.application.runObjective(1);
     assert.equal(finalReviews, 2);
     const head = git(args.target.origin, "rev-parse", "refs/heads/main");
-    assert.equal(state.integratedSha, head);
+    // Factory's integration stays its own; the foreign head is followed.
+    assert.notEqual(state.integratedSha, head);
+    assert.deepEqual(state.finalHead.heads, [head]);
     assert.equal(state.finalAcceptance.commit, head);
     assert.equal(state.objectiveClosure, "complete");
   });

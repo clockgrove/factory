@@ -650,7 +650,7 @@ test("GitHub issue projection renders the accepted assignment and resolved bindi
             const path = new URL(url).pathname.slice(1);
             assert.match(
               path,
-              /^(?:user|repos\/example\/profiles\/(?:labels|issues(?:\/[12](?:\/(?:labels|dependencies\/blocked_by|sub_issues|parent))?)?))$/,
+              /^(?:user|repos\/example\/profiles\/(?:labels|issues(?:\/\d+(?:\/(?:labels|dependencies\/blocked_by|sub_issues|parent))?)?))$/,
             );
             assert.equal(options.headers["x-github-api-version"], "2026-03-10");
             const method = options.method ?? "GET";

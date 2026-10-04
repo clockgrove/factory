@@ -1833,7 +1833,14 @@ export function objectiveReviewEvidence(args: {
       candidateCommitSha,
       candidateTreeSha,
       integratedCommitSha: state.integratedSha ?? null,
-      integratedTreeSha: state.integratedSha ? candidateTreeSha : null,
+      integratedTreeSha: state.integratedSha
+        ? pinnedGit(checkout, "rev-parse", `${state.integratedSha}^{tree}`)
+        : null,
+      // Commits others pushed on top of the integration, now the candidate.
+      followedHeads:
+        candidate.commitSha === state.integratedSha
+          ? []
+          : (state.finalHead?.heads ?? []),
       work,
     }),
     evidence,

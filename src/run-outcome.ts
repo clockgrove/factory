@@ -16,6 +16,8 @@ export function runOutcome(state: ContinuationState): {
 } {
   const objective = state.objective;
   const rerun = `factory run --objective ${objective}`;
+  // A step's decision stands until the operator's retry clears it.
+  const retry = `factory retry --objective ${objective}`;
   // An Objective step waits for the operator: a prerequisite to fix, or a decision.
   const wait = state.wait;
   if (
@@ -24,7 +26,7 @@ export function runOutcome(state: ContinuationState): {
   )
     return {
       code: EXIT_NEEDS_DECISION,
-      message: `Objective #${objective} waits for a prerequisite: ${wait.detail}\nFix: ${wait.fix ?? "see the detail"}; then rerun \`${rerun}\``,
+      message: `Objective #${objective} waits for a prerequisite: ${wait.detail}\nFix: ${wait.fix ?? "see the detail"}; then \`${retry}\` and \`${rerun}\``,
     };
   if (
     wait?.kind === "decision" &&
@@ -32,7 +34,7 @@ export function runOutcome(state: ContinuationState): {
   )
     return {
       code: EXIT_NEEDS_DECISION,
-      message: `Objective #${objective} needs a decision: ${wait.detail}\nResolve it, then rerun \`${rerun}\`, or cancel the Objective`,
+      message: `Objective #${objective} needs a decision: ${wait.detail}\nAnswer with \`${retry}\` (the step runs again on \`${rerun}\`), or \`factory cancel --objective ${objective}\``,
     };
   if (state.schemaVersion === 8)
     return {

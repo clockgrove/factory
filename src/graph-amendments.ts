@@ -374,17 +374,23 @@ function validateAmendmentReplacement(
     !rejected.error ||
     rejected.proposal.graph ||
     proposal.graph ||
-    rejected.reviewDigest ||
     (rejected.rejectionStage !== undefined
-      ? !["compilation", "validation", "review-findings"].includes(
-          rejected.rejectionStage,
-        )
+      ? ![
+          "compilation",
+          "validation",
+          "review-findings",
+          "projection",
+        ].includes(rejected.rejectionStage)
       : !!rejected.graph) ||
     (rejected.rejectionStage === "review-findings" && !rejected.graph) ||
-    !isDeepStrictEqual(rejected.issueByItemId, state.issueByItemId)
+    // A rejection after review may have projected issues; the replacement
+    // finds them again by marker.
+    (rejected.rejectionStage !== "projection" &&
+      (rejected.reviewDigest !== undefined ||
+        !isDeepStrictEqual(rejected.issueByItemId, state.issueByItemId)))
   )
     throw new Error(
-      "Replacement requires a known unprojected generated amendment rejection",
+      "Replacement requires a known generated amendment rejection",
     );
   if (
     state.coordinator?.mode !== "paused" ||
@@ -635,6 +641,16 @@ async function advanceAmendment(args: {
   let compilationResponseObserved = false;
   let calling: "compile" | "review" | "projection" | undefined;
   let stage: NonNullable<PendingAmendment["rejectionStage"]> = "compilation";
+  /** The amendment's result is refused: a `work` fault. */
+  const refused = (error: Error) =>
+    attachFault(error, { kind: "work", evidence: { detail: error.message } });
+  const checkAmendment = () => {
+    try {
+      validateAmendment(state, pending.graph!, config, args.body);
+    } catch (error) {
+      throw error instanceof Error ? refused(error) : error;
+    }
+  };
   try {
     if (args.cancelled()) throw new Error("Objective cancelled");
     const choices = executionProfileChoices(config);
@@ -666,8 +682,10 @@ async function advanceAmendment(args: {
         observed !== state.prerequisitesDigest ||
         !isDeepStrictEqual(current, prerequisites)
       )
-        throw new Error(
-          "Amendment native prerequisites differ from those the plan was made with",
+        throw refused(
+          new Error(
+            "Amendment native prerequisites differ from those the plan was made with",
+          ),
         );
     };
     await verifyPrerequisites();
@@ -727,7 +745,7 @@ async function advanceAmendment(args: {
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (stopped()) return false;
     stage = "validation";
-    validateAmendment(state, pending.graph!, config, args.body);
+    checkAmendment();
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (pending.phase === "compiled") {
       stage = "review";
@@ -776,12 +794,20 @@ async function advanceAmendment(args: {
         },
       });
       calling = undefined;
-      const findings = decodeGraphReview(response, evidence);
+      // An answer that does not decode refuses the amendment like findings.
+      let findings: ReturnType<typeof decodeGraphReview>;
+      try {
+        findings = decodeGraphReview(response, evidence);
+      } catch (error) {
+        throw error instanceof Error ? refused(error) : error;
+      }
       if (findings.length) {
         // Only a complete packet-bound decoded finding permits diagnosed correction.
         stage = "review-findings";
-        throw new Error(
-          `Independent amendment review rejected: ${JSON.stringify(findings)}`,
+        throw refused(
+          new Error(
+            `Independent amendment review rejected: ${JSON.stringify(findings)}`,
+          ),
         );
       }
       pending.reviewDigest = createHash("sha256")
@@ -792,7 +818,7 @@ async function advanceAmendment(args: {
     }
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (stopped()) return false;
-    validateAmendment(state, pending.graph!, config, args.body);
+    checkAmendment();
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (pending.phase === "reviewed") {
       await verifyPrerequisites();
@@ -804,6 +830,11 @@ async function advanceAmendment(args: {
         previousGraph: state.graph,
         objectiveIssue: state.objective,
         knownIssues: pending.issueByItemId,
+        author: state.issueAuthor,
+        authored: (login) => {
+          state.issueAuthor = login;
+          save();
+        },
         completedItems: Object.keys(state.work).filter(
           (id) => state.work[id]!.status === "done",
         ),
@@ -822,7 +853,7 @@ async function advanceAmendment(args: {
     }
     if (args.cancelled()) throw new Error("Objective cancelled");
     if (stopped()) return false;
-    validateAmendment(state, pending.graph!, config, args.body);
+    checkAmendment();
     await verifyPrerequisites();
     const proposalReceipt = structuredClone(pending.proposal);
     delete proposalReceipt.graph;
@@ -846,16 +877,14 @@ async function advanceAmendment(args: {
     save();
     return true;
   } catch (error) {
-    // A call that ended without a completed answer leaves the amendment at
-    // its last completed phase: the step repeats it, and a missing
-    // prerequisite waits for its fix. Anything else is a real rejection.
-    const fault = attachedFault(error);
-    const repeatable =
-      calling !== undefined &&
-      !(error instanceof CompletedModelInvocationError) &&
-      !(calling === "compile" && compilationResponseObserved) &&
-      (fault?.kind === "transient" || fault?.kind === "config");
-    if (repeatable) throw error;
+    // Only a refused result (a `work` fault) or an answered model output
+    // rejects the amendment. Anything else leaves it at its last completed
+    // phase: the step repeats a transient fault, waits on a decision or a
+    // configuration fix, and stops on cancellation or a defect.
+    const answered =
+      error instanceof CompletedModelInvocationError ||
+      (calling === "compile" && compilationResponseObserved);
+    if (!answered && attachedFault(error)?.kind !== "work") throw error;
     pending.rejectionStage = stage;
     pending.phase = "rejected";
     pending.error = error instanceof Error ? error.message : String(error);

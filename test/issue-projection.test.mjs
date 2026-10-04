@@ -6,6 +6,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { faultOf } from "../dist/fault.js";
 import { RealGitHubGateway, projectedIssueBody } from "../dist/github.js";
 import { projectionClient } from "./support/projection-client.mjs";
 const item = (id, kind = "work") => ({
@@ -225,11 +226,107 @@ test("owned duplicate Work Item issues keep the oldest and close the rest", asyn
   assert.deepEqual(issueByItemId, { ordinary: 2 });
   assert.equal(f.issues.get(2).state, "open");
   assert.equal(f.issues.get(3).state, "closed");
+  assert.equal(f.issues.get(3).state_reason, "not_planned");
+  assert.match(f.comments.get(3)[0].body, /Duplicate of #2/);
   assert.equal(
     f.calls.filter((c) => c.method === "POST" && c.route.endsWith("/issues"))
       .length,
     0,
   );
+  // A repeat keeps the same issue and leaves the closed duplicate alone.
+  assert.deepEqual((await f.gateway.projectGraph(f.request)).issueByItemId, {
+    ordinary: 2,
+  });
+  assert.equal(f.comments.get(3).length, 1);
+});
+test("a duplicate with progress is kept over an older one", async () => {
+  const f = fixture();
+  const projected = {
+    title: "ordinary",
+    body: projectedIssueBody(f.request.graph.items[0], 1),
+    labels: ["factory:work-item"],
+  };
+  f.issues.set(2, f.issue(2, projected));
+  f.issues.set(3, f.issue(3, { ...projected, comments: 1 }));
+  const { issueByItemId } = await f.gateway.projectGraph(f.request);
+  assert.deepEqual(issueByItemId, { ordinary: 3 });
+  assert.equal(f.issues.get(2).state, "closed");
+});
+test("an edited copy of a Work Item issue is not a duplicate to close", async () => {
+  const f = fixture();
+  const projected = {
+    title: "ordinary",
+    body: projectedIssueBody(f.request.graph.items[0], 1),
+    labels: ["factory:work-item"],
+  };
+  f.issues.set(2, f.issue(2, projected));
+  f.issues.set(3, f.issue(3, { ...projected, title: "Edited" }));
+  await assert.rejects(f.gateway.projectGraph(f.request), /some edited/);
+  assert.equal(f.issues.get(2).state, "open");
+  assert.equal(f.issues.get(3).state, "open");
+});
+test("closure records completion on an issue a human closed, after the lag window", async () => {
+  const f = fixture();
+  const marker = "<!-- factory:objective=1;item=ordinary -->";
+  const closed = (closedAt) =>
+    f.issue(2, {
+      title: "ordinary",
+      body: `${marker}\nbody`,
+      state: "closed",
+      closed_at: closedAt,
+    });
+  // Closed moments ago: the completion comment may not be listed yet.
+  f.issues.set(2, closed(new Date().toISOString()));
+  await assert.rejects(
+    f.gateway.closeIssue(2, "Completed", {
+      workItem: { objective: 1, id: "ordinary" },
+    }),
+    (error) => faultOf(error).kind === "transient",
+  );
+  assert.equal(f.comments.get(2), undefined);
+  // Closed long ago by a human: the intended end; record it, no decision.
+  f.issues.set(2, closed("2020-01-01T00:00:00Z"));
+  await f.gateway.closeIssue(2, "Completed", {
+    workItem: { objective: 1, id: "ordinary" },
+  });
+  assert.match(f.comments.get(2)[0].body, /factory:closure/);
+  assert.equal(
+    f.calls.filter((c) => c.method === "PATCH").length,
+    0,
+    "a closed issue is not closed again",
+  );
+  // A repeat finds its comment and posts nothing.
+  await f.gateway.closeIssue(2, "Completed", {
+    workItem: { objective: 1, id: "ordinary" },
+  });
+  assert.equal(f.comments.get(2).length, 1);
+});
+test("issue numbers past a gap or a deleted issue are still probed", async () => {
+  const f = fixture();
+  f.issues.set(
+    4,
+    f.issue(4, {
+      title: "ordinary",
+      body: projectedIssueBody(f.request.graph.items[0], 1),
+      labels: ["factory:work-item"],
+    }),
+  );
+  // The lists lag: neither shows #4, and #2 is deleted (410).
+  const paginate = f.client.paginate;
+  f.client.paginate = async (route) => {
+    const result = await paginate(route);
+    return route.includes("issues?state=all")
+      ? result.filter((issue) => issue.number !== 4)
+      : result;
+  };
+  const request = f.client.request;
+  f.client.request = async (method, route, body) => {
+    if (method === "GET" && /\/issues\/2$/.test(route))
+      throw new GitHubRequestError(410);
+    return request(method, route, body);
+  };
+  const { issueByItemId } = await f.gateway.projectGraph(f.request);
+  assert.deepEqual(issueByItemId, { ordinary: 4 });
 });
 test("an issue another login authored is not Factory's, even with its marker", async () => {
   const f = fixture();

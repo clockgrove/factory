@@ -53,7 +53,7 @@ import type {
   GitHubGateway,
   PlanningModel,
 } from "./contracts.js";
-import { attachedFault, attachFault, decision } from "./fault.js";
+import { attachedFault, attachFault, decision, faultDetail } from "./fault.js";
 import {
   type ControlRequest,
   requestControl,
@@ -67,6 +67,7 @@ import {
   awaitsOperator,
   clearAllRepeats,
   clearRepeats,
+  outageOf,
   step,
   type StepContext,
   type StepState,
@@ -117,6 +118,9 @@ import {
   reviewAcceptance,
   validateTree,
 } from "./validation.js";
+
+/** Heads others push during final validation that Factory follows before asking. */
+const FOLLOWED_HEAD_LIMIT = 3;
 
 /** One controller-derived binding for the immutable preparation inputs. */
 function preparationSourceDigest(
@@ -981,6 +985,15 @@ async function runObjectivePass(
           save: () => {
             if (state?.schemaVersion === 7) save(state);
             else if (state) saveState(path, state);
+            else {
+              // Nothing is saved before the Objective has state: report an
+              // outage to the run's output instead.
+              const outage = outageOf(unsaved as StepState, "objective");
+              if (outage)
+                reportRunStatus?.(
+                  `Factory: ${outage.step} failing since ${outage.since} (${outage.tries} tries): ${faultDetail(outage.last)}`,
+                );
+            }
           },
           signal: owner.abort.signal,
         },
@@ -1055,6 +1068,7 @@ async function runObjectivePass(
             github,
             saveCurrent,
             config.delivery.kind === "native-stack",
+            owner.abort.signal,
           );
       if (state.finalValidation?.passed) {
         reportRunStatus?.(
@@ -1069,7 +1083,13 @@ async function runObjectivePass(
               "Default branch changed before historical final acceptance could be sealed",
             );
         }
-        await closeObjectiveIssue(state, issue.body, github, saveCurrent);
+        await closeObjectiveIssue(
+          state,
+          issue.body,
+          github,
+          saveCurrent,
+          owner.abort.signal,
+        );
         return state;
       }
       if (state.cancelRequested || state.cancelledAt)
@@ -1324,6 +1344,11 @@ async function runObjectivePass(
               graph,
               objectiveIssue: objective,
               knownIssues: preparation!.issueByItemId,
+              author: preparation!.issueAuthor,
+              authored: (login) => {
+                preparation!.issueAuthor = login;
+                saveState(path, preparation!);
+              },
               beforeCreate: waitWhileStopped,
               projected: (id, number) => {
                 preparation!.issueByItemId[id] = number;
@@ -1365,6 +1390,9 @@ async function runObjectivePass(
           .update(issue.body)
           .digest("hex"),
         issueByItemId: projected.issueByItemId,
+        ...(preparation.issueAuthor
+          ? { issueAuthor: preparation.issueAuthor }
+          : {}),
         work: Object.fromEntries(
           graph.items.map((item) => [item.id, { status: "pending" }]),
         ),
@@ -1450,7 +1478,7 @@ async function runObjectivePass(
           throw attachFault(
             new Error(`${changed}; operator direction required`),
             decision(
-              `${changed} outside Factory. Restore it, or cancel the Objective.`,
+              `${changed} outside Factory. Restore it, then factory retry --objective ${objective}; or factory cancel --objective ${objective}`,
             ),
           );
       });
@@ -1515,21 +1543,23 @@ async function runObjectivePass(
      * validated again; that is not a fault. Returns whether it moved.
      */
     const followDefaultBranch = () =>
-      objectiveStep(state, "final-head", async () => {
+      objectiveStep(state, "final-head", async (context) => {
         const head = await fetchHead(
           config.checkout,
           await github.defaultBranch(),
         );
+        context.progress();
         const candidate = objectiveCandidate(state)!;
         if (head === candidate.commitSha) return false;
+        const integrated = state.integratedSha;
         let contained = false;
-        if (candidate.basis === "current-graph-integration")
+        if (candidate.basis === "current-graph-integration" && integrated)
           try {
             git(
               config.checkout,
               "merge-base",
               "--is-ancestor",
-              candidate.commitSha,
+              integrated,
               head,
             );
             contained = true;
@@ -1540,13 +1570,42 @@ async function runObjectivePass(
           const detail =
             candidate.basis === "pinned-baseline"
               ? `The default branch moved to ${head} from the pinned baseline ${candidate.commitSha}`
-              : `The default branch ${head} no longer contains the integrated Objective ${candidate.commitSha}`;
+              : `The default branch ${head} no longer contains the integrated Objective ${integrated}`;
           throw attachFault(
             new Error(detail),
-            decision(`${detail}. Inspect it, then retry or cancel.`),
+            decision(
+              `${detail}. Only cancelling resolves this: factory cancel --objective ${objective}`,
+            ),
           );
         }
-        state.integratedSha = head;
+        // Commits others pushed on top: follow them, bounded, apart from
+        // the integration Factory made.
+        const followed =
+          state.finalHead?.integratedSha === integrated
+            ? state.finalHead
+            : undefined;
+        const heads = (followed?.heads ?? []).filter((entry) => entry !== head);
+        if (head === integrated) delete state.finalHead;
+        else {
+          // A pending question is answered once the step runs again.
+          if (
+            !followed?.asked &&
+            (followed?.heads.length ?? 0) >= FOLLOWED_HEAD_LIMIT
+          ) {
+            state.finalHead = { ...followed!, asked: head };
+            save(state);
+            throw attachFault(
+              new Error(`The default branch keeps moving; now at ${head}`),
+              decision(
+                `The default branch keeps moving: ${followed!.heads.length} pushes by others during final validation, now at ${head}. Validate at ${head} now with factory retry --objective ${objective}, or wait and retry later.`,
+              ),
+            );
+          }
+          state.finalHead = {
+            integratedSha: integrated!,
+            heads: [...heads, head],
+          };
+        }
         save(state);
         return true;
       });
@@ -1798,7 +1857,13 @@ async function runObjectivePass(
         },
       });
       save(state);
-      await closeObjectiveIssue(state, issue.body, github, () => save(state));
+      await closeObjectiveIssue(
+        state,
+        issue.body,
+        github,
+        () => save(state),
+        owner.abort.signal,
+      );
       return state;
     }
   } catch (error) {

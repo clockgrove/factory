@@ -9,6 +9,7 @@ import test from "node:test";
 import { composePlanning } from "../dist/application.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
 import {
+  compileObjective,
   compilePlan,
   PlanValidationError,
   resolvePlan,
@@ -1054,7 +1055,7 @@ test("graph review asks about a finding without a question from its detail", asy
     );
     assert.match(
       requests[1].compileContext.instructions,
-      /"source":"independent review".*"question":"How should the plan change to fix this: Name the missing owner\?"/,
+      /"source":"review".*"question":"How should the plan change to fix this: Name the missing owner\?"/,
     );
   });
 });
@@ -1114,7 +1115,7 @@ test("a plan refused by deterministic validation spends the one revision with th
       assert.equal(requests[0].compileContext.instructions, "");
       assert.match(
         requests[1].compileContext.instructions,
-        /"source":"Factory check","detail":"Work Item one has invalid ownership path .*\/absolute\/one\.txt/,
+        /"source":"check","detail":"Work Item one has invalid ownership path .*\/absolute\/one\.txt/,
       );
       assert.deepEqual(
         requests.map((request) => request.invocation.ordinal),
@@ -1266,5 +1267,47 @@ test("compiler rejects wildcard ownership before independent review with actiona
       );
     }
     assert.equal(reviews, 0);
+  });
+});
+
+test("the planner packet labels each correction with its real source", async () => {
+  await fixture("correction-sources", async (root) => {
+    const target = createTarget(root, {
+      "docs/plan.md": "# Plan\n\n## Wave 0\nCanonical obligation\n",
+    });
+    const corrections = [
+      { source: "review", detail: "Name the missing owner." },
+      { source: "check", detail: "Ownership path is absolute." },
+      { source: "diagnosis", detail: "Split the item." },
+    ];
+    let instructions;
+    await compileObjective(
+      1,
+      body,
+      target.baseSha,
+      target.checkout,
+      {
+        async generateStructured(request) {
+          instructions = request.compileContext.instructions;
+          return withCoverage(request, graph(target.baseSha));
+        },
+        async reviewGraph() {
+          throw new Error("compileObjective never reviews");
+        },
+      },
+      [],
+      corrections,
+    );
+    const listed = JSON.parse(instructions.slice(instructions.indexOf("[")));
+    assert.deepEqual(
+      listed.map(({ source, detail }) => ({ source, detail })),
+      corrections,
+    );
+    // Only the reviewer is described as independent; checks and diagnosis are
+    // not presented as review.
+    assert.match(instructions, /review \(the independent plan reviewer\)/);
+    assert.match(instructions, /check \(a deterministic Factory refusal\)/);
+    assert.match(instructions, /diagnosis \(an analysis of the last failure\)/);
+    assert.doesNotMatch(instructions, /independent review|Factory check/);
   });
 });

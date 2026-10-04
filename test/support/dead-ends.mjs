@@ -26,6 +26,7 @@
 // A world's absolute root is part of its identity (the configuration digest
 // binds the checkout), so each trajectory is recorded once per slot and a
 // slot's cases run one at a time in that slot's own root.
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   cpSync,
@@ -45,6 +46,7 @@ import {
   gitTransportEnvironment,
 } from "./github-http-fake.mjs";
 import { createTarget, git, writeDescriptor } from "./integration-fixture.mjs";
+import { operatorFor } from "./operator-cli.mjs";
 
 const controller = join(import.meta.dirname, "dead-end-controller.mjs");
 const repositoryRoot = join(import.meta.dirname, "..", "..");
@@ -384,19 +386,20 @@ async function recordTrajectory(delivery) {
         180_000,
       );
       if (report.outcome === "complete") break;
-      const command = report.status?.nextAction
-        ? operatorCommand(report.status.nextAction.command)
+      const command = report.status?.action
+        ? operatorCommand(report.status.action.command)
         : {};
       if (run >= 6 || !DECISIONS.has(command.verb))
         throw new Error(
           `${delivery} trajectory stopped: ${JSON.stringify(report)}`,
         );
-      const applied = await controllerProcess(world, {
-        mode: "command",
-        command,
-      });
-      if (!applied.ok)
-        throw new Error(`${delivery} trajectory decision: ${applied.message}`);
+      const applied = operatorFor({
+        root,
+        config: world.descriptor.config,
+        fake,
+      }).follow(report.status.action.command);
+      if (applied.status !== 0)
+        throw new Error(`${delivery} trajectory decision: ${applied.stderr}`);
     }
     return { delivery, root, descriptor: world.descriptor, anchors };
   } finally {
@@ -838,12 +841,19 @@ const INSPECTION = new Set(["diagnostics", "status"]);
 const stopOf = (report) =>
   JSON.stringify([
     report.status?.phase,
-    report.status?.nextAction?.command,
+    report.status?.action?.command,
     report.status?.pending,
   ]);
 
 /** Operator commands followed from one state before it counts as stranded. */
 const MAX_COMMANDS = 4;
+
+/** Record the repair `factory repair --objective N --proposal FILE` names, in the world's controller. */
+async function recordRepair(world, command, proposal) {
+  assert.equal(command.options.proposal, "FILE", "the proposal is the FILE");
+  const applied = await controllerProcess(world, { mode: "repair", proposal });
+  return { status: applied.ok ? 0 : 1, stderr: applied.message ?? "" };
+}
 
 /**
  * Restart the controller from `state` in a copy of the anchor's world (in
@@ -852,7 +862,9 @@ const MAX_COMMANDS = 4;
  *   Objective forward on its own;
  * - terminal: the Objective is cancelled, as requested;
  * - decision: it stopped, and following the commands the status names (each
- *   then `factory run`) continues the Objective;
+ *   then `factory run`) continues the Objective. The status is read and the
+ *   commands are run through the CLI (test/support/operator-cli.mjs), so a
+ *   stop whose first line or second-line command is wrong fails here;
  * - rerun: the status names only `factory run`, and rerunning continues;
  * - config: it waits for a named fix outside Factory;
  * - stranded: anything else — no command, an inspection-only command, a
@@ -866,6 +878,11 @@ async function classify(slot, anchor, state) {
   writeFileSync(statePath(slot.root), `${JSON.stringify(state, null, 2)}\n`);
   const fake = await startFake(join(slot.root, "origin.git"), anchor.fakeState);
   const world = { root: slot.root, fake, descriptor: slot.descriptor };
+  const operator = operatorFor({
+    root: slot.root,
+    config: slot.descriptor.config,
+    fake,
+  });
   const trace = [];
   const snapshot = () =>
     existsSync(statePath(slot.root))
@@ -880,7 +897,7 @@ async function classify(slot, anchor, state) {
       idleMs: 300,
     });
     trace.push(
-      `run: ${report.outcome}${report.step ? ` (${report.step})` : ""}${report.message ? `: ${report.message.split("\n")[0]}` : ""} → ${report.status?.phase ?? "?"}: ${report.status?.nextAction?.command ?? "no next command"}`,
+      `run: ${report.outcome}${report.step ? ` (${report.step})` : ""}${report.message ? `: ${report.message.split("\n")[0]}` : ""} → ${report.status?.phase ?? "?"}: ${report.status?.action?.command ?? "no next command"}`,
     );
     return report;
   };
@@ -907,6 +924,21 @@ async function classify(slot, anchor, state) {
           : result("stranded", "cancelled without a request");
       const owner = report.status?.coordinator;
       const why = `${report.outcome}: ${report.message?.split("\n")[0] ?? report.status?.summary ?? ""} (coordinator ${owner?.mode ?? "none"}${owner?.waitReason ? `: ${owner.waitReason}` : ""})`;
+      // What the operator reads: a first line and the command on the second.
+      let view;
+      try {
+        view = operator.status();
+      } catch (error) {
+        return result(
+          "stranded",
+          `factory status does not lead with the phase and the command (${error.message}) after ${why}`,
+        );
+      }
+      report.status = {
+        ...report.status,
+        phase: view.document.phase,
+        action: view.document.action,
+      };
       const stop = stopOf(report);
       if (stops.has(stop))
         return result(
@@ -914,7 +946,7 @@ async function classify(slot, anchor, state) {
           `factory ${followed.verb} does not continue after ${stops.get(stop)}`,
         );
       stops.set(stop, why);
-      const action = report.status?.nextAction;
+      const action = report.status?.action;
       if (!action) return result("stranded", `no next command after ${why}`);
       const command = operatorCommand(action.command);
       if (command.external) return result("config", action.command);
@@ -931,19 +963,48 @@ async function classify(slot, anchor, state) {
       const before = snapshot();
       if (before) baseline = fingerprint(before);
       if (command.verb === "run") continue;
-      const applied = await controllerProcess(world, {
-        mode: "command",
-        command,
-      });
+      const fill = {};
+      if (command.verb === "repair") {
+        // The operator writes the proposal: a diagnosed implementation correction.
+        const [item, work] =
+          Object.entries(before?.work ?? {}).find(
+            ([, work]) => work.recovery?.phase === "stopped",
+          ) ?? [];
+        if (!work?.recovery?.failure)
+          return result(
+            "stranded",
+            `factory repair names no stopped repair to correct after ${why}`,
+          );
+        fill.FILE = join(slot.root, "repair-proposal.json");
+        writeFileSync(
+          fill.FILE,
+          JSON.stringify({
+            item,
+            correction: {
+              failureDigest: work.recovery.failure.digest,
+              kind: "implementation",
+              diagnosis: "Diagnosed by the dead-end finder",
+              correction: "Make the scripted change again",
+              actor: "operator",
+            },
+          }),
+        );
+      }
+      const applied =
+        command.verb === "repair"
+          ? await recordRepair(world, command, fill.FILE)
+          : operator.follow(action.command, fill);
+      const refusal = applied.stderr.trim();
       trace.push(
-        `factory ${command.verb}: ${applied.ok ? "applied" : `refused: ${applied.message}`}`,
+        `factory ${command.verb}: ${applied.status === 0 ? "applied" : `refused: ${refusal}`}`,
       );
-      if (!applied.ok)
+      if (applied.status !== 0)
         return result(
           "stranded",
-          `factory ${command.verb} is refused (${applied.message}) after ${why}`,
+          `factory ${command.verb} is refused (${refusal}) after ${why}`,
         );
-      if (applied.status?.phase === "cancelled") return result("terminal");
+      if (operator.status().document.phase === "cancelled")
+        return result("terminal");
       // Refusing a plan discards the preparation, and the next run plans
       // again. That is the decision only when nothing else was pending.
       if (!snapshot() && before?.schemaVersion === 8) {

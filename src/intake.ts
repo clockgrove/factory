@@ -98,14 +98,23 @@ function saveIntake(config: FactoryConfig, value: IntakeAuthorization): void {
     closeSync(directory);
   }
 }
+/**
+ * The queue record. A record written under another configuration is refused
+ * unless `anyConfiguration` is set, which only reads (`factory queue list`).
+ */
 export function readIntake(
   config: FactoryConfig,
+  { anyConfiguration = false } = {},
 ): IntakeAuthorization | undefined {
   const path = intakePath(config);
   if (!existsSync(path)) return;
-  const invalid = (reason: string): never => {
+  const invalid = (reason: string, queued = false): never => {
     throw new Error(
-      `The queue record ${path} cannot be used (${reason}). It is from an earlier build or another configuration; delete it, then run \`factory setup --background\` and \`factory queue add N\` to start a new queue`,
+      `The queue record ${path} cannot be used (${reason}). ${
+        queued
+          ? "Run `factory queue list` to see what it holds before deleting it, because deleting drops the queue order; then run `factory setup --background` and `factory queue add N` to start a new queue"
+          : "It is from an earlier build; delete it, then run `factory setup --background` and `factory queue add N` to start a new queue"
+      }`,
     );
   };
   let value: IntakeAuthorization;
@@ -117,11 +126,12 @@ export function readIntake(
   if (
     value.version !== 1 ||
     value.repository !== config.repository ||
-    value.configDigest !== factoryConfigDigest(config) ||
     !["running", "paused", "draining"].includes(value.mode) ||
     !Array.isArray(value.dequeued)
   )
     invalid("it does not match this installation");
+  if (!anyConfiguration && value.configDigest !== factoryConfigDigest(config))
+    invalid("it was written under another configuration", true);
   for (const key of Object.keys(value))
     if (
       ![
@@ -334,8 +344,11 @@ export async function intakeControl(
     if (action !== "status" || !(error instanceof ForegroundControllerError))
       throw error;
     return {
-      ...(readIntake(config) ?? { objectives: [], dequeued: [] }),
-      activeObjective: error.objective,
+      ...(readIntake(config, { anyConfiguration: true }) ?? {
+        objectives: [],
+        dequeued: [],
+      }),
+      activeObjective: error.objective || null,
     };
   }
   if (reply.handled) return reply.result;
@@ -343,7 +356,9 @@ export async function intakeControl(
   const path = join(stateRoot(config.repository), "controller.lock"),
     lock = acquireControllerLock(path, 0);
   try {
-    const record = readIntake(config);
+    const record = readIntake(config, {
+      anyConfiguration: action === "status",
+    });
     if (!record) {
       if (action === "status") return { objectives: [], dequeued: [] };
       throw new Error(

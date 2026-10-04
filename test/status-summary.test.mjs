@@ -60,7 +60,7 @@ test("not started points at run", () => {
   assert.deepEqual(summarizeStatus({ objective: 7, state: "not-started" }), {
     phase: "not-started",
     summary: "no Factory run recorded",
-    nextAction: {
+    action: {
       command: "factory run --objective 7",
       reason: "Plans the Objective and starts delivery",
     },
@@ -81,7 +81,7 @@ test("not started shows a wait or outage that no state could hold, and points at
   });
   assert.equal(decision.phase, "needs-decision");
   assert.match(decision.summary, /Predecessor #6 lacks/);
-  assert.equal(decision.nextAction.command, "factory run --objective 7");
+  assert.equal(decision.action.command, "factory run --objective 7");
   // No state exists, so `factory retry` has nothing to clear.
   assert.doesNotMatch(JSON.stringify(decision), /factory retry/);
 
@@ -100,8 +100,8 @@ test("not started shows a wait or outage that no state could hold, and points at
     outage,
   });
   assert.equal(down.phase, "waiting");
-  assert.match(down.summary, /on outage for the Objective \(observe\)/);
-  assert.equal(down.nextAction.command, "factory run --objective 7");
+  assert.match(down.summary, /^outage for the Objective \(observe\)/);
+  assert.equal(down.action.command, "factory run --objective 7");
   // A live run already retries the failing step.
   assert.equal(
     summarizeStatus({
@@ -110,7 +110,7 @@ test("not started shows a wait or outage that no state could hold, and points at
       runActive: true,
       wait: null,
       outage,
-    }).nextAction,
+    }).action,
     null,
   );
 });
@@ -119,9 +119,9 @@ test("preparation reports planning, a plan decision, pause and failure", () => {
   const planning = summarizeStatus(preparing());
   assert.equal(planning.phase, "planning");
   assert.equal(planning.summary, "compiling and reviewing the plan");
-  assert.equal(planning.nextAction, null);
+  assert.equal(planning.action, null);
   assert.equal(
-    summarizeStatus(preparing({ runActive: false })).nextAction.command,
+    summarizeStatus(preparing({ runActive: false })).action.command,
     "factory run --objective 7",
   );
   assert.equal(
@@ -139,9 +139,9 @@ test("preparation reports planning, a plan decision, pause and failure", () => {
       },
     }),
   );
-  assert.equal(decision.phase, "needs-plan-decision");
+  assert.equal(decision.phase, "needs-decision");
   assert.equal(
-    decision.nextAction.command,
+    decision.action.command,
     'factory decide --objective 7 --outcome accept|refuse --answer "ANSWER" --reason "WHY"',
   );
   // Planning that stopped before producing a plan names the way out.
@@ -155,9 +155,9 @@ test("preparation reports planning, a plan decision, pause and failure", () => {
       },
     }),
   );
-  assert.equal(stopped.phase, "needs-plan-decision");
+  assert.equal(stopped.phase, "needs-decision");
   assert.equal(
-    stopped.nextAction.command,
+    stopped.action.command,
     'factory decide --objective 7 --outcome refuse --reason "WHY"',
   );
   const paused = summarizeStatus(
@@ -166,8 +166,8 @@ test("preparation reports planning, a plan decision, pause and failure", () => {
     }),
   );
   assert.equal(paused.phase, "waiting");
-  assert.equal(paused.summary, "paused: held");
-  assert.equal(paused.nextAction.command, "factory resume --objective 7");
+  assert.equal(paused.summary, "the operator: paused: held");
+  assert.equal(paused.action.command, "factory resume --objective 7");
   const failed = summarizeStatus(preparing({ error: "identity changed" }));
   assert.equal(failed.phase, "failed");
   assert.equal(failed.summary, "planning failed: identity changed");
@@ -186,9 +186,9 @@ test("running names active items and needs no action while a run owns it", () =>
   assert.deepEqual(summarizeStatus(view), {
     phase: "running",
     summary: "1/3 done; B (execute)",
-    nextAction: null,
+    action: null,
   });
-  assert.deepEqual(summarizeStatus({ ...view, runActive: false }).nextAction, {
+  assert.deepEqual(summarizeStatus({ ...view, runActive: false }).action, {
     command: "factory run --objective 7",
     reason: "No run is active; this resumes it",
   });
@@ -211,8 +211,8 @@ test("waiting says on what: CI check, capacity, dependency", () => {
     ]),
   );
   assert.equal(ci.phase, "waiting");
-  assert.match(ci.summary, /^on CI check for A: Awaiting exact published head/);
-  assert.equal(ci.nextAction, null);
+  assert.match(ci.summary, /^CI check for A: Awaiting exact published head/);
+  assert.equal(ci.action, null);
   const capacity = summarizeStatus(
     execution([
       item("A", { blockedReason: "capacity" }),
@@ -220,20 +220,20 @@ test("waiting says on what: CI check, capacity, dependency", () => {
     ]),
   );
   assert.equal(capacity.phase, "waiting");
-  assert.equal(capacity.summary, "on worker capacity for A; 0/2 done");
+  assert.equal(capacity.summary, "worker capacity for A; 0/2 done");
   const dependency = summarizeStatus(
     execution([item("B", { blockedReason: "resource:X" })]),
   );
   assert.equal(
     dependency.summary,
-    "on dependency for B: shares paths with X; 0/1 done",
+    "dependency for B: shares paths with X; 0/1 done",
   );
   const published = summarizeStatus(
     execution([item("A", { status: "published", pullRequest: 4 })]),
   );
   assert.equal(
     published.summary,
-    "on CI check for A: PR #4 awaiting checks and merge; 0/1 done",
+    "CI check for A: PR #4 awaiting checks and merge; 0/1 done",
   );
 });
 
@@ -248,12 +248,9 @@ test("decisions name the exact command with real values", () => {
     ]),
   );
   assert.equal(criterion.phase, "needs-decision");
+  assert.equal(criterion.summary, `criterion of A at tree ${"a".repeat(12)}`);
   assert.equal(
-    criterion.summary,
-    `criterion decision for A at tree ${"a".repeat(12)}`,
-  );
-  assert.equal(
-    criterion.nextAction.command,
+    criterion.action.command,
     'factory decide --objective 7 --item A --outcome accept|refuse --reason "WHY"',
   );
   const asset = summarizeStatus(
@@ -267,7 +264,7 @@ test("decisions name the exact command with real values", () => {
   );
   assert.equal(asset.summary, "asset selection for M (1 candidate set)");
   assert.equal(
-    asset.nextAction.command,
+    asset.action.command,
     "factory select --objective 7 --item M --set set-1",
   );
   const final = summarizeStatus(
@@ -278,7 +275,7 @@ test("decisions name the exact command with real values", () => {
     }),
   );
   assert.equal(
-    final.nextAction.command,
+    final.action.command,
     'factory decide --objective 7 --outcome accept|refuse --reason "WHY"',
   );
   const repair = summarizeStatus(
@@ -286,8 +283,8 @@ test("decisions name the exact command with real values", () => {
       repairs: { A: { phase: "stopped", nextDecision: "Narrow the fix" } },
     }),
   );
-  assert.equal(repair.summary, "repair decision for A");
-  assert.deepEqual(repair.nextAction, {
+  assert.equal(repair.summary, "repair of A");
+  assert.deepEqual(repair.action, {
     command: "factory repair --objective 7 --proposal FILE",
     reason: "Narrow the fix",
   });
@@ -297,7 +294,7 @@ test("decisions name the exact command with real values", () => {
     }),
   );
   assert.equal(amendment.phase, "needs-decision");
-  assert.equal(amendment.nextAction.reason, "coverage gap");
+  assert.equal(amendment.action.reason, "coverage gap");
 });
 
 test("failures point at retry, logs, authentication or diagnostics", () => {
@@ -311,7 +308,7 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
   assert.deepEqual(retry, {
     phase: "failed",
     summary: "A failed: tests failed",
-    nextAction: {
+    action: {
       command: "factory retry --objective 7 --item A",
       reason: "Starts a new attempt; then factory run --objective 7",
     },
@@ -323,10 +320,10 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
   );
   // A published item keeps its PR: retry resumes its delivery.
   assert.equal(
-    published.nextAction.command,
+    published.action.command,
     "factory retry --objective 7 --item A",
   );
-  assert.match(published.nextAction.reason, /^Resumes delivery of PR #9\b/);
+  assert.match(published.action.reason, /^Resumes delivery of PR #9\b/);
   // A published wrong result (a failed check, a conflict) gets a new attempt.
   const wrong = summarizeStatus(
     execution([item("A", { status: "failed", pullRequest: 9 })], {
@@ -341,7 +338,7 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
       },
     }),
   );
-  assert.match(wrong.nextAction.reason, /^Starts a new attempt\b/);
+  assert.match(wrong.action.reason, /^Starts a new attempt\b/);
   const authentication = summarizeStatus(
     execution([
       item("A", {
@@ -353,9 +350,9 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
   assert.equal(authentication.phase, "waiting");
   assert.equal(
     authentication.summary,
-    "on external prerequisite: codex authentication for A",
+    "external prerequisite: codex authentication for A",
   );
-  assert.equal(authentication.nextAction.command, "codex login");
+  assert.equal(authentication.action.command, "codex login");
   const objectiveFailure = summarizeStatus(
     execution([item("A", { status: "done" })], {
       state: "failed",
@@ -364,10 +361,7 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
   );
   assert.equal(objectiveFailure.summary, "final validation failed");
   // A stop outside any Work Item names the command that runs it again.
-  assert.equal(
-    objectiveFailure.nextAction.command,
-    "factory retry --objective 7",
-  );
+  assert.equal(objectiveFailure.action.command, "factory retry --objective 7");
   // A failed item waits for running work to settle before retry is offered.
   const settling = summarizeStatus(
     execution([
@@ -376,7 +370,7 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
     ]),
   );
   assert.equal(settling.phase, "running");
-  assert.equal(settling.nextAction, null);
+  assert.equal(settling.action, null);
 });
 
 test("terminal, paused, cancellation and finalization states", () => {
@@ -387,7 +381,7 @@ test("terminal, paused, cancellation and finalization states", () => {
   assert.deepEqual(summarizeStatus(execution([], { state: "complete" })), {
     phase: "complete",
     summary: "final validation passed; Objective closed",
-    nextAction: null,
+    action: null,
   });
   const paused = summarizeStatus(
     execution([item("A", { status: "running", step: "execute" })], {
@@ -396,7 +390,7 @@ test("terminal, paused, cancellation and finalization states", () => {
     }),
   );
   assert.equal(paused.phase, "waiting");
-  assert.deepEqual(paused.nextAction, {
+  assert.deepEqual(paused.action, {
     command: "factory resume --objective 7",
     reason: "Resumes the Objective; then factory run --objective 7",
   });
@@ -406,7 +400,7 @@ test("terminal, paused, cancellation and finalization states", () => {
     }),
   );
   assert.equal(cancelling.phase, "needs-decision");
-  assert.equal(cancelling.nextAction.command, "factory cancel --objective 7");
+  assert.equal(cancelling.action.command, "factory cancel --objective 7");
   assert.equal(
     summarizeStatus(execution([item("A", { status: "done" })])).summary,
     "1/1 done; final validation and review",
@@ -418,7 +412,7 @@ test("terminal, paused, cancellation and finalization states", () => {
   assert.equal(closing.summary, "1/1 done; closing the Objective on GitHub");
 });
 
-test("text leads with the phase line, the next command, then the item table", () => {
+test("text leads with the phase line, the exact command on the second line, then the item table", () => {
   const view = execution([
     item("A", { status: "done", pullRequest: 11 }),
     item("B", {
@@ -432,11 +426,13 @@ test("text leads with the phase line, the next command, then the item table", ()
   const lines = renderStatusText({ ...view, ...summarizeStatus(view) });
   assert.equal(
     lines[0],
-    `Objective #7: needs decision — criterion decision for B at tree ${"a".repeat(12)}`,
+    `Needs decision: criterion of B at tree ${"a".repeat(12)}`,
   );
-  assert.match(lines[1], /^Next: factory decide --objective 7 --item B /);
-  assert.equal(lines[2], "      Answer the question below");
-  assert.deepEqual(lines.slice(4, 8), [
+  assert.equal(lines[1], summarizeStatus(view).action.command);
+  assert.match(lines[1], /^factory decide --objective 7 --item B /);
+  assert.equal(lines[2], "  Answer the question below");
+  assert.equal(lines[4], "Objective #7");
+  assert.deepEqual(lines.slice(6, 10), [
     "  ITEM  STATUS                    PR   REASON",
     "  A     done                      #11",
     "  B     waiting (approve-result)  #12  criterion decision",
@@ -448,14 +444,14 @@ test("text leads with the phase line, the next command, then the item table", ()
     item("A", { status: "running", step: "execute" }),
   ]);
   const quiet = renderStatusText({ ...running, ...summarizeStatus(running) });
-  assert.equal(quiet[0], "Objective #7: running — 0/1 done; A (execute)");
+  assert.equal(quiet[0], "Running: 0/1 done; A (execute)");
   assert.equal(quiet[1], "");
 });
 
 test("status documents carry the same phase, summary and next action", () => {
   const empty = statusDocument(undefined, "example/repo", 7, "regular");
   assert.equal(empty.phase, "not-started");
-  assert.equal(empty.nextAction.command, "factory run --objective 7");
+  assert.equal(empty.action.command, "factory run --objective 7");
   const prepared = preparationStatusDocument(
     {
       schemaVersion: 8,
@@ -484,14 +480,11 @@ test("status documents carry the same phase, summary and next action", () => {
     ["secret-value"],
     false,
   );
-  assert.equal(prepared.phase, "needs-plan-decision");
+  assert.equal(prepared.phase, "needs-decision");
   assert.equal(prepared.planReview.question, "Keep [REDACTED]?");
   assert.equal(prepared.planReview.digest, "e".repeat(12));
-  assert.doesNotMatch(prepared.nextAction.command, /--plan/);
+  assert.doesNotMatch(prepared.action.command, /--plan/);
   const text = renderStatusText(prepared);
-  assert.equal(
-    text[0],
-    "Objective #7: needs plan decision — plan review needs a human decision",
-  );
+  assert.equal(text[0], "Needs decision: plan review needs a human");
   assert.ok(text.includes("Question: Keep [REDACTED]?"));
 });

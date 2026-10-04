@@ -573,9 +573,9 @@ export function assertCancelled(result) {
  * A paid step hit its bound and the operator's answer converged: the first
  * run made exactly `bound.calls` paid tries of the faulted call (three
  * transient faults, then the fourth becomes a decision) and stopped for a
- * decision with the Work Item still in place, not failed; the restart ran the
- * `factory retry` command the status named (`bound.answer`), and the step
- * ran again. The end state is checked separately.
+ * decision with the Work Item still in place, not failed; the operator ran the
+ * `factory retry` command the status named (`bound.answer`) through the CLI
+ * and it succeeded, and the step ran again. The end state is checked separately.
  */
 export function assertBoundAnswered(result, { bound }) {
   const runs = () => result.runs.map(summarizeRun).join(" | ");
@@ -616,7 +616,7 @@ export function assertBoundAnswered(result, { bound }) {
   }
   assert.deepEqual(
     second?.answered,
-    { command: bound.answer, applied: "step" },
+    { command: bound.answer, exit: 0 },
     `the operator's answer: ${runs()}`,
   );
 }

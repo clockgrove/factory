@@ -270,6 +270,8 @@ factory diagnostics --objective ISSUE_NUMBER --summary
 factory diagnostics --objective ISSUE_NUMBER --logs WORK_ITEM_ID --follow
 ```
 
+Status leads with one line, the phase: planning, running, waiting on something, needs decision, failed, cancelled or complete. If you must act, the second line is the exact command (words in capitals, such as `"WHY"` or `FILE`, are yours to fill in); details follow. `--json` carries the same as `phase`, `summary` and `action.command`, which is `null` when nothing is needed. `factory status` without `--objective` leads the same way for the service and the queue.
+
 Status describes current continuation state, including blocked work, selection pauses, errors, and final acceptance. Diagnostics provide a private timeline and available usage; logs expose worker output. A quiet timeline means no new provider event was observed. Neither silence nor missing counters proves completion or zero usage. Keep transcripts and private validation output out of public issues. For optional sensitive local request/response capture and metadata-only inspection, see [capture and analysis](CAPTURE.md).
 
 For metadata-only comparisons of recorded usage, timing and outcomes, use [`factory diagnostics --analyze`](CAPTURE.md#analyze). Captured content inspection is a separate, explicit operation.

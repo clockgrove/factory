@@ -891,12 +891,12 @@ test("status shows an outage per scope, alongside a pending wait", () => {
   assert.equal(summary.phase, "waiting");
   assert.equal(
     summary.summary,
-    "on outage for one (publish): since 2026-10-03 10:00Z (9 tries, last: fetch failed); 0/2 done",
+    "outage for one (publish): since 2026-10-03 10:00Z (9 tries, last: fetch failed); 0/2 done",
   );
-  assert.equal(summary.nextAction, null);
+  assert.equal(summary.action, null);
   assert.equal(
     renderStatusText({ ...status, ...summary })[0],
-    "Objective #7: waiting — on outage for one (publish): since 2026-10-03 10:00Z (9 tries, last: fetch failed); 0/2 done",
+    "Waiting on outage for one (publish): since 2026-10-03 10:00Z (9 tries, last: fetch failed); 0/2 done",
   );
   const both = summarizeStatus(
     view([
@@ -922,7 +922,7 @@ test("status shows an outage per scope, alongside a pending wait", () => {
         outage: outage({ step: "close", tries: 1, last: "502" }),
       }),
     ).summary,
-    "on outage for the Objective (close): since 2026-10-03 10:00Z (1 try, last: 502); 1/1 done",
+    "outage for the Objective (close): since 2026-10-03 10:00Z (1 try, last: 502); 1/1 done",
   );
 });
 
@@ -932,13 +932,13 @@ test("a 24-hour outage offers cancel and keeps waiting, even beside running work
     view([itemView("one", { outage: escalated }), itemView("two")]),
   );
   assert.equal(live.phase, "waiting");
-  assert.equal(live.nextAction.command, "factory cancel --objective 7");
-  assert.match(live.nextAction.reason, /keeps retrying until you cancel$/);
+  assert.equal(live.action.command, "factory cancel --objective 7");
+  assert.match(live.action.reason, /keeps retrying until you cancel$/);
   const stopped = summarizeStatus(
     view([itemView("one", { outage: escalated })], { runActive: false }),
   );
   assert.match(
-    stopped.nextAction.reason,
+    stopped.action.reason,
     /or factory run --objective 7 to keep retrying$/,
   );
 });
@@ -955,8 +955,8 @@ test("a step decision asks for factory retry and hides the outage", () => {
     ]),
   );
   assert.equal(asked.phase, "needs-decision");
-  assert.equal(asked.summary, `decision for one: ${detail}`);
-  assert.deepEqual(asked.nextAction, {
+  assert.equal(asked.summary, `one: ${detail}`);
+  assert.deepEqual(asked.action, {
     command: "factory retry --objective 7 --item one",
     reason: "Retry runs the step again; or factory cancel --objective 7",
   });
@@ -966,8 +966,8 @@ test("a step decision asks for factory retry and hides the outage", () => {
       wait: { kind: "decision", detail, step: "objective/close" },
     }),
   );
-  assert.equal(objective.summary, `decision for the Objective: ${detail}`);
-  assert.deepEqual(objective.nextAction, {
+  assert.equal(objective.summary, `the Objective: ${detail}`);
+  assert.deepEqual(objective.action, {
     command: "factory retry --objective 7",
     reason:
       "Retry runs the step again; then factory run --objective 7; or factory cancel --objective 7",
@@ -985,9 +985,9 @@ test("a config pause names its fix and follows the restart convention", () => {
   assert.equal(live.phase, "waiting");
   assert.equal(
     live.summary,
-    "on external prerequisite for one: 403 Resource not accessible; 0/1 done",
+    "external prerequisite for one: 403 Resource not accessible; 0/1 done",
   );
-  assert.deepEqual(live.nextAction, {
+  assert.deepEqual(live.action, {
     command: "factory retry --objective 7 --item one",
     reason: "First: Grant the token contents: write",
   });
@@ -995,7 +995,7 @@ test("a config pause names its fix and follows the restart convention", () => {
     view([itemView("one", { wait })], { runActive: false }),
   );
   assert.equal(
-    stopped.nextAction.reason,
+    stopped.action.reason,
     "First: Grant the token contents: write; then factory run --objective 7",
   );
 });
@@ -1040,7 +1040,7 @@ test("planning status reads the Objective's outage from state, redacted", () => 
   assert.equal(document.phase, "waiting");
   assert.equal(
     document.summary,
-    "on outage for the Objective (plan): since 2026-10-03 10:00Z (4 tries, last: token [REDACTED] refused)",
+    "outage for the Objective (plan): since 2026-10-03 10:00Z (4 tries, last: token [REDACTED] refused)",
   );
   assert.equal(document.outage.tries, 4);
 });

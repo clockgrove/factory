@@ -97,7 +97,10 @@ export async function serveControl(
 export class ForegroundControllerError extends Error {
   constructor(readonly objective: number) {
     super(
-      `Controller is running Objective #${objective} in the foreground; \`factory status --objective ${objective}\` shows it, and queue commands work once it ends`,
+      // Objective 0 is a queue command holding the installation for a moment.
+      objective === 0
+        ? "A factory queue command is running; run this again in a moment"
+        : `Controller is running Objective #${objective} in the foreground; \`factory status --objective ${objective}\` shows it, and queue commands work once it ends`,
     );
   }
 }

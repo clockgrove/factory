@@ -25,7 +25,6 @@ export interface WaitView {
 export type StatusPhase =
   | "not-started"
   | "planning"
-  | "needs-plan-decision"
   | "running"
   | "waiting"
   | "needs-decision"
@@ -33,7 +32,7 @@ export type StatusPhase =
   | "cancelled"
   | "complete";
 
-export interface StatusNextAction {
+export interface StatusAction {
   command: string;
   reason: string;
 }
@@ -41,7 +40,7 @@ export interface StatusNextAction {
 export interface StatusSummary {
   phase: StatusPhase;
   summary: string;
-  nextAction: StatusNextAction | null;
+  action: StatusAction | null;
 }
 
 export interface PendingDecisionView {
@@ -298,20 +297,20 @@ function scopeSummary(
   if (shown.kind === "decision")
     return {
       phase: "needs-decision",
-      summary: `decision for ${label}: ${shown.detail}`,
-      nextAction: {
+      summary: `${label}: ${shown.detail}`,
+      action: {
         command: retryCommand(objective, item),
         reason: `Retry runs the step again${thenRun(view)}; or factory cancel --objective ${objective}`,
       },
     };
   const summary =
     shown.kind === "outage"
-      ? `on outage for ${label} ${shown.detail}`
-      : `on ${shown.kind} for ${label}${shown.detail === shown.kind ? "" : `: ${shown.detail}`}`;
+      ? `outage for ${label} ${shown.detail}`
+      : `${shown.kind} for ${label}${shown.detail === shown.kind ? "" : `: ${shown.detail}`}`;
   return {
     phase: "waiting",
     summary,
-    nextAction: shown.fix
+    action: shown.fix
       ? {
           command: retryCommand(objective, item),
           reason: `First: ${short(shown.fix, 160)}${thenRun(view)}`,
@@ -352,8 +351,8 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
     if (item.step === "approve-result" && item.acceptancePending)
       return {
         phase: "needs-decision",
-        summary: `criterion decision for ${item.id} at tree ${item.acceptancePending.treeSha.slice(0, 12)}`,
-        nextAction: {
+        summary: `criterion of ${item.id} at tree ${item.acceptancePending.treeSha.slice(0, 12)}`,
+        action: {
           command: `factory decide --objective ${objective} --item ${item.id} --outcome accept|refuse --reason ${REASON}`,
           reason: `Answer the question below${thenRun(view)}`,
         },
@@ -363,7 +362,7 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
       return {
         phase: "needs-decision",
         summary: `asset selection for ${item.id} (${sets.length} candidate set${sets.length === 1 ? "" : "s"})`,
-        nextAction: {
+        action: {
           command: `factory select --objective ${objective} --item ${item.id} --set ${sets.length === 1 ? sets[0] : "SET_ID"}`,
           reason: `Look at the candidates with factory select --objective ${objective} --item ${item.id} --output ABSOLUTE_NEW_DIRECTORY; add --bind for each dependent that consumes the set${thenRun(view)}`,
         },
@@ -373,8 +372,8 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
   if (view.finalAcceptancePending)
     return {
       phase: "needs-decision",
-      summary: `final acceptance decision at tree ${view.finalAcceptancePending.treeSha.slice(0, 12)}`,
-      nextAction: {
+      summary: `final acceptance at tree ${view.finalAcceptancePending.treeSha.slice(0, 12)}`,
+      action: {
         command: `factory decide --objective ${objective} --outcome accept|refuse --reason ${REASON}`,
         reason: `Answer the question below${thenRun(view)}`,
       },
@@ -387,8 +386,8 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
   if (diagnosing)
     return {
       phase: "waiting",
-      summary: `diagnosis of ${diagnosing[0]} did not finish`,
-      nextAction: {
+      summary: `diagnosis of ${diagnosing[0]}: it did not finish`,
+      action: {
         command: run(objective),
         reason: short(
           diagnosing[1].nextDecision ??
@@ -408,8 +407,8 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
   if (stopped)
     return {
       phase: "needs-decision",
-      summary: `repair decision for ${stopped[0]}`,
-      nextAction: {
+      summary: `repair of ${stopped[0]}`,
+      action: {
         command: `factory repair --objective ${objective} --proposal FILE`,
         reason: short(
           stopped[1].nextDecision ?? "Inspect the retained recovery failure",
@@ -421,7 +420,7 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
     return {
       phase: "needs-decision",
       summary: "graph amendment was rejected",
-      nextAction: {
+      action: {
         command: `factory propose-amendment --objective ${objective} --proposal FILE`,
         reason: short(
           view.pendingAmendment.error ?? "Submit a diagnosed replacement",
@@ -445,8 +444,8 @@ function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
   if (failed.authentication)
     return {
       phase: "waiting",
-      summary: `on external prerequisite: ${failed.authentication.provider} authentication for ${failed.id}`,
-      nextAction: {
+      summary: `external prerequisite: ${failed.authentication.provider} authentication for ${failed.id}`,
+      action: {
         command: failed.authentication.command,
         reason: `Run in the developer environment; then factory retry --objective ${objective} --item ${failed.id}`,
       },
@@ -456,7 +455,7 @@ function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
   return {
     phase: "failed",
     summary: `${failed.id} failed${error}`,
-    nextAction: {
+    action: {
       command: `factory retry --objective ${objective} --item ${failed.id}`,
       // A published item keeps its PR: retry resumes its delivery, unless
       // its result was wrong (a failed check, a conflict), which a new
@@ -498,12 +497,12 @@ function progress(view: ExecutionStatusView): StatusSummary {
       return {
         phase: "running",
         summary: `${counts}; final validation and review`,
-        nextAction: restart,
+        action: restart,
       };
     return {
       phase: "running",
       summary: `${counts}; closing the Objective on GitHub`,
-      nextAction: restart,
+      action: restart,
     };
   }
   const unfinished = view.work.filter(
@@ -525,7 +524,7 @@ function progress(view: ExecutionStatusView): StatusSummary {
     return {
       phase: "running",
       summary: `${counts}; ${names}${active.length > 3 ? `, +${active.length - 3} more` : ""}`,
-      nextAction: restart,
+      action: restart,
     };
   }
   const own = objectiveWait(view);
@@ -547,7 +546,7 @@ function progress(view: ExecutionStatusView): StatusSummary {
     summary: view.coordinator?.waitReason
       ? `${counts}; ${short(view.coordinator.waitReason, 80)}`
       : counts,
-    nextAction: restart,
+    action: restart,
   };
 }
 
@@ -557,13 +556,13 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
     return {
       phase: "cancelled",
       summary: "planning was cancelled",
-      nextAction: null,
+      action: null,
     };
   if (view.coordinator?.cancelError)
     return {
       phase: "needs-decision",
       summary: `cancellation unresolved: ${short(view.coordinator.cancelError, 80)}`,
-      nextAction: {
+      action: {
         command: `factory cancel --objective ${objective}`,
         reason: "Repeats cancellation of the recorded work",
       },
@@ -572,7 +571,7 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
     return {
       phase: "failed",
       summary: `planning failed: ${short(view.error, 80)}`,
-      nextAction: {
+      action: {
         command: `factory diagnostics --objective ${objective}`,
         reason: "Inspect the failure before running again",
       },
@@ -585,8 +584,8 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
   )
     return {
       phase: "waiting",
-      summary: `${view.coordinator.mode === "paused" ? "paused" : "drained"}${view.coordinator.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
-      nextAction: {
+      summary: `the operator: ${view.coordinator.mode === "paused" ? "paused" : "drained"}${view.coordinator.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
+      action: {
         command: `factory resume --objective ${objective}`,
         reason: `Resumes planning${view.runActive === true ? "" : `; then ${run(objective)}`}`,
       },
@@ -596,29 +595,29 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
     view.planReview.acceptable === false
   )
     return {
-      phase: "needs-plan-decision",
+      phase: "needs-decision",
       summary: `Factory cannot accept this plan${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
-      nextAction: {
+      action: {
         command: `factory decide --objective ${objective} --outcome refuse --reason ${REASON}`,
         reason: `Discards the plan; ${run(objective)} plans again`,
       },
     };
   if (view.planReview?.status === "needs-human")
     return {
-      phase: "needs-plan-decision",
-      summary: "plan review needs a human decision",
-      nextAction: {
+      phase: "needs-decision",
+      summary: "plan review needs a human",
+      action: {
         command: `factory decide --objective ${objective} --outcome accept|refuse --answer ${ANSWER} --reason ${REASON}`,
         reason: `Answer the question below; then ${run(objective)}`,
       },
     };
   if (view.planningStopped)
     return {
-      phase: "needs-plan-decision",
+      phase: "needs-decision",
       summary: view.coordinator?.waitReason
         ? short(view.coordinator.waitReason, 80)
-        : "planning stopped for a decision",
-      nextAction: {
+        : "planning stopped",
+      action: {
         command: `factory decide --objective ${objective} --outcome refuse --reason ${REASON}`,
         reason: `Discards the stopped planning; resolve the decision in the Objective, then ${run(objective)} plans again`,
       },
@@ -637,7 +636,7 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
     summary: view.coordinator?.waitReason
       ? `${doing}; ${short(view.coordinator.waitReason, 80)}`
       : doing,
-    nextAction:
+    action:
       view.runActive === false
         ? {
             command: run(objective),
@@ -662,7 +661,7 @@ export function summarizeStatus(view: StatusView): StatusSummary {
       // cause and runs the Objective again.
       return {
         ...waiting,
-        nextAction:
+        action:
           shown.kind === "outage" && view.runActive === true
             ? null
             : {
@@ -677,7 +676,7 @@ export function summarizeStatus(view: StatusView): StatusSummary {
     return {
       phase: "not-started",
       summary: "no Factory run recorded",
-      nextAction: {
+      action: {
         command: run(objective),
         reason: "Plans the Objective and starts delivery",
       },
@@ -688,19 +687,19 @@ export function summarizeStatus(view: StatusView): StatusSummary {
     return {
       phase: "cancelled",
       summary: "the Objective was cancelled",
-      nextAction: null,
+      action: null,
     };
   if (view.state === "complete")
     return {
       phase: "complete",
       summary: "final validation passed; Objective closed",
-      nextAction: null,
+      action: null,
     };
   if (view.coordinator?.cancelError)
     return {
       phase: "needs-decision",
       summary: `cancellation unresolved: ${short(view.coordinator.cancelError, 80)}`,
-      nextAction: {
+      action: {
         command: `factory cancel --objective ${objective}`,
         reason: "Repeats cancellation of the recorded work",
       },
@@ -712,7 +711,7 @@ export function summarizeStatus(view: StatusView): StatusSummary {
     return {
       phase: "failed",
       summary: short(view.lastError ?? "the Objective failed", 100),
-      nextAction: {
+      action: {
         command: `factory retry --objective ${objective}`,
         reason: `Runs the stopped step again once its cause is fixed (inspect with factory diagnostics --objective ${objective})${thenRun(view)}`,
       },
@@ -728,8 +727,8 @@ export function summarizeStatus(view: StatusView): StatusSummary {
   if (mode === "paused" || mode === "draining")
     return {
       phase: "waiting",
-      summary: `${mode === "paused" ? "paused" : settling ? "draining owned work" : "drained"}${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
-      nextAction: {
+      summary: `the operator: ${mode === "paused" ? "paused" : settling ? "draining owned work" : "drained"}${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
+      action: {
         command: `factory resume --objective ${objective}`,
         reason: `Resumes the Objective${view.runActive === true ? "" : `; then ${run(objective)}`}`,
       },
@@ -737,18 +736,34 @@ export function summarizeStatus(view: StatusView): StatusSummary {
   return failedItem(view) ?? progress(view);
 }
 
-const phaseLabel = (phase: StatusPhase) => phase.replaceAll("-", " ");
+const phaseLabel = (phase: StatusPhase) =>
+  phase[0]!.toUpperCase() + phase.slice(1).replaceAll("-", " ");
 
-/** Text status: the summary line, the next command, then compact detail. */
+/** The first line of status: the phase, then what is happening. */
+export function statusHeadline({ phase, summary }: StatusSummary): string {
+  return phase === "waiting"
+    ? `Waiting on ${summary}`
+    : `${phaseLabel(phase)}: ${summary}`;
+}
+
+/**
+ * The lines status leads with: the headline, then, if the operator must act,
+ * the exact command and why. Without an action the second line is blank.
+ */
+export function leadLines(summary: StatusSummary): string[] {
+  return summary.action
+    ? [
+        statusHeadline(summary),
+        summary.action.command,
+        `  ${summary.action.reason}`,
+        "",
+      ]
+    : [statusHeadline(summary), ""];
+}
+
+/** Text status: the headline, the command to run, then compact detail. */
 export function renderStatusText(view: StatusView & StatusSummary): string[] {
-  const lines = [
-    `Objective #${view.objective}: ${phaseLabel(view.phase)} — ${view.summary}`,
-  ];
-  if (view.nextAction)
-    lines.push(
-      `Next: ${view.nextAction.command}`,
-      `      ${view.nextAction.reason}`,
-    );
+  const lines = [...leadLines(view), `Objective #${view.objective}`];
   if (view.state === "not-started") return lines;
   if (view.state === "preparing") {
     if (view.planReview?.question)
@@ -841,10 +856,104 @@ export interface ServiceStatusDocument {
   };
 }
 
-/** The service and queue as text lines, each problem followed by the command that answers it. */
+/** The Objectives waiting in the queue, in order. */
+const queuedObjectives = (queue: ServiceStatusDocument["queue"]) =>
+  (queue.objectives ?? []).filter((id) => !(queue.dequeued ?? []).includes(id));
+
+/** The phase of the background service and its queue, and the command that moves it on. Pure. */
+export function summarizeService(
+  document: ServiceStatusDocument,
+): StatusSummary {
+  const { service, queue } = document;
+  if (service.supported === false)
+    return {
+      phase: "not-started",
+      summary: "no background service on this host",
+      action: null,
+    };
+  if (!service.registered)
+    return {
+      phase: "not-started",
+      summary: "the background service is not set up",
+      action: {
+        command: "factory setup --background",
+        reason: "Installs and starts the service that runs the queue",
+      },
+    };
+  const decision = queue.observation?.needsDecision;
+  if (service.waitingFor === "human-decision")
+    return {
+      phase: "needs-decision",
+      summary: decision
+        ? `Objective #${decision} needs a decision`
+        : "an Objective needs a decision",
+      action: {
+        command: decision
+          ? `factory status --objective ${decision}`
+          : "factory queue list",
+        reason: decision
+          ? "Names the command that answers it; then factory queue resume and factory supervisor start"
+          : "Names the Objective",
+      },
+    };
+  const resume = {
+    command: "factory queue resume",
+    reason: "Continues the queue",
+  };
+  if (queue.mode === "draining")
+    return {
+      phase: "waiting",
+      summary: "the operator: the queue is draining",
+      action:
+        service.active === "active"
+          ? resume
+          : {
+              ...resume,
+              reason: "Continues the queue; then factory supervisor start",
+            },
+    };
+  if (queue.mode === "paused")
+    return {
+      phase: "waiting",
+      summary: "the operator: the queue is paused",
+      action: resume,
+    };
+  if (service.active !== "active")
+    return {
+      phase: "waiting",
+      summary: "the service: not running",
+      action: {
+        command: "factory supervisor start",
+        reason: "Starts the service",
+      },
+    };
+  const queued = queuedObjectives(queue);
+  if (queue.activeObjective)
+    return {
+      phase: "running",
+      summary: `Objective #${queue.activeObjective}${queued.length ? `; queued ${queued.map((id) => `#${id}`).join(", ")}` : ""}`,
+      action: null,
+    };
+  if (queued.length)
+    return {
+      phase: "running",
+      summary: `queued ${queued.map((id) => `#${id}`).join(", ")}`,
+      action: null,
+    };
+  return {
+    phase: "waiting",
+    summary: "the queue: empty",
+    action: {
+      command: "factory queue add N",
+      reason: "Queues an Objective",
+    },
+  };
+}
+
+/** The service and queue as text lines: the headline and command, then each part with the command that answers its problem. */
 export function renderServiceStatus(document: ServiceStatusDocument): string[] {
   const { service, queue } = document;
-  const lines: string[] = [];
+  const lines: string[] = leadLines(summarizeService(document));
   if (service.supported === false)
     lines.push(
       "Service: unavailable on this host (no running systemd user manager); `factory run --objective N` runs an Objective in the foreground",
@@ -864,11 +973,14 @@ export function renderServiceStatus(document: ServiceStatusDocument): string[] {
           : "  Waiting for a decision; `factory queue list` names the Objective",
       );
     else if (service.active !== "active")
-      lines.push("  Not running; `factory supervisor start` starts it");
+      // A draining queue ends a started service at once: resume it first.
+      lines.push(
+        queue.mode === "draining"
+          ? "  Not running; the queue is draining, so `factory queue resume` first, then `factory supervisor start`"
+          : "  Not running; `factory supervisor start` starts it",
+      );
   }
-  const queued = (queue.objectives ?? []).filter(
-    (id) => !(queue.dequeued ?? []).includes(id),
-  );
+  const queued = queuedObjectives(queue);
   const parts = [
     queue.mode ?? "running",
     queued.length

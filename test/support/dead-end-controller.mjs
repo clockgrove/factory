@@ -7,7 +7,9 @@
 //   new state shape, so the test can copy that reachable state and its world;
 // - run: restart the Objective once and report how it ended, stopping as soon
 //   as a snapshot shows progress or the controller sits idle;
-// - command: apply one operator command through the application.
+// - repair: record the diagnosed repair a status names, from its proposal file.
+//   The CLI cannot compose this world's scripted harness, and `repair` is the
+//   one command that checks the configuration the state is bound to.
 //
 // Prints one JSON line (trajectory: one per anchor).
 import fs from "node:fs";
@@ -39,7 +41,6 @@ const { readContinuation } = await import("../../dist/state-store.js");
 const { continuationStatusDocument } = await import(
   "../../dist/diagnostics.js"
 );
-const { controlObjective } = await import("../../dist/runner.js");
 const { rewritingFetch } = await import("./github-http-fake.mjs");
 const { ScriptedHarness, ScriptedPlanningModel, readDescriptor } = await import(
   "./integration-fixture.mjs"
@@ -81,7 +82,7 @@ function status() {
     return {
       phase: document.phase,
       summary: document.summary,
-      nextAction: document.nextAction,
+      action: document.action,
       coordinator: continuation?.coordinator && {
         mode: continuation.coordinator.mode,
         waitReason: continuation.coordinator.waitReason,
@@ -169,62 +170,13 @@ const application = composeWithLocalHarness(
   },
 );
 
-/**
- * Run one operator command a status names ({verb, options}, parsed in
- * dead-ends.mjs), filling its placeholders: decisions accept.
- */
-async function command({ verb, options }) {
-  const item = options.item;
-  switch (verb) {
-    case "run":
-      return;
-    case "retry":
-      return application.retryWorkItem(objective, item);
-    case "select":
-      return application.selectAssetSet(objective, item, options.set, {
-        actor: "operator",
-      });
-    case "repair": {
-      // The operator writes the proposal: a diagnosed implementation correction.
-      const state = readContinuation(config.repository, objective);
-      const [id, work] =
-        Object.entries(state.work ?? {}).find(
-          ([, work]) => work.recovery?.phase === "stopped",
-        ) ?? [];
-      if (!work?.recovery?.failure)
-        throw new Error("No stopped repair names a failure to correct");
-      return application.repairWorkItem(objective, {
-        item: id,
-        correction: {
-          failureDigest: work.recovery.failure.digest,
-          kind: "implementation",
-          diagnosis: "Diagnosed by the dead-end finder",
-          correction: "Make the scripted change again",
-          actor: "operator",
-        },
-      });
-    }
-    case "decide":
-      // The state says whether this is a plan or a result; only a plan takes an answer.
-      return application.decide(objective, {
-        item,
-        actor: "operator",
-        outcome: options.outcome === "refuse" ? "refuse" : "accept",
-        answer: options.answer ? "Proceed" : undefined,
-        reason: "Decided by the dead-end finder",
-      });
-    case "cancel":
-      return application.cancelObjective(objective);
-    case "resume":
-      return controlObjective(config, { objective, action: "resume" });
-  }
-  throw new Error(`Unsupported operator command: factory ${verb}`);
-}
-
-if (descriptor.mode === "command") {
+if (descriptor.mode === "repair") {
   try {
-    await command(descriptor.command);
-    finish({ ok: true, status: status() });
+    application.repairWorkItem(
+      objective,
+      JSON.parse(fs.readFileSync(descriptor.proposal, "utf8")),
+    );
+    finish({ ok: true });
   } catch (error) {
     finish({ ok: false, message: String(error?.message ?? error) });
   }

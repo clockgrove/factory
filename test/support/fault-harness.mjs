@@ -18,6 +18,7 @@ import {
   gitTransportEnvironment,
 } from "./github-http-fake.mjs";
 import { createTarget, git, writeDescriptor } from "./integration-fixture.mjs";
+import { operatorFor } from "./operator-cli.mjs";
 
 const execFileAsync = promisify(execFile);
 const controller = join(import.meta.dirname, "fault-controller.mjs");
@@ -153,6 +154,23 @@ async function repositorySnapshot(origin, fake, items) {
 }
 
 /**
+ * Read the stop's status as the operator does (its first line and command
+ * checked) and run the command it names. Returns the command and the exit
+ * status; a command that exits non-zero carries its error.
+ */
+function answerStop(operatorCli) {
+  const { document } = operatorCli.status();
+  const command = document.action?.command;
+  if (!command) return { command: null };
+  const ran = operatorCli.follow(command);
+  return {
+    command,
+    exit: ran.status,
+    ...(ran.status !== 0 && { error: ran.stderr.trim() }),
+  };
+}
+
+/**
  * Run `items` (alpha → beta by default) with `delivery`. `http` rules are
  * injected into the fake for the whole scenario (each fires once per its
  * `times`); `inProcess` faults and the `operator` action (cancel when a
@@ -160,8 +178,8 @@ async function repositorySnapshot(origin, fake, items) {
  * `actions` adds to an item's scripted worker action; `barrier: true` holds
  * its worker until Factory cancels it or an `after` rule releases it.
  * `beforeRun(fake, index)` may change GitHub between controller runs. With
- * `answer`, each restart first runs the `factory retry` the status names for
- * the previous stop (the run reports it as `answered`).
+ * `answer`, each restart first runs the command the status names for the
+ * previous stop, through the real CLI (the run reports it as `answered`).
  * A run that crashed, stopped, failed or ended needing a human decision is
  * restarted at most `maxRestarts` times; a complete run ends the scenario.
  */
@@ -281,10 +299,14 @@ export async function runScenario({
     const runs = [];
     for (let index = 0; ; index++) {
       await beforeRun?.(fake, index);
+      // The operator reads the stop and runs the command its status names.
+      const answered =
+        answer && index > 0
+          ? answerStop(operatorFor({ root, config: descriptor.config, fake }))
+          : undefined;
       writeDescriptor(descriptorPath, {
         ...descriptor,
         run: index,
-        answer,
         faults: index === 0 ? inProcess : [],
         ...(index === 0 && operator && { operator }),
       });
@@ -299,7 +321,7 @@ export async function runScenario({
         },
       );
       child = undefined;
-      runs.push(result);
+      runs.push(answered ? { ...result, answered } : result);
       if (["complete", "hung", "failed"].includes(result.outcome)) break;
       if (runs.length > maxRestarts) break;
     }

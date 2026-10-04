@@ -186,7 +186,7 @@ test("fresh packed artifact composes a registered harness through the package ro
     );
     assert.match(
       status,
-      /^Objective #1: not started — no Factory run recorded\nNext: factory run --objective 1\n/,
+      /^Not started: no Factory run recorded\nfactory run --objective 1\n/,
     );
     const installedPackage = await import(
       pathToFileURL(
@@ -342,7 +342,7 @@ test("fresh packed artifact composes a registered harness through the package ro
     );
     assert.equal(after.state, "complete");
     assert.equal(after.phase, "complete");
-    assert.equal(after.nextAction, null);
+    assert.equal(after.action, null);
     assert.equal(after.finalValidation, true);
     const timeline = execFileSync(
       cli,

@@ -317,7 +317,7 @@ test("a plan decision reads the saved plan from state and refuses once projectio
     assert.equal(status.planReview.digest, digest);
     // The digest is shown, never typed: the command carries no plan to bind.
     assert.equal(
-      status.nextAction.command,
+      status.action.command,
       'factory decide --objective 1 --outcome accept|refuse --answer "ANSWER" --reason "WHY"',
     );
     const decision = {
@@ -444,9 +444,9 @@ test("planning that stops without a plan waits for a refusal instead of failing"
     assert.equal(runOutcome(stopped).code, 2);
     assert.match(runOutcome(stopped).message, /--outcome refuse/);
     const status = preparationStatusDocument(stopped);
-    assert.equal(status.phase, "needs-plan-decision");
+    assert.equal(status.phase, "needs-decision");
     assert.equal(
-      status.nextAction.command,
+      status.action.command,
       'factory decide --objective 1 --outcome refuse --reason "WHY"',
     );
     // A rerun repeats no model call and still names the way out.
@@ -645,9 +645,9 @@ for (const [name, expected, answers, diagnose, runs] of [
         /stopped for a decision: .*stopped for a decision/is,
       );
       const status = preparationStatusDocument(stopped);
-      assert.equal(status.phase, "needs-plan-decision");
+      assert.equal(status.phase, "needs-decision");
       assert.match(status.summary, /^Planning stopped for a decision: /);
-      const command = status.nextAction.command;
+      const command = status.action.command;
       assert.equal(
         command,
         'factory decide --objective 1 --outcome refuse --reason "WHY"',
@@ -869,7 +869,7 @@ test("a run that waits before any state exists exits 2, names run, and status sh
     const shown = status();
     assert.equal(shown.phase, "needs-decision");
     assert.match(shown.summary, /Predecessor #9/);
-    assert.equal(shown.nextAction.command, "factory run --objective 1");
+    assert.equal(shown.action.command, "factory run --objective 1");
     assert.throws(
       () => application.retryWorkItem(1),
       /Objective has no Factory state/,
@@ -925,7 +925,7 @@ test("an outage before the state file exists is shown in status", async () => {
     assert.match(during.outage.last, /fetch failed/);
     const summary = summarizeStatus(during);
     assert.equal(summary.phase, "waiting");
-    assert.match(summary.summary, /on outage for the Objective \(observe\)/);
+    assert.match(summary.summary, /^outage for the Objective \(observe\)/);
     // The outage ended with the first answer, and the state file replaced it.
     assert.equal(existsSync(preStatePath(config.repository, 1)), false);
   });
@@ -991,17 +991,17 @@ test("factory retry runs the command status prints for a step decision", async (
     });
     assert.equal(itemStatus.phase, "needs-decision");
     assert.equal(
-      itemStatus.nextAction.command,
+      itemStatus.action.command,
       "factory retry --objective 1 --item result",
     );
-    const answered = run(itemStatus.nextAction.command);
+    const answered = run(itemStatus.action.command);
     assert.equal(answered.status, 0, answered.stderr);
     assert.match(answered.stdout, /Work Item result step will run again/);
     const cleared = readState(config.repository, 1);
     assert.equal(cleared.work.result.wait, undefined);
     assert.deepEqual(cleared.repeats, { "objective/close": { paid: 1 } });
     // Nothing awaits the operator now, so the attempt rules apply again.
-    assert.match(run(itemStatus.nextAction.command).stderr, /already complete/);
+    assert.match(run(itemStatus.action.command).stderr, /already complete/);
 
     // The Objective's own step: no --item.
     cleared.wait = {
@@ -1019,11 +1019,8 @@ test("factory retry runs the command status prints for a step decision", async (
       ),
       state: "active",
     });
-    assert.equal(
-      objectiveStatus.nextAction.command,
-      "factory retry --objective 1",
-    );
-    const objectiveAnswer = run(objectiveStatus.nextAction.command);
+    assert.equal(objectiveStatus.action.command, "factory retry --objective 1");
+    const objectiveAnswer = run(objectiveStatus.action.command);
     assert.equal(objectiveAnswer.status, 0, objectiveAnswer.stderr);
     assert.match(objectiveAnswer.stdout, /Objective step will run again/);
     const done = readState(config.repository, 1);
@@ -1046,11 +1043,8 @@ test("factory retry runs the command status prints for a step decision", async (
       ),
       state: "failed",
     });
-    assert.equal(
-      stoppedStatus.nextAction.command,
-      "factory retry --objective 1",
-    );
-    const restarted = run(stoppedStatus.nextAction.command);
+    assert.equal(stoppedStatus.action.command, "factory retry --objective 1");
+    const restarted = run(stoppedStatus.action.command);
     assert.equal(restarted.status, 0, restarted.stderr);
     assert.match(restarted.stdout, /Objective step will run again/);
     assert.equal(readState(config.repository, 1).error, undefined);

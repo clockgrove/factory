@@ -115,6 +115,19 @@ export function options(args: string[], name: string): string[] {
   );
 }
 
+/** Setup options that only `--background` reads. */
+const backgroundOnlyFlags = ["outside-directory", "credential-file"];
+
+/** The setup command that takes an option, with a placeholder for its value. */
+function setupCommand(name: string): string {
+  if (name === "background" || name === "config-only")
+    return `use factory setup --${name}`;
+  const value = booleanFlags.has(name) ? "" : " VALUE";
+  return backgroundOnlyFlags.includes(name)
+    ? `use factory setup --background --${name}${value}`
+    : `use factory setup --config-only --${name}${value} (--background instead also starts the service)`;
+}
+
 /** Refuse an option the command does not read, so a typo or removed flag never runs silently. */
 export function assertKnownFlags(command: string, args: string[]): void {
   const moved = removedCommands[command];
@@ -142,6 +155,10 @@ export function assertKnownFlags(command: string, args: string[]): void {
       throw new Error(
         `${arg} was removed from factory ${command}; queue Objectives with factory queue add N`,
       );
+    if (name === "objective" && command === "queue")
+      throw new Error(
+        `factory queue takes Objective numbers as arguments, not --objective; use factory queue add ${args[args.indexOf(arg) + 1] ?? "N"} (or remove)`,
+      );
     const allowed = commandFlags[command];
     if (
       allowed &&
@@ -149,9 +166,7 @@ export function assertKnownFlags(command: string, args: string[]): void {
       !allowed.includes(name) &&
       commandFlags.setup!.includes(name)
     )
-      throw new Error(
-        `${arg} belongs to factory setup; use factory setup --background ${arg} VALUE`,
-      );
+      throw new Error(`${arg} belongs to factory setup; ${setupCommand(name)}`);
     if (allowed && name !== "config" && !allowed.includes(name))
       throw new Error(
         `Unknown option ${arg} for factory ${command}; see factory help`,

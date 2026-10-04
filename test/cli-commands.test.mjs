@@ -11,6 +11,7 @@ import { coverageObligations } from "../dist/qa.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
 import {
   renderServiceStatus,
+  summarizeService,
   summarizeStatus,
 } from "../dist/status-summary.js";
 import {
@@ -157,11 +158,11 @@ test("the result decision a stop names runs end to end, for a Work Item and for 
     const item = named();
     assert.equal(item.phase, "needs-decision");
     assert.equal(
-      item.nextAction.command,
+      item.action.command,
       'factory decide --objective 1 --item one --outcome accept|refuse --reason "WHY"',
     );
     // The placeholders are the operator's to fill; --answer is a plan's, not a result's.
-    const withAnswer = runNamed(item.nextAction.command, configPath, {
+    const withAnswer = runNamed(item.action.command, configPath, {
       "accept|refuse": "accept",
       WHY: "Looked at the exact result",
     });
@@ -181,7 +182,7 @@ test("the result decision a stop names runs end to end, for a Work Item and for 
     assert.ok(decided.acceptanceDecisions[0].actor);
 
     // The same decision again has nothing pending and says so.
-    const again = runNamed(item.nextAction.command, configPath, {
+    const again = runNamed(item.action.command, configPath, {
       "accept|refuse": "accept",
       WHY: "twice",
     });
@@ -205,10 +206,10 @@ test("the result decision a stop names runs end to end, for a Work Item and for 
     saveState(path, final);
     const objective = named();
     assert.equal(
-      objective.nextAction.command,
+      objective.action.command,
       'factory decide --objective 1 --outcome accept|refuse --reason "WHY"',
     );
-    const refused = runNamed(objective.nextAction.command, configPath, {
+    const refused = runNamed(objective.action.command, configPath, {
       "accept|refuse": "refuse",
       WHY: "Not what was asked",
     });
@@ -379,7 +380,11 @@ test("status without an Objective names the command that answers each service an
     registered: true,
     unit: "factory-x.service",
   };
-  const lines = (service, queue) => renderServiceStatus({ service, queue });
+  // The details after the lead lines (headline, command, reason, blank).
+  const lines = (service, queue) => {
+    const all = renderServiceStatus({ service, queue });
+    return all.slice(all.indexOf("") + 1);
+  };
   assert.deepEqual(lines({ supported: false }, {}), [
     "Service: unavailable on this host (no running systemd user manager); `factory run --objective N` runs an Objective in the foreground",
     "Queue: running; empty",
@@ -433,4 +438,46 @@ test("status without an Objective names the command that answers each service an
     ).join("\n"),
     /Queue: running; queued #4; #4 running/,
   );
+});
+
+test("status without an Objective leads with the phase and the command that moves it on", () => {
+  const registered = {
+    supported: true,
+    registered: true,
+    unit: "factory-x.service",
+    active: "active",
+    enabled: "enabled",
+  };
+  const lead = (service, queue) => {
+    const text = renderServiceStatus({ service, queue });
+    const summary = summarizeService({ service, queue });
+    assert.equal(text[1], summary.action?.command ?? "");
+    return summary;
+  };
+  assert.deepEqual(
+    [
+      lead({ supported: false }, {}),
+      lead({ supported: true, registered: false }, {}),
+      lead(registered, { objectives: [4], activeObjective: 4 }),
+      lead(registered, { mode: "paused" }),
+      lead({ ...registered, active: "inactive" }, { mode: "draining" }),
+      lead({ ...registered, active: "inactive" }, {}),
+      lead(registered, {}),
+    ].map(({ phase, action }) => [phase, action?.command ?? null]),
+    [
+      ["not-started", null],
+      ["not-started", "factory setup --background"],
+      ["running", null],
+      ["waiting", "factory queue resume"],
+      ["waiting", "factory queue resume"],
+      ["waiting", "factory supervisor start"],
+      ["waiting", "factory queue add N"],
+    ],
+  );
+  const decision = lead(
+    { ...registered, active: "inactive", waitingFor: "human-decision" },
+    { objectives: [4], observation: { needsDecision: 4 } },
+  );
+  assert.equal(decision.phase, "needs-decision");
+  assert.equal(decision.action.command, "factory status --objective 4");
 });

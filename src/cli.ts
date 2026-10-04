@@ -31,7 +31,11 @@ import {
   readControllerOwner,
   readPreState,
 } from "./state-store.js";
-import { renderServiceStatus, renderStatusText } from "./status-summary.js";
+import {
+  renderServiceStatus,
+  renderStatusText,
+  summarizeService,
+} from "./status-summary.js";
 import { checkIntakeServiceState, supervise } from "./supervision.js";
 
 /** Whether a live controller owns this Objective; null when the lock is unreadable. */
@@ -229,7 +233,14 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
     config,
     "status",
   )) as ServiceStatus["queue"];
-  if (json) console.log(JSON.stringify({ service, queue }));
+  if (json)
+    console.log(
+      JSON.stringify({
+        ...summarizeService({ service, queue }),
+        service,
+        queue,
+      }),
+    );
   else
     for (const line of renderServiceStatus({ service, queue }))
       console.log(line);

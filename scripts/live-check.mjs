@@ -192,7 +192,7 @@ Add a tiny POSIX shell greeting under \`${dir}/\` for Factory's live crash-resta
 
 1. \`lib\`: create \`${dir}/lib.sh\` defining a POSIX \`greet\` function that prints \`hello, $1\`.
 2. \`cli\`: depends on \`lib\`; create \`${dir}/hello.sh\` that sources \`lib.sh\` from its own directory and runs \`greet world\`.
-3. \`notes\`: independent; create \`${dir}/NOTES.md\` with one sentence describing the two scripts.
+3. \`notes\`: independent; create \`${dir}/NOTES.md\` with one sentence that names \`lib.sh\` and \`hello.sh\`.
 
 ## Acceptance
 
@@ -200,7 +200,7 @@ Add a tiny POSIX shell greeting under \`${dir}/\` for Factory's live crash-resta
 - \`sh -c '. ${dir}/lib.sh && test "$(greet world)" = "hello, world"'\`
 - \`test "$(sh ${dir}/hello.sh)" = "hello, world"\`
 - \`sh -n ${dir}/lib.sh\`
-- \`${dir}/NOTES.md\` is one sentence describing the scripts.
+- \`${dir}/NOTES.md\` is one sentence that names \`lib.sh\` and \`hello.sh\` (\`notes\` is independent, so its own patch proves this).
 
 ## Final validation
 

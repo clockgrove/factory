@@ -22,6 +22,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { Codex } from "@openai/codex-sdk";
+import { createCodexPlanningHome } from "./codex-planning-isolation.js";
 import type { CodexModelSelection } from "./config.js";
 import type {
   ExecutionProfileChoices,
@@ -535,7 +536,11 @@ interface StructuredCall {
 export const CODEX_PLANNING_PROVIDER = "openai-codex-sdk";
 export const CODEX_PLANNING_ADAPTER = "@openai/codex-sdk@0.156.0";
 
-/** Codex SDK transport: a read-only, never-approving thread per attempt. */
+/**
+ * Codex SDK transport: a read-only, never-approving, tool-free thread per
+ * attempt, run under Factory's own scratch CODEX_HOME so the operator's
+ * config.toml and AGENTS.md never apply.
+ */
 class CodexPlanningTransport implements PlanningTransport {
   readonly provider = CODEX_PLANNING_PROVIDER;
   readonly adapter = CODEX_PLANNING_ADAPTER;
@@ -573,8 +578,9 @@ class CodexPlanningTransport implements PlanningTransport {
     const turn = new ProviderTurnGuard(this.providerTurnIdleTimeoutMs);
     let thread: ReturnType<Codex["startThread"]> | undefined;
     let turnCompleted = false;
+    const home = createCodexPlanningHome();
     try {
-      thread = new Codex().startThread({
+      thread = new Codex({ env: home.env }).startThread({
         workingDirectory: this.checkout,
         sandboxMode: "read-only",
         approvalPolicy: "never",
@@ -716,6 +722,7 @@ class CodexPlanningTransport implements PlanningTransport {
     } finally {
       state.providerThreadId = thread?.id ?? undefined;
       turn.finish();
+      home.dispose();
     }
   }
 }

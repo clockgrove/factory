@@ -228,6 +228,28 @@ test("persisted state validates identities and graph/work keys before use", () =
   );
 });
 
+test("persisted state keeps errorItem with its error and drops an orphan one", () => {
+  const stopped = state();
+  stopped.error = "boom";
+  stopped.errorItem = "asset";
+  assert.equal(
+    parseFactoryState(stopped, repository, objective).errorItem,
+    "asset",
+  );
+  const orphan = state();
+  orphan.errorItem = "asset";
+  const parsed = parseFactoryState(orphan, repository, objective);
+  assert.equal(parsed.errorItem, undefined);
+  assert.equal(parsed.error, undefined);
+  const bad = state();
+  bad.error = "boom";
+  bad.errorItem = 3;
+  assert.throws(
+    () => parseFactoryState(bad, repository, objective),
+    /state.errorItem is invalid/,
+  );
+});
+
 test("persisted state rejects a malformed work.worker", () => {
   const valid = state();
   valid.work.asset.worker = 2;

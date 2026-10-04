@@ -45,8 +45,11 @@ export function awaitingOutcome(wait: AwaitingBeforeState): {
 export function stopRetryCommand(state: ContinuationState): string {
   const retry = `factory retry --objective ${state.objective}`;
   if (!("work" in state) || state.error === undefined) return retry;
+  // `retry --item` accepts only a failed or cancelled item; an item that
+  // finished since the stop (done, published) is answered by the Objective's retry.
   const item = state.errorItem;
-  return item !== undefined && state.work[item]
+  const status = item === undefined ? undefined : state.work[item]?.status;
+  return item !== undefined && (status === "failed" || status === "cancelled")
     ? `${retry} --item ${item}`
     : retry;
 }

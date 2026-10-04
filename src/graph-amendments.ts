@@ -929,6 +929,7 @@ async function advanceAmendment(args: {
         "accepted";
     delete state.pendingAmendment;
     delete state.error;
+    delete state.errorItem;
     save();
     return true;
   } catch (error) {

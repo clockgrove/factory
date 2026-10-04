@@ -987,6 +987,31 @@ test("factory retry runs the command status prints for a step decision", async (
     assert.equal(restarted.status, 0, restarted.stderr);
     assert.match(restarted.stdout, /Objective step will run again/);
     assert.equal(readState(config.repository, 1).error, undefined);
+
+    // A stop whose item finished since (done or published) cannot be retried
+    // by item: the outcome names the Objective's retry, and that command runs.
+    for (const finished of ["done", "published"]) {
+      const stale = readState(config.repository, 1);
+      stale.error = "Fixture stop of an item that finished since";
+      stale.errorItem = "result";
+      stale.work.result.status = finished;
+      // A closure is recorded only on a done item.
+      if (finished !== "done") delete stale.work.result.githubClosure;
+      saveState(path, stale);
+      const named = runOutcome(readState(config.repository, 1)).message.match(
+        /`(factory retry [^`]*)`/,
+      )?.[1];
+      assert.equal(named, "factory retry --objective 1", finished);
+      const answeredStop = run(named);
+      assert.equal(
+        answeredStop.status,
+        0,
+        `${finished}: ${answeredStop.stderr}`,
+      );
+      const afterStop = readState(config.repository, 1);
+      assert.equal(afterStop.error, undefined);
+      assert.equal(afterStop.errorItem, undefined);
+    }
   });
 });
 
@@ -1011,6 +1036,17 @@ test("a stop after an item defect names the item's retry; a waiting diagnosis na
   assert.equal(outcome.code, 1);
   assert.match(outcome.message, /Objective #5 stopped: boom\n/);
   assert.match(outcome.message, /`factory retry --objective 5 --item X` and/);
+  // Only a failed or cancelled item can be retried by item.
+  for (const status of ["done", "published"])
+    assert.match(
+      runOutcome({ ...state, work: { X: { status } } }).message,
+      /`factory retry --objective 5` and/,
+      status,
+    );
+  assert.match(
+    runOutcome({ ...state, work: { X: { status: "cancelled" } } }).message,
+    /`factory retry --objective 5 --item X` and/,
+  );
   // A failed item the stop did not come from is not named.
   const unmarked = { ...state };
   delete unmarked.errorItem;

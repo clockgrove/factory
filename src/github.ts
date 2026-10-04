@@ -1043,9 +1043,9 @@ export class RealGitHubGateway implements GitHubGateway {
   }
 
   /**
-   * The check names the repository requires on `branch`: its rulesets
-   * (readable with read access) and its classic branch protection, when the
-   * login may read it.
+   * The check names the repository requires on `branch`: its rulesets and
+   * its classic branch protection (from the protection route, else from the
+   * branch read, which shows them with read access).
    */
   private async requiredChecks(branch: string): Promise<string[]> {
     type Rule = {
@@ -1062,7 +1062,8 @@ export class RealGitHubGateway implements GitHubGateway {
           )
         : [],
     );
-    let classic: { contexts?: string[]; checks?: { context?: string }[] } = {};
+    type Required = { contexts?: unknown; checks?: unknown };
+    let classic: Required = {};
     try {
       classic = await this.client.request(
         "GET",
@@ -1071,8 +1072,7 @@ export class RealGitHubGateway implements GitHubGateway {
         ),
       );
     } catch (error) {
-      // Unprotected (404), or protection the login may not read (403); a
-      // rate limit is still a rate limit.
+      // 404: unprotected, or no required checks. A rate limit stays one.
       if (
         !(
           error instanceof GitHubRequestError &&
@@ -1081,15 +1081,26 @@ export class RealGitHubGateway implements GitHubGateway {
         )
       )
         throw error;
+      // 403: the login may not read protection settings; the branch read
+      // shows the same required checks with read access.
+      if (error.status === 403)
+        classic =
+          (
+            await this.api<{
+              protection?: { required_status_checks?: Required | null } | null;
+            }>("GET", `branches/${encodeURIComponent(branch)}`)
+          ).protection?.required_status_checks ?? {};
     }
     return [
-      ...new Set([
-        ...names,
-        ...(classic.contexts ?? []),
-        ...(classic.checks ?? []).flatMap((check) =>
-          typeof check.context === "string" ? [check.context] : [],
-        ),
-      ]),
+      ...new Set(
+        [
+          ...names,
+          ...(Array.isArray(classic.contexts) ? classic.contexts : []),
+          ...(Array.isArray(classic.checks) ? classic.checks : []).map(
+            (check) => (check as { context?: unknown } | null)?.context,
+          ),
+        ].filter((name): name is string => typeof name === "string" && !!name),
+      ),
     ];
   }
 
@@ -1124,10 +1135,21 @@ export class RealGitHubGateway implements GitHubGateway {
       runs.push(...result.check_runs);
       if (result.check_runs.length < 100) break;
     }
-    const statuses = await this.api<{
-      state: string;
-      total_count: number;
-    }>("GET", `commits/${identity.headSha}/status`);
+    type Status = { context?: unknown; state?: unknown };
+    const contexts: Status[] = [];
+    let combined: { state: string; total_count: number; statuses?: unknown };
+    for (let page = 1; ; page++) {
+      combined = await this.api<typeof combined>(
+        "GET",
+        `commits/${identity.headSha}/status?per_page=100&page=${page}`,
+      );
+      const listed = Array.isArray(combined.statuses)
+        ? (combined.statuses as Status[])
+        : [];
+      contexts.push(...listed);
+      if (listed.length < 100) break;
+    }
+    const statuses = combined;
     const failing =
       runs.some(
         (run) =>
@@ -1147,6 +1169,13 @@ export class RealGitHubGateway implements GitHubGateway {
             ].includes(run.conclusion ?? ""),
           )
           .map((run) => run.name),
+        // Commit statuses: branch protection often requires these contexts.
+        ...contexts.flatMap((status) =>
+          typeof status.context === "string" &&
+          ["error", "failure"].includes(String(status.state))
+            ? [status.context]
+            : [],
+        ),
       ),
     ];
     const checksByName = new Map<string, typeof runs>();

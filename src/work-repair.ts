@@ -243,11 +243,14 @@ export async function diagnoseWorkRepair(args: {
   const work = state.work[item.id]!;
   const failure = work.recovery?.failure;
   // Only a wrong result has a failure event; anything else is repeated or
-  // fixed, never diagnosed against an allowance.
-  if (!failure?.event || work.status !== "failed" || args.stopped())
+  // fixed, never diagnosed against an allowance. A cancelled run diagnoses
+  // nothing.
+  if (!failure?.event || work.status !== "failed" || args.signal?.aborted)
     return false;
   const retry = retryCommand(state, item.id);
   if (work.recovery?.phase === "ready" && work.recovery.correction) {
+    // The next pass applies a ready correction once the run goes on.
+    if (args.stopped()) return false;
     applyWorkCorrection(state, item.id, work.recovery.correction);
     save();
     return true;
@@ -274,6 +277,10 @@ export async function diagnoseWorkRepair(args: {
   }
   work.recovery!.phase = "diagnosing";
   save();
+  // Paused, or an amendment pending: the diagnosis is due, not dropped. The
+  // phase is "diagnosing", so resumeDiagnoses asks it once the run goes on
+  // (pause is not cancel; its event is already charged).
+  if (args.stopped()) return false;
   // A paid step: a lost answer is asked again, an invalid one again with
   // its validation error, until the paid bound makes it a decision.
   let rejected: string | undefined;

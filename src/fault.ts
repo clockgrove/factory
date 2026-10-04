@@ -6,6 +6,7 @@
  * classified is a `defect`.
  */
 
+import { readFileSync } from "node:fs";
 import * as time from "./clock.js";
 
 /** What a failed result showed, for repair and the operator. */
@@ -359,6 +360,23 @@ export function judgedAsWork<T>(check: () => T): T {
       cause: error,
     });
   }
+}
+
+/**
+ * Read the JSON result a finished worker left. A missing file or text that
+ * does not parse is the worker's wrong result; any other read failure
+ * (permissions, I/O) is Factory's own and keeps its classification.
+ */
+export function readWorkerJson(path: string): unknown {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      throw workFault("Harness left no result file", { cause: error });
+    throw error;
+  }
+  return judgedAsWork(() => JSON.parse(text));
 }
 
 export const decision = (question: string, ...evidence: string[]): Fault => ({

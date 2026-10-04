@@ -3,16 +3,19 @@ import {
   cancelledFault,
   classifyFaults,
   judgedAsWork,
-  StepFault,
+  readWorkerJson,
   workFault,
 } from "../fault.js";
 import { executionFault } from "./fault.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  accessSync,
+  constants,
   createReadStream,
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -226,9 +229,7 @@ export class CodexHarness implements AgentHarness {
           );
         throw workFault(observed.detail ?? "Codex harness worker failed");
       }
-      const result: unknown = judgedAsWork(() =>
-        JSON.parse(readFileSync(data.resultPath, "utf8")),
-      );
+      const result: unknown = readWorkerJson(data.resultPath);
       if (!result || typeof result !== "object" || Array.isArray(result))
         throw workFault("Harness result is not an object");
       const value = result as Record<string, unknown>;
@@ -331,6 +332,39 @@ async function preserveControllerAssetDestinations(
   return destinations;
 }
 
+/** Controller-owned staging that collection reads but never commits. */
+const PRIVATE_STAGING = [
+  ".factory-discovery.json",
+  ".factory-inputs",
+  ".factory-assets.json",
+];
+/** The first path under the worktree Factory cannot read, if any. */
+function firstUnreadable(directory: string, relative = ""): string | undefined {
+  let names: string[];
+  try {
+    names = readdirSync(directory);
+  } catch {
+    return relative || ".";
+  }
+  for (const name of names) {
+    if (!relative && name === ".git") continue;
+    const path = join(directory, name);
+    const shown = relative ? `${relative}/${name}` : name;
+    const type = lstatSync(path);
+    if (type.isDirectory()) {
+      const inner = firstUnreadable(path, shown);
+      if (inner) return inner;
+    } else if (type.isFile()) {
+      try {
+        accessSync(path, constants.R_OK);
+      } catch {
+        return shown;
+      }
+    }
+  }
+  return undefined;
+}
+
 const FACTORY_EMAIL = "factory@users.noreply.github.com";
 const collectionMessage = (request: ExecutionRequest) =>
   `Factory: ${request.item.title}`;
@@ -409,11 +443,6 @@ export async function collectWorktreeResult(
       source.ref,
     );
   }
-  rmSync(join(worktree, ".factory-inputs"), {
-    recursive: true,
-    force: true,
-  });
-  rmSync(join(worktree, ".factory-assets.json"), { force: true });
   if (
     request.item.expectedOutputRoles?.length &&
     assets.length < (request.item.minimumAssetSets ?? 1)
@@ -423,18 +452,31 @@ export async function collectWorktreeResult(
     worktree,
     assets,
   );
-  // The private discovery file is never staged, so its bytes never reach
-  // the object database.
-  if (discovery)
+  // Private staging is never staged, so its bytes never reach the object
+  // database. Bound inputs and the manifest stay on disk until the commit
+  // lands: a transient fault before then repeats collection from the top and
+  // verifies the same bytes again.
+  try {
     await pinnedGitMagicAsync(
       worktree,
       "add",
       "-A",
       "--",
       ".",
-      ":(exclude,literal).factory-discovery.json",
+      ...PRIVATE_STAGING.map((name) => `:(exclude,literal)${name}`),
     );
-  else await pinnedGitAsync(worktree, "add", "-A");
+  } catch (error) {
+    // Git cannot index what the worker left unreadable; any other failure
+    // keeps the classification it already has.
+    const unreadable = attachedFault(error)
+      ? undefined
+      : firstUnreadable(worktree);
+    if (unreadable)
+      throw workFault(`Worker left an unreadable path: ${unreadable}`, {
+        cause: error,
+      });
+    throw error;
+  }
   if (assetDestinations.length)
     await pinnedGitAsync(worktree, "reset", "HEAD", "--", ...assetDestinations);
   const acceptedIgnoredLinks: string[] = [];
@@ -460,6 +502,8 @@ export async function collectWorktreeResult(
   const commit = pinnedGit(worktree, "rev-parse", "HEAD");
   const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
   if (discovery) rmSync(discoveryPath);
+  rmSync(join(worktree, ".factory-inputs"), { recursive: true, force: true });
+  rmSync(join(worktree, ".factory-assets.json"), { force: true });
   return {
     changeRef: commit,
     treeSha,

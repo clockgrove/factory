@@ -3,6 +3,7 @@ import { ownsPath } from "./ownership.js";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
+  accessSync,
   chmodSync,
   closeSync,
   constants,
@@ -246,11 +247,7 @@ function assertSafeMaterializationDestination(
   return { destination: join(worktree, relative), exists: true };
 }
 
-async function putFile(
-  store: ContentStore,
-  path: string,
-  mediaType: string,
-): Promise<ContentRef> {
+function assertPlainContentSource(path: string): void {
   if (
     !isAbsolute(path) ||
     !lstatSync(path).isFile() ||
@@ -258,6 +255,14 @@ async function putFile(
     realpathSync(dirname(path)) !== resolve(dirname(path))
   )
     throw new Error("Content source must be a regular file without symlinks");
+}
+
+async function putFile(
+  store: ContentStore,
+  path: string,
+  mediaType: string,
+): Promise<ContentRef> {
+  assertPlainContentSource(path);
   const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   const stream = createReadStream(path, { fd: descriptor, autoClose: true });
   try {
@@ -464,9 +469,8 @@ export async function captureAssetSets(
   const declaration = join(worktree, ".factory-assets.json");
   let declarationDigest = "";
   if (sets.length && existsSync(declaration)) {
-    const declarationBytes = readRegularStagingFile(
-      declaration,
-      "AssetSet manifest",
+    const declarationBytes = judgedAsWork(() =>
+      readRegularStagingFile(declaration, "AssetSet manifest"),
     );
     const value: unknown = judgedAsWork(() =>
       JSON.parse(declarationBytes.toString("utf8")),
@@ -556,6 +560,12 @@ export async function captureAssetSets(
         throw workFault(
           "Produced asset path is missing or escapes the media root",
         );
+      // A symlinked or unreadable member is the worker's output; a failure of
+      // the store itself is not.
+      judgedAsWork(() => {
+        assertPlainContentSource(path);
+        accessSync(path, constants.R_OK);
+      });
       const ref = await putFile(store, path, member.mediaType);
       members.push({
         role: member.role,

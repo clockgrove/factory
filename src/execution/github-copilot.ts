@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { judgedAsWork, workFault } from "../fault.js";
-import { mkdirSync, readFileSync } from "node:fs";
+import { readWorkerJson, workFault } from "../fault.js";
+import { mkdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { GitHubCopilotSdkConfig } from "../config.js";
@@ -231,9 +231,7 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
           observed.detail ?? "GitHub Copilot harness worker failed",
         );
       }
-      const result: unknown = judgedAsWork(() =>
-        JSON.parse(readFileSync(data.resultPath, "utf8")),
-      );
+      const result: unknown = readWorkerJson(data.resultPath);
       if (!result || typeof result !== "object" || Array.isArray(result))
         throw workFault("GitHub Copilot harness result is not an object");
       const value = result as Record<string, unknown>;

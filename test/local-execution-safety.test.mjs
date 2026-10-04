@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -179,26 +181,37 @@ async function runCandidate(change, options = {}) {
         };
       },
     };
+    const store = new LocalContentStore(join(root, "content"));
     const driver = new LocalExecutionDriver(
       checkout,
       join(root, "worktrees"),
       harness,
       1,
-      new LocalContentStore(join(root, "content")),
+      store,
       "scripted-test@1",
     );
+    const bound = await options.bound?.(root, store);
     const item = {
       id: "safety",
       title: "Safety fixture",
       ownedPaths: options.ownedPaths ?? ["safe.txt"],
+      ...bound?.item,
     };
-    const handle = await driver.start({ attemptId: "attempt", baseSha, item });
+    const handle = await driver.start({
+      attemptId: "attempt",
+      baseSha,
+      item,
+      ...bound?.request,
+    });
     let result;
     try {
       result = await driver.collect(handle);
     } catch (error) {
       options.inspectFailure?.(handle.data.worktree);
-      throw error;
+      if (!options.repeat) throw error;
+      // The step repeats collection once the transient fault has passed.
+      options.repeat(handle.data.worktree, error);
+      result = await driver.collect(handle);
     }
     assert.deepEqual(
       result.evidence,
@@ -1071,6 +1084,137 @@ test("only a wrong result ends a finished worker's attempt as work; any other fa
     assert.equal(retained, expected[name] !== "work", name);
   }
 });
+
+test("a transient fault at the commit repeats collection with bound inputs still in place, and nothing is charged (#636)", async () => {
+  let failure;
+  let inputsAfterFailure;
+  let committed = false;
+  const result = await runCandidate(
+    (worktree) => {
+      writeFileSync(join(worktree, "safe.txt"), "safe\n");
+      // Another process holds the worktree's HEAD lock, so the commit fails.
+      writeFileSync(
+        join(git(worktree, "rev-parse", "--absolute-git-dir"), "HEAD.lock"),
+        "",
+      );
+    },
+    {
+      bound: async (root, store) => {
+        const selectedFile = join(root, "selected.bin");
+        const localFile = join(root, "private.bin");
+        writeFileSync(selectedFile, Buffer.from([1, 2, 3]));
+        writeFileSync(localFile, Buffer.from([4, 5, 6]));
+        const selected = await store.importFile(selectedFile, {
+          mediaType: "application/octet-stream",
+        });
+        return {
+          request: {
+            selectedAssets: [
+              {
+                fromItem: "earlier",
+                setId: "prior",
+                role: "image",
+                ref: selected,
+                visibility: "private",
+                destination: "prior.bin",
+                provenance: {
+                  source: "fixture",
+                  rights: "fixture",
+                  visibility: "private",
+                  lineage: [],
+                },
+              },
+            ],
+            objectiveBody: `private source at ${localFile}`,
+          },
+          item: {
+            sourceAssets: [
+              {
+                kind: "local",
+                path: localFile,
+                role: "source",
+                mediaType: "application/octet-stream",
+                visibility: "private",
+              },
+            ],
+          },
+        };
+      },
+      inspectFailure(worktree) {
+        inputsAfterFailure = readdirSync(join(worktree, ".factory-inputs"));
+      },
+      repeat(worktree, error) {
+        failure = faultOf(error);
+        rmSync(
+          join(git(worktree, "rev-parse", "--absolute-git-dir"), "HEAD.lock"),
+        );
+      },
+      inspectResult(collected, checkout) {
+        const files = git(
+          checkout,
+          "ls-tree",
+          "-r",
+          "--name-only",
+          collected.changeRef,
+        );
+        assert.equal(files, "README.md\nsafe.txt");
+        committed = true;
+      },
+    },
+  );
+  assert.equal(failure.kind, "transient");
+  assert.deepEqual(inputsAfterFailure.sort(), ["selected-0", "source-0"]);
+  assert.ok(committed);
+  assert.ok(result.changeRef);
+});
+
+test("a worker's unreadable or redirected files are its wrong result, not Factory's defect (#649)", async (t) => {
+  if (process.getuid?.() === 0) t.skip("root reads every file");
+  const unreadable = join("sub", "locked.txt");
+  const error = await runCandidate((worktree) => {
+    mkdirSync(join(worktree, "sub"));
+    writeFileSync(join(worktree, "safe.txt"), "safe\n");
+    writeFileSync(join(worktree, unreadable), "secret\n");
+    chmodSync(join(worktree, unreadable), 0o000);
+  }).then(
+    () => assert.fail("collection succeeded"),
+    (rejection) => rejection,
+  );
+  assert.equal(faultOf(error).kind, "work");
+  assert.match(error.message, /unreadable path: sub\/locked.txt/);
+});
+
+test("a result file that is missing or malformed is the worker's wrong result; an unreadable one is not (#649)", async (t) => {
+  const { readWorkerJson } = await import("../dist/fault.js");
+  const root = mkdtempSync(join(tmpdir(), "factory-worker-json-"));
+  try {
+    const path = join(root, "result.json");
+    assert.equal(faultOf(catchError(() => readWorkerJson(path))).kind, "work");
+    writeFileSync(path, "{not json");
+    assert.equal(faultOf(catchError(() => readWorkerJson(path))).kind, "work");
+    writeFileSync(path, '{"state":"complete"}');
+    assert.deepEqual(readWorkerJson(path), { state: "complete" });
+    // A directory where the file belongs is a read failure Factory did not
+    // cause the worker to make.
+    const directory = join(root, "directory");
+    mkdirSync(directory);
+    assert.equal(
+      faultOf(catchError(() => readWorkerJson(directory))).kind,
+      "defect",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function catchError(run) {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  assert.fail("did not throw");
+}
 
 const discoveryProposal = {
   scope: "backlog",

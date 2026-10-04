@@ -14,6 +14,7 @@ import type {
 } from "./contracts.js";
 import { notYet as lagged, settled } from "./delivery/lag.js";
 import type { NativeStackDelivery } from "./delivery/native-stack.js";
+import { deliveryReadiness } from "./delivery/readiness.js";
 import { attachedFault, attachFault, decision, transient } from "./fault.js";
 import {
   classifiedGitHubCall,
@@ -1251,9 +1252,9 @@ export class RealGitHubGateway implements GitHubGateway {
         case "UNSTABLE":
           mergeReadiness = "ready";
           break;
-        // Strict protection: GitHub or its owner updates the branch.
+        // Strict protection: Factory updates the branch (updateBranch).
         case "BEHIND":
-          mergeReadiness = "waiting";
+          mergeReadiness = "behind";
           break;
         case "DIRTY":
           mergeReadiness = "conflict";
@@ -1290,6 +1291,98 @@ export class RealGitHubGateway implements GitHubGateway {
           ? "pending"
           : "passing",
     };
+  }
+
+  /**
+   * Bring a PR that is BEHIND its base under strict protection up to date:
+   * GitHub merges the base into Factory's head (update-branch, guarded by
+   * the expected head). Returns the head GitHub made once the PR shows it;
+   * until then the call is transient (lag window), then a decision. A
+   * repeat that finds the update already made returns it without another
+   * request. The caller records the returned head as the PR's head.
+   */
+  async updateBranch(identity: PullRequestIdentity): Promise<string> {
+    const key = `update:${identity.number}:${identity.headSha}`;
+    const pull = await this.api<Pull>("GET", `pulls/${identity.number}`);
+    if (pull.merged || pull.state !== "open")
+      throw foreignChange(
+        `PR #${identity.number} is no longer open; its branch was not updated`,
+      );
+    if (pull.head.ref !== identity.branch)
+      throw foreignChange(`PR #${identity.number} head branch changed`);
+    // A read that has not caught up with an earlier attempt's push.
+    if (identity.earlierHeads?.includes(pull.head.sha))
+      this.assertHead(identity, pull);
+    if (pull.head.sha !== identity.headSha) {
+      const updated = await this.branchUpdateHead(identity, pull);
+      settled(key);
+      return updated;
+    }
+    const pending = () =>
+      lagged(
+        key,
+        `PR #${identity.number} does not show its branch update yet`,
+        decision(
+          `GitHub did not update PR #${identity.number}'s branch with its base. Inspect it, then retry or cancel.`,
+          `PUT pulls/${identity.number}/update-branch at ${identity.headSha}`,
+        ),
+      );
+    try {
+      await this.api("PUT", `pulls/${identity.number}/update-branch`, {
+        expected_head_sha: identity.headSha,
+      });
+    } catch (error) {
+      // The head moved, the branch is current, or the base conflicts: the
+      // repeat observes the PR (and its readiness) again.
+      if (error instanceof GitHubRequestError && error.status === 422)
+        throw pending();
+      throw error;
+    }
+    // Accepted (202): GitHub makes the merge asynchronously.
+    throw pending();
+  }
+
+  /**
+   * The PR's new head is the update GitHub made: a merge whose first parent
+   * is Factory's head and whose second is on the base branch, committed by
+   * GitHub. Anything else is a change Factory did not make.
+   */
+  private async branchUpdateHead(
+    identity: PullRequestIdentity,
+    pull: Pull,
+  ): Promise<string> {
+    const head = pull.head.sha;
+    const foreign = () =>
+      foreignChange(
+        `PR #${identity.number} head changed from ${identity.headSha} to ${head}`,
+      );
+    if (!/^[a-f0-9]{40}$/.test(head)) throw foreign();
+    const commit = await this.api<{
+      sha?: string;
+      parents?: { sha?: unknown }[];
+      committer?: { login?: unknown } | null;
+    }>("GET", `commits/${head}`);
+    const parents = Array.isArray(commit.parents)
+      ? commit.parents.map((parent) => parent?.sha)
+      : [];
+    const merged = parents[1];
+    if (
+      commit.sha !== head ||
+      parents.length !== 2 ||
+      parents[0] !== identity.headSha ||
+      typeof merged !== "string" ||
+      !/^[a-f0-9]{40}$/.test(merged) ||
+      commit.committer?.login !== "web-flow"
+    )
+      throw foreign();
+    const base = pull.base.ref.split("/").map(encodeURIComponent).join("/");
+    const compared = await this.api<{ status?: unknown }>(
+      "GET",
+      `compare/${merged}...${base}`,
+    );
+    if (compared.status !== "identical" && compared.status !== "ahead")
+      throw foreign();
+    return head;
   }
 
   async merge(
@@ -1336,6 +1429,15 @@ export class RealGitHubGateway implements GitHubGateway {
       ) {
         const after = await this.api<Pull>("GET", `pulls/${identity.number}`);
         if (after.merged) return this.confirmMerged(identity, after);
+        // Readiness changed since it was observed: a conflict or a failed
+        // required check is work on the published result, not a decision.
+        deliveryReadiness(
+          identity.number,
+          await this.observe(identity),
+          [],
+          identity.headSha,
+        );
+        // Otherwise a merge in progress, or readiness GitHub has not settled.
         throw lagged(
           refused,
           `GitHub refused to merge PR #${identity.number} (HTTP 405)`,

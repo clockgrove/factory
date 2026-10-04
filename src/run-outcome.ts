@@ -10,6 +10,22 @@ export const EXIT_COMPLETE = 0;
 export const EXIT_FAILED = 1;
 export const EXIT_NEEDS_DECISION = 2;
 
+/**
+ * The retry that answers a stop by a defect. A failed Work Item that ended
+ * the attempt needs its own new attempt (`--item`); a defect outside any
+ * item runs the Objective's step again.
+ */
+export function stopRetryCommand(state: ContinuationState): string {
+  const retry = `factory retry --objective ${state.objective}`;
+  const failed =
+    "work" in state
+      ? Object.entries(state.work).find(
+          ([, work]) => work.status === "failed" && work.recovery?.failure,
+        )
+      : undefined;
+  return failed ? `${retry} --item ${failed[0]}` : retry;
+}
+
 /** How a run ended: the exit code and one message naming the next command. */
 export function runOutcome(state: ContinuationState): {
   code: number;
@@ -62,6 +78,17 @@ export function runOutcome(state: ContinuationState): {
   );
   if (asked) {
     const [id, work] = asked;
+    // A failed item whose diagnosis waits repeats it on the next run; a
+    // retry would start a new attempt without it.
+    if (
+      work.status === "failed" &&
+      work.recovery?.phase === "diagnosing" &&
+      work.wait!.kind === "prerequisite"
+    )
+      return {
+        code: EXIT_NEEDS_DECISION,
+        message: `Objective #${objective} Work Item ${id} waits for a prerequisite: ${work.wait!.detail}\nFix: ${work.wait!.fix ?? "see the detail"}; then \`${rerun}\` asks the diagnosis again`,
+      };
     const itemRetry = `${retry} --item ${id}`;
     return {
       code: EXIT_NEEDS_DECISION,
@@ -74,7 +101,7 @@ export function runOutcome(state: ContinuationState): {
   if (state.error)
     return {
       code: EXIT_FAILED,
-      message: `Objective #${objective} stopped: ${state.error}\nFix the cause, then \`${retry}\` and \`${rerun}\`; or \`factory cancel --objective ${objective}\``,
+      message: `Objective #${objective} stopped: ${state.error}\nFix the cause, then \`${stopRetryCommand(state)}\` and \`${rerun}\`; or \`factory cancel --objective ${objective}\``,
     };
   return {
     code: EXIT_NEEDS_DECISION,

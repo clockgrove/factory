@@ -374,12 +374,11 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
       },
     };
   // A failure that is not a wrong result has nothing to correct; retry it
-  // (see failedItem). An environment failure revalidates the same result.
+  // (see failedItem).
   const stopped = Object.entries(view.repairs).find(
     ([id, repair]) =>
       repair.phase === "stopped" &&
-      (repair.failureEvent !== null ||
-        repair.failureClass === "validation-environment") &&
+      repair.failureEvent !== null &&
       ["failed", "waiting"].includes(status(id)),
   );
   if (stopped)

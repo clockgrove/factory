@@ -7,6 +7,7 @@ import {
   type RepairCorrection,
   resolveAutonomy,
 } from "./repair-policy.js";
+import { stopRetryCommand } from "./run-outcome.js";
 import { applyWorkCorrection, resumeDiagnoses } from "./work-repair.js";
 import { workerIdentity } from "./item-steps.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
@@ -1155,7 +1156,7 @@ async function runObjectivePass(
       }
       if (state.error)
         throw new Error(
-          `Objective stopped: ${state.error}. Fix the cause, then run \`factory retry --objective ${objective}\``,
+          `Objective stopped: ${state.error}. Fix the cause, then run \`${stopRetryCommand(state)}\``,
         );
       if (
         !state.objectiveBodyDigest &&
@@ -2120,7 +2121,10 @@ async function runObjectivePass(
         current.coordinator.waitReason =
           error instanceof Error ? error.message : String(error);
       } else {
-        current.error = error instanceof Error ? error.message : String(error);
+        // A run refused for an earlier stop keeps that stop's error; it must
+        // not wrap the same cause again on every run.
+        current.error ??=
+          error instanceof Error ? error.message : String(error);
       }
       if (current.schemaVersion === 7) save(current);
       else saveState(path, current);
@@ -2418,19 +2422,6 @@ export function repairWorkItem(
       state.configDigest !== factoryConfigDigest(config)
     )
       throw new Error("Objective is not available for diagnosed repair");
-    const work = state.work[input.item];
-    if (input.correction.kind !== "implementation") {
-      if (
-        !work?.changeRef ||
-        !work.treeSha ||
-        input.treeSha !== work.treeSha ||
-        pinnedGit(config.checkout, "rev-parse", `${work.changeRef}^{tree}`) !==
-          work.treeSha
-      )
-        throw new Error(
-          "Preserved repair candidate tree changed or is unavailable",
-        );
-    }
     applyWorkCorrection(state, input.item, input.correction);
     // The repair answers the stop the item's failure caused, as retry does.
     delete state.error;

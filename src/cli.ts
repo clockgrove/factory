@@ -723,7 +723,7 @@ async function main(): Promise<void> {
     const file = option(args, "proposal");
     if (!file)
       throw new Error(
-        "repair requires --proposal FILE containing item, exact tree for revalidation, and diagnosed correction",
+        "repair requires --proposal FILE containing item and diagnosed correction",
       );
     const input = JSON.parse(readFileSync(file, "utf8"));
     const reply = await requestControl(config.repository, {

@@ -2989,12 +2989,13 @@ test("hydration failure is URL-free and blocks final review, evidence, and closu
       assert.equal(failed.finalAcceptanceDecisions, undefined);
       assert.equal(failed.finalValidation, undefined);
       assert.equal(failed.objectiveClosure, undefined);
+      // A refused rerun keeps the original cause; it is not wrapped again.
       assert.equal(
         failed.error,
-        attempt
-          ? `Objective stopped: Fresh-clone hydration verification failed during clone. Fix the cause, then run \`factory retry --objective ${objective}\``
-          : "Fresh-clone hydration verification failed during clone",
+        "Fresh-clone hydration verification failed during clone",
       );
+      // The stop is not an item's: its retry is the Objective's.
+      assert.equal(failed.errorItem, undefined);
       assert.equal(github.state().closedIssues[objective], undefined);
       assert.doesNotMatch(
         JSON.stringify(failed),

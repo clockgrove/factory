@@ -987,5 +987,101 @@ test("factory retry runs the command status prints for a step decision", async (
     assert.equal(restarted.status, 0, restarted.stderr);
     assert.match(restarted.stdout, /Objective step will run again/);
     assert.equal(readState(config.repository, 1).error, undefined);
+
+    // A stop whose item finished since (done or published) cannot be retried
+    // by item: the outcome names the Objective's retry, and that command runs.
+    for (const finished of ["done", "published"]) {
+      const stale = readState(config.repository, 1);
+      stale.error = "Fixture stop of an item that finished since";
+      stale.errorItem = "result";
+      stale.work.result.status = finished;
+      // A closure is recorded only on a done item.
+      if (finished !== "done") delete stale.work.result.githubClosure;
+      saveState(path, stale);
+      const named = runOutcome(readState(config.repository, 1)).message.match(
+        /`(factory retry [^`]*)`/,
+      )?.[1];
+      assert.equal(named, "factory retry --objective 1", finished);
+      const answeredStop = run(named);
+      assert.equal(
+        answeredStop.status,
+        0,
+        `${finished}: ${answeredStop.stderr}`,
+      );
+      const afterStop = readState(config.repository, 1);
+      assert.equal(afterStop.error, undefined);
+      assert.equal(afterStop.errorItem, undefined);
+    }
   });
+});
+
+test("a stop after an item defect names the item's retry; a waiting diagnosis names the run", () => {
+  const failure = {
+    classification: "defect",
+    detail: "boom",
+    decision: "Factory hit a defect",
+  };
+  const state = {
+    schemaVersion: 7,
+    objective: 5,
+    error: "boom",
+    errorItem: "X",
+    coordinator: { mode: "running" },
+    work: {
+      other: { status: "done" },
+      X: { status: "failed", recovery: { failure, phase: "stopped" } },
+    },
+  };
+  const outcome = runOutcome(state);
+  assert.equal(outcome.code, 1);
+  assert.match(outcome.message, /Objective #5 stopped: boom\n/);
+  assert.match(outcome.message, /`factory retry --objective 5 --item X` and/);
+  // Only a failed or cancelled item can be retried by item.
+  for (const status of ["done", "published"])
+    assert.match(
+      runOutcome({ ...state, work: { X: { status } } }).message,
+      /`factory retry --objective 5` and/,
+      status,
+    );
+  assert.match(
+    runOutcome({ ...state, work: { X: { status: "cancelled" } } }).message,
+    /`factory retry --objective 5 --item X` and/,
+  );
+  // A failed item the stop did not come from is not named.
+  const unmarked = { ...state };
+  delete unmarked.errorItem;
+  assert.match(
+    runOutcome(unmarked).message,
+    /`factory retry --objective 5` and/,
+  );
+  // A defect outside any item runs the Objective's step again.
+  const objectiveOnly = runOutcome({
+    ...state,
+    work: { other: { status: "done" } },
+  });
+  assert.match(objectiveOnly.message, /`factory retry --objective 5` and/);
+  // A failed item whose diagnosis waits for a fix repeats it on the next run;
+  // a retry would start a new attempt without the diagnosis.
+  const waiting = runOutcome({
+    ...state,
+    error: undefined,
+    work: {
+      X: {
+        status: "failed",
+        recovery: { failure, phase: "diagnosing" },
+        wait: {
+          kind: "prerequisite",
+          detail: "The model login expired",
+          fix: "Run claude auth login",
+          step: "item/X/diagnose",
+        },
+      },
+    },
+  });
+  assert.equal(waiting.code, 2);
+  assert.match(
+    waiting.message,
+    /Fix: Run claude auth login; then `factory run --objective 5` asks the diagnosis again/,
+  );
+  assert.doesNotMatch(waiting.message, /factory retry/);
 });

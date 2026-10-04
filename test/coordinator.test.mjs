@@ -1273,6 +1273,9 @@ test("an item's defect stops only that item; a healthy sibling worker runs on un
       const state = readState(config.repository, 1);
       assert.equal(state.work.result.status, "failed");
       assert.equal(state.work.result.recovery.failure.classification, "defect");
+      // The stop names the item it came from, so its retry is exact.
+      assert.equal(state.errorItem, "result");
+      assert.match(state.error, /Selected AssetSet or captured change/);
       // The sibling was not cancelled, failed, charged or diagnosed.
       assert.equal(
         readEvents(eventsPath).some(

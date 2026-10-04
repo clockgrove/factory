@@ -176,3 +176,67 @@ for (const failure of ["selected LFS", "Git change", "packet digest"])
       assert.equal(markers, 0);
       assert.equal(submissions, 0);
     }));
+
+test("a cancel that lands while QA waits for review admission makes no paid review call", async () =>
+  fixture(async (root) => {
+    const target = createTarget(root);
+    const result = commitResult(target);
+    const config = factoryConfig(target.checkout, "example/qa-review-cancel");
+    const graph = {
+      objective: 1,
+      baseSha: target.baseSha,
+      items: [item("result"), item("qa", "qa", ["result"])],
+      coverage: [],
+    };
+    const state = {
+      schemaVersion: 7,
+      objective: 1,
+      runId: "run",
+      baseSha: target.baseSha,
+      integratedSha: result.commit,
+      graph,
+      work: {
+        result: {
+          status: "done",
+          changeRef: result.commit,
+          integratedSha: result.commit,
+        },
+        qa: { status: "running" },
+      },
+    };
+    const controller = new AbortController();
+    let cancelled = false;
+    let reviews = 0;
+    await assert.rejects(
+      runQaItem({
+        config,
+        root,
+        state,
+        item: graph.items[1],
+        github: {},
+        model: {
+          async reviewResult(request) {
+            reviews++;
+            return pass(request);
+          },
+        },
+        objectiveBody: body,
+        store: new LocalContentStore(join(root, "content")),
+        save: () => {},
+        cancelled: () => cancelled,
+        signal: controller.signal,
+        phases: {
+          async reserve(_id, phase) {
+            // The operator cancels while the item waits for review.
+            if (phase !== "review") return;
+            cancelled = true;
+            controller.abort();
+          },
+          release() {},
+        },
+      }),
+      (error) => error.fault?.kind === "cancelled",
+    );
+    assert.equal(reviews, 0);
+    assert.notEqual(state.work.qa.status, "failed");
+  }));

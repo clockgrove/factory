@@ -28,12 +28,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - run: git lfs version
-      - run: node --import ./test/support/isolated-state.mjs --test --test-timeout=300000 --test-shard=${{ matrix.shard }}/4 test/*.test.mjs
+      - run: node --import ./test/support/isolated-state.mjs --test --test-timeout=300000 --test-shard=${{ matrix.shard }}/8 test/*.test.mjs
 
   # The single required check for main; it passes only when every job above passes.
   package-gate:

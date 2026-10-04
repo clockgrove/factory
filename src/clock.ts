@@ -10,7 +10,12 @@ import { setTimeout as realSleep } from "node:timers/promises";
  * Waits that guard real processes (kill grace, process-group checks,
  * harness idle timeouts) and measured durations stay on real time.
  */
-const scale = positive(process.env.FACTORY_TIME_SCALE) ?? 1;
+// Only Factory's own test harness may compress time, and only with a shared
+// origin; anywhere else a stray FACTORY_TIME_SCALE is ignored.
+const testClock =
+  process.env.FACTORY_TEST_LOCAL_ORIGINS === "1" &&
+  positive(process.env.FACTORY_TIME_ORIGIN) !== undefined;
+const scale = testClock ? (positive(process.env.FACTORY_TIME_SCALE) ?? 1) : 1;
 const origin = positive(process.env.FACTORY_TIME_ORIGIN) ?? Date.now();
 const MAX_TIMER_MS = 2_147_483_647;
 

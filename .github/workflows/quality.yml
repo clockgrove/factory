@@ -68,5 +68,6 @@ jobs:
           INSTALLED: ${{ needs.installed.result }}
           EVENT: ${{ github.event_name }}
         run: |
-          test "$CHECKS" = success && test "$TESTS" = success
-          [ "$EVENT" != push ] || test "$INSTALLED" = success
+          test "$CHECKS" = success
+          test "$TESTS" = success
+          if [ "$EVENT" = push ]; then test "$INSTALLED" = success; fi

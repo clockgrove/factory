@@ -38,6 +38,7 @@
 // A world's absolute root is part of its identity (the configuration digest
 // binds the checkout), so each trajectory is recorded once per slot and a
 // slot's cases run one at a time in that slot's own root.
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -565,12 +566,26 @@ const itemWait = (wait) => (state) => {
   return true;
 };
 
-/** A clean plan whose review instead asks a human (`acceptable` false: refuse only). */
+/** A clean plan whose review instead asks a human (`acceptable` false: it fails verification, so only a refusal answers). */
 const reviewNeedsHuman = (acceptable) => (state) => {
   const plan = state.schemaVersion === 8 && state.plan;
-  if (!plan || plan.review.status !== "clean") return false;
+  // Projection starts only for a plan the review passed or a human accepted.
+  if (
+    !plan ||
+    plan.review.status !== "clean" ||
+    state.coordinator.phase === "projection" ||
+    Object.keys(state.issueByItemId).length
+  )
+    return false;
   plan.review.status = "needs-human";
-  if (acceptable === false) plan.review.acceptable = false;
+  if (acceptable === false) {
+    // Restart verifies a plan before it keeps the flag, so the plan must really
+    // fail verification: it was planned for another concurrency.
+    plan.review.acceptable = false;
+    plan.executionBounds = {
+      configuredConcurrency: state.capacity.concurrency + 1,
+    };
+  }
   plan.review.failure = {
     detail: "Injected review failure",
     question: "Is this plan acceptable?",
@@ -721,12 +736,11 @@ const OVERLAYS = {
       if (state.schemaVersion !== 7) return false;
       const [other] = otherItems(state);
       if (!other) return false;
-      spend(
-        state,
-        [`item/${other}/prior/0`, `item/${other}/prior/1`],
-        "implementationRepairs",
-        [other],
-      );
+      // Each path holds one repair, so the Objective's two sit on two paths.
+      spend(state, [`item/${other}/prior/0`], "implementationRepairs", [other]);
+      spend(state, [`item/${other}/prior/1`], "implementationRepairs", [
+        "extra.txt",
+      ]);
       return true;
     },
     "planning revisions are used up": (state) => {
@@ -898,6 +912,11 @@ const OVERLAYS = {
   },
 };
 
+/** Every overlay value, for the guard that each is exercised. */
+export const OVERLAY_VALUES = Object.values(OVERLAYS).flatMap((values) =>
+  Object.keys(values),
+);
+
 /** Apply overlay values ({dimension: value}) to a copy of a state. */
 function applyOverlays(state, values) {
   const copy = structuredClone(state);
@@ -987,8 +1006,24 @@ function dimensionsOf(state) {
         ? "all"
         : "partial with implementation"
       : "partial without implementation";
+  const day = 24 * 3_600_000;
   const single = {
     "repeat or wait record": Boolean(state.repeats || state.wait),
+    "fault run": Object.values(state.repeats ?? {}).some(
+      (repeat) => Date.now() - Date.parse(repeat.faults?.since) > day,
+    )
+      ? "over a day"
+      : state.repeats
+        ? "recent"
+        : "none",
+    "installation configuration": /^0+$/.test(state.configDigest)
+      ? "changed"
+      : "as planned",
+    "worker authentication": Object.values(state.work ?? {}).some(
+      (work) => work.authentication,
+    )
+      ? "needed"
+      : "none",
     "Objective wait": state.wait?.kind ?? "none",
     amendment: state.pendingAmendment?.phase ?? "none",
     "item wait": (focusId && state.work[focusId].wait?.kind) || "none",
@@ -1146,6 +1181,22 @@ function enumerateCases(anchors) {
     if (validSnapshot(structuredClone(head.candidate.state)))
       take(head.candidate);
   }
+  // An overlay that changes no dimension has no gain and is never picked: every
+  // overlay value some valid candidate admits is exercised at least once.
+  for (const value of OVERLAY_VALUES) {
+    if (
+      cases.some((testCase) => Object.values(testCase.values).includes(value))
+    )
+      continue;
+    const best = candidates
+      .filter(
+        (candidate) =>
+          Object.values(candidate.values).includes(value) &&
+          validSnapshot(structuredClone(candidate.state)),
+      )
+      .sort((a, b) => gain(b) - gain(a))[0];
+    if (best) take(best);
+  }
   return cases;
 }
 
@@ -1241,10 +1292,15 @@ const stopOf = (report) =>
     report.status?.pending,
   ]);
 
-/** What an operator sees at a stop, to share the probes of equal stops. */
-const sightOf = (delivery, report) =>
+/**
+ * What an operator sees at a stop, and the state behind it that decides what a
+ * command is allowed (autonomy, charges), to share the probes of equal stops.
+ */
+const sightOf = (delivery, report, state) =>
   JSON.stringify([
     delivery,
+    state?.autonomy,
+    state?.charges,
     report.status?.phase,
     report.status?.summary,
     report.status?.nextAction,
@@ -1484,12 +1540,17 @@ async function classify(slot, anchor, state) {
     // The first stop: the state as sampled, restarted once.
     let report = await run();
     const problems = [];
-    const named = stopped(report)
-      ? namedCommands(report).slice(0, MAX_PROBES)
-      : [];
+    const all = stopped(report) ? namedCommands(report) : [];
+    assert.ok(
+      all.length <= MAX_PROBES,
+      `A stop names ${all.length} commands besides its next action; raise MAX_PROBES: ${all.map((c) => c.text).join(" | ")}`,
+    );
+    const named = all;
     if (named.length) {
       const context = stopText(report);
-      // Each named command is executed from a restored copy of this stop.
+      // A stop whose controller is still up (a paused or draining owner, a
+      // held phase) takes its commands through the owner's control socket.
+      const live = report.outcome === "idle";
       stopOwner();
       const stop = {
         dir: temporary("fde-stop-"),
@@ -1503,27 +1564,34 @@ async function classify(slot, anchor, state) {
         fake.state = structuredClone(stop.fakeState);
         baseline = fingerprint(snapshot() ?? state);
       };
-      try {
-        for (const command of named) {
-          const key = `${sightOf(anchor.delivery, report)}|${commandKey(command)}`;
-          if (!probed.has(key)) {
-            restore();
-            probed.set(
-              key,
-              follow({
-                command,
-                context: `${context} (named by the ${command.source}: ${command.text})`,
-              }).then((probe) => {
-                stopOwner();
-                return probe.kind === "stranded"
-                  ? `${command.text} (${command.source}): ${probe.reason}`
-                  : undefined;
-              }),
-            );
-          }
-          const problem = await probed.get(key);
-          if (problem) problems.push(problem);
+      const sight = sightOf(anchor.delivery, report, snapshot());
+      /** Execute one named command from a restored copy of this stop. */
+      const probe = async (command, withOwner) => {
+        restore();
+        const where = withOwner ? "through the live owner" : "without an owner";
+        if (withOwner) {
+          // The owner comes back to the same stop and idles, as it did.
+          const back = await run();
+          if (back.outcome !== "idle")
+            return `${command.text} (${command.source}): the owner did not come back to the stop (${stopText(back)})`;
         }
+        const outcome = await follow({
+          command,
+          context: `${context} (named by the ${command.source}: ${command.text}, ${where})`,
+        });
+        stopOwner();
+        return outcome.kind === "stranded"
+          ? `${command.text} (${command.source}, ${where}): ${outcome.reason}`
+          : undefined;
+      };
+      try {
+        for (const command of named)
+          for (const withOwner of live ? [false, true] : [false]) {
+            const key = `${sight}|${commandKey(command)}|${withOwner ? "owner" : "none"}`;
+            if (!probed.has(key)) probed.set(key, probe(command, withOwner));
+            const problem = await probed.get(key);
+            if (problem) problems.push(problem);
+          }
       } finally {
         stopOwner();
         restore();

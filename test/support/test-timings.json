@@ -28,7 +28,7 @@
   "test/copilot-tools.test.mjs": 1.0,
   "test/copilot-usage.test.mjs": 2.0,
   "test/current-graph-finalization.test.mjs": 8.4,
-  "test/dead-ends.test.mjs": 190,
+  "test/dead-ends.test.mjs": 276,
   "test/delivery-plan.test.mjs": 0.0,
   "test/delivery-review-evidence.test.mjs": 7.5,
   "test/delivery-steps.test.mjs": 1.1,

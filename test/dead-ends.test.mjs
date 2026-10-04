@@ -7,11 +7,12 @@
 // The named-command finder runs in the same cases. At each sampled stop it
 // reads every command the stop names — the status's next action, its other
 // sentences (`nextDecision`, reasons, errors, waits) and the run's own message
-// — and executes it through the same calls the CLI makes (through the owner's
-// control socket while one runs, else the application: retry, repair,
-// decide, propose-amendment, resume, cancel...). A named command that is
-// refused, or after which the next run neither progresses nor reaches a
-// terminal or decision stop, is a dead end.
+// — and executes it through the same calls the CLI makes (retry, repair,
+// decide, propose-amendment, resume, cancel...): through the owner's control
+// socket while one runs, else the application. A stop whose owner is still up
+// (paused, draining, a held phase) gets each command both ways. A named
+// command that is refused, or after which the next run neither progresses nor
+// reaches a terminal or decision stop, is a dead end.
 //
 // Known dead ends are inverted, like the fault matrix's known failures: the
 // test passes while the state stays stranded for its diagnosed reason and fails
@@ -24,16 +25,10 @@
 import assert from "node:assert/strict";
 import { availableParallelism } from "node:os";
 import { describe, test } from "node:test";
-import { identityName, prepare } from "./support/dead-ends.mjs";
+import { identityName, OVERLAY_VALUES, prepare } from "./support/dead-ends.mjs";
 
 const has = (identity, ...values) =>
   values.some((value) => identity.slice(2).includes(value));
-const SPENT_REPAIRS = [
-  "this item's repair path is used up",
-  "the Objective's implementation repairs are used up",
-  "no repair class is enabled",
-  "only planning repairs are enabled",
-];
 
 /**
  * Diagnoses of stranded states. `pattern` matches the stranding reason, `when`
@@ -42,13 +37,31 @@ const SPENT_REPAIRS = [
  * issue (P1 when the Objective has another exit).
  */
 const D = {
-  repairRefused: {
+  repairAllowance: {
     diagnosis:
-      "Status names `factory repair` after the repair allowance is used up or repairClasses omits implementation; repair is refused",
+      "Status names `factory repair` after the repair allowance is used up (this item's path or the Objective's); repair is refused",
     issue: "#676, fixed by #567",
     pattern:
-      /factory repair is refused \((?:Repair class implementation is not enabled|Repair path \S+ implementationRepairs allowance exhausted|Objective implementationRepairs allowance exhausted)/,
-    when: (identity) => has(identity, ...SPENT_REPAIRS),
+      /factory repair is refused \((?:Repair path \S+ implementationRepairs allowance exhausted|Objective implementationRepairs allowance exhausted)/,
+    when: (identity) =>
+      has(
+        identity,
+        "this item's repair path is used up",
+        "the Objective's implementation repairs are used up",
+      ),
+  },
+  repairClass: {
+    diagnosis:
+      "Status names `factory repair` when repairClasses omits implementation; repair is refused",
+    issue: "#676, fixed by #567",
+    pattern:
+      /factory repair is refused \(Repair class implementation is not enabled/,
+    when: (identity) =>
+      has(
+        identity,
+        "no repair class is enabled",
+        "only planning repairs are enabled",
+      ),
   },
   amendmentPlanningRevision: {
     diagnosis:
@@ -84,12 +97,22 @@ const D = {
   },
   cancelledItem: {
     diagnosis:
-      "A cancelled item of a live Objective is never retried: status says `running` and names `factory run`, which waits for a decision nothing offers; `factory retry --item` would restart it",
+      "A cancelled item of a live Objective is never retried: status names `factory run` (waiting for a decision nothing offers) or an Objective-wide `factory retry` (no dependency-ready delivery unit); `factory retry --item` would restart it",
     issue: "#718",
     pattern:
-      /factory run does not continue after .*Awaiting exact candidate decision/,
+      /factory run does not continue after .*Awaiting exact candidate decision|factory retry does not continue after stopped: No dependency-ready delivery unit/,
     when: (identity) =>
       has(identity, "an item was cancelled and the Objective retried"),
+  },
+  configurationChanged: {
+    diagnosis:
+      "The installation configuration changed after the Objective started: status names `factory retry`, which is accepted, and the next run stops identically (the state does not match this installation)",
+    issue: "#739",
+    pattern:
+      /factory retry does not continue after stopped: Existing Objective state does not match this Factory installation/,
+    when: (identity) =>
+      has(identity, "the installation configuration changed") &&
+      !identity[1].startsWith("preparing"),
   },
 };
 
@@ -328,6 +351,18 @@ describe("dead ends", { concurrency: true }, () => {
         );
     });
   }
+
+  // An overlay the sampler never picks is a scenario CI does not run.
+  test("every overlay value is exercised", () => {
+    const used = new Set(
+      cases.flatMap((testCase) => Object.values(testCase.values ?? {})),
+    );
+    assert.deepEqual(
+      OVERLAY_VALUES.filter((value) => !used.has(value)),
+      [],
+      "No case applies these overlays; they change nothing or apply to no anchor",
+    );
+  });
 
   // A diagnosis that no case shows any more is fixed: remove it.
   test("every diagnosis is still reproduced", async () => {

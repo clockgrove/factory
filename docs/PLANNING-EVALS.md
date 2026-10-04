@@ -43,7 +43,7 @@ Runs use your provider login: the Codex login for `codex-sdk`, the Claude Code l
 Each plan run ends with one outcome:
 
 - `plan`: a clean plan.
-- `question`: planning stopped for an operator. Either the plan waits for a decision, or the controller refused with `PlanningNeedsDecision` before it had a plan.
+- `question`: planning stopped for an operator. Either the plan waits for a decision, or the controller refused with `PlanningNeedsDecision` before it had a plan. That covers every stop without a reviewed graph: an unchanged failure, a diagnosis that did not answer, an exhausted or disabled correction allowance, and an undelegated decision. A planner whose corrections never validate lands here, so it counts against production clean instead of dropping out of the metric.
 - `error`: a crash, timeout, provider outage or harness failure.
 
 Errors are counted but carry no quality metrics. They are left out of every rate and every comparison.
@@ -52,7 +52,7 @@ Exit codes:
 
 - 0: every run and judge call completed, whatever the plans' quality.
 - 1: at least one run or judge call errored. The report is still written.
-- 2: an invalid case, judge, config or option, caught before any model call. The output directory is left empty.
+- 2: an invalid case, judge, config or option, or a Codex judge on a host without the judge sandbox, caught before any model call. The output directory is left empty.
 
 Each run records the host-dependent planning inputs (`host.localExecutables`, `host.capacity`), so runs on different machines can be told apart.
 
@@ -68,6 +68,8 @@ Rates show a 95% interval clustered by case (by fixture in review-only mode), be
 - an exact sign-flip p-value, and its floor (the smallest p-value that number of units can reach).
 
 One metric is primary and reported unadjusted: production clean in plan mode, review recall and false positives in review-only mode. All other metrics are Holm-adjusted, including each judge's pass rate. A metric with fewer than 5 paired units is marked insufficient and gets no interval or p-value. An interval that contains 0 is no evidence of a change.
+
+Review mode has 3 fixtures and pools units per fixture, so every review-only `--compare` row is insufficient until there are at least 5 fixtures. Read the per-defect recall counts instead, and add fixtures before relying on a review comparison.
 
 | Number                           | Meaning                                                                                                                                                                                            |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -110,7 +112,7 @@ Judges run in a separate process inside a bubblewrap mount namespace (Linux, wit
 
 Everything else does not exist inside, including `/home`, `/tmp`, the eval's output, sibling runs' plans and checkouts. The working directory is an empty Git repository. `HOME` is in the scratch directory. `CODEX_HOME` holds the login and the judge's own `config.toml`, which turns off shell, file, web, app, plugin and agent tools; the operator's `config.toml` and `AGENTS.md` never apply. Only an allowlist of environment variables passes in. Claude judges also run with no tools, MCP servers, agents, plugins or settings.
 
-A Codex judge is refused, with exit 2, when the sandbox is unavailable. A Claude judge then runs in a plain child process. In plan mode, judges grade after the checkout is removed and before the plan reaches disk. In review-only mode, they grade after every review. The scratch directory is deleted afterwards.
+A Codex judge is refused, with exit 2 before any model call, when the sandbox is unavailable. A Claude judge then runs in a plain child process. In plan mode, judges grade after the checkout is removed and before the plan reaches disk. In review-only mode, they grade after every review. The scratch directory is deleted afterwards.
 
 - Never edit a frozen judge in a prompt PR, because a judge tuned with the prompt it grades measures nothing. Add a new judge file with a new name instead.
 - A judge is never the production reviewer prompt, because the reviewer cannot grade itself.
@@ -126,6 +128,8 @@ A judge's digest covers:
 - the provider SDK versions in `package-lock.json`.
 
 The test suite pins each digest, so a change to any of these fails CI.
+
+The sandbox tests (plan and review runs with the Codex judge, and the isolation probe) skip, with the reason in the test output, when the host cannot run bubblewrap with unprivileged user namespaces: macOS, Windows, containers, and Ubuntu 24.04 runners, which restrict user namespaces through AppArmor. CI does not install bubblewrap or enable user namespaces today, so these tests skip there. Enabling them in CI is the repository owner's decision (#655). Until then, run `node --test test/planning-eval.test.mjs` on a Linux host with user namespaces before changing the judge sandbox.
 
 ## Cases
 
@@ -150,5 +154,7 @@ Predecessor cases are text only: the eval serves no predecessor Objectives, so `
 Review fixtures live in `evals/review/<name>/fixture.json`. Each holds the case it plans, a known-good authored graph (coverage names criteria by index), `native` for native-stack delivery, and an optional `workerTest` command. The harness derives each defect from the good graph. A defect only applies where its rule can hold. For example, final review can replace a command only when an Acceptance bullet is exactly that command line.
 
 ## Report
+
+Reports are private. They contain absolute host paths (the configuration and judge file paths) and raw provider and process error text, which the eval does not redact the way production redacts `allowedSecretNames`. Keep them in the private evidence archive; do not publish or attach them as they are.
 
 `report.json` has `runs` (one per case and repeat, or per review), `summary`, and `units` (per-case means used by `--compare`). Each plan run keeps its plan, worker log and diagnostics under `runs/CASE-K/`.

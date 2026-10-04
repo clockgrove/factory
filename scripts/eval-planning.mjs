@@ -30,6 +30,7 @@ import {
   repositoryFacts,
 } from "./eval-planning/cases.mjs";
 import {
+  assertJudgeIsolation,
   gradeInIsolation,
   judgeInput,
   loadJudges,
@@ -462,6 +463,12 @@ async function main() {
   let judges;
   try {
     judges = loadJudges(values.judge);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  // Refuse before any model call when a judge cannot run in this environment.
+  try {
+    assertJudgeIsolation(judges);
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }

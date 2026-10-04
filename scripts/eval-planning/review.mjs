@@ -165,11 +165,11 @@ export async function prepareVariants(fixture, config) {
     sourceText: sources.map((source) => source.content).join("\n"),
     criteria: objectiveCriteria(evalCase.body),
     finalCommands: finalObjectiveCommands(evalCase.body),
-    // Which criteria are commands, by production's rule for the good plan.
+    // Which criteria are commands, by production's rule: the Objective and
+    // its sources only, so the plan never changes the answer.
     isCommand: commandAuthority(
-      good,
-      sources,
       evalCase.body,
+      sources,
       evalCase.commit,
       checkout,
     ),

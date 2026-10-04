@@ -21,6 +21,12 @@ import { sandboxBinary } from "../scripts/eval-planning/sandbox.mjs";
 const root = resolve(import.meta.dirname, "..");
 const script = join(root, "scripts/eval-planning.mjs");
 const support = (name) => join(root, "test/support", name);
+// Tests that run the Codex judge need bubblewrap with unprivileged user
+// namespaces. Hosts without it (macOS, Windows, containers, CI images that
+// restrict namespaces) skip them with this reason instead of failing.
+const sandboxSkip = sandboxBinary()
+  ? false
+  : "judge sandbox unavailable: bubblewrap with unprivileged user namespaces is not usable on this host";
 
 function writeConfig(work) {
   const path = join(work, "factory.json");
@@ -76,7 +82,9 @@ const runStatus = (args, env = {}) => {
 const readReport = (output) =>
   JSON.parse(readFileSync(join(output, "report.json"), "utf8"));
 
-test("plan mode plans public cases through planObjective and reports review, judge and metrics", () => {
+test("plan mode plans public cases through planObjective and reports review, judge and metrics", {
+  skip: sandboxSkip,
+}, () => {
   const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-"));
   try {
     const config = writeConfig(work);
@@ -304,7 +312,9 @@ test("plan mode runs private cases from a target checkout at a pinned commit", (
   }
 });
 
-test("review-only mode reports recall per seeded defect and the false-positive rate", () => {
+test("review-only mode reports recall per seeded defect and the false-positive rate", {
+  skip: sandboxSkip,
+}, () => {
   const work = mkdtempSync(join(tmpdir(), "factory-review-eval-"));
   try {
     const output = join(work, "out");
@@ -327,7 +337,7 @@ test("review-only mode reports recall per seeded defect and the false-positive r
       "--judge-transport",
       support("eval-judge-transport.mjs"),
     ]);
-    assert.match(stdout, /32 reviews of 3 fixtures/);
+    assert.match(stdout, /30 reviews of 3 fixtures/);
     const report = readReport(output);
     assert.equal(report.mode, "review");
     const { summary } = report;
@@ -342,11 +352,11 @@ test("review-only mode reports recall per seeded defect and the false-positive r
       ]),
     );
     // Compile validation refuses invented CI names and final review of the
-    // `npm test` criterion, so those variants never reach the reviewer.
+    // `npm test` criterion, so those variants never reach the reviewer. The media
+    // fixture has no command with authority, so that defect does not apply there.
     assert.deepEqual(recall, {
       "acceptance-needs-own-merge": [6, 6],
       "native-dependency-assumed-merged": [2, 2],
-      "final-review-replaces-command": [0, 2],
       "missing-ownership": [0, 6],
       "missing-dependency": [0, 6],
       "worker-test-only-proof": [4, 4],
@@ -373,7 +383,7 @@ test("review-only mode reports recall per seeded defect and the false-positive r
       ],
     );
     assert.equal(summary.errors, 0);
-    assert.equal(report.units.length, 16);
+    assert.equal(report.units.length, 15);
     const run0 = report.runs.find(
       (entry) => entry.defect === "worker-test-only-proof",
     );
@@ -579,6 +589,74 @@ test("planning that stops for an operator is a question, not an error", () => {
   }
 });
 
+test("planning that never validates a correction is a question, not an error", () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-stubborn-"));
+  try {
+    const output = join(work, "out");
+    const { status } = runStatus([
+      "--config",
+      writeConfig(work),
+      "--output",
+      output,
+      "--case",
+      "single-item",
+      "--planning-model",
+      support("eval-stubborn-planner.mjs"),
+    ]);
+    assert.equal(status, 0);
+    const report = readReport(output);
+    const [entry] = report.runs;
+    assert.equal(entry.outcome, "question");
+    assert.equal(entry.error, null);
+    assert.equal(entry.planned, false);
+    assert.match(entry.stop, /^Unchanged planning failure/);
+    // The stop stays in the primary metric's denominator.
+    assert.equal(report.summary.overall.errors, 0);
+    assert.equal(report.summary.overall.question.successes, 1);
+    assert.equal(report.summary.overall.question.total, 1);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("a Codex judge without the sandbox is refused with exit 2 before any model call", () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-nosandbox-"));
+  try {
+    const empty = join(work, "empty-path");
+    mkdirSync(empty);
+    const output = join(work, "out");
+    const { status, stderr } = runStatus(
+      [
+        "--config",
+        writeConfig(work),
+        "--output",
+        output,
+        "--case",
+        "single-item",
+        "--planning-model",
+        support("eval-fixture-planner.mjs"),
+        "--judge",
+        join(root, "evals/judges/strict-rubric-v1-claude.json"),
+        "--judge",
+        join(root, "evals/judges/strict-rubric-v1-codex.json"),
+        "--judge-transport",
+        support("eval-judge-transport.mjs"),
+      ],
+      // No bwrap on PATH, so the sandbox is unavailable on any host.
+      { PATH: empty },
+    );
+    assert.equal(status, 2, stderr);
+    assert.match(
+      stderr,
+      /strict-rubric-v1-codex needs the Linux judge sandbox/,
+    );
+    // The output directory is created only after the checks, so no run began.
+    assert.equal(existsSync(output), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
 /**
  * Write a `--judge-transport` module that records what a judge process can
  * see: a canary file and the eval output (absolute paths outside its
@@ -616,11 +694,9 @@ export function createJudgeTransport({ judge }) {
   return path;
 }
 
-test("judges run sandboxed: no file outside their scratch, no operator Codex config", () => {
-  assert.ok(
-    sandboxBinary(),
-    "the judge sandbox needs bubblewrap with unprivileged user namespaces",
-  );
+test("judges run sandboxed: no file outside their scratch, no operator Codex config", {
+  skip: sandboxSkip,
+}, () => {
   const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-isolation-"));
   try {
     const canary = join(work, "canary.txt");

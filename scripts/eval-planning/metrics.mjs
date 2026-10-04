@@ -53,7 +53,7 @@ export function requiredCommandLine(text, finalCommands, isCommand) {
 /**
  * Command obligations left to final review, by production's rule, outside
  * Final validation. Production now refuses these, so this stays 0 unless a
- * rule regresses. `isCommand` is production's `commandAuthority` for the plan.
+ * rule regresses. `isCommand` is production's `commandAuthority`.
  */
 export function finalReviewInsteadOfCommand(plan, isCommand) {
   const criteria = plan.graph.coverage

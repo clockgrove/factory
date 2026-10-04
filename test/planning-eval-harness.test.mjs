@@ -791,8 +791,8 @@ test("review fixtures compile; each defect reaches the reviewer or production re
     }
     // Every defect applies somewhere. Production now refuses invented CI
     // names and command criteria proved by final review, so those never
-    // reach the reviewer; the media command criterion has no command
-    // authority once the plan drops it, so it does.
+    // reach the reviewer. The media criterion has no command authority from
+    // the Objective or its sources (#693), so that defect does not apply there.
     assert.deepEqual(outcomes, {
       "invented-ci-name": [
         "native-stack-chain:refused",
@@ -805,7 +805,6 @@ test("review fixtures compile; each defect reaches the reviewer or production re
       ],
       "native-dependency-assumed-merged": ["native-stack-chain:review"],
       "final-review-replaces-command": [
-        "media-lfs-thumbnail:review",
         "native-stack-chain:refused",
         "required-ci-check-qa:refused",
       ],

@@ -119,13 +119,7 @@ try {
     result.metrics = planMetrics(
       plan,
       facts,
-      commandAuthority(
-        plan.graph,
-        plan.sources,
-        spec.body,
-        spec.commit,
-        checkout,
-      ),
+      commandAuthority(spec.body, plan.sources, spec.commit, checkout),
     );
   }
 } catch (error) {

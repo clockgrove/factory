@@ -81,9 +81,12 @@ const scenarios = [
     fake: { lag: [{ read: ISSUES, after: CREATE_ISSUE, reads: 1 }] },
   },
   {
-    // Real GitHub (#630): the list shows a new issue after 2.5-3.4 s.
-    name: "issue list lags 3 s after each issue creation",
+    // Real GitHub (#630): the list shows a new issue after 2.5-3.4 s. Factory
+    // keeps the number a create answers, so only a lost answer makes it list
+    // within that span; the number probe must find the issue, not a duplicate.
+    name: "lost issue creation, then the issue list lags 3 s after each creation",
     deliveries: BOTH,
+    http: [{ match: CREATE_ISSUE, kind: "drop" }],
     fake: { lag: [{ read: ISSUES, after: CREATE_ISSUE, ms: 3000 }] },
   },
   {

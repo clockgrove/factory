@@ -23,7 +23,7 @@ export function pairedPlanningModel(planner, reviewer) {
  * The reviewer's `planning` block from a Factory configuration file. Throws a
  * message fit for the operator when the file or block is not usable.
  */
-export async function readReviewerPlanning(path, config) {
+export async function readReviewerPlanning(path) {
   let reviewer;
   try {
     reviewer = JSON.parse(readFileSync(resolve(path), "utf8"));
@@ -32,16 +32,11 @@ export async function readReviewerPlanning(path, config) {
   }
   if (!reviewer?.planning || typeof reviewer.planning !== "object")
     throw new Error(`--reviewer-config ${path}: no \`planning\` block`);
-  const { validateConfig } = await import(
+  const { validatePlanning } = await import(
     pathToFileURL(resolve(dist, "index.js")).href
   );
   try {
-    // The checkout is the one the eval runs in; only `planning` is taken.
-    validateConfig({
-      ...config,
-      checkout: resolve(import.meta.dirname, "../.."),
-      planning: reviewer.planning,
-    });
+    validatePlanning(reviewer.planning);
   } catch (error) {
     throw new Error(`--reviewer-config ${path}: ${error.message}`);
   }

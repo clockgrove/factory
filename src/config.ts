@@ -350,7 +350,7 @@ function assertClaudeModelSelection(
     throw new Error(`${name}.reasoningEffort is unsupported`);
 }
 
-function validatePlanning(
+export function validatePlanning(
   value: unknown,
 ): asserts value is FactoryConfig["planning"] {
   assertObject(value, "planning");

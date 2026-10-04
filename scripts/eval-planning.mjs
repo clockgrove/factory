@@ -663,10 +663,7 @@ async function main() {
   let reviewerPlanning;
   if (values["reviewer-config"]) {
     try {
-      reviewerPlanning = await readReviewerPlanning(
-        values["reviewer-config"],
-        config,
-      );
+      reviewerPlanning = await readReviewerPlanning(values["reviewer-config"]);
     } catch (error) {
       fail(error instanceof Error ? error.message : String(error));
     }

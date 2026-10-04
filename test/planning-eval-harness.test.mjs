@@ -46,6 +46,7 @@ import { DEFECTS, planVariants } from "../scripts/eval-planning/mutations.mjs";
 import {
   composePairedPlanningModel,
   pairedPlanningModel,
+  readReviewerPlanning,
 } from "../scripts/eval-planning/pairing.mjs";
 import {
   backoffMs,
@@ -1568,4 +1569,43 @@ test("findings keep itemIds so recall can check the item", () => {
     [defect.recall.successes, defect.located.successes, defect.located.total],
     [4, 2, 3],
   );
+});
+
+test("the reviewer config supplies a valid planning block or is refused", async () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-reviewer-config-"));
+  try {
+    const write = (name, value) => {
+      const path = join(work, name);
+      writeFileSync(path, JSON.stringify(value));
+      return path;
+    };
+    const claude = {
+      kind: "claude-agent-sdk",
+      maxOutputTokens: 64000,
+      planner: { model: "claude-opus-5-5", reasoningEffort: "high" },
+      reviewer: { model: "claude-opus-5-5", reasoningEffort: "high" },
+    };
+    assert.deepEqual(
+      await readReviewerPlanning(
+        write("ok.json", { ...config, planning: claude }),
+      ),
+      claude,
+    );
+    await assert.rejects(
+      readReviewerPlanning(join(work, "absent.json")),
+      /absent\.json: ENOENT/,
+    );
+    await assert.rejects(
+      readReviewerPlanning(write("none.json", {})),
+      /no `planning` block/,
+    );
+    await assert.rejects(
+      readReviewerPlanning(
+        write("bad.json", { planning: { ...claude, kind: "nonsense" } }),
+      ),
+      /bad\.json: Unsupported planning model/,
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 });

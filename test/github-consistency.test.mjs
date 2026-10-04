@@ -81,6 +81,12 @@ const scenarios = [
     fake: { lag: [{ read: ISSUES, after: CREATE_ISSUE, reads: 1 }] },
   },
   {
+    // Real GitHub (#630): the list shows a new issue after 2.5-3.4 s.
+    name: "issue list lags 3 s after each issue creation",
+    deliveries: BOTH,
+    fake: { lag: [{ read: ISSUES, after: CREATE_ISSUE, ms: 3000 }] },
+  },
+  {
     name: "sub-issue list lags one read after a sub-issue is added",
     deliveries: BOTH,
     fake: {
@@ -115,6 +121,12 @@ const scenarios = [
     name: "stack merge stays pending for three polls",
     deliveries: ["native-stack"],
     fake: { asyncMergePolls: 3 },
+  },
+  {
+    // Real GitHub (#630): a merge-async stays pending for about 5-7 s.
+    name: "stack merge stays pending for 6 s",
+    deliveries: ["native-stack"],
+    fake: { asyncMergeMs: 6000 },
   },
   {
     name: "lost stack merge response while the merge is still pending",

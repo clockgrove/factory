@@ -162,7 +162,7 @@ test("a second PR for an open head is refused with 422, a stale head with 409; a
   assert.equal(fake.effects(`PUT ${repo}/pulls/{number}/merge`).length, 1);
 });
 
-test("lists paginate with Link headers and the issue list includes pull requests", async (t) => {
+test("lists paginate with Link headers, the issue list by cursor, and it includes pull requests", async (t) => {
   const { fake, pushBranch, client } = await setup(t, {});
   for (let index = 0; index < 4; index++)
     fake.openForeignIssue(`Issue ${index}`);
@@ -175,11 +175,98 @@ test("lists paginate with Link headers and the issue list includes pull requests
   const response = await fetch(
     `${fake.apiUrl}/repos/example/target/issues?state=all&per_page=2&page=1`,
   );
-  assert.match(response.headers.get("link"), /page=2>; rel="next"/);
-  assert.match(response.headers.get("link"), /page=3>; rel="last"/);
+  // The issue list paginates with a cursor (#630): only rel="next".
+  const link = response.headers.get("link");
+  assert.match(link, /[?&]after=[^&>]+[^>]*>; rel="next"$/);
+  assert.doesNotMatch(link, /rel="last"|[?&]page=/);
+  const second = await fetch(
+    link
+      .slice(1, link.indexOf(">"))
+      .replace("https://api.github.com", fake.apiUrl),
+  );
+  assert.deepEqual(
+    (await second.json()).map((issue) => issue.number),
+    [4, 3],
+  );
+  const paged = await fetch(
+    `${fake.apiUrl}/repos/example/target/issues?state=all&per_page=2&page=2`,
+  );
+  assert.equal(paged.status, 422);
   const all = await client.paginate("repos/example/target/issues?state=all");
   assert.equal(all.length, 6);
   assert.equal(all.filter((issue) => issue.pull_request).length, 1);
+});
+
+test("lag and merge-async timing read the fake's clock", async (t) => {
+  let now = Date.parse("2026-01-01T00:00:00Z");
+  const { fake, client, pushBranch } = await setup(t, {
+    now: () => now,
+    // Real GitHub: a new issue shows in the list after 2.5-3.4 s, and a
+    // merge-async stays pending for about 5-7 s.
+    lag: [
+      { read: `GET ${repo}/issues`, after: `POST ${repo}/issues`, ms: 3000 },
+    ],
+    asyncMergeMs: 6000,
+  });
+  const listed = async () =>
+    (await client.paginate("repos/example/target/issues?state=all")).map(
+      (issue) => issue.number,
+    );
+  const created = await client.request("POST", "repos/example/target/issues", {
+    title: "New",
+  });
+  // A single-issue read does not lag; the list does, for 3 s however often
+  // it is read.
+  assert.equal(
+    (
+      await client.request(
+        "GET",
+        `repos/example/target/issues/${created.number}`,
+      )
+    ).number,
+    created.number,
+  );
+  for (const elapsed of [0, 1000, 2999]) {
+    now = Date.parse("2026-01-01T00:00:00Z") + elapsed;
+    assert.equal((await listed()).includes(created.number), false);
+  }
+  now = Date.parse("2026-01-01T00:00:03Z");
+  assert.equal((await listed()).includes(created.number), true);
+  assert.equal(fake.lag[0].served, 3);
+
+  await pushBranch("feature");
+  const pull = await client.request("POST", "repos/example/target/pulls", {
+    head: "feature",
+    base: "main",
+    title: "Feature",
+  });
+  const start = now;
+  const accepted = await client.request(
+    "PUT",
+    `repos/example/target/pulls/${pull.number}/merge-async`,
+    { sha: pull.head.sha, merge_method: "merge", merge_action: "default" },
+  );
+  assert.equal(accepted.status, "pending");
+  const poll = () =>
+    client.request(
+      "GET",
+      `repos/example/target/pulls/${pull.number}/merge-async/${accepted.details.uuid}`,
+    );
+  // However often it is polled, it is pending until its time.
+  for (const elapsed of [0, 2000, 5999]) {
+    now = start + elapsed;
+    assert.equal((await poll()).status, "pending");
+  }
+  assert.equal(fake.state.pulls[pull.number].merged_at, undefined);
+  // Once due it lands whether or not it is polled: the PR read shows it.
+  now = start + 6000;
+  const merged = await client.request(
+    "GET",
+    `repos/example/target/pulls/${pull.number}`,
+  );
+  assert.equal(merged.merged, true);
+  assert.equal((await poll()).status, "merged");
+  assert.equal(fake.state.pulls[pull.number].merges, 1);
 });
 
 test("a dropped response applies the effect and the client reports an unknown outcome", async (t) => {

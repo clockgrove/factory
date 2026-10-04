@@ -19,7 +19,9 @@
 //   with id, node_id, number, open and base; creating one with a nonexistent
 //   PR is 422.
 // - Lists paginate (per_page default 30, max 100) with Link headers, and the
-//   issues list includes pull requests. A 422 carries one errors entry.
+//   issues list includes pull requests. The issues list paginates with an
+//   opaque `after` cursor, and refuses a page number past the first with 422.
+//   A 422 carries one errors entry.
 // - Every REST response carries x-ratelimit-* headers.
 // - PUT /pulls/{n}/update-branch merges the base into the head branch: 202,
 //   or 422 for a stale expected_head_sha, a closed PR, a conflict or a head
@@ -34,6 +36,12 @@
 //   protection route is 403 too, and GET /branches/{branch} shows the same
 //   required checks.
 // - Unknown routes are 404 and recorded as `unhandled`.
+//
+// Time: `now` (default Date.now) is the fake's clock. Lag for a number of
+// reads or for a span of time (real GitHub's issue list shows a new issue
+// after 2.5-3.4 s), and merge-async that lands after a span of time (real
+// GitHub: about 5-7 s) both read it, so a test with a manual clock is
+// deterministic.
 //
 // Modes: read-after-write lag per endpoint, fault rules on the Nth matching
 // request (5xx, 429 and 403 rate limits with or without retry-after, a
@@ -240,9 +248,11 @@ export class GitHubHttpFake {
    * @param {string} options.origin path of the bare Git repository
    * @param {{title: string, body: string, labels?: string[]}[]} [options.issues]
    *   issues created first, numbered from 1 (e.g. the Objective)
-   * @param {{read: string, after?: string, reads: number}[]} [options.lag]
+   * @param {{read: string, after?: string, reads?: number, ms?: number}[]} [options.lag]
    *   after each write (to `after`, or any endpoint), the next `reads` reads
-   *   of the `read` endpoint still see the state before that write
+   *   of the `read` endpoint, or every read of it for `ms` on the fake's
+   *   clock, still see the state before that write
+   * @param {() => number} [options.now] the fake's clock in ms (Date.now)
    * @param {(sha: string) => object[]} [options.checkRuns]
    * @param {(sha: string) => object} [options.statuses]
    * @param {(branch: string) => string[]} [options.rulesetChecks] checks a
@@ -253,6 +263,8 @@ export class GitHubHttpFake {
    *   that report UNKNOWN before GitHub computes mergeability
    * @param {number} [options.asyncMergePolls] merge-async status polls before
    *   the merge lands (0: lands with the PUT, reported on the first poll)
+   * @param {number} [options.asyncMergeMs] merge-async lands this long after
+   *   the PUT on the fake's clock, polled or not (overrides asyncMergePolls)
    * @param {string[]} [options.mergeMethods]
    * @param {boolean} [options.strict] required checks are strict: a PR
    *   must contain the base tip before it merges (BEHIND otherwise)
@@ -271,6 +283,8 @@ export class GitHubHttpFake {
       ? { login: `${this.name}-factory[bot]`, id: 2, type: "Bot" }
       : { login: this.owner, id: 1, type: "User" };
     this.lag = (options.lag ?? []).map((rule) => ({ ...rule, served: 0 }));
+    /** The fake's clock: lag spans and merge-async timing read it. */
+    this.now = options.now ?? Date.now;
     this.onCrash = options.onCrash;
     this.rules = [];
     this.log = [];
@@ -602,6 +616,7 @@ export class GitHubHttpFake {
     const rule = this.matchRules(entry);
     if (this.preEffect(rule, entry, response)) return;
     await this.synchronizeHeads();
+    await this.landDueMerges();
     const reading = method === "GET" || route.handler === "graphql";
     const before = reading ? undefined : structuredClone(this.state);
     const view = reading ? this.view(route.endpoint) : this.state;
@@ -665,9 +680,17 @@ export class GitHubHttpFake {
   recordWrite(before, endpoint) {
     const pending = {};
     for (const [index, rule] of this.lag.entries())
-      if (rule.reads > 0 && (!rule.after || rule.after === endpoint))
-        pending[index] = rule.reads;
+      if (rule.after && rule.after !== endpoint) continue;
+      else if (rule.ms > 0) pending[index] = { until: this.now() + rule.ms };
+      else if (rule.reads > 0) pending[index] = rule.reads;
     if (Object.keys(pending).length) this.writes.push({ before, pending });
+  }
+
+  /** Whether a write still lags for one rule: reads left, or time left. */
+  lagging(pending) {
+    return typeof pending === "number"
+      ? pending > 0
+      : pending !== undefined && this.now() < pending.until;
   }
 
   /** The state a read of `endpoint` observes: before the oldest lagging write. */
@@ -677,18 +700,22 @@ export class GitHubHttpFake {
     );
     if (!rules.length) return this.state;
     const lagging = this.writes.find((write) =>
-      rules.some((index) => write.pending[index] > 0),
+      rules.some((index) => this.lagging(write.pending[index])),
     );
     // Count stale reads per rule so a test can prove its lag took effect.
     if (lagging)
       for (const index of rules)
-        if (lagging.pending[index] > 0)
+        if (this.lagging(lagging.pending[index]))
           this.lag[index].served = (this.lag[index].served ?? 0) + 1;
     for (const write of this.writes)
       for (const index of rules)
-        if (write.pending[index] > 0) write.pending[index]--;
+        if (
+          typeof write.pending[index] === "number" &&
+          write.pending[index] > 0
+        )
+          write.pending[index]--;
     this.writes = this.writes.filter((write) =>
-      Object.values(write.pending).some((reads) => reads > 0),
+      Object.values(write.pending).some((pending) => this.lagging(pending)),
     );
     return lagging ? lagging.before : this.state;
   }
@@ -800,6 +827,49 @@ export class GitHubHttpFake {
     return {
       data: items.slice((page - 1) * perPage, page * perPage),
       headers: links.length ? { link: links.join(", ") } : {},
+    };
+  }
+
+  /**
+   * A cursor page of issue numbers, as GitHub's issue list paginates: `after`
+   * names the last issue of the previous page, and the Link header carries
+   * only rel="next". A page number past the first is refused.
+   */
+  cursorPage(query, numbers, path) {
+    const perPage = Math.min(
+      Math.max(Number(query.get("per_page")) || 30, 1),
+      100,
+    );
+    if ((Number(query.get("page")) || 1) > 1)
+      throw validation(
+        "Pagination with the page parameter is not supported for large datasets, please use cursor based pagination (after/before)",
+      );
+    const after = query.get("after");
+    let start = 0;
+    if (after !== null) {
+      const match = /^cursor:v2:(\d+)$/.exec(
+        Buffer.from(after, "base64url").toString("utf8"),
+      );
+      if (!match) throw validation("Invalid cursor");
+      // The first issue past the cursor's, even if that one left the list.
+      const last = Number(match[1]);
+      start = numbers.findIndex((number) =>
+        query.get("direction") === "asc" ? number > last : number < last,
+      );
+      if (start < 0) start = numbers.length;
+    }
+    const data = numbers.slice(start, start + perPage);
+    if (start + perPage >= numbers.length) return { data, headers: {} };
+    const next = new URLSearchParams(query);
+    next.delete("page");
+    next.set("per_page", String(perPage));
+    next.set(
+      "after",
+      Buffer.from(`cursor:v2:${data.at(-1)}`).toString("base64url"),
+    );
+    return {
+      data,
+      headers: { link: `<${API}${path}?${next}>; rel="next"` },
     };
   }
 
@@ -1067,7 +1137,11 @@ export class GitHubHttpFake {
       )
       .filter((number) => !s.issues[number].deleted)
       .sort((a, b) => (direction === "asc" ? a - b : b - a));
-    const page = this.page(query, issues, `/repos/${this.repository}/issues`);
+    const page = this.cursorPage(
+      query,
+      issues,
+      `/repos/${this.repository}/issues`,
+    );
     return {
       status: 200,
       data: page.data.map((number) => this.issueJson(s, number)),
@@ -1609,6 +1683,10 @@ export class GitHubHttpFake {
       top: number,
       layers,
       polls: this.options.asyncMergePolls ?? 0,
+      // Real GitHub keeps a merge-async pending for about 5-7 s.
+      ...(this.options.asyncMergeMs !== undefined
+        ? { landsAt: this.now() + this.options.asyncMergeMs }
+        : {}),
       applied: false,
       merge_method: method,
       merge_action: body.merge_action ?? "default",
@@ -1616,7 +1694,8 @@ export class GitHubHttpFake {
       bypass_rules: body.bypass_rules ?? false,
     };
     s.jobs[job.uuid] = job;
-    if (job.polls <= 0) await this.applyJob(s, job);
+    if (job.landsAt === undefined ? job.polls <= 0 : job.landsAt <= this.now())
+      await this.applyJob(s, job);
     return {
       status: 202,
       data: {
@@ -1626,12 +1705,24 @@ export class GitHubHttpFake {
     };
   }
 
+  /** Land every timed merge-async whose time has come, polled or not. */
+  async landDueMerges() {
+    for (const job of Object.values(this.state.jobs))
+      if (
+        !job.applied &&
+        job.landsAt !== undefined &&
+        job.landsAt <= this.now()
+      )
+        await this.applyJob(this.state, job);
+  }
+
   async mergeAsyncStatus(s, { params }) {
     // A status poll observes the live job, never a lagged snapshot.
     const job = this.state.jobs[params.uuid];
     if (!job || job.top !== Number(params.number))
       throw new HttpError(404, "Not Found");
-    if (!job.applied && --job.polls <= 0) await this.applyJob(this.state, job);
+    if (!job.applied && job.landsAt === undefined && --job.polls <= 0)
+      await this.applyJob(this.state, job);
     return {
       status: 200,
       data: {

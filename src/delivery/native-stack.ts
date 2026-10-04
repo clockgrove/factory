@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { attachFault, decision } from "../fault.js";
+import { attachFault, attachedFault, decision } from "../fault.js";
 import {
   classifiedGitHubCall,
   type GitHubClient,
@@ -102,6 +102,27 @@ export class NativeStackDelivery {
   }
 
   /** The one merge commit of a stack whose layers all merged. */
+  /**
+   * The stack's merge commit when every layer is merged with Factory's head,
+   * undefined while any layer is open.
+   */
+  private async mergedStack(layers: StackLayer[]): Promise<string | undefined> {
+    const pulls = await Promise.all(
+      layers.map((layer) => this.pull(layer.pullRequest)),
+    );
+    if (!pulls.every((pull) => pull.state === "closed" && pull.merged))
+      return undefined;
+    for (const [index, pull] of pulls.entries())
+      if (
+        pull.head.ref !== layers[index]!.branch ||
+        pull.head.sha !== layers[index]!.headSha
+      )
+        throw foreignChange(
+          "Merged native stack head changed; operator direction required",
+        );
+    return this.stackMergeCommit(layers);
+  }
+
   private async stackMergeCommit(layers: StackLayer[]): Promise<string> {
     const merged = await Promise.all(
       layers.map((layer) => this.mergedSha(layer)),
@@ -183,22 +204,16 @@ export class NativeStackDelivery {
       progress?: () => void;
       queued: (detail: string) => never;
       requireMergeCommits: () => Promise<void>;
+      /**
+       * Called when merge-async ends without a merge, before it is a
+       * decision: throws when readiness explains it (a required check
+       * still running is a CI wait, #626).
+       */
+      failed?: () => Promise<void>;
     },
   ): Promise<string> {
-    const already = await Promise.all(
-      layers.map((layer) => this.pull(layer.pullRequest)),
-    );
-    if (already.every((pull) => pull.state === "closed" && pull.merged)) {
-      for (const [index, pull] of already.entries())
-        if (
-          pull.head.ref !== layers[index]!.branch ||
-          pull.head.sha !== layers[index]!.headSha
-        )
-          throw foreignChange(
-            "Merged native stack head changed; operator direction required",
-          );
-      return this.stackMergeCommit(layers);
-    }
+    const merged = await this.mergedStack(layers);
+    if (merged) return merged;
     if (
       !options.resumeUuid &&
       (await this.ensureStack(layers, baseBranch)) !== expectedStack
@@ -230,6 +245,16 @@ export class NativeStackDelivery {
           { head: "ours" },
         );
       } catch (error) {
+        // GitHub may refuse a stack that merged meanwhile with 403: read the
+        // layers before the refusal is a permission fault (#627).
+        if (
+          error instanceof GitHubRequestError &&
+          error.status === 403 &&
+          attachedFault(error)?.kind !== "transient"
+        ) {
+          const merged = await this.mergedStack(layers);
+          if (merged) return merged;
+        }
         if (!(error instanceof GitHubRequestError && error.pendingMerge))
           throw error;
         observed = { status: "pending", details: { uuid: error.pendingMerge } };
@@ -256,7 +281,8 @@ export class NativeStackDelivery {
       );
       options.progress?.();
     }
-    if (observed.status !== "merged" || !observed.details.sha)
+    if (observed.status !== "merged" || !observed.details.sha) {
+      await options.failed?.();
       throw attachFault(
         new Error(
           `Native stack merge failed: ${observed.details.message ?? observed.status}`,
@@ -266,6 +292,7 @@ export class NativeStackDelivery {
           `merge-async ended ${observed.status}: ${observed.details.message ?? "no detail"}`,
         ),
       );
+    }
     if ((await this.stackMergeCommit(layers)) !== observed.details.sha)
       throw new Error(
         "Native stack merge commit differs from the async result",

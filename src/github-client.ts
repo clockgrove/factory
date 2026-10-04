@@ -512,6 +512,7 @@ export class GitHubClient {
             ? {
                 status: response.status,
                 etag: response.headers.etag,
+                link: response.headers.link,
                 data: response.data,
               }
             : response.data
@@ -578,19 +579,45 @@ export class GitHubClient {
     }
   }
 
+  /**
+   * Every page of a list, following GitHub's Link rel="next": a page number
+   * on most lists, an opaque cursor on the issue list (#630).
+   */
   async paginate<T>(route: string): Promise<T[]> {
     const result: T[] = [];
-    for (let page = 1; ; page++) {
-      const values = await this.request<T[]>(
+    const seen = new Set<string>();
+    let next: string | undefined =
+      `${route}${route.includes("?") ? "&" : "?"}per_page=100`;
+    while (next) {
+      if (seen.has(next))
+        throw new Error("GitHub returned a paginated response that repeats");
+      seen.add(next);
+      const page: { data?: unknown; link?: string } = await this.request(
         "GET",
-        `${route}${route.includes("?") ? "&" : "?"}per_page=100&page=${page}`,
+        next,
+        undefined,
+        {},
       );
-      if (!Array.isArray(values))
+      if (!Array.isArray(page.data))
         throw new Error("GitHub returned an invalid paginated response");
-      result.push(...values);
-      if (values.length < 100) return result;
+      result.push(...(page.data as T[]));
+      next = nextPage(page.link);
     }
+    return result;
   }
+}
+
+/** The route of a Link header's rel="next" page on api.github.com, if any. */
+function nextPage(link: string | undefined): string | undefined {
+  const target = link
+    ?.split(",")
+    .map((part) => /^\s*<([^>]+)>\s*;\s*rel="next"\s*$/.exec(part)?.[1])
+    .find((url) => url !== undefined);
+  if (!target) return undefined;
+  const url = new URL(target);
+  if (url.origin !== "https://api.github.com")
+    throw new Error("GitHub returned a next page outside its API");
+  return `${url.pathname.slice(1)}${url.search}`;
 }
 
 export const sharedGitHubClient = new GitHubClient();

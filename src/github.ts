@@ -1633,6 +1633,31 @@ export class RealGitHubGateway implements GitHubGateway {
     return this.native.mergeStack(layers, baseBranch, expectedStack, {
       ...options,
       requireMergeCommits: () => this.requireMergeCommits(baseBranch),
+      failed: () => this.stackReadiness(layers),
     });
+  }
+
+  /**
+   * Why a merge-async ended without a merge, when readiness explains it: a
+   * required check still running or not yet reported on an open layer is a
+   * CI wait, and a failed one is work (#626). Otherwise it returns.
+   */
+  private async stackReadiness(layers: NativeStackLayer[]): Promise<void> {
+    for (const layer of layers) {
+      // No base: GitHub retargets a layer once the one below it merges.
+      const identity = {
+        number: layer.pullRequest,
+        branch: layer.branch,
+        headSha: layer.headSha,
+      };
+      const waiting = deliveryReadiness(
+        layer.pullRequest,
+        await this.observe(identity),
+        [],
+        layer.headSha,
+      );
+      if (waiting)
+        throw attachFault(new Error(waiting), transient(waiting, false));
+    }
   }
 }

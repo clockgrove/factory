@@ -1076,6 +1076,31 @@ async function runObjectivePass(
       );
     const observeObjective = (state = owner.snapshot) =>
       objectiveStep(state, "observe", () => github.objective(objective));
+    /**
+     * The Objective issue changed outside Factory since planning: the
+     * operator's decision, whether the run or a resume sees it first.
+     */
+    const changedOutside = (
+      issue: { state?: string; body: string },
+      state: FactoryState,
+    ): Error | undefined => {
+      const changed =
+        issue.state === "closed" && !state.finalValidation?.passed
+          ? "The Objective issue was closed"
+          : state.objectiveBodyDigest &&
+              createHash("sha256").update(issue.body).digest("hex") !==
+                state.objectiveBodyDigest
+            ? "The Objective issue body changed"
+            : undefined;
+      return changed
+        ? attachFault(
+            new Error(`${changed}; operator direction required`),
+            decision(
+              `${changed} outside Factory. Restore it, then factory retry --objective ${objective}; or factory cancel --objective ${objective}`,
+            ),
+          )
+        : undefined;
+    };
     const issue = await observeObjective();
     assertObjectiveCriteria(issue.body);
     const installationConfigDigest = factoryConfigDigest(config);
@@ -1089,7 +1114,7 @@ async function runObjectivePass(
     let preparation =
       continuation?.schemaVersion === 8 ? continuation : undefined;
     let state = continuation?.schemaVersion === 7 ? continuation : undefined;
-    if (issue.state === "closed" && !state?.finalValidation?.passed)
+    if (issue.state === "closed" && !state)
       throw new Error(
         "Objective issue is confirmed closed; operator direction required",
       );
@@ -1121,14 +1146,13 @@ async function runObjectivePass(
         throw new Error(
           "Workspace package authority requires a digest-bound Objective; create a new plan",
         );
-      if (
-        state.objectiveBodyDigest &&
-        state.objectiveBodyDigest !==
-          createHash("sha256").update(issue.body).digest("hex")
-      )
-        throw new Error(
-          "Objective issue body changed; operator direction required",
-        );
+      // A decision, as when delivery observes the change: the observe
+      // step saves the question, and `factory retry` asks it again.
+      const changed = changedOutside(issue, state);
+      if (changed)
+        await objectiveStep(state, "observe", async () => {
+          throw changed;
+        });
       stateDiagnostics = new StateDiagnostics(
         diagnostics,
         state,
@@ -1562,21 +1586,11 @@ async function runObjectivePass(
         state,
         "observe",
         async () => {
-          const refreshed = await github.objective(objective);
-          const changed =
-            refreshed.state === "closed"
-              ? "The Objective issue was closed"
-              : createHash("sha256").update(refreshed.body).digest("hex") !==
-                  state.objectiveBodyDigest
-                ? "The Objective issue body changed"
-                : undefined;
-          if (changed)
-            throw attachFault(
-              new Error(`${changed}; operator direction required`),
-              decision(
-                `${changed} outside Factory. Restore it, then factory retry --objective ${objective}; or factory cancel --objective ${objective}`,
-              ),
-            );
+          const changed = changedOutside(
+            await github.objective(objective),
+            state,
+          );
+          if (changed) throw changed;
         },
         false,
         false,

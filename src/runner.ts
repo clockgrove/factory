@@ -75,6 +75,7 @@ import {
   clearAllRepeats,
   clearRepeats,
   outageOf,
+  StepPaused,
   step,
   type StepContext,
   type StepState,
@@ -107,6 +108,7 @@ import type {
   ContinuationState,
   FactoryState,
   PreparationState,
+  WorkState,
 } from "./state.js";
 import {
   acquireControllerLock,
@@ -343,7 +345,10 @@ function canHandoff(state: ContinuationState): boolean {
     !state.coordinator?.phase.endsWith("-submitted") &&
     !Object.entries(state.work).some(
       ([id, work]) =>
-        (work.status === "running" && !isReadinessWait(state, id)) ||
+        // An item waiting in place for the operator holds no effect in flight.
+        (work.status === "running" &&
+          !isReadinessWait(state, id) &&
+          !awaitsOperator(work.wait)) ||
         (work.status === "published" &&
           (!work.pullRequest || !work.changeRef || !work.treeSha)),
     )
@@ -352,8 +357,12 @@ function canHandoff(state: ContinuationState): boolean {
 
 interface LocalOwner {
   handoff?: boolean;
-  /** Aborts on a handoff (SIGTERM, `handoff`): Objective steps stop backing off. */
-  release: AbortController;
+  /**
+   * Aborts on pause, drain and handoff (SIGTERM, `handoff`): a step waiting
+   * between tries stops with `StepPaused`, nothing charged or failed.
+   * Replaced by a fresh controller on resume.
+   */
+  pause: AbortController;
   snapshot?: ContinuationState;
   lock: ControllerLock;
   abort: AbortController;
@@ -572,7 +581,7 @@ export async function runObjective(
     changed: false,
     lock,
     abort: new AbortController(),
-    release: new AbortController(),
+    pause: new AbortController(),
     waitForWake: async () => undefined,
     snapshot,
     deadlineAt: options.deadlineAt,
@@ -587,7 +596,7 @@ export async function runObjective(
   /** A handoff: stop at the next safe point and release ownership. */
   const releaseOwnership = () => {
     owner.handoff = true;
-    owner.release.abort(new Error("Coordinator handoff requested"));
+    owner.pause.abort(new Error("Coordinator handoff requested"));
   };
   const wait = async (observationDelay?: number) => {
     if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
@@ -728,6 +737,10 @@ export async function runObjective(
       }
       if (["pause", "drain", "resume", "handoff"].includes(request.action)) {
         if (request.action === "handoff") releaseOwnership();
+        else if (request.action === "resume") {
+          if (owner.pause.signal.aborted && !owner.handoff)
+            owner.pause = new AbortController();
+        } else owner.pause.abort(new Error(`Coordinator ${request.action}`));
         state.coordinator.mode =
           request.action === "pause"
             ? "paused"
@@ -1000,17 +1013,14 @@ async function runObjectivePass(
   } = services;
   let stateForSignal: FactoryState | undefined;
   const cancellationRequested = () => Boolean(owner.snapshot?.cancelRequested);
-  // Objective steps stop backing off on cancel, and on a handoff (SIGTERM)
-  // while ownership can be released; a drain that must still drive running
-  // items keeps them going. Item workers stop only on cancel.
-  const releasable = AbortSignal.any([
-    owner.abort.signal,
-    owner.release.signal,
-  ]);
-  const objectiveSignal = () =>
-    owner.handoff && owner.snapshot && !canHandoff(owner.snapshot)
-      ? owner.abort.signal
-      : releasable;
+  // Cancel stops every step. Pause, drain and handoff stop an Objective step
+  // waiting between tries only at a safe point (no running item depends on
+  // it); a drain that must still drive running items keeps them going.
+  const objectiveSignal = () => owner.abort.signal;
+  const objectivePause = () =>
+    owner.snapshot && !canHandoff(owner.snapshot)
+      ? undefined
+      : owner.pause.signal;
   /** Stop a pass the operator cancelled: a `cancelled` fault, never a failure. */
   const stopIfCancelled = () => {
     if (cancellationRequested())
@@ -1030,6 +1040,8 @@ async function runObjectivePass(
       name: string,
       fn: (context: StepContext) => Promise<T>,
       paid = false,
+      /** False inside item runners, which keep driving their items. */
+      pausable = true,
     ): Promise<T> =>
       step(
         state ?? (unsaved as StepState),
@@ -1050,6 +1062,7 @@ async function runObjectivePass(
             }
           },
           signal: objectiveSignal(),
+          pause: pausable ? objectivePause() : undefined,
         },
       );
     const observeObjective = (state = owner.snapshot) =>
@@ -1123,6 +1136,7 @@ async function runObjectivePass(
             saveCurrent,
             config.delivery.kind === "native-stack",
             objectiveSignal(),
+            objectivePause(),
           );
       if (state.finalValidation?.passed) {
         reportRunStatus?.(
@@ -1143,6 +1157,7 @@ async function runObjectivePass(
           github,
           saveCurrent,
           objectiveSignal(),
+          objectivePause(),
         );
         return state;
       }
@@ -1296,19 +1311,29 @@ async function runObjectivePass(
         }
       preparation.plan = plan;
       if (!["clean", "human-accepted"].includes(plan.review.status)) {
-        verifyPlanCandidate(
-          plan,
-          objective,
-          issue.body,
-          baseSha,
-          config.checkout,
-          installationConfigDigest,
-          true,
-          capacity.concurrency,
-        );
+        // A plan Factory's own checks refuse can only be refused: it still
+        // waits for the operator's plan decision (exit 2), never a failure.
+        let unacceptable: string | undefined;
+        try {
+          verifyPlanCandidate(
+            plan,
+            objective,
+            issue.body,
+            baseSha,
+            config.checkout,
+            installationConfigDigest,
+            true,
+            capacity.concurrency,
+          );
+        } catch (error) {
+          if (attachedFault(error)) throw error;
+          unacceptable = error instanceof Error ? error.message : String(error);
+        }
         preparation.coordinator.phase = "waiting";
         preparation.coordinator.phaseStartedAt = new Date().toISOString();
-        preparation.coordinator.waitReason = `Plan needs a decision: ${plan.review.failure?.question ?? plan.review.findings[0]?.question ?? "inspect the plan review"}`;
+        preparation.coordinator.waitReason = unacceptable
+          ? `Plan needs a decision: it cannot be accepted (${unacceptable}); refuse it to plan again`
+          : `Plan needs a decision: ${plan.review.failure?.question ?? plan.review.findings[0]?.question ?? "inspect the plan review"}`;
         saveState(path, preparation);
         return preparation;
       }
@@ -1471,6 +1496,7 @@ async function runObjectivePass(
       save: () => save(state),
       cancelled: cancellationRequested,
       signal: objectiveSignal(),
+      pause: objectivePause(),
       diagnostics,
     });
     if (state.coordinator.mode === "running" && !cancellationRequested()) {
@@ -1493,6 +1519,8 @@ async function runObjectivePass(
         save: () => save(current),
         stopped: () =>
           cancellationRequested() || current.coordinator?.mode !== "running",
+        signal: objectiveSignal(),
+        pause: objectivePause(),
       });
     }
     const graph = state.graph;
@@ -1518,23 +1546,29 @@ async function runObjectivePass(
       stopIfCancelled();
     };
     const observeUnchanged = async () => {
-      await objectiveStep(state, "observe", async () => {
-        const refreshed = await github.objective(objective);
-        const changed =
-          refreshed.state === "closed"
-            ? "The Objective issue was closed"
-            : createHash("sha256").update(refreshed.body).digest("hex") !==
-                state.objectiveBodyDigest
-              ? "The Objective issue body changed"
-              : undefined;
-        if (changed)
-          throw attachFault(
-            new Error(`${changed}; operator direction required`),
-            decision(
-              `${changed} outside Factory. Restore it, then factory retry --objective ${objective}; or factory cancel --objective ${objective}`,
-            ),
-          );
-      });
+      await objectiveStep(
+        state,
+        "observe",
+        async () => {
+          const refreshed = await github.objective(objective);
+          const changed =
+            refreshed.state === "closed"
+              ? "The Objective issue was closed"
+              : createHash("sha256").update(refreshed.body).digest("hex") !==
+                  state.objectiveBodyDigest
+                ? "The Objective issue body changed"
+                : undefined;
+          if (changed)
+            throw attachFault(
+              new Error(`${changed}; operator direction required`),
+              decision(
+                `${changed} outside Factory. Restore it, then factory retry --objective ${objective}; or factory cancel --objective ${objective}`,
+              ),
+            );
+        },
+        false,
+        false,
+      );
       state.coordinator!.observedAt = new Date().toISOString();
       save(state);
     };
@@ -1554,6 +1588,7 @@ async function runObjectivePass(
         active,
         reconcile,
         cancelled: cancellationRequested,
+        signal: owner.abort.signal,
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
         diagnostics,
@@ -1576,16 +1611,28 @@ async function runObjectivePass(
         active,
         reconcile,
         cancelled: cancellationRequested,
+        signal: owner.abort.signal,
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
         diagnostics,
       });
       if (awaitingSelection) return state;
     }
+    // A done item whose close step waits (a question, a fix, or a closure
+    // still pending) holds final validation; the next run repeats the close.
+    const closeWaits = (id: string): boolean => {
+      const work = state.work[id];
+      return (
+        awaitsOperator(work?.wait) ||
+        (work?.githubClosure !== "complete" && work?.wait !== undefined)
+      );
+    };
     if (
       state.coordinator.mode !== "running" ||
       amendmentBlocksDispatch(state) ||
-      graph.items.some((item) => state.work[item.id]?.status !== "done")
+      graph.items.some(
+        (item) => state.work[item.id]?.status !== "done" || closeWaits(item.id),
+      )
     )
       return state;
     stopIfCancelled();
@@ -1896,14 +1943,41 @@ async function runObjectivePass(
         github,
         () => save(state),
         objectiveSignal(),
+        objectivePause(),
       );
       return state;
     }
   } catch (error) {
     if (error instanceof CoordinatorHandoff) throw error;
-    // A handoff that stopped planning releases ownership; the step repeats on restart.
-    if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
+    // A step stopped by pause, drain or handoff while waiting between tries
+    // (or a try cut off by a handoff) is not a fault: its record stays and
+    // the next run resumes it.
+    const paused =
+      error instanceof StepPaused ||
+      (attachedFault(error)?.kind === "cancelled" &&
+        !!owner.handoff &&
+        !cancellationRequested());
+    // A handoff releases ownership at a safe point, also before the first
+    // snapshot exists; the step repeats on restart.
+    if (
+      owner.handoff &&
+      (owner.snapshot
+        ? canHandoff(owner.snapshot)
+        : paused && !cancellationRequested())
+    ) {
+      if (owner.snapshot?.coordinator) {
+        owner.snapshot.coordinator.mode = "draining";
+        saveState(path, owner.snapshot);
+      }
       throw new CoordinatorHandoff();
+    }
+    if (error instanceof StepPaused && owner.snapshot) {
+      await Promise.allSettled(active.values());
+      saveState(path, owner.snapshot);
+      // Paused planning: the owner serves control until resume.
+      if (owner.snapshot.schemaVersion === 8) throw error;
+      return owner.snapshot;
+    }
     const current = owner.snapshot;
     // A decision or a prerequisite to fix: the scope waits for the operator
     // and nothing fails, no worker stops (step.ts rule 7). A handoff stops
@@ -2198,7 +2272,12 @@ export function retryWorkItem(
       throw new Error(
         "Owned work cessation is unresolved; operator direction required before retry",
       );
-    if (Object.values(state.work).some((work) => work.status === "running"))
+    // An item waiting in place for the operator is not active work.
+    if (
+      Object.values(state.work).some(
+        (work) => work.status === "running" && !awaitsOperator(work.wait),
+      )
+    )
       throw new Error("Finish or cancel active work before retry");
     const work = state.work[itemId];
     if (!work || (work.status !== "failed" && work.status !== "cancelled"))
@@ -2211,29 +2290,33 @@ export function retryWorkItem(
             unit.items.some((item) => item.id === itemId),
           )
         : undefined;
-    // A published item resumes delivery with the same PR, attempt and
-    // head: publish leases against the recorded head, so repeating it is
-    // safe. In a native unit every published item of the unit resumes.
-    const publishedItems = (
+    // An item that reached delivery resumes it with the same attempt, head
+    // and validation: a published item keeps its PR (publish leases against
+    // the recorded head), and an unpublished one repeats publish, which finds
+    // its PR by head. In a native unit every such item of the unit resumes.
+    const delivering = (entry: WorkState | undefined): boolean =>
+      !!entry &&
+      (entry.status === "failed" || entry.status === "cancelled") &&
+      (!!entry.pullRequest || (entry.step === "deliver" && !!entry.validation));
+    const resumed = (
       nativeUnit?.items.map((item) => item.id) ?? [itemId]
-    ).filter((id) => {
-      const entry = state.work[id];
-      return (
-        !!entry?.pullRequest &&
-        (entry.status === "failed" || entry.status === "cancelled")
-      );
-    });
-    if (publishedItems.includes(itemId)) {
-      for (const id of publishedItems) {
+    ).filter((id) => delivering(state.work[id]));
+    if (resumed.includes(itemId)) {
+      for (const id of resumed) {
         const entry = state.work[id]!;
         if (!entry.changeRef || !entry.treeSha)
           throw new Error(
-            `Work Item ${id} has a PR without its recorded head; start the Objective fresh or factory cancel --objective ${objective}`,
+            `Work Item ${id} reached delivery without its recorded head; start the Objective fresh or factory cancel --objective ${objective}`,
           );
         clearRepeats(state, { item: id });
-        entry.status = "published";
+        if (entry.pullRequest) {
+          entry.status = "published";
+          delete entry.step;
+        } else {
+          entry.status = "running";
+          entry.step = "deliver";
+        }
         delete entry.error;
-        delete entry.step;
       }
       state.cancelRequested = false;
       delete state.cancelledAt;

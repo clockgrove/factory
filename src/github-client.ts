@@ -587,6 +587,9 @@ export class GitHubClient {
    * on most lists, an opaque cursor on the issue list (#630).
    */
   async paginate<T>(route: string): Promise<T[]> {
+    const repository = /^repos\/[^/]+\/[^/]+\//.exec(route)?.[0];
+    if (!repository)
+      throw new Error("GitHub route is outside the approved repository API");
     const result: T[] = [];
     const seen = new Set<string>();
     let next: string | undefined =
@@ -604,14 +607,23 @@ export class GitHubClient {
       if (!Array.isArray(page.data))
         throw new Error("GitHub returned an invalid paginated response");
       result.push(...(page.data as T[]));
-      next = nextPage(page.link);
+      next = nextPage(page.link, repository);
     }
     return result;
   }
 }
 
-/** The route of a Link header's rel="next" page on api.github.com, if any. */
-function nextPage(link: string | undefined): string | undefined {
+/**
+ * The route of a Link header's rel="next" page on api.github.com, if any,
+ * within `repository` (the `repos/<owner>/<name>/` prefix of the first page).
+ * GitHub links later pages by repository id (`repositories/<id>/...`); that
+ * id names the repository the first page was read from, so the page is read
+ * through the same approved `repos/<owner>/<name>/` route (#646).
+ */
+function nextPage(
+  link: string | undefined,
+  repository: string,
+): string | undefined {
   const target = link
     ?.split(",")
     .map((part) => /^\s*<([^>]+)>\s*;\s*rel="next"\s*$/.exec(part)?.[1])
@@ -620,7 +632,12 @@ function nextPage(link: string | undefined): string | undefined {
   const url = new URL(target);
   if (url.origin !== "https://api.github.com")
     throw new Error("GitHub returned a next page outside its API");
-  return `${url.pathname.slice(1)}${url.search}`;
+  const path = url.pathname.slice(1);
+  const byId = /^repositories\/\d+\/(.+)$/.exec(path)?.[1];
+  if (byId !== undefined) return `${repository}${byId}${url.search}`;
+  if (path.toLowerCase().startsWith(repository.toLowerCase()))
+    return `${path}${url.search}`;
+  throw new Error("GitHub returned a next page outside the repository");
 }
 
 export const sharedGitHubClient = new GitHubClient();

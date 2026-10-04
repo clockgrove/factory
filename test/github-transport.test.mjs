@@ -533,7 +533,8 @@ async function nativeMergeFixture(mode, options = {}) {
         200,
         next
           ? {
-              link: `<https://api.github.com${path}?per_page=100&page=${page + 1}>; rel="next"`,
+              // GitHub links later pages by repository id (#646).
+              link: `<https://api.github.com/repositories/1382474350/${path.split("/").slice(4).join("/")}?per_page=100&page=${page + 1}>; rel="next"`,
             }
           : {},
       );

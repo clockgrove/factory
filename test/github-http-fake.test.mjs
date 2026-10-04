@@ -175,10 +175,16 @@ test("lists paginate with Link headers, the issue list by cursor, and it include
   const response = await fetch(
     `${fake.apiUrl}/repos/example/target/issues?state=all&per_page=2&page=1`,
   );
-  // The issue list paginates with a cursor (#630): only rel="next".
+  // The issue list paginates with a cursor (#630): only rel="next". Like
+  // GitHub, the link names the repository by id and carries a page number
+  // next to the cursor (#646).
   const link = response.headers.get("link");
-  assert.match(link, /[?&]after=[^&>]+[^>]*>; rel="next"$/);
-  assert.doesNotMatch(link, /rel="last"|[?&]page=/);
+  assert.match(
+    link,
+    /^<https:\/\/api\.github\.com\/repositories\/\d+\/issues\?[^>]*[?&]after=[^&>]+[^>]*>; rel="next"$/,
+  );
+  assert.match(link, /[?&]page=2[&>]/);
+  assert.doesNotMatch(link, /rel="last"/);
   const second = await fetch(
     link
       .slice(1, link.indexOf(">"))
@@ -195,6 +201,36 @@ test("lists paginate with Link headers, the issue list by cursor, and it include
   const all = await client.paginate("repos/example/target/issues?state=all");
   assert.equal(all.length, 6);
   assert.equal(all.filter((issue) => issue.pull_request).length, 1);
+});
+
+test("paginate follows GitHub's repositories/{id} Link URLs past the first page", async (t) => {
+  const { fake, client } = await setup(t, {});
+  const before = fake.state.nextNumber;
+  for (let index = 0; index < 120; index++)
+    fake.openForeignIssue(`Issue ${index}`);
+  // The cursor list (issues) and a page-number list (comments) (#646).
+  const issues = await client.paginate("repos/example/target/issues?state=all");
+  const numbers = new Set(issues.map((issue) => issue.number));
+  assert.equal(numbers.size, issues.length);
+  for (let number = before; number < before + 120; number++)
+    assert.ok(numbers.has(number), `issue #${number} is listed`);
+  const number = issues[0].number;
+  for (let index = 0; index < 101; index++)
+    await client.request(
+      "POST",
+      `repos/example/target/issues/${number}/comments`,
+      { body: `comment ${index}` },
+    );
+  const comments = await client.paginate(
+    `repos/example/target/issues/${number}/comments`,
+  );
+  assert.equal(comments.length, 101);
+  const pages = fake.log.filter((entry) =>
+    /^\/repos\/example\/target\/issues(\/\d+\/comments)?\?.*page=2/.test(
+      entry.path,
+    ),
+  );
+  assert.equal(pages.length, 2);
 });
 
 test("lag and merge-async timing read the fake's clock", async (t) => {

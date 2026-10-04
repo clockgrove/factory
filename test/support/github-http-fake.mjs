@@ -20,7 +20,9 @@
 //   PR is 422.
 // - Lists paginate (per_page default 30, max 100) with Link headers, and the
 //   issues list includes pull requests. The issues list paginates with an
-//   opaque `after` cursor, and refuses a page number past the first with 422.
+//   opaque `after` cursor, and refuses a page number past the first without
+//   one with 422. Link URLs name the repository by id, as GitHub's do:
+//   /repositories/{id}/..., which the fake also serves.
 //   A 422 carries one errors entry.
 // - Every REST response carries x-ratelimit-* headers.
 // - PUT /pulls/{n}/update-branch merges the base into the head branch: 202,
@@ -274,6 +276,8 @@ export class GitHubHttpFake {
    */
   constructor(options) {
     this.repository = options.repository;
+    /** GitHub's numeric repository id, which its Link URLs use. */
+    this.repositoryId = 1382474350;
     [this.owner, this.name] = options.repository.split("/");
     this.origin = options.origin;
     this.defaultBranch = options.defaultBranch ?? "main";
@@ -568,6 +572,11 @@ export class GitHubHttpFake {
       return method === "GET"
         ? { endpoint: "GET /user", handler: "viewer", params: {} }
         : undefined;
+    const byId = /^\/repositories\/(\d+)(\/.*)?$/.exec(path);
+    if (byId)
+      return Number(byId[1]) === this.repositoryId
+        ? this.route(method, `/repos/${this.repository}${byId[2] ?? ""}`)
+        : undefined;
     const match = /^\/repos\/([^/]+)\/([^/]+)(\/.*)?$/.exec(path);
     if (!match) return undefined;
     if (
@@ -817,7 +826,7 @@ export class GitHubHttpFake {
       const next = new URLSearchParams(query);
       next.set("per_page", String(perPage));
       next.set("page", String(target));
-      return `<${API}${path}?${next}>`;
+      return `<${this.linkUrl(path)}?${next}>`;
     };
     const links = [];
     if (page < last)
@@ -840,7 +849,7 @@ export class GitHubHttpFake {
       Math.max(Number(query.get("per_page")) || 30, 1),
       100,
     );
-    if ((Number(query.get("page")) || 1) > 1)
+    if ((Number(query.get("page")) || 1) > 1 && query.get("after") === null)
       throw validation(
         "Pagination with the page parameter is not supported for large datasets, please use cursor based pagination (after/before)",
       );
@@ -860,17 +869,26 @@ export class GitHubHttpFake {
     }
     const data = numbers.slice(start, start + perPage);
     if (start + perPage >= numbers.length) return { data, headers: {} };
+    // GitHub carries a page number next to the cursor.
     const next = new URLSearchParams(query);
-    next.delete("page");
     next.set("per_page", String(perPage));
     next.set(
       "after",
       Buffer.from(`cursor:v2:${data.at(-1)}`).toString("base64url"),
     );
+    next.set("page", String((Number(query.get("page")) || 1) + 1));
     return {
       data,
-      headers: { link: `<${API}${path}?${next}>; rel="next"` },
+      headers: { link: `<${this.linkUrl(path)}?${next}>; rel="next"` },
     };
+  }
+
+  /** A Link URL for a /repos/{owner}/{name}/... path, by repository id. */
+  linkUrl(path) {
+    const prefix = `/repos/${this.repository}/`;
+    return path.startsWith(prefix)
+      ? `${API}/repositories/${this.repositoryId}/${path.slice(prefix.length)}`
+      : `${API}${path}`;
   }
 
   createIssueRecord(s, { title, body, labels = [], user }, pull) {

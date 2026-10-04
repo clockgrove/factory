@@ -1167,6 +1167,95 @@ test("a refused plan revision still fails compilation", async () => {
   });
 });
 
+test("a base-observed command the plan itself creates is revision feedback before review", async () => {
+  await fixture("base-observed-created", async (root) => {
+    const target = createTarget(root, {
+      "docs/plan.md": "# Plan\n\n## Wave 0\nCanonical obligation\n",
+    });
+    // The live-check shape: an item creates scripts/cli.sh and its own
+    // validation runs it, claiming the base already has it.
+    const creating = (baseSha) => {
+      const value = graph(baseSha);
+      value.items[0].ownedPaths = ["scripts/cli.sh"];
+      value.items[0].validation = [
+        {
+          command: "bash scripts/cli.sh",
+          provenance: "base-observed",
+          source: "scripts/cli.sh",
+        },
+      ];
+      return value;
+    };
+    const requests = [];
+    let reviews = 0;
+    const candidate = await compilePlan(
+      1,
+      body,
+      target.baseSha,
+      target.checkout,
+      {
+        async generateStructured(request) {
+          requests.push(request);
+          return withCoverage(
+            request,
+            requests.length === 1
+              ? creating(target.baseSha)
+              : graph(target.baseSha),
+          );
+        },
+        async reviewGraph(request) {
+          reviews++;
+          return { packetId: request.reviewPacket.id, findings: [] };
+        },
+      },
+    );
+    // Refused before review and revised once; the review never sees it.
+    assert.equal(requests.length, 2);
+    assert.equal(reviews, 1);
+    assert.match(
+      requests[1].compileContext.instructions,
+      /"source":"check","detail":"Work Item one marks .*bash scripts\/cli\.sh.* base-observed/,
+    );
+    assert.equal(candidate.review.revisions, 1);
+    assert.equal(candidate.review.status, "clean");
+  });
+});
+
+test("a base-observed command that exists at the base is not refused", async () => {
+  await fixture("base-observed-existing", async (root) => {
+    const target = createTarget(root, {
+      "docs/plan.md": "# Plan\n\n## Wave 0\nCanonical obligation\n",
+      "scripts/cli.sh": "bash scripts/cli.sh\n",
+    });
+    let generated = 0;
+    const candidate = await compilePlan(
+      1,
+      body,
+      target.baseSha,
+      target.checkout,
+      {
+        async generateStructured(request) {
+          generated++;
+          const value = graph(target.baseSha);
+          value.items[0].validation = [
+            {
+              command: "bash scripts/cli.sh",
+              provenance: "base-observed",
+              source: "scripts/cli.sh",
+            },
+          ];
+          return withCoverage(request, value);
+        },
+        async reviewGraph(request) {
+          return { packetId: request.reviewPacket.id, findings: [] };
+        },
+      },
+    );
+    assert.equal(generated, 1);
+    assert.equal(candidate.review.revisions, 0);
+  });
+});
+
 test("graph review requires an array and accepts an explicit clean empty review", async () => {
   await fixture("review-top-level", async (root) => {
     const target = createTarget(root, {

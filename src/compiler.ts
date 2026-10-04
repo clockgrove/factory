@@ -983,7 +983,7 @@ How to answer:
 - The compiler choices below hold the pinned sources as ordered lines; join a source's lines with newlines to read it.
 - Coverage: put every supplied obligation, by obligationIndex, under exactly one owning item, with a proof that item can produce. An item's own proof is judged after its validation and before its own delivery, so it cannot depend on its own merge, later items or final validation. An item's acceptance is judged before its own LFS upload, publication, merge and hydration, and a native-stack dependency is not yet merged when its dependent runs. Proof that needs the integrated result belongs to a read-only QA node or to final review. Final controller proof selects a supplied controller guarantee that fully covers the obligation. An obligation that requires a command to pass is proved by that exact command, unless it is a Final validation command.
 - Citations: select, by choiceIndex, every source section a worker needs, including exact interfaces or literals. Factory gives workers those sections verbatim, so the brief says what to do and does not recopy them. Workers also have the full repository checkout.
-- Validation: for a source-declared command, choose the sourceIndex and lineIndex of a non-empty line holding one complete command. For a base-observed command, give the exact command and the tracked file that defines it. Package scripts use the repository's existing npm/pnpm invocation.
+- Validation: for a source-declared command, choose the sourceIndex and lineIndex of a non-empty line holding one complete command. For a base-observed command, give the exact command and the tracked file that defines it at the base. A command this plan creates is not at the base, so it is never base-observed. Package scripts use the repository's existing npm/pnpm invocation.
 - Environment: use local/available with a null probe and empty preparedBy unless a source requires an external prerequisite. A real environment needs a readiness probe from the owner's validation that can pass before the work starts; preparedBy names a dependency only for prepare. Never invent setup, infrastructure or mocks; ask a precise question instead.
 - Item kinds: work for implementation, qa for read-only checks of the integrated result, aggregate for a parent that depends on all its children (aggregates omit acceptance). Every QA node owns at least one obligation. Integrated QA depends on all implementation nodes it checks. Read-only nodes omit ownership, asset, candidate-count and execution-profile fields.
 - Ownership: list literal repository-relative files or directory prefixes ending in "/" (no wildcards, absolute paths, backslashes, or empty or "." parts). Every file the work creates or changes has one owner, and items that can run in parallel do not overlap. Own an existing pnpm-workspace.yaml only when the Objective has Workspace package additions; then one item owns it and each new package manifest, keeps every existing entry, and cites the section naming the new directory.
@@ -1941,6 +1941,27 @@ export async function compileObjective(
   return graph;
 }
 
+/**
+ * A base-observed command exists at the base: a package script or a line of a
+ * tracked file at baseSha. A command the plan itself creates does not, so the
+ * planner is told to revise it before review rather than stopping on it.
+ */
+function assertBaseObservedCommands(
+  graph: WorkGraph,
+  sources: PlanningSource[],
+  checkout: string,
+): void {
+  for (const item of graph.items)
+    for (const check of item.validation)
+      if (
+        check.provenance === "base-observed" &&
+        !authorizedCommand(check, graph.baseSha, sources, checkout)
+      )
+        throw new Error(
+          `Work Item ${item.id} marks \`${check.command}\` base-observed in ${check.source ?? "an unknown source"}, but it does not exist at base ${graph.baseSha}. A command the plan creates is not base-observed: use a source-declared command line from the Objective or a pinned source, or prove the criterion by review.`,
+        );
+}
+
 export function validateGraphSources(
   graph: WorkGraph,
   sources: PlanningSource[],
@@ -1953,6 +1974,7 @@ export function validateGraphSources(
   validateCitations(graph, sources);
   assertWorkerInputSources(graph, sources);
   validateWorkspacePackagePlan(graph, body, checkout);
+  assertBaseObservedCommands(graph, sources, checkout);
   for (const item of graph.items) {
     if (
       new Set(item.expectedOutputRoles ?? []).size !==

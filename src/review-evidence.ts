@@ -324,6 +324,15 @@ export function decodeGraphReview(
     )
       throw new ReviewProtocolError("Graph finding contains unknown fields");
     const detail = text(value.detail, "detail");
+    const question = text(value.question, "question", false).trim();
+    // A finding without a question is still a finding: its detail says what
+    // to change. A detail with no words gives nothing to ask about, so the
+    // finding is invalid review output.
+    const subject = detail.trim().replace(/[.?!:;\s]+$/, "");
+    if (!question && !/[\p{L}\p{N}]/u.test(subject))
+      throw new ReviewProtocolError(
+        "Review finding needs a question or a detail to derive one from",
+      );
     return {
       evidence: resolveReviewReferences(
         reviewEvidenceIds(value.evidenceIndices, packet),
@@ -331,11 +340,8 @@ export function decodeGraphReview(
         false,
       ),
       detail,
-      // A finding without a question is still a finding; the operator is
-      // asked about its detail, which says what to change.
       question:
-        text(value.question, "question", false).trim() ||
-        `How should the plan change to fix this: ${detail.trim().replace(/[.?!:;\s]+$/, "")}?`,
+        question || `How should the plan change to fix this: ${subject}?`,
     };
   });
 }

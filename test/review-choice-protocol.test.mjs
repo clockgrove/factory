@@ -281,3 +281,25 @@ test("graph review is atomic and empty packets cannot invent evidence", () => {
     /evidence/,
   );
 });
+
+test("graph finding without a question derives it from the detail or is invalid", () => {
+  const p = packet();
+  const decoded = (detail, question) =>
+    decodeGraphReview(
+      response(p, [{ evidenceIndices: [0], detail, question }]),
+      p,
+    );
+  assert.equal(
+    decoded("Name the missing owner.", "")[0].question,
+    "How should the plan change to fix this: Name the missing owner?",
+  );
+  assert.equal(
+    decoded("Name the missing owner.", "  ")[0].question,
+    "How should the plan change to fix this: Name the missing owner?",
+  );
+  assert.equal(decoded("Detail", "Which owner?")[0].question, "Which owner?");
+  // A detail with no words has nothing to derive a question from.
+  for (const detail of ["?", " . ", "..."])
+    assert.throws(() => decoded(detail, ""), /question or a detail/);
+  assert.equal(decoded("?", "Which owner?")[0].question, "Which owner?");
+});

@@ -467,6 +467,59 @@ test("a body change first seen at resume is a decision, as during the run (#648)
   );
 });
 
+test("a live retry of an item waiting in place resumes it in the running pass (#643)", async () => {
+  let asks = 0;
+  await fixture(
+    "live-retry",
+    async ({ application, config, root }) => {
+      const run = application.runObjective(1);
+      // The result item waits in place for its question while second runs.
+      await until(
+        () =>
+          readContinuation(config.repository, 1)?.work?.result?.wait?.kind ===
+          "decision",
+      );
+      const retried = await requestControl(config.repository, {
+        objective: 1,
+        action: "retry",
+        input: { item: "result" },
+      });
+      assert.equal(retried.handled, true);
+      assert.equal(retried.result, "step");
+      // The live owner resumes the item at once, before second finishes.
+      await until(() => asks >= 2);
+      writeFileSync(join(root, "barrier", "second"), "go\n");
+      const result = await run;
+      assert.ok(result.finalValidation.passed);
+      assert.equal(result.error, undefined);
+    },
+    undefined,
+    (descriptor) => {
+      const second = structuredClone(descriptor.graph.items[0]);
+      second.id = "second";
+      second.title = "Second";
+      second.ownedPaths = ["second.txt"];
+      second.acceptance = ["second.txt exists"];
+      second.validation[0].command = "test -s second.txt";
+      descriptor.graph.items.push(second);
+      descriptor.objectiveBody +=
+        "\n## Other validation\n- `test -s second.txt`\n";
+      descriptor.actions.second = {
+        files: [{ path: "second.txt", text: "second\n" }],
+        barrier: join(descriptor.fakeRoot, "..", "barrier", "second"),
+      };
+      descriptor.resultReviewer = passingReviewer((request) => {
+        if (!request.criteria.includes("result.txt exists")) return;
+        if (++asks === 1)
+          throw attachFault(
+            new Error("reviewer asks"),
+            decision("Is the result right?"),
+          );
+      });
+    },
+  );
+});
+
 test("cancellation while GitHub is unavailable stops locally with no dispatch", async () => {
   await fixture(
     "cancel-outage",

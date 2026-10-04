@@ -374,6 +374,11 @@ interface LocalOwner {
   deadlineAt?: string;
   cancellation?: Promise<void>;
   waitForWake: () => Promise<void>;
+  /**
+   * Settles at the next wake without consuming it, so a running pass sees
+   * the operator's live control action (a `factory retry`) at once.
+   */
+  woken: () => Promise<void>;
   /** The pass's observing save: emits each item's state change, terminal ones included. */
   save?: (state: FactoryState) => void;
 }
@@ -583,12 +588,23 @@ export async function runObjective(
       phase: "idle",
       phaseStartedAt: new Date().toISOString(),
     };
+  let woke: { promise: Promise<void>; resolve: () => void } | undefined;
   const owner: LocalOwner = {
     changed: false,
     lock,
     abort: new AbortController(),
     pause: new AbortController(),
     waitForWake: async () => undefined,
+    woken: () => {
+      if (!woke) {
+        let resolve!: () => void;
+        const promise = new Promise<void>((settle) => {
+          resolve = settle;
+        });
+        woke = { promise, resolve };
+      }
+      return woke.promise;
+    },
     snapshot,
     deadlineAt: options.deadlineAt,
   };
@@ -598,6 +614,8 @@ export async function runObjective(
     owner.changed = true;
     for (const resolve of waiters) resolve();
     waiters.clear();
+    woke?.resolve();
+    woke = undefined;
   };
   /** A handoff: stop at the next safe point and release ownership. */
   const releaseOwnership = () => {
@@ -1648,6 +1666,7 @@ async function runObjectivePass(
         },
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
+        woken: owner.woken,
         diagnostics,
       });
       if (awaitingSelection) return state;

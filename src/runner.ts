@@ -294,6 +294,10 @@ export async function decidePlan(
     } else {
       if (!preparation.plan)
         throw new Error("Objective planning has not produced a plan yet");
+      if (preparation.plan.review.acceptable === false)
+        throw new Error(
+          `Factory cannot accept plan ${shortPlanDigest(preparation.plan)}; refuse it to plan again`,
+        );
       const issue = await services.github.objective(objective);
       preparation.plan = await resolvePlan(
         preparation.plan,
@@ -1334,6 +1338,8 @@ async function runObjectivePass(
           if (attachedFault(error)) throw error;
           unacceptable = error instanceof Error ? error.message : String(error);
         }
+        if (unacceptable) plan.review.acceptable = false;
+        else delete plan.review.acceptable;
         preparation.coordinator.phase = "waiting";
         preparation.coordinator.phaseStartedAt = new Date().toISOString();
         preparation.coordinator.waitReason = unacceptable

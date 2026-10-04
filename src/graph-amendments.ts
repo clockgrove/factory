@@ -625,17 +625,6 @@ async function advanceAmendment(args: {
   const stopped = () =>
     state.coordinator && state.coordinator.mode !== "running";
   if (stopped()) return false;
-  // Charged by the amendment's id, so a repeat after a restart is free.
-  if (pending.proposal.replacement)
-    chargeRepair(
-      state,
-      amendmentEvent(pending),
-      pending.proposal.replacement.correction.kind,
-      ["$planning"],
-    );
-  else
-    charge(state, amendmentEvent(pending), "planningRevisions", ["$planning"]);
-  const ordinal = consumption(state).planningRevisions;
   state.graphRevisions ??= [
     { graph: structuredClone(state.graph), digest: graphDigest(state.graph) },
   ];
@@ -710,6 +699,21 @@ async function advanceAmendment(args: {
         );
     };
     await verifyPrerequisites();
+    // Charged by the amendment's id, so a repeat after a restart is free.
+    // Only after the predecessor evidence holds: a predecessor decision
+    // leaves the amendment at its phase with no charge and no model call.
+    if (pending.proposal.replacement)
+      chargeRepair(
+        state,
+        amendmentEvent(pending),
+        pending.proposal.replacement.correction.kind,
+        ["$planning"],
+      );
+    else
+      charge(state, amendmentEvent(pending), "planningRevisions", [
+        "$planning",
+      ]);
+    const ordinal = consumption(state).planningRevisions;
     if (pending.phase === "ready") {
       if (pending.proposal.graph) {
         pending.graph = structuredClone(pending.proposal.graph);

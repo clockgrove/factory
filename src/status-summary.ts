@@ -94,6 +94,8 @@ export interface PreparingStatusView extends WaitView {
   /** `digest` is the short review digest `decide --plan` must name. */
   planReview: {
     status: string;
+    /** False when Factory refuses the plan: only `refuse` can answer it. */
+    acceptable?: boolean;
     question: string | null;
     digest: string;
   } | null;
@@ -556,6 +558,18 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
       nextAction: {
         command: `factory resume --objective ${objective}`,
         reason: `Resumes planning${view.runActive === true ? "" : `; then ${run(objective)}`}`,
+      },
+    };
+  if (
+    view.planReview?.status === "needs-human" &&
+    view.planReview.acceptable === false
+  )
+    return {
+      phase: "needs-plan-decision",
+      summary: `Factory cannot accept this plan${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
+      nextAction: {
+        command: `factory decide --objective ${objective} --plan ${view.planReview.digest} --outcome refuse --reason ${REASON}`,
+        reason: `Discards the plan; ${run(objective)} plans again`,
       },
     };
   if (view.planReview?.status === "needs-human")

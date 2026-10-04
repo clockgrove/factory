@@ -1224,6 +1224,12 @@ export interface PlanCandidate {
   };
   review: {
     status: "clean" | "needs-human" | "human-accepted" | "refused";
+    /**
+     * False when Factory's own checks refuse this plan (for example its
+     * execution bounds differ from configuration): only a refusal can
+     * answer it. Not part of the review digest.
+     */
+    acceptable?: false;
     revisions: number;
     failure?: { detail: string; question: string };
     findings: (

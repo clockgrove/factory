@@ -7,7 +7,7 @@ import test from "node:test";
 import { Octokit } from "@octokit/core";
 import { RealGitHubGateway } from "../dist/github.js";
 import { faultOf } from "../dist/fault.js";
-import { GitHubClient } from "../dist/github-client.js";
+import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { withProcessCancellation } from "../dist/process.js";
 import { controlObjective } from "../dist/runner.js";
 import { intakeControl } from "../dist/intake.js";
@@ -682,6 +682,13 @@ function observedGateway(status, checks = [], change = {}) {
           if (path.endsWith("/check-runs")) return json({ check_runs: checks });
           if (path.endsWith("/status"))
             return json({ state: "success", total_count: 0 });
+          // No rulesets and no classic protection on the base.
+          if (path.endsWith("/rules/branches/main")) return json([]);
+          if (path.endsWith("/branches/main/protection/required_status_checks"))
+            return new Response('{"message":"Not Found"}', {
+              status: 404,
+              headers: { "content-type": "application/json" },
+            });
           throw new Error("Unexpected credential-free transport request");
         },
       },
@@ -848,7 +855,15 @@ test("public no-registered-check reproduction refuses gated integration while pr
       if (path.includes("/check-runs?")) return { check_runs: runs };
       if (path.includes("/status?"))
         return { state: "pending", total_count: 0, statuses: [] };
+      // No classic protection on the base.
+      if (path.endsWith("/branches/main/protection/required_status_checks"))
+        throw new GitHubRequestError(404);
       throw new Error(`Unexpected request ${method} ${path}`);
+    },
+    async paginate(route) {
+      // No rulesets on the base.
+      if (route.endsWith("/rules/branches/main")) return [];
+      throw new Error(`Unexpected paginated request ${route}`);
     },
     async pullRequestReadiness() {
       return {

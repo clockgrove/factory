@@ -178,6 +178,9 @@ const readyPull = {
   [repo]: () => json({ default_branch: "main", allow_merge_commit: true }),
   // Read before every merge: no ruleset forbids merge commits.
   "GET /repos/a/b/rules/branches/main": () => json([]),
+  // Read when GitHub says the PR is ready: no classic protection.
+  "GET /repos/a/b/branches/main/protection/required_status_checks": () =>
+    json({ message: "Not Found" }, 404),
 };
 
 const gitHubCases = [
@@ -517,6 +520,46 @@ const gitHubCases = [
         json({ message: "Head branch was modified." }, 409),
     },
     { kind: "decision" },
+  ],
+  [
+    // Real GitHub (#627): PUT merge on a stacked PR is 403, not a permission
+    // fault. The PR is open in a stack Factory did not record.
+    "403 merging a PR in an unrecorded native stack",
+    (g) => g.merge(identity, headSha),
+    {
+      ...readyPull,
+      "PUT /repos/a/b/pulls/5/merge": () =>
+        json(
+          {
+            message: "Merging stacked PRs via this endpoint is not supported",
+          },
+          403,
+        ),
+      "GET /repos/a/b/stacks": () => json([{ id: 1, number: 1 }]),
+    },
+    { kind: "decision" },
+  ],
+  [
+    "403 merging a PR in no stack",
+    (g) => g.merge(identity, headSha),
+    {
+      ...readyPull,
+      "PUT /repos/a/b/pulls/5/merge": () =>
+        json({ message: "Resource not accessible by integration" }, 403),
+      "GET /repos/a/b/stacks": () => json([]),
+    },
+    { kind: "config", fix: /write access/ },
+  ],
+  [
+    // Real GitHub (#627): a stale expected head is 400; observe it again.
+    "400 merging at a stale head",
+    (g) => g.merge(identity, headSha),
+    {
+      ...readyPull,
+      "PUT /repos/a/b/pulls/5/merge": () =>
+        json({ message: "Head sha does not match", status: "failed" }, 400),
+    },
+    { kind: "transient", outcomeUnknown: false },
   ],
   [
     "merge accepted but not yet readable",

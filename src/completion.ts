@@ -229,7 +229,7 @@ export async function closeWorkItem(
           throw attachFault(
             new Error(`PR #${work.pullRequest} is not merged`),
             decision(
-              `PR #${work.pullRequest} is no longer merged. Inspect it, then retry or cancel.`,
+              `PR #${work.pullRequest} is no longer merged. Inspect it, then factory retry --objective ${state.objective} --item ${itemId}; or factory cancel --objective ${state.objective}`,
             ),
           );
       }

@@ -303,7 +303,7 @@ test("validation descendants left running are stopped and the tree they changed 
           );
           assert.equal(evidence.commands[0].stoppedLeftovers, undefined);
           // One still running after it is stopped, and its receipt says so.
-          const stopped = await validate(["sleep 30 >/dev/null 2>&1 &"]);
+          const stopped = await validate(["sleep 30 &"]);
           assert.equal(stopped.commands[0].stoppedLeftovers, 1);
           assert.match(
             commandPassEvidence(stopped.commands).content,
@@ -311,7 +311,7 @@ test("validation descendants left running are stopped and the tree they changed 
           );
           // One still running after it is stopped; the change it made counts.
           await assert.rejects(
-            validate(["printf dirty >> base.txt; sleep 30 >/dev/null 2>&1 &"]),
+            validate(["printf dirty >> base.txt; sleep 30 &"]),
             (error) => {
               assert.ok(error instanceof CandidateValidationFailure, error);
               assert.match(error.message, /modified the result tree/);

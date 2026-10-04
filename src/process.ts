@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type SpawnOptions, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { type Fault, transient, withFault } from "./fault.js";
@@ -29,11 +29,17 @@ export function command(
   return result.stdout.trim();
 }
 
-/** The git subcommand, with LFS subcommands named in full. */
-function gitSubcommand(args: string[]): string {
+/** Where the subcommand is, after git's own options. */
+function subcommandIndex(args: string[]): number {
   let index = 0;
   while (index < args.length && args[index]!.startsWith("-"))
     index += ["-c", "-C"].includes(args[index]!) ? 2 : 1;
+  return index;
+}
+
+/** The git subcommand, with LFS subcommands named in full. */
+function gitSubcommand(args: string[]): string {
+  const index = subcommandIndex(args);
   const name = args[index] ?? "";
   return name === "lfs" ? `lfs ${args[index + 1] ?? ""}` : name;
 }
@@ -68,6 +74,12 @@ export function gitFault(args: string[], error: unknown): Fault | undefined {
       kind: "config",
       detail: "Git LFS is not installed on the controller host",
       fix: "Install Git LFS, then `factory run`",
+    };
+  if (error instanceof RepositoryProgramConfigured)
+    return {
+      kind: "config",
+      detail: error.message,
+      fix: `Remove ${error.key} from the target checkout's repository configuration (configure a trusted driver in your global git configuration instead), then \`factory run\``,
     };
   // A stalled fetch was stopped so it does not hold the repository lock.
   if (error instanceof GitDeadlineExceeded)
@@ -263,17 +275,197 @@ async function withRepositoryLock<T>(
 }
 
 /**
- * Configuration for every git command Factory runs. No background
- * maintenance, which would walk the worktree registry unlocked. No
- * repository hooks: they are code from a worker-modified tree or checkout
- * that would run with the controller's environment and credentials.
- * Command-line scope overrides any hooksPath the repository sets.
+ * Configuration pinned for every git command Factory runs. Workers, and the
+ * tools workers and validation commands run, can write the checkout's shared
+ * repository configuration, so nothing configured there may run a program
+ * inside Factory's git, which has the controller's environment and
+ * credentials. Command-line scope overrides the repository's values:
+ * - no background maintenance, which would walk the worktree registry unlocked;
+ * - no hooks, fsmonitor, signing, signature verification or alternate-refs
+ *   command (external diff and textconv: see withoutDiffPrograms);
+ * - no `ext::` or `git://` transport, which an insteadOf could rewrite
+ *   origin to, and origin's upload-pack and receive-pack fixed;
+ * - no credential helper or askpass, except the operator's own for remote
+ *   commands (see operatorRemoteSettings).
+ * Drivers named by attributes cannot be pinned in advance: see
+ * assertNoRepositoryPrograms.
  */
 const GIT_CONFIG: [string, string][] = [
   ["maintenance.auto", "false"],
   ["gc.auto", "0"],
   ["core.hooksPath", "/dev/null"],
+  ["core.fsmonitor", "false"],
+  ["core.alternateRefsCommand", ""],
+  ["commit.gpgSign", "false"],
+  ["tag.gpgSign", "false"],
+  ["push.gpgSign", "false"],
+  ["merge.verifySignatures", "false"],
+  ["log.showSignature", "false"],
+  ["protocol.ext.allow", "never"],
+  ["protocol.git.allow", "never"],
+  ["remote.origin.uploadpack", "git-upload-pack"],
+  ["remote.origin.receivepack", "git-receive-pack"],
+  // An empty helper clears every helper configured before it.
+  ["credential.helper", ""],
+  ["core.askPass", ""],
 ];
+
+/**
+ * Program-running configuration named by attributes or used by Git LFS. A
+ * definition in the repository's configuration (local or worktree scope,
+ * with includes) stops Factory's git with a configuration fault instead of
+ * running. Operator configuration (global or system scope) is trusted.
+ */
+const REPOSITORY_PROGRAMS =
+  "^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge))$";
+/** The filter commands `git lfs install` writes. */
+const LFS_FILTER_COMMANDS: Record<string, string[]> = {
+  "filter.lfs.clean": ["git-lfs clean -- %f"],
+  "filter.lfs.smudge": ["git-lfs smudge -- %f", "git-lfs smudge --skip -- %f"],
+  "filter.lfs.process": [
+    "git-lfs filter-process",
+    "git-lfs filter-process --skip",
+  ],
+};
+
+/** The repository's configuration would run a program inside Factory's git. */
+export class RepositoryProgramConfigured extends Error {
+  constructor(
+    readonly directory: string,
+    readonly key: string,
+  ) {
+    super(
+      `Repository configuration for ${directory} defines ${key}; Factory's git runs no program from repository configuration other than Git LFS`,
+    );
+  }
+}
+
+/** One `git config --show-scope --get-regexp` read: [scope, key, value]. */
+function configEntries(
+  directory: string,
+  env: NodeJS.ProcessEnv,
+  pattern: string,
+): [string, string, string][] {
+  // Without the directory there is no repository configuration to read;
+  // the command itself reports the missing directory.
+  if (!existsSync(directory)) return [];
+  const result = spawnSync(
+    "git",
+    [
+      "-C",
+      directory,
+      "config",
+      "--show-scope",
+      "--includes",
+      "--get-regexp",
+      pattern,
+    ],
+    { env, encoding: "utf8" },
+  );
+  if (result.error) throw result.error;
+  if (result.status === 1) return [];
+  if (result.status !== 0)
+    throw new Error(
+      `git config --get-regexp failed (${result.status}): ${result.stderr}`,
+    );
+  return result.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const tab = line.indexOf("\t");
+      const entry = line.slice(tab + 1);
+      const space = entry.indexOf(" ");
+      return space < 0
+        ? [line.slice(0, tab), entry, ""]
+        : [line.slice(0, tab), entry.slice(0, space), entry.slice(space + 1)];
+    });
+}
+
+function assertNoRepositoryPrograms(
+  directory: string,
+  env: NodeJS.ProcessEnv,
+): void {
+  for (const [scope, key, value] of configEntries(
+    directory,
+    env,
+    REPOSITORY_PROGRAMS,
+  ))
+    if (
+      (scope === "local" || scope === "worktree") &&
+      !LFS_FILTER_COMMANDS[key]?.includes(value)
+    )
+      throw new RepositoryProgramConfigured(directory, key);
+}
+
+/**
+ * For a remote command, the operator's own credential helpers, askpass and
+ * SSH command (global or system scope, or the environment) replace whatever
+ * the repository configures. Without an operator SSH command, a stalled SSH
+ * transfer is bounded like an HTTP one; these options take precedence over
+ * ~/.ssh/config, so set GIT_SSH_COMMAND or a global core.sshCommand to
+ * choose others.
+ */
+function withOperatorRemoteSettings(
+  directory: string,
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const entries: [string, string][] = [];
+  let sshCommand: string | undefined;
+  for (const [scope, key, value] of configEntries(
+    directory,
+    env,
+    "^(credential\\..*helper|core\\.askpass|core\\.sshcommand)$",
+  )) {
+    if (scope !== "global" && scope !== "system") continue;
+    if (key === "core.sshcommand") sshCommand = value;
+    else if (key === "core.askpass") entries.push(["core.askPass", value]);
+    else entries.push([key, value]);
+  }
+  return {
+    ...withGitConfig(env, entries),
+    GIT_SSH_COMMAND:
+      env.GIT_SSH_COMMAND ||
+      sshCommand ||
+      (env.GIT_SSH
+        ? `'${env.GIT_SSH.replaceAll("'", "'\\''")}'`
+        : SSH_KEEPALIVE_COMMAND),
+  };
+}
+
+/** External diff and textconv drivers are programs from configuration. */
+function withoutDiffPrograms(args: string[]): string[] {
+  const index = subcommandIndex(args);
+  return ["diff", "show", "log"].includes(args[index] ?? "")
+    ? [
+        ...args.slice(0, index + 1),
+        "--no-ext-diff",
+        "--no-textconv",
+        ...args.slice(index + 1),
+      ]
+    : args;
+}
+
+/** Everything a Factory git command runs with: arguments and environment. */
+function factoryGit(
+  directory: string,
+  args: string[],
+  pinned: boolean,
+  overrides: NodeJS.ProcessEnv = {},
+): { args: string[]; env: NodeJS.ProcessEnv } {
+  let env = {
+    ...(pinned ? pinnedGitEnvironment() : ambientGitEnvironment()),
+    ...overrides,
+  };
+  if (GIT_REMOTE.has(gitSubcommand(args)))
+    env = withOperatorRemoteSettings(directory, env);
+  if (["fetch", "pull"].includes(gitSubcommand(args)))
+    env = withGitConfig(env, LOCKED_NETWORK_CONFIG);
+  assertNoRepositoryPrograms(directory, env);
+  return {
+    args: ["-C", directory, ...withoutDiffPrograms(args)],
+    env,
+  };
+}
 /** A stalled transfer must not hold the repository lock indefinitely. */
 const LOCKED_NETWORK_CONFIG: [string, string][] = [
   ["http.lowSpeedLimit", "1000"],
@@ -284,28 +476,6 @@ export const lockedNetworkDeadline = { milliseconds: 15 * 60_000 };
 /** The SSH counterpart of the HTTP low-speed bound: 4 unanswered 15 s probes. */
 export const SSH_KEEPALIVE_COMMAND =
   "ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=4";
-
-/**
- * Bound a stalled SSH transfer the way LOCKED_NETWORK_CONFIG bounds HTTP,
- * unless the operator chose the SSH command (GIT_SSH_COMMAND, GIT_SSH or
- * core.sshCommand), which is then used unchanged. ssh still reads the
- * operator's ssh configuration.
- */
-function withSshKeepalive(
-  checkout: string,
-  env: NodeJS.ProcessEnv,
-): NodeJS.ProcessEnv {
-  if (env.GIT_SSH_COMMAND || env.GIT_SSH) return env;
-  const configured = spawnSync(
-    "git",
-    ["-C", checkout, "config", "--get", "core.sshCommand"],
-    { env, encoding: "utf8" },
-  );
-  if (configured.error) throw configured.error;
-  // Exit 1 means unset; anything else leaves the choice to git itself.
-  if (configured.status !== 1) return env;
-  return { ...env, GIT_SSH_COMMAND: SSH_KEEPALIVE_COMMAND };
-}
 
 /** Append configuration through GIT_CONFIG_COUNT, after any entries already set. */
 function withGitConfig(
@@ -324,8 +494,13 @@ function withGitConfig(
   return result;
 }
 
+/**
+ * The operator's environment with Factory's pins. Inherited
+ * GIT_CONFIG_PARAMETERS (`git -c`) would override them, so it is dropped.
+ */
 function ambientGitEnvironment(): NodeJS.ProcessEnv {
-  return withGitConfig(process.env, GIT_CONFIG);
+  const { GIT_CONFIG_PARAMETERS: _, ...env } = process.env;
+  return withGitConfig(env, GIT_CONFIG);
 }
 
 /** A locked network command outlived lockedNetworkDeadline. */
@@ -335,18 +510,18 @@ function gitProcess(
   checkout: string,
   args: string[],
   pinned: boolean,
+  overrides?: NodeJS.ProcessEnv,
 ): Promise<string> {
   const mode = gitLockMode(args);
   const network = ["fetch", "pull"].includes(gitSubcommand(args));
-  let env = pinned ? pinnedGitEnvironment() : ambientGitEnvironment();
-  if (network) env = withGitConfig(env, LOCKED_NETWORK_CONFIG);
   const run = async () => {
     const deadline = network
       ? AbortSignal.timeout(lockedNetworkDeadline.milliseconds)
       : undefined;
     try {
-      const result = await subprocessAsync("git", ["-C", checkout, ...args], {
-        env: network ? withSshKeepalive(checkout, env) : env,
+      const command = factoryGit(checkout, args, pinned, overrides);
+      const result = await subprocessAsync("git", command.args, {
+        env: command.env,
         ...(deadline && { signal: deadline }),
       });
       if (result.status !== 0)
@@ -367,7 +542,10 @@ function gitProcess(
     if (!mode) return run();
     let key: string;
     try {
-      key = repositoryKey(checkout, pinned ? env : process.env);
+      key = repositoryKey(
+        checkout,
+        pinned ? pinnedGitEnvironment() : process.env,
+      );
     } catch (error) {
       return Promise.reject(error);
     }
@@ -458,14 +636,10 @@ export async function removeWorktree(
 
 export function git(checkout: string, ...args: string[]): string {
   assertUnlocked(args);
-  return classifiedGit(args, () =>
-    command(
-      "git",
-      ["-C", checkout, ...args],
-      undefined,
-      ambientGitEnvironment(),
-    ),
-  );
+  return classifiedGit(args, () => {
+    const factory = factoryGit(checkout, args, false);
+    return command("git", factory.args, undefined, factory.env);
+  });
 }
 
 /** Keep inherited Git overrides from redirecting a pinned local tree operation. */
@@ -479,8 +653,9 @@ export function pinnedGit(checkout: string, ...args: string[]): string {
 export function pinnedGitRaw(checkout: string, ...args: string[]): Buffer {
   assertUnlocked(args);
   return classifiedGit(args, () => {
-    const result = spawnSync("git", ["-C", checkout, ...args], {
-      env: pinnedGitEnvironment(),
+    const factory = factoryGit(checkout, args, true);
+    const result = spawnSync("git", factory.args, {
+      env: factory.env,
       maxBuffer: Number.MAX_SAFE_INTEGER,
     });
     if (result.error) throw result.error;
@@ -723,11 +898,18 @@ export async function subprocessAsync(
   });
   child.stdin?.end(input);
   let error: Error | undefined;
+  // `close` waits for the output pipes, which a leftover descendant may hold
+  // open; the grace period starts when the command itself exits.
+  const closed = new Promise<number | null>((resolve) =>
+    child.on("close", resolve),
+  );
   const status = await new Promise<number | null>((resolve) => {
     child.on("error", (cause) => {
       error = cause;
     });
-    child.on("close", resolve);
+    child.on("exit", resolve);
+    // A command that never started emits close without exit.
+    void closed.then(resolve);
   });
   signal?.removeEventListener("abort", cancel);
   if (aborted && child.pid) {
@@ -760,6 +942,20 @@ export async function subprocessAsync(
         { cause: stopError },
       );
     }
+  }
+  // The group is gone, and with it every copy of the output pipes it held. A
+  // process that left the group can still hold them: stop reading then.
+  let timer: NodeJS.Timeout | undefined;
+  const drained = await Promise.race([
+    closed.then(() => true),
+    new Promise<false>((resolve) => {
+      timer = setTimeout(resolve, 1_000, false);
+    }),
+  ]);
+  clearTimeout(timer);
+  if (!drained) {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
   }
   if (owned) scope?.observe?.(owned, true);
   if (aborted)
@@ -797,4 +993,12 @@ export function pinnedGitAsync(
   ...args: string[]
 ): Promise<string> {
   return gitProcess(checkout, args, true);
+}
+
+/** pinnedGitAsync whose pathspecs may use magic, such as `:(exclude)`. */
+export function pinnedGitMagicAsync(
+  checkout: string,
+  ...args: string[]
+): Promise<string> {
+  return gitProcess(checkout, args, true, { GIT_LITERAL_PATHSPECS: "0" });
 }

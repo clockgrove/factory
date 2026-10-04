@@ -48,12 +48,11 @@ import {
 } from "../media.js";
 import {
   addWorktree,
-  commandAsync,
   hasUnresolvedSubprocesses,
   linuxProcessIdentity,
   pinnedGit,
   pinnedGitAsync,
-  pinnedGitEnvironment,
+  pinnedGitMagicAsync,
   processGroupExists,
   removeWorktree,
   sanitizedWorkerEnvironment,
@@ -435,20 +434,16 @@ export async function collectWorktreeResult(
     worktree,
     assets,
   );
+  // The private discovery file is never staged, so its bytes never reach
+  // the object database.
   if (discovery)
-    await commandAsync(
-      "git",
-      [
-        "-C",
-        worktree,
-        "add",
-        "-A",
-        "--",
-        ".",
-        ":(exclude,literal).factory-discovery.json",
-      ],
-      undefined,
-      { ...pinnedGitEnvironment(), GIT_LITERAL_PATHSPECS: "0" },
+    await pinnedGitMagicAsync(
+      worktree,
+      "add",
+      "-A",
+      "--",
+      ".",
+      ":(exclude,literal).factory-discovery.json",
     );
   else await pinnedGitAsync(worktree, "add", "-A");
   if (assetDestinations.length)

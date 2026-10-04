@@ -21,6 +21,13 @@
 // - Lists paginate (per_page default 30, max 100) with Link headers, and the
 //   issues list includes pull requests. A 422 carries one errors entry.
 // - Every REST response carries x-ratelimit-* headers.
+// - PUT /pulls/{n}/update-branch merges the base into the head branch: 202,
+//   or 422 for a stale expected_head_sha, a closed PR, a conflict or a head
+//   that already contains the base. Under strict protection (`strict`), a PR
+//   whose head lacks the base tip reads BEHIND.
+// - A deleted issue (`deleteIssue`) answers 410 and leaves every list.
+// - With `appToken`, GET /user is 403 (an App installation token has no user)
+//   and what Factory creates is authored by the App's bot login.
 // - Unknown routes are 404 and recorded as `unhandled`.
 //
 // Modes: read-after-write lag per endpoint, fault rules on the Nth matching
@@ -74,6 +81,7 @@ const ROUTES = [
   ["GET", "/pulls/:number", "getPull"],
   ["PUT", "/pulls/:number/merge", "mergePull"],
   ["PUT", "/pulls/:number/merge-async", "mergeAsync"],
+  ["PUT", "/pulls/:number/update-branch", "updateBranch"],
   ["GET", "/pulls/:number/merge-async/:uuid", "mergeAsyncStatus"],
   ["GET", "/commits/:sha/check-runs", "checkRuns"],
   ["GET", "/commits/:sha/status", "combinedStatus"],
@@ -238,6 +246,10 @@ export class GitHubHttpFake {
    * @param {number} [options.asyncMergePolls] merge-async status polls before
    *   the merge lands (0: lands with the PUT, reported on the first poll)
    * @param {string[]} [options.mergeMethods]
+   * @param {boolean} [options.strict] required checks are strict: a PR
+   *   must contain the base tip before it merges (BEHIND otherwise)
+   * @param {boolean} [options.appToken] the token is an App installation
+   *   token: GET /user is 403 and Factory's objects carry the bot login
    * @param {(entry: object) => void} [options.onCrash] kills the controller
    */
   constructor(options) {
@@ -246,6 +258,10 @@ export class GitHubHttpFake {
     this.origin = options.origin;
     this.defaultBranch = options.defaultBranch ?? "main";
     this.options = options;
+    /** Who authors what the token creates: the owner, or the App's bot. */
+    this.author = options.appToken
+      ? { login: `${this.name}-factory[bot]`, id: 2, type: "Bot" }
+      : { login: this.owner, id: 1, type: "User" };
     this.lag = (options.lag ?? []).map((rule) => ({ ...rule, served: 0 }));
     this.onCrash = options.onCrash;
     this.rules = [];
@@ -408,6 +424,11 @@ export class GitHubHttpFake {
     const issue = this.state.issues[number];
     issue.body = body;
     issue.updated_at = this.tick(this.state);
+  }
+
+  /** A maintainer deletes an issue: reads answer 410 and lists omit it. */
+  deleteIssue(number) {
+    this.state.issues[number].deleted = true;
   }
 
   openForeignIssue(title = "Unrelated issue", body = "Not a Factory issue") {
@@ -693,7 +714,7 @@ export class GitHubHttpFake {
       state_reason: issue.state_reason ?? null,
       title: issue.title,
       body: issue.body ?? null,
-      user: { login: this.owner, id: 1, type: "User" },
+      user: issue.user,
       labels: issue.labels.map((name) => this.labelJson(s, name)),
       locked: false,
       comments: (s.comments[number] ?? []).length,
@@ -733,7 +754,7 @@ export class GitHubHttpFake {
       locked: false,
       title: issue.title,
       body: issue.body ?? null,
-      user: { login: this.owner },
+      user: { login: this.author.login },
       created_at: issue.created_at,
       updated_at: issue.updated_at,
       closed_at: issue.closed_at ?? null,
@@ -769,7 +790,7 @@ export class GitHubHttpFake {
     };
   }
 
-  createIssueRecord(s, { title, body, labels = [] }, pull) {
+  createIssueRecord(s, { title, body, labels = [], user }, pull) {
     const number = s.nextNumber++;
     const now = this.tick(s);
     for (const name of labels) this.ensureLabel(s, name);
@@ -783,6 +804,7 @@ export class GitHubHttpFake {
       created_at: now,
       updated_at: now,
       pull: Boolean(pull),
+      user: user ?? { login: this.owner, id: 1, type: "User" },
     };
     s.timeline[number] = [];
     if (pull) s.pulls[number] = pull;
@@ -811,6 +833,7 @@ export class GitHubHttpFake {
   requireIssue(s, number) {
     const issue = s.issues[Number(number)];
     if (!issue) throw new HttpError(404, "Not Found");
+    if (issue.deleted) throw new HttpError(410, "This issue was deleted");
     return issue;
   }
 
@@ -847,6 +870,68 @@ export class GitHubHttpFake {
         this.event(this.state, pull.number, "head_ref_force_pushed");
       }
     }
+  }
+
+  async isAncestor(ancestor, descendant) {
+    const result = await gitStatus(
+      this.origin,
+      "merge-base",
+      "--is-ancestor",
+      ancestor,
+      descendant,
+    );
+    return result.status === 0;
+  }
+
+  /**
+   * Update a PR's branch with its base, like the "Update branch" button: a
+   * merge commit of the base tip into the head, guarded by the head the
+   * caller expects.
+   */
+  async updateBranch(s, { params, body }) {
+    const number = Number(params.number);
+    const pull = s.pulls[number];
+    if (!pull) throw new HttpError(404, "Not Found");
+    if (s.issues[number].state !== "open" || pull.merged_at)
+      throw validation("Pull request is not open");
+    if (
+      body?.expected_head_sha !== undefined &&
+      body.expected_head_sha !== pull.head.sha
+    )
+      throw validation("expected head sha didn't match current head ref.");
+    const refs = await this.refs();
+    const base = refs.get(pull.base.ref);
+    if (await this.isAncestor(base, pull.head.sha))
+      throw validation("There are no new commits on the base branch.");
+    const merged = await this.conflicts(pull.head.sha, base);
+    if (!merged) throw validation("merge conflict between base and head");
+    const commit = await git(
+      this.origin,
+      "commit-tree",
+      merged.tree,
+      "-p",
+      pull.head.sha,
+      "-p",
+      base,
+      "-m",
+      `Merge branch '${pull.base.ref}' into ${pull.head.ref}`,
+    );
+    await git(
+      this.origin,
+      "update-ref",
+      `refs/heads/${pull.head.ref}`,
+      commit,
+      pull.head.sha,
+    );
+    pull.head.sha = commit;
+    this.event(s, number, "head_ref_force_pushed");
+    return {
+      status: 202,
+      data: {
+        message: "Updating pull request branch.",
+        url: `https://github.com/${this.repository}/pull/${number}`,
+      },
+    };
   }
 
   async conflicts(base, head) {
@@ -940,16 +1025,14 @@ export class GitHubHttpFake {
 
   /** The token's user, who authors everything Factory creates here. */
   viewer() {
-    return {
-      status: 200,
-      data: { login: this.owner, id: 1, type: "User" },
-    };
+    if (this.options.appToken)
+      throw new HttpError(403, "Resource not accessible by integration");
+    return { status: 200, data: this.author };
   }
 
   listIssues(s, { query }) {
     const state = query.get("state") ?? "open";
     const labels = query.get("labels")?.split(",").filter(Boolean) ?? [];
-    // Every issue here is authored by the owner.
     const creator = query.get("creator");
     const direction = query.get("direction") ?? "desc";
     const sort = query.get("sort") ?? "created";
@@ -964,10 +1047,11 @@ export class GitHubHttpFake {
         labels.every((name) => s.issues[number].labels.includes(name)),
       )
       .filter(
-        () =>
+        (number) =>
           creator === null ||
-          creator.toLowerCase() === this.owner.toLowerCase(),
+          creator.toLowerCase() === s.issues[number].user.login.toLowerCase(),
       )
+      .filter((number) => !s.issues[number].deleted)
       .sort((a, b) => (direction === "asc" ? a - b : b - a));
     const page = this.page(query, issues, `/repos/${this.repository}/issues`);
     return {
@@ -984,6 +1068,7 @@ export class GitHubHttpFake {
     if (typeof body.body === "string" && body.body.length > 65536)
       throw validation("body is too long (maximum is 65536 characters)");
     const number = this.createIssueRecord(s, {
+      user: this.author,
       title: body.title,
       body: body.body,
       labels: (body.labels ?? []).map((label) =>
@@ -1049,7 +1134,7 @@ export class GitHubHttpFake {
       id: s.nextId++,
       node_id: `IC_${s.nextId}`,
       body: body.body,
-      user: { login: this.owner },
+      user: { login: this.author.login },
       html_url: `https://github.com/${this.repository}/issues/${number}#issuecomment-${s.nextId}`,
       issue_url: `${API}/repos/${this.repository}/issues/${number}`,
       created_at: this.tick(s),
@@ -1278,7 +1363,7 @@ export class GitHubHttpFake {
     const number = s.nextNumber;
     this.createIssueRecord(
       s,
-      { title: body.title, body: body.body },
+      { title: body.title, body: body.body, user: this.author },
       {
         number,
         head: { ref: headRef, sha: headSha },
@@ -1540,7 +1625,9 @@ export class GitHubHttpFake {
             ruleset_source: this.repository,
             ruleset_id: 1,
             parameters: {
-              strict_required_status_checks_policy: false,
+              strict_required_status_checks_policy: Boolean(
+                this.options.strict,
+              ),
               required_status_checks: checks.map((context) => ({ context })),
             },
           },
@@ -1563,7 +1650,7 @@ export class GitHubHttpFake {
       status: 200,
       data: {
         url: `${API}/repos/${this.repository}/branches/${params.branch}/protection/required_status_checks`,
-        strict: false,
+        strict: Boolean(this.options.strict),
         contexts: checks,
         checks: checks.map((context) => ({ context, app_id: null })),
       },
@@ -1627,7 +1714,10 @@ export class GitHubHttpFake {
         const base = refs.get(pull.base.ref);
         status =
           base && (await this.conflicts(base, pull.head.sha))
-            ? "CLEAN"
+            ? this.options.strict &&
+              !(await this.isAncestor(base, pull.head.sha))
+              ? "BEHIND"
+              : "CLEAN"
             : "DIRTY";
       }
     }

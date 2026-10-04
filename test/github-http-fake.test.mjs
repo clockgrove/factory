@@ -8,11 +8,8 @@ import { promisify } from "node:util";
 import { Octokit } from "@octokit/core";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
-import {
-  GitHubClient,
-  GitHubOutcomeUnknown,
-  GitHubRequestError,
-} from "../dist/github-client.js";
+import { faultOf } from "../dist/fault.js";
+import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { RealGitHubGateway } from "../dist/github.js";
 import {
   ENDPOINTS,
@@ -28,6 +25,11 @@ import { createTarget, git } from "./support/integration-fixture.mjs";
 
 const repo = "/repos/{owner}/{repo}";
 const run = promisify(execFile);
+/** A mutation that may have taken effect: transient, outcome unknown. */
+const unknownOutcome = (error) => {
+  const fault = faultOf(error);
+  return fault.kind === "transient" && fault.outcomeUnknown === true;
+};
 
 const commit = (checkout, message) =>
   git(
@@ -188,7 +190,7 @@ test("a dropped response applies the effect and the client reports an unknown ou
   fake.inject({ match: `POST ${repo}/issues`, kind: "drop" });
   await assert.rejects(
     client.request("POST", "repos/example/target/issues", { title: "Lost" }),
-    (error) => error instanceof GitHubOutcomeUnknown,
+    unknownOutcome,
   );
   assert.equal(fake.effects(`POST ${repo}/issues`).length, 1);
   assert.equal(
@@ -213,7 +215,7 @@ test("an unavailable burst and rate limits are answered without an effect", asyn
   for (let attempt = 0; attempt < 2; attempt++)
     await assert.rejects(
       client.request("POST", "repos/example/target/issues", { title: "X" }),
-      (error) => error instanceof GitHubOutcomeUnknown,
+      unknownOutcome,
     );
   await assert.rejects(
     client.request("POST", "repos/example/target/issues", { title: "X" }),
@@ -262,7 +264,7 @@ test("regular delivery finds the PR whose creation response was lost instead of 
   const previousGit = process.env.FACTORY_FAKE_GITHUB_GIT;
   Object.assign(process.env, gitTransportEnvironment(fake.gitUrl));
   try {
-    await assert.rejects(delivery.publish(request), GitHubOutcomeUnknown);
+    await assert.rejects(delivery.publish(request), unknownOutcome);
     const published = await delivery.publish(request);
     assert.equal(published.headSha, head);
   } finally {
@@ -423,4 +425,100 @@ test("every response carries rate-limit headers; a duplicate PR is one 422 error
   assert.equal(limited.status, 403);
   assert.equal(limited.headers.get("x-ratelimit-remaining"), "4999");
   assert.ok(limited.headers.get("x-ratelimit-reset"));
+});
+
+test("update-branch merges the base into the head, guarded by the expected head; strict protection reads BEHIND", async (t) => {
+  const { fake, client, pushBranch } = await setup(t, {
+    strict: true,
+    protectionChecks: () => [],
+  });
+  const head = await pushBranch("feature");
+  const pull = await client.request("POST", "repos/example/target/pulls", {
+    head: "feature",
+    base: "main",
+    title: "Feature",
+  });
+  const readiness = () =>
+    client.pullRequestReadiness("example/target", pull.number);
+  assert.equal((await readiness()).mergeStateStatus, "CLEAN");
+  await assert.rejects(
+    client.request(
+      "PUT",
+      `repos/example/target/pulls/${pull.number}/update-branch`,
+      { expected_head_sha: head },
+    ),
+    (error) => error instanceof GitHubRequestError && error.status === 422,
+    "nothing new on the base",
+  );
+  const base = await fake.pushForeignCommit();
+  assert.equal((await readiness()).mergeStateStatus, "BEHIND");
+  await assert.rejects(
+    client.request(
+      "PUT",
+      `repos/example/target/pulls/${pull.number}/update-branch`,
+      { expected_head_sha: "f".repeat(40) },
+    ),
+    (error) => error instanceof GitHubRequestError && error.status === 422,
+    "a stale expected head",
+  );
+  const updated = await client.request(
+    "PUT",
+    `repos/example/target/pulls/${pull.number}/update-branch`,
+    { expected_head_sha: head },
+  );
+  assert.match(updated.message, /Updating/);
+  const after = await client.request(
+    "GET",
+    `repos/example/target/pulls/${pull.number}`,
+  );
+  assert.notEqual(after.head.sha, head);
+  assert.deepEqual(
+    git(fake.origin, "rev-list", "--parents", "-n", "1", after.head.sha)
+      .split(" ")
+      .slice(1),
+    [head, base],
+  );
+  assert.equal((await readiness()).mergeStateStatus, "CLEAN");
+  const protection = await client.request(
+    "GET",
+    "repos/example/target/branches/main/protection/required_status_checks",
+  );
+  assert.equal(protection.strict, true);
+});
+
+test("a deleted issue answers 410 and leaves the lists", async (t) => {
+  const { fake, client } = await setup(t);
+  const created = await client.request("POST", "repos/example/target/issues", {
+    title: "Doomed",
+  });
+  fake.deleteIssue(created.number);
+  await assert.rejects(
+    client.request("GET", `repos/example/target/issues/${created.number}`),
+    (error) => error instanceof GitHubRequestError && error.status === 410,
+  );
+  const listed = await client.paginate("repos/example/target/issues?state=all");
+  assert.deepEqual(
+    listed.map((issue) => issue.number),
+    [1],
+  );
+});
+
+test("an App token has no user; what it creates carries the bot login", async (t) => {
+  const { fake, client } = await setup(t, { appToken: true });
+  await assert.rejects(
+    client.request("GET", "user"),
+    (error) => error instanceof GitHubRequestError && error.status === 403,
+  );
+  const created = await client.request("POST", "repos/example/target/issues", {
+    title: "Work",
+  });
+  assert.equal(created.user.login, fake.author.login);
+  assert.match(created.user.login, /\[bot\]$/);
+  const mine = await client.paginate(
+    `repos/example/target/issues?state=all&creator=${encodeURIComponent(created.user.login)}`,
+  );
+  assert.deepEqual(
+    mine.map((issue) => issue.number),
+    [created.number],
+  );
 });

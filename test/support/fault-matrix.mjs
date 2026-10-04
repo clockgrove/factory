@@ -44,26 +44,35 @@ export function scenarioConcurrency() {
 
 const KINDS = ["crash-before", "crash-after", "lost", "unavailable"];
 const MERGE_ASYNC = "PUT /repos/{owner}/{repo}/pulls/{number}/merge-async";
+const MERGE_ASYNC_STATUS =
+  "GET /repos/{owner}/{repo}/pulls/{number}/merge-async/{uuid}";
 // A reset before the effect: the client cannot tell it from a lost response.
 const MUTATION_KINDS = [...KINDS, "reset"];
 const PAID = new Set(["crash-after", "lost"]);
 
 /**
  * Whether the log entry at `index` is a merge-async 409 that directly
- * follows a dropped or crashed merge-async on the same PR: after a lost
- * response, the 409 naming the pending request is the only way to learn
- * its uuid.
+ * follows a dropped or crashed merge-async on the same PR, and that Factory
+ * then used: after a lost response, the 409 naming the pending request is
+ * the only way to learn its uuid, so a status poll of that PR's merge
+ * request must follow. Any other 409 is Factory's request refused.
  */
 function resumesLostMerge(log, index) {
   const entry = log[index];
   if (entry.endpoint !== MERGE_ASYNC || entry.status !== 409) return false;
   const previous = log
     .slice(0, index)
-    .findLast((other) => other.endpoint === MERGE_ASYNC);
-  return (
-    previous?.path === entry.path &&
-    ["dropped", "crash"].includes(previous.status)
-  );
+    .findLast(
+      (other) => other.endpoint === MERGE_ASYNC && other.path === entry.path,
+    );
+  const polled = log
+    .slice(index + 1)
+    .some(
+      (other) =>
+        other.endpoint === MERGE_ASYNC_STATUS &&
+        other.path.startsWith(`${entry.path.split("?")[0]}/`),
+    );
+  return ["dropped", "crash"].includes(previous?.status) && polled;
 }
 
 /** The run every case is compared with, once per process and delivery. */
@@ -316,7 +325,10 @@ export function assertFaultsFired(result) {
  * merge commit an ancestor of it, and the reviewed dependency and sub-issue
  * topology.
  */
-export async function assertEndState(result, { foreignIssues = 0 } = {}) {
+export async function assertEndState(
+  result,
+  { foreignIssues = 0, extraMutations = [] } = {},
+) {
   const { fake, items, repository } = result;
   const reference = await referenceRun(result.delivery);
   const context = () =>
@@ -362,7 +374,7 @@ export async function assertEndState(result, { foreignIssues = 0 } = {}) {
   }
   assert.deepEqual(
     effectEndpoints(result),
-    effectEndpoints(reference),
+    [...new Set([...effectEndpoints(reference), ...extraMutations])].sort(),
     "kinds of mutation",
   );
   assert.deepEqual(

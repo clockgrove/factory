@@ -306,6 +306,37 @@ scenarios.push({
   refuses: /does not contain the merge/,
 });
 
+// An App installation token has no user: GET /user is 403, and the issues
+// and PRs Factory creates are authored by the App's bot. Ownership is the
+// author login persisted at the first create, not the viewer.
+scenarios.push({
+  name: "an App installation token without a user",
+  deliveries: BOTH,
+  fake: { appToken: true },
+});
+
+// A maintainer deleted the newest issue: the number probe past the newest
+// listed issue reads 410, which is a gap like 404.
+scenarios.push({
+  name: "a deleted issue right after the Objective",
+  deliveries: BOTH,
+  earlierIssues: 1,
+  beforeRun: (fake, index) => {
+    if (index === 0) fake.deleteIssue(2);
+  },
+});
+
+// Strict required checks: once the default branch moves, alpha's open PR is
+// BEHIND. Factory updates the branch with the head it expects instead of
+// waiting forever, then merges.
+scenarios.push({
+  name: "the default branch moves under strict protection while alpha's PR is open",
+  deliveries: ["regular"],
+  fake: { strict: true, protectionChecks: () => [] },
+  http: [{ match: CREATE_PULL, kind: "after", run: pushForeign }],
+  extraMutations: [`PUT ${repo}/pulls/{number}/update-branch`],
+});
+
 // Factory integrates with merge commits (its evidence binds the delivered
 // head as the second parent): a repository that disallows them waits for
 // the configuration fix before any merge is sent.
@@ -358,6 +389,7 @@ describe("GitHub consistency, rate limits and other actors", {
           foreignIssues: scenario.foreignIssues ?? scenario.earlierIssues ?? 0,
           refuses: scenario.refuses,
           unsent: scenario.unsent ?? [],
+          extraMutations: scenario.extraMutations ?? [],
         },
         known,
       );

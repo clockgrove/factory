@@ -769,7 +769,12 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
       assert.equal(calls, 0, fault);
       assert.equal(state.pendingAmendment.phase, "ready", fault);
       assert.deepEqual(state.graph, second.graph);
-      assert.equal(consumption(state).planningRevisions, 1);
+      // No charge: the predecessor decision comes before the amend charge.
+      assert.equal(
+        consumption(state).planningRevisions,
+        consumption(second).planningRevisions,
+        fault,
+      );
       saveState(statePath(f.config.repository, 1), first);
       f.issues.get(1).body = body(1);
       f.dependencies.set(2, [1]);

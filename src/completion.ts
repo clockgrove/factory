@@ -49,7 +49,12 @@ export function assertTerminalEligibility(state: FactoryState): void {
     state.cancelledAt ||
     state.error ||
     state.finalAcceptancePending ||
-    amendmentBlocksDispatch(state)
+    amendmentBlocksDispatch(state) ||
+    // An unsealed Objective needs every controller subprocess stopped. After
+    // the seal, recorded processes (a crash between comment and close) are
+    // orphan-cleanup bookkeeping, not evidence: the restart closes it.
+    (!state.finalAcceptance &&
+      (state.coordinator?.cancelError || state.coordinator?.processes?.length))
   )
     throw new Error("Objective terminal eligibility is unresolved");
   for (const work of Object.values(state.work)) {
@@ -144,11 +149,6 @@ export function sealFinalAcceptance(state: FactoryState): void {
     assertFinalAcceptance(state);
     return;
   }
-  // The seal binds stopped controller processes at sealing time. Processes
-  // recorded after it are orphan-cleanup bookkeeping, not evidence, so only
-  // sealing checks them.
-  if (state.coordinator?.cancelError || state.coordinator?.processes?.length)
-    throw new Error("Objective terminal eligibility is unresolved");
   state.finalAcceptance = {
     candidateBasis: objectiveCandidate(state)!.basis,
     sealedAt: new Date().toISOString(),

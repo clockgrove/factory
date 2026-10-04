@@ -18,6 +18,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { stateRoot, validateCapacity } from "./config.js";
 import { linuxProcessIdentity } from "./process.js";
 import { assertRepeats, assertWait } from "./fault.js";
+import { assertPlanningExecutionBounds } from "./contracts.js";
 import {
   assertCoordinator,
   type ContinuationState,
@@ -180,6 +181,10 @@ function parsePreparation(
       value.plan.review.status !== "needs-human")
   )
     throw new Error("Invalid preparation plan acceptability");
+  // Factory derives execution bounds from configuration; an authored shape it
+  // never writes is refused when parsed, not judged as a plan.
+  if (value.plan?.executionBounds !== undefined)
+    assertPlanningExecutionBounds(value.plan.executionBounds);
   assertCoordinator(value.coordinator);
   validateCapacity(value.capacity);
   assertRepairLedger(value);

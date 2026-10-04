@@ -9,6 +9,7 @@ import { CompletedModelInvocationError } from "../dist/contracts.js";
 import { readContinuation, saveState, statePath } from "../dist/state-store.js";
 import { shortPlanDigest } from "../dist/status-summary.js";
 import { withCoverage } from "./support/coverage.mjs";
+import { writeStateFile } from "./support/state-file.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
 import {
   createTarget,
@@ -412,7 +413,8 @@ test("controller planning bounds are observed from configuration and refuse reha
         configuredConcurrency: config.execution.concurrency,
         authorizedMaxConcurrency: 3,
       };
-      saveState(path, invalid);
+      // Written as an authored file: Factory refuses to save this shape.
+      writeStateFile(path, invalid);
       await assert.rejects(
         application.runObjective(1),
         /Invalid controller planning execution bounds/,

@@ -39,6 +39,7 @@ import { phaseAdmission } from "../phase-admission.js";
 import { readyItems } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
 import {
+  awaitsOperator,
   clearWait,
   repeatKey,
   setWait,
@@ -79,6 +80,8 @@ export async function runRegularGraph(args: {
   signal?: AbortSignal;
   /** The owner's pause, drain or handoff signal, passed to every step. */
   pause?: AbortSignal;
+  /** Settles when the owner is woken (an operator's live control action). */
+  woken?: () => Promise<void>;
 }): Promise<boolean> {
   const {
     config,
@@ -669,6 +672,9 @@ export async function runRegularGraph(args: {
         if (error instanceof AuthenticationRequiredError)
           work.authentication = error.authentication;
         if (!work.execution) phases.release(item.id);
+        // The operator's live `factory retry` clears the wait: the item
+        // then resumes in this pass.
+        if (awaitsOperator(work.wait)) parked.add(item.id);
         save();
         reportCancelled(error, state, item.id, args.diagnostics);
         return;
@@ -720,63 +726,40 @@ export async function runRegularGraph(args: {
       throw error;
     }
   };
-  for (const item of graph.items) {
+  /** Items stopped in place for an operator's answer. */
+  const parked = new Set<string>();
+  const dispatch = (item: WorkItem, itemBase: string): void => {
+    const promise = execute(item, itemBase).finally(() =>
+      active.delete(item.id),
+    );
+    void promise.catch(() => undefined);
+    active.set(item.id, promise);
+  };
+  /** Drive a running or published item on from where its state stands. */
+  const resume = (item: WorkItem): void => {
     const work = state.work[item.id]!;
-    if (work.status === "published") {
-      const promise = execute(item, work.baseSha!).finally(() =>
-        active.delete(item.id),
-      );
-      void promise.catch(() => undefined);
-      active.set(item.id, promise);
-      continue;
-    }
-    if (work.status !== "running") continue;
-    if (item.kind === "qa" || item.kind === "aggregate") {
-      const promise = execute(item, state.integratedSha ?? baseSha).finally(
-        () => active.delete(item.id),
-      );
-      void promise.catch(() => undefined);
-      active.set(item.id, promise);
-      continue;
-    }
-    if (
-      (work.step === "validate" || work.step === "deliver") &&
-      work.baseSha &&
-      work.changeRef &&
-      work.treeSha
-    ) {
-      const promise = execute(item, work.baseSha).finally(() =>
-        active.delete(item.id),
-      );
-      void promise.catch(() => undefined);
-      active.set(item.id, promise);
-      continue;
-    }
-    if (
-      work.step === "approve-asset" &&
-      work.selectedAssetSet &&
-      work.baseSha
-    ) {
-      const promise = execute(item, work.baseSha).finally(() =>
-        active.delete(item.id),
-      );
-      void promise.catch(() => undefined);
-      active.set(item.id, promise);
-      continue;
-    }
+    if (work.status === "published") dispatch(item, work.baseSha!);
+    else if (work.status !== "running") return;
+    else if (item.kind === "qa" || item.kind === "aggregate")
+      dispatch(item, state.integratedSha ?? baseSha);
+    else if (
+      ((work.step === "validate" || work.step === "deliver") &&
+        work.baseSha &&
+        work.changeRef &&
+        work.treeSha) ||
+      (work.step === "approve-asset" && work.selectedAssetSet && work.baseSha)
+    )
+      dispatch(item, work.baseSha!);
     // An execute step resumes with or without a recorded handle: the attempt
     // id was saved before start, and the driver adopts or stops it.
-    if (work.step !== "execute" || !work.attempt || !work.baseSha) {
+    else if (work.step === "execute" && work.attempt && work.baseSha)
+      dispatch(item, work.baseSha);
+    else
       throw new Error(
         `Work Item ${item.id} has ambiguous active state at ${work.step ?? "unknown"}; operator direction required`,
       );
-    }
-    const promise = execute(item, work.baseSha).finally(() => {
-      active.delete(item.id);
-    });
-    void promise.catch(() => undefined);
-    active.set(item.id, promise);
-  }
+  };
+  for (const item of graph.items) resume(item);
   while (graph.items.some((item) => state.work[item.id]?.status !== "done")) {
     if (failure) throw failure;
     if (stopped()) throw await cancelRun();
@@ -850,12 +833,17 @@ export async function runRegularGraph(args: {
       work.executionBaseSha = itemBase;
       work.integratedShaAtStart = state.integratedSha ?? null;
       save();
-      const promise = execute(item, itemBase).finally(() => {
-        active.delete(item.id);
-      });
-      void promise.catch(() => undefined);
-      active.set(item.id, promise);
+      dispatch(item, itemBase);
     }
+    // An item the operator answered while the run is live (`factory
+    // retry` cleared its wait) resumes where it stopped.
+    if (!stopped() && !args.paused?.() && !args.amendmentPending?.())
+      for (const id of parked) {
+        if (active.has(id) || awaitsOperator(state.work[id]?.wait)) continue;
+        parked.delete(id);
+        const item = graph.items.find((entry) => entry.id === id);
+        if (item) resume(item);
+      }
     if (
       !active.size &&
       graph.items.some((item) => state.work[item.id]?.status === "waiting")
@@ -864,7 +852,11 @@ export async function runRegularGraph(args: {
     if (!active.size && args.paused?.()) return true;
     if (failure) throw failure;
     if (!active.size) return true;
-    await Promise.race([...active.values(), phases.changed()]);
+    await Promise.race([
+      ...active.values(),
+      phases.changed(),
+      ...(args.woken ? [args.woken()] : []),
+    ]);
   }
   await Promise.all(active.values());
   if (failure) throw failure;

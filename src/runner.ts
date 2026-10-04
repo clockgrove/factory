@@ -374,6 +374,11 @@ interface LocalOwner {
   deadlineAt?: string;
   cancellation?: Promise<void>;
   waitForWake: () => Promise<void>;
+  /**
+   * Settles at the next wake without consuming it, so a running pass sees
+   * the operator's live control action (a `factory retry`) at once.
+   */
+  woken: () => Promise<void>;
   /** The pass's observing save: emits each item's state change, terminal ones included. */
   save?: (state: FactoryState) => void;
 }
@@ -583,12 +588,23 @@ export async function runObjective(
       phase: "idle",
       phaseStartedAt: new Date().toISOString(),
     };
+  let woke: { promise: Promise<void>; resolve: () => void } | undefined;
   const owner: LocalOwner = {
     changed: false,
     lock,
     abort: new AbortController(),
     pause: new AbortController(),
     waitForWake: async () => undefined,
+    woken: () => {
+      if (!woke) {
+        let resolve!: () => void;
+        const promise = new Promise<void>((settle) => {
+          resolve = settle;
+        });
+        woke = { promise, resolve };
+      }
+      return woke.promise;
+    },
     snapshot,
     deadlineAt: options.deadlineAt,
   };
@@ -598,6 +614,8 @@ export async function runObjective(
     owner.changed = true;
     for (const resolve of waiters) resolve();
     waiters.clear();
+    woke?.resolve();
+    woke = undefined;
   };
   /** A handoff: stop at the next safe point and release ownership. */
   const releaseOwnership = () => {
@@ -1076,6 +1094,31 @@ async function runObjectivePass(
       );
     const observeObjective = (state = owner.snapshot) =>
       objectiveStep(state, "observe", () => github.objective(objective));
+    /**
+     * The Objective issue changed outside Factory since planning: the
+     * operator's decision, whether the run or a resume sees it first.
+     */
+    const changedOutside = (
+      issue: { state?: string; body: string },
+      state: FactoryState,
+    ): Error | undefined => {
+      const changed =
+        issue.state === "closed" && !state.finalValidation?.passed
+          ? "The Objective issue was closed"
+          : state.objectiveBodyDigest &&
+              createHash("sha256").update(issue.body).digest("hex") !==
+                state.objectiveBodyDigest
+            ? "The Objective issue body changed"
+            : undefined;
+      return changed
+        ? attachFault(
+            new Error(`${changed}; operator direction required`),
+            decision(
+              `${changed} outside Factory. Restore it, then factory retry --objective ${objective}; or factory cancel --objective ${objective}`,
+            ),
+          )
+        : undefined;
+    };
     const issue = await observeObjective();
     assertObjectiveCriteria(issue.body);
     const installationConfigDigest = factoryConfigDigest(config);
@@ -1089,7 +1132,7 @@ async function runObjectivePass(
     let preparation =
       continuation?.schemaVersion === 8 ? continuation : undefined;
     let state = continuation?.schemaVersion === 7 ? continuation : undefined;
-    if (issue.state === "closed" && !state?.finalValidation?.passed)
+    if (issue.state === "closed" && !state)
       throw new Error(
         "Objective issue is confirmed closed; operator direction required",
       );
@@ -1121,14 +1164,13 @@ async function runObjectivePass(
         throw new Error(
           "Workspace package authority requires a digest-bound Objective; create a new plan",
         );
-      if (
-        state.objectiveBodyDigest &&
-        state.objectiveBodyDigest !==
-          createHash("sha256").update(issue.body).digest("hex")
-      )
-        throw new Error(
-          "Objective issue body changed; operator direction required",
-        );
+      // A decision, as when delivery observes the change: the observe
+      // step saves the question, and `factory retry` asks it again.
+      const changed = changedOutside(issue, state);
+      if (changed)
+        await objectiveStep(state, "observe", async () => {
+          throw changed;
+        });
       stateDiagnostics = new StateDiagnostics(
         diagnostics,
         state,
@@ -1152,10 +1194,11 @@ async function runObjectivePass(
           "Factory: resuming the existing run from atomic state",
         );
         if (!state.finalAcceptance && state.objectiveClosure !== "complete") {
-          if (
-            (await fetchHead(config.checkout, await github.defaultBranch())) !==
-            objectiveCandidate(state)?.commitSha
-          )
+          // A remote read: transient faults repeat with backoff.
+          const head = await objectiveStep(state, "final-head", async () =>
+            fetchHead(config.checkout, await github.defaultBranch()),
+          );
+          if (head !== objectiveCandidate(state)?.commitSha)
             throw new Error(
               "Default branch changed before historical final acceptance could be sealed",
             );
@@ -1561,21 +1604,11 @@ async function runObjectivePass(
         state,
         "observe",
         async () => {
-          const refreshed = await github.objective(objective);
-          const changed =
-            refreshed.state === "closed"
-              ? "The Objective issue was closed"
-              : createHash("sha256").update(refreshed.body).digest("hex") !==
-                  state.objectiveBodyDigest
-                ? "The Objective issue body changed"
-                : undefined;
-          if (changed)
-            throw attachFault(
-              new Error(`${changed}; operator direction required`),
-              decision(
-                `${changed} outside Factory. Restore it, then factory retry --objective ${objective}; or factory cancel --objective ${objective}`,
-              ),
-            );
+          const changed = changedOutside(
+            await github.objective(objective),
+            state,
+          );
+          if (changed) throw changed;
         },
         false,
         false,
@@ -1633,6 +1666,7 @@ async function runObjectivePass(
         },
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
+        woken: owner.woken,
         diagnostics,
       });
       if (awaitingSelection) return state;
@@ -1762,62 +1796,75 @@ async function runObjectivePass(
           workspacePackageAdditions: workspacePackageAdditions(issue.body),
         },
       );
-      const commandEvidence = await validateTree(
-        config.checkout,
-        join(root, "final-validation"),
-        candidateCommitSha,
-        finalTree,
-        state.objectiveCommands ?? finalObjectiveCommands(issue.body),
-        (entry) =>
-          diagnostics.emit({
-            runId: state.runId,
-            operation: "objective-validation-command",
-            outcome: entry.passed ? "completed" : "failed",
-            durationMs: entry.durationMs,
-            metadata: { commandIndex: entry.index, exitCode: entry.exitCode },
-            detail: entry.output,
-          }),
-        (entry) =>
-          diagnostics.emitStream(
-            {
-              runId: state.runId,
-              operation: "objective-validation-output",
-              outcome: "observed",
-              metadata: { commandIndex: entry.index, stream: entry.stream },
-            },
-            entry.output,
-            entry.final,
-          ),
-        finalValidationLfsMembers(state),
-        contentStore,
-      );
-      const selectedAssets = graph.items.flatMap((item) => {
-        const work = state.work[item.id];
-        const set = work?.assets?.find(
-          (candidate) => candidate.id === work.selectedAssetSet,
-        );
-        return set ? [{ itemId: item.id, set }] : [];
-      });
-      const hydrationReceipt = selectedAssets.length
-        ? await diagnostics.span(
-            {
-              runId: state.runId,
-              operation: "media-hydration-verification",
-              metadata: {
-                integratedSha: state.integratedSha!,
-                treeSha: finalTree,
-              },
-            },
-            async () =>
-              verifyHydratedAssets({
-                checkout: config.checkout,
-                workRoot: join(root, "hydration"),
-                integratedSha: candidateCommitSha,
-                selections: selectedAssets,
+      // Validation and fresh-clone hydration read the remote: one step,
+      // repeatable from the top (a fresh worktree and clone per try), so a
+      // transient fault repeats with backoff instead of stopping the Objective.
+      const { commandEvidence, hydrationReceipt } = await objectiveStep(
+        state,
+        "final-validate",
+        async () => {
+          const commandEvidence = await validateTree(
+            config.checkout,
+            join(root, "final-validation"),
+            candidateCommitSha,
+            finalTree,
+            state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+            (entry) =>
+              diagnostics.emit({
+                runId: state.runId,
+                operation: "objective-validation-command",
+                outcome: entry.passed ? "completed" : "failed",
+                durationMs: entry.durationMs,
+                metadata: {
+                  commandIndex: entry.index,
+                  exitCode: entry.exitCode,
+                },
+                detail: entry.output,
               }),
-            (receipt) => ({ members: receipt?.members.length ?? 0 }),
-          )
-        : undefined;
+            (entry) =>
+              diagnostics.emitStream(
+                {
+                  runId: state.runId,
+                  operation: "objective-validation-output",
+                  outcome: "observed",
+                  metadata: { commandIndex: entry.index, stream: entry.stream },
+                },
+                entry.output,
+                entry.final,
+              ),
+            finalValidationLfsMembers(state),
+            contentStore,
+          );
+          const selectedAssets = graph.items.flatMap((item) => {
+            const work = state.work[item.id];
+            const set = work?.assets?.find(
+              (candidate) => candidate.id === work.selectedAssetSet,
+            );
+            return set ? [{ itemId: item.id, set }] : [];
+          });
+          const hydrationReceipt = selectedAssets.length
+            ? await diagnostics.span(
+                {
+                  runId: state.runId,
+                  operation: "media-hydration-verification",
+                  metadata: {
+                    integratedSha: state.integratedSha!,
+                    treeSha: finalTree,
+                  },
+                },
+                async () =>
+                  verifyHydratedAssets({
+                    checkout: config.checkout,
+                    workRoot: join(root, "hydration"),
+                    integratedSha: candidateCommitSha,
+                    selections: selectedAssets,
+                  }),
+                (receipt) => ({ members: receipt?.members.length ?? 0 }),
+              )
+            : undefined;
+          return { commandEvidence, hydrationReceipt };
+        },
+      );
       const acceptanceEvidence = hydrationReceipt
         ? { ...commandEvidence, hydrationReceipt }
         : commandEvidence;
@@ -1827,57 +1874,60 @@ async function runObjectivePass(
         candidateCommitSha,
         candidateTreeSha: finalTree,
       });
-      // A paid step: only the model call counts toward the bound. A lost
-      // answer is asked again, an invalid one again with its validation
-      // error, until the bound makes it a decision. A criterion the
-      // operator must judge comes back as the pending final acceptance.
+      // A paid step, like item review: the call and the decoding of its
+      // answer count toward the bound together, so a lost answer and an
+      // invalid one are both asked again (the invalid one with its
+      // validation error) until the bound makes it a decision. A criterion
+      // the operator must judge comes back as the pending final acceptance.
       let previousInvalid: string | undefined;
       const reviewFinal = () =>
         objectiveStep(
           state,
           "final-review",
           (context) =>
-            reviewOutcome({
-              beforeSubmit: stopIfCancelled,
-              model: paidModel(planningModel, context),
-              reviewPhase: "objective-review",
-              checkout: config.checkout,
-              baseSha: state.baseSha,
-              commit: candidateCommitSha,
-              evidence: acceptanceEvidence,
-              criteria: objectiveCriteria(issue.body),
-              sources: planningSources(
-                issue.body,
-                state.baseSha,
-                config.checkout,
-              ),
-              evidenceSources: [
-                ...objectiveEvidence.evidence,
-                ...(hydrationReceipt
-                  ? [
-                      {
-                        path: "Controller hydration receipt",
-                        content: JSON.stringify(hydrationReceipt),
-                      },
-                    ]
-                  : []),
-              ],
-              decisions: state.finalAcceptanceDecisions,
-              observations: objectiveEvidence.observations,
-              invocation: {
-                invocationId: randomUUID(),
-                phase: "objective-review",
-                ordinal: 0,
-                observe: diagnostics.modelObserver({
-                  scopeId: state.runId,
-                  runId: state.runId,
-                }),
-              },
-              ...(previousInvalid ? { previousInvalid } : {}),
-              onInvalid: (detail) => {
-                previousInvalid = detail;
-              },
-            }),
+            context.paid(() =>
+              reviewOutcome({
+                beforeSubmit: stopIfCancelled,
+                model: planningModel,
+                reviewPhase: "objective-review",
+                checkout: config.checkout,
+                baseSha: state.baseSha,
+                commit: candidateCommitSha,
+                evidence: acceptanceEvidence,
+                criteria: objectiveCriteria(issue.body),
+                sources: planningSources(
+                  issue.body,
+                  state.baseSha,
+                  config.checkout,
+                ),
+                evidenceSources: [
+                  ...objectiveEvidence.evidence,
+                  ...(hydrationReceipt
+                    ? [
+                        {
+                          path: "Controller hydration receipt",
+                          content: JSON.stringify(hydrationReceipt),
+                        },
+                      ]
+                    : []),
+                ],
+                decisions: state.finalAcceptanceDecisions,
+                observations: objectiveEvidence.observations,
+                invocation: {
+                  invocationId: randomUUID(),
+                  phase: "objective-review",
+                  ordinal: 0,
+                  observe: diagnostics.modelObserver({
+                    scopeId: state.runId,
+                    runId: state.runId,
+                  }),
+                },
+                ...(previousInvalid ? { previousInvalid } : {}),
+                onInvalid: (detail) => {
+                  previousInvalid = detail;
+                },
+              }),
+            ),
           true,
         );
       const reviewed = await diagnostics.span(

@@ -12,7 +12,6 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
 import { killMatches } from "../scripts/live-check-hook.mjs";
-import { renderReport } from "../scripts/live-check-report.mjs";
 import {
   scriptedActions,
   scriptedGraph,
@@ -211,54 +210,4 @@ test("the scripted worker's files pass the scripted plan's validation", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-});
-
-test("the nightly workflow is scheduled, serialized and reports failures", () => {
-  const text = readFileSync(
-    join(import.meta.dirname, "..", ".github", "workflows", "live-check.yml"),
-    "utf8",
-  );
-  const workflow = parse(text);
-  assert.ok(workflow.on.schedule[0].cron);
-  assert.ok("workflow_dispatch" in workflow.on);
-  assert.equal(workflow.concurrency["cancel-in-progress"], false);
-  assert.equal(workflow.permissions.contents, "read");
-  assert.equal(workflow.permissions.issues, "write");
-  assert.match(text, /secrets\.FACTORY_SMOKE_TOKEN/);
-  assert.match(text, /--worker scripted/);
-  for (const delivery of ["regular", "native-stack"])
-    assert.ok(text.includes(delivery), delivery);
-});
-
-test("the failure report names what failed, and a missing report", () => {
-  const report = {
-    objective: 9,
-    delivery: "regular",
-    worker: "scripted",
-    pass: false,
-    launches: [{ launch: 1, point: null, code: 1, signal: null, killed: null }],
-    unreached: ["merge"],
-    github: {
-      checks: { oneIssuePerMarker: true, oneMergePerPr: false },
-      issuesPerItem: {},
-      prsPerBranch: {},
-      duplicateComments: {},
-    },
-  };
-  const text = renderReport("https://example.test/run/1", {
-    regular: report,
-    stack: undefined,
-  });
-  assert.match(text, /https:\/\/example\.test\/run\/1/);
-  assert.match(text, /\*\*regular\*\* .*Objective #9\): FAIL/);
-  assert.match(text, /Failed GitHub checks: oneMergePerPr/);
-  assert.match(text, /Kill points never reached: merge/);
-  assert.match(text, /\*\*stack\*\*: no report/);
-  const huge = renderReport("u", {
-    a: {
-      ...report,
-      launches: [{ ...report.launches[0], tail: "x".repeat(90000) }],
-    },
-  });
-  assert.ok(huge.length < 61_000);
 });

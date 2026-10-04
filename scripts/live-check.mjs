@@ -26,7 +26,7 @@
 // `--worker scripted` makes no model calls: the controller is
 // scripts/live-check-scripted.mjs, which composes Factory with the test
 // harness's scripted planner, reviewer and worker over real GitHub, and the
-// setup needs no model login. The nightly workflow uses it. The run exits 1
+// setup needs no model login. The nightly run uses it. The run exits 1
 // unless the last launch completed, every kill point was reached and GitHub
 // holds the expected counts.
 // Run `npm run build` first. `reset` closes only what this harness made: Objectives

@@ -1,17 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import {
-  AuthenticationRequiredError,
-  CompletedModelInvocationError,
-  Interruption,
-} from "./contracts.js";
+import { AuthenticationRequiredError, Interruption } from "./contracts.js";
 import { GitHubOutcomeUnknown, GitHubRequestError } from "./github-client.js";
 import {
   ProviderTurnIncompleteError,
   ProviderTurnTimeoutError,
 } from "./provider-turn.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
-import { attachFault, faultOf, transient } from "./fault.js";
+import { attachFault, faultOf, StepFault, transient } from "./fault.js";
+import { type StepClock, step } from "./step.js";
 import type { PlanningModel, WorkItem } from "./contracts.js";
 import {
   installedControllerCapabilities,
@@ -24,7 +21,6 @@ import {
   consumption,
   failureDigest,
   itemEvent,
-  PAID_ATTEMPTS,
   repairScopes,
   validateCorrection,
   type FailureDisposition,
@@ -246,7 +242,6 @@ export function recordWorkFailure(
     (fault.kind === "work" ||
       error instanceof SettledAttemptFailure ||
       error instanceof CandidateEnvironmentFailure);
-  const prior = work.recovery?.failure;
   const event =
     isolated && fault.kind === "work"
       ? itemEvent(
@@ -258,10 +253,6 @@ export function recordWorkFailure(
   const failure: FailureDisposition = {
     digest: failureDigest(detail),
     ...(event && { event }),
-    // Recording the same event again keeps its paid diagnoses.
-    ...(event && prior?.event === event && prior.diagnoses
-      ? { diagnoses: prior.diagnoses }
-      : {}),
     detail,
     at: new Date().toISOString(),
     classification: event
@@ -405,6 +396,8 @@ export async function diagnoseWorkRepair(args: {
   stopped: () => boolean;
   diagnostics?: DiagnosticEmitter;
   sources?: { path: string; content: string; heading?: string }[];
+  /** Backoff time for the diagnose step; tests inject one. */
+  clock?: StepClock;
 }): Promise<boolean> {
   const { state, item, save } = args;
   const work = state.work[item.id]!;
@@ -425,10 +418,6 @@ export async function diagnoseWorkRepair(args: {
     save();
     return false;
   };
-  if ((failure.diagnoses ?? 0) >= PAID_ATTEMPTS)
-    return stop(
-      `The diagnosis did not answer ${PAID_ATTEMPTS} times; supply a correction (\`factory repair\`) or start a new attempt with \`${retry}\``,
-    );
   // The charge is keyed by the failure event, so a diagnosis repeated after
   // a restart or a lost response is not charged again.
   try {
@@ -443,72 +432,79 @@ export async function diagnoseWorkRepair(args: {
       `${error instanceof Error ? error.message : String(error)}; start a new attempt with \`${retry}\``,
     );
   }
-  failure.diagnoses = (failure.diagnoses ?? 0) + 1;
   work.recovery!.phase = "diagnosing";
   save();
-  let response;
+  // A paid step: a lost answer is asked again, an invalid one again with
+  // its validation error, until the paid bound makes it a decision.
+  let rejected: string | undefined;
+  let answer: RepairCorrection | string;
   try {
-    response = await args.model.generateStructured<{
-      diagnosis: string;
-      correction: string;
-      decision: string;
-    }>({
-      purpose: "diagnosis",
-      objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.\n${JSON.stringify({ item, failure, prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef })}`,
-      baseSha: work.executionBaseSha ?? state.baseSha,
-      sources: args.sources ?? [],
-      controllerCapabilities: installedControllerCapabilities(),
-      controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-      schema: diagnosisSchema,
-      invocation: {
-        invocationId: randomUUID(),
-        phase: "diagnosis",
-        ordinal: consumption(state).implementationRepairs,
-        observe: args.diagnostics?.modelObserver({
-          scopeId: work.attempt!,
-          runId: state.runId,
-          itemId: item.id,
-          attemptId: work.attempt,
+    answer = await step(
+      state,
+      { scope: { item: item.id }, name: "diagnose", paid: true },
+      (context) =>
+        context.paid(async () => {
+          const response = await args.model.generateStructured<{
+            diagnosis: string;
+            correction: string;
+            decision: string;
+          }>({
+            purpose: "diagnosis",
+            objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item, failure, prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef })}`,
+            baseSha: work.executionBaseSha ?? state.baseSha,
+            sources: args.sources ?? [],
+            controllerCapabilities: installedControllerCapabilities(),
+            controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+            schema: diagnosisSchema,
+            invocation: {
+              invocationId: randomUUID(),
+              phase: "diagnosis",
+              ordinal: consumption(state).implementationRepairs,
+              observe: args.diagnostics?.modelObserver({
+                scopeId: work.attempt!,
+                runId: state.runId,
+                itemId: item.id,
+                attemptId: work.attempt,
+              }),
+            },
+          });
+          if (response.decision !== "repair")
+            return (
+              response.diagnosis || "Failure requires an operator decision"
+            );
+          const proposed: RepairCorrection = {
+            kind: "implementation",
+            failureDigest: failure.digest,
+            event: failure.event,
+            diagnosis: response.diagnosis,
+            correction: response.correction,
+            actor: "factory-controller",
+          };
+          try {
+            validateCorrection(work, proposed);
+          } catch (error) {
+            rejected = error instanceof Error ? error.message : String(error);
+            throw new StepFault(
+              transient(`Diagnosis was invalid: ${rejected}`, true),
+            );
+          }
+          return proposed;
         }),
-      },
-    });
+      { save, ...(args.clock ? { clock: args.clock } : {}) },
+    );
   } catch (error) {
-    if (error instanceof CompletedModelInvocationError)
-      return stop(error.message);
-    // An unanswered diagnosis stays under way; the next run asks again
-    // (see resumeDiagnoses). A configuration fault was not paid for.
+    // A decision (the paid bound, a refusal) or a configuration fix stops
+    // the diagnosis for the operator; anything else is a defect.
     const fault = faultOf(error);
-    if (fault.kind !== "transient" && fault.kind !== "config") throw error;
-    if (fault.kind === "config") failure.diagnoses--;
-    failure.decision =
-      fault.kind === "config"
-        ? fault.fix
-        : `The diagnosis did not answer (${failure.diagnoses}/${PAID_ATTEMPTS}); run the Objective again to ask again`;
-    save();
-    return false;
+    if (fault.kind === "decision")
+      return stop(
+        `${fault.question} Supply a correction (\`factory repair\`) or start a new attempt with \`${retry}\``,
+      );
+    if (fault.kind === "config") return stop(fault.fix);
+    throw error;
   }
-  work.recovery!.phase = "stopped";
-  if (response.decision !== "repair") {
-    failure.decision =
-      response.diagnosis || "Failure requires an operator decision";
-    save();
-    return false;
-  }
-  const correction: RepairCorrection = {
-    kind: "implementation",
-    failureDigest: failure.digest,
-    event: failure.event,
-    diagnosis: response.diagnosis,
-    correction: response.correction,
-    actor: "factory-controller",
-  };
-  try {
-    validateCorrection(work, correction);
-  } catch (error) {
-    failure.decision = error instanceof Error ? error.message : String(error);
-    save();
-    return false;
-  }
+  if (typeof answer === "string") return stop(answer);
+  const correction = answer;
   work.recovery!.correction = correction;
   work.recovery!.phase = "ready";
   save();
@@ -519,7 +515,7 @@ export async function diagnoseWorkRepair(args: {
 }
 
 /**
- * Ask again any diagnosis a restart or an unanswered call left under way.
+ * Ask again any diagnosis a restart left under way.
  * Its event is already charged, so asking again is free.
  */
 export async function resumeDiagnoses(

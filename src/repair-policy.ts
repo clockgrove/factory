@@ -148,7 +148,7 @@ export interface RepairLedger {
    */
   charges?: Record<string, Charge>;
 }
-/** Paid calls (diagnoses, reviews) asked per failure event before the operator decides. */
+/** Paid calls (planning diagnoses, reviews) asked per failure event before the operator decides. */
 export const PAID_ATTEMPTS = 3;
 export interface FailureDisposition {
   digest: string;
@@ -157,8 +157,6 @@ export interface FailureDisposition {
    * transient or configuration failure is never charged.
    */
   event?: string;
-  /** Diagnoses sent for this failure; bounded by PAID_ATTEMPTS. */
-  diagnoses?: number;
   classification: RepairClass | "interruption" | "authority" | "uncertain";
   detail: string;
   at: string;

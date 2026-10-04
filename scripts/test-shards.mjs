@@ -1,19 +1,26 @@
 #!/usr/bin/env node
 // Print the test files for CI shard <shard> of <total>, one per line.
 //
-//   node scripts/test-shards.mjs <shard> <total>
+//   node scripts/test-shards.mjs <shard> <total>   files for that shard
+//   node scripts/test-shards.mjs --installed       installed-package tests
 //
 // Files are packed longest first, each onto the shard with the least
 // estimated time so far, using test/support/test-timings.json (seconds per
 // file; a file it does not list counts as DEFAULT_SECONDS). The order is
 // fixed, so every shard computes the same assignment. Refresh the timings
 // from a CI log when a shard nears its timeout.
-
+//
+// Installed-package tests pack and install the package; they run only on
+// pushes to main and at release, so they are never in a shard.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dirname, "..");
 const DEFAULT_SECONDS = 5;
+const INSTALLED = [
+  "test/package-smoke.test.mjs",
+  "test/sandbox-installed.test.mjs",
+];
 
 /** Every test file, as `test/<name>.test.mjs`, sorted. */
 function testFiles() {
@@ -45,6 +52,10 @@ function packShards(files, timings, total) {
 }
 
 function main(args) {
+  if (args[0] === "--installed") {
+    console.log(INSTALLED.join("\n"));
+    return;
+  }
   const [shard, total] = args.map(Number);
   if (
     args.length !== 2 ||
@@ -53,11 +64,12 @@ function main(args) {
     shard < 1 ||
     shard > total
   )
-    throw new Error("usage: test-shards.mjs <shard> <total>");
+    throw new Error("usage: test-shards.mjs <shard> <total> | --installed");
   const timings = JSON.parse(
     readFileSync(join(root, "test/support/test-timings.json"), "utf8"),
   );
-  const shards = packShards(testFiles(), timings, total);
+  const files = testFiles().filter((file) => !INSTALLED.includes(file));
+  const shards = packShards(files, timings, total);
   const { files: mine, seconds } = shards[shard - 1];
   // An empty list would make `node --test` run every test file.
   if (!mine.length) throw new Error(`shard ${shard}/${total} has no files`);

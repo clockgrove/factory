@@ -42,10 +42,31 @@ jobs:
           files=$(node scripts/test-shards.mjs ${{ matrix.shard }} 8)
           node --import ./test/support/isolated-state.mjs --test --test-timeout=300000 --test-concurrency=8 $files
 
-  # The single required check for main; it passes only when every job above passes.
+  # Tests that pack and install the package: on pushes to main (and in the
+  # release workflow's complete run), not on pull requests.
+  installed:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: |
+          files=$(node scripts/test-shards.mjs --installed)
+          node --import ./test/support/isolated-state.mjs --test --test-timeout=300000 $files
+
+  # The single required check for main; it passes only when every job above
+  # passes. Pull requests skip the installed-package job.
   package-gate:
     if: always()
-    needs: [checks, tests]
+    needs: [checks, tests, installed]
     runs-on: ubuntu-24.04
     steps:
-      - run: test "${{ needs.checks.result }}" = success && test "${{ needs.tests.result }}" = success
+      - env:
+          CHECKS: ${{ needs.checks.result }}
+          TESTS: ${{ needs.tests.result }}
+          INSTALLED: ${{ needs.installed.result }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          test "$CHECKS" = success && test "$TESTS" = success
+          [ "$EVENT" != push ] || test "$INSTALLED" = success

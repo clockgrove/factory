@@ -19,6 +19,7 @@ import {
 } from "../dist/state-store.js";
 import { stateRoot } from "../dist/config.js";
 import { deliveryReadiness } from "../dist/delivery/readiness.js";
+import { setLagClock } from "../dist/delivery/lag.js";
 import {
   createTarget,
   factoryConfig,
@@ -489,6 +490,45 @@ for (const route of ["regular", "native-stack"]) {
       );
     }));
 }
+
+test("regular: a PR closed without a merge asks the operator; the retry opens a new PR for the same result", async (t) =>
+  fixture("regular", "closed", async (f) => {
+    // GitHub's two-minute lag window passes in a fraction of a second.
+    const started = Date.now();
+    t.after(setLagClock(() => started + (Date.now() - started) * 1_000));
+    const { running, waiting } = await startWaiting(f);
+    const first = identityOf(waiting);
+    f.github.update((state) => {
+      state.pullRequests[first.pullRequest].state = "closed";
+    });
+    await until(() => {
+      const wait = readContinuation(f.config.repository, 1)?.work?.result?.wait;
+      return wait?.kind === "decision";
+    });
+    // Answered: the same reviewed result goes out as a new PR, with no new
+    // worker, instead of asking about the closed PR again.
+    assert.equal(f.application.retryWorkItem(1, "result"), "step");
+    const again = await startWaiting(
+      f,
+      (state) =>
+        state.work.result.wait?.kind === "ci" &&
+        state.work.result.pullRequest !== first.pullRequest,
+    );
+    const second = identityOf(again.waiting);
+    assert.notEqual(second.pullRequest, first.pullRequest);
+    assert.equal(second.head, first.head);
+    assert.equal(second.attempt, first.attempt);
+    f.ready();
+    await again.running;
+    const done = readState(f.config.repository, 1);
+    assert.equal(done.finalValidation.passed, true);
+    assert.equal(done.work.result.closedPullRequest, undefined);
+    assert.equal(f.counts().merges, 1);
+    assert.equal(
+      readEvents(f.eventsPath).filter((event) => event.type === "start").length,
+      1,
+    );
+  }));
 
 for (const route of ["regular", "native-stack"]) {
   test(`${route}: source-required quality waits for exact named evidence despite clean no-check readiness`, async () =>

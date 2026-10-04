@@ -812,8 +812,11 @@ export class StatefulGitHubFake {
       request.treeSha,
     );
     return this.update((state) => {
+      // Like the real gateway: only an open PR is found; a closed or
+      // merged one on the branch does not stop a new PR.
       const existing = Object.values(state.pullRequests).find(
-        (candidate) => candidate.branch === request.branch,
+        (candidate) =>
+          candidate.branch === request.branch && candidate.state === "open",
       );
       if (existing) {
         assert.equal(existing.base, request.base);

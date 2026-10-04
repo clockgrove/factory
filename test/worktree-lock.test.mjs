@@ -25,9 +25,12 @@ import {
   GitDeadlineExceeded,
   git,
   gitAsync,
+  lingeringDescendants,
+  linuxProcessIdentity,
   lockedNetworkDeadline,
   pinnedGitAsync,
   pinnedGitRaw,
+  processGroupExists,
   removeWorktree,
   withProcessCancellation,
 } from "../dist/process.js";
@@ -69,6 +72,12 @@ fi
 "$FACTORY_TEST_REAL_GIT" "$@"
 status=$?
 [ -n "$quiet" ] || echo "end $sub" >>"$FACTORY_TEST_DIR/log"
+# Like git-remote-http after a connection reset: a transport helper that
+# outlives the command in its process group.
+if [ "$sub" = "$FACTORY_TEST_LINGER" ]; then
+  sleep 30 >/dev/null 2>&1 &
+  echo $! >"$FACTORY_TEST_DIR/lingering"
+fi
 exit $status
 `;
 
@@ -357,6 +366,32 @@ test("a stalled fetch stops at its deadline and releases the lock", async () => 
     lockedNetworkDeadline.milliseconds = saved;
   }
   assert.equal(existsSync(validation), false);
+});
+
+test("a transport helper outliving its fetch is stopped after the grace period", async () => {
+  const { root, checkout, head } = fixture();
+  const saved = lingeringDescendants.graceMilliseconds;
+  lingeringDescendants.graceMilliseconds = 300;
+  process.env.FACTORY_TEST_LINGER = "fetch";
+  try {
+    await withShim(root, "none", async () => {
+      const groups = [];
+      const fetched = await withProcessCancellation(
+        undefined,
+        () => fetchHead(checkout, "main"),
+        (owned, settled) => groups.push({ owned, settled }),
+      );
+      assert.equal(fetched, head);
+      const helper = Number(readFileSync(join(root, "lingering"), "utf8"));
+      assert.ok([undefined, "Z"].includes(linuxProcessIdentity(helper)?.state));
+      assert.ok(groups.some(({ settled }) => settled));
+      for (const { owned } of groups)
+        assert.equal(processGroupExists(owned.pid), false);
+    });
+  } finally {
+    delete process.env.FACTORY_TEST_LINGER;
+    lingeringDescendants.graceMilliseconds = saved;
+  }
 });
 
 test("Factory's git never starts automatic maintenance", async () => {

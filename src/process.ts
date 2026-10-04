@@ -610,6 +610,22 @@ export function withProcessCancellation<T>(
   return processCancellation.run({ signal, observe }, operation);
 }
 
+/** How long an exited command's leftover descendants may run before they are stopped; tests shorten it. */
+export const lingeringDescendants = { graceMilliseconds: 5_000 };
+
+/** Whether process group `group` is gone within `milliseconds`. */
+async function groupEnds(
+  group: number,
+  milliseconds: number,
+): Promise<boolean> {
+  const deadline = Date.now() + milliseconds;
+  while (processGroupExists(group)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  return true;
+}
+
 export async function subprocessAsync(
   file: string,
   args: string[],
@@ -670,25 +686,35 @@ export async function subprocessAsync(
   signal?.removeEventListener("abort", cancel);
   if (aborted && child.pid) {
     // SIGKILL is asynchronous. Allow the kernel to reap runnable descendants.
-    for (
-      let attempt = 0;
-      attempt < 100 && processGroupExists(child.pid);
-      attempt++
-    )
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    if (cancellationError || processGroupExists(child.pid)) {
+    if (cancellationError || !(await groupEnds(child.pid, 1_000))) {
       if (scope) scope.unresolved = true;
       throw new Error(
         "Owned subprocess cessation could not be verified; outcome unknown",
         { cause: cancellationError },
       );
     }
+  } else if (
+    owned &&
+    !(await groupEnds(owned.pid, lingeringDescendants.graceMilliseconds))
+  ) {
+    // The command has exited, but descendants it left in its group (such as
+    // a git transport helper after a connection reset) are still running.
+    // Stop them and verify they are gone; the exit status stays authoritative.
+    let stopError: unknown;
+    try {
+      process.kill(-owned.pid, "SIGKILL");
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ESRCH") stopError = cause;
+    }
+    if (stopError || !(await groupEnds(owned.pid, 1_000))) {
+      if (scope) scope.unresolved = true;
+      throw new Error(
+        "Owned subprocess group remains active; outcome unknown",
+        { cause: stopError },
+      );
+    }
   }
-  if (owned && !processGroupExists(owned.pid)) scope?.observe?.(owned, true);
-  else if (owned) {
-    if (scope) scope.unresolved = true;
-    throw new Error("Owned subprocess group remains active; outcome unknown");
-  }
+  if (owned) scope?.observe?.(owned, true);
   if (aborted)
     throw new Error("Owned subprocess cancelled after verified cessation");
   if (error) throw error;

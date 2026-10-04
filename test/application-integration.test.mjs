@@ -3022,6 +3022,127 @@ test("hydration failure is URL-free and blocks final review, evidence, and closu
   });
 });
 
+test("a transient fault in final hydration repeats final validation instead of stopping the Objective (#642)", async () => {
+  await fixture("hydration-transient", async (root) => {
+    const selectedModel = Buffer.from([0, 7, 0, 8, 255]);
+    const target = createTarget(root, { "approved/model.bin": selectedModel });
+    writeFileSync(
+      join(target.checkout, ".gitattributes"),
+      "approved/*.bin filter=lfs diff=lfs merge=lfs -text\n",
+    );
+    git(target.checkout, "add", ".gitattributes");
+    git(
+      target.checkout,
+      "-c",
+      "user.name=Factory Test",
+      "-c",
+      "user.email=factory-test@example.com",
+      "commit",
+      "-m",
+      "Require LFS for approved binaries",
+    );
+    git(target.checkout, "push", "origin", "main");
+    target.baseSha = git(target.checkout, "rev-parse", "HEAD");
+    git(target.checkout, "lfs", "install", "--local");
+    // The first fresh clone of final hydration cannot resolve the remote's
+    // host; every other git call is real.
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const bin = join(root, "bin");
+    const fired = join(root, "dns-fault-fired");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh
+case " $* " in
+  *" clone --no-checkout "*)
+    if [ ! -e ${JSON.stringify(fired)} ]; then
+      : > ${JSON.stringify(fired)}
+      echo "fatal: unable to access 'https://example.invalid/': Could not resolve host: example.invalid" >&2
+      exit 128
+    fi;;
+esac
+exec ${JSON.stringify(realGit)} "$@"
+`,
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    const command = "test -s approved/model.bin";
+    const media = item("media", {
+      path: "approved/model.bin",
+      command,
+      sourceAssets: [
+        {
+          kind: "repository",
+          path: "approved/model.bin",
+          role: "source",
+          mediaType: "application/octet-stream",
+          visibility: "repository",
+        },
+      ],
+      expectedOutputRoles: ["model"],
+      minimumAssetSets: 1,
+      requiredLfsRoles: ["model"],
+    });
+    const descriptor = {
+      config: factoryConfig(target.checkout, "example/hydration-transient"),
+      graph: { objective, baseSha: target.baseSha, items: [media] },
+      objectiveBody: `# Deterministic Objective
+
+## Acceptance
+- Fresh-clone hydration preserves the selected bytes at approved/model.bin.
+- \`${command}\`
+
+## Final validation
+- \`${command}\`
+`,
+      fakeRoot: join(root, "fake"),
+      actions: {
+        media: {
+          assets: [
+            {
+              id: "byte-identical",
+              members: [
+                {
+                  role: "model",
+                  file: "model.bin",
+                  mediaType: "application/octet-stream",
+                  destination: "approved/model.bin",
+                  base64: selectedModel.toString("base64"),
+                },
+              ],
+              provenance: {
+                source: "approved/model.bin",
+                rights: "public integration fixture",
+                visibility: "repository",
+                lineage: ["approved/model.bin"],
+              },
+            },
+          ],
+        },
+      },
+    };
+    const { application } = makeApplication(descriptor);
+    const waiting = await application.runObjective(objective);
+    assert.equal(waiting.work.media.status, "waiting");
+    await application.selectAssetSet(objective, "media", "byte-identical", {
+      actor: "test-operator",
+      reason: "transient-fault fixture",
+      downstreamItems: [],
+    });
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      const completed = await application.runObjective(objective);
+      assert.equal(existsSync(fired), true);
+      assert.equal(completed.error, undefined);
+      assert.equal(completed.finalValidation.passed, true);
+      assert.equal(completed.finalValidation.hydrationReceipt.passed, true);
+      assert.equal(completed.repeats, undefined);
+    } finally {
+      process.env.PATH = path;
+    }
+  });
+});
+
 function dirnameFor(path) {
   return path.slice(0, path.lastIndexOf("/"));
 }

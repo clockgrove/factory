@@ -1152,10 +1152,11 @@ async function runObjectivePass(
           "Factory: resuming the existing run from atomic state",
         );
         if (!state.finalAcceptance && state.objectiveClosure !== "complete") {
-          if (
-            (await fetchHead(config.checkout, await github.defaultBranch())) !==
-            objectiveCandidate(state)?.commitSha
-          )
+          // A remote read: transient faults repeat with backoff.
+          const head = await objectiveStep(state, "final-head", async () =>
+            fetchHead(config.checkout, await github.defaultBranch()),
+          );
+          if (head !== objectiveCandidate(state)?.commitSha)
             throw new Error(
               "Default branch changed before historical final acceptance could be sealed",
             );
@@ -1762,62 +1763,75 @@ async function runObjectivePass(
           workspacePackageAdditions: workspacePackageAdditions(issue.body),
         },
       );
-      const commandEvidence = await validateTree(
-        config.checkout,
-        join(root, "final-validation"),
-        candidateCommitSha,
-        finalTree,
-        state.objectiveCommands ?? finalObjectiveCommands(issue.body),
-        (entry) =>
-          diagnostics.emit({
-            runId: state.runId,
-            operation: "objective-validation-command",
-            outcome: entry.passed ? "completed" : "failed",
-            durationMs: entry.durationMs,
-            metadata: { commandIndex: entry.index, exitCode: entry.exitCode },
-            detail: entry.output,
-          }),
-        (entry) =>
-          diagnostics.emitStream(
-            {
-              runId: state.runId,
-              operation: "objective-validation-output",
-              outcome: "observed",
-              metadata: { commandIndex: entry.index, stream: entry.stream },
-            },
-            entry.output,
-            entry.final,
-          ),
-        finalValidationLfsMembers(state),
-        contentStore,
-      );
-      const selectedAssets = graph.items.flatMap((item) => {
-        const work = state.work[item.id];
-        const set = work?.assets?.find(
-          (candidate) => candidate.id === work.selectedAssetSet,
-        );
-        return set ? [{ itemId: item.id, set }] : [];
-      });
-      const hydrationReceipt = selectedAssets.length
-        ? await diagnostics.span(
-            {
-              runId: state.runId,
-              operation: "media-hydration-verification",
-              metadata: {
-                integratedSha: state.integratedSha!,
-                treeSha: finalTree,
-              },
-            },
-            async () =>
-              verifyHydratedAssets({
-                checkout: config.checkout,
-                workRoot: join(root, "hydration"),
-                integratedSha: candidateCommitSha,
-                selections: selectedAssets,
+      // Validation and fresh-clone hydration read the remote: one step,
+      // repeatable from the top (a fresh worktree and clone per try), so a
+      // transient fault repeats with backoff instead of stopping the Objective.
+      const { commandEvidence, hydrationReceipt } = await objectiveStep(
+        state,
+        "final-validate",
+        async () => {
+          const commandEvidence = await validateTree(
+            config.checkout,
+            join(root, "final-validation"),
+            candidateCommitSha,
+            finalTree,
+            state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+            (entry) =>
+              diagnostics.emit({
+                runId: state.runId,
+                operation: "objective-validation-command",
+                outcome: entry.passed ? "completed" : "failed",
+                durationMs: entry.durationMs,
+                metadata: {
+                  commandIndex: entry.index,
+                  exitCode: entry.exitCode,
+                },
+                detail: entry.output,
               }),
-            (receipt) => ({ members: receipt?.members.length ?? 0 }),
-          )
-        : undefined;
+            (entry) =>
+              diagnostics.emitStream(
+                {
+                  runId: state.runId,
+                  operation: "objective-validation-output",
+                  outcome: "observed",
+                  metadata: { commandIndex: entry.index, stream: entry.stream },
+                },
+                entry.output,
+                entry.final,
+              ),
+            finalValidationLfsMembers(state),
+            contentStore,
+          );
+          const selectedAssets = graph.items.flatMap((item) => {
+            const work = state.work[item.id];
+            const set = work?.assets?.find(
+              (candidate) => candidate.id === work.selectedAssetSet,
+            );
+            return set ? [{ itemId: item.id, set }] : [];
+          });
+          const hydrationReceipt = selectedAssets.length
+            ? await diagnostics.span(
+                {
+                  runId: state.runId,
+                  operation: "media-hydration-verification",
+                  metadata: {
+                    integratedSha: state.integratedSha!,
+                    treeSha: finalTree,
+                  },
+                },
+                async () =>
+                  verifyHydratedAssets({
+                    checkout: config.checkout,
+                    workRoot: join(root, "hydration"),
+                    integratedSha: candidateCommitSha,
+                    selections: selectedAssets,
+                  }),
+                (receipt) => ({ members: receipt?.members.length ?? 0 }),
+              )
+            : undefined;
+          return { commandEvidence, hydrationReceipt };
+        },
+      );
       const acceptanceEvidence = hydrationReceipt
         ? { ...commandEvidence, hydrationReceipt }
         : commandEvidence;

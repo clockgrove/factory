@@ -912,6 +912,7 @@ test("independent review blocks inadequate negative controls and unauthorized go
             packetId: request.reviewPacket.id,
             findings: [
               {
+                itemIds: [],
                 evidenceIndices: [
                   request.reviewPacket.evidence.findIndex(
                     (source) => source.path === "OBJECTIVE",

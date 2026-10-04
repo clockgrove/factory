@@ -501,8 +501,8 @@ test("one sourced review finding permits one revision and re-review", async () =
       ["compile", "review", "diagnosis", "compile", "review"],
     );
     assert.match(calls[3].objective, /Missing obligation/);
-    // The revision packet shows the reviewed items beside each finding.
-    assert.match(calls[3].objective, /"itemIds":\["one"\]/);
+    // The diagnosis of the finding sees the items it concerns.
+    assert.match(calls[2].objective, /"itemIds":\["one"\]/);
     assert.deepEqual(
       calls.map((call) => [call.invocation.phase, call.invocation.ordinal]),
       [
@@ -556,6 +556,7 @@ test("graph review identifies the exact supplied section among duplicate paths",
               reviews === 1
                 ? [
                     {
+                      itemIds: [],
                       evidenceIndices: [
                         request.reviewPacket.evidence.findIndex(
                           (e) =>
@@ -731,6 +732,7 @@ test("unresolved review asks one human question and records a specific decision"
           packetId: request.reviewPacket.id,
           findings: [
             {
+              itemIds: [],
               evidenceIndices: [
                 request.reviewPacket.evidence.findIndex(
                   (e) => e.path === "OBJECTIVE",
@@ -887,6 +889,7 @@ test("malformed graph review pauses on the pinned graph and an explicit decision
           packetId: request.reviewPacket.id,
           findings: [
             {
+              itemIds: [],
               evidenceIndices: ["not-in-this-packet"],
               detail: "Unsupported finding",
               question: "Approve this?",
@@ -1003,18 +1006,31 @@ test("graph review rejects malformed protocol fields without retaining finding c
     const cases = [
       () => privateContent,
       () => ({
+        itemIds: [],
         evidenceIndices: [privateContent],
         detail: "detail",
         question: "question",
       }),
-      () => ({ evidenceIndices: [], detail: "detail", question: "question" }),
+      () => ({
+        itemIds: [],
+        evidenceIndices: [],
+        detail: "detail",
+        question: "question",
+      }),
       (id) => ({
+        itemIds: [],
         evidenceIndices: [id, id],
         detail: "detail",
         question: "question",
       }),
-      (id) => ({ evidenceIndices: [id], detail: " ", question: "question" }),
       (id) => ({
+        itemIds: [],
+        evidenceIndices: [id],
+        detail: " ",
+        question: "question",
+      }),
+      (id) => ({
+        itemIds: [],
         evidenceIndices: [id],
         detail: "detail",
         question: "question",
@@ -1089,6 +1105,7 @@ test("graph review asks about a finding without a question from its detail", asy
               reviews++ === 0
                 ? [
                     {
+                      itemIds: [],
                       evidenceIndices: [0],
                       detail: "Name the missing owner.",
                       question: " ",
@@ -1154,6 +1171,7 @@ test("a plan refused by deterministic validation spends the one revision with th
               findings: reviewFinds
                 ? [
                     {
+                      itemIds: [],
                       evidenceIndices: [0],
                       detail: "A material defect remains.",
                       question: "Which owner is intended?",
@@ -1499,6 +1517,7 @@ test("invalid reviews after a revision are bounded by the plan step's paid count
               packetId: request.reviewPacket.id,
               findings: [
                 {
+                  itemIds: [],
                   evidenceIndices: [0],
                   detail: "Missing obligation",
                   question: "Which requirement owns this obligation?",

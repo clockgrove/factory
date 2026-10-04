@@ -525,6 +525,7 @@ for (const kind of [
               reviews === 1 && kind !== "planning-output"
                 ? [
                     {
+                      itemIds: [],
                       evidenceIndices: [0],
                       detail:
                         kind === "operator"
@@ -1189,6 +1190,7 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
       packetId: request.reviewPacket.id,
       findings: [
         {
+          itemIds: [],
           evidenceIndices: [0],
           detail: "Source needs an owner interpretation",
           question: "Which delivery policy applies?",

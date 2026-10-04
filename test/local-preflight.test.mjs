@@ -536,6 +536,7 @@ test("actual planning packets carry presence without executing acceptance, and b
           packetId: packet.packetId,
           findings: [
             {
+              itemIds: [],
               evidenceIndices: [evidenceIndex],
               detail: "Scripted semantic stop exercises bounded diagnosis",
               question: "A separate product decision is required",

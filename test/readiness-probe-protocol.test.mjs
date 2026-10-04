@@ -299,6 +299,7 @@ for (const phase of ["provider", "invalid-probe"]) {
           packetId: request.reviewPacket.id,
           findings: [
             {
+              itemIds: [],
               evidenceIndices: [
                 request.reviewPacket.evidence.findIndex(
                   (entry) => entry.path === "OBJECTIVE",

@@ -1376,6 +1376,7 @@ test("an explicitly accepted unresolved graph review runs the same pinned graph 
           packetId: request.reviewPacket.id,
           findings: [
             {
+              itemIds: [],
               evidenceIndices: [0],
               detail: "Source needs an owner interpretation",
               question: "Approve?",
@@ -1534,6 +1535,7 @@ test("preview planning stays read-only and a refused plan is planned again", asy
 
     findings = [
       {
+        itemIds: [],
         evidenceIndices: [0],
         detail: "Source needs an owner interpretation",
         question: "Approve?",

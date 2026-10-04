@@ -162,6 +162,7 @@ test("rendered compiler and plan reviewer carry the source commands and stop uns
           packetId: packet.packetId,
           findings: [
             {
+              itemIds: [],
               evidenceIndices: [source.evidenceIndex],
               detail:
                 "The source requires unavailable history and future hydration at policy review.",

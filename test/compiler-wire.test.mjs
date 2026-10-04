@@ -258,6 +258,7 @@ test("planning wire retains one whole compound proof and substantive review refu
     [{ origin: "source", path: "OBJECTIVE", content: objective }],
   );
   const finding = {
+    itemIds: [],
     evidenceIndices: [0],
     detail:
       "The integration guarantee does not cover the independent automatic review clause; retain the whole criterion once with final-review.",
@@ -1937,6 +1938,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
           findings: invalidGate
             ? [
                 {
+                  itemIds: [],
                   evidenceIndices: [
                     packet.evidence.findIndex(
                       (entry) => entry.path === "AGENTS.md",
@@ -1951,6 +1953,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
             : reviewCalls === 1
               ? [
                   {
+                    itemIds: [],
                     evidenceIndices: [boundsIndex],
                     detail:
                       "Authored prose claims 999 although the actual configured ceiling is two.",

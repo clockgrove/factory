@@ -1868,8 +1868,6 @@ export type PlanCorrection = {
   source: PlanFindingSource;
   detail: string;
   question?: string;
-  /** Graph items the finding concerns; empty when it concerns the plan as a whole. */
-  itemIds?: string[];
   evidence?: ResolvedGraphFinding["evidence"];
 };
 

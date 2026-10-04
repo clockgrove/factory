@@ -43,6 +43,7 @@ import type {
   PreparationState,
   WorkState,
 } from "./state.js";
+import type { PreState } from "./state-store.js";
 import { shortPlanDigest, summarizeStatus } from "./status-summary.js";
 import { outageOf, type StepScope, type StepState, waitOf } from "./step.js";
 import { normalizeTokenUsage, tokenCategories } from "./usage.js";
@@ -1076,6 +1077,7 @@ export function statusDocument(
   secrets: string[] = [],
   concurrency?: number,
   runActive: boolean | null = null,
+  preState?: PreState,
 ) {
   if (!state) {
     const view = {
@@ -1083,6 +1085,17 @@ export function statusDocument(
       objective,
       state: "not-started" as const,
       work: [],
+      ...(preState
+        ? {
+            runActive,
+            ...waitStatus(
+              preState as StepState,
+              preState.wait,
+              "objective",
+              secrets,
+            ),
+          }
+        : {}),
     };
     return { ...summarizeStatus(view), ...view };
   }
@@ -1354,6 +1367,7 @@ export function continuationStatusDocument(
   secrets: string[] = [],
   concurrency?: number,
   runActive: boolean | null = null,
+  preState?: PreState,
 ) {
   return continuation?.schemaVersion === 8
     ? preparationStatusDocument(continuation, secrets, runActive)
@@ -1365,6 +1379,7 @@ export function continuationStatusDocument(
         secrets,
         concurrency,
         runActive,
+        preState,
       );
 }
 

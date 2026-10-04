@@ -146,12 +146,21 @@ export interface ExecutionStatusView extends WaitView {
   runActive: boolean | null;
   coordinator: CoordinatorView | null;
   pendingAmendment: { phase: string; error: string | null } | null;
+  /** The digest of the accepted graph now; an amendment that lands changes it. */
+  graphDigest?: string;
+  /** What is left of each allowance; an amendment takes a planning revision. */
+  allowanceRemaining?: { objective: { planningRevisions: number } };
   repairs: Record<
     string,
     {
       phase: string | null;
       failureClass?: string | null;
       failureEvent?: string | null;
+      /** The merged predecessor the failure was blamed on, if any. */
+      blamedPredecessor?: string | null;
+      blamedPath?: string | null;
+      /** The graph digest when it was blamed. */
+      blamedGraphDigest?: string | null;
       nextDecision: string | null;
     }
   >;
@@ -432,9 +441,13 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
   return undefined;
 }
 
+/** As the runner's: retry starts a new attempt, so a published item's PR is not resumed. */
 function wrongResult(view: ExecutionStatusView, id: string): boolean {
   const repair = view.repairs[id];
-  return repair?.failureClass === "implementation" && !!repair.failureEvent;
+  return (
+    (repair?.failureClass === "implementation" && !!repair.failureEvent) ||
+    !!repair?.blamedPredecessor
+  );
 }
 
 function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
@@ -453,6 +466,8 @@ function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
     };
   // Retry refuses while other work runs; let it settle first.
   if (view.work.some((item) => item.status === "running")) return undefined;
+  const blamed = view.repairs[failed.id]?.blamedPredecessor;
+  if (blamed) return blamedItem(view, failed.id, blamed);
   return {
     phase: "failed",
     summary: `${failed.id} failed${error}`,
@@ -465,6 +480,107 @@ function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
         failed.pullRequest && !wrongResult(view, failed.id)
           ? `Resumes delivery of PR #${failed.pullRequest}${thenRun(view)}; or factory cancel --objective ${objective}`
           : `Starts a new attempt${thenRun(view)}`,
+    },
+  };
+}
+
+/**
+ * An item blamed on a merged predecessor's file: retry cannot pass until that
+ * file is fixed, and the way to fix it is an amendment. What to name depends
+ * on how far the fix is, so in this order (as the stored decision's): a
+ * pending amendment (what settles it), then whether the graph changed since
+ * the blame (an amendment landed: retry), and only then the planning
+ * allowance. The amendment that fixes the file takes the last revision
+ * itself, so reading the allowance first would offer cancel after the fix.
+ */
+function blamedItem(
+  view: ExecutionStatusView,
+  id: string,
+  predecessor: string,
+): StatusSummary {
+  const objective = view.objective;
+  const repair = view.repairs[id];
+  const file = repair?.blamedPath
+    ? `${predecessor}'s ${repair.blamedPath}`
+    : `${predecessor}'s file`;
+  const error = view.work.find((item) => item.id === id)?.lastError;
+  const summary = `${id} failed${error ? `: ${short(error, 80)}` : ""}`;
+  const retry = `factory retry --objective ${objective} --item ${id}`;
+  const pending = view.pendingAmendment;
+  if (pending?.phase === "rejected")
+    return {
+      phase: "failed",
+      summary,
+      nextAction: {
+        command: `factory propose-amendment --objective ${objective} --proposal FILE`,
+        reason: `The amendment that was to fix ${file} was rejected: ${short(pending.error ?? "submit a replacement", 120)}`,
+      },
+    };
+  if (pending && pending.phase !== "backlog")
+    return {
+      phase: "failed",
+      summary: `${summary}; an amendment to fix ${file} is pending`,
+      nextAction:
+        view.runActive === true
+          ? null
+          : {
+              command: run(objective),
+              reason: `An amendment to fix ${file} is pending: this reviews and projects it and merges its Work Items; then ${retry} starts a new attempt on the integrated head`,
+            },
+    };
+  if (
+    view.graphDigest !== undefined &&
+    repair?.blamedGraphDigest &&
+    repair.blamedGraphDigest !== view.graphDigest
+  ) {
+    // The amendment landed. Its Work Items merge before the retry: this item
+    // does not depend on them, so a new attempt would be blamed again.
+    // Items that wait on this one are not that.
+    const waiting = new Set([id]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const item of view.work) {
+        const on = /^dependency:(.*)$/.exec(item.blockedReason ?? "")?.[1];
+        if (on !== undefined && waiting.has(on) && !waiting.has(item.id)) {
+          waiting.add(item.id);
+          grew = true;
+        }
+      }
+    }
+    const unmerged = view.work.some(
+      (item) =>
+        !waiting.has(item.id) &&
+        !["done", "failed", "cancelled"].includes(item.status),
+    );
+    return {
+      phase: "failed",
+      summary,
+      nextAction: unmerged
+        ? {
+            command: run(objective),
+            reason: `An amendment to fix ${file} landed: this merges its Work Items; then ${retry} starts a new attempt on the integrated head`,
+          }
+        : {
+            command: retry,
+            reason: `An amendment to fix ${file} landed and merged: this starts a new attempt on the integrated head${thenRun(view)}`,
+          },
+    };
+  }
+  if ((view.allowanceRemaining?.objective.planningRevisions ?? 1) <= 0)
+    return {
+      phase: "failed",
+      summary,
+      nextAction: {
+        command: `factory cancel --objective ${objective}`,
+        reason: `${file} is wrong and the planning revisions are used up, so no amendment can fix it; a higher autonomy.allowances.planningRevisions applies to a new Objective`,
+      },
+    };
+  return {
+    phase: "failed",
+    summary,
+    nextAction: {
+      command: retry,
+      reason: `Only after ${file} is fixed: factory propose-amendment --objective ${objective} --proposal FILE adds a Work Item after ${predecessor} that owns it${view.runActive === true ? "" : `; if no run is active, ${run(objective)} merges it`}; then this retry starts a new attempt on the integrated head`,
     },
   };
 }

@@ -347,6 +347,8 @@ When the controller could not prepare validation (a configuration fault, such as
 
 A validation command that fails is a wrong result, whatever the cause. Factory diagnoses and charges it like any other wrong result. `factory repair` or `factory retry` starts a new attempt from the accepted base; the failed result is not validated again.
 
+When the failure comes from a file a merged predecessor owns (by the accepted graph's `ownedPaths`), Factory stops the item with a decision that names the predecessor, its PR and the file, and spends no repair: repairing the dependent cannot fix it. The way forward is an amendment that adds a Work Item after the predecessor and owns the file (`factory propose-amendment`, which works while the Objective is stopped), then `factory run` to merge it, `factory retry --item ITEM` to start a new attempt on the integrated head, and `factory run`. `factory status` names the step that is due, including while the amendment is pending and after it has merged. An amendment takes a planning revision (the default is 1) and is refused up front when none is left; then only `factory cancel` and a new Objective with a higher `autonomy.allowances.planningRevisions` helps, because limits are recorded when an Objective starts.
+
 To supply a diagnosed correction for a wrong result yourself, submit a proposal file containing `item` and `correction` with `kind: "implementation"`, `failureDigest`, `actor`, `diagnosis` and `correction`:
 
 ```sh
@@ -377,7 +379,7 @@ completed QA evidence remains distinct. Missing or stale capture is missing proo
 not proof that no proposal was submitted. Missing or mismatched evidence cannot
 pass a required discovery or amendment criterion.
 
-An operator can submit the same structured discovery to a running owner:
+An operator can submit the same structured discovery to a running owner, or while the Objective is stopped (no owner running). A stopped Objective takes only an in-scope amendment: Factory records it under the state lock after the same graph-digest check, and the next `factory run` reviews, charges and projects it. A backlog discovery needs a running owner.
 
 ```sh
 factory propose-amendment --objective 123 --proposal /absolute/path/proposal.json

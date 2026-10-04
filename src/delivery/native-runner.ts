@@ -175,6 +175,7 @@ export async function runNativeGraph(args: {
           state.baseSha,
           config.checkout,
         ),
+        checkout: config.checkout,
         save,
         signal,
         pause: args.pause,

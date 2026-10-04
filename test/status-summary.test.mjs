@@ -342,6 +342,159 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
     }),
   );
   assert.match(wrong.nextAction.reason, /^Starts a new attempt\b/);
+  // A failure blamed on a merged predecessor is not resumed either: the same
+  // head would be blamed again, so retry starts a new attempt after the fix.
+  const blamed = summarizeStatus(
+    execution([item("A", { status: "failed", pullRequest: 9 })], {
+      state: "failed",
+      repairs: {
+        A: {
+          phase: "stopped",
+          failureClass: "decision",
+          failureEvent: null,
+          blamedPredecessor: "lib",
+          blamedPath: "lib.sh",
+          nextDecision: null,
+        },
+      },
+    }),
+  );
+  // The reason carries the amendment that fixes it, not only the retry.
+  assert.match(
+    blamed.nextAction.reason,
+    /^Only after lib's lib\.sh is fixed: factory propose-amendment --objective 7 --proposal FILE adds a Work Item after lib that owns it; then this retry starts a new attempt on the integrated head$/,
+  );
+  assert.equal(
+    blamed.nextAction.command,
+    "factory retry --objective 7 --item A",
+  );
+  // With no planning revision left, an amendment cannot be taken: cancel.
+  const used = summarizeStatus(
+    execution([item("A", { status: "failed" })], {
+      state: "failed",
+      allowanceRemaining: { objective: { planningRevisions: 0 } },
+      repairs: {
+        A: {
+          phase: "stopped",
+          failureClass: "decision",
+          failureEvent: null,
+          blamedPredecessor: "lib",
+          blamedPath: "lib.sh",
+          nextDecision: null,
+        },
+      },
+    }),
+  );
+  assert.equal(used.nextAction.command, "factory cancel --objective 7");
+  assert.doesNotMatch(used.nextAction.reason, /propose-amendment/);
+  // The blame is judged in order: a pending amendment, whether the graph
+  // changed since, then the allowance. The amendment that fixes the file takes
+  // the last planning revision itself, so zero left must not mean cancel.
+  const blame = (digest) => ({
+    A: {
+      phase: "stopped",
+      failureClass: "decision",
+      failureEvent: null,
+      blamedPredecessor: "lib",
+      blamedPath: "lib.sh",
+      blamedGraphDigest: digest,
+      nextDecision: null,
+    },
+  });
+  const none = { objective: { planningRevisions: 0 } };
+  const pendingAmendment = summarizeStatus(
+    execution([item("A", { status: "failed" })], {
+      state: "failed",
+      runActive: false,
+      graphDigest: "g1",
+      allowanceRemaining: none,
+      pendingAmendment: { phase: "ready", error: null },
+      repairs: blame("g1"),
+    }),
+  );
+  assert.equal(
+    pendingAmendment.nextAction.command,
+    "factory run --objective 7",
+  );
+  assert.match(pendingAmendment.nextAction.reason, /amendment .* is pending/);
+  const owned = summarizeStatus(
+    execution([item("A", { status: "failed" })], {
+      state: "failed",
+      runActive: true,
+      graphDigest: "g1",
+      allowanceRemaining: none,
+      pendingAmendment: { phase: "reviewed", error: null },
+      repairs: blame("g1"),
+    }),
+  );
+  assert.equal(owned.nextAction, null);
+  assert.match(owned.summary, /amendment .* is pending/);
+  const rejected = summarizeStatus(
+    execution([item("A", { status: "failed" })], {
+      state: "failed",
+      graphDigest: "g1",
+      allowanceRemaining: none,
+      pendingAmendment: { phase: "rejected", error: "bad graph" },
+      repairs: blame("g1"),
+    }),
+  );
+  assert.match(rejected.nextAction.command, /^factory propose-amendment /);
+  const landed = summarizeStatus(
+    execution(
+      [item("A", { status: "failed" }), item("fix", { status: "done" })],
+      {
+        state: "failed",
+        runActive: false,
+        graphDigest: "g2",
+        allowanceRemaining: none,
+        repairs: blame("g1"),
+      },
+    ),
+  );
+  assert.equal(
+    landed.nextAction.command,
+    "factory retry --objective 7 --item A",
+  );
+  // The fix is not merged yet: it merges first. Items waiting on A do not count.
+  const unmerged = summarizeStatus(
+    execution(
+      [
+        item("A", { status: "failed" }),
+        item("fix", { status: "pending" }),
+        item("after", { status: "pending", blockedReason: "dependency:A" }),
+        item("later", { status: "pending", blockedReason: "dependency:after" }),
+      ],
+      {
+        state: "failed",
+        runActive: false,
+        graphDigest: "g2",
+        allowanceRemaining: none,
+        repairs: blame("g1"),
+      },
+    ),
+  );
+  assert.equal(unmerged.nextAction.command, "factory run --objective 7");
+  const waitingOnly = summarizeStatus(
+    execution(
+      [
+        item("A", { status: "failed" }),
+        item("fix", { status: "done" }),
+        item("after", { status: "pending", blockedReason: "dependency:A" }),
+        item("later", { status: "pending", blockedReason: "dependency:after" }),
+      ],
+      {
+        state: "failed",
+        runActive: false,
+        graphDigest: "g2",
+        allowanceRemaining: none,
+        repairs: blame("g1"),
+      },
+    ),
+  );
+  assert.equal(
+    waitingOnly.nextAction.command,
+    "factory retry --objective 7 --item A",
+  );
   const authentication = summarizeStatus(
     execution([
       item("A", {

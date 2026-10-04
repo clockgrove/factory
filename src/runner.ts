@@ -491,9 +491,15 @@ export async function controlObjective(
     if (!state) throw new Error("Objective has no Factory state");
     if (request.action === "status") return state.coordinator;
     if (request.action === "propose-amendment") {
-      if (state.schemaVersion !== 7 || !request.input?.replacement)
+      // Every stop names this command, so it works while the Objective is
+      // stopped: it records the pending amendment under the lock (the same
+      // checks, review and charges as an owner's) and the next run compiles,
+      // reviews and projects it.
+      if (state.schemaVersion !== 7)
+        throw new Error("Planning has no active graph to amend");
+      if (request.input?.scope !== "in-scope")
         throw new Error(
-          "Only diagnosed rejected-amendment replacement is supported without an active owner",
+          "Only an in-scope amendment can be proposed while the Objective is stopped; a backlog discovery needs a running owner",
         );
       if (state.configDigest !== factoryConfigDigest(config))
         throw new Error("Objective differs from this Factory installation");
@@ -1627,6 +1633,7 @@ async function runObjectivePass(
         model: planningModel,
         diagnostics,
         sources: planningSources(issue.body, current.baseSha, config.checkout),
+        checkout: config.checkout,
         save: () => save(current),
         stopped: () =>
           cancellationRequested() || current.coordinator?.mode !== "running",
@@ -2354,10 +2361,18 @@ function retryStep(
   }
 }
 
-/** The attempt failed with a wrong result: a new attempt corrects it. */
+/**
+ * The attempt failed with a wrong result: a new attempt corrects it. A failure
+ * blamed on a merged predecessor counts: the same head would fail and be
+ * blamed again, so the retry that follows the predecessor's fix starts a new
+ * attempt on the integrated head.
+ */
 function wrongResult(work: WorkState): boolean {
   const failure = work.recovery?.failure;
-  return failure?.classification === "implementation" && !!failure.event;
+  return (
+    (failure?.classification === "implementation" && !!failure.event) ||
+    !!failure?.predecessor
+  );
 }
 
 /**
@@ -2409,9 +2424,10 @@ export function retryWorkItem(
     // and validation: a published item keeps its PR (publish leases against
     // the recorded head), and an unpublished one repeats publish, which finds
     // its PR by head. In a native unit every such item of the unit resumes.
-    // A wrong result (a failed required check, a conflict) is not resumed:
-    // the same head would fail the same way. It gets a new attempt that
-    // republishes the branch with a lease, as a repair does.
+    // A wrong result (a failed required check, a conflict, a failure blamed
+    // on a merged predecessor) is not resumed: the same head would fail the
+    // same way. It gets a new attempt that republishes the branch with a
+    // lease, as a repair does.
     const delivering = (entry: WorkState | undefined): boolean =>
       !!entry &&
       (entry.status === "failed" || entry.status === "cancelled") &&

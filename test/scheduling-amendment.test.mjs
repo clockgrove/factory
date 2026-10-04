@@ -80,7 +80,7 @@ test("accepted reprioritization changes pending order without resetting running 
       autonomy: resolveAutonomy({
         repairClasses: [],
         allowances: {
-          planningRevisions: 1,
+          planningRevisions: 2,
           implementationRepairs: 0,
           resultRereviews: 0,
         },

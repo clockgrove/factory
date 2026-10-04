@@ -195,6 +195,19 @@ export interface FailureDisposition {
   continuation: "new-attempt-from-accepted-base" | "operator-decision";
   unfinishedEdits: "removed" | "unavailable";
   decision: string;
+  /**
+   * The integrated predecessor whose delivered file caused the failure
+   * (src/work-repair.ts). Only a decision about that predecessor names one.
+   */
+  predecessor?: {
+    item: string;
+    path: string;
+    pullRequest?: number;
+    /** The model's diagnosis, capped; quoted in the decision. */
+    diagnosis: string;
+    /** The graph the blame was made on: a different one means an amendment landed. */
+    graphDigest: string;
+  };
 }
 export interface RepairCorrection {
   failureDigest: string;
@@ -306,6 +319,22 @@ export function allowanceAvailable(
 ): boolean {
   return charged(state, event, key) || !exhausted(state, key, scopes);
 }
+/** Whether one more amendment (one planning revision) fits the limit the Objective recorded. */
+export function amendmentAllowed(state: RepairLedger): boolean {
+  return allowanceAvailable(
+    state,
+    objectiveEvent("amend", "new"),
+    "planningRevisions",
+    ["$planning"],
+  );
+}
+/**
+ * What works once amendments are not allowed. Limits are recorded when an
+ * Objective starts, so a higher limit in the config reaches only an Objective
+ * started after it.
+ */
+export const amendmentsUsedUp = (objective: number): string =>
+  `The Objective's planningRevisions allowance is used up, so it cannot take an amendment. Limits are recorded when an Objective starts: a higher autonomy.allowances.planningRevisions in the config applies to a new Objective only. Run \`factory cancel --objective ${objective}\`, raise the limit, then start a new Objective`;
 /**
  * Charge one failure event against `key`. Repeating it is free; a correction
  * of another kind for the same event charges its own allowance. A charge
@@ -332,6 +361,21 @@ export function charge(
       scopes: unique,
     },
   };
+}
+/**
+ * Give back the implementation repair a failure event used: no correction was
+ * made for it. Any other allowance the event holds stays charged.
+ */
+export function releaseCharge(state: RepairLedger, event: string): void {
+  const held = state.charges?.[event];
+  if (!held) return;
+  const { [event]: _released, ...others } = state.charges!;
+  const allowances = held.allowances.filter(
+    (key) => key !== "implementationRepairs",
+  );
+  state.charges = allowances.length
+    ? { ...others, [event]: { ...held, allowances } }
+    : others;
 }
 /** Corrections of `kind` must be enabled for this Objective. */
 export function assertRepairClass(

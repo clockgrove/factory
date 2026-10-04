@@ -34,6 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
+      - uses: ./.github/actions/judge-sandbox
       - run: git lfs version
       # scripts/test-shards.mjs packs files by test/support/test-timings.json.
       # The assignment stops the step if the script fails; an empty file list

@@ -18,6 +18,8 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { assertSupportedGit } from "../dist/config.js";
+import { LocalContentStore } from "../dist/content/local.js";
+import { LocalExecutionDriver } from "../dist/execution/local.js";
 import { attachedFault } from "../dist/fault.js";
 import {
   addWorktree,
@@ -272,6 +274,55 @@ test("addWorktree checks out files outside the lock", async () => {
   assert.equal(readFileSync(join(added, "file.txt"), "utf8"), "base\n");
   assert.equal(run(added, "status", "--porcelain"), "");
   assert.notEqual(run(added, "rev-parse", "HEAD"), head);
+});
+
+test("a local worker's checkout runs outside the lock (#649)", async () => {
+  const { root, checkout } = fixture();
+  const harness = {
+    capabilities: {
+      protocolVersion: 1,
+      worktree: "factory-owned-read-write",
+      head: "preserve",
+      lifecycle: "restart-safe-durable-handle",
+      publication: "controller-only",
+      assetSets: true,
+      authentication: "none",
+    },
+    async start(request) {
+      return { identity: request.attemptId, data: {} };
+    },
+    async observe() {
+      return { state: "complete" };
+    },
+    async cancel() {},
+    async collect() {
+      return { evidence: { harness: "scripted" } };
+    },
+  };
+  const driver = new LocalExecutionDriver(
+    checkout,
+    join(root, "worktrees"),
+    harness,
+    1,
+    new LocalContentStore(join(root, "content")),
+    "scripted-test@1",
+  );
+  const baseSha = run(checkout, "rev-parse", "HEAD");
+  const item = { id: "item", title: "Item", ownedPaths: ["file.txt"] };
+  await withShim(root, "reset", async ({ release }) => {
+    const start = driver.start({ attemptId: "attempt", baseSha, item });
+    // The checkout is the held command; without one, nothing ever holds.
+    for (let waited = 0; !existsSync(join(root, "held")); waited += 10) {
+      assert.ok(waited < 10_000, "the checkout runs as its own command");
+      await delay(10);
+    }
+    // The registration is done; a fetch need not wait for the checkout.
+    const fetch = gitAsync(checkout, "fetch", "origin", "main");
+    assert.equal(await settlesSoon(fetch), true);
+    await fetch;
+    release();
+    await start;
+  });
 });
 
 test("a failed command releases the lock", async () => {

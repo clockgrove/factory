@@ -1,11 +1,21 @@
-import { cancelledFault, classifyFaults } from "../fault.js";
+import {
+  attachedFault,
+  cancelledFault,
+  classifyFaults,
+  judgedAsWork,
+  readWorkerJson,
+  workFault,
+} from "../fault.js";
 import { executionFault } from "./fault.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  accessSync,
+  constants,
   createReadStream,
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -44,6 +54,7 @@ import {
   parseProducedAssetSets,
 } from "../media.js";
 import {
+  addWorktree,
   hasUnresolvedSubprocesses,
   linuxProcessIdentity,
   pinnedGit,
@@ -216,11 +227,11 @@ export class CodexHarness implements AgentHarness {
             observed.detail ?? "Codex authentication required",
             observed.authentication,
           );
-        throw new Error(observed.detail ?? "Codex harness worker failed");
+        throw workFault(observed.detail ?? "Codex harness worker failed");
       }
-      const result: unknown = JSON.parse(readFileSync(data.resultPath, "utf8"));
+      const result: unknown = readWorkerJson(data.resultPath);
       if (!result || typeof result !== "object" || Array.isArray(result))
-        throw new Error("Harness result is not an object");
+        throw workFault("Harness result is not an object");
       const value = result as Record<string, unknown>;
       if (
         value.state !== "complete" ||
@@ -228,7 +239,7 @@ export class CodexHarness implements AgentHarness {
         typeof value.evidence !== "object" ||
         Array.isArray(value.evidence)
       )
-        throw new Error("Harness completion result lacks structured evidence");
+        throw workFault("Harness completion result lacks structured evidence");
       const assets =
         value.assets === undefined
           ? undefined
@@ -269,7 +280,7 @@ async function verifyBoundInput(path: string, ref: ContentRef): Promise<void> {
     !lstatSync(path).isFile() ||
     realpathSync(path) !== resolve(path)
   )
-    throw new Error("Bound asset input is missing or redirected");
+    throw workFault("Bound asset input is missing or redirected");
   const hash = createHash("sha256");
   let bytes = 0;
   for await (const chunk of createReadStream(path)) {
@@ -277,7 +288,7 @@ async function verifyBoundInput(path: string, ref: ContentRef): Promise<void> {
     bytes += chunk.length;
   }
   if (bytes !== ref.bytes || hash.digest("hex") !== ref.digest)
-    throw new Error("Bound asset input differs from its captured digest");
+    throw workFault("Bound asset input differs from its captured digest");
 }
 
 function assertDurableHandle(handle: HarnessHandle): void {
@@ -307,18 +318,51 @@ async function preserveControllerAssetDestinations(
     const path = join(worktree, destination);
     if (!existsSync(path)) {
       if (source)
-        throw new Error(
+        throw workFault(
           `Worker removed controller-owned asset destination ${destination}`,
         );
       continue;
     }
     if (!source)
-      throw new Error(
+      throw workFault(
         `Worker wrote controller-owned asset destination ${destination}`,
       );
     await verifyBoundInput(path, source.ref);
   }
   return destinations;
+}
+
+/** Controller-owned staging that collection reads but never commits. */
+const PRIVATE_STAGING = [
+  ".factory-discovery.json",
+  ".factory-inputs",
+  ".factory-assets.json",
+];
+/** The first path under the worktree Factory cannot read, if any. */
+function firstUnreadable(directory: string, relative = ""): string | undefined {
+  let names: string[];
+  try {
+    names = readdirSync(directory);
+  } catch {
+    return relative || ".";
+  }
+  for (const name of names) {
+    if (!relative && name === ".git") continue;
+    const path = join(directory, name);
+    const shown = relative ? `${relative}/${name}` : name;
+    const type = lstatSync(path);
+    if (type.isDirectory()) {
+      const inner = firstUnreadable(path, shown);
+      if (inner) return inner;
+    } else if (type.isFile()) {
+      try {
+        accessSync(path, constants.R_OK);
+      } catch {
+        return shown;
+      }
+    }
+  }
+  return undefined;
 }
 
 const FACTORY_EMAIL = "factory@users.noreply.github.com";
@@ -340,11 +384,14 @@ export async function collectWorktreeResult(
       !lstatSync(discoveryPath).isFile() ||
       realpathSync(discoveryPath) !== discoveryPath
     )
-      throw new Error(
+      throw workFault(
         "Discovery manifest must be a regular private staging file",
       );
-    discovery = JSON.parse(readFileSync(discoveryPath, "utf8"));
-    assertDiscovery(discovery!);
+    discovery = judgedAsWork(() => {
+      const parsed = JSON.parse(readFileSync(discoveryPath, "utf8"));
+      assertDiscovery(parsed);
+      return parsed;
+    });
     if (
       pinnedGit(worktree, "ls-tree", "HEAD", "--", ".factory-discovery.json") ||
       pinnedGit(
@@ -355,7 +402,7 @@ export async function collectWorktreeResult(
         ".factory-discovery.json",
       )
     )
-      throw new Error("Discovery manifest must be untracked private staging");
+      throw workFault("Discovery manifest must be untracked private staging");
   }
   // A collection interrupted after its own commit is undone to the staged
   // candidate and checked again from the top.
@@ -367,7 +414,7 @@ export async function collectWorktreeResult(
   )
     await pinnedGitAsync(worktree, "reset", "--soft", request.baseSha);
   if (pinnedGit(worktree, "rev-parse", "HEAD") !== request.baseSha) {
-    throw new Error(
+    throw workFault(
       "Worker changed HEAD; expected uncommitted changes at exact base",
     );
   }
@@ -396,32 +443,40 @@ export async function collectWorktreeResult(
       source.ref,
     );
   }
-  rmSync(join(worktree, ".factory-inputs"), {
-    recursive: true,
-    force: true,
-  });
-  rmSync(join(worktree, ".factory-assets.json"), { force: true });
   if (
     request.item.expectedOutputRoles?.length &&
     assets.length < (request.item.minimumAssetSets ?? 1)
   )
-    throw new Error("Media Work Item did not produce the requested AssetSets");
+    throw workFault("Media Work Item did not produce the requested AssetSets");
   const assetDestinations = await preserveControllerAssetDestinations(
     worktree,
     assets,
   );
-  // The private discovery file is never staged, so its bytes never reach
-  // the object database.
-  if (discovery)
+  // Private staging is never staged, so its bytes never reach the object
+  // database. Bound inputs and the manifest stay on disk until the commit
+  // lands: a transient fault before then repeats collection from the top and
+  // verifies the same bytes again.
+  try {
     await pinnedGitMagicAsync(
       worktree,
       "add",
       "-A",
       "--",
       ".",
-      ":(exclude,literal).factory-discovery.json",
+      ...PRIVATE_STAGING.map((name) => `:(exclude,literal)${name}`),
     );
-  else await pinnedGitAsync(worktree, "add", "-A");
+  } catch (error) {
+    // Git cannot index what the worker left unreadable; any other failure
+    // keeps the classification it already has.
+    const unreadable = attachedFault(error)
+      ? undefined
+      : firstUnreadable(worktree);
+    if (unreadable)
+      throw workFault(`Worker left an unreadable path: ${unreadable}`, {
+        cause: error,
+      });
+    throw error;
+  }
   if (assetDestinations.length)
     await pinnedGitAsync(worktree, "reset", "HEAD", "--", ...assetDestinations);
   const acceptedIgnoredLinks: string[] = [];
@@ -432,7 +487,7 @@ export async function collectWorktreeResult(
     acceptedIgnoredLinks,
   );
   if (!paths.length && !assets.length)
-    throw new Error("Worker produced no repository change");
+    throw workFault("Worker produced no repository change");
   if (paths.length)
     await pinnedGitAsync(
       worktree,
@@ -447,6 +502,8 @@ export async function collectWorktreeResult(
   const commit = pinnedGit(worktree, "rev-parse", "HEAD");
   const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
   if (discovery) rmSync(discoveryPath);
+  rmSync(join(worktree, ".factory-inputs"), { recursive: true, force: true });
+  rmSync(join(worktree, ".factory-assets.json"), { force: true });
   return {
     changeRef: commit,
     treeSha,
@@ -604,14 +661,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     );
     if (verified !== request.baseSha)
       throw new Error("Execution base does not resolve exactly");
-    await pinnedGitAsync(
-      this.checkout,
-      "worktree",
-      "add",
-      "--detach",
-      worktree,
-      request.baseSha,
-    );
+    await addWorktree(this.checkout, worktree, request.baseSha);
     try {
       const sourceAssets = await importSourceAssets(
         this.contentStore,
@@ -839,6 +889,17 @@ export class LocalExecutionDriver implements ExecutionDriver {
         "Collection subprocess ownership unresolved; checkout retained",
       );
     const interrupted = !collected && observed.interrupted === true;
+    // Only a wrong result ends the attempt here. A transient, config or
+    // defect fault from collecting a finished worker's result is not the
+    // worker's: it leaves the result in its worktree for the step to repeat
+    // collect, or to stop as a defect, and charges nothing.
+    if (
+      !collected &&
+      !interrupted &&
+      !(collectionError instanceof AuthenticationRequiredError) &&
+      attachedFault(collectionError)?.kind !== "work"
+    )
+      throw collectionError;
     if (collected)
       context?.checkpoint({
         ...handle,

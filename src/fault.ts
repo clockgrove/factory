@@ -6,6 +6,7 @@
  * classified is a `defect`.
  */
 
+import { readFileSync } from "node:fs";
 import * as time from "./clock.js";
 
 /** What a failed result showed, for repair and the operator. */
@@ -336,6 +337,47 @@ export const transient = (
   ...(retryAt && { retryAt }),
   outcomeUnknown,
 });
+
+/**
+ * The produced result is wrong (`work`): the worker's output broke a rule
+ * Factory checks. Throw this only for the worker's result, never for a
+ * failure of Factory's own effects.
+ */
+export const workFault = (detail: string, options?: ErrorOptions): StepFault =>
+  new StepFault({ kind: "work", evidence: { detail } }, options);
+
+/**
+ * Run a pure check of the worker's output: whatever it throws unclassified
+ * is the worker's wrong result. A fault an adapter already attached passes
+ * through unchanged.
+ */
+export function judgedAsWork<T>(check: () => T): T {
+  try {
+    return check();
+  } catch (error) {
+    if (attachedFault(error)) throw error;
+    throw workFault(error instanceof Error ? error.message : String(error), {
+      cause: error,
+    });
+  }
+}
+
+/**
+ * Read the JSON result a finished worker left. A missing file or text that
+ * does not parse is the worker's wrong result; any other read failure
+ * (permissions, I/O) is Factory's own and keeps its classification.
+ */
+export function readWorkerJson(path: string): unknown {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      throw workFault("Harness left no result file", { cause: error });
+    throw error;
+  }
+  return judgedAsWork(() => JSON.parse(text));
+}
 
 export const decision = (question: string, ...evidence: string[]): Fault => ({
   kind: "decision",

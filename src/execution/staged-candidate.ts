@@ -1,3 +1,4 @@
+import { workFault } from "../fault.js";
 import { ownsPath } from "../ownership.js";
 import { spawnSync } from "node:child_process";
 import {
@@ -73,10 +74,10 @@ function checkChangedPath(worktree: string, path: string): void {
         (component) => !component || component === "." || component === "..",
       )
   )
-    throw new Error(`Worker changed unsafe path ${JSON.stringify(path)}`);
+    throw workFault(`Worker changed unsafe path ${JSON.stringify(path)}`);
   const destination = resolve(worktree, path);
   if (!inside(destination, worktree))
-    throw new Error(
+    throw workFault(
       `Worker changed path outside worktree: ${JSON.stringify(path)}`,
     );
   let current = worktree;
@@ -90,12 +91,12 @@ function checkChangedPath(worktree: string, path: string): void {
       throw error;
     }
     if (type.isSymbolicLink() || (!type.isFile() && !type.isDirectory()))
-      throw new Error(
+      throw workFault(
         `Worker changed unsafe filesystem entry at ${JSON.stringify(path)}`,
       );
   }
   if (existsSync(destination) && !inside(realpathSync(destination), worktree))
-    throw new Error(
+    throw workFault(
       `Worker changed path escaping worktree: ${JSON.stringify(path)}`,
     );
 }
@@ -161,12 +162,12 @@ function checkWorktreeEntries(
           if (base.length === 0 && safeIgnoredLink(worktree, path))
             acceptedIgnoredLinks?.push(path);
           else
-            throw new Error(
+            throw workFault(
               `Worker introduced unsafe symlink at ${JSON.stringify(path)}`,
             );
         }
       } else if (!type.isFile()) {
-        throw new Error(
+        throw workFault(
           `Worker introduced special file at ${JSON.stringify(path)}`,
         );
       }
@@ -237,7 +238,7 @@ async function scanChangedFile(
         .toString("utf8")
         .matchAll(/@secretlint\/secretlint-rule-[A-Za-z0-9-]+/g),
     ].map((match) => match[0]);
-    throw new Error(
+    throw workFault(
       `Secretlint found suspected secret in ${JSON.stringify(path)} (${rules.at(-1) ?? "Secretlint recommended rules"}). Publication stopped. Operator: review the finding; remove or rotate the value, or supply a reviewed Secretlint config outside the target checkout via FACTORY_SECRETLINT_CONFIG and explicitly retry.`,
     );
   }
@@ -254,7 +255,7 @@ export async function checkStagedCandidate(
   const paths = changedPaths(worktree);
   const unowned = paths.filter((path) => !ownsPath(path, ownedPaths));
   if (unowned.length)
-    throw new Error(
+    throw workFault(
       `Worker changed paths outside ownership: ${unowned.join(", ")}`,
     );
   for (const path of paths) {
@@ -262,7 +263,7 @@ export async function checkStagedCandidate(
     const entry = stagedEntry(worktree, path);
     if (!entry) continue; // Deletion has no new content to publish.
     if (path === ".gitmodules" || !["100644", "100755"].includes(entry.mode))
-      throw new Error(
+      throw workFault(
         `Worker changed unsafe Git entry at ${JSON.stringify(path)}`,
       );
     const scanRoot = mkdtempSync(join(dirname(worktree), "secret-scan-"));

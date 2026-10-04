@@ -9,7 +9,7 @@ const USAGE_LIMIT = /session limit|usage limit|hit your (?:\w+ )?limit/i;
 const THROTTLED = /rate.?limit|too many requests|\b429\b/i;
 /** The host could not reach the provider: DNS, refused, unreachable, reset. */
 const NETWORK =
-  /EAI_AGAIN|ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENETDOWN|UND_ERR_CONNECT_TIMEOUT|getaddrinfo|Can't reach the API|Could not resolve host|fetch failed|socket hang up/i;
+  /Reconnecting\.\.\. \d+\/\d+|stream disconnected|failed to lookup address|workspace routing discovery failed|EAI_AGAIN|ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENETDOWN|UND_ERR_CONNECT_TIMEOUT|getaddrinfo|Can't reach the API|Could not resolve host|fetch failed|socket hang up/i;
 
 /**
  * Provider and process errors reach the eval as text, so this is the one place

@@ -37,7 +37,7 @@ node scripts/eval-planning.mjs --compare out/a/report.json out/b/report.json
 | `--fixtures DIR`             | Review fixtures for `--review-only`. Default `evals/review`.                                                                                                               |
 | `--planning-model MODULE`    | Module exporting `createPlanningModel({ config, directory })`, replacing the configured planner and reviewer.                                                              |
 | `--reviewer-config FILE`     | Pair the planner from `--config` with the reviewer from another Factory configuration's `planning` block, for example a Codex planner with a Claude reviewer. See Pairing. |
-| `--max-retries N`            | Retries per run after a usage limit or network outage. Default 4; 0 turns retrying off. See Retries.                                                                       |
+| `--max-retries N`            | Retries per run after a usage limit or network outage. Default 8; 0 turns retrying off. See Retries.                                                                       |
 | `--max-wait MINUTES`         | Most one run waits in total. Default 360.                                                                                                                                  |
 | `--retry-wait SECONDS`       | First wait, doubling up to 8x. Default 15 minutes for a usage limit and 30 seconds for a network outage, each capped (60 and 5 minutes).                                   |
 | `--allow-unsandboxed-judges` | Run judges without the sandbox when the host cannot create one. See Frozen judges. The report records it.                                                                  |
@@ -47,7 +47,7 @@ Runs use your provider login: the Codex login for `codex-sdk`, the Claude Code l
 
 ## Retries
 
-A provider usage limit (`You've hit your session limit`, `usage limit`) or a network outage (`EAI_AGAIN`, `ENOTFOUND`, a refused or reset connection) says nothing about planning quality. The eval does not score it: it holds every run for the wait, starts the run again from nothing, and records the wait. Each wait doubles up to a cap. A run stops retrying after `--max-retries` retries or `--max-wait` minutes of waiting, and then stays an `error`.
+A provider usage limit (`You've hit your session limit`, `usage limit`) or a network outage (`EAI_AGAIN`, `ENOTFOUND`, a refused or reset connection, the Codex SDK's `Reconnecting... 2/5`) says nothing about planning quality. The eval does not score it: it holds every run for the wait, starts the run again from nothing, and records the wait. Each wait doubles up to a cap. A run stops retrying after `--max-retries` retries or `--max-wait` minutes of waiting, and then stays an `error`.
 
 - The pause is shared. When one run hits a limit, runs that have not started wait too.
 - Provider and process errors arrive as text, so the eval reads them to decide this. It looks at an errored run's `error` and at errored judge calls. It also looks at the `failure` and `stop` text of a question, because production reports an unclassified provider error during review as an invalid review. For those only the provider's own limit and network wording counts, because a plan can talk about rate limits.

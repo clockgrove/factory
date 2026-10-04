@@ -682,7 +682,7 @@ test("a usage limit or an outage backs off, resumes the run and records the wait
     assert.equal(status, 0);
     assert.match(
       stderr,
-      /native-stack-chain-1: usage-limit, waiting [\d.]+s before retry 1\/4/,
+      /native-stack-chain-1: usage-limit, waiting [\d.]+s before retry 1\/8/,
     );
     const report = readReport(output);
     const [entry] = report.runs;
@@ -712,7 +712,7 @@ test("a usage limit or an outage backs off, resumes the run and records the wait
     );
     assert.ok(overall.retries.pausedMs >= 150);
     assert.deepEqual(report.retry, {
-      maxRetries: 4,
+      maxRetries: 8,
       maxWaitMinutes: 360,
       waitSeconds: 0.05,
     });

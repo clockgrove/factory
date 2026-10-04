@@ -630,7 +630,7 @@ async function main() {
       },
       "planning-model": { type: "string" },
       "reviewer-config": { type: "string" },
-      "max-retries": { type: "string", default: "4" },
+      "max-retries": { type: "string", default: "8" },
       "max-wait": { type: "string", default: "360" },
       "retry-wait": { type: "string" },
       judge: { type: "string", multiple: true, default: [] },

@@ -205,12 +205,14 @@ test("sealed closure reconciles a lost acknowledgement on rerun without model re
   });
 });
 
-test("remote default advancement during final review cannot seal acceptance or close Objective", async () => {
+test("remote default advancement during final review validates and reviews the new head before sealing", async () => {
   await fixture("remote-head", async (args) => {
     let finalReviews = 0;
     const setup = setupFixture(args, (request) => {
-      if (request.invocation.phase === "objective-review") {
-        finalReviews++;
+      if (
+        request.invocation.phase === "objective-review" &&
+        ++finalReviews === 1
+      ) {
         const head = git(args.target.origin, "rev-parse", "refs/heads/main");
         git(args.config.checkout, "checkout", "--detach", head);
         writeFileSync(
@@ -243,15 +245,14 @@ test("remote default advancement during final review cannot seal acceptance or c
         ),
       };
     });
-    await assert.rejects(
-      setup.application.runObjective(1),
-      /Default branch changed during final review/,
-    );
-    const state = readState(args.config.repository, 1);
-    assert.equal(finalReviews, 1);
-    assert.equal(state.finalAcceptance, undefined);
-    assert.equal(state.objectiveClosure, undefined);
-    assert.equal(setup.github.state().closedIssues[1], undefined);
+    // Another contributor's push is not a fault: the new head is validated
+    // and reviewed again, and only that head is sealed.
+    const state = await setup.application.runObjective(1);
+    assert.equal(finalReviews, 2);
+    const head = git(args.target.origin, "rev-parse", "refs/heads/main");
+    assert.equal(state.integratedSha, head);
+    assert.equal(state.finalAcceptance.commit, head);
+    assert.equal(state.objectiveClosure, "complete");
   });
 });
 

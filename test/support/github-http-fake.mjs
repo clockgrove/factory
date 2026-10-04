@@ -91,6 +91,7 @@ const ROUTES = [
 /** Endpoint names as they appear in the request log. */
 export const ENDPOINTS = [
   ...ROUTES.map((route) => route.endpoint),
+  "GET /user",
   "POST /graphql",
   "GIT fetch-advertise",
   "GIT fetch",
@@ -495,6 +496,10 @@ export class GitHubHttpFake {
     if (path === "/graphql")
       return method === "POST"
         ? { endpoint: "POST /graphql", handler: "graphql", params: {} }
+        : undefined;
+    if (path === "/user")
+      return method === "GET"
+        ? { endpoint: "GET /user", handler: "viewer", params: {} }
         : undefined;
     const match = /^\/repos\/([^/]+)\/([^/]+)(\/.*)?$/.exec(path);
     if (!match) return undefined;
@@ -910,6 +915,14 @@ export class GitHubHttpFake {
           "rebase",
         ),
       },
+    };
+  }
+
+  /** The token's user, who authors everything Factory creates here. */
+  viewer() {
+    return {
+      status: 200,
+      data: { login: this.owner, id: 1, type: "User" },
     };
   }
 

@@ -68,8 +68,6 @@ const SAMPLES = {
     objectiveStopped("GitHub request failed (HTTP 503)"),
     published,
   ),
-  PLANNER_STOP: stopped("socket hang up", {}),
-  FINAL_REVIEW: stopped(objectiveStopped("socket hang up"), done),
   START_AMBIGUOUS: stopped(
     "Objective stopped: Work Item beta has ambiguous active state at execute; operator direction required. Use explicit retry or operator direction.",
     { alpha: "done", beta: "running@execute" },
@@ -92,15 +90,6 @@ const SAMPLES = {
       },
     ),
   }),
-  PROJECTION_STOP: stopped(
-    "GitHub mutation outcome unknown; reconcile authenticated evidence before retrying",
-    {},
-  ),
-  CLOSURE_PAUSE: stopped(
-    "Objective #1: GitHub mutation outcome unknown; reconcile authenticated evidence before retrying",
-    done,
-  ),
-  READBACK_LAG: stopped("Work Item hierarchy did not reconcile exactly", {}),
   MERGE_READ_LAG: stopped(
     objectiveStopped("PR merge has not confirmed the exact integrated commit"),
     { alpha: "failed", beta: "pending" },
@@ -113,7 +102,6 @@ const SAMPLES = {
     alpha: "failed@deliver",
     beta: "pending",
   }),
-  ISSUE_LIST_LAG: "Work Item alpha has 2 issues with its marker\n{}",
   STACK_MERGE_REPEAT: stopped(
     objectiveStopped("GitHub request failed (HTTP 409)"),
     published,
@@ -130,16 +118,6 @@ const SAMPLES = {
     alpha: "failed",
     beta: "pending",
   }),
-  PAGE_SHIFT: stopped(
-    "Multiple Work Item issues for alpha; operator direction required",
-    {},
-  ),
-  FOREIGN_PUSH: stopped(
-    objectiveStopped(
-      `Default branch changed before final validation: expected ${sha}, observed ${"b".repeat(40)}`,
-    ),
-    done,
-  ),
 };
 
 test("every diagnosis has a sample, and each sample matches only its own diagnosis", () => {
@@ -189,24 +167,10 @@ test("generic transport text matches only where the run stopped", () => {
       beta: "pending",
     },
   );
-  for (const key of [
-    "PLANNER_STOP",
-    "FINAL_REVIEW",
-    "PROJECTION_STOP",
-    "NATIVE_READS",
-  ]) {
+  for (const key of ["NATIVE_READS"]) {
     assert.equal(DIAGNOSES[key].pattern.test(midRun), false, key);
     assert.equal(DIAGNOSES[key].pattern.test(midDelivery), false, key);
   }
-  // The page-shift stop is not a duplicate issue, nor the reverse.
-  assert.equal(
-    DIAGNOSES.ISSUE_LIST_LAG.pattern.test(SAMPLES.PAGE_SHIFT),
-    false,
-  );
-  assert.equal(
-    DIAGNOSES.PAGE_SHIFT.pattern.test(SAMPLES.ISSUE_LIST_LAG),
-    false,
-  );
 });
 
 test("the target is the run that ended the scenario, or the last stop", () => {
@@ -221,12 +185,6 @@ test("the target is the run that ended the scenario, or the last stop", () => {
   assert.equal(
     diagnosisTarget({ runs: [early, late] }, "end", error),
     summarizeRun(late),
-  );
-  assert.equal(
-    DIAGNOSES.PAGE_SHIFT.pattern.test(
-      diagnosisTarget({ runs: [early, late] }, "end", error),
-    ),
-    false,
   );
   // After a complete run: the operator-stop check names the last stop, other
   // checks the end-state fact.

@@ -88,6 +88,8 @@ function projectionTransport() {
     urls.push(String(url));
     const path = new URL(String(url)).pathname.slice(1);
     const method = options.method ?? "GET";
+    if (method === "GET" && path === "user")
+      return json({ login: await fixture.client.viewer() });
     if (
       method === "GET" &&
       (path.endsWith("/labels") ||

@@ -230,15 +230,6 @@ export async function classifiedGitHubCall<T>(
   }
 }
 
-/** Classify only an actual acknowledged rejection; retained prose is never evidence. */
-export function isCompletedProjectionRejection(error: unknown): boolean {
-  return (
-    error instanceof GitHubRequestError &&
-    error.status >= 400 &&
-    error.status < 500
-  );
-}
-
 /** One account/host gate shared by ordinary and native-stack delivery. No retries. */
 export class GitHubClient {
   private client?: Promise<Octokit>;
@@ -343,6 +334,20 @@ export class GitHubClient {
     if (!["GET", "POST", "PATCH", "PUT", "DELETE"].includes(method))
       throw new Error("Unsupported GitHub method");
     return this.dispatch<T>(method, route, body, observation, method === "GET");
+  }
+
+  /** The login of the token's user: the author of everything Factory creates. */
+  async viewer(): Promise<string> {
+    const user = await this.dispatch<{ login?: unknown }>(
+      "GET",
+      "user",
+      undefined,
+      undefined,
+      true,
+    );
+    if (typeof user?.login !== "string" || !user.login)
+      throw new Error("GitHub returned no login for the token's user");
+    return user.login;
   }
 
   /** Fixed repository-scoped observation; callers cannot submit arbitrary GraphQL. */

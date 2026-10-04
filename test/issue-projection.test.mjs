@@ -180,7 +180,6 @@ for (const mode of [
   "body",
   "title",
   "closed",
-  "duplicate",
 ])
   test(`reused issue rejects changed ${mode} without creating replacement`, async () => {
     const f = fixture();
@@ -197,10 +196,9 @@ for (const mode of [
     if (mode === "title") existing.title = "Changed";
     if (mode === "closed") existing.state = "closed";
     f.issues.set(2, existing);
-    if (mode === "duplicate") f.issues.set(3, f.issue(3, existing));
     await assert.rejects(
       f.gateway.projectGraph(f.request),
-      /identity|projection changed|Multiple/,
+      /identity|projection changed/,
     );
     assert.equal(
       f.calls.filter((c) => c.method === "POST" && c.route.endsWith("/issues"))
@@ -208,6 +206,71 @@ for (const mode of [
       0,
     );
   });
+test("owned duplicate Work Item issues keep the oldest and close the rest", async () => {
+  const f = fixture();
+  const projected = {
+    title: "ordinary",
+    body: projectedIssueBody(f.request.graph.items[0], 1),
+    labels: ["factory:work-item"],
+  };
+  f.issues.set(2, f.issue(2, projected));
+  f.issues.set(3, f.issue(3, projected));
+  // The same row on two pages is one issue, not a duplicate.
+  const paginate = f.client.paginate;
+  f.client.paginate = async (route) => {
+    const result = await paginate(route);
+    return route.includes("issues?state=all") ? [...result, result[1]] : result;
+  };
+  const { issueByItemId } = await f.gateway.projectGraph(f.request);
+  assert.deepEqual(issueByItemId, { ordinary: 2 });
+  assert.equal(f.issues.get(2).state, "open");
+  assert.equal(f.issues.get(3).state, "closed");
+  assert.equal(
+    f.calls.filter((c) => c.method === "POST" && c.route.endsWith("/issues"))
+      .length,
+    0,
+  );
+});
+test("an issue another login authored is not Factory's, even with its marker", async () => {
+  const f = fixture();
+  f.issues.set(
+    5,
+    f.issue(5, {
+      title: "ordinary",
+      body: projectedIssueBody(f.request.graph.items[0], 1),
+      labels: ["factory:work-item"],
+      user: { login: "someone-else" },
+    }),
+  );
+  const { issueByItemId } = await f.gateway.projectGraph(f.request);
+  assert.notEqual(issueByItemId.ordinary, 5);
+  assert.equal(f.issues.get(5).state, "open");
+});
+test("an issue the list does not show yet is found by number, not created again", async () => {
+  const f = fixture();
+  f.issues.set(
+    2,
+    f.issue(2, {
+      title: "ordinary",
+      body: projectedIssueBody(f.request.graph.items[0], 1),
+      labels: ["factory:work-item"],
+    }),
+  );
+  const paginate = f.client.paginate;
+  f.client.paginate = async (route) => {
+    const result = await paginate(route);
+    return route.includes("issues?state=all")
+      ? result.filter((issue) => issue.number !== 2)
+      : result;
+  };
+  const { issueByItemId } = await f.gateway.projectGraph(f.request);
+  assert.deepEqual(issueByItemId, { ordinary: 2 });
+  assert.equal(
+    f.calls.filter((c) => c.method === "POST" && c.route.endsWith("/issues"))
+      .length,
+    0,
+  );
+});
 test("projection refuses existing foreign parent and ambiguous authenticated hierarchy", async () => {
   for (const mode of ["parent", "duplicate", "database"]) {
     const f = fixture();

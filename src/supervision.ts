@@ -424,7 +424,7 @@ function checkServiceContinuationFields(state: ContinuationState): void {
   const fields =
     state.schemaVersion === 8
       ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest autonomy capacity charges planningRecovery coordinator plan issueByItemId error cancelRequested cancelledAt permanentAbandonment repeats wait"
-      : "schemaVersion repository objective runId configDigest baseSha autonomy capacity planGraphDigest prerequisitesDigest coordinator graph graphRevisions pendingAmendment rejectedAmendments charges planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error repeats wait";
+      : "schemaVersion repository objective runId configDigest baseSha autonomy capacity planGraphDigest prerequisitesDigest coordinator graph graphRevisions pendingAmendment rejectedAmendments charges planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure cancelRequested cancelledAt error repeats wait";
   for (const field of Object.keys(state))
     if (!fields.split(" ").includes(field))
       throw new Error(

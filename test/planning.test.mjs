@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { composePlanning } from "../dist/application.js";
+import { CompletedModelInvocationError } from "../dist/contracts.js";
 import {
   compilePlan,
   PlanValidationError,
@@ -406,7 +407,10 @@ test("read-only planning diagnostics redact configured secret values", async () 
             usageAvailable: false,
             detail: "provider exposed private-planning-secret",
           });
-          throw new Error("provider exposed private-planning-secret");
+          // A provider answer that completed and failed: an invalid review.
+          throw new CompletedModelInvocationError(
+            "provider exposed private-planning-secret",
+          );
         },
       };
       const { application } = makeApplication({

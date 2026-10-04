@@ -728,5 +728,26 @@ test("factory retry runs the command status prints for a step decision", async (
       run("factory retry --objective 1").stderr,
       /No Objective step awaits/,
     );
+
+    // A stop outside any Work Item: status names the retry, which answers it.
+    done.error = "Fixture stop outside any Work Item";
+    saveState(path, done);
+    const stoppedStatus = summarizeStatus({
+      ...statusDocument(
+        readState(config.repository, 1),
+        config.repository,
+        1,
+        "regular",
+      ),
+      state: "failed",
+    });
+    assert.equal(
+      stoppedStatus.nextAction.command,
+      "factory retry --objective 1",
+    );
+    const restarted = run(stoppedStatus.nextAction.command);
+    assert.equal(restarted.status, 0, restarted.stderr);
+    assert.match(restarted.stdout, /Objective step will run again/);
+    assert.equal(readState(config.repository, 1).error, undefined);
   });
 });

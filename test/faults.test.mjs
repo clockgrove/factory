@@ -293,7 +293,10 @@ const gitHubCases = [
       "GET /repos/a/b/labels": () =>
         json([{ name: "factory:objective" }, { name: "factory:work-item" }]),
       "GET /repos/a/b/issues/7": () => json(objectiveIssue),
+      "GET /user": () => json({ login: "factory" }),
       "GET /repos/a/b/issues": () => json([]),
+      // Projection reads past the newest listed issue before creating one.
+      "GET /repos/a/b/issues/1": () => json({ message: "Not Found" }, 404),
       "POST /repos/a/b/issues": () =>
         json(
           {
@@ -395,7 +398,10 @@ const gitHubCases = [
       "GET /repos/a/b/labels": () =>
         json([{ name: "factory:objective" }, { name: "factory:work-item" }]),
       "GET /repos/a/b/issues/7": () => json(objectiveIssue),
+      "GET /user": () => json({ login: "factory" }),
       "GET /repos/a/b/issues": () => json([]),
+      // Projection reads past the newest listed issue before creating one.
+      "GET /repos/a/b/issues/1": () => json({ message: "Not Found" }, 404),
       "POST /repos/a/b/issues": () =>
         json(
           {

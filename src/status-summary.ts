@@ -118,7 +118,6 @@ export interface ExecutionStatusView extends WaitView {
   finalAcceptancePending: PendingDecisionView | null;
   objectiveClosure: string | null;
   lastError: string | null;
-  githubClosureError: string | null;
   work: StatusItemView[];
 }
 
@@ -475,12 +474,6 @@ function progress(view: ExecutionStatusView): StatusSummary {
         summary: `${counts}; final validation and review`,
         nextAction: restart,
       };
-    if (view.githubClosureError)
-      return {
-        phase: "waiting",
-        summary: `on external prerequisite: GitHub closure: ${short(view.githubClosureError, 80)}`,
-        nextAction: restart,
-      };
     return {
       phase: "running",
       summary: `${counts}; closing the Objective on GitHub`,
@@ -540,6 +533,15 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
       summary: "planning was cancelled",
       nextAction: null,
     };
+  if (view.coordinator?.cancelError)
+    return {
+      phase: "needs-decision",
+      summary: `cancellation unresolved: ${short(view.coordinator.cancelError, 80)}`,
+      nextAction: {
+        command: `factory cancel --objective ${objective}`,
+        reason: "Repeats cancellation of the recorded work",
+      },
+    };
   if (view.error)
     return {
       phase: "failed",
@@ -547,6 +549,20 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
       nextAction: {
         command: `factory diagnostics --objective ${objective}`,
         reason: "Inspect the failure before running again",
+      },
+    };
+  // Resume first: refusing a plan discards the preparation, and with it a
+  // pause or drain the operator asked for.
+  if (
+    view.coordinator?.mode === "paused" ||
+    view.coordinator?.mode === "draining"
+  )
+    return {
+      phase: "waiting",
+      summary: `${view.coordinator.mode === "paused" ? "paused" : "drained"}${view.coordinator.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
+      nextAction: {
+        command: `factory resume --objective ${objective}`,
+        reason: `Resumes planning${view.runActive === true ? "" : `; then ${run(objective)}`}`,
       },
     };
   if (view.planReview?.status === "needs-human")
@@ -569,15 +585,6 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
     };
   const waiting = objectiveWait(view);
   if (waiting) return waiting;
-  if (view.coordinator?.mode === "paused")
-    return {
-      phase: "waiting",
-      summary: `paused${view.coordinator.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
-      nextAction: {
-        command: `factory resume --objective ${objective}`,
-        reason: `Resumes planning${view.runActive === true ? "" : `; then ${run(objective)}`}`,
-      },
-    };
   const phase = view.coordinator?.phase ?? "planning";
   const doing =
     phase === "projection"
@@ -634,24 +641,30 @@ export function summarizeStatus(view: StatusView): StatusSummary {
         reason: "Repeats cancellation of the recorded work",
       },
     };
-  const decision = decisionNeeded(view);
-  if (decision) return decision;
-  if (view.state === "failed") {
-    const failed = failedItem(view);
-    if (failed) return failed;
+  // An Objective stopped outside any Work Item: inspect, then run it again.
+  // A pending decision waits until then, since decide-result refuses a
+  // stopped Objective; a failed item's retry or repair answers the stop.
+  if (view.state === "failed" && !failedItem(view))
     return {
       phase: "failed",
       summary: short(view.lastError ?? "the Objective failed", 100),
       nextAction: {
-        command: `factory diagnostics --objective ${objective}`,
-        reason: "Inspect the failure",
+        command: `factory retry --objective ${objective}`,
+        reason: `Runs the stopped step again once its cause is fixed (inspect with factory diagnostics --objective ${objective})${thenRun(view)}`,
       },
     };
-  }
-  if (view.coordinator?.mode === "paused")
+  const decision = decisionNeeded(view);
+  if (decision) return decision;
+  if (view.state === "failed") return failedItem(view)!;
+  // Only resume continues a drain, including owned work it holds back.
+  const mode = view.coordinator?.mode;
+  const settling =
+    mode === "draining" &&
+    view.work.some((item) => ["running", "published"].includes(item.status));
+  if (mode === "paused" || mode === "draining")
     return {
       phase: "waiting",
-      summary: `paused${view.coordinator.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
+      summary: `${mode === "paused" ? "paused" : settling ? "draining owned work" : "drained"}${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
       nextAction: {
         command: `factory resume --objective ${objective}`,
         reason: `Resumes the Objective${view.runActive === true ? "" : `; then ${run(objective)}`}`,
@@ -739,7 +752,5 @@ export function renderStatusText(view: StatusView & StatusSummary): string[] {
     question("Objective:", view.finalAcceptancePending);
   if (view.state === "failed" && view.lastError)
     lines.push("", `Error: ${view.lastError}`);
-  if (view.githubClosureError)
-    lines.push("", `GitHub: ${view.githubClosureError}`);
   return lines;
 }

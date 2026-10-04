@@ -186,25 +186,28 @@ for (const delivery of ["regular", "native-stack"])
       );
     });
 
-    test("an issue closure failure keeps the gateway's fault as its cause", async () => {
+    test("a transient issue closure failure repeats until the issue closes", async () => {
       await withApp(
         "closure",
         delivery,
         {},
         async ({ application, github }) => {
-          const outage = attachFault(new Error("GitHub HTTP 502"), {
-            kind: "transient",
-            detail: "GitHub HTTP 502",
-            outcomeUnknown: false,
-          });
-          github.closeIssue = async () => {
-            throw outage;
+          const close = github.closeIssue.bind(github);
+          let failures = 0;
+          github.closeIssue = async (...args) => {
+            if (failures++ < 2)
+              throw attachFault(new Error("GitHub HTTP 502"), {
+                kind: "transient",
+                detail: "GitHub HTTP 502",
+                outcomeUnknown: false,
+              });
+            return close(...args);
           };
-          const error = await application
-            .runObjective(objective)
-            .catch((caught) => caught);
-          assert.ok(error instanceof Error, String(error));
-          assert.deepEqual(faultOf(error), faultOf(outage));
+          const state = await application.runObjective(objective);
+          assert.equal(state.work.result.githubClosure, "complete");
+          assert.equal(state.objectiveClosure, "complete");
+          assert.equal(state.repeats, undefined);
+          assert.equal(failures, 4);
         },
       );
     });

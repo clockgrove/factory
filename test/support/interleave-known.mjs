@@ -44,11 +44,6 @@ export const DIAGNOSES = {
       "native-stack delivery repeats driver.start with the same attempt id after a crash between `git worktree add` and the handle checkpoint; the local driver's `git worktree add` fails because the attempt's worktree exists, and the run stops uncertain (fault matrix START_REPEAT, r1 #4)",
     match: { ambiguous: REPEATED_ADD, stop: REPEATED_ADD },
   },
-  INTEGRATION_ORDER: {
-    diagnosis:
-      "regular-runner sets state.integratedSha to each Work Item's own merge commit when it records the item done; after a crash between beta's merge and its done checkpoint, the restart merges alpha first and then records beta, so state.integratedSha names beta's older merge and final validation stops with 'Default branch changed before final validation' although only Factory merged",
-    match: { stop: /Default branch changed before final validation/ },
-  },
   COLLECT_WINDOW: {
     diagnosis:
       "LocalExecutionDriver.collect commits the worker's result in the attempt worktree and then removes the worktree before the runner records the commit; a crash before the removal makes the repeated collect fail with 'Worker changed HEAD; expected uncommitted changes at exact base', and one after it with \"cannot change to '<attempt worktree>'\", both recorded as implementation failures that need an operator (fault matrix COLLECT_REPEAT, r1 #5)",
@@ -111,22 +106,6 @@ export const PINNED = [
     name: "crash right after alpha's execute checkpoint",
     schedule: {
       crash: { at: "alpha state running/execute #1", phase: "done" },
-    },
-  },
-  {
-    known: "INTEGRATION_ORDER",
-    family: "independent",
-    name: "crash after beta's post-merge fetch while alpha waits to merge",
-    schedule: {
-      holds: [
-        {
-          hold: "alpha git push #1",
-          until: "beta POST /pulls #1",
-          phase: "start",
-        },
-        { hold: "beta git fetch #1", until: "alpha state published/- #1" },
-      ],
-      crash: { at: "beta git fetch #1", phase: "done" },
     },
   },
   {

@@ -394,10 +394,9 @@ test("moving default branch during final review cannot seal baseline acceptance"
   fixture(
     "regular",
     async ({ application, config, eventsPath }) => {
-      await assert.rejects(
-        application.runObjective(1),
-        /Default branch changed during final review/,
-      );
+      const result = await application.runObjective(1);
+      assert.equal(result.wait.kind, "decision");
+      assert.match(result.wait.detail, /moved .* from the pinned baseline/);
       const state = readState(config.repository, 1);
       assert.equal(state.finalAcceptance, undefined);
       assert.equal(state.finalValidation, undefined);

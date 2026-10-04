@@ -3,6 +3,8 @@ import { graphDigest, amendmentBlocksDispatch } from "./graph-amendments.js";
 import { assertCompletedCoverage, objectiveCandidate } from "./qa.js";
 import type { GitHubGateway } from "./contracts.js";
 import type { FactoryState } from "./state.js";
+import { attachFault, decision } from "./fault.js";
+import { step } from "./step.js";
 
 /** Compact bindings into the existing snapshot, not a second copy of its evidence. */
 export interface FinalAcceptance {
@@ -171,8 +173,11 @@ export function objectiveComplete(state: FactoryState): boolean {
   }
 }
 
-export class GitHubClosureFailure extends Error {}
-
+/**
+ * Close a delivered Work Item's issue. The completion comment carries a
+ * marker the gateway checks before posting, and the close is idempotent, so
+ * the step repeats it from the top after a lost response.
+ */
 export async function closeWorkItem(
   state: FactoryState,
   itemId: string,
@@ -182,10 +187,9 @@ export async function closeWorkItem(
 ): Promise<void> {
   const work = state.work[itemId]!;
   if (work.githubClosure === "complete") return;
-  if (
-    state.graph.items.find((item) => item.id === itemId)?.kind === "qa" ||
-    state.graph.items.find((item) => item.id === itemId)?.kind === "aggregate"
-  ) {
+  const kind = state.graph.items.find((item) => item.id === itemId)?.kind;
+  const readOnly = kind === "qa" || kind === "aggregate";
+  if (readOnly) {
     if (
       work.status !== "done" ||
       !work.changeRef ||
@@ -197,28 +201,7 @@ export async function closeWorkItem(
       work.execution
     )
       throw new Error(`Completed QA ${itemId} lacks read-only proof identity`);
-    work.githubClosure = "pending";
-    save();
-    try {
-      await github.closeIssue(
-        state.issueByItemId[itemId]!,
-        `QA completed at commit ${work.changeRef}; validated tree ${work.treeSha}.`,
-        { workItem: { objective: state.objective, id: itemId } },
-      );
-      work.githubClosure = "complete";
-      delete work.error;
-      delete state.githubClosureError;
-      save();
-      return;
-    } catch (error) {
-      state.githubClosureError = `QA ${itemId}: ${error instanceof Error ? error.message : String(error)}`;
-      save();
-      throw new GitHubClosureFailure(state.githubClosureError, {
-        cause: error,
-      });
-    }
-  }
-  if (
+  } else if (
     work.status !== "done" ||
     !work.pullRequest ||
     !work.changeRef ||
@@ -226,35 +209,45 @@ export async function closeWorkItem(
     !state.issueByItemId[itemId]
   )
     throw new Error(`Completed Work Item ${itemId} lacks delivery identity`);
-  try {
-    const observed = await github.observe({
-      number: work.pullRequest,
-      branch: `factory/objective-${state.objective}/${itemId}`,
-      headSha: work.changeRef,
-    });
-    if (observed.state !== "merged")
-      throw new Error(
-        `PR #${work.pullRequest} is not merged; operator direction required`,
-      );
-    work.githubClosure = "pending";
-    save();
-    const comment = native
+  const comment = readOnly
+    ? `QA completed at commit ${work.changeRef}; validated tree ${work.treeSha}.`
+    : native
       ? `Completed by native delivery PR #${work.pullRequest}; integrated at ${work.integratedSha ?? state.integratedSha}.`
       : `Completed by PR #${work.pullRequest}; validated tree ${work.treeSha}.`;
-    await github.closeIssue(state.issueByItemId[itemId]!, comment, {
-      workItem: { objective: state.objective, id: itemId },
-    });
-    work.githubClosure = "complete";
-    delete work.error;
-    delete state.githubClosureError;
-    save();
-  } catch (error) {
-    state.githubClosureError = `Work Item ${itemId}: ${error instanceof Error ? error.message : String(error)}`;
-    save();
-    throw new GitHubClosureFailure(state.githubClosureError, { cause: error });
-  }
+  await step(
+    state,
+    { scope: { item: itemId }, name: "close" },
+    async () => {
+      if (!readOnly) {
+        const observed = await github.observe({
+          number: work.pullRequest!,
+          branch: `factory/objective-${state.objective}/${itemId}`,
+          headSha: work.changeRef!,
+        });
+        if (observed.state !== "merged")
+          throw attachFault(
+            new Error(`PR #${work.pullRequest} is not merged`),
+            decision(
+              `PR #${work.pullRequest} is no longer merged. Inspect it, then retry or cancel.`,
+            ),
+          );
+      }
+      if (work.githubClosure !== "pending") {
+        work.githubClosure = "pending";
+        save();
+      }
+      await github.closeIssue(state.issueByItemId[itemId]!, comment, {
+        workItem: { objective: state.objective, id: itemId },
+      });
+    },
+    { save },
+  );
+  work.githubClosure = "complete";
+  delete work.error;
+  save();
 }
 
+/** Close the Objective issue once final acceptance is sealed; repeats like closeWorkItem. */
 export async function closeObjectiveIssue(
   state: FactoryState,
   body: string,
@@ -263,20 +256,22 @@ export async function closeObjectiveIssue(
 ): Promise<void> {
   if (state.objectiveClosure === "complete") return;
   sealFinalAcceptance(state);
-  try {
+  if (state.objectiveClosure !== "pending") {
     state.objectiveClosure = "pending";
     save();
-    await github.closeIssue(
-      state.objective,
-      `Factory completed ${state.graph.items.length} Work Items; final validation passed at ${objectiveCandidate(state)!.commitSha} (${objectiveCandidate(state)!.basis}).`,
-      { body },
-    );
-    state.objectiveClosure = "complete";
-    delete state.githubClosureError;
-    save();
-  } catch (error) {
-    state.githubClosureError = `Objective #${state.objective}: ${error instanceof Error ? error.message : String(error)}`;
-    save();
-    throw new GitHubClosureFailure(state.githubClosureError, { cause: error });
   }
+  const candidate = objectiveCandidate(state)!;
+  await step(
+    state,
+    { scope: "objective", name: "close" },
+    () =>
+      github.closeIssue(
+        state.objective,
+        `Factory completed ${state.graph.items.length} Work Items; final validation passed at ${candidate.commitSha} (${candidate.basis}).`,
+        { body },
+      ),
+    { save },
+  );
+  state.objectiveClosure = "complete";
+  save();
 }

@@ -34,7 +34,6 @@ const execution = (work, overrides = {}) => ({
   finalAcceptancePending: null,
   objectiveClosure: null,
   lastError: null,
-  githubClosureError: null,
   work,
   ...overrides,
 });
@@ -297,9 +296,10 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
     }),
   );
   assert.equal(objectiveFailure.summary, "final validation failed");
+  // A stop outside any Work Item names the command that runs it again.
   assert.equal(
     objectiveFailure.nextAction.command,
-    "factory diagnostics --objective 7",
+    "factory retry --objective 7",
   );
   // A failed item waits for running work to settle before retry is offered.
   const settling = summarizeStatus(
@@ -345,16 +345,10 @@ test("terminal, paused, cancellation and finalization states", () => {
     "1/1 done; final validation and review",
   );
   const closing = summarizeStatus(
-    execution([item("A", { status: "done" })], {
-      finalValidation: true,
-      githubClosureError: "rate limited",
-    }),
+    execution([item("A", { status: "done" })], { finalValidation: true }),
   );
-  assert.equal(closing.phase, "waiting");
-  assert.equal(
-    closing.summary,
-    "on external prerequisite: GitHub closure: rate limited",
-  );
+  assert.equal(closing.phase, "running");
+  assert.equal(closing.summary, "1/1 done; closing the Objective on GitHub");
 });
 
 test("text leads with the phase line, the next command, then the item table", () => {

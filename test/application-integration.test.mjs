@@ -2944,7 +2944,7 @@ test("hydration failure is URL-free and blocks final review, evidence, and closu
         assert.equal(
           error.message,
           attempt
-            ? "Objective stopped: Fresh-clone hydration verification failed during clone. Use explicit retry or operator direction."
+            ? `Objective stopped: Fresh-clone hydration verification failed during clone. Fix the cause, then run \`factory retry --objective ${objective}\``
             : "Fresh-clone hydration verification failed during clone",
         );
         assert.doesNotMatch(error.message, /arbitrary-secret|private-origin/);
@@ -2958,7 +2958,7 @@ test("hydration failure is URL-free and blocks final review, evidence, and closu
       assert.equal(
         failed.error,
         attempt
-          ? "Objective stopped: Fresh-clone hydration verification failed during clone. Use explicit retry or operator direction."
+          ? `Objective stopped: Fresh-clone hydration verification failed during clone. Fix the cause, then run \`factory retry --objective ${objective}\``
           : "Fresh-clone hydration verification failed during clone",
       );
       assert.equal(github.state().closedIssues[objective], undefined);
@@ -3104,24 +3104,27 @@ test("close failures replay after merge and final validation without worker or P
     };
     const { application, github, eventsPath } = makeApplication(descriptor);
     github.failCloseAfterComment = 100;
-    await assert.rejects(application.runObjective(objective), /close failure/);
+    // A refused closure waits for its fix; it does not fail the Objective.
+    await application.runObjective(objective);
     const afterMerge = readState(descriptor.config.repository, objective);
     assert.equal(afterMerge.work.result.status, "done");
     assert.equal(afterMerge.work.result.githubClosure, "pending");
     assert.equal(afterMerge.error, undefined);
-    assert.match(afterMerge.githubClosureError, /close failure/);
+    assert.equal(afterMerge.work.result.wait.kind, "prerequisite");
+    assert.match(afterMerge.work.result.wait.detail, /close failure/);
     const mergedPr = afterMerge.work.result.pullRequest;
     const expectedHead = github.state().pullRequests[mergedPr].headSha;
     github.update((state) => {
       state.pullRequests[mergedPr].headSha = target.baseSha;
     });
-    await assert.rejects(
-      application.runObjective(objective),
-      /identity changed/,
-    );
+    const changed = await application.runObjective(objective);
+    assert.equal(changed.error, undefined);
+    assert.match(changed.work.result.wait.detail, /identity changed/);
     github.update((state) => {
       state.pullRequests[mergedPr].headSha = expectedHead;
     });
+    // The operator answers the closure decision; the step runs again.
+    assert.equal(application.retryWorkItem(objective, "result"), "step");
     const counts = () => ({
       starts: readEvents(eventsPath).filter((event) => event.type === "start")
         .length,
@@ -3133,8 +3136,9 @@ test("close failures replay after merge and final validation without worker or P
     });
     const beforeReplay = counts();
     github.failCloseAfterComment = objective;
-    await assert.rejects(application.runObjective(objective), /close failure/);
+    await application.runObjective(objective);
     const afterValidation = readState(descriptor.config.repository, objective);
+    assert.equal(afterValidation.wait.kind, "prerequisite");
     assert.equal(afterValidation.finalValidation.passed, true);
     assert.equal(afterValidation.work.result.githubClosure, "complete");
     assert.equal(afterValidation.objectiveClosure, "pending");

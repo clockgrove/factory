@@ -1,9 +1,11 @@
 import { GitHubRequestError } from "../../dist/github-client.js";
 export const roleLabels = ["factory:objective", "factory:work-item"];
+/** The token's login: Factory authored every issue unless a test says otherwise. */
+export const factoryLogin = "factory-bot";
 export function projectionClient(repository, initial = []) {
   const issues = new Map(
     initial.map((issue) => {
-      const copy = structuredClone(issue);
+      const copy = { user: { login: factoryLogin }, ...structuredClone(issue) };
       delete copy.parent_issue_url;
       return [issue.number, copy];
     }),
@@ -20,10 +22,15 @@ export function projectionClient(repository, initial = []) {
     state: "open",
     labels: [],
     repository_url: `https://api.github.com/repos/${repository}`,
+    user: { login: factoryLogin },
     ...value,
   });
   let next = Math.max(1, ...issues.keys()) + 1;
   const client = {
+    async viewer() {
+      calls.push({ method: "GET", route: "user" });
+      return factoryLogin;
+    },
     async paginate(route) {
       calls.push({ method: "GET", route });
       if (route.endsWith("/labels")) return structuredClone(labels);
@@ -49,6 +56,7 @@ export function projectionClient(repository, initial = []) {
           if (parent === undefined) throw new GitHubRequestError(404);
           return structuredClone(issues.get(parent));
         }
+        if (!issues.has(number)) throw new GitHubRequestError(404);
         return structuredClone(issues.get(number));
       }
       if (route.endsWith("/labels") && !route.includes("/issues/")) {

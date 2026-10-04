@@ -32,6 +32,7 @@ type Issue = {
   pull_request?: unknown;
   labels?: (string | { name?: string })[];
   repository_url?: string;
+  user?: { login?: string } | null;
 };
 type Pull = {
   number: number;
@@ -81,6 +82,68 @@ export class RealGitHubGateway implements GitHubGateway {
     private readonly native: NativeStackDelivery,
     private readonly client: GitHubClient = sharedGitHubClient,
   ) {}
+
+  private login?: string;
+
+  /** The token's user: Factory owns only what this login authored. */
+  private async viewer(): Promise<string> {
+    this.login ??= await classifiedGitHubCall(
+      this.client,
+      this.repository,
+      { method: "GET", path: "user" },
+      () => this.client.viewer(),
+    );
+    return this.login;
+  }
+
+  /** One issue (or PR) by number, or undefined when GitHub has none. */
+  private issueIfExists(number: number): Promise<Issue | undefined> {
+    return classifiedGitHubCall(
+      this.client,
+      this.repository,
+      { method: "GET", path: `issues/${number}` },
+      () =>
+        this.client
+          .request<Issue>("GET", this.route(`issues/${number}`))
+          .catch((error: unknown) => {
+            if (error instanceof GitHubRequestError && error.status === 404)
+              return undefined;
+            throw error;
+          }),
+    );
+  }
+
+  /**
+   * Every issue Factory authored that carries one of this Objective's Work
+   * Item markers. The list is read oldest first, so issues opened during the
+   * scan land on its last page instead of shifting rows, and rows are
+   * deduplicated by id. GitHub's list lags creation while single-issue reads
+   * do not, so numbers past the newest listed one are read too: an issue
+   * whose create response was lost is found before the list shows it.
+   */
+  private async ownedWorkItemIssues(objective: number): Promise<Issue[]> {
+    const login = await this.viewer();
+    const byId = new Map<number, Issue>();
+    for (const issue of await this.pages<Issue>(
+      "issues?state=all&sort=created&direction=asc",
+    ))
+      byId.set(issue.id, issue);
+    let number = Math.max(0, ...[...byId.values()].map((i) => i.number));
+    for (;;) {
+      const issue = await this.issueIfExists(++number);
+      if (!issue) break;
+      byId.set(issue.id, issue);
+    }
+    const prefix = `<!-- factory:objective=${objective};item=`;
+    return [...byId.values()]
+      .filter(
+        (issue) =>
+          !issue.pull_request &&
+          issue.user?.login === login &&
+          (issue.body ?? "").includes(prefix),
+      )
+      .sort((left, right) => left.number - right.number);
+  }
 
   private route(path: string): string {
     return `repos/${this.repository}/${path}`;
@@ -274,15 +337,29 @@ export class RealGitHubGateway implements GitHubGateway {
       throw foreignChange(
         `Issue #${number} identity changed; operator direction required`,
       );
-    const comments = await this.pages<{ body: string }>(
-      `issues/${number}/comments`,
-    );
-    if (!comments.some((entry) => entry.body === comment)) {
+    // The completion comment carries a marker, so a repeat after a lost
+    // response finds it instead of posting it twice.
+    const closure = expected.workItem
+      ? `<!-- factory:closure objective=${expected.workItem.objective};item=${expected.workItem.id} -->`
+      : `<!-- factory:closure objective=${number} -->`;
+    const login = await this.viewer();
+    const comments = await this.pages<{
+      body?: string;
+      user?: { login?: string } | null;
+    }>(`issues/${number}/comments`);
+    if (
+      !comments.some(
+        (entry) =>
+          entry.user?.login === login && (entry.body ?? "").includes(closure),
+      )
+    ) {
       if (issue.state !== "open")
         throw foreignChange(
           `Issue #${number} closed without Factory completion evidence; operator direction required`,
         );
-      await this.api("POST", `issues/${number}/comments`, { body: comment });
+      await this.api("POST", `issues/${number}/comments`, {
+        body: `${closure}\n${comment}`,
+      });
     }
     if (issue.state === "open")
       await this.api("PATCH", `issues/${number}`, {
@@ -365,12 +442,13 @@ export class RealGitHubGateway implements GitHubGateway {
         observed.body !== issue.body ||
         observed.title !== issue.title ||
         observed.state !== issue.state ||
-        !observedNames.includes(role) ||
         names.some((name) => !observedNames.includes(name))
       )
         throw foreignChange(
           "Factory role label did not reconcile exactly; issue changed",
         );
+      if (!observedNames.includes(role))
+        throw notYet(`Factory role label ${role} is not visible yet`);
       return observed;
     };
     const objective = authenticated(
@@ -383,6 +461,26 @@ export class RealGitHubGateway implements GitHubGateway {
     // Issues this call created; GitHub may not show them for a moment.
     const createdAt = new Map<number, number>();
     let existing: Issue[] | undefined;
+    /**
+     * The one owned issue for a marker. Duplicates (a create repeated before
+     * GitHub showed the first) are reconciled: the oldest is kept and the
+     * rest are closed.
+     */
+    const ownedIssue = async (marker: string): Promise<Issue | undefined> => {
+      existing ??= await this.ownedWorkItemIssues(request.objectiveIssue);
+      const [kept, ...duplicates] = existing.filter((issue) =>
+        (issue.body ?? "").includes(marker),
+      );
+      for (const duplicate of duplicates) {
+        if (duplicate.state === "open")
+          await this.api("PATCH", `issues/${duplicate.number}`, {
+            state: "closed",
+            state_reason: "not_planned",
+          });
+        existing = existing.filter((issue) => issue.id !== duplicate.id);
+      }
+      return kept;
+    };
     for (const item of request.graph.items) {
       const marker = `<!-- factory:objective=${request.objectiveIssue};item=${item.id} -->`;
       const known = request.knownIssues?.[item.id];
@@ -398,17 +496,7 @@ export class RealGitHubGateway implements GitHubGateway {
             `Known Work Item issue for ${item.id} changed identity`,
           );
       } else {
-        existing ??= (await this.pages<Issue>("issues?state=all")).filter(
-          (issue) => !issue.pull_request,
-        );
-        const matches = existing.filter((issue) =>
-          issue.body?.includes(marker),
-        );
-        if (matches.length > 1)
-          throw foreignChange(
-            `Multiple Work Item issues for ${item.id}; operator direction required`,
-          );
-        found = matches[0];
+        found = await ownedIssue(marker);
         if (found && (found.body ?? "").split(marker).length !== 2)
           throw foreignChange(
             `Work Item issue for ${item.id} has ambiguous identity`,

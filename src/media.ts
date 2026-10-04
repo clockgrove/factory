@@ -1,5 +1,6 @@
 import { ownsPath } from "./ownership.js";
 import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   closeSync,
@@ -38,6 +39,7 @@ import {
   hasUnresolvedSubprocesses,
   pinnedGit,
   pinnedGitAsync,
+  pinnedGitEnvironment,
   pinnedGitRaw,
   removeWorktree,
 } from "./process.js";
@@ -46,6 +48,78 @@ import type { FactoryState } from "./state.js";
 const LFS_POINTER_HEADER = Buffer.from(
   "version https://git-lfs.github.com/spec/v1\n",
 );
+/** Git LFS reads blobs up to this size as possible pointers. */
+const LFS_POINTER_MAX_BYTES = 1024;
+
+/**
+ * Whether `commit` adds or changes any Git LFS pointer relative to `base`.
+ * Factory runs no repository hooks, so LFS's pre-push hook does not upload
+ * the objects behind such pointers; delivery pushes them explicitly.
+ */
+export async function addsLfsPointers(
+  checkout: string,
+  base: string,
+  commit: string,
+): Promise<boolean> {
+  const entries = (
+    await pinnedGitAsync(
+      checkout,
+      "diff-tree",
+      "-r",
+      "-z",
+      "--no-renames",
+      "--diff-filter=d",
+      base,
+      commit,
+    )
+  ).split("\0");
+  const blobs = new Set<string>();
+  // Raw entries are ":<old mode> <new mode> <old oid> <new oid> <status>", path.
+  for (let index = 0; index + 1 < entries.length; index += 2) {
+    const [, mode, , oid] = entries[index]!.split(" ");
+    if (mode?.startsWith("100") && oid) blobs.add(oid);
+  }
+  if (!blobs.size) return false;
+  const batch = (format: string[], oids: string[]): Buffer => {
+    const result = spawnSync("git", ["-C", checkout, "cat-file", ...format], {
+      env: pinnedGitEnvironment(),
+      input: `${oids.join("\n")}\n`,
+      maxBuffer: Number.MAX_SAFE_INTEGER,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0)
+      throw new Error(
+        `git cat-file ${format.join(" ")} failed (${result.status}): ${result.stderr.toString("utf8")}`,
+      );
+    return result.stdout;
+  };
+  const small = batch(["--batch-check"], [...blobs])
+    .toString("utf8")
+    .split("\n")
+    .map((line) => line.split(" "))
+    .filter(
+      ([, type, size]) =>
+        type === "blob" && Number(size) <= LFS_POINTER_MAX_BYTES,
+    )
+    .map(([oid]) => oid!);
+  if (!small.length) return false;
+  const contents = batch(["--batch"], small);
+  // Each object is "<oid> <type> <size>\n", its bytes, then "\n".
+  for (let offset = 0; offset < contents.length; ) {
+    const headerEnd = contents.indexOf(0x0a, offset);
+    const size = Number(
+      contents.subarray(offset, headerEnd).toString("utf8").split(" ")[2],
+    );
+    const bytes = contents.subarray(headerEnd + 1, headerEnd + 1 + size);
+    if (
+      bytes.subarray(0, LFS_POINTER_HEADER.length).equals(LFS_POINTER_HEADER) &&
+      /^oid sha256:[0-9a-f]{64}$/m.test(bytes.toString("utf8"))
+    )
+      return true;
+    offset = headerEnd + 1 + size + 1;
+  }
+  return false;
+}
 
 export function recognizedObjectiveAttachment(value: string): boolean {
   try {

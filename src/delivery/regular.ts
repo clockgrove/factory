@@ -8,6 +8,7 @@ import type {
   MergeResult,
 } from "../contracts.js";
 import { attachFault, decision, transient } from "../fault.js";
+import { addsLfsPointers } from "../media.js";
 import { gitAsync, pushRejected } from "../process.js";
 
 export class RegularDelivery implements DeliveryStrategy {
@@ -31,7 +32,12 @@ export class RegularDelivery implements DeliveryStrategy {
         pullRequest: existing.number,
         headSha: existing.headSha,
       };
-    if (request.lfs)
+    // Factory runs no repository hooks, so LFS's pre-push hook does not
+    // upload a worker's LFS objects: push them explicitly before the branch.
+    if (
+      request.lfs ||
+      (await addsLfsPointers(this.checkout, request.baseSha, commit))
+    )
       await gitAsync(this.checkout, "lfs", "push", "origin", commit);
     try {
       await gitAsync(

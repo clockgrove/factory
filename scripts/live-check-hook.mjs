@@ -30,7 +30,7 @@ function write(entry) {
 if (active) {
   const original = globalThis.fetch;
   globalThis.fetch = async (input, init = {}) => {
-    const url = new URL(typeof input === "string" ? input : input.url);
+    const url = new URL(input instanceof Request ? input.url : String(input));
     if (url.hostname !== "api.github.com") return original(input, init);
     const method = (init.method ?? input.method ?? "GET").toUpperCase();
     const path = url.pathname + url.search;
@@ -60,7 +60,12 @@ if (active) {
       ++seen === kill.nth
     ) {
       write({ kill: `${method} ${url.pathname}`, status: response.status });
-      process.kill(-process.pid, "SIGKILL");
+      // The harness starts this process as its group's leader. Never let a
+      // failed group kill reach Factory as a fetch error: die regardless.
+      try {
+        process.kill(-process.pid, "SIGKILL");
+      } catch {}
+      process.kill(process.pid, "SIGKILL");
       await new Promise(() => {});
     }
     return response;

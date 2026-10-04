@@ -2,7 +2,7 @@
 // makes an assumption: native stacks and merge-async, merge refusals, error
 // bodies, pull fields under API 2026-03-10, pagination and read-after-write
 // lag. Run `node scripts/live-check-probe.mjs`. Creates throwaway
-// branches and PRs under probe-TAG/ in LIVE_CHECK_REPO, merges some of them
+// branches and PRs under probe-TAG/ in clockgrove/factory-smoke, merges some of them
 // into main, and writes $TMPDIR/live-check-probe-TAG.json.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";

@@ -4,10 +4,10 @@
 //   node scripts/live-check.mjs run [--kills LIST] [--delivery regular|native-stack] [-- INSTALL_ARGS]
 //   node scripts/live-check.mjs assert --objective N [--work /tmp/live-check-TAG]
 //   node scripts/live-check-probe.mjs                   record real stack/merge/error behaviour
-//   node scripts/live-check.mjs reset                   close leftover live-check issues and PRs
+//   node scripts/live-check.mjs reset [--objective N]   close leftover live-check issues and PRs
 //
 // `run` creates a fresh three-item Objective (one dependency) in
-// LIVE_CHECK_REPO (default clockgrove/factory-smoke), installs Factory from
+// clockgrove/factory-smoke, the only repository these scripts touch, installs Factory from
 // this checkout's dist/ into private XDG roots under /tmp/live-check-TAG, and
 // runs `factory run --objective N`. Each kill point SIGKILLs the controller's
 // process group once, then the harness restarts it with the next point,
@@ -23,7 +23,8 @@
 // The GitHub points use scripts/live-check-hook.mjs (a --import preload that
 // wraps fetch); Factory has no test hook. Needs `gh` logged in with repo
 // admin, and the planner/worker logins Factory's install defaults use.
-// Run `npm run build` first. Workers are detached by design and survive a
+// Run `npm run build` first. `reset --objective N` limits reset to one
+// Objective, so it leaves another agent's live run alone. Workers are detached by design and survive a
 // controller kill; Factory must reattach them.
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -32,7 +33,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-export const REPO = process.env.LIVE_CHECK_REPO ?? "clockgrove/factory-smoke";
+/** The scratch repository; setup, run, probe and reset write nowhere else. */
+export const REPO = "clockgrove/factory-smoke";
+if (process.env.LIVE_CHECK_REPO && process.env.LIVE_CHECK_REPO !== REPO)
+  throw new Error(`live-check only runs against ${REPO}`);
 const API_VERSION = "2026-03-10";
 const KILLS = {
   "issue-created": { method: "POST", path: "^/repos/[^/]+/[^/]+/issues$" },
@@ -270,7 +274,12 @@ async function launch(work, objective, point, index) {
           : [];
         const hit = lines.some((line) => {
           if (!line.includes(kill.op)) return false;
-          const event = JSON.parse(line);
+          let event;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            return false; // a line still being written
+          }
           return (
             event.operation === kill.op &&
             event.outcome === "started" &&
@@ -311,6 +320,9 @@ async function launch(work, objective, point, index) {
 
 async function run(options) {
   const tag = options.tag ?? `t${Date.now().toString(36)}`;
+  // The tag names a local directory and a path in the repository.
+  if (!/^[A-Za-z0-9_-]+$/.test(tag))
+    throw new Error(`--tag must be letters, digits, - or _: ${tag}`);
   const work = join(tmpdir(), `live-check-${tag}`);
   const kills = (options.kills ?? DEFAULT_KILLS.join(","))
     .split(",")
@@ -319,7 +331,8 @@ async function run(options) {
     if (!KILLS[point]) throw new Error(`Unknown kill point ${point}`);
   let objective = Number(options.objective);
   if (!objective) {
-    mkdirSync(work, { recursive: true });
+    // Private: the HTTP log and Factory state hold private repository data.
+    mkdirSync(work, { recursive: true, mode: 0o700 });
     const url = gh(
       [
         "issue",
@@ -519,12 +532,20 @@ function count(objective, work) {
   };
 }
 
-/** Close open live-check Objectives, Work Items and PRs, and delete their branches. */
-function reset() {
+/**
+ * Close open live-check Objectives, Work Items and PRs, and delete their
+ * branches; with `objective`, only that Objective's.
+ */
+function reset(objective) {
+  if (objective !== undefined && !/^[1-9]\d*$/.test(objective))
+    throw new Error(`--objective must be an issue number: ${objective}`);
+  const id = objective ?? "\\d+";
+  const marker = new RegExp(`<!-- factory:objective=${id};item=`);
+  const prefix = objective ? `factory/objective-${objective}/` : "factory/";
   for (const issue of all(`repos/${REPO}/issues?state=open&per_page=100`)) {
-    const ours =
-      issue.title.startsWith("Live check ") ||
-      /<!-- factory:objective=\d+;item=/.test(issue.body ?? "");
+    const ours = objective
+      ? issue.number === Number(objective) || marker.test(issue.body ?? "")
+      : issue.title.startsWith("Live check ") || marker.test(issue.body ?? "");
     if (ours && !issue.pull_request)
       api("PATCH", `repos/${REPO}/issues/${issue.number}`, {
         state: "closed",
@@ -532,12 +553,12 @@ function reset() {
       });
   }
   for (const pull of all(`repos/${REPO}/pulls?state=open&per_page=100`))
-    if (pull.head.ref.startsWith("factory/"))
+    if (pull.head.ref.startsWith(prefix))
       api("PATCH", `repos/${REPO}/pulls/${pull.number}`, { state: "closed" });
-  for (const ref of all(`repos/${REPO}/git/matching-refs/heads/factory/`))
+  for (const ref of all(`repos/${REPO}/git/matching-refs/heads/${prefix}`))
     api("DELETE", `repos/${REPO}/git/${ref.ref}`);
   log(
-    `reset ${REPO}: live-check issues and PRs closed, factory/* branches deleted`,
+    `reset ${REPO}: live-check issues and PRs closed, ${prefix}* branches deleted`,
   );
 }
 
@@ -552,7 +573,7 @@ else if (command === "assert")
   console.log(
     JSON.stringify(count(Number(options.objective), options.work), null, 2),
   );
-else if (command === "reset") reset();
+else if (command === "reset") reset(options.objective);
 else if (command !== "library") {
   console.error(
     readFileSync(fileURLToPath(import.meta.url), "utf8")

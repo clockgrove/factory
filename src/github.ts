@@ -334,12 +334,32 @@ export class RealGitHubGateway implements GitHubGateway {
    * Factory merges with a merge commit: integration evidence binds the
    * delivered head as its second parent. Checked before any merge is sent.
    */
-  private async requireMergeCommits(): Promise<void> {
-    if (!(await this.settings()).mergeCommits)
-      throw attachFault(
+  private async requireMergeCommits(branch: string): Promise<void> {
+    const forbidden = () =>
+      attachFault(
         new Error("The repository does not allow merge commits"),
         MERGE_COMMITS_REQUIRED,
       );
+    if (!(await this.settings()).mergeCommits) throw forbidden();
+    // A ruleset on the base may forbid them too: linear history, or a pull
+    // request rule whose allowed methods omit merge.
+    type Rule = {
+      type?: unknown;
+      parameters?: { allowed_merge_methods?: unknown } | null;
+    };
+    const rules = await this.pages<Rule>(
+      `rules/branches/${encodeURIComponent(branch)}`,
+    );
+    if (
+      rules.some(
+        (rule) =>
+          rule?.type === "required_linear_history" ||
+          (rule?.type === "pull_request" &&
+            Array.isArray(rule.parameters?.allowed_merge_methods) &&
+            !rule.parameters.allowed_merge_methods.includes("merge")),
+      )
+    )
+      throw forbidden();
   }
 
   async objective(number: number): Promise<ObjectiveIssue> {
@@ -1405,7 +1425,7 @@ export class RealGitHubGateway implements GitHubGateway {
         ),
       );
     this.assertHead(identity, current);
-    await this.requireMergeCommits();
+    await this.requireMergeCommits(current.base.ref);
     const refused = `merge-refused:${identity.number}:${identity.headSha}`;
     let result: { merged: boolean; sha: string };
     try {
@@ -1516,7 +1536,7 @@ export class RealGitHubGateway implements GitHubGateway {
   ): Promise<string> {
     return this.native.mergeStack(layers, baseBranch, expectedStack, {
       ...options,
-      requireMergeCommits: () => this.requireMergeCommits(),
+      requireMergeCommits: () => this.requireMergeCommits(baseBranch),
     });
   }
 }

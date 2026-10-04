@@ -52,6 +52,11 @@ test("shared gate holds queued dispatch as a transient fault with retryAt", asyn
   const fault = faultOf(results[1].reason);
   assert.equal(fault.kind, "transient");
   assert.ok(Date.parse(fault.retryAt) >= calls[0] + 59_000);
+  // A command outside a step shows this message: it names the reset.
+  assert.equal(
+    results[1].reason.message,
+    `GitHub request held by the rate limit until ${fault.retryAt}`,
+  );
   assert.equal(calls.length, 1);
 });
 

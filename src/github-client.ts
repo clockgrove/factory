@@ -493,15 +493,14 @@ export class GitHubClient {
       const client = await this.octokit();
       // Rate-limited: nothing is sent. The caller's step waits until the
       // gate opens, where pause, drain and handoff can stop it (#641).
-      if (Date.now() < this.notBefore)
+      if (Date.now() < this.notBefore) {
+        const until = new Date(this.notBefore).toISOString();
+        // A command outside a step reports this message: name the reset.
         throw attachFault(
-          new Error("GitHub request held by the rate limit"),
-          transient(
-            "GitHub rate limit",
-            false,
-            new Date(this.notBefore).toISOString(),
-          ),
+          new Error(`GitHub request held by the rate limit until ${until}`),
+          transient(`GitHub rate limit until ${until}`, false, until),
         );
+      }
       try {
         const response = await client.request(`${method} /${route}`, {
           ...body,

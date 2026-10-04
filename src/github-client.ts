@@ -123,6 +123,12 @@ export function gitHubFault(
   const what = `${call.method} ${path || "repository"}`;
   const merge = /^pulls\/\d+\/merge(-async)?$/.test(path);
   switch (error.status) {
+    case 400:
+      // merge-async answers a head that moved with 400 {status: "failed"}:
+      // the repeat observes the head again, which settles it (#627).
+      return merge
+        ? transient(`GitHub refused ${what} at a stale head`, false)
+        : undefined;
     case 401:
       return { ...GITHUB_LOGIN, detail: `GitHub rejected the login (${what})` };
     case 403:

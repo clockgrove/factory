@@ -17,7 +17,7 @@ import {
 import { resultFindings } from "./support/review-protocol.mjs";
 
 // An interruption is not a failure of the work: Factory repeats the step in
-// the same run (at most twice per attempt) instead of stopping.
+// the same run instead of stopping (a paid step up to its bound).
 
 const objective = 1;
 const command = 'test "$(cat result.txt)" = result';
@@ -99,6 +99,14 @@ function passingReview(request) {
   };
 }
 
+/** A review answer lost mid-call, classified as the model adapter does. */
+const lostAnswer = () =>
+  attachFault(new Error("socket hang up"), {
+    kind: "transient",
+    detail: "Model connection failed mid-call: socket hang up",
+    outcomeUnknown: true,
+  });
+
 const mergeEvents = (github) =>
   github
     .state()
@@ -115,7 +123,7 @@ for (const delivery of ["regular", "native-stack"])
         {
           resultReviewer(request) {
             reviews++;
-            if (reviews === 1) throw new Error("socket hang up");
+            if (reviews === 1) throw lostAnswer();
             return passingReview(request);
           },
         },
@@ -241,7 +249,7 @@ for (const delivery of ["regular", "native-stack"])
       );
     });
 
-    test("a persistent interruption stops after two repeats and allows retry", async () => {
+    test("a review answer lost past the paid bound asks the operator and allows retry", async () => {
       let reviews = 0;
       await withApp(
         "persistent",
@@ -249,21 +257,21 @@ for (const delivery of ["regular", "native-stack"])
         {
           resultReviewer(request) {
             reviews++;
-            if (reviews <= 3) throw new Error("socket hang up");
+            if (reviews <= 4) throw lostAnswer();
             return passingReview(request);
           },
         },
         async ({ application, descriptor }) => {
-          await assert.rejects(
-            application.runObjective(objective),
-            /socket hang up/,
-          );
-          assert.equal(reviews, 3);
+          // Three lost answers repeat; the fourth is a decision for this
+          // item only: the run waits instead of stopping the Objective.
+          const waiting = await application.runObjective(objective);
+          assert.equal(waiting.error, undefined);
+          assert.equal(reviews, 4);
           const failed = readState(descriptor.config.repository, objective);
           assert.equal(failed.work.result.status, "failed");
-          assert.equal(
-            failed.work.result.recovery.failure.classification,
-            "interruption",
+          assert.match(
+            failed.work.result.recovery.failure.decision,
+            /retry or cancel\? Start a new attempt with `factory retry/,
           );
           application.retryWorkItem(objective, "result");
           const state = await application.runObjective(objective);

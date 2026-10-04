@@ -1,4 +1,5 @@
 import {
+  invalidReviewAnswer,
   packetFromPrompt,
   resultFindings,
 } from "./support/review-protocol.mjs";
@@ -9,10 +10,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel } from "../dist/compiler.js";
-import {
-  AcceptanceDecisionRequired,
-  reviewAcceptance,
-} from "../dist/validation.js";
+import { reviewAcceptance } from "../dist/validation.js";
 import { createTarget, git } from "./support/integration-fixture.mjs";
 
 const label = "Exact result tree inventory";
@@ -201,15 +199,7 @@ test("bounded incomplete inventory cannot ground a pass; larger existing budget 
       });
       if (budget === 48_000)
         assert.equal((await reviewed).criteria[0].verdict, "pass");
-      else
-        await assert.rejects(reviewed, (error) => {
-          assert.ok(error instanceof AcceptanceDecisionRequired);
-          assert.equal(
-            error.pending.reviewRejection.reason,
-            "invalid-response",
-          );
-          return true;
-        });
+      else await assert.rejects(reviewed, invalidReviewAnswer);
     }
   } finally {
     if (oldBudget === undefined)
@@ -266,11 +256,7 @@ test("non-UTF-8 tracked names cannot produce a complete inventory", async () => 
           },
         },
       }),
-      (error) => {
-        assert.ok(error instanceof AcceptanceDecisionRequired);
-        assert.equal(error.pending.reviewRejection.reason, "invalid-response");
-        return true;
-      },
+      invalidReviewAnswer,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

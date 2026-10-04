@@ -25,7 +25,6 @@ import { ClaudePlanningModel } from "../dist/claude-planning.js";
 import { CodexPlanningModel, modelFault } from "../dist/compiler.js";
 import {
   AuthenticationRequiredError,
-  CompletedModelInvocationError,
   Interruption,
 } from "../dist/contracts.js";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
@@ -60,11 +59,7 @@ import {
   ProviderTurnIncompleteError,
   ProviderTurnTimeoutError,
 } from "../dist/provider-turn.js";
-import {
-  AcceptanceDecisionRequired,
-  reviewAcceptance,
-  validateTree,
-} from "../dist/validation.js";
+import { reviewAcceptance, validateTree } from "../dist/validation.js";
 import { SettledAttemptFailure } from "../dist/work-repair.js";
 import {
   createTarget,
@@ -1590,6 +1585,27 @@ const codexCases = [
     { kind: "transient", outcomeUnknown: true },
   ],
   [
+    // turn.started precedes the model request: nothing was paid yet.
+    "connection refused after turn.started, before any item",
+    codexThread(
+      [],
+      Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), {
+        code: "ECONNREFUSED",
+      }),
+    ),
+    { kind: "transient", outcomeUnknown: false },
+  ],
+  [
+    "connection refused after the model produced an item",
+    codexThread(
+      [{ type: "item.started", item: { id: "item-0", type: "reasoning" } }],
+      Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), {
+        code: "ECONNREFUSED",
+      }),
+    ),
+    { kind: "transient", outcomeUnknown: true },
+  ],
+  [
     "insufficient quota reported as 429",
     codexThread([
       {
@@ -1782,7 +1798,7 @@ const reviewCases = [
   [
     "no reviewer configured",
     () => ({}),
-    AcceptanceDecisionRequired,
+    Error,
     { kind: "config", fix: /reviewer/ },
   ],
   [
@@ -1794,7 +1810,7 @@ const reviewCases = [
           status: 529,
         }),
       ),
-    AcceptanceDecisionRequired,
+    Error,
     { kind: "transient", outcomeUnknown: false },
   ],
   [
@@ -1805,7 +1821,7 @@ const reviewCases = [
           error: "authentication_failed",
         }),
       ),
-    Interruption,
+    Error,
     { kind: "config", fix: /claude auth login/ },
   ],
   [
@@ -1815,8 +1831,8 @@ const reviewCases = [
         return { packetId: reviewPacket.id, findings: [] };
       },
     }),
-    AcceptanceDecisionRequired,
-    { kind: "decision" },
+    StepFault,
+    { kind: "transient", outcomeUnknown: true },
   ],
   [
     "reviewer refuses the criterion",
@@ -1836,7 +1852,7 @@ const reviewCases = [
         };
       },
     }),
-    CompletedModelInvocationError,
+    StepFault,
     { kind: "work" },
   ],
 ];

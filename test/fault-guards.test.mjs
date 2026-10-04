@@ -70,6 +70,7 @@ const SAMPLES = {
     objectiveStopped("GitHub request failed (HTTP 503)"),
     published,
   ),
+<<<<<<< HEAD
 >>>>>>> origin/claude/phase-a-4-objective
   START_AMBIGUOUS: stopped(
     "Objective stopped: Work Item beta has ambiguous active state at execute; operator direction required. Use explicit retry or operator direction.",
@@ -94,6 +95,9 @@ const SAMPLES = {
     ),
   }),
 <<<<<<< HEAD
+=======
+  PLANNER_STOP: stopped("socket hang up", {}),
+>>>>>>> origin/claude/phase-a-3-items
   PROJECTION_STOP: stopped(
     "GitHub mutation outcome unknown; reconcile authenticated evidence before retrying",
     {},
@@ -194,10 +198,14 @@ test("generic transport text matches only where the run stopped", () => {
     },
   );
 <<<<<<< HEAD
+<<<<<<< HEAD
   for (const key of ["PLANNER_STOP", "FINAL_REVIEW", "PROJECTION_STOP"]) {
 =======
   for (const key of ["NATIVE_READS"]) {
 >>>>>>> origin/claude/phase-a-4-objective
+=======
+  for (const key of ["PLANNER_STOP", "PROJECTION_STOP", "NATIVE_READS"]) {
+>>>>>>> origin/claude/phase-a-3-items
     assert.equal(DIAGNOSES[key].pattern.test(midRun), false, key);
     assert.equal(DIAGNOSES[key].pattern.test(midDelivery), false, key);
   }
@@ -234,13 +242,17 @@ test("the target is the run that ended the scenario, or the last stop", () => {
 
 test("racy and inverted entries share one duplicate check", () => {
   assert.throws(
+<<<<<<< HEAD
     () => todos({ PAGE_SHIFT: ["a"] }, { START_AMBIGUOUS: ["a"] }),
+=======
+    () => todos({ GIT_PUSH: ["a"] }, { GIT_FETCH: ["a"] }),
+>>>>>>> origin/claude/phase-a-3-items
     /Duplicate known failure: a/,
   );
   assert.throws(() => todos({ NOT_A_DIAGNOSIS: ["b"] }), /Unknown diagnosis/);
+  // The closure race is fixed: no racy entries remain.
   const racy = Object.values(KNOWN.regular).filter((entry) => entry.racy);
-  assert.equal(racy.length, 8);
-  assert.ok(racy.every((entry) => entry.key === "START_AMBIGUOUS"));
+  assert.equal(racy.length, 0);
 });
 
 test("the snapshot refuses deliveries it no longer derives and boundary changes", () => {

@@ -26,7 +26,6 @@ import {
   CandidateValidationFailure,
   CandidateEnvironmentFailure,
   SettledAttemptFailure,
-  prepareEvidenceRecovery,
 } from "../dist/work-repair.js";
 import {
   compilePlan,
@@ -63,7 +62,6 @@ const autonomy = () => ({
   },
   repairClasses: [
     "implementation",
-    "review-evidence",
     "validation-environment",
     "planning-output",
     "planning-evidence",
@@ -356,34 +354,6 @@ test("settled failures ignore sibling processes while correction still requires 
   }
 });
 
-test("transport recovery never accepts semantic findings or invents accounting", () => {
-  const state = {
-    autonomy: autonomy(),
-    graph: { items: [item()] },
-    work: {
-      result: {
-        status: "waiting",
-        step: "approve-result",
-        attempt: "original",
-        baseSha: "a".repeat(40),
-        changeRef: "b".repeat(40),
-        treeSha: "c".repeat(40),
-        acceptancePending: { detail: "semantic disagreement" },
-      },
-    },
-  };
-  assert.equal(prepareEvidenceRecovery(state, "result"), false);
-  state.work.result.acceptancePending.reviewRejection = {
-    field: "source",
-    reason: "unknown-source",
-  };
-  assert.equal(prepareEvidenceRecovery(state, "result"), true);
-  assert.equal(state.work.result.attempt, "original");
-  assert.equal(state.work.result.status, "running");
-  assert.equal(consumption(state).resultRereviews, 1);
-  assert.equal(state.work.result.acceptanceDecisions, undefined);
-  assert.equal(state.work.result.recovery.history[0].work.usage, undefined);
-});
 for (const delivery of ["regular", "native-stack"])
   test(`${delivery}: diagnosed lost-connectivity repair preserves original attempt, cleans its workspace and completes without duplicate worker`, async () => {
     const root = mkdtempSync(join(tmpdir(), "factory-repair-"));
@@ -1420,7 +1390,7 @@ test("regular: diagnosed read-only QA repair retains its selected commit through
 });
 
 for (const delivery of ["regular", "native-stack"])
-  test(`${delivery}: evidence-only recovery retains original rejection and exact worker result`, async () => {
+  test(`${delivery}: an invalid review answer is asked again with its error on the exact worker result`, async () => {
     const root = mkdtempSync(join(tmpdir(), "factory-evidence-repair-"));
     const previous = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = join(root, "state");
@@ -1452,7 +1422,10 @@ for (const delivery of ["regular", "native-stack"])
                 },
               ],
             };
-          assert.match(request.observations, /reviewTransportCorrection/);
+          assert.match(
+            request.previousInvalid,
+            /Independent review answer was invalid/,
+          );
         }
         return reviewer(request);
       };
@@ -1468,7 +1441,8 @@ for (const delivery of ["regular", "native-stack"])
       });
       const done = await fixture.application.runObjective(1);
       assert.equal(done.finalValidation.passed, true);
-      assert.equal(consumption(done).resultRereviews, 1);
+      // A re-ask is the review step's paid repeat, not a repair.
+      assert.equal(consumption(done).resultRereviews, 0);
       assert.equal(calls, 2);
       assert.equal(new Set(reviewedTrees).size, 1);
       assert.equal(
@@ -1476,11 +1450,7 @@ for (const delivery of ["regular", "native-stack"])
           .length,
         1,
       );
-      assert.equal(
-        done.work.result.recovery.history[0].work.acceptancePending
-          .reviewRejection.reason,
-        "invalid-response",
-      );
+      assert.equal(done.work.result.recovery, undefined);
       assert.equal(done.work.result.acceptanceDecisions, undefined);
     } finally {
       if (previous === undefined) delete process.env.XDG_STATE_HOME;

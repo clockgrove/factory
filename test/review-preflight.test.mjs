@@ -1,4 +1,5 @@
 import {
+  invalidReviewAnswer,
   packetFromPrompt,
   resultFindings,
 } from "./support/review-protocol.mjs";
@@ -14,11 +15,7 @@ import {
   verifyPlanCandidate,
 } from "../dist/compiler.js";
 import { LocalContentStore } from "../dist/content/local.js";
-import {
-  AcceptanceDecisionRequired,
-  reviewAcceptance,
-  validateTree,
-} from "../dist/validation.js";
+import { reviewAcceptance, validateTree } from "../dist/validation.js";
 import {
   createTarget,
   factoryConfig,
@@ -103,7 +100,7 @@ for (const attributes of [undefined, "*.bin filter=lfs # café\n"])
           assert.equal(packet.patches[0].truncated, false);
           assert.ok(Buffer.byteLength(packet.patches[0].excerpt) > 24_000);
         } else {
-          await assert.rejects(review, AcceptanceDecisionRequired);
+          await assert.rejects(review, invalidReviewAnswer);
           assert.equal(packet.patches[0].truncated, true);
         }
         assert.equal(

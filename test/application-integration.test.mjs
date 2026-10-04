@@ -783,7 +783,7 @@ test("application retries capacity for exact Work Item and final review requests
   });
 });
 
-test("application fails closed once after exhausted result-review capacity without replaying work", async () => {
+test("exhausted result-review capacity repeats the review step without replaying work", async () => {
   await fixture("review-capacity-exhausted", async (root) => {
     const original = Codex.prototype.startThread;
     const target = createTarget(root);
@@ -844,10 +844,37 @@ test("application fails closed once after exhausted result-review capacity witho
               return;
             }
             resultPrompts.push(prompt);
+            // The adapter's own capacity retries (three tries) run out once.
+            if (resultPrompts.length <= 3) {
+              yield {
+                type: "turn.failed",
+                error: { message: "reviewer capacity unavailable" },
+              };
+              return;
+            }
+            const packet = packetFromPrompt(prompt);
             yield {
-              type: "turn.failed",
-              error: { message: "reviewer capacity unavailable" },
+              type: "item.completed",
+              item: {
+                id: `${id}-message`,
+                type: "agent_message",
+                text: JSON.stringify({
+                  packetId: packet.packetId,
+                  findings: packet.criteria.map(({ criterionIndex }) => ({
+                    criterionIndex,
+                    verdict: "pass",
+                    evidenceIndices: [
+                      packet.evidence.find((e) => e.path === "OBJECTIVE")
+                        .evidenceIndex,
+                    ],
+                    detail:
+                      "The exact validated result satisfies the criterion.",
+                    question: "",
+                  })),
+                }),
+              },
             };
+            yield { type: "turn.completed", usage: null };
           }
           return { events: events() };
         },
@@ -882,21 +909,22 @@ test("application fails closed once after exhausted result-review capacity witho
         },
       };
       const { application, eventsPath, github } = makeApplication(descriptor);
-      const waiting = await application.runObjective(objective);
-      assert.equal(waiting.work["review-exhausted"].status, "waiting");
-      assert.equal(waiting.work["review-exhausted"].step, "approve-result");
-      assert.match(
-        waiting.work["review-exhausted"].acceptancePending.detail,
-        /Independent review transport was invalid: reviewer capacity unavailable/,
-      );
-      // Default autonomy repeats the review once on fresh evidence, then stops.
-      assert.equal(resultPrompts.length, 6);
+      const completed = await application.runObjective(objective);
+      assert.equal(completed.finalValidation.passed, true);
+      assert.equal(completed.work["review-exhausted"].status, "done");
+      // Capacity is a wait, not a paid fault: the review step asks again
+      // (item review: 3 failed tries, then 1; final review: 1).
+      assert.equal(resultPrompts.length, 5);
+      // The adapter retries one prompt; the repeated step reviews the same tree.
       assert.ok(
         resultPrompts
           .slice(0, 3)
           .every((prompt) => prompt === resultPrompts[0]),
       );
-      assert.equal(consumption(waiting).resultRereviews, 1);
+      const tree = (prompt) => /Result tree: [0-9a-f]{40}/.exec(prompt)?.[0];
+      assert.ok(tree(resultPrompts[0]));
+      assert.equal(tree(resultPrompts[3]), tree(resultPrompts[0]));
+      assert.equal(consumption(completed).resultRereviews, 0);
       assert.equal(
         readEvents(eventsPath).filter(
           (event) =>
@@ -904,13 +932,12 @@ test("application fails closed once after exhausted result-review capacity witho
         ).length,
         1,
       );
-      assert.equal(Object.keys(github.state().pullRequests).length, 0);
+      assert.equal(Object.keys(github.state().pullRequests).length, 1);
       const summary = summarizeModelInvocations(
         readDiagnostics(descriptor.config.repository, objective),
       );
-      assert.equal(summary.byPhase["result-review"].invocationCount, 6);
-      assert.equal(summary.byPhase["result-review"].failedCount, 6);
-      assert.equal(summary.byPhase["result-review"].completedCount, 0);
+      assert.equal(summary.byPhase["result-review"].failedCount, 3);
+      assert.equal(summary.byPhase["result-review"].completedCount, 1);
     } finally {
       Codex.prototype.startThread = original;
     }

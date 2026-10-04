@@ -49,17 +49,6 @@ export type WorkStep =
   | "approve-result"
   | "deliver";
 
-export type ReviewRejectionReason =
-  | "invalid-response"
-  | "missing-finding"
-  | "criterion-mismatch"
-  | "invalid-verdict"
-  | "empty-detail"
-  | "unknown-source"
-  | "source-truncated"
-  | "empty-quote"
-  | "quote-not-found";
-
 export interface AcceptancePending {
   criterion: string;
   treeSha: string;
@@ -68,10 +57,6 @@ export interface AcceptancePending {
   question: string;
   detail: string;
   reviewFinding?: ResultReviewCandidate;
-  reviewRejection?: {
-    field: "finding" | "criterion" | "verdict" | "detail" | "source" | "quote";
-    reason: ReviewRejectionReason;
-  };
 }
 
 export interface WorkState {
@@ -92,6 +77,11 @@ export interface WorkState {
   attempt?: string;
   waitingReason?: string;
   execution?: ExecutionHandle;
+  /**
+   * Workers of this attempt that stopped without a result. The driver's
+   * identity for the current worker is the attempt, then `<attempt>-<n>`.
+   */
+  worker?: number;
   /** Immutable base supplied to the worker for this attempt. */
   executionBaseSha?: string;
   /** Integrated default-branch head observed when this attempt started. */
@@ -343,34 +333,6 @@ function acceptancePending(value: unknown, label: string): void {
       if (typeof finding[key] !== "string" || finding[key].length > 4_096)
         throw new Error(`${label}.reviewFinding.${key} is invalid`);
     }
-  }
-  if (pending.reviewRejection !== undefined) {
-    const rejection = record(
-      pending.reviewRejection,
-      `${label}.reviewRejection`,
-    );
-    if (
-      ![
-        "finding",
-        "criterion",
-        "verdict",
-        "detail",
-        "source",
-        "quote",
-      ].includes(String(rejection.field)) ||
-      ![
-        "invalid-response",
-        "missing-finding",
-        "criterion-mismatch",
-        "invalid-verdict",
-        "empty-detail",
-        "unknown-source",
-        "source-truncated",
-        "empty-quote",
-        "quote-not-found",
-      ].includes(String(rejection.reason))
-    )
-      throw new Error(`${label}.reviewRejection is invalid`);
   }
 }
 
@@ -930,7 +892,13 @@ export function parseFactoryState(
         throw new Error(`Work Item ${id} execution identity is invalid`);
       if (execution.data !== undefined)
         jsonSafe(execution.data, `work.${id}.execution.data`);
-      if (execution.provider === "local") {
+      const interruptedStart =
+        execution.provider === "local" &&
+        JSON.stringify(
+          Object.keys(record(execution.data, `${id}.data`)).sort(),
+        ) === '["stopped","worktree"]' &&
+        typeof (execution.data as { stopped?: unknown }).stopped === "string";
+      if (execution.provider === "local" && !interruptedStart) {
         const active = record(execution.data, `work.${id}.execution.data`);
         const request = record(active.request, `work.${id}.execution.request`);
         const attemptedItem = record(request.item, `work.${id}.execution.item`);

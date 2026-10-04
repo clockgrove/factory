@@ -39,7 +39,17 @@ import {
   validateTree,
   validateWorkItem,
 } from "../dist/validation.js";
+import { faultOf } from "../dist/fault.js";
 import { withCoverage } from "./support/coverage.mjs";
+
+/** An invalid review answer is a paid transient fault: the review step asks again. */
+function invalidAnswer(error) {
+  const fault = faultOf(error);
+  assert.equal(fault.kind, "transient", String(error?.message ?? error));
+  assert.equal(fault.outcomeUnknown, true);
+  assert.match(fault.detail, /Independent review answer was invalid/);
+  return true;
+}
 import {
   createTarget,
   factoryConfig,
@@ -990,7 +1000,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         model: {},
         invocation: invocation(absentEvents),
       }),
-      AcceptanceDecisionRequired,
+      (error) => faultOf(error).kind === "config",
     );
     assert.deepEqual(absentEvents, []);
     const providerFailureEvents = [];
@@ -1023,7 +1033,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
         },
         invocation: invocation(malformedEvents),
       }),
-      AcceptanceDecisionRequired,
+      invalidAnswer,
     );
     assert.deepEqual(
       malformedEvents.map((event) => [event.type, event.failureField]),
@@ -1090,7 +1100,7 @@ test("result review auto-accepts sourced evidence, otherwise asks one exact-tree
             observe,
           },
         }),
-        AcceptanceDecisionRequired,
+        invalidAnswer,
       );
       const events = readDiagnostics("example/retry-semantic", 1);
       const invalid = events.find(
@@ -1842,14 +1852,7 @@ test("truncated per-Work-Item evidence cannot ground an automatic pass", async (
             },
           },
         }),
-        (error) => {
-          assert.ok(error instanceof AcceptanceDecisionRequired);
-          assert.deepEqual(error.pending.reviewRejection, {
-            field: "finding",
-            reason: "invalid-response",
-          });
-          return true;
-        },
+        invalidAnswer,
       );
     } finally {
       if (previous === undefined)
@@ -2206,14 +2209,7 @@ test("final review shares one text budget across ordinary and materialization pa
               },
             },
           }),
-          (error) => {
-            assert.ok(error instanceof AcceptanceDecisionRequired);
-            assert.deepEqual(error.pending.reviewRejection, {
-              field: "finding",
-              reason: "invalid-response",
-            });
-            return true;
-          },
+          invalidAnswer,
         );
       } finally {
         if (previous === undefined)
@@ -2274,10 +2270,10 @@ test("large binary results reach independent review as descriptors, and reviewer
           },
         },
       }),
+      // The failed call surfaces as itself; the review step decides by its fault.
       (error) => {
-        assert.ok(error instanceof AcceptanceDecisionRequired);
-        assert.match(error.pending.detail, /review context unavailable/);
-        assert.equal(error.pending.treeSha, treeSha);
+        assert.ok(!(error instanceof AcceptanceDecisionRequired));
+        assert.match(error.message, /review context unavailable/);
         return true;
       },
     );
@@ -2360,12 +2356,9 @@ test("a reviewer pass cannot auto-accept truncated result text", async () => {
             },
           },
         }),
-        (error) => {
-          assert.ok(error instanceof AcceptanceDecisionRequired);
-          assert.equal(error.pending.treeSha, treeSha);
-          assert.match(error.pending.detail, /incomplete cited evidence/);
-          return true;
-        },
+        (error) =>
+          invalidAnswer(error) &&
+          /incomplete cited evidence/.test(faultOf(error).detail),
       );
       assert.equal(calls, 1);
       const accepted = await reviewAcceptance({
@@ -2459,10 +2452,6 @@ test("operator decision records criterion and exact tree before resuming validat
                 detail: "Unsupported",
                 question: "",
               },
-              reviewRejection: {
-                field: "quote",
-                reason: "quote-not-found",
-              },
             },
           },
         },
@@ -2494,10 +2483,6 @@ test("operator decision records criterion and exact tree before resuming validat
       );
       const stillWaiting = readState(config.repository, 1).work.one;
       assert.equal(stillWaiting.status, "waiting");
-      assert.deepEqual(stillWaiting.acceptancePending.reviewRejection, {
-        field: "quote",
-        reason: "quote-not-found",
-      });
       assert.equal(
         stillWaiting.acceptancePending.reviewFinding.quote,
         "missing quote",

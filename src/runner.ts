@@ -8,6 +8,7 @@ import {
   resolveAutonomy,
 } from "./repair-policy.js";
 import { applyWorkCorrection, resumeDiagnoses } from "./work-repair.js";
+import { workerIdentity } from "./item-steps.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
 import {
@@ -53,7 +54,10 @@ import type {
   GitHubGateway,
   PlanningModel,
 } from "./contracts.js";
+<<<<<<< HEAD
 import { attachedFault, attachFault, decision, faultDetail } from "./fault.js";
+=======
+>>>>>>> origin/claude/phase-a-3-items
 import {
   type ControlRequest,
   requestControl,
@@ -112,12 +116,14 @@ import {
   statePath,
 } from "./state-store.js";
 import {
-  AcceptanceDecisionRequired,
   assertPinnedNpmScripts,
   objectiveReviewEvidence,
-  reviewAcceptance,
+  reviewOutcome,
+  sweepValidationWorktrees,
   validateTree,
 } from "./validation.js";
+import { faultOf } from "./fault.js";
+import { step } from "./step.js";
 
 /** Heads others push during final validation that Factory follows before asking. */
 const FOLLOWED_HEAD_LIMIT = 3;
@@ -484,10 +490,16 @@ async function cancelKnownWork(
         work.status === "cancelled"
       )
         continue;
+      // An attempt saved before its start was recorded: the driver stops
+      // whatever it started under the attempt's identity, if anything.
       if (!work.execution) {
-        errors.push(
-          "Active attempt has no stable handle; cessation is unknown",
-        );
+        if (work.attempt)
+          tasks.push(() =>
+            driver.cancelUnrecorded(
+              workerIdentity(work),
+              executionContext(work, save),
+            ),
+          );
         continue;
       }
       tasks.push(() =>
@@ -497,7 +509,6 @@ async function cancelKnownWork(
         ),
       );
     }
-  if (errors.length) throw new Error(errors.join("; "));
   tasks.push(() => cancelRecordedSubprocesses(state));
   for (const result of await Promise.allSettled(tasks.map((task) => task())))
     if (result.status === "rejected") errors.push(String(result.reason));
@@ -1462,6 +1473,8 @@ async function runObjectivePass(
     const graph = state.graph;
     verifyExecutionProfiles(graph, executionProfileChoices(config));
     await driver.preflight?.(graph);
+    // This controller holds the repository lock: no validation runs yet.
+    await sweepValidationWorktrees(config.checkout, root);
     validateCommandProvenance(
       graph,
       planningSources(issue.body, state.baseSha, config.checkout),
@@ -1829,6 +1842,7 @@ async function runObjectivePass(
               reviewFinding: error.pending.reviewFinding ?? null,
               reviewRejection: error.pending.reviewRejection ?? null,
             }),
+<<<<<<< HEAD
           });
           return state;
         }
@@ -1872,6 +1886,129 @@ async function runObjectivePass(
             : {}),
         },
       });
+=======
+          (receipt) => ({ members: receipt?.members.length ?? 0 }),
+        )
+      : undefined;
+    const acceptanceEvidence = hydrationReceipt
+      ? { ...commandEvidence, hydrationReceipt }
+      : commandEvidence;
+    let finalEvidence;
+    try {
+      const objectiveEvidence = objectiveReviewEvidence({
+        state,
+        checkout: config.checkout,
+        candidateCommitSha,
+        candidateTreeSha: finalTree,
+      });
+      // A paid step: a lost answer is asked again, an invalid one again with
+      // its validation error, until the paid bound makes it a decision.
+      let previousInvalid: string | undefined;
+      const reviewFinal = () =>
+        step(
+          state,
+          { scope: "objective", name: "final-review", paid: true },
+          (context) =>
+            context.paid(() =>
+              reviewOutcome({
+                beforeSubmit: () => {
+                  if (cancellationRequested())
+                    throw new Error("Objective cancellation requested");
+                },
+                model: planningModel,
+                reviewPhase: "objective-review",
+                checkout: config.checkout,
+                baseSha: state.baseSha,
+                commit: candidateCommitSha,
+                evidence: acceptanceEvidence,
+                criteria: objectiveCriteria(issue.body),
+                sources: planningSources(
+                  issue.body,
+                  state.baseSha,
+                  config.checkout,
+                ),
+                evidenceSources: [
+                  ...objectiveEvidence.evidence,
+                  ...(hydrationReceipt
+                    ? [
+                        {
+                          path: "Controller hydration receipt",
+                          content: JSON.stringify(hydrationReceipt),
+                        },
+                      ]
+                    : []),
+                ],
+                decisions: state.finalAcceptanceDecisions,
+                observations: objectiveEvidence.observations,
+                invocation: {
+                  invocationId: randomUUID(),
+                  phase: "objective-review",
+                  ordinal: 0,
+                  observe: diagnostics.modelObserver({
+                    scopeId: state.runId,
+                    runId: state.runId,
+                  }),
+                },
+                ...(previousInvalid ? { previousInvalid } : {}),
+                onInvalid: (detail) => {
+                  previousInvalid = detail;
+                },
+              }),
+            ),
+          { save: () => save(state) },
+        );
+      const reviewed = await diagnostics.span(
+        {
+          runId: state.runId,
+          operation: "objective-acceptance-review",
+          metadata: {
+            treeSha: finalTree,
+            candidateCommitSha,
+            candidateBasis: objectiveCandidate(state)!.basis,
+            ...(state.integratedSha
+              ? { integratedSha: state.integratedSha }
+              : {}),
+          },
+        },
+        reviewFinal,
+        (outcome) => ({ criteria: outcome.evidence?.criteria?.length ?? 0 }),
+      );
+      if (reviewed.pending) {
+        state.coordinator.phase = "waiting";
+        state.finalAcceptancePending = reviewed.pending;
+        save(state);
+        diagnostics.emit({
+          runId: state.runId,
+          operation: "objective-validation",
+          outcome: "waiting",
+          durationMs: Date.now() - finalValidationStarted,
+          metadata: { treeSha: finalTree },
+          detail: JSON.stringify({
+            question: reviewed.pending.question,
+            detail: reviewed.pending.detail,
+            reviewFinding: reviewed.pending.reviewFinding ?? null,
+          }),
+        });
+        return state;
+      }
+      finalEvidence = reviewed.evidence;
+      if (cancellationRequested())
+        throw new Error("Objective cancellation requested");
+      state.coordinator.phase = "objective-review-complete";
+      delete state.finalAcceptancePending;
+    } catch (error) {
+      // A valid review that refused a criterion completed the review.
+      if (faultOf(error).kind === "work")
+        state.coordinator.phase = "objective-review-complete";
+      throw error;
+    }
+    if (
+      state.coordinator.mode !== "running" ||
+      amendmentBlocksDispatch(state) ||
+      graphDigest(state.graph) !== finalGraphDigest ||
+      objectiveCandidate(state)?.commitSha !== candidateCommitSha
+    ) {
+>>>>>>> origin/claude/phase-a-3-items
       save(state);
       await closeObjectiveIssue(
         state,
@@ -2164,14 +2301,8 @@ export function retryWorkItem(
     const work = state.work[itemId];
     if (!work || (work.status !== "failed" && work.status !== "cancelled"))
       throw new Error("Only a failed or cancelled Work Item can be retried");
-    if (
-      work.step === "execute" &&
-      work.execution !== undefined &&
-      work.recovery?.failure?.classification === "uncertain"
-    )
-      throw new Error(
-        "Submitted effect outcome is unknown; operator direction required before retry",
-      );
+    // A recorded worker of the failed attempt is stopped by the driver
+    // before the new attempt starts (see executeItem).
     const nativeUnit =
       config.delivery.kind === "native-stack"
         ? linearDeliveryUnits(state.graph).find((unit) =>

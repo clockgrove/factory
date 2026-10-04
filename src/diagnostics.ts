@@ -1107,7 +1107,6 @@ export function statusDocument(
                 ]),
               )
             : null,
-          reviewRejection: pending.reviewRejection ?? null,
         }
       : null;
   const activeCount = Object.values(state.work).filter(
@@ -1401,7 +1400,6 @@ export class StateDiagnostics {
             question: work.acceptancePending.question,
             detail: work.acceptancePending.detail,
             reviewFinding: work.acceptancePending.reviewFinding ?? null,
-            reviewRejection: work.acceptancePending.reviewRejection ?? null,
           }),
         });
       }
@@ -1534,8 +1532,6 @@ export class StateDiagnostics {
               detail: this.state.finalAcceptancePending.detail,
               reviewFinding:
                 this.state.finalAcceptancePending.reviewFinding ?? null,
-              reviewRejection:
-                this.state.finalAcceptancePending.reviewRejection ?? null,
             })
           : undefined,
       });

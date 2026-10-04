@@ -478,6 +478,22 @@ export class SandboxExecutionDriver implements ExecutionDriver {
       context,
     );
   }
+  /** Start checkpoints before creating a sandbox: nothing can run unrecorded. */
+  @classifyFaults(executionFault)
+  async cancelUnrecorded(): Promise<void> {
+    // Nothing to stop.
+  }
+  /** A sandbox that stopped without a result is destroyed again (idempotent) to confirm it. */
+  @classifyFaults(executionFault)
+  async find(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionHandle | undefined> {
+    const a = this.active(handle);
+    if (a.result || !a.stopped?.interrupted) return handle;
+    await this.destroy(handle, a.terminal ?? "failed", context);
+    return undefined;
+  }
   /**
    * Any failure either interrupts the step (it reattaches) or destroys the
    * sandbox first, so a repeated attempt never runs beside it.

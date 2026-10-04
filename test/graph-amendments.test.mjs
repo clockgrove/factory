@@ -2163,12 +2163,6 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
           s.coordinator.processes = [{ pid: 1, startTime: "1" }];
         },
         (s) => {
-          s.work.result.recovery = {
-            phase: "stopped",
-            failure: { classification: "uncertain" },
-          };
-        },
-        (s) => {
           s.error = "unrelated error";
         },
         (s) => {

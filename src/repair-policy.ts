@@ -5,7 +5,6 @@ import type { FactoryState, WorkState } from "./state.js";
 
 export const repairClasses = [
   "implementation",
-  "review-evidence",
   "validation-environment",
   "planning-output",
   "planning-evidence",
@@ -149,7 +148,7 @@ export interface RepairLedger {
    */
   charges?: Record<string, Charge>;
 }
-/** Paid calls (diagnoses, reviews) asked per failure event before the operator decides. */
+/** Paid calls (planning diagnoses, reviews) asked per failure event before the operator decides. */
 export const PAID_ATTEMPTS = 3;
 export interface FailureDisposition {
   digest: string;
@@ -158,15 +157,12 @@ export interface FailureDisposition {
    * transient or configuration failure is never charged.
    */
   event?: string;
-  /** Diagnoses sent for this failure; bounded by PAID_ATTEMPTS. */
-  diagnoses?: number;
   classification: RepairClass | "interruption" | "authority" | "uncertain";
   detail: string;
   at: string;
   continuation:
     | "new-attempt-from-accepted-base"
     | "exact-candidate-revalidation"
-    | "exact-result-review"
     | "operator-decision";
   unfinishedEdits: "removed" | "unavailable";
   decision: string;
@@ -215,7 +211,7 @@ export const objectiveEvent = (step: string, round: number | string) =>
 const EVENT =
   /^(objective|item\/[A-Za-z0-9][A-Za-z0-9_-]*)\/[a-z][a-z-]*\/[A-Za-z0-9_-]+$/;
 /** Failure classes that are wrong results; only their failures carry an event. */
-const CHARGED: readonly string[] = ["implementation", "review-evidence"];
+const CHARGED: readonly string[] = ["implementation"];
 
 /** Consumption derived from the charged events, Objective-wide or for one scope. */
 export function consumption(

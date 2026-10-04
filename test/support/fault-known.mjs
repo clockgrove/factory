@@ -34,6 +34,7 @@ const D = {
     text: "native delivery's reads outside a Work Item step (defaultBranch at start; PR, check-run, status and readiness observation before the stack merge) are not repeated: one 5xx or connection reset stops the Objective with state.error and a restart refuses it (r1 #8)",
     pattern:
       /^outcome=stopped; message=(Objective stopped: )+GitHub request failed \(HTTP 50[03]\)\..*; work=(alpha:pending,beta:pending|alpha:published,beta:published)$/,
+<<<<<<< HEAD
 >>>>>>> origin/claude/phase-a-4-objective
   },
   START_AMBIGUOUS: {
@@ -52,6 +53,14 @@ const D = {
       /^outcome=(stopped|needs-decision); message=.*; work=.*\b(\w+):failed@execute\b.*; failure\[\2\]=git rev-parse HEAD failed \(128\): fatal: cannot change to '[^']+': No such file or directory/,
   },
 <<<<<<< HEAD
+=======
+  },
+  PLANNER_STOP: {
+    text: "a lost or unavailable planner response stops the run; planning is not repeated in the run, only a manual restart compiles again",
+    pattern:
+      /^outcome=stopped; message=(socket hang up|503 Service Unavailable); work=none$/,
+  },
+>>>>>>> origin/claude/phase-a-3-items
   PROJECTION_STOP: {
     text: "graph projection (labels, issues, dependencies, sub-issues, the marker scan) runs outside any repeat: a lost response, 5xx or 429 stops the run ('GitHub mutation outcome unknown' or 'GitHub request failed') and only a manual restart continues it",
     pattern:
@@ -143,25 +152,8 @@ export function todos(groups, racy = {}) {
   return map;
 }
 
-// Racy known failures: regular-runner calls phases.release(alpha) before
-// `await closeWorkItem(alpha)`, which wakes the scheduler, so beta is
-// checkpointed at running/execute and its driver.start begins while alpha's
-// completion comment and close are in flight. A crash during alpha's closure
-// sometimes lands between beta's checkpoint and its driver handle
-// (START_AMBIGUOUS). The race predates #543 (same code at 3fbea270) and shows
-// on slower CI runners. These tests must pass, or fail for exactly this reason.
-const RACY_CLOSURE_START = ["crash-before", "crash-after"].flatMap((kind) =>
-  [
-    "POST /repos/{owner}/{repo}/issues/{number}/comments #1",
-    "PATCH /repos/{owner}/{repo}/issues/{number} #1",
-  ].flatMap((boundary) =>
-    ["", " without an operator stop"].map(
-      (suffix) => `${kind} at ${boundary}${suffix}`,
-    ),
-  ),
-);
-
 export const KNOWN = {
+<<<<<<< HEAD
   regular: todos(
     {
 <<<<<<< HEAD
@@ -267,6 +259,82 @@ export const KNOWN = {
     },
     { START_AMBIGUOUS: RACY_CLOSURE_START },
   ),
+=======
+  regular: todos({
+    PROJECTION_STOP: [
+      "unavailable at GET /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
+      "unavailable at GET /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
+      "unavailable at GET /repos/{owner}/{repo}/labels #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/labels #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/labels #2 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/labels #1 without an operator stop",
+      "unavailable at GET /repos/{owner}/{repo}/issues #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues #2 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
+      "unavailable at GET /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
+      "unavailable at GET /repos/{owner}/{repo}/issues/{number}/parent #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #2 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/labels #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/labels #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/labels #2 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/labels #1 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues #2 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by #1 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues/{number}/parent #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/sub_issues #2 without an operator stop",
+    ],
+    GIT_PUSH: [
+      "unavailable at GIT push-advertise #1",
+      "unavailable at GIT push-advertise #1 without an operator stop",
+      "lost at GIT push #1",
+      "lost at GIT push #1 without an operator stop",
+      "lost at GIT push #2",
+      "lost at GIT push #2 without an operator stop",
+      "reset at GIT push-advertise #1",
+      "reset at GIT push-advertise #1 without an operator stop",
+      "unavailable at GIT push #1",
+      "unavailable at GIT push #1 without an operator stop",
+      "unavailable at GIT push #2",
+      "unavailable at GIT push #2 without an operator stop",
+    ],
+    GIT_FETCH: [
+      "unavailable at GIT fetch-advertise #1",
+      "unavailable at GIT fetch-advertise #1 without an operator stop",
+    ],
+    GIT_FETCH_RESET: [
+      "reset at GIT fetch-advertise #1",
+      "reset at GIT fetch-advertise #1 without an operator stop",
+    ],
+    CLOSURE_PAUSE: [
+      "unavailable at GET /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
+      "lost at PATCH /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/comments #2 without an operator stop",
+      "lost at PATCH /repos/{owner}/{repo}/issues/{number} #2 without an operator stop",
+      "lost at POST /repos/{owner}/{repo}/issues/{number}/comments #3 without an operator stop",
+      "lost at PATCH /repos/{owner}/{repo}/issues/{number} #3 without an operator stop",
+      "reset at GET /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/comments #1 without an operator stop",
+      "unavailable at PATCH /repos/{owner}/{repo}/issues/{number} #1 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/comments #2 without an operator stop",
+      "unavailable at PATCH /repos/{owner}/{repo}/issues/{number} #2 without an operator stop",
+      "unavailable at POST /repos/{owner}/{repo}/issues/{number}/comments #3 without an operator stop",
+      "unavailable at PATCH /repos/{owner}/{repo}/issues/{number} #3 without an operator stop",
+    ],
+    PLANNER_STOP: [
+      "lost at model.generateStructured #1 without an operator stop",
+      "unavailable at model.generateStructured #1 without an operator stop",
+    ],
+  }),
+>>>>>>> origin/claude/phase-a-3-items
   "native-stack": todos({
 <<<<<<< HEAD
     PROJECTION_STOP: [
@@ -364,6 +432,7 @@ export const KNOWN = {
       "reset at GIT fetch-advertise #1 without an operator stop",
 >>>>>>> origin/claude/phase-a-4-objective
     ],
+<<<<<<< HEAD
     START_REPEAT: [
       "lost at driver.start #1",
       "lost at driver.start #1 without an operator stop",
@@ -384,6 +453,8 @@ export const KNOWN = {
       "crash-after at driver.collect #2",
       "crash-after at driver.collect #2 without an operator stop",
     ],
+=======
+>>>>>>> origin/claude/phase-a-3-items
   }),
   consistency: todos({
 <<<<<<< HEAD

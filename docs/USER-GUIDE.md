@@ -159,7 +159,6 @@ Every run repairs and amends within bounded limits. The optional `autonomy` sect
     },
     "repairClasses": [
       "implementation",
-      "review-evidence",
       "validation-environment",
       "planning-output",
       "planning-evidence",
@@ -344,9 +343,9 @@ If the controller stops for any reason, run the Objective again. Factory re-read
 
 ## Allow diagnosed repairs
 
-Automatic repairs are on within the [configured limits](#limit-unattended-work). The `repairClasses` are `implementation`, `review-evidence`, `validation-environment`, `planning-output`, `planning-evidence` and `planning-choice`. Children, restart and recompilation cannot reset consumption. Each failure is charged once, however often it repeats; a transient or configuration failure is never charged.
+Automatic repairs are on within the [configured limits](#limit-unattended-work). The `repairClasses` are `implementation`, `validation-environment`, `planning-output`, `planning-evidence` and `planning-choice`. Children, restart and recompilation cannot reset consumption. Each failure is charged once, however often it repeats; a transient or configuration failure is never charged.
 
-Factory requires a concrete diagnosis and correction before another implementation attempt. The new attempt starts from the accepted base; removed unfinished edits are unavailable. An evidence-only review correction preserves the result and still requires independent review. Missing product or security decisions, unknown external outcomes and exhausted limits stop for an explicit decision. `status --json` reports the failure identity, consumed allowances, the charged failure events and the next decision.
+Factory requires a concrete diagnosis and correction before another implementation attempt. The new attempt starts from the accepted base; removed unfinished edits are unavailable. Missing product or security decisions, unknown external outcomes and exhausted limits stop for an explicit decision. `status --json` reports the failure identity, consumed allowances, the charged failure events and the next decision.
 
 When the controller could not prepare validation (a configuration failure), or a validation failed because of an external prerequisite, restore only the already authorized environment and revalidate the same result. Submit a proposal file containing `item`, the preserved `treeSha`, and `correction` with `kind: "validation-environment"`, `failureDigest`, `actor`, `diagnosis` and `correction`:
 

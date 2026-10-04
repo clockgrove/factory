@@ -65,8 +65,13 @@ const references = Object.fromEntries(
 );
 
 for (const pinned of PINNED)
-  if (!DIAGNOSES[pinned.known] || !FAMILIES[pinned.family])
-    throw new Error(`Unknown pinned race ${pinned.known} in ${pinned.family}`);
+  if (
+    (pinned.known ? !DIAGNOSES[pinned.known] : !pinned.fixed) ||
+    !FAMILIES[pinned.family]
+  )
+    throw new Error(
+      `Unknown pinned race ${pinned.known ?? pinned.fixed} in ${pinned.family}`,
+    );
 
 /** The schedule and what came of it, for a report. */
 function report(schedule, result) {
@@ -146,13 +151,18 @@ describe("interleavings of two Work Items", {
     });
 
     for (const pinned of PINNED.filter((entry) => entry.family === family))
-      test(`${title}: ${pinned.name} (known race ${pinned.known})`, {
+      test(`${title}: ${pinned.name} (${pinned.known ? `known race ${pinned.known}` : `fixed race ${pinned.fixed}`})`, {
         timeout: 300_000,
       }, async (t) => {
-        const { diagnosis } = DIAGNOSES[pinned.known];
         const result = await run(family, pinned.schedule);
         t.diagnostic(report(pinned.schedule, result));
         const known = judge(pinned.name, pinned.schedule, result, reference);
+        // A fixed race stays pinned: every invariant must hold.
+        if (!pinned.known) {
+          if (known.size) t.diagnostic(`known race ${[...known].join(", ")}`);
+          return;
+        }
+        const { diagnosis } = DIAGNOSES[pinned.known];
         if (!known.has(pinned.known))
           assert.fail(
             `Known race no longer reproduces${infeasible(result).length ? " (Factory now serializes the held effects)" : ""}; remove it from test/support/interleave-known.mjs: ${diagnosis}\n${report(pinned.schedule, result)}`,

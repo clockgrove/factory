@@ -20,6 +20,7 @@ import {
   type GitHubClient,
   type GitHubCall,
   GITHUB_LAG_MS,
+  gitHubFault,
   GitHubRequestError,
   MERGE_COMMITS_REQUIRED,
   sharedGitHubClient,
@@ -106,20 +107,20 @@ export class RealGitHubGateway implements GitHubGateway {
   private async viewer(): Promise<string | undefined> {
     if (this.login) return this.login;
     try {
-      this.login = await classifiedGitHubCall(
-        this.client,
-        this.repository,
-        { method: "GET", path: "user" },
-        () => this.client.viewer(),
-      );
+      this.login = await this.client.viewer();
     } catch (error) {
+      // Classified here, not by the generic gateway call: that would turn
+      // the App token's 403 into a permission fault. A rate limit stays one.
       if (
         error instanceof GitHubRequestError &&
         [403, 404].includes(error.status) &&
-        !attachedFault(error)
+        attachedFault(error)?.kind !== "transient"
       )
         return undefined;
-      throw error;
+      throw attachFault(
+        error,
+        gitHubFault(error, { method: "GET", path: "user" }),
+      );
     }
     return this.login;
   }

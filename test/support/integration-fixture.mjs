@@ -21,7 +21,7 @@ import { resolveCapacity, stateRoot } from "../../dist/config.js";
 import { LocalContentStore } from "../../dist/content/local.js";
 import { RegularDelivery } from "../../dist/delivery/regular.js";
 import { LocalExecutionDriver } from "../../dist/execution/local.js";
-import { attachFault, decision } from "../../dist/fault.js";
+import { attachFault, decision, workFault } from "../../dist/fault.js";
 import { withCoverage } from "./coverage.mjs";
 import { resultFindings } from "./review-protocol.mjs";
 
@@ -621,7 +621,8 @@ export class ScriptedHarness {
     if (starts <= (action.failAttempts ?? 0)) {
       appendEvent(this.eventsPath, { type: "failed", item: data.item });
       writeFileSync(`${data.resultPath}.failed`, "failed\n");
-      throw new Error(`Scripted failure for ${data.item}`);
+      // What a harness reports for a worker that ended with a failed result.
+      throw workFault(`Scripted failure for ${data.item}`);
     }
     for (const file of action.files ?? []) {
       const destination = join(data.worktree, file.path);

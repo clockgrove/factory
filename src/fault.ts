@@ -337,6 +337,30 @@ export const transient = (
   outcomeUnknown,
 });
 
+/**
+ * The produced result is wrong (`work`): the worker's output broke a rule
+ * Factory checks. Throw this only for the worker's result, never for a
+ * failure of Factory's own effects.
+ */
+export const workFault = (detail: string, options?: ErrorOptions): StepFault =>
+  new StepFault({ kind: "work", evidence: { detail } }, options);
+
+/**
+ * Run a pure check of the worker's output: whatever it throws unclassified
+ * is the worker's wrong result. A fault an adapter already attached passes
+ * through unchanged.
+ */
+export function judgedAsWork<T>(check: () => T): T {
+  try {
+    return check();
+  } catch (error) {
+    if (attachedFault(error)) throw error;
+    throw workFault(error instanceof Error ? error.message : String(error), {
+      cause: error,
+    });
+  }
+}
+
 export const decision = (question: string, ...evidence: string[]): Fault => ({
   kind: "decision",
   question,

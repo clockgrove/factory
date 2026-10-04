@@ -16,6 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import { LocalContentStore } from "../dist/content/local.js";
+import { faultOf } from "../dist/fault.js";
 import { LocalExecutionDriver } from "../dist/execution/local.js";
 import { checkStagedCandidate } from "../dist/execution/staged-candidate.js";
 import { sanitizedWorkerEnvironment } from "../dist/process.js";
@@ -1014,6 +1015,60 @@ test("late secret and commit failures never return completed collection observat
       failure === "secret" ? /Secretlint/ : /git.*commit|Command failed/s,
     );
     assert.equal(completed, false);
+  }
+});
+
+test("only a wrong result ends a finished worker's attempt as work; any other fault keeps the result for a repeat (#636)", async () => {
+  const cases = {
+    // Another process holds the worktree's HEAD lock, so the commit fails.
+    transient: {
+      change(worktree) {
+        writeFileSync(join(worktree, "safe.txt"), "safe\n");
+        writeFileSync(
+          join(git(worktree, "rev-parse", "--absolute-git-dir"), "HEAD.lock"),
+          "",
+        );
+      },
+      options: {},
+    },
+    // A Factory failure that nobody classified.
+    defect: {
+      change() {},
+      options: {
+        collect() {
+          throw new Error("content store write failed");
+        },
+      },
+    },
+    work: { change() {}, options: {} },
+    ownership: {
+      change(worktree) {
+        writeFileSync(join(worktree, "other.txt"), "safe\n");
+      },
+      options: {},
+    },
+  };
+  const expected = {
+    transient: "transient",
+    defect: "defect",
+    work: "work",
+    ownership: "work",
+  };
+  for (const [name, { change, options }] of Object.entries(cases)) {
+    let retained;
+    const error = await runCandidate(change, {
+      ...options,
+      inspectFailure(worktree) {
+        retained = existsSync(worktree);
+      },
+    }).then(
+      () => assert.fail(`${name} collection succeeded`),
+      (rejection) => rejection,
+    );
+    assert.equal(faultOf(error).kind, expected[name], name);
+    // A wrong result is over with its worktree; the other faults leave the
+    // finished worker's result in place for the step to collect again.
+    assert.equal(retained, expected[name] !== "work", name);
   }
 });
 

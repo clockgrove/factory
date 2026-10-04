@@ -1,3 +1,4 @@
+import { judgedAsWork, workFault } from "./fault.js";
 import { ownsPath } from "./ownership.js";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -297,17 +298,17 @@ function readRegularStagingFile(path: string, label: string): Buffer {
 /** One ingress check for the worker manifest and controller collection. */
 export function parseProducedAssetSets(value: unknown): ProducedAssetSet[] {
   if (!Array.isArray(value))
-    throw new Error("AssetSet manifest must contain a sets array");
+    throw workFault("AssetSet manifest must contain a sets array");
   for (const raw of value) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw))
-      throw new Error("AssetSet entry must be an object");
+      throw workFault("AssetSet entry must be an object");
     const set = raw as Record<string, unknown>;
     if (
       typeof set.id !== "string" ||
       !Array.isArray(set.members) ||
       !set.members.length
     )
-      throw new Error("AssetSet entry needs an ID and members");
+      throw workFault("AssetSet entry needs an ID and members");
     const provenance = set.provenance as Record<string, unknown> | undefined;
     if (
       !provenance ||
@@ -317,7 +318,7 @@ export function parseProducedAssetSets(value: unknown): ProducedAssetSet[] {
       !Array.isArray(provenance.lineage) ||
       !provenance.lineage.every((part) => typeof part === "string")
     )
-      throw new Error(`AssetSet ${set.id} provenance is invalid`);
+      throw workFault(`AssetSet ${set.id} provenance is invalid`);
     const declaredRoles = new Set<string>();
     for (const rawMember of set.members) {
       if (
@@ -325,14 +326,14 @@ export function parseProducedAssetSets(value: unknown): ProducedAssetSet[] {
         typeof rawMember !== "object" ||
         Array.isArray(rawMember)
       )
-        throw new Error(`AssetSet ${set.id} member is invalid`);
+        throw workFault(`AssetSet ${set.id} member is invalid`);
       const member = rawMember as Record<string, unknown>;
       if (
         ["role", "path", "mediaType", "destination"].some(
           (key) => typeof member[key] !== "string",
         )
       )
-        throw new Error(`AssetSet ${set.id} member binding is incomplete`);
+        throw workFault(`AssetSet ${set.id} member binding is incomplete`);
       declaredRoles.add(member.role as string);
       if (member.formatMetadata !== undefined) {
         const metadata = member.formatMetadata;
@@ -341,7 +342,7 @@ export function parseProducedAssetSets(value: unknown): ProducedAssetSet[] {
           typeof metadata !== "object" ||
           Array.isArray(metadata)
         )
-          throw new Error(`AssetSet ${set.id} format metadata is invalid`);
+          throw workFault(`AssetSet ${set.id} format metadata is invalid`);
         const detail = metadata as Record<string, unknown>;
         if (
           typeof detail.source !== "string" ||
@@ -350,7 +351,7 @@ export function parseProducedAssetSets(value: unknown): ProducedAssetSet[] {
           typeof detail.values !== "object" ||
           Array.isArray(detail.values)
         )
-          throw new Error(`AssetSet ${set.id} format metadata is invalid`);
+          throw workFault(`AssetSet ${set.id} format metadata is invalid`);
       }
     }
     if (set.relationships !== undefined) {
@@ -368,7 +369,7 @@ export function parseProducedAssetSets(value: unknown): ProducedAssetSet[] {
             !!edge.kind,
         )
       )
-        throw new Error(`AssetSet ${set.id} relationships are invalid`);
+        throw workFault(`AssetSet ${set.id} relationships are invalid`);
     }
     if (set.production !== undefined) {
       if (
@@ -376,14 +377,14 @@ export function parseProducedAssetSets(value: unknown): ProducedAssetSet[] {
         typeof set.production !== "object" ||
         Array.isArray(set.production)
       )
-        throw new Error(`AssetSet ${set.id} production evidence is invalid`);
+        throw workFault(`AssetSet ${set.id} production evidence is invalid`);
       const production = set.production as Record<string, unknown>;
       for (const key of ["model", "tool"])
         if (
           production[key] !== undefined &&
           (typeof production[key] !== "string" || !production[key])
         )
-          throw new Error(`AssetSet ${set.id} production ${key} is invalid`);
+          throw workFault(`AssetSet ${set.id} production ${key} is invalid`);
     }
   }
   return value as ProducedAssetSet[];
@@ -438,14 +439,14 @@ export async function captureAssetSets(
 ): Promise<CapturedAssetSet[]> {
   parseProducedAssetSets(sets);
   if (new Set(sets.map((set) => set.id)).size !== sets.length)
-    throw new Error("Produced AssetSet identifiers must be unique");
+    throw workFault("Produced AssetSet identifiers must be unique");
   if (sets.length && !evidence)
-    throw new Error("Produced AssetSets require harness evidence");
+    throw workFault("Produced AssetSets require harness evidence");
   if (
     sets.length &&
     (!evidence || typeof evidence !== "object" || Array.isArray(evidence))
   )
-    throw new Error("Produced AssetSets require structured harness evidence");
+    throw workFault("Produced AssetSets require structured harness evidence");
   const evidenceObject = (
     evidence && typeof evidence === "object" && !Array.isArray(evidence)
       ? evidence
@@ -453,7 +454,7 @@ export async function captureAssetSets(
   ) as Record<string, unknown>;
   const harnessIdentity = evidenceObject.threadId ?? evidenceObject.harness;
   if (sets.length && (typeof harnessIdentity !== "string" || !harnessIdentity))
-    throw new Error("Produced AssetSets require a harness identity");
+    throw workFault("Produced AssetSets require a harness identity");
   const evidenceRef = {
     harnessIdentity: harnessIdentity as string,
     resultDigest: createHash("sha256")
@@ -467,14 +468,16 @@ export async function captureAssetSets(
       declaration,
       "AssetSet manifest",
     );
-    const value: unknown = JSON.parse(declarationBytes.toString("utf8"));
+    const value: unknown = judgedAsWork(() =>
+      JSON.parse(declarationBytes.toString("utf8")),
+    );
     if (!value || typeof value !== "object" || Array.isArray(value))
-      throw new Error("AssetSet manifest must be an object with sets");
+      throw workFault("AssetSet manifest must be an object with sets");
     const declared = parseProducedAssetSets(
       (value as Record<string, unknown>).sets,
     );
     if (!isDeepStrictEqual(declared, sets))
-      throw new Error("Harness AssetSets differ from .factory-assets.json");
+      throw workFault("Harness AssetSets differ from .factory-assets.json");
     declarationDigest = createHash("sha256")
       .update(declarationBytes)
       .digest("hex");
@@ -484,7 +487,7 @@ export async function captureAssetSets(
     sets.length &&
     (!existsSync(mediaRoot) || realpathSync(mediaRoot) !== resolve(mediaRoot))
   )
-    throw new Error("Produced media root is missing or redirected");
+    throw workFault("Produced media root is missing or redirected");
   const captured: CapturedAssetSet[] = [];
   const receiptInputs: NonNullable<AssetCaptureReceipt["inputs"]> = inputs.map(
     (input) => ({
@@ -504,7 +507,7 @@ export async function captureAssetSets(
   );
   for (const set of sets) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(set.id) || !set.members.length)
-      throw new Error(
+      throw workFault(
         "Produced AssetSet has an invalid identity or no members",
       );
     const provenance = set.provenance;
@@ -518,7 +521,7 @@ export async function captureAssetSets(
       !Array.isArray(provenance.lineage) ||
       !provenance.lineage.every((entry) => typeof entry === "string")
     )
-      throw new Error(
+      throw workFault(
         "Produced AssetSet lacks provenance, rights, visibility, or lineage",
       );
     const roles = new Set<string>();
@@ -534,7 +537,7 @@ export async function captureAssetSets(
         !ownsPath(member.destination, item.ownedPaths) ||
         destinations.has(member.destination)
       )
-        throw new Error(
+        throw workFault(
           "Produced AssetSet has duplicate or unowned member bindings",
         );
       roles.add(member.role);
@@ -543,14 +546,14 @@ export async function captureAssetSets(
         !safeRelative(member.path, true) ||
         !member.path.startsWith(".factory-media/")
       )
-        throw new Error("Produced asset must be inside .factory-media");
+        throw workFault("Produced asset must be inside .factory-media");
       const path = resolve(worktree, member.path);
       if (
         !existsSync(path) ||
         !lstatSync(path).isFile() ||
         !realpathSync(path).startsWith(`${realpathSync(mediaRoot)}${sep}`)
       )
-        throw new Error(
+        throw workFault(
           "Produced asset path is missing or escapes the media root",
         );
       const ref = await putFile(store, path, member.mediaType);
@@ -571,7 +574,7 @@ export async function captureAssetSets(
     }
     for (const role of item.expectedOutputRoles ?? [])
       if (!roles.has(role))
-        throw new Error(`AssetSet ${set.id} lacks expected role ${role}`);
+        throw workFault(`AssetSet ${set.id} lacks expected role ${role}`);
     captured.push({
       id: set.id,
       ...(inputs.length && { inputs }),
@@ -610,7 +613,7 @@ export async function captureAssetSets(
       ),
     ).size !== captured.length
   )
-    throw new Error("Candidate AssetSets must have distinct content");
+    throw workFault("Candidate AssetSets must have distinct content");
   return captured;
 }
 

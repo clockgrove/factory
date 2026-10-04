@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { judgedAsWork, workFault } from "../fault.js";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -226,13 +227,15 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
             observed.detail ?? "GitHub Copilot authentication required",
             observed.authentication,
           );
-        throw new Error(
+        throw workFault(
           observed.detail ?? "GitHub Copilot harness worker failed",
         );
       }
-      const result: unknown = JSON.parse(readFileSync(data.resultPath, "utf8"));
+      const result: unknown = judgedAsWork(() =>
+        JSON.parse(readFileSync(data.resultPath, "utf8")),
+      );
       if (!result || typeof result !== "object" || Array.isArray(result))
-        throw new Error("GitHub Copilot harness result is not an object");
+        throw workFault("GitHub Copilot harness result is not an object");
       const value = result as Record<string, unknown>;
       if (
         value.state !== "complete" ||
@@ -240,7 +243,7 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
         typeof value.evidence !== "object" ||
         Array.isArray(value.evidence)
       )
-        throw new Error(
+        throw workFault(
           "GitHub Copilot completion result lacks structured evidence",
         );
       const assets =

@@ -1374,3 +1374,40 @@ test("state ingress validates repeat records and structured waits", () => {
     assert.throws(() => parseFactoryState(bad, repository, objective));
   }
 });
+
+test("an interrupted local start is exactly its stopped reason and worktree (#603)", () => {
+  const interrupted = state();
+  interrupted.work.asset = {
+    status: "running",
+    step: "execute",
+    baseSha: sha,
+    execution: {
+      provider: "local",
+      identity: "attempt-1",
+      data: { stopped: "worker died", worktree: "/tmp/worktree" },
+    },
+  };
+  assert.equal(
+    parseFactoryState(interrupted, repository, objective).work.asset.execution
+      .data.stopped,
+    "worker died",
+  );
+  for (const [name, data] of Object.entries({
+    "an unknown key": {
+      stopped: "worker died",
+      worktree: "/tmp/worktree",
+      extra: true,
+    },
+    "no worktree": { stopped: "worker died" },
+    "no reason": { worktree: "/tmp/worktree" },
+    "a reason that is not text": { stopped: 1, worktree: "/tmp/worktree" },
+  })) {
+    const changed = structuredClone(interrupted);
+    changed.work.asset.execution.data = data;
+    assert.throws(
+      () => parseFactoryState(changed, repository, objective),
+      /execution/,
+      name,
+    );
+  }
+});

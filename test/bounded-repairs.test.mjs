@@ -722,6 +722,109 @@ for (const delivery of ["regular", "native-stack"])
     }
   });
 
+for (const delivery of ["regular", "native-stack"])
+  test(`${delivery}: an Objective decision during delivery leaves the Work Item in place, and delivery resumes once it is answered`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "factory-objective-scope-"));
+    const previous = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = join(root, "state");
+    try {
+      const target = createTarget(root);
+      const config = factoryConfig(
+        target.checkout,
+        `example/objective-scope-${delivery}`,
+        delivery,
+        1,
+      );
+      const graph = {
+        objective: 1,
+        baseSha: target.baseSha,
+        items: [item()],
+      };
+      const fixture = makeApplication({
+        config,
+        graph,
+        objectiveBody: body,
+        fakeRoot: join(root, "fake"),
+        actions: {
+          result: { files: [{ path: "result.txt", text: "done\n" }] },
+        },
+        planningModel: model(graph),
+      });
+      const plan = await fixture.application.planObjective(1);
+      const projection = await fixture.github.projectGraph({
+        graph: plan.graph,
+        objectiveIssue: 1,
+      });
+      const state = {
+        schemaVersion: 7,
+        repository: config.repository,
+        objective: 1,
+        runId: "fixture",
+        configDigest: "d".repeat(64),
+        baseSha: target.baseSha,
+        graph: plan.graph,
+        autonomy: autonomy(),
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: plan.graphDigest,
+        issueByItemId: projection.issueByItemId,
+        work: { result: { status: "pending" } },
+      };
+      const { RegularDelivery } = await import("../dist/delivery/regular.js");
+      const { runRegularGraph } = await import(
+        "../dist/delivery/regular-runner.js"
+      );
+      const { runNativeGraph } = await import(
+        "../dist/delivery/native-runner.js"
+      );
+      // The Objective re-observation before publication finds a foreign
+      // edit: a decision on the Objective, not on the Work Item.
+      let edited = true;
+      const reconcile = async () => {
+        if (edited && state.work.result.step === "deliver")
+          throw new StepFault({
+            kind: "decision",
+            question: "The Objective issue body changed outside Factory",
+            evidence: [],
+          });
+      };
+      const run = () =>
+        (delivery === "regular" ? runRegularGraph : runNativeGraph)({
+          config,
+          objective: 1,
+          objectiveBody: body,
+          root: join(root, "run"),
+          state,
+          driver: fixture.driver,
+          delivery: new RegularDelivery(config.checkout, fixture.github),
+          contentStore: fixture.contentStore,
+          github: fixture.github,
+          planningModel: model(graph),
+          save: () => {},
+          active: new Map(),
+          cancelled: () => false,
+          reconcile,
+        });
+      await run();
+      assert.equal(state.work.result.status, "running");
+      assert.equal(state.work.result.step, "deliver");
+      assert.equal(state.work.result.recovery, undefined);
+      assert.equal(state.work.result.pullRequest, undefined);
+      // The operator answers the Objective's decision; delivery resumes.
+      edited = false;
+      await run();
+      assert.equal(state.work.result.status, "done");
+      assert.equal(
+        readEvents(fixture.eventsPath).filter((event) => event.type === "start")
+          .length,
+        1,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
 test("run's durable planning carries consumed planning allowance into activation", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-durable-plan-"));
   const previous = process.env.XDG_STATE_HOME;

@@ -786,9 +786,10 @@ export async function runNativeGraph(args: {
       const publishLayer = async (): Promise<void> => {
         if (work.status !== "running" || work.step !== "deliver") return;
         await phases.reserve(item.id, "delivery");
-        await args.reconcile?.();
         let published: DeliveryResult;
         try {
+          // A decision the Objective asks here waits on the Objective.
+          await args.reconcile?.();
           published = await itemStep(
             item.id,
             "publish",

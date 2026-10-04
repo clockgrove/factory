@@ -2355,10 +2355,18 @@ function retryStep(
   }
 }
 
-/** The attempt failed with a wrong result: a new attempt corrects it. */
+/**
+ * The attempt failed with a wrong result: a new attempt corrects it. A failure
+ * blamed on a merged predecessor counts: the same head would fail and be
+ * blamed again, so the retry that follows the predecessor's fix starts a new
+ * attempt on the integrated head.
+ */
 function wrongResult(work: WorkState): boolean {
   const failure = work.recovery?.failure;
-  return failure?.classification === "implementation" && !!failure.event;
+  return (
+    (failure?.classification === "implementation" && !!failure.event) ||
+    !!failure?.predecessor
+  );
 }
 
 /**
@@ -2410,9 +2418,10 @@ export function retryWorkItem(
     // and validation: a published item keeps its PR (publish leases against
     // the recorded head), and an unpublished one repeats publish, which finds
     // its PR by head. In a native unit every such item of the unit resumes.
-    // A wrong result (a failed required check, a conflict) is not resumed:
-    // the same head would fail the same way. It gets a new attempt that
-    // republishes the branch with a lease, as a repair does.
+    // A wrong result (a failed required check, a conflict, a failure blamed
+    // on a merged predecessor) is not resumed: the same head would fail the
+    // same way. It gets a new attempt that republishes the branch with a
+    // lease, as a repair does.
     const delivering = (entry: WorkState | undefined): boolean =>
       !!entry &&
       (entry.status === "failed" || entry.status === "cancelled") &&

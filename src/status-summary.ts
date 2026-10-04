@@ -152,6 +152,8 @@ export interface ExecutionStatusView extends WaitView {
       phase: string | null;
       failureClass?: string | null;
       failureEvent?: string | null;
+      /** The merged predecessor the failure was blamed on, if any. */
+      blamedPredecessor?: string | null;
       nextDecision: string | null;
     }
   >;
@@ -432,9 +434,13 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
   return undefined;
 }
 
+/** As the runner's: retry starts a new attempt, so a published item's PR is not resumed. */
 function wrongResult(view: ExecutionStatusView, id: string): boolean {
   const repair = view.repairs[id];
-  return repair?.failureClass === "implementation" && !!repair.failureEvent;
+  return (
+    (repair?.failureClass === "implementation" && !!repair.failureEvent) ||
+    !!repair?.blamedPredecessor
+  );
 }
 
 function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
@@ -453,6 +459,7 @@ function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
     };
   // Retry refuses while other work runs; let it settle first.
   if (view.work.some((item) => item.status === "running")) return undefined;
+  const blamed = view.repairs[failed.id]?.blamedPredecessor;
   return {
     phase: "failed",
     summary: `${failed.id} failed${error}`,
@@ -464,7 +471,9 @@ function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
       reason:
         failed.pullRequest && !wrongResult(view, failed.id)
           ? `Resumes delivery of PR #${failed.pullRequest}${thenRun(view)}; or factory cancel --objective ${objective}`
-          : `Starts a new attempt${thenRun(view)}`,
+          : blamed
+            ? `Once ${blamed} is fixed, starts a new attempt on the integrated head${thenRun(view)}`
+            : `Starts a new attempt${thenRun(view)}`,
     },
   };
 }

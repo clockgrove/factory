@@ -342,6 +342,26 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
     }),
   );
   assert.match(wrong.nextAction.reason, /^Starts a new attempt\b/);
+  // A failure blamed on a merged predecessor is not resumed either: the same
+  // head would be blamed again, so retry starts a new attempt after the fix.
+  const blamed = summarizeStatus(
+    execution([item("A", { status: "failed", pullRequest: 9 })], {
+      state: "failed",
+      repairs: {
+        A: {
+          phase: "stopped",
+          failureClass: "decision",
+          failureEvent: null,
+          blamedPredecessor: "lib",
+          nextDecision: null,
+        },
+      },
+    }),
+  );
+  assert.match(
+    blamed.nextAction.reason,
+    /^Once lib is fixed, starts a new attempt on the integrated head\b/,
+  );
   const authentication = summarizeStatus(
     execution([
       item("A", {

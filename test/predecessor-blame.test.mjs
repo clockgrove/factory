@@ -48,7 +48,12 @@ const workItem = (id, ownedPaths, dependencies, command) => ({
   minimumAssetSets: 0,
   requiredLfsRoles: [],
 });
-const lib = workItem("lib", ["live/p2c/lib.sh"], [], "sh -n live/p2c/lib.sh");
+const lib = workItem(
+  "lib",
+  ["live/p2c/lib.sh", "live/p2c/gone.sh"],
+  [],
+  "sh -n live/p2c/lib.sh",
+);
 const cli = workItem(
   "cli",
   ["live/p2c/hello.sh"],
@@ -202,15 +207,11 @@ test("a failure in a merged predecessor's file stops with a decision and spends 
   assert.equal(requests.length, 1);
 });
 
-test("a blame the accepted graph does not support is asked again, then repaired normally", async (t) => {
+/** Each answer is invalid and asked again with its reason; then a repair applies. */
+async function askUntilRepaired(t, invalid) {
   const { checkout, state } = liveScenario(t);
   const answers = [
-    // Not a predecessor of cli.
-    blame("ghost", "live/p2c/lib.sh"),
-    // A path the predecessor does not own.
-    blame("lib", "live/p2c/other.sh"),
-    // The failing item's own file.
-    blame("lib", "live/p2c/hello.sh"),
+    ...invalid,
     {
       decision: "repair",
       diagnosis: "hello.sh forgot to call greet",
@@ -226,7 +227,6 @@ test("a blame the accepted graph does not support is asked again, then repaired 
       return answers.shift();
     },
   };
-  // Each invalid blame is asked again with its reason; then the repair applies.
   const repaired = await diagnoseWorkRepair({
     state,
     item: cli,
@@ -237,12 +237,40 @@ test("a blame the accepted graph does not support is asked again, then repaired 
     clock: clock(),
   });
   assert.equal(repaired, true);
-  assert.equal(prompts.length, 4);
+  assert.equal(prompts.length, invalid.length + 1);
+  assert.equal(state.work.cli.status, "pending");
+  assert.equal(consumption(state).implementationRepairs, 1);
+  return prompts;
+}
+
+test("a blame the accepted graph does not support is asked again, then repaired normally", async (t) => {
+  const prompts = await askUntilRepaired(t, [
+    // Not a predecessor of cli.
+    blame("ghost", "live/p2c/lib.sh"),
+    // A path the predecessor does not own.
+    blame("lib", "live/p2c/other.sh"),
+    // The failing item's own file.
+    blame("lib", "live/p2c/hello.sh"),
+  ]);
   assert.match(prompts[1], /ghost is not a merged predecessor of cli/);
   assert.match(prompts[2], /live\/p2c\/other\.sh is not owned by lib/);
   assert.match(prompts[3], /live\/p2c\/hello\.sh is not owned by lib/);
-  assert.equal(state.work.cli.status, "pending");
-  assert.equal(consumption(state).implementationRepairs, 1);
+});
+
+test("a blame must name a regular file of the failed result", async (t) => {
+  const prompts = await askUntilRepaired(t, [
+    // A directory (trailing slash), and a path that is not Git-relative.
+    blame("lib", "docs/"),
+    blame("lib", "../live/p2c/lib.sh"),
+    // Owned by the predecessor, but not in the failed result.
+    blame("lib", "live/p2c/gone.sh"),
+  ]);
+  assert.match(prompts[1], /docs\/ is not a file path/);
+  assert.match(prompts[2], /\.\.\/live\/p2c\/lib\.sh is not a file path/);
+  assert.match(
+    prompts[3],
+    /live\/p2c\/gone\.sh is not a regular file in the result of cli/,
+  );
 });
 
 test("a repair answer still spends its allowance", async (t) => {
@@ -269,4 +297,63 @@ test("a repair answer still spends its allowance", async (t) => {
     true,
   );
   assert.equal(consumption(state).implementationRepairs, 1);
+});
+
+test("diagnosis evidence lists the failing item's files first and skips only what does not fit", async (t) => {
+  const { checkout, state } = liveScenario(t);
+  // Sorts before the item's own file; five files too large for the budget
+  // together, then a small one after them.
+  const wide = { ...lib, ownedPaths: ["a/", "z.txt"] };
+  state.graph.items[0] = wide;
+  const extra = {};
+  for (let n = 1; n <= 5; n++) extra[`a/${n}.txt`] = "x".repeat(20_000);
+  extra["a/huge.bin"] = "y".repeat(1_200_000);
+  extra["z.txt"] = "small\n";
+  for (const [path, content] of Object.entries(extra)) {
+    mkdirSync(dirname(join(checkout, path)), { recursive: true });
+    writeFileSync(join(checkout, path), content);
+  }
+  git(checkout, "add", "-A");
+  git(
+    checkout,
+    "-c",
+    "user.name=T",
+    "-c",
+    "user.email=t@example.com",
+    "commit",
+    "-q",
+    "-m",
+    "more",
+  );
+  state.work.cli.treeSha = git(checkout, "rev-parse", "HEAD^{tree}");
+  const requests = [];
+  const model = {
+    generateStructured: async (request) => {
+      requests.push(request);
+      return {
+        decision: "operator",
+        diagnosis: "unclear",
+        correction: "",
+        predecessor: "",
+        path: "",
+      };
+    },
+  };
+  await diagnoseWorkRepair({
+    state,
+    item: cli,
+    model,
+    checkout,
+    save: () => {},
+    stopped: () => false,
+    clock: clock(),
+  });
+  const paths = requests[0].sources.map((source) => source.path);
+  assert.equal(paths[0], "live/p2c/hello.sh");
+  assert.ok(paths.includes("z.txt"), "a small file after the overflow is kept");
+  assert.ok(!paths.includes("a/huge.bin"), "an oversized blob is not read");
+  assert.ok(
+    paths.filter((path) => path.startsWith("a/")).length < 5,
+    "the budget bounds the evidence",
+  );
 });

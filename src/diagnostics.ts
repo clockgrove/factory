@@ -1319,6 +1319,8 @@ export function statusDocument(
             failureClass: work.recovery!.failure?.classification ?? null,
             failureDigest: work.recovery!.failure?.digest ?? null,
             failureEvent: work.recovery!.failure?.event ?? null,
+            blamedPredecessor:
+              work.recovery!.failure?.predecessor?.item ?? null,
             continuation: work.recovery!.failure?.continuation ?? null,
             unfinishedEdits: work.recovery!.failure?.unfinishedEdits ?? null,
             priorAttempts: work.recovery!.history?.length ?? 0,

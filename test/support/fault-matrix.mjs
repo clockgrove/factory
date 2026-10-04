@@ -10,7 +10,10 @@ import { createHash } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
+  mkdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { availableParallelism } from "node:os";
@@ -149,12 +152,27 @@ const compiles = (result) =>
     (call) => call.method === "generateStructured" && call.reached,
   ).length;
 
-/** Every injected fault and lag took effect; otherwise the case proves nothing. */
+/**
+ * Every injected fault and lag took effect, and nothing outside the harness
+ * signalled a controller; otherwise the case proves nothing about Factory.
+ */
 export function assertFaultsFired(result) {
+  const runs = () => result.runs.map(summarizeRun).join(" | ");
+  assert.deepEqual(
+    result.signals ?? [],
+    [],
+    `a controller received a signal from outside the harness (SIGTERM makes Factory drain and release ownership), so the scenario is void, not a Factory result: ${runs()}`,
+  );
   for (const rule of result.fake.rules)
-    assert.ok(rule.fired > 0, `fault never fired: ${String(rule.match)}`);
+    assert.ok(
+      rule.fired > 0,
+      `fault never fired: ${String(rule.match)}; runs: ${runs()}`,
+    );
   for (const rule of result.fake.lag)
-    assert.ok(rule.served > 0, `lag never served a stale read: ${rule.read}`);
+    assert.ok(
+      rule.served > 0,
+      `lag never served a stale read: ${rule.read}; runs: ${runs()}`,
+    );
   for (const fault of result.inProcess)
     assert.ok(
       result.calls.some(
@@ -163,7 +181,7 @@ export function assertFaultsFired(result) {
           call.method === fault.method &&
           call.fault === fault.kind,
       ),
-      `fault never fired: ${fault.kind} at ${fault.target}.${fault.method} #${fault.occurrence}`,
+      `fault never fired: ${fault.kind} at ${fault.target}.${fault.method} #${fault.occurrence}; runs: ${runs()}`,
     );
 }
 
@@ -191,7 +209,11 @@ export async function assertEndState(result, { foreignIssues = 0 } = {}) {
   const issueOf = {};
   for (const item of items) {
     const issues = fake.issuesWithMarker(marker(item.id));
-    assert.equal(issues.length, 1, `issues for ${item.id}\n${context()}`);
+    assert.equal(
+      issues.length,
+      1,
+      `Work Item ${item.id} has ${issues.length} issues with its marker\n${context()}`,
+    );
     issueOf[item.id] = issues[0].number;
     assert.equal(issues[0].state, "closed", `issue for ${item.id} closed`);
     assert.equal(
@@ -341,6 +363,7 @@ function report(name, value) {
       suite: basename(process.argv[1] ?? ""),
       name,
       runs: value.runs,
+      summaries: value.runs.map(summarizeRun),
       crashes: value.crashes,
       refused: value.fake.log
         .filter(
@@ -353,6 +376,50 @@ function report(name, value) {
         ),
     })}\n`,
   );
+}
+
+/**
+ * One controller run as a single line: its outcome, its message, and where
+ * each Work Item stood. Diagnosis patterns anchor on this, so they name where
+ * a run stopped, not just generic transport text.
+ */
+export function summarizeRun(run) {
+  const entries = Object.entries(run.work ?? {}).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  const work = entries.length
+    ? entries
+        .map(
+          ([id, item]) =>
+            `${id}:${item.status}${item.step ? `@${item.step}` : ""}`,
+        )
+        .join(",")
+    : "none";
+  const failures = entries
+    .filter(([, item]) => item.failure)
+    .map(([id, item]) => `; failure[${id}]=${item.failure.trim()}`)
+    .join("");
+  const message = (run.message ?? run.stderr ?? "").replace(/\s+/g, " ").trim();
+  return `outcome=${run.outcome}; message=${message}; work=${work}${failures}`;
+}
+
+/**
+ * What a known failure's pattern must match: the run that ended the scenario
+ * when it did not complete; for the operator-stop check, the last run that
+ * stopped; otherwise the check's own failure message (a fact about the end
+ * state, such as a duplicate issue). Matching one run, not all runs, keeps an
+ * earlier run's message from hiding a later, different failure.
+ */
+export function diagnosisTarget(result, check, error) {
+  const final = result.runs.at(-1);
+  if (final && final.outcome !== "complete") return summarizeRun(final);
+  if (check === "stop") {
+    const stop = result.runs.findLast(
+      (run) => !["complete", "crashed"].includes(run.outcome),
+    );
+    if (stop) return summarizeRun(stop);
+  }
+  return String(error?.message ?? error);
 }
 
 /**
@@ -381,10 +448,10 @@ export function declareScenario(name, run, options, known) {
       try {
         await CHECKS[check].assert(value, context);
       } catch (error) {
-        const message = String(error?.message ?? error);
-        if (!diagnosis.pattern.test(message))
+        const target = diagnosisTarget(value, check, error);
+        if (!diagnosis.pattern.test(target))
           assert.fail(
-            `Known failure ${diagnosis.key} failed for another reason (expected ${diagnosis.pattern}): ${message.slice(0, 4000)}`,
+            `Known failure ${diagnosis.key} failed for another reason (expected ${diagnosis.pattern} on: ${target.slice(0, 2000)}): ${String(error?.message ?? error).slice(0, 2000)}`,
           );
         t.diagnostic(
           `${diagnosis.racy ? "racy " : ""}known failure ${diagnosis.key}: ${diagnosis.text}`,
@@ -405,7 +472,10 @@ const checksFor = (testCase) =>
     ? ["end", "stop", "budget", "plan"]
     : ["end", "stop", "budget"];
 
-const SNAPSHOT = join(import.meta.dirname, "fault-boundaries.json");
+export const SNAPSHOT = join(import.meta.dirname, "fault-boundaries.json");
+
+/** The delivery modes the matrix derives boundaries for; the snapshot holds exactly these. */
+export const MATRIX_DELIVERIES = ["native-stack", "regular"];
 
 /** Derived boundary names by group, sorted so request interleaving cannot reorder them. */
 export function boundarySnapshot(cases) {
@@ -418,36 +488,84 @@ export function boundarySnapshot(cases) {
 }
 
 /**
- * Compare the derived boundaries with the committed snapshot. A boundary added
- * or removed changes what the matrix tests, so it fails until the snapshot is
- * regenerated deliberately (`npm run test:fault-boundaries`, which sets
- * FACTORY_UPDATE_FAULT_BOUNDARIES=1).
+ * Differences between the committed snapshot and one delivery's derived
+ * boundaries, including deliveries the snapshot holds that the matrix no
+ * longer derives. Empty when they agree.
  */
-export function checkBoundarySnapshot(delivery, snapshot) {
-  const committed = existsSync(SNAPSHOT)
-    ? JSON.parse(readFileSync(SNAPSHOT, "utf8"))
-    : {};
-  if (process.env.FACTORY_UPDATE_FAULT_BOUNDARIES === "1") {
-    // Read-modify-write per delivery; the update script runs one file at a time.
-    committed[delivery] = snapshot;
-    const ordered = Object.fromEntries(
-      Object.keys(committed)
-        .sort()
-        .map((key) => [key, committed[key]]),
-    );
-    writeFileSync(SNAPSHOT, `${JSON.stringify(ordered, null, 2)}\n`);
-    return;
-  }
-  const expected = committed[delivery] ?? {};
+export function snapshotDifferences(committed, delivery, snapshot) {
   const differences = [];
-  for (const group of Object.keys(snapshot)) {
-    const now = new Set(snapshot[group]);
+  if (!MATRIX_DELIVERIES.includes(delivery))
+    differences.push(`+ delivery ${delivery} is not a matrix delivery`);
+  for (const stale of Object.keys(committed))
+    if (!MATRIX_DELIVERIES.includes(stale))
+      differences.push(`- delivery ${stale} is no longer derived`);
+  const expected = committed[delivery] ?? {};
+  for (const group of new Set([
+    ...Object.keys(snapshot),
+    ...Object.keys(expected),
+  ])) {
+    const now = new Set(snapshot[group] ?? []);
     const before = new Set(expected[group] ?? []);
     for (const name of now)
       if (!before.has(name)) differences.push(`+ ${group}: ${name}`);
     for (const name of before)
       if (!now.has(name)) differences.push(`- ${group}: ${name}`);
   }
+  return differences;
+}
+
+const pause = (ms) =>
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Record one delivery's boundaries in `path` under an exclusive lock, so
+ * concurrent update runs cannot lose each other's write. Deliveries the
+ * matrix no longer derives are dropped.
+ */
+export function updateSnapshot(path, delivery, snapshot) {
+  const lock = `${path}.lock`;
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST" || Date.now() > deadline) throw error;
+      pause(25);
+    }
+  }
+  try {
+    const committed = existsSync(path)
+      ? JSON.parse(readFileSync(path, "utf8"))
+      : {};
+    committed[delivery] = snapshot;
+    const ordered = Object.fromEntries(
+      Object.keys(committed)
+        .filter((key) => MATRIX_DELIVERIES.includes(key))
+        .sort()
+        .map((key) => [key, committed[key]]),
+    );
+    const temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(ordered, null, 2)}\n`);
+    renameSync(temporary, path);
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Compare the derived boundaries with the committed snapshot. A boundary or
+ * delivery added or removed changes what the matrix tests, so it fails until
+ * the snapshot is regenerated deliberately (`npm run test:fault-boundaries`,
+ * which sets FACTORY_UPDATE_FAULT_BOUNDARIES=1).
+ */
+export function checkBoundarySnapshot(delivery, snapshot, path = SNAPSHOT) {
+  if (process.env.FACTORY_UPDATE_FAULT_BOUNDARIES === "1")
+    return updateSnapshot(path, delivery, snapshot);
+  const committed = existsSync(path)
+    ? JSON.parse(readFileSync(path, "utf8"))
+    : {};
+  const differences = snapshotDifferences(committed, delivery, snapshot);
   if (differences.length)
     throw new Error(
       `Fault boundaries for ${delivery} delivery differ from test/support/fault-boundaries.json: boundary added or removed; update the snapshot deliberately with \`npm run test:fault-boundaries\` and review the diff.\n${differences.join("\n")}`,

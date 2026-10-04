@@ -49,6 +49,17 @@ function record(value) {
   appendFileSync(callsPath, `${JSON.stringify(value)}\n`);
 }
 
+// The harness signals a controller only with SIGKILL. A SIGTERM came from
+// outside the test (it makes Factory drain and release ownership), so record
+// it: the scenario is then void, not a Factory result.
+process.on("SIGTERM", () => {
+  mkdirSync(descriptor.fakeRoot, { recursive: true });
+  appendFileSync(
+    join(descriptor.fakeRoot, "signals.ndjson"),
+    `${JSON.stringify({ signal: "SIGTERM", at: new Date().toISOString() })}\n`,
+  );
+});
+
 /** The error a caller sees when the call never reached its service. */
 function unavailable(target) {
   const cause = Object.assign(new Error("503 Service Unavailable"), {

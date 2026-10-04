@@ -1911,7 +1911,9 @@ async function runObjectivePass(
     // the pass; the next controller repeats the step.
     const fault = attachedFault(error);
     const handedOff =
-      fault?.kind === "cancelled" && !!owner.handoff && !cancellationRequested();
+      fault?.kind === "cancelled" &&
+      !!owner.handoff &&
+      !cancellationRequested();
     const waiting =
       !!current &&
       !cancellationRequested() &&
@@ -2213,9 +2215,9 @@ export function retryWorkItem(
     // A published item resumes delivery with the same PR, attempt and
     // head: publish leases against the recorded head, so repeating it is
     // safe. In a native unit every published item of the unit resumes.
-    const publishedItems = (nativeUnit?.items.map((item) => item.id) ?? [
-      itemId,
-    ]).filter((id) => {
+    const publishedItems = (
+      nativeUnit?.items.map((item) => item.id) ?? [itemId]
+    ).filter((id) => {
       const entry = state.work[id];
       return (
         !!entry?.pullRequest &&

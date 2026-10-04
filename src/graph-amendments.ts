@@ -62,22 +62,13 @@ export interface PendingAmendment {
   proposal: AmendmentProposal;
   /** Last completed phase; a restart repeats the next call. */
   phase:
-    | "ready"
-    | "compiled"
-    | "reviewed"
-    | "projected"
-    | "rejected"
-    | "backlog";
+    "ready" | "compiled" | "reviewed" | "projected" | "rejected" | "backlog";
   graph?: WorkGraph;
   reviewDigest?: string;
   issueByItemId: Record<string, number>;
   error?: string;
   rejectionStage?:
-    | "compilation"
-    | "validation"
-    | "review"
-    | "review-findings"
-    | "projection";
+    "compilation" | "validation" | "review" | "review-findings" | "projection";
 }
 export interface GraphRevision {
   graph: WorkGraph;

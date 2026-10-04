@@ -1,7 +1,7 @@
 // Live crash-restart check against a real GitHub repository (#515 A6).
 //
 //   node scripts/live-check.mjs setup                   CI workflow + ruleset requiring `check`
-//   node scripts/live-check.mjs run [--kills LIST] [--delivery regular|native-stack] [-- INSTALL_ARGS]
+//   node scripts/live-check.mjs run [--kills LIST] [--delivery regular|native-stack] [--worker real|scripted] [-- INSTALL_ARGS]
 //   node scripts/live-check.mjs assert --objective N [--work /tmp/live-check-TAG]
 //   node scripts/live-check-probe.mjs                   record real stack/merge/error behaviour
 //   node scripts/live-check.mjs reset [--objective N]   close leftover live-check issues and PRs
@@ -23,6 +23,12 @@
 // The GitHub points use scripts/live-check-hook.mjs (a --import preload that
 // wraps fetch); Factory has no test hook. Needs `gh` logged in with repo
 // admin, and the planner/worker logins Factory's install defaults use.
+// `--worker scripted` makes no model calls: the controller is
+// scripts/live-check-scripted.mjs, which composes Factory with the test
+// harness's scripted planner, reviewer and worker over real GitHub, and the
+// install needs no model login. The nightly workflow uses it. The run exits 1
+// unless the last launch completed, every kill point was reached and GitHub
+// holds the expected counts.
 // Run `npm run build` first. `reset` closes only what this harness made: Objectives
 // titled `Live check TAG` with this fixture's body and the gh login as author, their Work
 // Item issues, their `factory/objective-N/*` PRs and branches. `reset --objective N` limits
@@ -141,7 +147,7 @@ export function all(path) {
 /** The options each command accepts; anything else is refused, never ignored. */
 export const OPTIONS = {
   setup: [],
-  run: ["tag", "kills", "delivery", "objective"],
+  run: ["tag", "kills", "delivery", "objective", "worker"],
   assert: ["objective", "work"],
   reset: ["objective"],
 };
@@ -244,7 +250,7 @@ export function setup(call = api) {
 const signature = (tag) =>
   `under \`live/${tag}/\` for Factory's live crash-restart check`;
 
-function objectiveBody(tag) {
+export function objectiveBody(tag) {
   const dir = `live/${tag}`;
   return `## Outcome
 
@@ -275,7 +281,7 @@ Add a tiny POSIX shell greeting ${signature(tag)}. Plan exactly three Work Items
 
 // ---------------------------------------------------------------- run
 
-async function launch(work, objective, point, index) {
+async function launch(work, objective, point, index, controller) {
   const env = {
     ...factoryEnv(work),
     LIVE_CHECK_PARENT: String(process.pid),
@@ -294,14 +300,7 @@ async function launch(work, objective, point, index) {
   const started = Date.now();
   const child = spawn(
     process.execPath,
-    [
-      "--import",
-      join(ROOT, "scripts", "live-check-hook.mjs"),
-      join(ROOT, "dist", "cli.js"),
-      "run",
-      "--objective",
-      String(objective),
-    ],
+    ["--import", join(ROOT, "scripts", "live-check-hook.mjs"), ...controller],
     { env, detached: true, stdio: ["ignore", "pipe", "pipe"] },
   );
   let text = "";
@@ -401,6 +400,9 @@ export async function run(options) {
     if (!existsSync(work))
       throw new Error(`No work dir ${work} for --tag ${tag}`);
   }
+  const worker = options.worker ?? "real";
+  if (worker !== "real" && worker !== "scripted")
+    throw new Error(`--worker must be real or scripted: ${worker}`);
   const kills = (options.kills ?? DEFAULT_KILLS.join(","))
     .split(",")
     .filter(Boolean);
@@ -463,37 +465,77 @@ export async function run(options) {
         stdio: ["ignore", "ignore", "inherit"],
       },
     );
+    if (worker === "scripted") registerScriptedHarness(work);
   }
+  // Stages a scripted run finishes before the harness can kill inside them.
+  const pace = kills.filter((point) => PACED.includes(point));
+  const controller =
+    worker === "scripted"
+      ? [
+          join(ROOT, "scripts", "live-check-scripted.mjs"),
+          "--objective",
+          String(objective),
+          "--tag",
+          tag,
+          "--work",
+          work,
+          ...(pace.length ? ["--pace", pace.join(",")] : []),
+        ]
+      : [join(ROOT, "dist", "cli.js"), "run", "--objective", String(objective)];
   log(
-    `Objective #${objective} (${tag}) in ${work}; kills: ${kills.join(",") || "none"}`,
+    `Objective #${objective} (${tag}) in ${work}; ${worker} worker; kills: ${kills.join(",") || "none"}`,
   );
   const launches = [];
   let next = 0;
   for (let index = 1; index <= kills.length + 4; index++) {
     const point = kills[next];
     log(`launch ${index}${point ? ` (kill at ${point})` : ""}`);
-    const result = await launch(work, objective, point, index);
+    const result = await launch(work, objective, point, index, controller);
     launches.push(result);
     log(JSON.stringify(result));
     if (result.killed === "timeout" || !result.killed) break;
     next++;
   }
+  const github = count(objective, work);
+  const unreached = kills.slice(next);
+  const last = launches.at(-1);
   const report = {
     repository: REPO,
     objective,
     tag,
+    worker,
+    delivery: options.delivery ?? "regular",
     work,
     launches,
-    unreached: kills.slice(next),
+    unreached,
     status: status(work, objective),
-    github: count(objective, work),
+    github,
+    // The run ended by itself with Factory reporting complete, no kill point
+    // was skipped, and GitHub holds exactly the expected effects.
+    pass: github.pass && last?.code === 0 && !last.killed && !unreached.length,
   };
   writeFileSync(
     join(work, "report.json"),
     `${JSON.stringify(report, null, 2)}\n`,
   );
   console.log(JSON.stringify(report, null, 2));
+  if (!report.pass) process.exitCode = 1;
   return report;
+}
+
+/** Kill points a scripted run is paced to make reachable. */
+const PACED = ["final-review", "execute"];
+
+/** Swap the installed worker for the scripted one; the config digest then names it. */
+function registerScriptedHarness(work) {
+  const path = join(work, "config", "clockgrove-factory", "config.json");
+  const config = JSON.parse(readFileSync(path, "utf8"));
+  config.execution.harness = {
+    kind: "registered",
+    adapter: "scripted-test@1",
+    config: {},
+  };
+  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }
 
 function status(work, objective) {

@@ -3,15 +3,6 @@ import { Octokit } from "@octokit/core";
 import { attachFault, decision, transient, type Fault } from "./fault.js";
 import { commandAsync, currentProcessSignal } from "./process.js";
 
-/** A mutation may have reached GitHub even when its response was lost. */
-export class GitHubOutcomeUnknown extends Error {
-  constructor() {
-    super(
-      "GitHub mutation outcome unknown; reconcile authenticated evidence before retrying",
-    );
-  }
-}
-
 /**
  * GitHub refusals recognised by their documented message or error code.
  * Only this code is kept: the server's prose is never retained.
@@ -469,7 +460,13 @@ export class GitHubClient {
     readOnly: boolean,
   ): Promise<T> {
     const signal = currentProcessSignal();
-    signal?.throwIfAborted();
+    // Cancelled before the request was sent: nothing reached GitHub.
+    const cancelled = () =>
+      attachFault(new Error("GitHub request cancelled before dispatch"), {
+        kind: "cancelled",
+        detail: `GitHub ${method} cancelled before it was sent`,
+      });
+    if (signal?.aborted) throw cancelled();
     const previous = this.queue;
     let release!: () => void;
     this.queue = new Promise<void>((resolve) => {
@@ -477,17 +474,22 @@ export class GitHubClient {
     });
     let abortListener: (() => void) | undefined;
     const aborted = new Promise<never>((_resolve, reject) => {
-      abortListener = () =>
-        reject(new Error("GitHub request cancelled before dispatch"));
+      abortListener = () => reject(cancelled());
       signal?.addEventListener("abort", abortListener, { once: true });
     });
+    // Unobserved when the queue wins the race.
+    aborted.catch(() => undefined);
     try {
       await Promise.race([previous, aborted]);
-      signal?.throwIfAborted();
+      if (signal?.aborted) throw cancelled();
       const client = await this.octokit();
       while (Date.now() < this.notBefore)
-        await setTimeout(this.notBefore - Date.now(), undefined, { signal });
-      signal?.throwIfAborted();
+        await setTimeout(this.notBefore - Date.now(), undefined, {
+          signal,
+        }).catch(() => {
+          throw cancelled();
+        });
+      if (signal?.aborted) throw cancelled();
       try {
         const response = await client.request(`${method} /${route}`, {
           ...body,
@@ -526,12 +528,13 @@ export class GitHubClient {
           return { status: 304, etag: error.response?.headers?.etag } as T;
         // Only facts that mean the same for every caller are classified
         // here; the gateway classifies statuses whose meaning depends on it.
+        // A mutation may have reached GitHub even when its response was lost.
         if (
           !readOnly &&
           (!error.status || error.status >= 500 || signal?.aborted)
         )
           throw attachFault(
-            new GitHubOutcomeUnknown(),
+            new Error(`GitHub ${method} outcome unknown`),
             transient(
               error.status
                 ? `GitHub answered HTTP ${error.status} to a ${method}; it may have taken effect`

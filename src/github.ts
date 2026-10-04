@@ -14,12 +14,14 @@ import type {
 } from "./contracts.js";
 import { notYet as lagged, settled } from "./delivery/lag.js";
 import type { NativeStackDelivery } from "./delivery/native-stack.js";
+import { deliveryReadiness } from "./delivery/readiness.js";
 import { attachedFault, attachFault, decision, transient } from "./fault.js";
 import {
   classifiedGitHubCall,
   type GitHubClient,
   type GitHubCall,
   GITHUB_LAG_MS,
+  gitHubFault,
   GitHubRequestError,
   MERGE_COMMITS_REQUIRED,
   sharedGitHubClient,
@@ -106,20 +108,20 @@ export class RealGitHubGateway implements GitHubGateway {
   private async viewer(): Promise<string | undefined> {
     if (this.login) return this.login;
     try {
-      this.login = await classifiedGitHubCall(
-        this.client,
-        this.repository,
-        { method: "GET", path: "user" },
-        () => this.client.viewer(),
-      );
+      this.login = await this.client.viewer();
     } catch (error) {
+      // Classified here, not by the generic gateway call: that would turn
+      // the App token's 403 into a permission fault. A rate limit stays one.
       if (
         error instanceof GitHubRequestError &&
         [403, 404].includes(error.status) &&
-        !attachedFault(error)
+        attachedFault(error)?.kind !== "transient"
       )
         return undefined;
-      throw error;
+      throw attachFault(
+        error,
+        gitHubFault(error, { method: "GET", path: "user" }),
+      );
     }
     return this.login;
   }
@@ -332,12 +334,32 @@ export class RealGitHubGateway implements GitHubGateway {
    * Factory merges with a merge commit: integration evidence binds the
    * delivered head as its second parent. Checked before any merge is sent.
    */
-  private async requireMergeCommits(): Promise<void> {
-    if (!(await this.settings()).mergeCommits)
-      throw attachFault(
+  private async requireMergeCommits(branch: string): Promise<void> {
+    const forbidden = () =>
+      attachFault(
         new Error("The repository does not allow merge commits"),
         MERGE_COMMITS_REQUIRED,
       );
+    if (!(await this.settings()).mergeCommits) throw forbidden();
+    // A ruleset on the base may forbid them too: linear history, or a pull
+    // request rule whose allowed methods omit merge.
+    type Rule = {
+      type?: unknown;
+      parameters?: { allowed_merge_methods?: unknown } | null;
+    };
+    const rules = await this.pages<Rule>(
+      `rules/branches/${encodeURIComponent(branch)}`,
+    );
+    if (
+      rules.some(
+        (rule) =>
+          rule?.type === "required_linear_history" ||
+          (rule?.type === "pull_request" &&
+            Array.isArray(rule.parameters?.allowed_merge_methods) &&
+            !rule.parameters.allowed_merge_methods.includes("merge")),
+      )
+    )
+      throw forbidden();
   }
 
   async objective(number: number): Promise<ObjectiveIssue> {
@@ -1042,9 +1064,9 @@ export class RealGitHubGateway implements GitHubGateway {
   }
 
   /**
-   * The check names the repository requires on `branch`: its rulesets
-   * (readable with read access) and its classic branch protection, when the
-   * login may read it.
+   * The check names the repository requires on `branch`: its rulesets and
+   * its classic branch protection (from the protection route, else from the
+   * branch read, which shows them with read access).
    */
   private async requiredChecks(branch: string): Promise<string[]> {
     type Rule = {
@@ -1061,7 +1083,8 @@ export class RealGitHubGateway implements GitHubGateway {
           )
         : [],
     );
-    let classic: { contexts?: string[]; checks?: { context?: string }[] } = {};
+    type Required = { contexts?: unknown; checks?: unknown };
+    let classic: Required = {};
     try {
       classic = await this.client.request(
         "GET",
@@ -1070,8 +1093,7 @@ export class RealGitHubGateway implements GitHubGateway {
         ),
       );
     } catch (error) {
-      // Unprotected (404), or protection the login may not read (403); a
-      // rate limit is still a rate limit.
+      // 404: unprotected, or no required checks. A rate limit stays one.
       if (
         !(
           error instanceof GitHubRequestError &&
@@ -1080,15 +1102,26 @@ export class RealGitHubGateway implements GitHubGateway {
         )
       )
         throw error;
+      // 403: the login may not read protection settings; the branch read
+      // shows the same required checks with read access.
+      if (error.status === 403)
+        classic =
+          (
+            await this.api<{
+              protection?: { required_status_checks?: Required | null } | null;
+            }>("GET", `branches/${encodeURIComponent(branch)}`)
+          ).protection?.required_status_checks ?? {};
     }
     return [
-      ...new Set([
-        ...names,
-        ...(classic.contexts ?? []),
-        ...(classic.checks ?? []).flatMap((check) =>
-          typeof check.context === "string" ? [check.context] : [],
-        ),
-      ]),
+      ...new Set(
+        [
+          ...names,
+          ...(Array.isArray(classic.contexts) ? classic.contexts : []),
+          ...(Array.isArray(classic.checks) ? classic.checks : []).map(
+            (check) => (check as { context?: unknown } | null)?.context,
+          ),
+        ].filter((name): name is string => typeof name === "string" && !!name),
+      ),
     ];
   }
 
@@ -1123,10 +1156,21 @@ export class RealGitHubGateway implements GitHubGateway {
       runs.push(...result.check_runs);
       if (result.check_runs.length < 100) break;
     }
-    const statuses = await this.api<{
-      state: string;
-      total_count: number;
-    }>("GET", `commits/${identity.headSha}/status`);
+    type Status = { context?: unknown; state?: unknown };
+    const contexts: Status[] = [];
+    let combined: { state: string; total_count: number; statuses?: unknown };
+    for (let page = 1; ; page++) {
+      combined = await this.api<typeof combined>(
+        "GET",
+        `commits/${identity.headSha}/status?per_page=100&page=${page}`,
+      );
+      const listed = Array.isArray(combined.statuses)
+        ? (combined.statuses as Status[])
+        : [];
+      contexts.push(...listed);
+      if (listed.length < 100) break;
+    }
+    const statuses = combined;
     const failing =
       runs.some(
         (run) =>
@@ -1135,8 +1179,8 @@ export class RealGitHubGateway implements GitHubGateway {
       ) || ["error", "failure"].includes(statuses.state);
     // Completed runs that failed; cancelled or superseded runs did not.
     const failedChecks = [
-      ...new Set(
-        runs
+      ...new Set([
+        ...runs
           .filter((run) =>
             [
               "failure",
@@ -1146,7 +1190,14 @@ export class RealGitHubGateway implements GitHubGateway {
             ].includes(run.conclusion ?? ""),
           )
           .map((run) => run.name),
-      ),
+        // Commit statuses: branch protection often requires these contexts.
+        ...contexts.flatMap((status) =>
+          typeof status.context === "string" &&
+          ["error", "failure"].includes(String(status.state))
+            ? [status.context]
+            : [],
+        ),
+      ]),
     ];
     const checksByName = new Map<string, typeof runs>();
     for (const run of runs) {
@@ -1221,9 +1272,9 @@ export class RealGitHubGateway implements GitHubGateway {
         case "UNSTABLE":
           mergeReadiness = "ready";
           break;
-        // Strict protection: GitHub or its owner updates the branch.
+        // Strict protection: Factory updates the branch (updateBranch).
         case "BEHIND":
-          mergeReadiness = "waiting";
+          mergeReadiness = "behind";
           break;
         case "DIRTY":
           mergeReadiness = "conflict";
@@ -1262,6 +1313,98 @@ export class RealGitHubGateway implements GitHubGateway {
     };
   }
 
+  /**
+   * Bring a PR that is BEHIND its base under strict protection up to date:
+   * GitHub merges the base into Factory's head (update-branch, guarded by
+   * the expected head). Returns the head GitHub made once the PR shows it;
+   * until then the call is transient (lag window), then a decision. A
+   * repeat that finds the update already made returns it without another
+   * request. The caller records the returned head as the PR's head.
+   */
+  async updateBranch(identity: PullRequestIdentity): Promise<string> {
+    const key = `update:${identity.number}:${identity.headSha}`;
+    const pull = await this.api<Pull>("GET", `pulls/${identity.number}`);
+    if (pull.merged || pull.state !== "open")
+      throw foreignChange(
+        `PR #${identity.number} is no longer open; its branch was not updated`,
+      );
+    if (pull.head.ref !== identity.branch)
+      throw foreignChange(`PR #${identity.number} head branch changed`);
+    // A read that has not caught up with an earlier attempt's push.
+    if (identity.earlierHeads?.includes(pull.head.sha))
+      this.assertHead(identity, pull);
+    if (pull.head.sha !== identity.headSha) {
+      const updated = await this.branchUpdateHead(identity, pull);
+      settled(key);
+      return updated;
+    }
+    const pending = () =>
+      lagged(
+        key,
+        `PR #${identity.number} does not show its branch update yet`,
+        decision(
+          `GitHub did not update PR #${identity.number}'s branch with its base. Inspect it, then retry or cancel.`,
+          `PUT pulls/${identity.number}/update-branch at ${identity.headSha}`,
+        ),
+      );
+    try {
+      await this.api("PUT", `pulls/${identity.number}/update-branch`, {
+        expected_head_sha: identity.headSha,
+      });
+    } catch (error) {
+      // The head moved, the branch is current, or the base conflicts: the
+      // repeat observes the PR (and its readiness) again.
+      if (error instanceof GitHubRequestError && error.status === 422)
+        throw pending();
+      throw error;
+    }
+    // Accepted (202): GitHub makes the merge asynchronously.
+    throw pending();
+  }
+
+  /**
+   * The PR's new head is the update GitHub made: a merge whose first parent
+   * is Factory's head and whose second is on the base branch, committed by
+   * GitHub. Anything else is a change Factory did not make.
+   */
+  private async branchUpdateHead(
+    identity: PullRequestIdentity,
+    pull: Pull,
+  ): Promise<string> {
+    const head = pull.head.sha;
+    const foreign = () =>
+      foreignChange(
+        `PR #${identity.number} head changed from ${identity.headSha} to ${head}`,
+      );
+    if (!/^[a-f0-9]{40}$/.test(head)) throw foreign();
+    const commit = await this.api<{
+      sha?: string;
+      parents?: { sha?: unknown }[];
+      committer?: { login?: unknown } | null;
+    }>("GET", `commits/${head}`);
+    const parents = Array.isArray(commit.parents)
+      ? commit.parents.map((parent) => parent?.sha)
+      : [];
+    const merged = parents[1];
+    if (
+      commit.sha !== head ||
+      parents.length !== 2 ||
+      parents[0] !== identity.headSha ||
+      typeof merged !== "string" ||
+      !/^[a-f0-9]{40}$/.test(merged) ||
+      commit.committer?.login !== "web-flow"
+    )
+      throw foreign();
+    const base = pull.base.ref.split("/").map(encodeURIComponent).join("/");
+    const compared = await this.api<{ status?: unknown }>(
+      "GET",
+      `compare/${merged}...${base}`,
+    );
+    if (compared.status !== "identical" && compared.status !== "ahead")
+      throw foreign();
+    return head;
+  }
+
   async merge(
     identity: PullRequestIdentity,
     expectedHead: string,
@@ -1282,7 +1425,7 @@ export class RealGitHubGateway implements GitHubGateway {
         ),
       );
     this.assertHead(identity, current);
-    await this.requireMergeCommits();
+    await this.requireMergeCommits(current.base.ref);
     const refused = `merge-refused:${identity.number}:${identity.headSha}`;
     let result: { merged: boolean; sha: string };
     try {
@@ -1306,6 +1449,15 @@ export class RealGitHubGateway implements GitHubGateway {
       ) {
         const after = await this.api<Pull>("GET", `pulls/${identity.number}`);
         if (after.merged) return this.confirmMerged(identity, after);
+        // Readiness changed since it was observed: a conflict or a failed
+        // required check is work on the published result, not a decision.
+        deliveryReadiness(
+          identity.number,
+          await this.observe(identity),
+          [],
+          identity.headSha,
+        );
+        // Otherwise a merge in progress, or readiness GitHub has not settled.
         throw lagged(
           refused,
           `GitHub refused to merge PR #${identity.number} (HTTP 405)`,
@@ -1384,7 +1536,7 @@ export class RealGitHubGateway implements GitHubGateway {
   ): Promise<string> {
     return this.native.mergeStack(layers, baseBranch, expectedStack, {
       ...options,
-      requireMergeCommits: () => this.requireMergeCommits(),
+      requireMergeCommits: () => this.requireMergeCommits(baseBranch),
     });
   }
 }

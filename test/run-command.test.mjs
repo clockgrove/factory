@@ -14,14 +14,23 @@ import os, { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { stateRoot } from "../dist/config.js";
+import { attachFault } from "../dist/fault.js";
 import {
   preparationStatusDocument,
   statusDocument,
 } from "../dist/diagnostics.js";
 import { defaultAutonomy } from "../dist/index.js";
-import { intakeExitCode, runOutcome } from "../dist/run-outcome.js";
 import {
+  AwaitingBeforeState,
+  awaitingOutcome,
+  intakeExitCode,
+  runOutcome,
+} from "../dist/run-outcome.js";
+import { continuationStatusDocument } from "../dist/diagnostics.js";
+import {
+  preStatePath,
   readContinuation,
+  readPreState,
   readState,
   saveState,
   statePath,
@@ -745,6 +754,113 @@ test("the CLI requires an answer to accept a plan and keeps no admission vocabul
       assert.equal(result.status, 1, args.join(" "));
       assert.match(result.stderr, message);
     }
+  });
+});
+
+test("a run that waits before any state exists exits 2, names run, and status shows why", async () => {
+  await fixture("pre-state", async ({ root, config, graph }) => {
+    const { application, github } = makeApplication({
+      config,
+      graph,
+      objectiveBody: body,
+      fakeRoot: join(root, "fake"),
+      actions: { result: { files: [{ path: "result.txt", text: "done\n" }] } },
+      planningModel: model(graph, []),
+    });
+    // Objective 1 depends on #9, which has no accepted state.
+    let dependencies = [9];
+    github.objectiveDependencies = async () => dependencies;
+    const waited = await application.runObjective(1).then(
+      () => undefined,
+      (error) => error,
+    );
+    assert(waited instanceof AwaitingBeforeState, String(waited));
+    assert.equal(awaitingOutcome(waited).code, 2);
+    assert.match(awaitingOutcome(waited).message, /Predecessor #9/);
+    assert.match(
+      awaitingOutcome(waited).message,
+      /run `factory run --objective 1` again/,
+    );
+    assert.doesNotMatch(awaitingOutcome(waited).message, /factory retry/);
+    assert.equal(readContinuation(config.repository, 1), undefined);
+
+    // Status reports the wait although no state file exists, and does not
+    // name a retry that has nothing to clear.
+    const status = () => {
+      const document = continuationStatusDocument(
+        undefined,
+        config.repository,
+        1,
+        "regular",
+        [],
+        undefined,
+        false,
+        readPreState(config.repository, 1),
+      );
+      return { document, ...summarizeStatus(document) };
+    };
+    const shown = status();
+    assert.equal(shown.phase, "needs-decision");
+    assert.match(shown.summary, /Predecessor #9/);
+    assert.equal(shown.nextAction.command, "factory run --objective 1");
+    assert.throws(
+      () => application.retryWorkItem(1),
+      /Objective has no Factory state/,
+    );
+
+    // Once the cause is gone the run proceeds and the stale record is gone.
+    dependencies = [];
+    const completed = await application.runObjective(1);
+    assert.equal(runOutcome(completed).code, 0);
+    assert.equal(existsSync(preStatePath(config.repository, 1)), false);
+  });
+});
+
+test("an outage before the state file exists is shown in status", async () => {
+  await fixture("pre-outage", async ({ root, config, graph }) => {
+    const { application, github } = makeApplication({
+      config,
+      graph,
+      objectiveBody: body,
+      fakeRoot: join(root, "fake"),
+      actions: { result: { files: [{ path: "result.txt", text: "done\n" }] } },
+      planningModel: model(graph, []),
+    });
+    const real = github.objective.bind(github);
+    let calls = 0;
+    let during;
+    // GitHub is unreachable for the first reads, before any state exists.
+    github.objective = async (id) => {
+      calls += 1;
+      if (calls <= 9)
+        throw attachFault(new Error("fetch failed"), {
+          kind: "transient",
+          detail: "fetch failed",
+          outcomeUnknown: false,
+        });
+      if (calls === 10)
+        during = continuationStatusDocument(
+          undefined,
+          config.repository,
+          1,
+          "regular",
+          [],
+          undefined,
+          true,
+          readPreState(config.repository, 1),
+        );
+      return real(id);
+    };
+    const completed = await application.runObjective(1);
+    assert.equal(runOutcome(completed).code, 0);
+    assert.equal(during.state, "not-started");
+    assert.equal(during.outage?.step, "observe");
+    assert.match(during.outage.last, /fetch failed/);
+    const summary = summarizeStatus(during);
+    assert.equal(summary.phase, "waiting");
+    assert.match(summary.summary, /on outage for the Objective \(observe\)/);
+    // The outage ended with the first answer, and the state file replaced it.
+    assert.equal(existsSync(preStatePath(config.repository, 1)), false);
   });
 });
 

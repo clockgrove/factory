@@ -17,7 +17,12 @@ import {
 import { dirname, join, resolve, sep } from "node:path";
 import { stateRoot, validateCapacity } from "./config.js";
 import { linuxProcessIdentity } from "./process.js";
-import { assertRepeats, assertWait } from "./fault.js";
+import {
+  assertRepeats,
+  assertWait,
+  type RepeatRecord,
+  type Wait,
+} from "./fault.js";
 import { assertPlanningExecutionBounds } from "./contracts.js";
 import {
   assertCoordinator,
@@ -34,6 +39,66 @@ export function statePath(repository: string, objective: number): string {
     String(objective),
     "state.json",
   );
+}
+
+/**
+ * What an Objective's steps recorded before its state file exists: the run's
+ * repeat records and the wait, so `factory status` can report an outage or a
+ * question that has no state to live in. The state file replaces it.
+ */
+export interface PreState {
+  repeats?: Record<string, RepeatRecord>;
+  wait?: Wait;
+}
+
+export function preStatePath(repository: string, objective: number): string {
+  return join(dirname(statePath(repository, objective)), "pre-state.json");
+}
+
+/** Record the pre-state steps' records; none left removes the file. */
+export function writePreState(
+  repository: string,
+  objective: number,
+  record: PreState,
+): void {
+  const path = preStatePath(repository, objective);
+  const repeats = Object.keys(record.repeats ?? {}).length
+    ? record.repeats
+    : undefined;
+  if (!repeats && !record.wait) {
+    rmSync(path, { force: true });
+    return;
+  }
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  const fd = openSync(temporary, "wx", 0o600);
+  try {
+    writeFileSync(
+      fd,
+      `${JSON.stringify({ repeats, wait: record.wait }, null, 2)}\n`,
+    );
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temporary, path);
+}
+
+/** The pre-state record, if one exists and is valid; status never fails on it. */
+export function readPreState(
+  repository: string,
+  objective: number,
+): PreState | undefined {
+  try {
+    const value = JSON.parse(
+      readFileSync(preStatePath(repository, objective), "utf8"),
+    );
+    assertRepeats(value.repeats, "repeats");
+    assertWait(value.wait, "wait");
+    return { repeats: value.repeats, wait: value.wait };
+  } catch {
+    return undefined;
+  }
 }
 
 /**

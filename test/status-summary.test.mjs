@@ -67,6 +67,54 @@ test("not started points at run", () => {
   });
 });
 
+test("not started shows a wait or outage that no state could hold, and points at run", () => {
+  const decision = summarizeStatus({
+    objective: 7,
+    state: "not-started",
+    runActive: false,
+    wait: {
+      kind: "decision",
+      detail: "Predecessor #6 lacks bound accepted candidate evidence",
+      step: "objective/prerequisites",
+    },
+    outage: null,
+  });
+  assert.equal(decision.phase, "needs-decision");
+  assert.match(decision.summary, /Predecessor #6 lacks/);
+  assert.equal(decision.nextAction.command, "factory run --objective 7");
+  // No state exists, so `factory retry` has nothing to clear.
+  assert.doesNotMatch(JSON.stringify(decision), /factory retry/);
+
+  const outage = {
+    step: "observe",
+    since: "2026-10-03T10:00:00.000Z",
+    tries: 4,
+    last: "fetch failed",
+    escalated: false,
+  };
+  const down = summarizeStatus({
+    objective: 7,
+    state: "not-started",
+    runActive: false,
+    wait: null,
+    outage,
+  });
+  assert.equal(down.phase, "waiting");
+  assert.match(down.summary, /on outage for the Objective \(observe\)/);
+  assert.equal(down.nextAction.command, "factory run --objective 7");
+  // A live run already retries the failing step.
+  assert.equal(
+    summarizeStatus({
+      objective: 7,
+      state: "not-started",
+      runActive: true,
+      wait: null,
+      outage,
+    }).nextAction,
+    null,
+  );
+});
+
 test("preparation reports planning, a plan decision, pause and failure", () => {
   const planning = summarizeStatus(preparing());
   assert.equal(planning.phase, "planning");

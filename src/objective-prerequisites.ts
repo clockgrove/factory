@@ -28,7 +28,7 @@ export async function planningPrerequisites(
   const refusal = (predecessor: number, reason: string) =>
     new StepFault(
       decision(
-        `Predecessor #${predecessor} ${reason}; restore it, then factory retry --objective ${objective}`,
+        `Predecessor #${predecessor} ${reason}; restore it`,
         `predecessor #${predecessor}`,
       ),
     );

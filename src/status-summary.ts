@@ -80,9 +80,14 @@ export interface StatusItemView extends WaitView {
   authentication: { provider: string; command: string } | null;
 }
 
-export interface NotStartedStatusView {
+/**
+ * No state file yet. Steps that ran before it exists leave their wait or
+ * outage beside it (`PreState`).
+ */
+export interface NotStartedStatusView extends WaitView {
   objective: number;
   state: "not-started";
+  runActive?: boolean | null;
 }
 
 export interface PreparingStatusView extends WaitView {
@@ -627,7 +632,30 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
 /** The single derivation of phase, summary and next action. Pure. */
 export function summarizeStatus(view: StatusView): StatusSummary {
   const objective = view.objective;
-  if (view.state === "not-started")
+  if (view.state === "not-started") {
+    const shown = structuredWait(view);
+    if (shown) {
+      const waiting = scopeSummary(
+        { objective, runActive: view.runActive ?? null },
+        shown,
+        "the Objective",
+      );
+      // No record exists for `factory retry` to clear: the operator fixes the
+      // cause and runs the Objective again.
+      return {
+        ...waiting,
+        nextAction:
+          shown.kind === "outage" && view.runActive === true
+            ? null
+            : {
+                command: run(objective),
+                reason:
+                  shown.kind === "outage"
+                    ? "Retries the failing step"
+                    : `${shown.fix ? `First: ${short(shown.fix, 160)}; then` : "Resolve it, then"} run again (nothing is recorded to retry yet)`,
+              },
+      };
+    }
     return {
       phase: "not-started",
       summary: "no Factory run recorded",
@@ -636,6 +664,7 @@ export function summarizeStatus(view: StatusView): StatusSummary {
         reason: "Plans the Objective and starts delivery",
       },
     };
+  }
   if (view.state === "preparing") return summarizePreparation(view);
   if (view.state === "cancelled")
     return {

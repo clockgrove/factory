@@ -119,7 +119,9 @@ import {
   releaseControllerLock,
   saveState,
   statePath,
+  writePreState,
 } from "./state-store.js";
+import { AwaitingBeforeState } from "./run-outcome.js";
 import {
   assertPinnedNpmScripts,
   objectiveReviewEvidence,
@@ -1049,6 +1051,9 @@ async function runObjectivePass(
   };
   try {
     diagnostics.emit({ operation: "objective-run", outcome: "started" });
+    // A record of an earlier run's wait is stale once this run starts; its
+    // steps write theirs again.
+    writePreState(config.repository, objective, {});
     // Before the Objective has state its first reads repeat in memory: there
     // is nothing to save yet.
     const unsaved: Pick<PreparationState, "repeats" | "wait"> = {};
@@ -1070,8 +1075,9 @@ async function runObjectivePass(
             if (state?.schemaVersion === 7) save(state);
             else if (state) saveState(path, state);
             else {
-              // Nothing is saved before the Objective has state: report an
-              // outage to the run's output instead.
+              // No state file yet: keep the records beside it for status, and
+              // report an outage to the run's output.
+              writePreState(config.repository, objective, unsaved);
               const outage = outageOf(unsaved as StepState, "objective");
               if (outage)
                 reportRunStatus?.(
@@ -2038,6 +2044,23 @@ async function runObjectivePass(
       return owner.snapshot;
     }
     const current = owner.snapshot;
+    // Before any state exists nothing can hold the wait, and `factory retry`
+    // has no record to clear: the operator fixes it and runs the Objective again.
+    if (!current && !cancellationRequested()) {
+      const early = attachedFault(error);
+      if (early?.kind === "decision" || early?.kind === "config") {
+        diagnostics.emit({
+          operation: "objective-run",
+          outcome: "waiting",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+        throw new AwaitingBeforeState(
+          objective,
+          early.kind === "decision" ? early.question : early.detail,
+          early.kind === "config" ? early.fix : undefined,
+        );
+      }
+    }
     // A decision or a prerequisite to fix: the scope waits for the operator
     // and nothing fails, no worker stops (step.ts rule 7). A handoff stops
     // the pass; the next controller repeats the step.

@@ -228,6 +228,24 @@ test("persisted state validates identities and graph/work keys before use", () =
   );
 });
 
+test("persisted state rejects a malformed work.worker", () => {
+  const valid = state();
+  valid.work.asset.worker = 2;
+  assert.equal(
+    parseFactoryState(valid, repository, objective).work.asset.worker,
+    2,
+  );
+  for (const worker of [0, -1, 1.5, "2", null, Number.NaN]) {
+    const bad = state();
+    bad.work.asset.worker = worker;
+    assert.throws(
+      () => parseFactoryState(bad, repository, objective),
+      /invalid worker count/,
+      `worker ${String(worker)}`,
+    );
+  }
+});
+
 test("schemaVersion 4 state requires ordered exact-tree command receipts", () => {
   for (const schemaVersion of [1, 2, 3]) {
     const previousVersion = state();

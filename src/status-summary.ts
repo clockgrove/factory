@@ -110,6 +110,36 @@ export interface PreparingStatusView extends WaitView {
   error?: string | null;
 }
 
+export interface CapacityView {
+  concurrency: number;
+  concurrencySource: "host" | "config";
+  schedulingSource: "host" | "config" | null;
+  scheduling: {
+    cpu?: number;
+    memoryMiB?: number;
+    reviewConcurrency?: number;
+    validationConcurrency?: number;
+    phases?: Partial<
+      Record<"coding" | "validation" | "review" | "delivery", unknown>
+    >;
+  } | null;
+}
+
+/** One line naming the worker ceiling, the phase ceilings and who chose them. */
+export function capacityLine(capacity: CapacityView): string {
+  const { scheduling: plan } = capacity;
+  const parts = [
+    `${capacity.concurrency} coding worker${capacity.concurrency === 1 ? "" : "s"} (${capacity.concurrencySource === "host" ? "sized from host" : "configured"})`,
+  ];
+  if (plan?.validationConcurrency !== undefined)
+    parts.push(`validation ${plan.validationConcurrency}`);
+  if (plan?.reviewConcurrency !== undefined)
+    parts.push(`review ${plan.reviewConcurrency}`);
+  if (plan?.cpu !== undefined) parts.push(`cpu ${plan.cpu}`);
+  if (plan?.memoryMiB !== undefined) parts.push(`memory ${plan.memoryMiB} MiB`);
+  return `Capacity: ${parts.join(", ")}${capacity.schedulingSource === "host" ? "; phase reservations sized from host" : ""}`;
+}
+
 export interface ExecutionStatusView extends WaitView {
   objective: number;
   state: "active" | "waiting" | "complete" | "failed" | "cancelled";
@@ -125,6 +155,8 @@ export interface ExecutionStatusView extends WaitView {
       nextDecision: string | null;
     }
   >;
+  /** The sizing scheduling uses now; see `capacityView`. */
+  capacity?: CapacityView;
   finalValidation: boolean;
   finalAcceptancePending: PendingDecisionView | null;
   objectiveClosure: string | null;
@@ -770,6 +802,7 @@ export function renderStatusText(view: StatusView & StatusSummary): string[] {
           .trimEnd()}`,
       );
   }
+  if (view.capacity) lines.push("", capacityLine(view.capacity));
   const question = (label: string, pending: PendingDecisionView) =>
     lines.push(
       "",

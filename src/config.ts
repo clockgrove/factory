@@ -178,10 +178,10 @@ export interface SchedulingConfig {
  * wait on remote APIs, so 0.5 CPU and 512 MiB. Each reservation is capped at the totals, and a
  * phase ceiling is how many of its reservations fit. Review allows two per coding worker.
  */
-export function hostSchedulingDefaults(host: {
-  cpus: number;
-  memoryBytes: number;
-}): { concurrency: number; scheduling: Required<SchedulingConfig> } {
+export function hostSchedulingDefaults(host: HostFacts): {
+  concurrency: number;
+  scheduling: Required<SchedulingConfig>;
+} {
   const cpu = Math.max(1, host.cpus - 2);
   const memoryMiB = Math.max(
     1024,
@@ -765,13 +765,16 @@ export interface Capacity {
 }
 
 /** The declared capacity, or this host's defaults when `execution.concurrency` is omitted. */
-export function resolveCapacity(config: FactoryConfig): Capacity {
+export function resolveCapacity(
+  config: FactoryConfig,
+  hostFacts?: HostFacts,
+): Capacity {
   if (config.execution.concurrency !== undefined)
     return {
       concurrency: config.execution.concurrency,
       ...(config.scheduling ? { scheduling: config.scheduling } : {}),
     };
-  const host = currentHostDefaults();
+  const host = currentHostDefaults(hostFacts);
   return {
     concurrency: host.concurrency,
     scheduling: config.scheduling ?? host.scheduling,
@@ -781,21 +784,29 @@ export function resolveCapacity(config: FactoryConfig): Capacity {
   };
 }
 
-function currentHostDefaults() {
-  return hostSchedulingDefaults({
-    cpus: availableParallelism(),
-    memoryBytes: totalmem(),
-  });
+/** The host facts sizing reads; tests inject them, a run reads the live host. */
+export interface HostFacts {
+  cpus: number;
+  memoryBytes: number;
+}
+
+function currentHostDefaults(hostFacts?: HostFacts) {
+  return hostSchedulingDefaults(
+    hostFacts ?? { cpus: availableParallelism(), memoryBytes: totalmem() },
+  );
 }
 
 /**
  * The capacity to schedule with now. Stored values bind plan bounds; a host-sized value never
  * exceeds what the current host offers, so a smaller host is not oversubscribed.
  */
-export function liveCapacity(capacity: Capacity): Capacity {
+export function liveCapacity(
+  capacity: Capacity,
+  hostFacts?: HostFacts,
+): Capacity {
   const sized = capacity.hostSized;
   if (!sized) return capacity;
-  const host = currentHostDefaults();
+  const host = currentHostDefaults(hostFacts);
   const least = (stored: number | undefined, live: number | undefined) =>
     stored === undefined || live === undefined
       ? stored

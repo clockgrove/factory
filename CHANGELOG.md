@@ -4,6 +4,7 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- `status` shows the sizing it schedules with (#684): the coding worker ceiling, validation and review ceilings, CPU and memory, and whether the host or `config.json` chose them. When `execution.concurrency` is omitted these follow the host at run time; `status --json` carries them as `capacity`.
 - A plan that marks a command base-observed when it does not exist at the base (for example a script the plan itself creates) is refused before plan review, and the planner revises it from the error (#667). Previously the command was shown to review as blocked and the plan stopped for a decision.
 - Planning that stops with no reviewed plan (an unchanged failure, an exhausted planning allowance, a diagnosis that never answers, or a diagnosis that leaves the decision to the operator) is a `PlanningNeedsDecision`, not a plain error (#701). `run` and `status` name the command that answers it, `factory decide --objective N --outcome refuse --reason "…"`, and no longer say "planning stopped for a decision" twice. The planning eval counts it as a `question`, not an error.
 - Repair allowances are charged once per failure event, and never for a transient or configuration failure (#515). State records the charged events as `charges`; consumption is derived from them. The state schema is now 7 for an Objective and 8 for a preparation, so state from earlier versions is refused: finish it with the version that wrote it, or start it fresh.

@@ -19,7 +19,12 @@ import {
   type InteractionMetadata,
 } from "./capture.js";
 import { objectiveComplete } from "./completion.js";
-import { stateRoot } from "./config.js";
+import {
+  type Capacity,
+  type HostFacts,
+  liveCapacity,
+  stateRoot,
+} from "./config.js";
 import type {
   ModelInvocationObservation,
   ModelInvocationPhase,
@@ -1069,6 +1074,26 @@ export function readUsageSummaryEvents(
   return events.sort((a, b) => String(a.at).localeCompare(String(b.at)));
 }
 
+/**
+ * The sizing scheduling uses now: the worker ceiling and the per-phase reservations, and whether
+ * the host or the configuration chose each. Host-sized values follow the current host.
+ */
+export function capacityView(capacity: Capacity, hostFacts?: HostFacts) {
+  const live = liveCapacity(capacity, hostFacts);
+  return {
+    concurrency: live.concurrency,
+    concurrencySource: capacity.hostSized?.concurrency
+      ? ("host" as const)
+      : ("config" as const),
+    schedulingSource: live.scheduling
+      ? capacity.hostSized?.scheduling
+        ? ("host" as const)
+        : ("config" as const)
+      : null,
+    scheduling: live.scheduling ?? null,
+  };
+}
+
 export function statusDocument(
   state: FactoryState | undefined,
   repository: string,
@@ -1304,6 +1329,7 @@ export function statusDocument(
         ]),
     ),
     configuredSlots: configuredSlots ?? null,
+    capacity: capacityView(state.capacity),
     baseSha: state.baseSha,
     integratedSha: state.integratedSha ?? null,
     candidate: objectiveCandidate(state) ?? null,

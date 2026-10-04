@@ -426,15 +426,13 @@ function failedItem(view: ExecutionStatusView): StatusSummary | undefined {
   return {
     phase: "failed",
     summary: `${failed.id} failed${error}`,
-    nextAction: failed.pullRequest
-      ? {
-          command: `factory logs --objective ${objective} --item ${failed.id}`,
-          reason: `PR #${failed.pullRequest} is published, so retry is refused; inspect it and decide`,
-        }
-      : {
-          command: `factory retry --objective ${objective} --item ${failed.id}`,
-          reason: `Starts a new attempt${thenRun(view)}`,
-        },
+    nextAction: {
+      command: `factory retry --objective ${objective} --item ${failed.id}`,
+      // A published item keeps its PR: retry resumes its delivery.
+      reason: failed.pullRequest
+        ? `Resumes delivery of PR #${failed.pullRequest}${thenRun(view)}; or factory cancel --objective ${objective}`
+        : `Starts a new attempt${thenRun(view)}`,
+    },
   };
 }
 

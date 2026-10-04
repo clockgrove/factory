@@ -455,6 +455,42 @@ for (const route of ["regular", "native-stack"]) {
         1,
       );
     }));
+  test(`${route}: retry of a published result that failed its checks starts a new attempt that republishes it`, async () =>
+    fixture(route, "retry-failing", async (f) => {
+      const { running, waiting } = await startWaiting(f);
+      const first = identityOf(waiting);
+      f.github.update((state) => {
+        for (const pull of Object.values(state.pullRequests))
+          pull.checks = "failing";
+      });
+      await running;
+      const stopped = readState(f.config.repository, 1);
+      assert.equal(stopped.work.result.status, "failed");
+      assert.equal(stopped.work.result.pullRequest, first.pullRequest);
+      // The same head would fail the same check: retry corrects the result.
+      assert.equal(f.application.retryWorkItem(1, "result"), "attempt");
+      const retried = readState(f.config.repository, 1);
+      assert.equal(retried.work.result.status, "pending");
+      assert.equal(
+        retried.work.result.recovery.history.at(-1).work.pullRequest,
+        first.pullRequest,
+      );
+      const again = await startWaiting(f);
+      const second = identityOf(again.waiting);
+      assert.notEqual(second.attempt, first.attempt);
+      assert.notEqual(second.head, first.head);
+      // The new attempt republished the same PR with a lease.
+      assert.equal(second.pullRequest, first.pullRequest);
+      f.ready();
+      const done = await again.running;
+      assert.equal(done.finalValidation.passed, true);
+      assert.equal(f.counts().merges, 1);
+      assert.equal(
+        readEvents(f.eventsPath).filter((event) => event.type === "start")
+          .length,
+        2,
+      );
+    }));
 }
 
 for (const route of ["regular", "native-stack"]) {

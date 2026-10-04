@@ -279,6 +279,21 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
     "factory retry --objective 7 --item A",
   );
   assert.match(published.nextAction.reason, /^Resumes delivery of PR #9\b/);
+  // A published wrong result (a failed check, a conflict) gets a new attempt.
+  const wrong = summarizeStatus(
+    execution([item("A", { status: "failed", pullRequest: 9 })], {
+      state: "failed",
+      repairs: {
+        A: {
+          phase: null,
+          failureClass: "implementation",
+          failureEvent: "A:await-ci:0",
+          nextDecision: null,
+        },
+      },
+    }),
+  );
+  assert.match(wrong.nextAction.reason, /^Starts a new attempt\b/);
   const authentication = summarizeStatus(
     execution([
       item("A", {

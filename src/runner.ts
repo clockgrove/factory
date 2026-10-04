@@ -2265,6 +2265,12 @@ function retryStep(
   }
 }
 
+/** The attempt failed with a wrong result: a new attempt corrects it. */
+function wrongResult(work: WorkState): boolean {
+  const failure = work.recovery?.failure;
+  return failure?.classification === "implementation" && !!failure.event;
+}
+
 /**
  * `factory retry`: answers a step's decision or config fix when one awaits
  * the operator (Objective without an item), else starts a new attempt of a
@@ -2314,9 +2320,13 @@ export function retryWorkItem(
     // and validation: a published item keeps its PR (publish leases against
     // the recorded head), and an unpublished one repeats publish, which finds
     // its PR by head. In a native unit every such item of the unit resumes.
+    // A wrong result (a failed required check, a conflict) is not resumed:
+    // the same head would fail the same way. It gets a new attempt that
+    // republishes the branch with a lease, as a repair does.
     const delivering = (entry: WorkState | undefined): boolean =>
       !!entry &&
       (entry.status === "failed" || entry.status === "cancelled") &&
+      !wrongResult(entry) &&
       (!!entry.pullRequest || (entry.step === "deliver" && !!entry.validation));
     const resumed = (
       nativeUnit?.items.map((item) => item.id) ?? [itemId]
@@ -2358,11 +2368,12 @@ export function retryWorkItem(
       nativeUnit.items.findIndex((item) => item.id === itemId) + 1,
     );
     if (
-      work.step === "deliver" ||
-      above?.some((item) => state.work[item.id]?.pullRequest) ||
-      (nativeUnit &&
-        (state.stackNumbers?.[nativeUnit.id] ||
-          state.stackMerges?.[nativeUnit.id]))
+      !wrongResult(work) &&
+      (work.step === "deliver" ||
+        above?.some((item) => state.work[item.id]?.pullRequest) ||
+        (nativeUnit &&
+          (state.stackNumbers?.[nativeUnit.id] ||
+            state.stackMerges?.[nativeUnit.id])))
     )
       throw new Error(
         `Work Item ${itemId} is part of a delivery that cannot start again; retry the published item of its unit, or factory cancel --objective ${objective}`,

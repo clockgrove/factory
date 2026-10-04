@@ -15,6 +15,7 @@ import test from "node:test";
 import { graphDigest } from "../dist/graph-amendments.js";
 import {
   assertRepairLedger,
+  defaultAutonomy,
   consumption,
   releaseCharge,
 } from "../dist/repair-policy.js";
@@ -209,6 +210,9 @@ test("a failure in a merged predecessor's file stops with a decision and spends 
     item: "lib",
     path: "live/p2c/lib.sh",
     pullRequest: 69,
+    diagnosis: "lib.sh prints hello world, which cli's script only forwards",
+    // The graph the blame was made on: a later amendment changes it.
+    graphDigest: graphDigest(state.graph),
   });
   // The decision names the predecessor, its PR and the file, and a way that works.
   assert.match(recovery.failure.decision, /live\/p2c\/lib\.sh/);
@@ -729,6 +733,84 @@ test("the stop's named commands, run as written while stopped, fix the predecess
         .map((entry) => entry.id),
       ["result", "fix"],
     );
+  }));
+
+/**
+ * The default limits give one planning revision, and the amendment that fixes
+ * the predecessor takes it. Each step below runs the command `factory status`
+ * names, so a status that offers cancel (or a retry too early) fails here.
+ */
+test("at the default planningRevisions of 1, status names each step through blame, amendment, merged fix and retry", async () =>
+  blameFixture("default", { limits: defaultAutonomy }, async (f) => {
+    assert.equal(defaultAutonomy.allowances.planningRevisions, 1);
+    const status = async () =>
+      JSON.parse(await f.command("factory status --objective 1 --json"));
+    await f.application.runObjective(1).catch(() => undefined);
+    assert.equal(f.stateOf().work.next.status, "failed");
+
+    // Blamed: the amendment comes first, and a planning revision is left.
+    const blamed = await status();
+    assert.equal(blamed.allowanceRemaining.objective.planningRevisions, 1);
+    assert.match(blamed.nextAction.reason, /factory propose-amendment/);
+    const [amend] = namedCommands(
+      f.stateOf().work.next.recovery.failure.decision,
+    );
+    f.prepare(false);
+    await f.command(amend);
+
+    // Pending: status names what settles it, not cancel or retry.
+    const pending = await status();
+    assert.equal(pending.nextAction.command, "factory run --objective 1");
+    assert.match(pending.nextAction.reason, /amendment .* is pending/);
+    const stored = f.stateOf().work.next.recovery.failure.decision;
+    assert.doesNotMatch(stored, /propose-amendment/);
+    assert.match(stored, /An amendment is pending/);
+    const fixRun = f.command(pending.nextAction.command);
+    await until(
+      () =>
+        readContinuation(f.config.repository, 1)?.work?.fix?.status ===
+        "published",
+    );
+    // The run charged the one revision; mid-run the fix is still unmerged.
+    f.checks(f.stateOf().work.fix.pullRequest, "passing");
+    await fixRun.catch(() => undefined);
+    const merged = f.stateOf();
+    assert.equal(merged.work.fix.status, "done");
+    assert.equal(merged.work.next.status, "failed");
+
+    // Merged: no revision is left, yet the way forward is retry, not cancel.
+    const after = await status();
+    assert.equal(after.allowanceRemaining.objective.planningRevisions, 0);
+    assert.equal(
+      after.nextAction.command,
+      "factory retry --objective 1 --item next",
+    );
+    assert.match(after.nextAction.reason, /landed and merged/);
+    const refreshed = merged.work.next.recovery.failure.decision;
+    assert.doesNotMatch(refreshed, /propose-amendment|factory cancel/);
+    assert.match(refreshed, /The graph changed since this stop/);
+    assert.deepEqual(
+      namedCommands(refreshed).map((text) => text.split(" ")[1]),
+      ["retry", "run"],
+    );
+
+    // The named retry starts a new attempt on the integrated head and passes.
+    assert.match(await f.command(after.nextAction.command), /attempt/);
+    const retried = await status();
+    assert.equal(retried.nextAction.command, "factory run --objective 1");
+    const finished = f.command(retried.nextAction.command);
+    await until(
+      () =>
+        readContinuation(f.config.repository, 1)?.work?.next?.status ===
+        "published",
+    );
+    const live = f.stateOf();
+    assert.equal(live.work.next.baseSha, live.work.fix.integratedSha);
+    f.checks(live.work.next.pullRequest, "passing");
+    const final = await finished;
+    assert.equal(final.work.next.status, "done");
+    assert.equal(final.finalValidation.passed, true);
+    assert.equal(consumption(final).implementationRepairs, 0);
   }));
 
 test("an owner already running takes the proposed amendment once in-flight delivery settles", async () =>

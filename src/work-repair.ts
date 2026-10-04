@@ -3,6 +3,8 @@ import type { DiagnosticEmitter } from "./diagnostics.js";
 import { attachFault, faultOf, StepFault, transient } from "./fault.js";
 import { type StepClock, StepPaused, clearRepeats, step } from "./step.js";
 import type { PlanningModel, WorkItem } from "./contracts.js";
+import { blameDecision, cappedDiagnosis } from "./blame-decision.js";
+import { graphDigest } from "./graph-amendments.js";
 import { ownsPath, validOwnershipPath } from "./ownership.js";
 import { pinnedGitRaw } from "./process.js";
 import {
@@ -17,8 +19,6 @@ import {
   failureDigest,
   itemEvent,
   releaseCharge,
-  amendmentAllowed,
-  amendmentsUsedUp,
   repairScopes,
   validateCorrection,
   type FailureClass,
@@ -200,7 +200,10 @@ const diagnosisSchema = {
   },
 };
 
-type Blame = NonNullable<FailureDisposition["predecessor"]>;
+type Blame = Omit<
+  NonNullable<FailureDisposition["predecessor"]>,
+  "diagnosis" | "graphDigest"
+>;
 
 /** Work Items this one depends on, directly or not, that are merged. */
 function mergedPredecessors(
@@ -337,8 +340,6 @@ function blamedPredecessor(
   };
 }
 
-/** The most of the model's diagnosis a decision quotes. */
-const DIAGNOSIS_QUOTE_CHARS = 400;
 const EVIDENCE_FILE_BYTES = 16_000;
 const EVIDENCE_TOTAL_BYTES = 64_000;
 /** A larger blob is not read at all: it is not source a diagnosis can use. */
@@ -586,25 +587,17 @@ export async function diagnoseWorkRepair(args: {
     // so none is spent. The allowance the diagnosis took is given back and
     // the failure becomes a decision about the predecessor.
     const { blame, diagnosis } = answer;
-    const owner = `${blame.item}${blame.pullRequest ? ` (PR #${blame.pullRequest})` : ""}`;
     releaseCharge(state, failure.event);
     delete failure.event;
     failure.classification = "decision";
     failure.continuation = "operator-decision";
-    failure.predecessor = blame;
-    // The model's text is quoted and capped: it is evidence, not the
-    // controller's wording, and it must not read as a command.
-    const said = JSON.stringify(
-      diagnosis.length > DIAGNOSIS_QUOTE_CHARS
-        ? `${diagnosis.slice(0, DIAGNOSIS_QUOTE_CHARS)}...`
-        : diagnosis,
-    );
-    const head = `${blame.path} is owned by ${owner}, which is merged; ${item.id} did not cause this failure and a repair of ${item.id} cannot fix it. The diagnosis said: ${said}.`;
-    // An amendment needs a planning revision: name it only while one is left.
+    failure.predecessor = {
+      ...blame,
+      diagnosis: cappedDiagnosis(diagnosis),
+      graphDigest: graphDigest(state.graph),
+    };
     return stop(
-      amendmentAllowed(state)
-        ? `${head} Fix ${blame.item} in this order: (1) \`factory propose-amendment --objective ${state.objective} --proposal FILE\` with an in-scope proposal that adds a Work Item depending on ${blame.item} and owning ${blame.path}; it works while the Objective is stopped. (2) If no run is active, \`factory run --objective ${state.objective}\` until that Work Item merges. (3) \`${retry}\`, which starts a new attempt on the integrated head. (4) \`factory run --objective ${state.objective}\` again`
-        : `${head} ${amendmentsUsedUp(state.objective)}`,
+      blameDecision(state, item.id, failure.predecessor.graphDigest)!,
     );
   }
   const correction = answer;

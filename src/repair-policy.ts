@@ -199,7 +199,15 @@ export interface FailureDisposition {
    * The integrated predecessor whose delivered file caused the failure
    * (src/work-repair.ts). Only a decision about that predecessor names one.
    */
-  predecessor?: { item: string; path: string; pullRequest?: number };
+  predecessor?: {
+    item: string;
+    path: string;
+    pullRequest?: number;
+    /** The model's diagnosis, capped; quoted in the decision. */
+    diagnosis: string;
+    /** The graph the blame was made on: a different one means an amendment landed. */
+    graphDigest: string;
+  };
 }
 export interface RepairCorrection {
   failureDigest: string;

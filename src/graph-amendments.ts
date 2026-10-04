@@ -11,6 +11,7 @@ import {
   objectiveEvent,
   type RepairCorrection,
 } from "./repair-policy.js";
+import { refreshBlameDecisions } from "./blame-decision.js";
 import { preflightObjective } from "./local-preflight.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -368,6 +369,7 @@ export function submitAmendment(
     phase: "ready",
     issueByItemId: { ...state.issueByItemId },
   };
+  refreshBlameDecisions(state, graphDigest(state.graph));
   // Discovery invalidates finalization even when a review is already in flight.
   delete state.finalValidation;
   delete state.finalAcceptancePending;
@@ -936,6 +938,7 @@ async function advanceAmendment(args: {
     delete state.pendingAmendment;
     delete state.error;
     delete state.errorItem;
+    refreshBlameDecisions(state, graphDigest(state.graph));
     save();
     return true;
   } catch (error) {
@@ -953,6 +956,7 @@ async function advanceAmendment(args: {
     pending.rejectionStage = stage;
     pending.phase = "rejected";
     pending.error = error instanceof Error ? error.message : String(error);
+    refreshBlameDecisions(state, graphDigest(state.graph));
     if (state.coordinator) {
       state.coordinator.mode = "paused";
       state.coordinator.waitReason = pending.error;

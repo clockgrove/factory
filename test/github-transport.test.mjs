@@ -443,10 +443,13 @@ test("native merge resumes its UUID without submitting another mutation", async 
 });
 
 test("regular merge rejects unsuccessful acknowledgement and changed current PR identity", async () => {
+  const stillOpen = { state: "open", merged: false };
   for (const [result, detail, expected] of [
-    [{ merged: false, sha: integratedSha }, undefined, /did not produce/],
-    [{ merged: true }, undefined, /did not produce/],
-    [{ merged: true, sha: "not-a-commit" }, undefined, /did not produce/],
+    // An acknowledgement without a fresh merge reads the PR (#627): still
+    // open means the merge did not happen.
+    [{ merged: false, sha: integratedSha }, stillOpen, /did not produce/],
+    [{ merged: true }, stillOpen, /did not produce/],
+    [{ merged: true, sha: "not-a-commit" }, stillOpen, /did not produce/],
     [{ merged: true, sha: integratedSha }, { state: "open" }, /yet/],
     [{ merged: true, sha: integratedSha }, { merged: false }, /yet/],
     [
@@ -465,6 +468,8 @@ test("regular merge rejects unsuccessful acknowledgement and changed current PR 
       const path = new URL(url).pathname;
       if (path === "/repos/a/b") return json(repository);
       if (path === "/repos/a/b/rules/branches/main") return json([]);
+      if (path === "/repos/a/b/issues/4/timeline")
+        return json([{ event: "merged", commit_id: integratedSha }]);
       methods.push(options.method);
       assert.equal(options.headers["x-github-api-version"], "2026-03-10");
       if (options.method === "PUT") return json(result);
@@ -520,8 +525,18 @@ async function nativeMergeFixture(mode, options = {}) {
       const events = options.events?.(number) ?? [
         { event: "merged", commit_id: integratedSha },
       ];
-      const page = Number(query.get("page"));
-      return json(events.slice((page - 1) * 100, page * 100));
+      // GitHub pages by Link rel="next" (#630).
+      const page = Number(query.get("page") ?? 1);
+      const next = page * 100 < events.length;
+      return json(
+        events.slice((page - 1) * 100, page * 100),
+        200,
+        next
+          ? {
+              link: `<https://api.github.com${path}?per_page=100&page=${page + 1}>; rel="next"`,
+            }
+          : {},
+      );
     }
     if (path.endsWith("/merge-async/saved-uuid")) {
       completed = true;

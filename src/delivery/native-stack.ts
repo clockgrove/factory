@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { attachFault, decision } from "../fault.js";
+import { attachFault, attachedFault, decision } from "../fault.js";
 import {
   classifiedGitHubCall,
   type GitHubClient,
@@ -241,7 +241,11 @@ export class NativeStackDelivery {
       } catch (error) {
         // GitHub refuses to merge layers that already merged (a lost
         // response): read the layers again and confirm (#627).
-        if (error instanceof GitHubRequestError && error.status === 403) {
+        if (
+          error instanceof GitHubRequestError &&
+          error.status === 403 &&
+          attachedFault(error)?.kind !== "transient"
+        ) {
           const sha = await this.alreadyMerged(layers);
           if (sha) return sha;
         }

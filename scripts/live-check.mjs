@@ -19,7 +19,7 @@
 //   merge          after the first PUT merge / merge-async response, unseen
 //   final-review   5 s into the final Objective review (diagnostics span)
 // Extra points for batch finding: label, dependency, sub-issue, execute,
-// comment, close, objective-comment, objective-close (see KILLS).
+// comment, close, objective-comment, objective-close, stack-merge (see KILLS).
 // The GitHub points use scripts/live-check-hook.mjs (a --import preload that
 // wraps fetch); Factory has no test hook. Needs `gh` logged in with repo
 // admin, and the planner/worker logins Factory's install defaults use.
@@ -42,6 +42,8 @@ const KILLS = {
   "issue-created": { method: "POST", path: "^/repos/[^/]+/[^/]+/issues$" },
   "pr-created": { method: "POST", path: "^/repos/[^/]+/[^/]+/pulls$" },
   merge: { method: "PUT", path: "/pulls/\\d+/merge(-async)?$" },
+  // native-stack: the stack's merge-async; `merge` may hit an unstacked PR first.
+  "stack-merge": { method: "PUT", path: "/pulls/\\d+/merge-async$" },
   "final-review": { op: "objective-acceptance-review", delayMs: 5000 },
   // Extra points (not in the default list); {objective} is the issue number.
   label: { method: "POST", path: "/issues/\\d+/labels$" },

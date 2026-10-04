@@ -27,6 +27,7 @@ import type {
 } from "../contracts.js";
 import { AuthenticationRequiredError } from "../contracts.js";
 import type { DiagnosticEmitter } from "../diagnostics.js";
+import { faultOf } from "../fault.js";
 import { materializeAssetSet, validationLfsMembersForItem } from "../media.js";
 import { currentProcessSignal } from "../process.js";
 import { runQaItem } from "../qa-execution.js";
@@ -45,6 +46,7 @@ import {
 import {
   deliveredHead,
   deliveryEarlierHeads,
+  retireDeliveredHead,
   updateBehindBranch,
 } from "./branch-update.js";
 import {
@@ -175,6 +177,23 @@ export async function runRegularGraph(args: {
   const deliver = async (item: WorkItem, itemBase: string): Promise<void> => {
     const work = state.work[item.id]!;
     const branch = `factory/objective-${objective}/${item.id}`;
+    // The operator answered "PR closed without a merge" with a retry (the
+    // answer cleared the wait): the reviewed result gets a new PR on its
+    // branch. The closed PR can never merge, so observing it again would
+    // only ask the same question.
+    if (
+      work.status === "published" &&
+      work.closedPullRequest !== undefined &&
+      work.closedPullRequest === work.pullRequest &&
+      !awaitsOperator(work.wait)
+    ) {
+      retireDeliveredHead(work);
+      delete work.pullRequest;
+      delete work.closedPullRequest;
+      work.status = "running";
+      work.step = "deliver";
+      save();
+    }
     if (work.status !== "published") {
       await phases.reserve(item.id, "delivery");
       work.step = "deliver";
@@ -269,14 +288,28 @@ export async function runRegularGraph(args: {
       context.progress();
       if (observation.mergeReadiness === "behind")
         await updateBranch(context, published.headSha);
-      const pending = deliveryReadiness(
-        published.pullRequest,
-        observation,
-        (state.graph.requiredPreIntegrationChecks ?? []).map(
-          (check) => check.checkName,
-        ),
-        published.headSha,
-      );
+      let pending: string | undefined;
+      try {
+        pending = deliveryReadiness(
+          published.pullRequest,
+          observation,
+          (state.graph.requiredPreIntegrationChecks ?? []).map(
+            (check) => check.checkName,
+          ),
+          published.headSha,
+        );
+      } catch (error) {
+        // Past GitHub's lag a closed PR is a question for the operator;
+        // remember which PR, so the retry that answers it starts a new one.
+        if (
+          observation.state === "closed" &&
+          faultOf(error).kind === "decision"
+        ) {
+          work.closedPullRequest = published.pullRequest;
+          save();
+        }
+        throw error;
+      }
       if (pending) context.pending({ kind: "ci", detail: pending });
       return observation;
     };

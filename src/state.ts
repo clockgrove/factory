@@ -115,6 +115,11 @@ export interface WorkState {
   selectionDigest?: string;
   selection?: AssetSelectionDecision;
   pullRequest?: number;
+  /**
+   * The PR whose closing without a merge was put to the operator. Its retry
+   * is the answer: delivery then opens a new PR for the same reviewed result.
+   */
+  closedPullRequest?: number;
   error?: string;
   authentication?: AuthenticationRequest;
   startedAt?: string;
@@ -595,6 +600,11 @@ export function parseFactoryState(
       sha(item.integratedShaAtStart, `${id}.integratedShaAtStart`);
     if (item.integratedSha !== undefined)
       sha(item.integratedSha, `${id}.integratedSha`);
+    if (
+      item.closedPullRequest !== undefined &&
+      !Number.isSafeInteger(item.closedPullRequest)
+    )
+      throw new Error(`Work Item ${id} closedPullRequest must be an integer`);
     if (item.branchUpdateFrom !== undefined && !item.pullRequest)
       throw new Error(`Work Item ${id} branch update lacks a pull request`);
     if (

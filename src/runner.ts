@@ -1879,13 +1879,13 @@ async function runObjectivePass(
       // invalid one are both asked again (the invalid one with its
       // validation error) until the bound makes it a decision. A criterion
       // the operator must judge comes back as the pending final acceptance.
-      let previousInvalid: string | undefined;
       const reviewFinal = () =>
         objectiveStep(
           state,
           "final-review",
-          (context) =>
-            context.paid(() =>
+          (context) => {
+            const previousInvalid = context.previousInvalid();
+            return context.paid(() =>
               reviewOutcome({
                 beforeSubmit: stopIfCancelled,
                 model: planningModel,
@@ -1923,11 +1923,10 @@ async function runObjectivePass(
                   }),
                 },
                 ...(previousInvalid ? { previousInvalid } : {}),
-                onInvalid: (detail) => {
-                  previousInvalid = detail;
-                },
+                onInvalid: (detail) => context.invalid(detail),
               }),
-            ),
+            );
+          },
           true,
         );
       const reviewed = await diagnostics.span(

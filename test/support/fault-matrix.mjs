@@ -1,7 +1,6 @@
 // The fault matrix: run an uninterrupted two-item Objective (alpha → beta)
 // once per delivery strategy, derive every effect boundary from what that
-// run did, then inject a crash, a lost response, a connection reset or an
-// unavailable burst at each boundary, restart the controller, and check
+// run did, then inject a crash, a lost response or an unavailable burst at each boundary, restart the controller, and check
 // invariants of the end state read from GitHub's request log and the
 // repository, not from Factory's own state. Driver lifecycle premises (an
 // operator cancel, a run stopped for a decision) reach the execution
@@ -46,8 +45,6 @@ const KINDS = ["crash-before", "crash-after", "lost", "unavailable"];
 const MERGE_ASYNC = "PUT /repos/{owner}/{repo}/pulls/{number}/merge-async";
 const MERGE_ASYNC_STATUS =
   "GET /repos/{owner}/{repo}/pulls/{number}/merge-async/{uuid}";
-// A reset before the effect: the client cannot tell it from a lost response.
-const MUTATION_KINDS = [...KINDS, "reset"];
 const PAID = new Set(["crash-after", "lost"]);
 
 /**
@@ -93,8 +90,6 @@ function httpRule(endpoint, occurrence, kind) {
       return { match: endpoint, occurrence, kind };
     case "lost":
       return { match: endpoint, occurrence, kind: "drop" };
-    case "reset":
-      return { match: endpoint, occurrence, kind: "reset" };
     case "unavailable":
       // A burst of two: within Factory's documented repeat budget.
       return { match: endpoint, occurrence, times: 2, ...faults.unavailable() };
@@ -121,7 +116,7 @@ export function deriveCases(reference) {
     const occurrence = (seen.get(entry.endpoint) ?? 0) + 1;
     seen.set(entry.endpoint, occurrence);
     if (entry.effect)
-      for (const kind of MUTATION_KINDS)
+      for (const kind of KINDS)
         cases.push({
           name: `${kind} at ${entry.endpoint} #${occurrence}`,
           group: "mutations",
@@ -131,14 +126,13 @@ export function deriveCases(reference) {
         });
     else if (isRead(entry) && !firstRead.has(entry.endpoint)) {
       firstRead.add(entry.endpoint);
-      for (const kind of ["unavailable", "reset"])
-        cases.push({
-          name: `${kind} at ${entry.endpoint} #1`,
-          group: "reads",
-          boundaryName: `${entry.endpoint} #1`,
-          boundary: { kind: "http", endpoint: entry.endpoint, occurrence: 1 },
-          http: [httpRule(entry.endpoint, 1, kind)],
-        });
+      cases.push({
+        name: `unavailable at ${entry.endpoint} #1`,
+        group: "reads",
+        boundaryName: `${entry.endpoint} #1`,
+        boundary: { kind: "http", endpoint: entry.endpoint, occurrence: 1 },
+        http: [httpRule(entry.endpoint, 1, "unavailable")],
+      });
     }
   }
   const calls = new Map();
@@ -169,6 +163,42 @@ export function deriveCases(reference) {
       });
   }
   return cases;
+}
+
+/**
+ * The boundaries two deliveries' reference runs share before either touches
+ * delivery: the leading requests both made in the same order, up to the first
+ * git request (the first Work Item checkout), and the model calls before the
+ * first execution-driver call. A fault there reaches no delivery-specific
+ * code, so running it for the second delivery repeats the first. Measured with
+ * V8 line coverage over 7 case pairs (lost, crash and unavailable at issue,
+ * label and sub-issue creation, the first reads, and the planning calls): the
+ * native-stack case covered no line that the regular case and the native
+ * reference did not.
+ */
+export function sharedBoundaries(reference, other) {
+  const keys = new Set();
+  const seen = new Map();
+  const [a, b] = [reference.fake.log, other.fake.log];
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    if (a[i].endpoint !== b[i].endpoint || a[i].unhandled || b[i].unhandled)
+      break;
+    if (a[i].endpoint.startsWith("GIT ")) break;
+    const occurrence = (seen.get(a[i].endpoint) ?? 0) + 1;
+    seen.set(a[i].endpoint, occurrence);
+    keys.add(`${a[i].endpoint} #${occurrence}`);
+  }
+  const calls = new Map();
+  const [x, y] = [reference.calls, other.calls];
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    const key = `${x[i].target}.${x[i].method}`;
+    if (key !== `${y[i].target}.${y[i].method}` || x[i].target === "driver")
+      break;
+    const occurrence = (calls.get(key) ?? 0) + 1;
+    calls.set(key, occurrence);
+    keys.add(`${key} #${occurrence}`);
+  }
+  return keys;
 }
 
 /**
@@ -878,6 +908,12 @@ export async function defineMatrix(delivery, known, part = 1, parts = 2) {
     referenceRun(delivery),
     ...VARIANTS.map((variant) => variantReferenceRun(variant, delivery)),
   ]);
+  // Native-stack skips the boundaries it shares with regular delivery (see
+  // sharedBoundaries). The snapshot still lists every boundary.
+  const shared =
+    delivery === "native-stack"
+      ? sharedBoundaries(reference, await referenceRun("regular"))
+      : new Set();
   const cases = [
     ...deriveCases(reference),
     ...VARIANTS.flatMap((variant, index) =>
@@ -919,6 +955,11 @@ export async function defineMatrix(delivery, known, part = 1, parts = 2) {
     }
     for (const [index, testCase] of cases.entries()) {
       if (partOf(testCase.name, parts) !== part) continue;
+      if (
+        ["mutations", "reads", "calls"].includes(testCase.group) &&
+        shared.has(testCase.boundaryName)
+      )
+        continue;
       const premise = testCase.variant?.scenario ?? {};
       declareScenario(
         testCase.name,

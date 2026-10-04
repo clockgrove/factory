@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { Octokit } from "@octokit/core";
 import { RealGitHubGateway } from "../dist/github.js";
+import { now, realDelay } from "../dist/clock.js";
 import { faultOf } from "../dist/fault.js";
 import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { withProcessCancellation } from "../dist/process.js";
@@ -18,7 +19,6 @@ import {
 } from "../dist/state-store.js";
 import { stateRoot } from "../dist/config.js";
 import { deliveryReadiness } from "../dist/delivery/readiness.js";
-import { scaleTimers } from "./support/fast-timers.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -26,9 +26,6 @@ import {
   readEvents,
 } from "./support/integration-fixture.mjs";
 import { runWithHeartbeat } from "./support/liveness.mjs";
-
-// CI waits poll from inside the delivery step; run its polls fast.
-scaleTimers(0.02);
 
 const body =
   "## Acceptance\n- result.txt exists\n\n## Commands\n- test -s result.txt\n\n## Final validation\n- test -s result.txt\n";
@@ -779,7 +776,7 @@ test("fixed read query shares REST rate gate, rejects partial data and never cla
     new Octokit({
       request: {
         fetch: async (url) => {
-          calls.push({ url: String(url), at: Date.now() });
+          calls.push({ url: String(url), at: now() });
           return String(url).endsWith("/graphql")
             ? json({
                 errors: [{ message: "private information" }],
@@ -788,7 +785,7 @@ test("fixed read query shares REST rate gate, rejects partial data and never cla
             : new Response("{}", {
                 headers: {
                   "content-type": "application/json",
-                  "retry-after": "0.06",
+                  "retry-after": "6",
                 },
               });
         },
@@ -802,19 +799,19 @@ test("fixed read query shares REST rate gate, rejects partial data and never cla
     .catch((error) => error);
   assert.equal(faultOf(held).kind, "transient");
   assert.equal(faultOf(held).outcomeUnknown, false);
-  assert.ok(Date.parse(faultOf(held).retryAt) - calls[0].at >= 50);
+  assert.ok(Date.parse(faultOf(held).retryAt) - calls[0].at >= 5_000);
   assert.equal(calls.length, 1);
   await new Promise((resolve) =>
     setTimeout(
       resolve,
-      Math.max(Date.parse(faultOf(held).retryAt) - Date.now(), 0) + 5,
+      realDelay(Math.max(Date.parse(faultOf(held).retryAt) - now(), 0)) + 5,
     ),
   );
   await assert.rejects(
     client.pullRequestReadiness("example/target", 1),
     /unavailable/,
   );
-  assert.ok(calls[1].at - calls[0].at >= 50);
+  assert.ok(calls[1].at - calls[0].at >= 5_000);
   for (const data of [
     { data: null },
     { data: { repository: { pullRequest: null } } },

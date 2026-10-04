@@ -39,15 +39,15 @@
 //   required checks.
 // - Unknown routes are 404 and recorded as `unhandled`.
 //
-// Time: `now` (default Date.now) is the fake's clock. Lag for a number of
-// reads or for a span of time (real GitHub's issue list shows a new issue
+// Time: `now` (default Factory's logical clock, src/clock.ts) is the fake's
+// clock. Lag for a number of reads or for a span of time (real GitHub's issue list shows a new issue
 // after 2.5-3.4 s), and merge-async that lands after a span of time (real
 // GitHub: about 5-7 s) both read it, so a test with a manual clock is
 // deterministic.
 //
 // Modes: read-after-write lag per endpoint, fault rules on the Nth matching
 // request (5xx, 429 and 403 rate limits with or without retry-after, a
-// dropped response after the effect, a reset before it, a controller crash
+// dropped response after the effect, a controller crash
 // before or after the effect, another actor changing the repository), and a
 // per-request log.
 import { execFile, spawn } from "node:child_process";
@@ -64,6 +64,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { now } from "../../dist/clock.js";
 
 const execFileAsync = promisify(execFile);
 export const API = "https://api.github.com";
@@ -146,7 +147,7 @@ function rateHeaders() {
     "x-ratelimit-remaining": "4999",
     "x-ratelimit-used": "1",
     "x-ratelimit-resource": "core",
-    "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 3600),
+    "x-ratelimit-reset": String(Math.floor(now() / 1000) + 3600),
   };
 }
 
@@ -254,7 +255,7 @@ export class GitHubHttpFake {
    *   after each write (to `after`, or any endpoint), the next `reads` reads
    *   of the `read` endpoint, or every read of it for `ms` on the fake's
    *   clock, still see the state before that write
-   * @param {() => number} [options.now] the fake's clock in ms (Date.now)
+   * @param {() => number} [options.now] the fake's clock in ms (logical now)
    * @param {(sha: string) => object[]} [options.checkRuns]
    * @param {(sha: string) => object} [options.statuses]
    * @param {(branch: string) => string[]} [options.rulesetChecks] checks a
@@ -288,7 +289,7 @@ export class GitHubHttpFake {
       : { login: this.owner, id: 1, type: "User" };
     this.lag = (options.lag ?? []).map((rule) => ({ ...rule, served: 0 }));
     /** The fake's clock: lag spans and merge-async timing read it. */
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? now;
     this.onCrash = options.onCrash;
     this.rules = [];
     this.log = [];
@@ -358,8 +359,7 @@ export class GitHubHttpFake {
    * name, a RegExp over `METHOD path`, or a predicate over the log entry) and
    * to the `times - 1` matching requests after it.
    * Kinds: status (respond `status` with `headers`/`message`, no effect),
-   * reset (close the connection before the effect), drop (apply the effect,
-   * then close the connection), crash-before, crash-after (onCrash then close),
+   * drop (apply the effect, then close the connection), crash-before, crash-after (onCrash then close),
    * after (respond normally once `run(fake, entry)` has changed the repository).
    */
   inject(rule) {
@@ -539,11 +539,6 @@ export class GitHubHttpFake {
           status: String(rule.status),
         }),
       );
-      return true;
-    }
-    if (rule.kind === "reset") {
-      entry.status = "reset";
-      response.socket?.destroy();
       return true;
     }
     if (rule.kind === "crash-before") {
@@ -2108,9 +2103,7 @@ export const faults = {
     headers: () => ({
       "x-ratelimit-remaining": "0",
       "x-ratelimit-used": "5000",
-      "x-ratelimit-reset": String(
-        Math.ceil(Date.now() / 1000 + resetInSeconds),
-      ),
+      "x-ratelimit-reset": String(Math.ceil(now() / 1000 + resetInSeconds)),
     }),
   }),
   // An exhausted primary limit whose reset header a proxy stripped.

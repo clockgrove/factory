@@ -47,7 +47,6 @@ import {
 import { createTarget, git, writeDescriptor } from "./integration-fixture.mjs";
 
 const controller = join(import.meta.dirname, "dead-end-controller.mjs");
-const fastTimers = join(import.meta.dirname, "fast-timers.mjs");
 const repositoryRoot = join(import.meta.dirname, "..", "..");
 const dist = (path) => join(repositoryRoot, "dist", path);
 const errors = await import(dist("work-repair.js"));
@@ -275,21 +274,16 @@ function controllerProcess(world, extra, onLine, timeoutMs = 120_000) {
     ...extra,
   });
   return new Promise((resolve) => {
-    const child = spawn(
-      process.execPath,
-      ["--import", fastTimers, controller, path],
-      {
-        env: {
-          ...process.env,
-          ...gitTransportEnvironment(world.fake.gitUrl),
-          XDG_STATE_HOME: join(world.root, "state"),
-          FACTORY_TEST_TIME_SCALE: "0.01",
-        },
-        cwd: repositoryRoot,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
+    const child = spawn(process.execPath, [controller, path], {
+      env: {
+        ...process.env,
+        ...gitTransportEnvironment(world.fake.gitUrl),
+        XDG_STATE_HOME: join(world.root, "state"),
       },
-    );
+      cwd: repositoryRoot,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     let buffer = "";
     let stderr = "";
     let last;

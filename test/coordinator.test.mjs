@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Octokit } from "@octokit/core";
+import { now, realDelay } from "../dist/clock.js";
 import { GitHubClient } from "../dist/github-client.js";
 import { RealGitHubGateway } from "../dist/github.js";
 import { withProcessCancellation } from "../dist/process.js";
@@ -215,7 +216,7 @@ test("compound: after an interrupted projection, read-only observations keep the
         new Octokit({
           request: {
             fetch: async () => {
-              reads.push(Date.now());
+              reads.push(now());
               return new Response(
                 JSON.stringify(
                   reads.length === 1
@@ -226,7 +227,7 @@ test("compound: after an interrupted projection, read-only observations keep the
                   status: reads.length === 1 ? 403 : 200,
                   headers: {
                     "content-type": "application/json",
-                    ...(reads.length === 1 ? { "retry-after": "0.1" } : {}),
+                    ...(reads.length === 1 ? { "retry-after": "10" } : {}),
                   },
                 },
               );
@@ -251,17 +252,17 @@ test("compound: after an interrupted projection, read-only observations keep the
     const held = await github.objective(1).catch((error) => error);
     assert.equal(faultOf(held).kind, "transient");
     assert.equal(faultOf(held).outcomeUnknown, false);
-    assert.ok(Date.parse(faultOf(held).retryAt) - reads[0] >= 90);
+    assert.ok(Date.parse(faultOf(held).retryAt) - reads[0] >= 9_000);
     assert.equal(reads.length, 1);
     await new Promise((resolve) =>
       setTimeout(
         resolve,
-        Math.max(Date.parse(faultOf(held).retryAt) - Date.now(), 0) + 5,
+        realDelay(Math.max(Date.parse(faultOf(held).retryAt) - now(), 0)) + 5,
       ),
     );
     await github.objective(1);
     assert.equal(reads.length, 2);
-    assert.ok(reads[1] - reads[0] >= 90);
+    assert.ok(reads[1] - reads[0] >= 9_000);
     const stopped = readContinuation(config.repository, 1);
     assert.equal(stopped.runId, original.runId);
     assert.deepEqual(stopped.plan, original.plan);

@@ -1,5 +1,6 @@
 import { consumption } from "../dist/repair-policy.js";
 import { attachFault, faultOf, transient } from "../dist/fault.js";
+import { now } from "../dist/clock.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1093,7 +1094,7 @@ test("closed selection stays ineligible until explicit dequeue without model cal
 
 /** A rate-limit hold the GitHub client raises without sending (#641). */
 const rateHeld = (milliseconds) => {
-  const until = new Date(Date.now() + milliseconds).toISOString();
+  const until = new Date(now() + milliseconds).toISOString();
   return attachFault(
     new Error(`GitHub request held by the rate limit until ${until}`),
     transient(`GitHub rate limit until ${until}`, false, until),
@@ -1107,7 +1108,7 @@ test("a rate-limited read before compilation waits for GitHub instead of pausing
     const reads = [];
     let held;
     f.github.objective = async (id) => {
-      reads.push(Date.now());
+      reads.push(now());
       // The second read is the check before compilation.
       if (reads.length === 2) throw (held = rateHeld(500));
       return read(id);

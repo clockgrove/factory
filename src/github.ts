@@ -12,6 +12,7 @@ import type {
   PullRequestPublication,
   WorkItem,
 } from "./contracts.js";
+import * as time from "./clock.js";
 import { notYet as lagged, settled } from "./delivery/lag.js";
 import type { NativeStackDelivery } from "./delivery/native-stack.js";
 import { deliveryReadiness } from "./delivery/readiness.js";
@@ -492,7 +493,7 @@ export class RealGitHubGateway implements GitHubGateway {
     ) {
       // Closed moments ago with no comment listed: GitHub may not list the
       // comment Factory just posted yet.
-      const closedFor = Date.now() - Date.parse(issue.closed_at ?? "");
+      const closedFor = time.now() - Date.parse(issue.closed_at ?? "");
       if (issue.state !== "open" && closedFor >= 0 && closedFor < GITHUB_LAG_MS)
         throw notYet(`Issue #${number} completion comment is not listed yet`);
       // Closure follows a merged Work Item or a sealed Objective, so a human
@@ -801,7 +802,7 @@ export class RealGitHubGateway implements GitHubGateway {
           "Created Work Item projection did not reconcile exactly",
         );
       issues.set(created.number, created);
-      createdAt.set(created.number, Date.now());
+      createdAt.set(created.number, time.now());
       existing?.push(created);
     }
     for (const item of request.graph.items) {

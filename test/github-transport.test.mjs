@@ -5,6 +5,7 @@ import { projectionClient } from "./support/projection-client.mjs";
 import { RealGitHubGateway, projectedIssueBody } from "../dist/github.js";
 import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { faultOf } from "../dist/fault.js";
+import { now, realDelay } from "../dist/clock.js";
 import { withProcessCancellation } from "../dist/process.js";
 import { step } from "../dist/step.js";
 
@@ -40,7 +41,7 @@ const gated = (at) => (error) =>
 test("shared gate holds queued dispatch as a transient fault with retryAt", async () => {
   const calls = [];
   const client = clientFor(async () => {
-    calls.push(Date.now());
+    calls.push(now());
     return json({}, 200, calls.length === 1 ? { "retry-after": "60" } : {});
   });
   const results = await Promise.allSettled([
@@ -81,7 +82,7 @@ test("rate rejection is not retried, and the gated request is not sent", async (
 
 test("a rate-limit gate an hour away lets pause stop the step at once (#641)", async () => {
   let calls = 0;
-  const reset = Math.ceil(Date.now() / 1000) + 3600;
+  const reset = Math.ceil(now() / 1000) + 3600;
   const client = clientFor(async () => {
     calls++;
     return json({}, 200, {
@@ -399,8 +400,8 @@ test("primary exhaustion on a successful response gates the next request", async
   const calls = [];
   let reset;
   const client = clientFor(async () => {
-    calls.push(Date.now());
-    reset ??= Date.now() + 80;
+    calls.push(now());
+    reset ??= now() + 8_000;
     return json(
       {},
       200,
@@ -419,7 +420,7 @@ test("primary exhaustion on a successful response gates the next request", async
   );
   assert.equal(calls.length, 1);
   await new Promise((resolve) =>
-    setTimeout(resolve, Math.max(reset - Date.now(), 0) + 5),
+    setTimeout(resolve, realDelay(Math.max(reset - now(), 0)) + 5),
   );
   await client.request("GET", "repos/a/b/issues/3");
   assert.equal(calls.length, 2);

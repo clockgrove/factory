@@ -12,10 +12,6 @@ import {
 } from "./integration-fixture.mjs";
 import { withCoverage } from "./coverage.mjs";
 import { startHeartbeat } from "./liveness.mjs";
-import { scaleTimers } from "./fast-timers.mjs";
-
-// CI waits poll from inside the delivery step; run its polls fast.
-scaleTimers(0.02);
 
 // Parent owns the disposable root and a heartbeat watchdog: a microtask spin
 // starves this timer, so the parent detects the regression without a

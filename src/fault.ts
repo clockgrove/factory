@@ -6,6 +6,8 @@
  * classified is a `defect`.
  */
 
+import * as time from "./clock.js";
+
 /** What a failed result showed, for repair and the operator. */
 export interface FailureEvidence {
   detail: string;
@@ -260,7 +262,7 @@ function header(headers: HeaderSource, name: string): string | undefined {
 /** When a rate-limited request may be sent again, from standard headers. */
 export function retryAfter(
   headers: HeaderSource,
-  now = Date.now(),
+  now = time.now(),
 ): string | undefined {
   const retry = header(headers, "retry-after");
   if (retry !== undefined) {

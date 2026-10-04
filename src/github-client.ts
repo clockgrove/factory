@@ -1,4 +1,5 @@
 import { Octokit } from "@octokit/core";
+import * as time from "./clock.js";
 import { attachFault, decision, transient, type Fault } from "./fault.js";
 import {
   commandAsync,
@@ -119,7 +120,7 @@ const FEATURE_ROUTE = /^(stacks\b|issues\/\d+\/(dependencies|sub_issues)\b)/;
 export function gitHubFault(
   error: unknown,
   call: GitHubCall,
-  now = Date.now(),
+  now = time.now(),
 ): Fault | undefined {
   if (!(error instanceof GitHubRequestError)) return undefined;
   const path = call.path.split("?")[0]!;
@@ -306,7 +307,7 @@ export class GitHubClient {
     status: number,
     message = "",
   ): number | undefined {
-    const now = Date.now();
+    const now = time.now();
     let limited = false;
     const retry = headers["retry-after"];
     if (retry !== undefined) {
@@ -435,7 +436,7 @@ export class GitHubClient {
     ) {
       this.notBefore = Math.max(
         this.notBefore,
-        Date.now() + RATE_LIMIT_FALLBACK_MS,
+        time.now() + RATE_LIMIT_FALLBACK_MS,
       );
       throw attachFault(
         new Error("GitHub PR readiness observation is unavailable"),
@@ -493,7 +494,7 @@ export class GitHubClient {
       const client = await this.octokit();
       // Rate-limited: nothing is sent. The caller's step waits until the
       // gate opens, where pause, drain and handoff can stop it (#641).
-      if (Date.now() < this.notBefore) {
+      if (time.now() < this.notBefore) {
         const until = new Date(this.notBefore).toISOString();
         // A command outside a step reports this message: name the reset.
         throw attachFault(

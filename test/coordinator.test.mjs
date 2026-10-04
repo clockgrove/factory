@@ -414,7 +414,7 @@ test("cancellation while GitHub is unavailable stops locally with no dispatch", 
             )
           : original(...args);
       const run = application.runObjective(1);
-      const rejected = assert.rejects(run, /cancel|abort/i);
+      const rejected = assert.rejects(run, /cancel/);
       await until(
         () =>
           readContinuation(config.repository, 1)?.repeats?.[

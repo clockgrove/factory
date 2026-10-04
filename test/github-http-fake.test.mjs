@@ -104,7 +104,7 @@ test("every served endpoint is named in the request log", () => {
   assert.equal(new Set(ENDPOINTS).size, ENDPOINTS.length);
 });
 
-test("a second PR for an open head is refused with 422, a merged PR with 405, a stale head with 409", async (t) => {
+test("a second PR for an open head is refused with 422, a stale head with 409; a merged PR answers 200 with its merge", async (t) => {
   const { fake, client, pushBranch } = await setup(t);
   const sha = await pushBranch("feature");
   const created = await client.request("POST", "repos/example/target/pulls", {
@@ -139,17 +139,14 @@ test("a second PR for an open head is refused with 422, a merged PR with 405, a 
     { sha, merge_method: "merge" },
   );
   assert.equal(merged.merged, true);
-  await assert.rejects(
-    client.request(
-      "PUT",
-      `repos/example/target/pulls/${created.number}/merge`,
-      {
-        sha,
-        merge_method: "merge",
-      },
-    ),
-    (error) => error instanceof GitHubRequestError && error.status === 405,
+  // Real GitHub (#627): merging an already merged PR answers 200 with the
+  // same merge commit and merges nothing again.
+  const again = await client.request(
+    "PUT",
+    `repos/example/target/pulls/${created.number}/merge`,
+    { sha, merge_method: "merge" },
   );
+  assert.deepEqual([again.merged, again.sha], [true, merged.sha]);
   // The merge commit is on the default branch and only on the timeline.
   const main = git(fake.origin, "rev-parse", "refs/heads/main");
   assert.equal(main, merged.sha);
@@ -351,6 +348,24 @@ test("stacks: listing fields, a nonexistent PR is 422, and merge-async follows t
   assert.equal(typeof listed.id, "number");
   assert.equal(typeof listed.node_id, "string");
   assert.equal(listed.open, true);
+  // Real GitHub (#627): a stacked PR never merges through PUT merge, and a
+  // stale expected head fails merge-async with 400.
+  await assert.rejects(
+    client.request("PUT", `repos/example/target/pulls/${one.number}/merge`, {
+      sha: one.head.sha,
+      merge_method: "merge",
+    }),
+    (error) => error instanceof GitHubRequestError && error.status === 403,
+  );
+  const stale = await fetch(
+    `${fake.apiUrl}/repos/example/target/pulls/${two.number}/merge-async`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ sha: "f".repeat(40), merge_method: "merge" }),
+    },
+  );
+  assert.equal(stale.status, 400);
+  assert.equal((await stale.json()).status, "failed");
   // Merging the middle PR includes the PR below it, not the one above.
   const accepted = await client.request(
     "PUT",
@@ -378,6 +393,8 @@ test("stacks: listing fields, a nonexistent PR is 422, and merge-async follows t
   assert.ok(fake.state.pulls[one.number].merged_at);
   assert.ok(fake.state.pulls[two.number].merged_at);
   assert.equal(fake.state.pulls[three.number].merged_at, undefined);
+  // The open layer above the merge now targets the stack's base.
+  assert.equal(fake.state.pulls[three.number].base.ref, "main");
   // Already merged: 200 with the merge commit, and no second merge.
   const again = await client.request(
     "PUT",
@@ -389,6 +406,13 @@ test("stacks: listing fields, a nonexistent PR is 422, and merge-async follows t
     ["merged", polled.details.sha],
   );
   assert.equal(fake.state.pulls[two.number].merges, 1);
+  await assert.rejects(
+    client.request("PUT", `repos/example/target/pulls/${two.number}/merge`, {
+      sha: two.head.sha,
+      merge_method: "merge",
+    }),
+    (error) => error instanceof GitHubRequestError && error.status === 403,
+  );
   // A closed PR is not ready to merge.
   await client.request("PATCH", `repos/example/target/issues/${three.number}`, {
     state: "closed",
@@ -418,6 +442,7 @@ test("every response carries rate-limit headers; a duplicate PR is one 422 error
   assert.equal(duplicate.status, 422);
   assert.ok(duplicate.headers.get("x-ratelimit-reset"));
   const body = await duplicate.json();
+  assert.equal(body.status, "422");
   assert.equal(body.errors.length, 1);
   assert.match(body.errors[0].message, /A pull request already exists/);
   fake.inject({ match: `GET ${repo}`, ...faults.secondaryRateLimit() });

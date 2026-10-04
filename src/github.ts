@@ -171,6 +171,9 @@ export class RealGitHubGateway implements GitHubGateway {
       "GET",
       "issues?state=all&sort=created&direction=desc&per_page=1&page=1",
     );
+    // The paginated list can lag; the newest-issue read is fresh. Keep what it
+    // returned, or the probe below starts past it and never sees it (#621).
+    if (newest) byId.set(newest.id, newest);
     let number = Math.max(
       0,
       newest?.number ?? 0,
@@ -193,6 +196,30 @@ export class RealGitHubGateway implements GitHubGateway {
           (issue.body ?? "").includes(prefix),
       )
       .sort((left, right) => left.number - right.number);
+  }
+
+  /**
+   * Add one dependency or sub-issue link. GitHub answers a duplicate link
+   * with 422, which is also how a repeat sees the link a lost response made:
+   * the list is read back, and the link that is there is done (#628).
+   */
+  private async linked(
+    post: () => Promise<unknown>,
+    list: string,
+    id: number,
+    call: Omit<GitHubCall, "method" | "path">,
+  ): Promise<void> {
+    try {
+      await post();
+    } catch (error) {
+      if (
+        error instanceof GitHubRequestError &&
+        error.status === 422 &&
+        (await this.pages<Issue>(list, call)).some((issue) => issue.id === id)
+      )
+        return;
+      throw error;
+    }
   }
 
   private route(path: string): string {
@@ -832,11 +859,17 @@ export class RealGitHubGateway implements GitHubGateway {
             throw new Error(
               "Dependency issue has no authenticated database identity",
             );
-          await this.api(
-            "POST",
+          await this.linked(
+            () =>
+              this.api(
+                "POST",
+                `issues/${number}/dependencies/blocked_by`,
+                { issue_id: issue.id },
+                undefined,
+                fresh,
+              ),
             `issues/${number}/dependencies/blocked_by`,
-            { issue_id: issue.id },
-            undefined,
+            issue.id,
             fresh,
           );
         }
@@ -952,13 +985,22 @@ export class RealGitHubGateway implements GitHubGateway {
           (!replacing && observedParent !== undefined)
         )
           throw foreignChange("Unreviewed remote hierarchy parent");
-        await this.api(
-          "POST",
+        // Either side may be an issue GitHub does not show yet.
+        const call = {
+          createdAt: latest(createdAt.get(parent), createdAt.get(child)),
+        };
+        await this.linked(
+          () =>
+            this.api(
+              "POST",
+              `issues/${parent}/sub_issues`,
+              { sub_issue_id: childIssue.id, replace_parent: replacing },
+              undefined,
+              call,
+            ),
           `issues/${parent}/sub_issues`,
-          { sub_issue_id: childIssue.id, replace_parent: replacing },
-          undefined,
-          // Either side may be an issue GitHub does not show yet.
-          { createdAt: latest(createdAt.get(parent), createdAt.get(child)) },
+          childIssue.id,
+          { createdAt: createdAt.get(parent) },
         );
       }
       // Read back every affected parent, including those that became empty.
@@ -1286,15 +1328,27 @@ export class RealGitHubGateway implements GitHubGateway {
           throw new Error("GitHub PR readiness status is unsupported");
       }
     }
-    // Which checks the repository requires matters only once one failed.
+    // GitHub can report a PR CLEAN before a required check registers on its
+    // head. A required check with no run and no status yet is pending, so
+    // the merge waits for it (#626). Which checks are required also matters
+    // once one failed.
     const requiredChecks =
-      failedChecks.length && !detail.merged && detail.state !== "closed"
+      mergeReadiness === "ready" ||
+      (failedChecks.length && !detail.merged && detail.state !== "closed")
         ? await this.requiredChecks(detail.base.ref)
         : [];
+    const reported = new Set<unknown>([
+      ...runs.map((run) => run.name),
+      ...contexts.map((status) => status.context),
+    ]);
+    const unreported = requiredChecks.some((name) => !reported.has(name));
+    if (unreported && mergeReadiness === "ready") mergeReadiness = "waiting";
     return {
       namedChecks,
       ...(failedChecks.length ? { failedChecks } : {}),
-      ...(requiredChecks.length ? { requiredChecks } : {}),
+      ...(failedChecks.length && requiredChecks.length
+        ? { requiredChecks }
+        : {}),
       ...(mergeReadiness ? { mergeReadiness } : {}),
       ...(!detail.merged && detail.state === "closed" && detail.closed_at
         ? { closedAt: detail.closed_at }
@@ -1306,7 +1360,8 @@ export class RealGitHubGateway implements GitHubGateway {
           : "open",
       checks: failing
         ? "failing"
-        : runs.some((run) => run.status !== "completed") ||
+        : unreported ||
+            runs.some((run) => run.status !== "completed") ||
             (statuses.total_count > 0 && statuses.state === "pending")
           ? "pending"
           : "passing",
@@ -1451,12 +1506,18 @@ export class RealGitHubGateway implements GitHubGateway {
         if (after.merged) return this.confirmMerged(identity, after);
         // Readiness changed since it was observed: a conflict or a failed
         // required check is work on the published result, not a decision.
-        deliveryReadiness(
+        const waiting = deliveryReadiness(
           identity.number,
           await this.observe(identity),
           [],
           identity.headSha,
         );
+        // A required check still running or not yet reported: the repeat
+        // waits for CI before it sends the merge again (#626).
+        if (waiting) {
+          settled(refused);
+          throw attachFault(new Error(waiting), transient(waiting, false));
+        }
         // Otherwise a merge in progress, or readiness GitHub has not settled.
         throw lagged(
           refused,
@@ -1467,15 +1528,34 @@ export class RealGitHubGateway implements GitHubGateway {
           ),
         );
       }
+      // GitHub refuses PUT merge on a PR in a native stack with 403, even
+      // once the stack merged. Read the PR and its stack, not the message.
+      if (
+        error instanceof GitHubRequestError &&
+        error.status === 403 &&
+        attachedFault(error)?.kind !== "transient"
+      ) {
+        const after = await this.api<Pull>("GET", `pulls/${identity.number}`);
+        if (after.merged) return this.confirmMerged(identity, after);
+        if (await this.stacked(identity.number))
+          throw foreignChange(
+            `PR #${identity.number} is in a native stack Factory did not record`,
+          );
+      }
       throw error;
     }
     settled(refused);
+    // A PR merged meanwhile answers 200 without a fresh merge: confirm the
+    // merge from the PR and its timeline (#627).
     if (
       result.merged !== true ||
       typeof result.sha !== "string" ||
       !/^[a-f0-9]{40}$/.test(result.sha)
-    )
+    ) {
+      const after = await this.api<Pull>("GET", `pulls/${identity.number}`);
+      if (after.merged) return this.confirmMerged(identity, after);
       throw new Error("PR merge did not produce an integrated commit");
+    }
     const key = `merge:${identity.number}:${identity.headSha}`;
     const detail = await this.api<Pull>("GET", `pulls/${identity.number}`);
     if (
@@ -1490,6 +1570,22 @@ export class RealGitHubGateway implements GitHubGateway {
       );
     settled(key);
     return { integratedSha: result.sha };
+  }
+
+  /** Whether GitHub shows the PR in a native stack. */
+  private async stacked(number: number): Promise<boolean> {
+    try {
+      const stacks = await this.api<unknown[]>(
+        "GET",
+        `stacks?pull_request=${number}`,
+      );
+      return Array.isArray(stacks) && stacks.length > 0;
+    } catch (error) {
+      // No stacks for this repository: the PR is in none.
+      if (error instanceof GitHubRequestError && error.status === 404)
+        return false;
+      throw error;
+    }
   }
 
   /** A merged PR: its head must be Factory's, its merge commit on the timeline. */

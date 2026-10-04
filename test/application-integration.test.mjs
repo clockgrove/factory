@@ -2053,7 +2053,7 @@ test("native execution failure is terminal until an explicit safe retry", async 
   });
 });
 
-test("native retry stops when its stack already has a published layer", async () => {
+test("native retry resumes a stack that already has a published layer", async () => {
   await fixture("native-published-retry", async (root) => {
     const target = createTarget(root);
     const commands = ["test -s first.txt", "test -s second.txt"];
@@ -2085,23 +2085,30 @@ test("native retry stops when its stack already has a published layer", async ()
         },
       },
     };
-    const { application, eventsPath } = makeApplication(descriptor);
-    await assert.rejects(
-      application.runObjective(objective),
-      /Scripted failure for second/,
-    );
-    const state = readState(descriptor.config.repository, objective);
-    assert.ok(state.work.first.pullRequest);
-    assert.equal(state.work.second.status, "failed");
-    assert.throws(
-      () => application.retryWorkItem(objective, "second"),
-      /Published PR requires operator direction/,
+    const { application, eventsPath, github } = makeApplication(descriptor);
+    // second's failed result is a work fault: the run keeps the failure for
+    // an explicit retry instead of rejecting, and first's layer stays
+    // published (#577).
+    const failed = await application.runObjective(objective);
+    assert.equal(failed.error, undefined);
+    assert.equal(failed.work.second.status, "failed");
+    const firstPull = failed.work.first.pullRequest;
+    assert.ok(firstPull);
+    application.retryWorkItem(objective, "second");
+    const done = await application.runObjective(objective);
+    assert.equal(done.finalValidation.passed, true);
+    // The stack resumes on first's PR: no duplicate PR for either layer.
+    assert.equal(done.work.first.pullRequest, firstPull);
+    const pulls = Object.values(github.state().pullRequests);
+    assert.deepEqual(
+      pulls.map((pull) => pull.number).sort(),
+      [done.work.first.pullRequest, done.work.second.pullRequest].sort(),
     );
     assert.equal(
       readEvents(eventsPath).filter(
         (event) => event.type === "start" && event.item === "second",
       ).length,
-      1,
+      2,
     );
   });
 });

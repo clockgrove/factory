@@ -176,6 +176,8 @@ const noPulls = { "GET /repos/a/b/pulls": () => json([]) };
 const readyPull = {
   "GET /repos/a/b/pulls/5": () => json(pull()),
   [repo]: () => json({ default_branch: "main", allow_merge_commit: true }),
+  // Read before every merge: no ruleset forbids merge commits.
+  "GET /repos/a/b/rules/branches/main": () => json([]),
 };
 
 const gitHubCases = [

@@ -340,6 +340,16 @@ test("Claude driver verifies bootstrap before implementation and collects exact 
   assert.equal(f.saved.at(-1).data.phase, "disposed");
 });
 const settledInterruption = (error) => stoppedWithoutResult(error);
+/**
+ * A transport failure before the deadline passes through as `transient` and
+ * settles nothing; the step repeats collect, which resolves the recorded
+ * phase from the session's history.
+ */
+const passedThrough = (f) => (error) =>
+  faultOf(error).kind === "transient" &&
+  !f.state.calls.includes("user.interrupt") &&
+  !f.state.calls.some((call) => call.startsWith("delete:")) &&
+  f.saved.at(-1).data.phase !== "disposed";
 test("Claude create lost after submission adopts the tagged session instead of creating another", async (t) => {
   const f = fixture(t);
   f.state.loseCreate = true;
@@ -392,14 +402,20 @@ test("Claude bootstrap send resolves from history: adopted when received, sent a
     assert.equal(f.state.creates, 1);
   }
 });
-test("Claude implementation send resolves in place: adopted when received, sent again when not", async (t) => {
+test("Claude implementation send resolves on the repeat: adopted when received, sent again when not", async (t) => {
   for (const flag of ["loseSend", "failSend"]) {
     const f = fixture(t);
     const handle = await f.driver().start(f.request, f.context);
     f.state[flag] = true;
     f.output(handle);
-    // One collection resolves the lost response without a step interruption.
-    const result = await f.driver().collect(handle, f.context);
+    await assert.rejects(
+      f.driver().collect(handle, f.context),
+      passedThrough(f),
+    );
+    // The step's repeat resolves the lost response from history.
+    const result = await f
+      .driver()
+      .collect(structuredClone(f.saved.at(-1)), f.context);
     assert.equal(f.git("show", `${result.changeRef}:keep.txt`), "changed");
     assert.equal(f.state.sends, flag === "loseSend" ? 2 : 3, flag);
   }
@@ -412,10 +428,14 @@ test("Claude unknown implementation outcome settles the session and interrupts t
   f.state.onFailSend = () => {
     f.state.session.status = "running";
   };
+  // The lost send passes through; the repeat finds activity it cannot
+  // attribute and settles the session.
+  await assert.rejects(f.driver().collect(handle, f.context), passedThrough(f));
   await assert.rejects(
-    f.driver().collect(handle, f.context),
+    f.driver().collect(structuredClone(f.saved.at(-1)), f.context),
     settledInterruption,
   );
+  assert.ok(f.state.calls.includes("user.interrupt"));
   assert.ok(
     f.state.calls.indexOf("user.interrupt") <
       f.state.calls.indexOf("delete:sesn_1"),
@@ -579,11 +599,11 @@ test("Claude refused read settles the attempt; a passed deadline settles it as a
     assert.equal(f.state.sends, 1);
   }
 });
-test("Claude transient read is retried in place without spending a step interruption", async (t) => {
+test("Claude transient read repeats the step without settling the attempt", async (t) => {
   const f = fixture(t);
   const handle = await f.driver().start(f.request, f.context);
   const events = f.driver().args.client.events;
-  let failures = 2;
+  let failures = 1;
   f.driver().args.client.events = async (...args) => {
     if (failures-- > 0)
       throw Object.assign(new Error("connection reset"), {
@@ -592,7 +612,10 @@ test("Claude transient read is retried in place without spending a step interrup
     return events(...args);
   };
   f.output(handle);
-  const result = await f.driver().collect(handle, f.context);
+  await assert.rejects(f.driver().collect(handle, f.context), passedThrough(f));
+  const result = await f
+    .driver()
+    .collect(structuredClone(f.saved.at(-1)), f.context);
   assert.equal(f.git("show", `${result.changeRef}:keep.txt`), "changed");
   assert.equal(f.state.creates, 1);
   assert.equal(f.state.sends, 2);

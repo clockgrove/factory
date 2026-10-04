@@ -706,7 +706,7 @@ test("check registration waits on authenticated protection readiness while clean
   );
   for (const [status, readiness] of [
     ["DIRTY", "conflict"],
-    ["BEHIND", "waiting"],
+    ["BEHIND", "behind"],
     ["DRAFT", "draft"],
     ["UNSTABLE", "ready"],
   ])
@@ -846,7 +846,8 @@ test("public no-registered-check reproduction refuses gated integration while pr
           merged: false,
         };
       if (path.includes("/check-runs?")) return { check_runs: runs };
-      if (path.endsWith("/status")) return { state: "pending", total_count: 0 };
+      if (path.includes("/status?"))
+        return { state: "pending", total_count: 0, statuses: [] };
       throw new Error(`Unexpected request ${method} ${path}`);
     },
     async pullRequestReadiness() {

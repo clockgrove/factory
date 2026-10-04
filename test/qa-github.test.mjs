@@ -186,13 +186,25 @@ async function observeChecks(pages, readiness = "CLEAN") {
       const page = Number(request.searchParams.get("page"));
       return response(pages[page - 1] ?? []);
     }
+    const json = (value) =>
+      new Response(JSON.stringify(value), {
+        headers: { "content-type": "application/json" },
+      });
+    // A failing check makes observe read the base's required checks: no
+    // rulesets and no classic required checks here.
+    if (request.pathname === "/repos/example/target/rules/branches/main")
+      return json([]);
+    if (
+      request.pathname ===
+      "/repos/example/target/branches/main/protection/required_status_checks"
+    )
+      return json({ contexts: [], checks: [] });
     assert.equal(
       request.pathname,
       `/repos/example/target/commits/${head}/status`,
     );
-    return new Response(JSON.stringify({ state: "success", total_count: 0 }), {
-      headers: { "content-type": "application/json" },
-    });
+    assert.equal(request.searchParams.get("per_page"), "100");
+    return json({ state: "success", total_count: 0, statuses: [] });
   });
   return github.observe({
     number: 1,

@@ -266,13 +266,17 @@ for (const delivery of ["regular", "native-stack"])
           const waiting = await application.runObjective(objective);
           assert.equal(waiting.error, undefined);
           assert.equal(reviews, 4);
-          const failed = readState(descriptor.config.repository, objective);
-          assert.equal(failed.work.result.status, "failed");
+          // The item waits in place for the answer (contract 2).
+          const asked = readState(descriptor.config.repository, objective);
+          assert.equal(asked.error, undefined);
+          assert.equal(asked.work.result.status, "running");
+          assert.equal(asked.work.result.recovery?.failure, undefined);
+          assert.equal(asked.work.result.wait?.kind, "decision");
           assert.match(
-            failed.work.result.recovery.failure.decision,
-            /retry or cancel\? Start a new attempt with `factory retry/,
+            asked.work.result.wait.detail,
+            /review failed 4 times .*retry or cancel/,
           );
-          application.retryWorkItem(objective, "result");
+          assert.equal(application.retryWorkItem(objective, "result"), "step");
           const state = await application.runObjective(objective);
           assert.equal(state.finalValidation.passed, true);
         },

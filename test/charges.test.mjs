@@ -295,7 +295,7 @@ test("transient and configuration failures are never charged", async () => {
     ],
     [
       new CandidateEnvironmentFailure("Validation environment unavailable"),
-      /validation-environment correction/,
+      /Restore the controller.s validation environment; `factory retry`/,
       "validation-environment",
     ],
   ]) {
@@ -709,15 +709,15 @@ for (const delivery of ["regular", "native-stack"]) {
         const fixture = application();
         const stopped = await fixture.application.runObjective(1);
         const work = stopped.work.result;
-        assert.equal(work.status, "failed");
-        assert.equal(work.recovery.failure.event, undefined);
-        assert.match(
-          work.recovery.failure.decision,
-          /factory retry --objective 1 --item result/,
-        );
+        // The paid bound is a decision: the item waits in place (contract 2).
+        assert.equal(work.status, "running");
+        assert.equal(work.wait?.kind, "decision");
+        assert.match(work.wait.detail, /retry or cancel/);
+        assert.equal(work.recovery?.failure, undefined);
+        assert.equal(stopped.error, undefined);
         assert.equal(stopped.charges, undefined);
         assert.equal(diagnoses, 0);
-        fixture.application.retryWorkItem(1, "result");
+        assert.equal(fixture.application.retryWorkItem(1, "result"), "step");
         const done = await application().application.runObjective(1);
         assert.equal(done.finalValidation.passed, true);
         assert.equal(done.charges, undefined);

@@ -517,6 +517,8 @@ export class GitHubHttpFake {
         JSON.stringify({
           message: rule.message ?? `Injected HTTP ${rule.status}`,
           documentation_url: "https://docs.github.com/rest",
+          // Real error bodies carry the status as a string (#630).
+          status: String(rule.status),
         }),
       );
       return true;
@@ -620,6 +622,7 @@ export class GitHubHttpFake {
         data: {
           message: error.message,
           documentation_url: "https://docs.github.com/rest",
+          status: String(error.status),
           ...error.extra,
         },
       };
@@ -1212,8 +1215,9 @@ export class GitHubHttpFake {
     if (blocker.number === number)
       throw validation("An issue cannot be blocked by itself");
     s.blockedBy[number] ??= [];
+    // Real GitHub answers a duplicate with a bare message (#628).
     if (s.blockedBy[number].includes(blocker.number))
-      throw validation("Dependency already exists");
+      throw new HttpError(422, "Dependency already exists");
     s.blockedBy[number].push(blocker.number);
     return { status: 201, data: this.issueJson(s, blocker.number) };
   }
@@ -1252,8 +1256,9 @@ export class GitHubHttpFake {
     if (child.number === parent)
       throw validation("An issue cannot be its own sub-issue");
     const current = s.parent[child.number];
+    // Real GitHub answers a duplicate with a bare message (#628).
     if (current === parent)
-      throw validation("Issue is already a sub-issue of this parent");
+      throw new HttpError(422, "Issue is already a sub-issue of this parent");
     if (current !== undefined && body.replace_parent !== true)
       throw validation("Issue may only have one parent");
     if (current !== undefined)
@@ -1415,11 +1420,31 @@ export class GitHubHttpFake {
     return pull;
   }
 
+  /**
+   * PUT merge, as real GitHub answers it (#627): 403 for any PR in a stack,
+   * merged or not; 200 with the existing merge commit for a PR already
+   * merged; otherwise the mergeability checks.
+   */
   async mergePull(s, { params, body }) {
     const number = Number(params.number);
-    const pull = this.checkMergeable(s, number, body);
+    this.requirePull(s, number);
     if (s.stacks.some((stack) => stack.pulls.includes(number)))
-      throw new HttpError(405, "Stacked pull requests merge as a stack");
+      throw new HttpError(
+        403,
+        "Merging stacked PRs via this endpoint is not supported",
+      );
+    const merged = s.pulls[number];
+    if (merged.merged_at)
+      return {
+        status: 200,
+        effect: false,
+        data: {
+          sha: merged.mergeSha,
+          merged: true,
+          message: "Pull Request successfully merged",
+        },
+      };
+    const pull = this.checkMergeable(s, number, body);
     const sha = await this.mergeCommit(
       pull.base.ref,
       pull.head.sha,
@@ -1489,6 +1514,7 @@ export class GitHubHttpFake {
   /**
    * Land an async merge: the requested PR with every open PR below it in its
    * stack, as one merge commit of the requested head into the stack's base.
+   * The open layer above it then targets the stack's base.
    * Unverified against GitHub: whether each layer reports that one commit on
    * its timeline, or a commit of its own.
    */
@@ -1501,6 +1527,14 @@ export class GitHubHttpFake {
       `Merge pull request #${job.top} from ${this.owner}/${top.head.ref}`,
     );
     for (const number of job.layers) this.markMerged(s, number, sha);
+    // Real GitHub retargets the lowest open layer above the merge onto the
+    // stack's base (#630).
+    const stack = s.stacks.find((candidate) =>
+      candidate.pulls.includes(job.top),
+    );
+    const above = stack?.pulls[stack.pulls.indexOf(job.top) + 1];
+    if (above !== undefined && !s.pulls[above].merged_at)
+      s.pulls[above].base = { ref: base, sha };
     job.sha = sha;
     job.applied = true;
   }
@@ -1518,7 +1552,8 @@ export class GitHubHttpFake {
 
   /**
    * PUT merge-async (API 2026-03-10): 202 pending with a uuid; 200 merged
-   * when the PR already merged; 400 when it is closed or a draft; 409 with
+   * when the PR already merged; 400 when it is closed or a draft, or with a
+   * failed status when the expected head is stale; 409 with
    * the pending request when a merge is already requested. For a stacked PR
    * the merge includes every open PR below it.
    */
@@ -1552,8 +1587,15 @@ export class GitHubHttpFake {
     const method = body.merge_method ?? "merge";
     if (!methods.includes(method) || method !== "merge")
       throw validation(`${method} merges are not allowed on this repository`);
+    // A stale expected head: real GitHub answers 400 with a failed status.
     if (body.sha !== undefined && body.sha !== pull.head.sha)
-      throw validation("Head sha does not match the pull request head");
+      throw new HttpError(
+        400,
+        "Head sha does not match the pull request head",
+        {
+          status: "failed",
+        },
+      );
     const stack = s.stacks.find((candidate) =>
       candidate.pulls.includes(number),
     );

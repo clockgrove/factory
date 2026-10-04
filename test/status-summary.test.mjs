@@ -273,10 +273,12 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
       state: "failed",
     }),
   );
+  // A published item keeps its PR: retry resumes its delivery.
   assert.equal(
     published.nextAction.command,
-    "factory logs --objective 7 --item A",
+    "factory retry --objective 7 --item A",
   );
+  assert.match(published.nextAction.reason, /^Resumes delivery of PR #9\b/);
   const authentication = summarizeStatus(
     execution([
       item("A", {

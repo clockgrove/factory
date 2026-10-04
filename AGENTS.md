@@ -8,7 +8,7 @@ Read [the architecture](docs/ARCHITECTURE.md) and the relevant [project](https:/
 
 Factory is a general-purpose open-source tool. No adopter is its design center, and adopter-specific behavior does not belong in its source.
 
-Keep the trunk path working: Objective → Work Item DAG → local execution → exact validation → GitHub delivery → Objective final validation. Trunk includes native linear PR stacks, media assets, Git LFS, restart/cancel/status, and packaging. Managed execution (#7), sandbox execution (#8) and their providers are branches built on the same contracts; keep provider-specific APIs and configuration inside adapters. A declared interface or scripted fixture does not qualify a real provider.
+Keep the trunk path working: Objective → Work Item DAG → local execution → exact validation → GitHub delivery → Objective final validation. Trunk includes native linear PR stacks, media assets, Git LFS, restart/cancel/status, and packaging. Managed execution (#7) and its provider are branches built on the same contracts; keep provider-specific APIs and configuration inside the adapter. A declared interface or scripted fixture does not qualify a real provider.
 
 ## Working process
 

@@ -26,7 +26,7 @@ export function missingCredential(detail: string): StepFault {
 }
 
 /**
- * Classify an error leaving an execution driver or sandbox provider method.
+ * Classify an error leaving an execution driver method.
  * A StepFault the driver built carries its own classification; a lost
  * response to an effect may have spent a paid run.
  */

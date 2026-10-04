@@ -7,11 +7,12 @@ import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import {
   CodexPlanningModel,
+  commandAuthority,
   compilePlan,
   objectiveCriteria,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
-import { coverageObligations } from "../dist/qa.js";
+import { assertCoverageSources, coverageObligations } from "../dist/qa.js";
 import { withCoverage } from "./support/coverage.mjs";
 import {
   encodeCompilerWire,
@@ -208,4 +209,63 @@ test("rendered compiler and plan reviewer carry the source commands and stop uns
         : prompt.includes(size),
     ),
   );
+});
+
+test("command authority comes from the Objective and sources, never from the plan under check", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-command-authority-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const policy = "git check-attr filter -- approved/selected.png | grep -q lfs";
+  const stored = "git lfs ls-files | grep -q 'approved/selected.png'";
+  // The media fixture shape: backticked criteria, one of them also a line in
+  // the base repository, and the other a Final validation command.
+  const target = createTarget(root, { "docs/checks.txt": `${stored}\n` });
+  const text = `# Media gate\n\n## Acceptance\n- \`${policy}\`\n- \`${stored}\`\n\n## Final validation\n- \`${policy}\`\n`;
+  const sources = [{ path: "OBJECTIVE", content: text }];
+  const obligations = coverageObligations(text, objectiveCriteria(text));
+  const authority = commandAuthority(
+    text,
+    sources,
+    target.baseSha,
+    target.checkout,
+  );
+  assert.equal(authority(policy, true), true);
+  // A plan that carries the command with base-observed provenance cannot
+  // make it a command obligation; a plan that drops it cannot unmake one.
+  assert.equal(authority(stored, true), false);
+  const planWith = (validation) => ({
+    objective: 1,
+    baseSha: target.baseSha,
+    items: [
+      {
+        id: "gate",
+        kind: "work",
+        validation: validation.map((command) => ({
+          command,
+          provenance: "base-observed",
+          source: "docs/checks.txt",
+        })),
+      },
+    ],
+    coverage: obligations.map((entry) => ({
+      ...entry,
+      itemId: "gate",
+      proof: { kind: "final-review" },
+      environment: {
+        kind: "local",
+        readiness: "available",
+        probe: "",
+        preparedBy: "",
+      },
+    })),
+  });
+  for (const plan of [planWith([stored]), planWith([])])
+    assert.doesNotThrow(() =>
+      assertCoverageSources(
+        plan,
+        sources,
+        obligations,
+        [policy],
+        commandAuthority(text, sources, target.baseSha, target.checkout),
+      ),
+    );
 });

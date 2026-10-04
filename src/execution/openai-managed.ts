@@ -483,8 +483,18 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     );
   }
 
+  /**
+   * Faults are classified once, here at the driver boundary. Collection
+   * reads through `observeActive`, so `endAttempt` sees the raw error.
+   */
   @classifyFaults(executionFault)
   async observe(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionObservation> {
+    return this.observeActive(handle, context);
+  }
+  private async observeActive(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<ExecutionObservation> {
@@ -686,7 +696,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       }
     }
     while (data.phase !== "delete-submitted") {
-      const observed = await this.observe(handle, context);
+      const observed = await this.observeActive(handle, context);
       if (observed.state !== "running") break;
       await this.wait(data);
     }
@@ -735,7 +745,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       // leaves collect and the step's repeat resumes here; a lost input is
       // resolved from the turn list.
       if (data.phase === "prepared") await this.submitInput(handle, context);
-      const observed = await this.observe(handle, context);
+      const observed = await this.observeActive(handle, context);
       if (observed.state === "complete") break;
       if (observed.state !== "running")
         await this.settle(

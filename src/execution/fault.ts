@@ -1,3 +1,4 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { AuthenticationRequiredError } from "../contracts.js";
 import { type Fault, requestFault, StepFault, transient } from "../fault.js";
 import {
@@ -45,10 +46,21 @@ export function executionFault(
     error instanceof ProviderTurnIncompleteError
   )
     return transient(detail, true);
-  return requestFault(error, {
-    outcomeUnknown: EFFECTS.has(method),
-    fix: CREDENTIAL_FIX,
-  });
+  return providerRequestFault(error, EFFECTS.has(method));
+}
+
+/**
+ * A failed provider request: the shared HTTP and network rules, plus the
+ * Anthropic SDK's connection errors (including its timeout subclass), which
+ * carry no status and no network code.
+ */
+export function providerRequestFault(
+  error: unknown,
+  outcomeUnknown: boolean,
+): Fault | undefined {
+  if (error instanceof Anthropic.APIConnectionError)
+    return transient(error.message, outcomeUnknown);
+  return requestFault(error, { outcomeUnknown, fix: CREDENTIAL_FIX });
 }
 
 /** Daytona SDK errors by class name, then the shared execution rules. */

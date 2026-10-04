@@ -2,7 +2,6 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { BetaCloudConfig } from "@anthropic-ai/sdk/resources/beta/environments/environments";
 import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
-import { transportFailure } from "./attempt.js";
 import { missingCredential } from "./fault.js";
 import type {
   BetaManagedAgentsSession,
@@ -188,13 +187,6 @@ export function claudeGone(error: unknown): boolean {
   return (
     error instanceof Anthropic.NotFoundError ||
     (error as { status?: unknown } | null | undefined)?.status === 404
-  );
-}
-
-/** A request that failed in transit; the SDK's connection errors carry no status. */
-export function claudeTransient(error: unknown): boolean {
-  return (
-    error instanceof Anthropic.APIConnectionError || transportFailure(error)
   );
 }
 

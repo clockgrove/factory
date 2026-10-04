@@ -196,13 +196,15 @@ Add a tiny POSIX shell greeting under \`${dir}/\` for Factory's live crash-resta
 
 ## Acceptance
 
-- \`sh ${dir}/hello.sh\` prints exactly \`hello, world\`.
-- \`${dir}/NOTES.md\` is one sentence describing the scripts.
+- \`${dir}/hello.sh\` prints exactly \`hello, world\`. \`lib\` proves its own output with the first command below, \`cli\` proves the script's with the second.
+- \`sh -c '. ${dir}/lib.sh && test "$(greet world)" = "hello, world"'\`
+- \`test "$(sh ${dir}/hello.sh)" = "hello, world"\`
 - \`sh -n ${dir}/lib.sh\`
+- \`${dir}/NOTES.md\` is one sentence describing the scripts.
 
 ## Final validation
 
-- \`sh ${dir}/hello.sh\`
+- \`test "$(sh ${dir}/hello.sh)" = "hello, world"\`
 - \`sh -n ${dir}/lib.sh\`
 
 ## Constraints

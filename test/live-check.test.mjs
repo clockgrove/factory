@@ -1,9 +1,26 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { parse } from "yaml";
 import { killMatches } from "../scripts/live-check-hook.mjs";
+import { renderReport } from "../scripts/live-check-report.mjs";
+import {
+  scriptedActions,
+  scriptedGraph,
+} from "../scripts/live-check-scripted.mjs";
 import {
   checkOptions,
   count,
+  objectiveBody,
   parseArgs,
   REPO,
   reset,
@@ -134,4 +151,114 @@ test("assert without the planned set does not pass", () => {
   assert.equal(result.checks.plannedKnown, false);
   assert.equal(result.pass, false);
   assert.equal(result.planned, null);
+});
+
+test("run takes --worker real or scripted, nothing else", async () => {
+  const options = parseArgs(["run", "--worker", "scripted"]);
+  assert.doesNotThrow(() => checkOptions("run", options));
+  assert.throws(
+    () => checkOptions("reset", parseArgs(["reset", "--worker", "scripted"])),
+    /Unknown option --worker for reset/,
+  );
+  await assert.rejects(
+    run({ worker: "model", rest: [] }),
+    /--worker must be real or scripted/,
+  );
+});
+
+test("the scripted plan is the Objective's: its commands are lines of the body", () => {
+  const tag = "t1";
+  const body = objectiveBody(tag).split("\n");
+  const graph = scriptedGraph(tag, 7, "abc");
+  assert.deepEqual(
+    graph.items.map((item) => [item.id, item.dependencies]),
+    [
+      ["lib", []],
+      ["cli", ["lib"]],
+      ["notes", []],
+    ],
+  );
+  for (const item of graph.items)
+    for (const check of item.validation)
+      assert.ok(
+        body.some((line) => line.replace(/^- `|`$/g, "") === check.command),
+        `not in the Objective: ${check.command}`,
+      );
+});
+
+test("the scripted worker's files pass the scripted plan's validation", () => {
+  const tag = "t2";
+  const root = mkdtempSync(join(tmpdir(), "live-check-scripted-"));
+  try {
+    const graph = scriptedGraph(tag, 7, "abc");
+    const actions = scriptedActions(tag);
+    // Dependency order: lib, then cli on top of it, then notes.
+    for (const item of graph.items) {
+      assert.deepEqual(
+        actions[item.id].files.map((file) => file.path),
+        item.ownedPaths,
+      );
+      for (const file of actions[item.id].files) {
+        mkdirSync(dirname(join(root, file.path)), { recursive: true });
+        writeFileSync(join(root, file.path), file.text);
+      }
+      for (const check of item.validation)
+        execFileSync("sh", ["-c", check.command], { cwd: root });
+    }
+    const notes = readFileSync(join(root, `live/${tag}/NOTES.md`), "utf8");
+    assert.match(notes, /lib\.sh/);
+    assert.match(notes, /hello\.sh/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the nightly workflow is scheduled, serialized and reports failures", () => {
+  const text = readFileSync(
+    join(import.meta.dirname, "..", ".github", "workflows", "live-check.yml"),
+    "utf8",
+  );
+  const workflow = parse(text);
+  assert.ok(workflow.on.schedule[0].cron);
+  assert.ok("workflow_dispatch" in workflow.on);
+  assert.equal(workflow.concurrency["cancel-in-progress"], false);
+  assert.equal(workflow.permissions.contents, "read");
+  assert.equal(workflow.permissions.issues, "write");
+  assert.match(text, /secrets\.FACTORY_SMOKE_TOKEN/);
+  assert.match(text, /--worker scripted/);
+  for (const delivery of ["regular", "native-stack"])
+    assert.ok(text.includes(delivery), delivery);
+});
+
+test("the failure report names what failed, and a missing report", () => {
+  const report = {
+    objective: 9,
+    delivery: "regular",
+    worker: "scripted",
+    pass: false,
+    launches: [{ launch: 1, point: null, code: 1, signal: null, killed: null }],
+    unreached: ["merge"],
+    github: {
+      checks: { oneIssuePerMarker: true, oneMergePerPr: false },
+      issuesPerItem: {},
+      prsPerBranch: {},
+      duplicateComments: {},
+    },
+  };
+  const text = renderReport("https://example.test/run/1", {
+    regular: report,
+    stack: undefined,
+  });
+  assert.match(text, /https:\/\/example\.test\/run\/1/);
+  assert.match(text, /\*\*regular\*\* .*Objective #9\): FAIL/);
+  assert.match(text, /Failed GitHub checks: oneMergePerPr/);
+  assert.match(text, /Kill points never reached: merge/);
+  assert.match(text, /\*\*stack\*\*: no report/);
+  const huge = renderReport("u", {
+    a: {
+      ...report,
+      launches: [{ ...report.launches[0], tail: "x".repeat(90000) }],
+    },
+  });
+  assert.ok(huge.length < 61_000);
 });

@@ -52,6 +52,24 @@ node --import ./test/support/isolated-state.mjs --test test/acceptance.test.mjs
 
 Compare planner prompt, model or provider changes with [planning evals](docs/PLANNING-EVALS.md). Add a regression test for a concrete bug. For documentation-only changes, check the relevant commands, links, and formatting. Live acceptance is separate from deterministic testing: changes to GitHub delivery, process lifecycle, or binary content may also need a live run on a disposable target; minor releases are qualified that way under the [release procedure](docs/RELEASING.md).
 
+## Live crash-restart check
+
+The fault tests run against a fake GitHub, which encodes our own assumptions about GitHub. `scripts/live-check.mjs` checks them against the real thing: it runs a three-item Objective in the private scratch repository `clockgrove/factory-smoke`, kills the controller at four points (after an issue, a PR and a merge are created, and mid final review), restarts it each time, and counts the result from GitHub alone. Its header lists the commands and kill points. Build first (`npm run build`).
+
+`--worker scripted` swaps in the test harness's scripted planner, reviewer and worker, so a run makes no model calls and costs only GitHub time. Use it for any repeatable check; the default `real` worker is for qualification with real models. The run exits 1 unless the last launch completed, every kill point was reached, and GitHub holds one issue per Work Item, one PR per branch, one merge per PR and a closed Objective.
+
+```sh
+node scripts/live-check.mjs run --worker scripted --delivery regular
+node scripts/live-check.mjs run --worker scripted --delivery native-stack
+node scripts/live-check.mjs reset --objective N   # close what that run left
+```
+
+### Nightly run
+
+[`.github/workflows/live-check.yml`](.github/workflows/live-check.yml) runs both deliveries with the scripted worker at 10:07 UTC every day, and on demand from the Actions tab. Runs never overlap (one concurrency group). It resets the fixture afterwards. On failure it opens, or comments on, the one open issue labelled `live-check`, with the per-delivery report in the body and the full reports as the `live-check-reports` workflow artifact. A pass comments on that issue only if one is open; close it once you understand the failure.
+
+The workflow needs one repository secret, `FACTORY_SMOKE_TOKEN`: a fine-grained personal access token whose only repository is `clockgrove/factory-smoke`, with Contents, Issues and Pull requests read/write plus Checks and Commit statuses read. _Because_ the run merges and deletes branches, and nothing else should be reachable if the token leaks. Create it once, put an expiry reminder on it, and run `node scripts/live-check.mjs setup` once by hand (repository admin) to install the fixture's CI workflow and required check. Without the secret the first step fails and the issue says so.
+
 ## Pull requests
 
 Link the issue, explain the user-visible change, and report the checks you ran. Keep each pull request focused on one complete outcome, with adjacent cleanup left out. Describe any remaining limitations and distinguish local test results from live acceptance evidence. Never include credentials, private repository content, raw agent transcripts, or private run details.

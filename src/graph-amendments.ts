@@ -35,8 +35,7 @@ import type {
   WorkGraph,
   WorkItem,
 } from "./contracts.js";
-import { CompletedModelInvocationError } from "./contracts.js";
-import { attachedFault, attachFault } from "./fault.js";
+import { attachedFault, attachFault, StepFault } from "./fault.js";
 import { step, type StepOptions } from "./step.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import {
@@ -640,6 +639,11 @@ async function advanceAmendment(args: {
   let compilationResponseObserved = false;
   let calling: "compile" | "review" | "projection" | undefined;
   let stage: NonNullable<PendingAmendment["rejectionStage"]> = "compilation";
+  /** The operator cancelled: stop quietly at this safe point. */
+  const stopIfCancelled = () => {
+    if (args.cancelled())
+      throw new StepFault({ kind: "cancelled", detail: "Objective cancelled" });
+  };
   /** The amendment's result is refused: a `work` fault. */
   const refused = (error: Error) =>
     attachFault(error, { kind: "work", evidence: { detail: error.message } });
@@ -651,7 +655,7 @@ async function advanceAmendment(args: {
     }
   };
   try {
-    if (args.cancelled()) throw new Error("Objective cancelled");
+    stopIfCancelled();
     const choices = executionProfileChoices(config);
     const localExecutables = preflightObjective(
       config,
@@ -741,11 +745,11 @@ async function advanceAmendment(args: {
       pending.phase = "compiled";
       save();
     }
-    if (args.cancelled()) throw new Error("Objective cancelled");
+    stopIfCancelled();
     if (stopped()) return false;
     stage = "validation";
     checkAmendment();
-    if (args.cancelled()) throw new Error("Objective cancelled");
+    stopIfCancelled();
     if (pending.phase === "compiled") {
       stage = "review";
       await verifyPrerequisites();
@@ -815,10 +819,10 @@ async function advanceAmendment(args: {
       pending.phase = "reviewed";
       save();
     }
-    if (args.cancelled()) throw new Error("Objective cancelled");
+    stopIfCancelled();
     if (stopped()) return false;
     checkAmendment();
-    if (args.cancelled()) throw new Error("Objective cancelled");
+    stopIfCancelled();
     if (pending.phase === "reviewed") {
       await verifyPrerequisites();
       stage = "projection";
@@ -838,7 +842,7 @@ async function advanceAmendment(args: {
           (id) => state.work[id]!.status === "done",
         ),
         beforeCreate: () => {
-          if (args.cancelled()) throw new Error("Objective cancelled");
+          stopIfCancelled();
         },
         projected: (id, issue) => {
           pending.issueByItemId[id] = issue;
@@ -850,7 +854,7 @@ async function advanceAmendment(args: {
       pending.phase = "projected";
       save();
     }
-    if (args.cancelled()) throw new Error("Objective cancelled");
+    stopIfCancelled();
     if (stopped()) return false;
     checkAmendment();
     await verifyPrerequisites();
@@ -880,10 +884,13 @@ async function advanceAmendment(args: {
     // rejects the amendment. Anything else leaves it at its last completed
     // phase: the step repeats a transient fault, waits on a decision or a
     // configuration fix, and stops on cancellation or a defect.
-    const answered =
-      error instanceof CompletedModelInvocationError ||
-      (calling === "compile" && compilationResponseObserved);
-    if (!answered && attachedFault(error)?.kind !== "work") throw error;
+    // A compiled graph that fails Factory's checks is an answered,
+    // refused result even before it carries a fault.
+    const fault = attachedFault(error);
+    const refusedResult =
+      fault?.kind === "work" ||
+      (!fault && calling === "compile" && compilationResponseObserved);
+    if (!refusedResult) throw error;
     pending.rejectionStage = stage;
     pending.phase = "rejected";
     pending.error = error instanceof Error ? error.message : String(error);

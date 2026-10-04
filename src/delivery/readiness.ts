@@ -141,11 +141,11 @@ export function isReadinessWait(state: FactoryState, id: string): boolean {
   const work = state.work[id];
   return Boolean(
     work &&
-      ((work.status === "published" && work.wait?.kind === "ci") ||
-        (work.waitingReason &&
-          work.status === "running" &&
-          work.step === "validate" &&
-          state.graph.items.find((item) => item.id === id)?.kind === "qa")),
+    ((work.status === "published" && work.wait?.kind === "ci") ||
+      (work.wait?.kind === "ci" &&
+        work.status === "running" &&
+        work.step === "validate" &&
+        state.graph.items.find((item) => item.id === id)?.kind === "qa")),
   );
 }
 

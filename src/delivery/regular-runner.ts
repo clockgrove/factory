@@ -1,15 +1,13 @@
 import { assertIntegrated, laterIntegration } from "./integration.js";
 import { deliveryReadiness } from "./readiness.js";
 import { workerContext } from "../execution/checkpoint.js";
+import { recordWorkFailure, diagnoseWorkRepair } from "../work-repair.js";
 import {
-  recordWorkFailure,
-  diagnoseWorkRepair,
-  repeatInterrupted,
-} from "../work-repair.js";
-import {
+  cancelledFault,
   executeItem,
-  operatorWait,
+  ItemPaused,
   reviewItem,
+  staysInPlace,
   validateItem,
 } from "../item-steps.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
@@ -35,14 +33,13 @@ import {
   selectedInputsForItem,
   validationLfsMembersForItem,
 } from "../media.js";
-import { faultOf, StepFault } from "../fault.js";
 import { earlierHeads } from "../repair-policy.js";
 import { currentProcessSignal } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { readyItems } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
-import { type StepContext, step } from "../step.js";
+import { clearWait, setWait, type StepContext, step } from "../step.js";
 import {
   validateWorkItem,
   workItemReviewEvidence,
@@ -67,6 +64,8 @@ export async function runRegularGraph(args: {
   amendmentPending?: () => boolean;
   reconcile?: () => Promise<void>;
   diagnostics?: DiagnosticEmitter;
+  /** The Objective run's cancel signal, passed to every step. */
+  signal?: AbortSignal;
 }): Promise<boolean> {
   const {
     config,
@@ -85,6 +84,20 @@ export async function runRegularGraph(args: {
   const baseSha = state.baseSha;
   let failure: unknown;
   let mergeTail: Promise<void> = Promise.resolve();
+  const signal = args.signal ?? currentProcessSignal();
+  /** The operator cancelled the Objective. */
+  const stopped = () => Boolean(signal?.aborted || args.cancelled());
+  /** Faults the Objective's re-observation raised: the Objective's, not an item's. */
+  const objectiveFaults = new WeakSet<object>();
+  const reconcile = async (): Promise<void> => {
+    try {
+      await args.reconcile?.();
+    } catch (error) {
+      if (error !== null && typeof error === "object")
+        objectiveFaults.add(error);
+      throw error;
+    }
+  };
   /** What a diagnostics span records for one try of a delivery step. */
   interface Span<T> {
     operation: string;
@@ -115,43 +128,8 @@ export async function runRegularGraph(args: {
               span.summarize,
             )
           : fn(context),
-      { save, signal: currentProcessSignal() },
+      { save, signal },
     );
-<<<<<<< HEAD
-  /**
-   * A delivery step that stopped without failing the attempt: it waits for
-   * the operator (a decision or a configuration fix; `factory retry` or the
-   * next run repeats it), or it was cancelled, or the owner paused while it
-   * waited for CI. The item keeps its place. Returns whether `error` was
-   * such a stop.
-   */
-  const stopped = (item: WorkItem, error: unknown): boolean => {
-    const { kind } = faultOf(error);
-    if (!["decision", "config", "cancelled"].includes(kind)) return false;
-    phases.release(item.id);
-=======
-    await integrate;
-    // The delivery slot frees only once closure is durable, so the scheduler
-    // never starts dependent work while this item's issue is closing.
-    try {
-      await closeWorkItem(state, item.id, github, save, false);
-    } finally {
-      phases.release(item.id);
-    }
-  };
-  // Publication finds an existing open PR for the deterministic branch
-  // before creating one, so a restart at "deliver" simply runs this again.
-  const deliverReviewed = async (
-    item: WorkItem,
-    itemBase: string,
-  ): Promise<void> => {
-    const work = state.work[item.id]!;
-    await phases.reserve(item.id, "delivery");
-    work.step = "deliver";
->>>>>>> origin/claude/phase-a-3-items
-    save();
-    return true;
-  };
   /** The owner paused while this item waits for CI: stop polling. */
   const pausedWhileWaiting = (item: WorkItem): boolean =>
     Boolean(args.paused?.()) && state.work[item.id]!.wait?.kind === "ci";
@@ -163,152 +141,150 @@ export async function runRegularGraph(args: {
   const deliver = async (item: WorkItem, itemBase: string): Promise<void> => {
     const work = state.work[item.id]!;
     const branch = `factory/objective-${objective}/${item.id}`;
-    try {
-      if (work.status !== "published") {
-        await phases.reserve(item.id, "delivery");
-        work.step = "deliver";
-        save();
-        await args.reconcile?.();
-        const published = await deliveryStep(
-          item,
-          "publish",
-          () =>
-            delivery.publish({
-              item,
-              baseSha: itemBase,
-              treeSha: work.treeSha!,
-              changeRef: work.changeRef!,
-              branch,
-              lfs: Boolean(work.selectedAssetSet),
-              earlierHeads: earlierHeads(work),
-            }),
-          {
-            operation: "github-publication",
-            metadata: {
-              baseSha: itemBase,
-              treeSha: work.treeSha!,
-              headSha: work.changeRef!,
-            },
-            summarize: (result) => ({ pullRequest: result.pullRequest }),
-          },
-        );
-        work.pullRequest = published.pullRequest;
-        work.status = "published";
-        delete work.step;
-        phases.release(item.id);
-        save();
-      }
-      const published: DeliveryResult = {
-        branch,
-        pullRequest: work.pullRequest!,
-        headSha: work.changeRef!,
-        earlierHeads: earlierHeads(work),
-      };
-      if (pausedWhileWaiting(item)) return;
-      await args.reconcile?.();
-      /** Observe the PR; return it when it may merge, else wait for CI. */
-      const ready = async (context: StepContext) => {
-        const observation = await delivery.observe(published);
-        context.progress();
-        const pending = deliveryReadiness(
-          published.pullRequest,
-          observation,
-          (state.graph.requiredPreIntegrationChecks ?? []).map(
-            (check) => check.checkName,
-          ),
-          published.headSha,
-        );
-        if (pending) context.pending({ kind: "ci", detail: pending });
-        return observation;
-      };
-      // The CI wait holds no phase reservation; the merge does.
-      const observation = await deliveryStep(
+    if (work.status !== "published") {
+      await phases.reserve(item.id, "delivery");
+      work.step = "deliver";
+      save();
+      await reconcile();
+      const published = await deliveryStep(
         item,
-        "await-ci",
-        async (context) => {
-          if (pausedWhileWaiting(item))
-            throw new StepFault({ kind: "cancelled", detail: "paused" });
-          return ready(context);
+        "publish",
+        () =>
+          delivery.publish({
+            item,
+            baseSha: itemBase,
+            treeSha: work.treeSha!,
+            changeRef: work.changeRef!,
+            branch,
+            lfs: Boolean(work.selectedAssetSet),
+            earlierHeads: earlierHeads(work),
+          }),
+        {
+          operation: "github-publication",
+          metadata: {
+            baseSha: itemBase,
+            treeSha: work.treeSha!,
+            headSha: work.changeRef!,
+          },
+          summarize: (result) => ({ pullRequest: result.pullRequest }),
         },
       );
-      work.preIntegrationChecks = observation.namedChecks ?? [];
-      save();
-      await phases.reserve(item.id, "delivery");
-      // Merges run one at a time, so each sees the last one's result.
-      const merged = mergeTail.then(() =>
-        deliveryStep(
-          item,
-          "merge",
-          async (context) => {
-            // Readiness can change after await-ci (a conflict, a failed
-            // check): judge it again before the merge is sent.
-            await ready(context);
-            const merged = await delivery.merge(published);
-            await assertIntegrated(
-              config.checkout,
-              await github.defaultBranch(),
-              merged.integratedSha,
-              `PR #${published.pullRequest}`,
-            );
-            return {
-              merge: merged.integratedSha,
-              integrated: await laterIntegration(
-                config.checkout,
-                state.integratedSha,
-                merged.integratedSha,
-              ),
-            };
-          },
-          {
-            operation: "github-merge",
-            metadata: {
-              pullRequest: published.pullRequest,
-              headSha: published.headSha,
-            },
-            summarize: (result) => ({ integratedSha: result.merge }),
-          },
-        ),
-      );
-      mergeTail = merged.then(
-        () => undefined,
-        () => undefined,
-      );
-      const result = await merged;
-      state.integratedSha = result.integrated;
-      work.integratedSha = result.merge;
-      work.status = "done";
-      work.completedAt = new Date().toISOString();
+      work.pullRequest = published.pullRequest;
+      work.status = "published";
       delete work.step;
       save();
-    } catch (error) {
-      if (stopped(item, error)) return;
-      throw error;
     }
+    // The CI wait holds no phase reservation; the merge does.
     phases.release(item.id);
-    await closeWorkItem(state, item.id, github, save, false);
-  };
-<<<<<<< HEAD
-  const runStep = async (
-    item: WorkItem,
-    itemBase: string,
-    existingHandle?: NonNullable<FactoryState["work"][string]["execution"]>,
-  ): Promise<"deliver" | undefined> => {
-    const work = state.work[item.id]!;
-    if (work.status === "published") return "deliver";
-=======
-  // Publication and merge still repeat interruptions (bounded) until the
-  // delivery steps move to `step`.
-  const deliver = (item: WorkItem, itemBase: string): Promise<void> => {
-    const work = state.work[item.id]!;
-    return repeatInterrupted(work, save, () =>
-      work.status === "published"
-        ? integratePublished(item, {
-            branch: `factory/objective-${objective}/${item.id}`,
-            pullRequest: work.pullRequest!,
-            headSha: work.changeRef!,
-          })
-        : deliverReviewed(item, itemBase),
+    const published: DeliveryResult = {
+      branch,
+      pullRequest: work.pullRequest!,
+      headSha: work.changeRef!,
+      earlierHeads: earlierHeads(work),
+    };
+    if (pausedWhileWaiting(item)) throw new ItemPaused();
+    await reconcile();
+    /** Observe the PR; return it when it may merge, else wait for CI. */
+    const ready = async (context: StepContext) => {
+      const observation = await delivery.observe(published);
+      context.progress();
+      // Strict protection: bring the branch up to date with its base, from
+      // exactly the head Factory published; its checks run again.
+      if (observation.mergeReadiness === "behind") {
+        const head = await github.updateBranch(
+          {
+            number: published.pullRequest,
+            branch,
+            headSha: published.headSha,
+            earlierHeads: published.earlierHeads,
+          },
+          published.headSha,
+        );
+        context.progress();
+        work.changeRef = head;
+        published.headSha = head;
+        save();
+        context.pending({
+          kind: "ci",
+          detail: `PR #${published.pullRequest} was updated with its base; awaiting its checks`,
+        });
+      }
+      const pending = deliveryReadiness(
+        published.pullRequest,
+        observation,
+        (state.graph.requiredPreIntegrationChecks ?? []).map(
+          (check) => check.checkName,
+        ),
+        published.headSha,
+      );
+      if (pending) context.pending({ kind: "ci", detail: pending });
+      return observation;
+    };
+    const observation = await deliveryStep(
+      item,
+      "await-ci",
+      async (context) => {
+        if (pausedWhileWaiting(item)) throw new ItemPaused();
+        return ready(context);
+      },
     );
+    work.preIntegrationChecks = observation.namedChecks ?? [];
+    save();
+    await phases.reserve(item.id, "delivery");
+    // Merges run one at a time, so each sees the last one's result.
+    const merged = mergeTail.then(() =>
+      deliveryStep(
+        item,
+        "merge",
+        async (context) => {
+          // Readiness can change after await-ci (a conflict, a failed
+          // check): judge it again before the merge is sent.
+          await ready(context);
+          const merged = await delivery.merge(published);
+          context.progress();
+          await assertIntegrated(
+            config.checkout,
+            await github.defaultBranch(),
+            merged.integratedSha,
+            `PR #${published.pullRequest}`,
+          );
+          return {
+            merge: merged.integratedSha,
+            integrated: await laterIntegration(
+              config.checkout,
+              state.integratedSha,
+              merged.integratedSha,
+            ),
+          };
+        },
+        {
+          operation: "github-merge",
+          metadata: {
+            pullRequest: published.pullRequest,
+            headSha: published.headSha,
+          },
+          summarize: (result) => ({ integratedSha: result.merge }),
+        },
+      ),
+    );
+    mergeTail = merged.then(
+      () => undefined,
+      () => undefined,
+    );
+    const result = await merged;
+    state.integratedSha = result.integrated;
+    work.integratedSha = result.merge;
+    work.status = "done";
+    work.completedAt = new Date().toISOString();
+    delete work.step;
+    save();
+    // The delivery slot frees only once closure is durable, so the scheduler
+    // never starts dependent work while this item's issue is closing.
+    try {
+      await closeWorkItem(state, item.id, github, save, false);
+    } finally {
+      phases.release(item.id);
+    }
   };
   const runStep = async (item: WorkItem, itemBase: string): Promise<void> => {
     const work = state.work[item.id]!;
@@ -316,9 +292,8 @@ export async function runRegularGraph(args: {
       await deliver(item, itemBase);
       return;
     }
->>>>>>> origin/claude/phase-a-3-items
     if (item.kind === "qa" || item.kind === "aggregate") {
-      if (args.paused?.() && work.waitingReason) return;
+      if (args.paused?.() && work.wait?.kind === "ci") return;
       await runQaItem({
         config,
         root,
@@ -336,14 +311,6 @@ export async function runRegularGraph(args: {
       });
       return;
     }
-<<<<<<< HEAD
-    if (work.step === "deliver" && work.validation) return "deliver";
-    if (!existingHandle && work.step === "execute") {
-      await phases.reserve(item.id, "validation");
-      await preflightItemEnvironment({
-        config,
-        root,
-=======
     if (work.step === "deliver" && work.validation) {
       await deliver(item, itemBase);
       return;
@@ -365,11 +332,11 @@ export async function runRegularGraph(args: {
       if (work.phaseReservation !== "coding")
         await phases.reserve(item.id, "coding");
       const result = await executeItem({
->>>>>>> origin/claude/phase-a-3-items
         state,
         item,
         driver,
         save,
+        signal,
         cancelled: args.cancelled,
         diagnostics: args.diagnostics,
         request: (attemptId) => ({
@@ -403,7 +370,7 @@ export async function runRegularGraph(args: {
           },
           detail: JSON.stringify(result.collection),
         });
-      if (args.cancelled()) throw new Error("Objective cancelled");
+      if (stopped()) throw cancelledFault();
       // Recorded once; the handle stays as the attempt's actual execution.
       recordWorkerDiscovery(state, item.id, result.discovery);
       work.changeRef = result.changeRef;
@@ -457,6 +424,7 @@ export async function runRegularGraph(args: {
       state,
       item,
       save,
+      signal,
       validate: () =>
         validateWorkItem(
           config.checkout,
@@ -510,6 +478,8 @@ export async function runRegularGraph(args: {
         state,
         item,
         save,
+        signal,
+        cancelled: args.cancelled,
         review: (retry) => ({
           ...retry,
           model: args.planningModel,
@@ -574,10 +544,7 @@ export async function runRegularGraph(args: {
     }
     work.validation = reviewed.evidence;
     delete work.acceptancePending;
-    if (args.cancelled()) throw new Error("Objective cancelled");
-<<<<<<< HEAD
-    return "deliver";
-=======
+    if (stopped()) throw cancelledFault();
     await deliver(item, itemBase);
   };
   /** Stop the item's own worker after its attempt failed, so a retry never runs beside it. */
@@ -594,38 +561,31 @@ export async function runRegularGraph(args: {
       );
       delete work.execution;
     } catch {
-      // Left recorded: retry refuses until the worker is confirmed stopped.
+      // Left recorded: the next attempt starts only once the driver
+      // confirmed it stopped.
     }
->>>>>>> origin/claude/phase-a-3-items
   };
   const execute = async (item: WorkItem, itemBase: string): Promise<void> => {
     const work = state.work[item.id]!;
     try {
-<<<<<<< HEAD
-      const next = await repeatInterrupted(work, save, () =>
-        runStep(
-          item,
-          itemBase,
-          work.step === "execute" ? work.execution : undefined,
-        ),
-      );
-      // Delivery steps repeat themselves: they run outside that repeat.
-      if (next === "deliver") await deliver(item, itemBase);
-    } catch (error) {
-      if (error instanceof AcceptanceDecisionRequired) {
-        phases.release(item.id);
-        work.status = "waiting";
-        work.step = "approve-result";
-        work.acceptancePending = error.pending;
-        if (!args.cancelled() && !args.paused?.() && !args.amendmentPending?.())
-          prepareEvidenceRecovery(state, item.id);
-=======
       await runStep(item, itemBase);
     } catch (error) {
-      if (error instanceof DeliveryReadinessPending) {
-        work.waitingReason = error.message;
-        phases.release(item.id);
->>>>>>> origin/claude/phase-a-3-items
+      // The Objective's own fault leaves the item where it is; the Objective
+      // answers it.
+      if (objectiveFaults.has(error as object)) {
+        if (!work.execution) phases.release(item.id);
+        save();
+        if (staysInPlace(error)) return;
+        failure ??= error;
+        throw error;
+      }
+      // Step rule 7: a decision or a configuration fix waits on this item
+      // only, and cancel or pause stops it quietly. The item keeps its
+      // place, its worker keeps running, and the run goes on.
+      if (staysInPlace(error)) {
+        if (error instanceof AuthenticationRequiredError)
+          work.authentication = error.authentication;
+        if (!work.execution) phases.release(item.id);
         save();
         return;
       }
@@ -640,8 +600,10 @@ export async function runRegularGraph(args: {
       if (work.status === "failed" && work.step === "execute")
         await stopWorker(item);
       if (work.phaseReservation !== "coding") phases.release(item.id);
+      // A wrong result is repaired, published or not: the next attempt
+      // republishes the same branch with a lease.
       const isolated = recordWorkFailure(state, item.id, error);
-      if (isolated && !args.cancelled()) {
+      if (isolated && !stopped()) {
         phases.release(item.id);
         save();
         await phases.reserve(item.id, "review");
@@ -658,7 +620,7 @@ export async function runRegularGraph(args: {
             ),
             save,
             stopped: () =>
-              args.cancelled() ||
+              stopped() ||
               Boolean(args.paused?.()) ||
               Boolean(args.amendmentPending?.()),
           });
@@ -668,9 +630,6 @@ export async function runRegularGraph(args: {
         return;
       }
       save();
-      // A decision or a configuration fix waits on this item only: the run
-      // goes on, and `factory retry` or the fix continues it.
-      if (operatorWait(error)) return;
       failure ??= error;
       throw error;
     }
@@ -734,7 +693,7 @@ export async function runRegularGraph(args: {
   }
   while (graph.items.some((item) => state.work[item.id]?.status !== "done")) {
     if (failure) throw failure;
-    if (args.cancelled()) throw new Error("Objective cancelled");
+    if (stopped()) throw cancelledFault();
     const reported = await driver.availableSlots();
     args.diagnostics?.emit({
       runId: state.runId,
@@ -776,16 +735,23 @@ export async function runRegularGraph(args: {
                       : "driver or operator coding capacity"
                     : undefined));
             if (blocked) {
-              state.work[item.id]!.waitingReason = blocked;
+              setWait(
+                state,
+                { item: item.id },
+                {
+                  kind: "capacity",
+                  detail: blocked,
+                },
+              );
               return false;
             }
-            delete state.work[item.id]!.waitingReason;
+            clearWait(state, { item: item.id });
             if (item.kind !== "qa" && item.kind !== "aggregate") workerSlots--;
             return true;
           });
     if (ready.length) await args.reconcile?.();
     for (const item of ready) {
-      if (args.cancelled()) throw new Error("Objective cancelled");
+      if (stopped()) throw cancelledFault();
       if (args.paused?.() || args.amendmentPending?.()) break;
       const work = state.work[item.id]!;
       work.status = "running";

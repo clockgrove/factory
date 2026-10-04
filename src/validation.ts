@@ -1992,6 +1992,8 @@ export async function reviewAcceptance(args: {
     throw new StepFault(transient(detail, true), { cause: error });
   }
   const invalidAnswers: string[] = [];
+  /** The first criterion whose answer was invalid. */
+  let firstInvalid: string | undefined;
   const proven: CriterionEvidence[] = [];
   let pending: AcceptancePending | undefined;
   let refused: string | undefined;
@@ -2019,6 +2021,7 @@ export async function reviewAcceptance(args: {
     if (invalid) {
       observeInvalidReview(args.invocation, "finding", "invalid-response");
       invalidAnswers.push(`criterion ${index}: ${invalid}`);
+      firstInvalid ??= criterion;
       continue;
     }
     if (finding?.verdict === "pass") {
@@ -2053,6 +2056,7 @@ export async function reviewAcceptance(args: {
   if (decoded.packetError && automaticCriterion !== undefined) {
     observeInvalidReview(args.invocation, "finding", "invalid-response");
     invalidAnswers.unshift(decoded.packetError);
+    firstInvalid ??= automaticCriterion;
   }
   // Preserve independent valid assessments on existing item evidence; final raw
   // response remains in existing diagnostics rather than a second durable store.
@@ -2095,11 +2099,21 @@ export async function reviewAcceptance(args: {
   if (refused)
     throw new StepFault({ kind: "work", evidence: { detail: refused } });
   // An invalid answer may have been paid for: the review step asks again
-  // with the validation error, then the operator decides.
+  // once with the validation error. An answer still invalid is one the
+  // reviewer cannot fix (evidence it may not cite, a source it cannot see
+  // whole): the operator decides that criterion, and re-review stays open.
   if (invalidAnswers.length) {
     const detail = `Independent review answer was invalid: ${invalidAnswers.join("; ")}`;
-    args.onInvalid?.(detail);
-    throw new StepFault(transient(detail, true));
+    if (!args.previousInvalid || firstInvalid === undefined) {
+      args.onInvalid?.(detail);
+      throw new StepFault(transient(detail, true));
+    }
+    pending ??= {
+      criterion: firstInvalid,
+      treeSha: evidence.treeSha,
+      detail,
+      question: `The independent reviewer could not give a valid answer for this criterion twice. Inspect the evidence and accept or refuse it.`,
+    };
   }
   if (pending)
     throw attachFault(

@@ -105,7 +105,12 @@ try {
   writeFileSync(result.plan, `${JSON.stringify(plan, null, 2)}\n`);
 } catch (error) {
   if (started) result.wallMs = Math.round(performance.now() - started);
-  result.error = error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  // Planning that stopped for the operator is a question, not an error.
+  if (error?.name === "PlanningNeedsDecision") {
+    result.review = "question";
+    result.failure = { question: message };
+  } else result.error = message;
 } finally {
   rmSync(checkout, { recursive: true, force: true });
 }

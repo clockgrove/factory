@@ -8,6 +8,7 @@ import { ClaudePlanningModel } from "../dist/claude-planning.js";
 import {
   CodexPlanningModel,
   MalformedPlannerOutput,
+  PlanningNeedsDecision,
   compilePlan,
 } from "../dist/compiler.js";
 import { consumption } from "../dist/repair-policy.js";
@@ -104,9 +105,9 @@ const state = (planningRevisions) => ({
 
 /**
  * Both providers answer from the same script, keyed on the request's schema:
- * `spoiled(n)` says whether the nth compile answer is refused by the decoder.
+ * `spoilFor(n)` is how the nth compile answer is spoiled (none: it is sound).
  */
-function script(spoil, spoiled) {
+function script(spoilFor) {
   const calls = { compile: 0, diagnosis: 0, review: 0 };
   const prompts = [];
   const answer = (prompt, schema) => {
@@ -114,7 +115,7 @@ function script(spoil, spoiled) {
       calls.compile++;
       prompts.push(prompt);
       const response = compilerResponse(prompt);
-      if (spoiled(calls.compile)) spoil(response);
+      spoilFor(calls.compile)?.(response);
       return response;
     }
     if (schema.properties.packetId) {
@@ -240,7 +241,9 @@ for (const [provider, build] of Object.entries(providers))
       const root = mkdtempSync(join(tmpdir(), "factory-semantic-revision-"));
       t.after(() => rmSync(root, { recursive: true, force: true }));
       const target = createTarget(root);
-      const { calls, prompts, answer } = script(refusal.spoil, (n) => n === 1);
+      const { calls, prompts, answer } = script((n) =>
+        n === 1 ? refusal.spoil : undefined,
+      );
       const model = build(t, target, answer);
       const recovery = state(1);
       const candidate = await compilePlan(
@@ -270,35 +273,50 @@ for (const [provider, build] of Object.entries(providers))
       assert(!prompts[0].includes("Cover each supplied obligation"));
     });
 
-    test(`${provider}: ${kind} that repeats stops at the planning allowance`, async (t) => {
+    const stopped = async (t, spoilFor) => {
       const root = mkdtempSync(join(tmpdir(), "factory-semantic-bound-"));
       t.after(() => rmSync(root, { recursive: true, force: true }));
       const target = createTarget(root);
-      const { calls, answer } = script(refusal.spoil, () => true);
+      const { calls, answer } = script(spoilFor);
       const model = build(t, target, answer);
       const recovery = state(1);
-      await assert.rejects(
-        compilePlan(
-          17,
-          body,
-          target.baseSha,
-          target.checkout,
-          model,
-          undefined,
-          undefined,
-          undefined,
-          { state: recovery, save: () => {} },
-        ),
-        (error) =>
-          !(error instanceof MalformedPlannerOutput) &&
-          /operator decision required|allowance is exhausted/.test(
-            error.message,
-          ),
+      const error = await compilePlan(
+        17,
+        body,
+        target.baseSha,
+        target.checkout,
+        model,
+        undefined,
+        undefined,
+        undefined,
+        { state: recovery, save: () => {} },
+      ).then(
+        () => assert.fail("planning stopped without a decision"),
+        (thrown) => thrown,
       );
+      // An operator plan decision, never a malformed-output failure.
+      assert(error instanceof PlanningNeedsDecision, error.message);
+      assert(!(error instanceof MalformedPlannerOutput));
       // The refused answer was diagnosed once, asked once more, and never reviewed.
-      assert.equal(calls.compile, 2);
-      assert.equal(calls.diagnosis, 1);
-      assert.equal(calls.review, 0);
+      assert.deepEqual(calls, { compile: 2, diagnosis: 1, review: 0 });
       assert.equal(consumption(recovery).planningRevisions, 1);
+      assert.equal(recovery.planningRecovery.phase, "stopped");
+      assert.equal(recovery.planningRecovery.history.length, 1);
+      return error;
+    };
+
+    test(`${provider}: ${kind} that is refused again unchanged stops for a decision`, async (t) => {
+      const error = await stopped(t, () => refusal.spoil);
+      assert.match(error.message, /Unchanged planning failure/);
+    });
+
+    test(`${provider}: ${kind} followed by a different refusal stops at the planning allowance`, async (t) => {
+      // The second answer is refused for another reason, so the failure is
+      // new and only the spent allowance stops planning.
+      const other = Object.values(refusals).find((entry) => entry !== refusal);
+      const error = await stopped(t, (n) =>
+        n === 1 ? refusal.spoil : other.spoil,
+      );
+      assert.match(error.message, /allowance is exhausted/);
     });
   }

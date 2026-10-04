@@ -156,6 +156,16 @@ export function paidModel(
 
 export class MalformedPlannerOutput extends CompletedModelInvocationError {}
 
+/**
+ * Planning stopped before any graph was reviewed, so there is no plan to
+ * accept. The operator answers by discarding the stopped planning (`factory
+ * decide --objective N --outcome refuse`); `retry` cannot reopen it, because
+ * the record of what was tried and the spent allowance stay.
+ */
+export class PlanningNeedsDecision extends Error {
+  override readonly name = "PlanningNeedsDecision";
+}
+
 class ProviderCapacityFailure extends CompletedModelInvocationError {
   constructor(cause: unknown) {
     super(cause);
@@ -2209,7 +2219,7 @@ async function compileRecoverablePlan(
   // event, so a reissued diagnosis is not charged twice.
   if (record.phase === "submitted") record.phase = "ready";
   if (record.phase === "stopped")
-    throw new Error(
+    throw new PlanningNeedsDecision(
       "Planning recovery stopped; inspect the preserved exact decision",
     );
   if ("reviewResponse" in record)
@@ -2482,7 +2492,7 @@ async function compileRecoverablePlan(
         return candidate;
       }
       save();
-      throw new Error(
+      throw new PlanningNeedsDecision(
         unchanged
           ? "Unchanged planning failure; operator decision required"
           : diagnosed >= PAID_ATTEMPTS
@@ -2552,7 +2562,7 @@ async function compileRecoverablePlan(
           review,
           record.history.length,
         );
-      throw new Error(
+      throw new PlanningNeedsDecision(
         `Planning needs an undelegated decision: ${diagnosis.diagnosis || failure}`,
       );
     }

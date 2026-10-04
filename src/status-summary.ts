@@ -592,7 +592,9 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
   if (view.planningStopped)
     return {
       phase: "needs-plan-decision",
-      summary: `planning stopped for a decision${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
+      summary: view.coordinator?.waitReason
+        ? short(view.coordinator.waitReason, 80)
+        : "planning stopped for a decision",
       nextAction: {
         command: `factory decide --objective ${objective} --outcome refuse --reason ${REASON}`,
         reason: `Discards the stopped planning; resolve the decision in the Objective, then ${run(objective)} plans again`,

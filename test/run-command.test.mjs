@@ -566,6 +566,128 @@ test("the active graph stays bound to the accepted plan and runs report exit cod
   });
 });
 
+/**
+ * A planner scripted to stop planning before any graph is reviewed. `answers`
+ * are the compile answers in order (the last repeats); `diagnose` answers or
+ * throws for each diagnosis.
+ */
+function stoppingModel(calls, answers, diagnose) {
+  let compiled = 0;
+  return {
+    async generateStructured(request) {
+      calls.push(request.purpose ?? "compile");
+      if (request.purpose === "diagnosis") return diagnose();
+      return answers[Math.min(compiled++, answers.length - 1)];
+    },
+    async reviewGraph() {
+      throw new Error("a stopped planning is never reviewed");
+    },
+  };
+}
+
+const diagnosing = () => ({
+  kind: "planning-output",
+  diagnosis: "The answer is not a graph",
+  correction: "Return the graph",
+});
+
+for (const [name, expected, answers, diagnose, runs] of [
+  ["an unchanged failure", /Unchanged planning failure/, [{}], diagnosing, 1],
+  [
+    "an exhausted planning allowance",
+    /allowance is exhausted/,
+    [{}, { items: "not a list" }],
+    diagnosing,
+    1,
+  ],
+  [
+    "a diagnosis that never answers",
+    /diagnosis did not answer 3 times/,
+    [{}],
+    () => {
+      throw new Error("diagnosis unavailable");
+    },
+    4,
+  ],
+  [
+    "a diagnosis that says the operator decides",
+    /undelegated decision/,
+    [{}],
+    () => ({
+      kind: "operator",
+      diagnosis: "The Objective leaves the owner undecided",
+      correction: "Assign result.txt to the result item",
+    }),
+    1,
+  ],
+])
+  test(`planning that stopped on ${name} names a decide command that works`, async () => {
+    await fixture("stop-command", async ({ root, config, graph }) => {
+      const calls = [];
+      const { application } = makeApplication({
+        config,
+        graph,
+        objectiveBody: body,
+        fakeRoot: join(root, "fake"),
+        actions: {},
+        planningModel: stoppingModel(calls, answers, diagnose),
+      });
+      // A diagnosis that fails is a defect each run; the fourth run stops.
+      let stopped;
+      for (let run = 1; run <= runs; run++)
+        stopped = await application
+          .runObjective(1)
+          .catch((error) => (run < runs ? undefined : Promise.reject(error)));
+      assert.equal(stopped.plan, undefined);
+      assert.equal(stopped.planningRecovery.phase, "stopped");
+      assert.match(stopped.coordinator.waitReason, expected);
+      const outcome = runOutcome(stopped);
+      assert.equal(outcome.code, 2);
+      assert.match(outcome.message, expected);
+      // The reason is said once, and the way out is the printed command.
+      assert.doesNotMatch(
+        outcome.message,
+        /stopped for a decision: .*stopped for a decision/is,
+      );
+      const status = preparationStatusDocument(stopped);
+      assert.equal(status.phase, "needs-plan-decision");
+      assert.match(status.summary, /^Planning stopped for a decision: /);
+      const command = status.nextAction.command;
+      assert.equal(
+        command,
+        'factory decide --objective 1 --outcome refuse --reason "WHY"',
+      );
+      assert(outcome.message.includes(command.replace("WHY", "…")));
+
+      // Run the printed command, as the operator would.
+      const configPath = join(root, "config.json");
+      writeFileSync(configPath, JSON.stringify(config));
+      const [factory, ...args] = command.match(/"[^"]*"|\S+/g);
+      assert.equal(factory, "factory");
+      const decided = spawnSync(
+        process.execPath,
+        [
+          join(import.meta.dirname, "../dist/cli.js"),
+          ...args.map((arg) =>
+            arg === '"WHY"' ? "Clarified the Objective" : arg,
+          ),
+          "--actor",
+          "operator",
+          "--config",
+          configPath,
+        ],
+        { encoding: "utf8", env: { ...process.env } },
+      );
+      assert.equal(decided.status, 0, decided.stderr);
+      assert.equal(existsSync(statePath(config.repository, 1)), false);
+
+      // The next run plans again from scratch instead of staying stopped.
+      const before = calls.length;
+      await application.runObjective(1).catch(() => undefined);
+      assert(calls.length > before);
+    });
+  });
+
 test("the CLI requires an answer to accept a plan and keeps no admission vocabulary", async () => {
   await fixture("cli", async ({ root, config }) => {
     const configPath = join(root, "config.json");

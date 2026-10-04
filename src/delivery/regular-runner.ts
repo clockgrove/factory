@@ -691,6 +691,7 @@ export async function runRegularGraph(args: {
               state.baseSha,
               config.checkout,
             ),
+            checkout: config.checkout,
             save,
             signal,
             pause: args.pause,

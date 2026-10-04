@@ -195,6 +195,11 @@ export interface FailureDisposition {
   continuation: "new-attempt-from-accepted-base" | "operator-decision";
   unfinishedEdits: "removed" | "unavailable";
   decision: string;
+  /**
+   * The integrated predecessor whose delivered file caused the failure
+   * (src/work-repair.ts). Only a decision about that predecessor names one.
+   */
+  predecessor?: { item: string; path: string; pullRequest?: number };
 }
 export interface RepairCorrection {
   failureDigest: string;
@@ -332,6 +337,12 @@ export function charge(
       scopes: unique,
     },
   };
+}
+/** Give back the allowance a failure event used: no correction was made for it. */
+export function releaseCharge(state: RepairLedger, event: string): void {
+  if (!state.charges?.[event]) return;
+  const { [event]: _released, ...kept } = state.charges;
+  state.charges = kept;
 }
 /** Corrections of `kind` must be enabled for this Objective. */
 export function assertRepairClass(

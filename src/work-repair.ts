@@ -3,6 +3,8 @@ import type { DiagnosticEmitter } from "./diagnostics.js";
 import { attachFault, faultOf, StepFault, transient } from "./fault.js";
 import { type StepClock, StepPaused, clearRepeats, step } from "./step.js";
 import type { PlanningModel, WorkItem } from "./contracts.js";
+import { ownsPath } from "./ownership.js";
+import { pinnedGitRaw } from "./process.js";
 import {
   installedControllerCapabilities,
   CONTROLLER_CAPABILITIES_DIGEST,
@@ -14,6 +16,7 @@ import {
   consumption,
   failureDigest,
   itemEvent,
+  releaseCharge,
   repairScopes,
   validateCorrection,
   type FailureClass,
@@ -183,13 +186,137 @@ export function applyWorkCorrection(
 const diagnosisSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["diagnosis", "correction", "decision"],
+  required: ["diagnosis", "correction", "decision", "predecessor", "path"],
   properties: {
     diagnosis: { type: "string" },
     correction: { type: "string" },
-    decision: { type: "string", enum: ["repair", "operator"] },
+    decision: { type: "string", enum: ["repair", "operator", "predecessor"] },
+    // With "predecessor": the merged predecessor Work Item that owns the
+    // faulty file, and that file's path. Empty otherwise.
+    predecessor: { type: "string" },
+    path: { type: "string" },
   },
 };
+
+type Blame = NonNullable<FailureDisposition["predecessor"]>;
+
+/** Work Items this one depends on, directly or not, that are merged. */
+function mergedPredecessors(
+  state: FactoryState,
+  item: WorkItem,
+): { item: WorkItem; pullRequest?: number }[] {
+  const found = new Map<string, WorkItem>();
+  const visit = (current: WorkItem): void => {
+    for (const id of current.dependencies) {
+      const dependency = state.graph.items.find((entry) => entry.id === id);
+      if (!dependency || found.has(id)) continue;
+      found.set(id, dependency);
+      visit(dependency);
+    }
+  };
+  visit(item);
+  return [...found.values()].flatMap((dependency) => {
+    const work = state.work[dependency.id];
+    return work?.status === "done" && work.integratedSha
+      ? [
+          {
+            item: dependency,
+            ...(work.pullRequest && { pullRequest: work.pullRequest }),
+          },
+        ]
+      : [];
+  });
+}
+
+/**
+ * The failure is a merged predecessor's when the file the diagnosis names is
+ * owned by that predecessor and not by the failing item. Ownership comes from
+ * the accepted graph, so the answer is checked as structure, never as prose.
+ */
+function blamedPredecessor(
+  state: FactoryState,
+  item: WorkItem,
+  answer: { predecessor?: string; path?: string },
+): Blame {
+  const path = answer.path?.trim() ?? "";
+  const owner = mergedPredecessors(state, item).find(
+    (entry) => entry.item.id === answer.predecessor,
+  );
+  if (!owner)
+    throw new Error(
+      `${answer.predecessor || "(none)"} is not a merged predecessor of ${item.id}`,
+    );
+  if (!path || !ownsPath(path, owner.item.ownedPaths))
+    throw new Error(`${path || "(none)"} is not owned by ${owner.item.id}`);
+  if (ownsPath(path, item.ownedPaths))
+    throw new Error(`${path} is owned by ${item.id} itself`);
+  return {
+    item: owner.item.id,
+    path,
+    ...(owner.pullRequest && { pullRequest: owner.pullRequest }),
+  };
+}
+
+const EVIDENCE_FILE_BYTES = 16_000;
+const EVIDENCE_TOTAL_BYTES = 64_000;
+/**
+ * The files of the failed result that it and its merged predecessors own, as
+ * text: what a diagnosis needs to tell whose file is wrong. They are read from
+ * the result tree, which holds the integrated predecessors' files.
+ */
+function diagnosisFiles(
+  state: FactoryState,
+  item: WorkItem,
+  checkout: string | undefined,
+): { path: string; heading: string; content: string }[] {
+  const treeSha = state.work[item.id]?.treeSha;
+  if (!checkout || !treeSha) return [];
+  const owners = [
+    { item, label: `owned by ${item.id} (the failing item)` },
+    ...mergedPredecessors(state, item).map((entry) => ({
+      item: entry.item,
+      label: `owned by ${entry.item.id} (merged)`,
+    })),
+  ];
+  const files: { path: string; heading: string; content: string }[] = [];
+  let total = 0;
+  try {
+    const paths = pinnedGitRaw(
+      checkout,
+      "ls-tree",
+      "-r",
+      "--name-only",
+      "-z",
+      treeSha,
+    )
+      .toString("utf8")
+      .split("\0")
+      .filter(Boolean);
+    for (const path of paths) {
+      const owner = owners.find((entry) =>
+        ownsPath(path, entry.item.ownedPaths),
+      );
+      if (!owner) continue;
+      let content: string;
+      try {
+        content = new TextDecoder("utf-8", { fatal: true }).decode(
+          pinnedGitRaw(checkout, "show", `${treeSha}:${path}`),
+        );
+      } catch {
+        continue;
+      }
+      if (content.length > EVIDENCE_FILE_BYTES)
+        content = `${content.slice(0, EVIDENCE_FILE_BYTES)}\n[truncated]`;
+      if (total + content.length > EVIDENCE_TOTAL_BYTES) break;
+      total += content.length;
+      files.push({ path, heading: owner.label, content });
+    }
+  } catch {
+    // Evidence is best effort: the diagnosis still runs on the failure record.
+  }
+  return files;
+}
+
 export async function diagnoseWorkRepair(args: {
   state: FactoryState;
   item: WorkItem;
@@ -198,6 +325,8 @@ export async function diagnoseWorkRepair(args: {
   stopped: () => boolean;
   diagnostics?: DiagnosticEmitter;
   sources?: { path: string; content: string; heading?: string }[];
+  /** The target checkout: the failed result's files are read from it. */
+  checkout?: string;
   /** The run's cancel signal: ends the diagnose step's wait or try. */
   signal?: AbortSignal;
   /** The run's pause signal: ends the diagnose step's wait; it resumes later. */
@@ -249,7 +378,9 @@ export async function diagnoseWorkRepair(args: {
   if (args.stopped()) return false;
   // A paid step: a lost answer is asked again, an invalid one again with
   // its validation error, until the paid bound makes it a decision.
-  let answer: RepairCorrection | string;
+  const predecessors = mergedPredecessors(state, item);
+  const files = diagnosisFiles(state, item, args.checkout);
+  let answer: RepairCorrection | string | { blame: Blame; diagnosis: string };
   try {
     answer = await step(
       state,
@@ -262,11 +393,13 @@ export async function diagnoseWorkRepair(args: {
             diagnosis: string;
             correction: string;
             decision: string;
+            predecessor?: string;
+            path?: string;
           }>({
             purpose: "diagnosis",
-            objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item, failure, prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef })}`,
+            objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item, failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef })}`,
             baseSha: work.executionBaseSha ?? state.baseSha,
-            sources: args.sources ?? [],
+            sources: [...(args.sources ?? []), ...files],
             controllerCapabilities: installedControllerCapabilities(),
             controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
             schema: diagnosisSchema,
@@ -282,6 +415,21 @@ export async function diagnoseWorkRepair(args: {
               }),
             },
           });
+          if (response.decision === "predecessor") {
+            try {
+              return {
+                blame: blamedPredecessor(state, item, response),
+                diagnosis: response.diagnosis,
+              };
+            } catch (error) {
+              const detail =
+                error instanceof Error ? error.message : String(error);
+              context.invalid(detail);
+              throw new StepFault(
+                transient(`Diagnosis was invalid: ${detail}`, true),
+              );
+            }
+          }
           if (response.decision !== "repair")
             return (
               response.diagnosis || "Failure requires an operator decision"
@@ -336,6 +484,21 @@ export async function diagnoseWorkRepair(args: {
     throw error;
   }
   if (typeof answer === "string") return stop(answer);
+  if ("blame" in answer) {
+    // The defect is in a merged predecessor: no repair of this item can pass,
+    // so none is spent. The allowance the diagnosis took is given back and
+    // the failure becomes a decision about the predecessor.
+    const { blame, diagnosis } = answer;
+    const owner = `${blame.item}${blame.pullRequest ? ` (PR #${blame.pullRequest})` : ""}`;
+    releaseCharge(state, failure.event);
+    delete failure.event;
+    failure.classification = "decision";
+    failure.continuation = "operator-decision";
+    failure.predecessor = blame;
+    return stop(
+      `${blame.path} is owned by ${owner}, which is merged; ${item.id} did not cause this failure and a repair of ${item.id} cannot fix it. ${diagnosis} Fix ${blame.item}: propose an amendment that adds a Work Item after ${blame.item} owning ${blame.path} (\`factory propose-amendment --objective ${state.objective}\`), then run \`${retry}\` once it is merged`,
+    );
+  }
   const correction = answer;
   work.recovery!.correction = correction;
   work.recovery!.phase = "ready";

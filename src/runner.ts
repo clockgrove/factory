@@ -1627,6 +1627,7 @@ async function runObjectivePass(
         model: planningModel,
         diagnostics,
         sources: planningSources(issue.body, current.baseSha, config.checkout),
+        checkout: config.checkout,
         save: () => save(current),
         stopped: () =>
           cancellationRequested() || current.coordinator?.mode !== "running",

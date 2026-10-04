@@ -1,0 +1,12 @@
+#!/bin/sh
+# Format and lint staged files with the same Biome commands CI runs.
+# Enabled by `npm install` (the prepare script sets core.hooksPath).
+set -e
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.ts' '*.mts' '*.js' '*.mjs' '*.json')
+[ -n "$staged" ] || exit 0
+# shellcheck disable=SC2086
+npx --no-install biome format --write --no-errors-on-unmatched $staged
+# shellcheck disable=SC2086
+git add -- $staged
+# shellcheck disable=SC2086
+npx --no-install biome lint --error-on-warnings --no-errors-on-unmatched $staged

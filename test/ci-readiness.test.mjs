@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Octokit } from "@octokit/core";
 import { RealGitHubGateway } from "../dist/github.js";
 import { now, realDelay } from "../dist/clock.js";
-import { faultOf } from "../dist/fault.js";
+import { faultOf, StepFault, transient } from "../dist/fault.js";
 import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { withProcessCancellation } from "../dist/process.js";
 import { controlObjective } from "../dist/runner.js";
@@ -23,6 +23,7 @@ import { setLagClock } from "../dist/delivery/lag.js";
 import {
   createTarget,
   factoryConfig,
+  git,
   makeApplication,
   readEvents,
 } from "./support/integration-fixture.mjs";
@@ -595,6 +596,130 @@ for (const route of ["regular", "native-stack"]) {
       true,
     ));
 }
+
+/** Main renames a workflow job, as a merged change on the default branch. */
+function renameJob(f, from, to, name) {
+  const clone = join(f.root, name);
+  git(f.root, "clone", join(f.root, "origin.git"), clone);
+  const workflow = join(clone, ".github/workflows/quality.yml");
+  writeFileSync(
+    workflow,
+    readFileSync(workflow, "utf8").replace(`${from}:`, `${to}:`),
+  );
+  git(clone, "add", "-A");
+  git(
+    clone,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.com",
+    "commit",
+    "-m",
+    `Rename ${from} to ${to}`,
+  );
+  git(clone, "push", "origin", "main");
+}
+
+for (const route of ["regular", "native-stack"]) {
+  test(`${route}: a workflow job renamed after planning stops with a decision; restoring the job and factory retry proceeds`, async () =>
+    fixture(
+      route,
+      "named-renamed",
+      async (f) => {
+        const { running } = await startWaiting(f);
+        // Main now names the job differently, and the gate has not reported
+        // on the head: "quality" will never report.
+        renameJob(f, "quality", "qa", "rename");
+        f.ready();
+        await running;
+        const stopped = readState(f.config.repository, 1);
+        assert.equal(f.counts().merges, 0);
+        assert.notEqual(stopped.finalValidation?.passed, true);
+        const wait = stopped.work.result.wait;
+        assert.equal(wait.kind, "decision");
+        assert.match(wait.detail, /CI check "quality" is no longer a job/);
+        // Only answers that work mid-run are offered.
+        assert.match(
+          wait.detail,
+          /Restore the job under that name and run factory retry, or cancel and plan again\?/,
+        );
+        assert.doesNotMatch(
+          wait.detail,
+          /Required checks, or amend|amend the plan/,
+        );
+        assert.equal(stopped.work.result.status, "published");
+        // The named answer: restore the job, then factory retry.
+        renameJob(f, "qa", "quality", "restore");
+        f.setNamedMode("success");
+        f.application.retryWorkItem(1, "result");
+        const done = await f.track(f.application.runObjective(1));
+        assert.equal(done.finalValidation.passed, true);
+        assert.equal(f.counts().merges, 1);
+        assert.equal(done.work.result.status, "done");
+      },
+      false,
+      true,
+    ));
+}
+
+for (const route of ["regular", "native-stack"]) {
+  test(`${route}: a gate already satisfied on the exact head merges although main renamed the job since`, async () =>
+    fixture(
+      route,
+      "named-renamed-satisfied",
+      async (f) => {
+        const { running } = await startWaiting(f);
+        // The gate has passed on the exact head; the PR only waits for
+        // protection.
+        f.setNamedMode("success");
+        await observedAgain(f);
+        renameJob(f, "quality", "qa", "rename");
+        await observedAgain(f);
+        assert.equal(f.counts().merges, 0);
+        assert.equal(
+          readState(f.config.repository, 1).work.result.wait?.kind,
+          "ci",
+        );
+        f.ready();
+        const done = await running;
+        assert.equal(done.finalValidation.passed, true);
+        assert.equal(f.counts().merges, 1);
+        assert.equal(done.work.result.status, "done");
+      },
+      false,
+      true,
+    ));
+}
+
+test("regular: a PR already merged re-enters merge after a restart without asking about a job main renamed", async () =>
+  fixture(
+    "regular",
+    "named-renamed-merged",
+    async (f) => {
+      const { running } = await startWaiting(f);
+      f.setNamedMode("success");
+      const merge = f.github.merge.bind(f.github);
+      let lost = false;
+      f.github.merge = async (...args) => {
+        const result = await merge(...args);
+        if (!lost) {
+          lost = true;
+          // The merge landed, main renames the job, and the response is
+          // lost: the step repeats against a PR that is already merged.
+          renameJob(f, "quality", "qa", "rename");
+          throw new StepFault(transient("Lost the merge response", true));
+        }
+        return result;
+      };
+      f.ready();
+      const done = await running;
+      assert.equal(lost, true);
+      assert.equal(done.finalValidation.passed, true);
+      assert.equal(done.work.result.status, "done");
+    },
+    false,
+    true,
+  ));
 
 test("intake keeps its ordinary pending-CI Objective owned and finishes it when checks pass", async () =>
   fixture("regular", "intake", async (f) => {

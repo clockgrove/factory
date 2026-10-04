@@ -1,6 +1,7 @@
 import { assertIntegrated, laterIntegration } from "./integration.js";
 import { cancelledFault } from "../fault.js";
-import { deliveryReadiness } from "./readiness.js";
+import { assertCheckSourcesAtIntegration } from "./check-sources.js";
+import { deliveryReadiness, unreportedGates } from "./readiness.js";
 import { runWorker, stopWorker as stopSharedWorker } from "../item-worker.js";
 import { recordWorkFailure, diagnoseWorkRepair } from "../work-repair.js";
 import {
@@ -284,8 +285,26 @@ export async function runRegularGraph(args: {
       // head is GitHub's merge, not a foreign change.
       if (work.branchUpdateFrom)
         await updateBranch(context, work.branchUpdateFrom);
+      context.progress();
       const observation = await delivery.observe(published);
       context.progress();
+      // A gate that has not reported on this head, and whose job main has
+      // renamed, never will. A gate already on the head, or a merged PR,
+      // is not asked.
+      await assertCheckSourcesAtIntegration({
+        graph: state.graph,
+        baseSha: state.baseSha,
+        objectiveBody: args.objectiveBody,
+        checkout: config.checkout,
+        gates: unreportedGates(
+          observation,
+          (state.graph.requiredPreIntegrationChecks ?? []).map(
+            (check) => check.checkName,
+          ),
+          published.headSha,
+        ),
+        defaultBranch: () => github.defaultBranch(),
+      });
       if (observation.mergeReadiness === "behind")
         await updateBranch(context, published.headSha);
       let pending: string | undefined;

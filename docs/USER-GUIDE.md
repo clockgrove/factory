@@ -189,7 +189,7 @@ Create the issue in the repository that owns the work. Start from the [one-page 
 
 - **Acceptance** is what the plan must deliver and what review checks. Write one observable fact per bullet. A bullet that is exactly one command line means that command must pass. If a constraint must be verified, such as "the Git tree stays clean", put it here.
 - **Final validation** lists exact commands that must pass on the integrated result. A vague "run the tests" is not a command.
-- **Required checks** (optional) lists exact CI check names that are not jobs in the target's workflows. A plan can name a CI check only if it is a pull-request workflow job at the base or listed here. Checks reported by external apps, such as codecov, must be listed here.
+- **Required checks** (optional) lists exact CI check names that are not jobs in the target's workflows. A plan can name a CI check only if it is a pull-request workflow job at the base or listed here. Checks reported by external apps, such as codecov, must be listed here. Delivery re-checks a required check against the default branch: if its job is renamed after planning, the run asks you to restore the job and `factory retry`, or to cancel and plan again, instead of waiting for a check that never reports.
 - **Planning sources** lists files, or `path#Exact Heading` sections, that workers need. Workers receive those sections verbatim and also have the full checkout. Keep the list short: every source costs tokens in planning and review.
 
 Keep the first Objective small, for example a `healthcheck` script that calls the existing test command.

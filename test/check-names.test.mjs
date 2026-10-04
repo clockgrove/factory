@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,12 +7,20 @@ import {
   assertKnownCheckNames,
   workflowCheckNames,
 } from "../dist/check-names.js";
+import { createHash } from "node:crypto";
 import {
+  assertCheckSourcesAtIntegration,
+  assertProofCheckDefined,
+} from "../dist/delivery/check-sources.js";
+import { faultOf } from "../dist/fault.js";
+import { unreportedGates } from "../dist/delivery/readiness.js";
+import {
+  validateGraphSources,
   knownCheckNames,
   objectiveRequiredChecks,
   planningSources,
 } from "../dist/compiler.js";
-import { createTarget } from "./support/integration-fixture.mjs";
+import { createTarget, git } from "./support/integration-fixture.mjs";
 
 const step = '    runs-on: ubuntu-latest\n    steps: [{ run: "true" }]\n';
 const workflows = {
@@ -95,7 +103,7 @@ test("workflow check names are the names GitHub reports on a pull request", () =
     // A Git failure is an error, never an empty list.
     assert.throws(
       () => workflowCheckNames(target.checkout, "0".repeat(40)),
-      /Cannot read the GitHub workflows at base 0{40}/,
+      /Cannot read the GitHub workflows at commit 0{40}/,
     );
     // The Objective's Required checks add exact names the workflows cannot.
     const body =
@@ -151,4 +159,214 @@ test("a plan may name only known CI checks, by exact string", () => {
         `CI check "${name.replace("/", "\\/")}" is not a job in the base's GitHub workflows or an entry under the Objective's Required checks`,
       ),
     );
+});
+
+const objectiveBody = (checks) =>
+  `## Acceptance\n- Done.\n\n## Required checks\n${checks}\n\n## Final validation\n- \`true\`\n`;
+const planOf = (body, baseSha, gate, proof) => ({
+  objective: 1,
+  baseSha,
+  items: [],
+  requiredPreIntegrationChecks: gate
+    ? [
+        {
+          checkName: gate,
+          source: {
+            path: "OBJECTIVE",
+            digest: createHash("sha256").update(body).digest("hex"),
+            text: body,
+          },
+        },
+      ]
+    : [],
+  coverage: proof
+    ? [{ proof: { kind: "integrated-ci", checkName: proof } }]
+    : [],
+});
+
+test("a planned gate or CI proof naming an invented or misspelled check is refused at plan time", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-check-names-"));
+  try {
+    const target = createTarget(root, workflows);
+    const body = objectiveBody("- `codecov/patch`");
+    const sources = planningSources(body, target.baseSha, target.checkout);
+    const validate = (gate, proof) =>
+      validateGraphSources(
+        planOf(body, target.baseSha, gate, proof),
+        sources,
+        target.checkout,
+        body,
+        target.baseSha,
+      );
+    for (const [gate, proof, name] of [
+      ["lnit", undefined, "lnit"],
+      ["lint", "tests", "tests"],
+      [undefined, "Lint", "Lint"],
+    ])
+      assert.throws(
+        () => validate(gate, proof),
+        new RegExp(`CI check "${name}" is not a job in the base's GitHub`),
+      );
+    // A workflow job and a Required checks line are the two bindings.
+    validate("lint", "codecov/patch");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function renameLint(root, target) {
+  const clone = join(root, "clone");
+  git(root, "clone", target.origin, clone);
+  const file = join(clone, ".github/workflows/ci.yml");
+  writeFileSync(
+    file,
+    readFileSync(file, "utf8").replace("  lint:", "  lint2:"),
+  );
+  git(clone, "add", "-A");
+  git(
+    clone,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.com",
+    "commit",
+    "-m",
+    "Rename lint",
+  );
+  git(clone, "push", "origin", "main");
+}
+
+test("delivery refuses a gate that main no longer defines, offering only answers that work", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-check-names-"));
+  try {
+    const target = createTarget(root, workflows);
+    const body = objectiveBody("- `codecov/patch`");
+    const at = (gate, proof) =>
+      assertCheckSourcesAtIntegration({
+        graph: planOf(body, target.baseSha, gate, proof),
+        baseSha: target.baseSha,
+        objectiveBody: body,
+        checkout: target.checkout,
+        gates: gate ? [gate] : [],
+        defaultBranch: () => "main",
+      });
+    // A job and a Required checks line both bind a gate.
+    await at("lint");
+    await at("codecov/patch");
+    // No gate: nothing to bind, and a CI proof is bound by QA, not delivery.
+    await at(undefined, undefined);
+    await at(undefined, "gone");
+    renameLint(root, target);
+    await assert.rejects(at("lint"), (error) => {
+      const fault = faultOf(error);
+      assert.equal(fault.kind, "decision");
+      assert.match(
+        fault.question,
+        /CI check "lint" is no longer a job in main's/,
+      );
+      assert.match(
+        fault.question,
+        /Restore the job under that name and run factory retry, or cancel and plan again\?/,
+      );
+      assert.doesNotMatch(fault.question, /amend|add the new name/);
+      return true;
+    });
+    // A proof naming the renamed job is not a delivery wait.
+    await at(undefined, "lint");
+    await at("lint2", "codecov/patch");
+    // A verified gate stays verified only for its tip: "lint" passed above
+    // before the rename and is refused after it.
+    // The Objective's Required checks can no longer justify the name.
+    await assert.rejects(
+      assertCheckSourcesAtIntegration({
+        graph: planOf(body, target.baseSha, "codecov/patch"),
+        baseSha: target.baseSha,
+        objectiveBody: objectiveBody("- `other`"),
+        checkout: target.checkout,
+        gates: ["codecov/patch"],
+        defaultBranch: () => "main",
+      }),
+      (error) => faultOf(error).kind === "decision",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a QA CI proof is bound to its own commit, only while it must wait", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-check-names-"));
+  try {
+    const target = createTarget(root, workflows);
+    const body = objectiveBody("- `codecov/patch`");
+    const at = (checkName, commit = target.baseSha, text = body) =>
+      assertProofCheckDefined({
+        checkName,
+        commit,
+        objectiveBody: text,
+        checkout: target.checkout,
+      });
+    at("lint");
+    at("codecov/patch");
+    for (const name of ["lnit", "Lint"])
+      assert.throws(
+        () => at(name),
+        (error) => {
+          const fault = faultOf(error);
+          assert.equal(fault.kind, "decision");
+          assert.match(
+            fault.question,
+            new RegExp(
+              `CI check "${name}" is not a job in the GitHub workflows at ${target.baseSha.slice(0, 12)}`,
+            ),
+          );
+          assert.match(fault.question, /Cancel and plan again/);
+          assert.doesNotMatch(fault.question, /amend|add the new name/);
+          return true;
+        },
+      );
+    assert.throws(() =>
+      at("codecov/patch", target.baseSha, objectiveBody("- `x`")),
+    );
+    // The commit decides: a later rename on main does not change it.
+    renameLint(root, target);
+    at("lint");
+    // A commit that is unreadable is a decision that names the commit, not
+    // a plain Error.
+    assert.throws(
+      () => at("lint", "0".repeat(40)),
+      (error) => {
+        const fault = faultOf(error);
+        assert.equal(fault.kind, "decision");
+        assert.match(fault.question, /could not read the GitHub workflows/);
+        assert.match(fault.question, /factory retry, or cancel and plan again/);
+        assert.match(
+          fault.evidence.join("\n"),
+          /Cannot read the GitHub workflows at commit 0{40}/,
+        );
+        return true;
+      },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("only gates a PR has not reported on at its head can be waiting for a check that never comes", () => {
+  const head = "a".repeat(40);
+  const run = (name, headSha = head) => ({
+    id: 1,
+    name,
+    headSha,
+    status: "in_progress",
+  });
+  const gates = ["lint", "test", "build", "docs"];
+  const open = {
+    state: "open",
+    namedChecks: [run("lint"), run("test", "b".repeat(40))],
+    failedChecks: ["build"],
+  };
+  // Running or failed on the head has reported; a stale head has not.
+  assert.deepEqual(unreportedGates(open, gates, head), ["test", "docs"]);
+  assert.deepEqual(unreportedGates({ state: "merged" }, gates, head), []);
+  assert.deepEqual(unreportedGates({ state: "closed" }, gates, head), []);
 });

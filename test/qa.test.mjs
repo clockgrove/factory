@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -30,6 +30,7 @@ import { workItemReviewEvidence } from "../dist/validation.js";
 import {
   createTarget,
   factoryConfig,
+  git,
   makeApplication,
   readEvents,
 } from "./support/integration-fixture.mjs";
@@ -92,7 +93,7 @@ const body = `# Public multi-item QA fixture
 ## Required checks
 - dependency-version-test
 `;
-function graph(baseSha) {
+function graph(baseSha, text = body) {
   const unit = work("unit");
   const integration = work("integration", ["unit"]);
   const qa = {
@@ -108,7 +109,7 @@ function graph(baseSha) {
       },
     ],
   };
-  const obligations = coverageObligations(body, objectiveCriteria(body));
+  const obligations = coverageObligations(text, objectiveCriteria(text));
   const entry = (
     i,
     itemId,
@@ -637,6 +638,88 @@ for (const delivery of ["regular", "native"])
       staleCoverage.integratedSha = "a".repeat(40);
       assert.throws(() => assertCompletedCoverage(staleCoverage), /stale/);
     }));
+
+test("a job renamed on main after merge does not stop QA whose CI proof is bound to its own commit", async () =>
+  fixture(async (root) => {
+    const workflow = ".github/workflows/ci.yml";
+    const target = createTarget(root, {
+      "real-environment.txt": "actual local fixture resource",
+      [workflow]:
+        "name: CI\non: pull_request\njobs:\n  dependency-version-test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n",
+    });
+    // The check is bound by the workflow job alone.
+    const objectiveBody = body.replace(
+      "## Required checks\n- dependency-version-test\n",
+      "",
+    );
+    const { application, github } = makeApplication({
+      config: factoryConfig(target.checkout, "example/qa-renamed-on-main"),
+      graph: graph(target.baseSha, objectiveBody),
+      objectiveBody,
+      fakeRoot: join(root, "fake"),
+      actions: {
+        unit: { files: [{ path: "unit.txt", text: "unit" }] },
+        integration: {
+          files: [{ path: "integration.txt", text: "integration" }],
+        },
+      },
+    });
+    const calls = [];
+    let reported = false;
+    github.namedCheck = async (headSha, name) => {
+      calls.push(headSha);
+      if (calls.length === 1) {
+        // The proof starts waiting; meanwhile main renames the job.
+        const clone = join(root, "rename");
+        git(root, "clone", join(root, "origin.git"), clone);
+        const file = join(clone, workflow);
+        writeFileSync(
+          file,
+          readFileSync(file, "utf8").replace(
+            "dependency-version-test:",
+            "renamed:",
+          ),
+        );
+        git(clone, "add", "-A");
+        git(
+          clone,
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.com",
+          "commit",
+          "-m",
+          "Rename the job",
+        );
+        git(clone, "push", "origin", "main");
+      }
+      return {
+        id: 73,
+        headSha,
+        name,
+        status: reported ? "completed" : "in_progress",
+        conclusion: "success",
+        detailsUrl: "https://github.com/example/check/73",
+      };
+    };
+    const running = application.runObjective(1);
+    const waiting = await until(() => {
+      const state = runSnapshot("example/qa-renamed-on-main");
+      return state?.work.qa.wait?.kind === "ci" ? state : undefined;
+    });
+    assert.equal(waiting.work.qa.wait.kind, "ci");
+    reported = true;
+    // The resumed validation does not read the renamed tip: QA finishes its
+    // own item. (Main moving past the candidate is a separate, ordinary
+    // staleness of the final result, so the run itself is not awaited.)
+    const done = await until(() => {
+      const state = runSnapshot("example/qa-renamed-on-main");
+      return state?.work.qa.status === "done" ? state : undefined;
+    });
+    assert.notEqual(done.work.qa.wait?.kind, "decision");
+    assert.ok(calls.length >= 2);
+    await running.catch(() => {});
+  }));
 
 for (const failure of ["missing", "pending", "failure", "stale", "unrelated"])
   test(`local success cannot finish with ${failure} named CI evidence`, async () =>

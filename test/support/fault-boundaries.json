@@ -57,7 +57,7 @@
     ],
     "cancel-running": ["driver.cancel #1"],
     "cancel-starting": [],
-    "stop-running": ["driver.cancel #1"]
+    "edit-running": []
   },
   "regular": {
     "mutations": [
@@ -114,6 +114,6 @@
     ],
     "cancel-running": ["driver.cancel #1"],
     "cancel-starting": [],
-    "stop-running": ["driver.cancel #1"]
+    "edit-running": []
   }
 }

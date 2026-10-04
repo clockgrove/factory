@@ -2084,9 +2084,12 @@ async function checkedPlanReview(
     });
     return { findings };
   } catch (error) {
-    // A configuration fault needs its fix before the review can be asked.
-    if (!responseReceived && attachedFault(error)?.kind === "config")
-      throw error;
+    // No response came back: a classified fault (lost response, limit,
+    // missing credentials, cancel, decision) belongs to the plan or amend
+    // step, which repeats it within its paid bound. Only a received but
+    // invalid answer, or an unclassified provider error, is a plan question.
+    const fault = responseReceived ? undefined : attachedFault(error);
+    if (fault && fault.kind !== "work" && fault.kind !== "defect") throw error;
     if (responseReceived) {
       const rejections = [{ field: "findings", reason: "invalid" }];
       for (const rejection of rejections)
@@ -2410,6 +2413,8 @@ async function compileRecoverablePlan(
         context.stopped?.() ||
         String(record.phase) === "submitted" ||
         fault?.kind === "config" ||
+        fault?.kind === "decision" ||
+        fault?.kind === "cancelled" ||
         (fault?.kind === "transient" && !answered)
       )
         throw error;
@@ -2664,6 +2669,11 @@ export async function compilePlan(
       packet = revisedPacket;
       review = revisedReview;
     } catch (error) {
+      // A lost, limited, cancelled or misconfigured call is the amend step's
+      // fault to repeat or wait on; only a failed revision is a plan question.
+      const fault = attachedFault(error);
+      if (fault && fault.kind !== "work" && fault.kind !== "defect")
+        throw error;
       if (
         error instanceof Error &&
         error.message.includes("Complete planning source packet exceeds")

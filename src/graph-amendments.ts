@@ -35,7 +35,7 @@ import type {
   WorkGraph,
   WorkItem,
 } from "./contracts.js";
-import { attachedFault, attachFault, StepFault } from "./fault.js";
+import { attachedFault, attachFault, decision, StepFault } from "./fault.js";
 import { step, type StepOptions } from "./step.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import {
@@ -382,6 +382,9 @@ function validateAmendmentReplacement(
         ].includes(rejected.rejectionStage)
       : !!rejected.graph) ||
     (rejected.rejectionStage === "review-findings" && !rejected.graph) ||
+    // A projection rejection follows a passed review: graph and digest.
+    (rejected.rejectionStage === "projection" &&
+      (!rejected.graph || rejected.reviewDigest === undefined)) ||
     // A rejection after review may have projected issues; the replacement
     // finds them again by marker.
     (rejected.rejectionStage !== "projection" &&
@@ -581,15 +584,15 @@ export function validateAmendment(
  */
 export function applyPendingAmendment(
   args: Parameters<typeof advanceAmendment>[0] &
-    Pick<StepOptions, "signal" | "clock">,
+    Pick<StepOptions, "signal" | "pause" | "clock">,
 ): Promise<boolean> {
-  const { signal, clock, ...rest } = args;
+  const { signal, pause, clock, ...rest } = args;
   return step(
     args.state,
     { scope: "objective", name: "amend", paid: true },
     (context) =>
       advanceAmendment({ ...rest, model: paidModel(args.model, context) }),
-    { save: args.save, signal, clock },
+    { save: args.save, signal, pause, clock },
   );
 }
 
@@ -663,21 +666,34 @@ async function advanceAmendment(args: {
       state.baseSha,
     );
     const sources = planningSources(args.body, state.baseSha, config.checkout);
-    const prerequisites = await planningPrerequisites(
-      config,
-      args.github,
-      state.objective,
-      state.baseSha,
-    );
+    /**
+     * Observe the predecessor evidence. A gateway fault keeps its kind; a
+     * missing, unaccepted or changed predecessor is the operator's decision,
+     * and the amendment waits at its phase (contract 2).
+     */
+    const observePrerequisites = async () => {
+      try {
+        return await planningPrerequisites(
+          config,
+          args.github,
+          state.objective,
+          state.baseSha,
+        );
+      } catch (error) {
+        if (attachedFault(error)) throw error;
+        throw new StepFault(
+          decision(
+            `Amendment predecessor evidence is unavailable: ${error instanceof Error ? error.message : String(error)}. Restore it, then factory retry --objective ${state.objective}; or factory cancel --objective ${state.objective}`,
+          ),
+          { cause: error },
+        );
+      }
+    };
+    const prerequisites = await observePrerequisites();
     const verifyPrerequisites = async () => {
       // Reobserve the original sources; retain only the activation digest,
       // never a duplicate predecessor projection.
-      const current = await planningPrerequisites(
-        config,
-        args.github,
-        state.objective,
-        state.baseSha,
-      );
+      const current = await observePrerequisites();
       const observed = current
         ? createHash("sha256").update(JSON.stringify(current)).digest("hex")
         : undefined;
@@ -685,9 +701,11 @@ async function advanceAmendment(args: {
         observed !== state.prerequisitesDigest ||
         !isDeepStrictEqual(current, prerequisites)
       )
-        throw refused(
-          new Error(
-            "Amendment native prerequisites differ from those the plan was made with",
+        // The predecessor's evidence changed: the operator decides, and the
+        // amendment waits at its phase (contract 2); nothing is refused.
+        throw new StepFault(
+          decision(
+            `Amendment native prerequisites differ from those the plan was made with. Restore the predecessor evidence, then factory retry --objective ${state.objective}; or factory cancel --objective ${state.objective}`,
           ),
         );
     };

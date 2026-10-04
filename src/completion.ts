@@ -47,7 +47,10 @@ export function assertTerminalEligibility(state: FactoryState): void {
     state.finalAcceptancePending ||
     amendmentBlocksDispatch(state) ||
     state.coordinator?.cancelError ||
-    state.coordinator?.processes?.length
+    // Sealing needs every controller subprocess stopped. After the seal, a
+    // helper the close step spawned (and a crash left recorded) is not
+    // evidence: the next run stops it and clears the record.
+    (!state.finalAcceptance && state.coordinator?.processes?.length)
   )
     throw new Error("Objective terminal eligibility is unresolved");
   for (const work of Object.values(state.work)) {
@@ -185,6 +188,7 @@ export async function closeWorkItem(
   save: () => void,
   native: boolean,
   signal?: AbortSignal,
+  pause?: AbortSignal,
 ): Promise<void> {
   const work = state.work[itemId]!;
   if (work.githubClosure === "complete") return;
@@ -242,7 +246,7 @@ export async function closeWorkItem(
         ...(state.issueAuthor ? { author: state.issueAuthor } : {}),
       });
     },
-    { save, signal },
+    { save, signal, pause },
   );
   work.githubClosure = "complete";
   delete work.error;
@@ -256,6 +260,7 @@ export async function closeObjectiveIssue(
   github: GitHubGateway,
   save: () => void,
   signal?: AbortSignal,
+  pause?: AbortSignal,
 ): Promise<void> {
   if (state.objectiveClosure === "complete") return;
   sealFinalAcceptance(state);
@@ -273,7 +278,7 @@ export async function closeObjectiveIssue(
         `Factory completed ${state.graph.items.length} Work Items; final validation passed at ${candidate.commitSha} (${candidate.basis}).`,
         { body, ...(state.issueAuthor ? { author: state.issueAuthor } : {}) },
       ),
-    { save, signal },
+    { save, signal, pause },
   );
   state.objectiveClosure = "complete";
   save();

@@ -202,10 +202,12 @@ export const VARIANTS = [
     checks: ["cancelled"],
   },
   {
-    key: "stop-running",
+    key: "edit-running",
     when: "when the Objective is edited while beta's worker runs",
-    // Independent items run together; the edit stops the run at alpha's
-    // merge, and the run's teardown observes and cancels beta's attempt.
+    // Independent items run together. The edit at alpha's PR is an
+    // Objective decision (contracts 2 and 4): the Objective waits for it, and
+    // beta's running worker is neither failed nor stopped. Beta's barrier
+    // opens only after the edit, so beta's worker spans it.
     scenario: {
       items: [workItem("alpha"), workItem("beta")],
       actions: { beta: { barrier: true } },
@@ -213,16 +215,20 @@ export const VARIANTS = [
         {
           match: `POST ${repo}/pulls`,
           kind: "after",
-          run: (fake) =>
+          run: (fake, _entry, { release }) => {
             fake.editIssueBody(
               OBJECTIVE,
               `${fake.issue(OBJECTIVE).body}\nEdited by the Objective's author.\n`,
-            ),
+            );
+            release("beta");
+          },
         },
       ],
     },
     checks: ["refusal"],
-    refuses: /Objective issue body changed; operator direction required/,
+    refuses:
+      /needs a decision: The Objective issue body changed outside Factory/,
+    untouched: ["beta"],
   },
 ];
 
@@ -459,7 +465,27 @@ export async function assertPlanCompiledOnce(result) {
  * with `refuses`, and neither the Objective nor any Work Item issue was
  * closed as completed, and none of the `unsent` endpoints was requested.
  */
-export function assertRefusal(result, { refuses, unsent = [] }) {
+export function assertRefusal(
+  result,
+  { refuses, unsent = [], untouched = [] },
+) {
+  // Items an Objective-scope stop must leave in place: never failed and
+  // their workers never stopped (contract 2).
+  for (const id of untouched) {
+    assert.deepEqual(
+      result.harness.filter(
+        (event) => event.type === "cancel" && event.item === id,
+      ),
+      [],
+      `${id}'s worker was stopped: ${result.runs.map(summarizeRun).join(" | ")}`,
+    );
+    for (const run of result.runs)
+      assert.notEqual(
+        run.work?.[id]?.status,
+        "failed",
+        `${id} failed: ${summarizeRun(run)}`,
+      );
+  }
   // Requests Factory must refuse before sending.
   for (const endpoint of unsent)
     assert.equal(result.fake.requests(endpoint).length, 0, `sent ${endpoint}`);
@@ -883,7 +909,11 @@ export async function defineMatrix(delivery, known, part = 1, parts = 2) {
         declareScenario(
           premiseName(variant),
           () => variantReferenceRun(variant, delivery),
-          { checks: variant.checks, refuses: variant.refuses },
+          {
+            checks: variant.checks,
+            refuses: variant.refuses,
+            untouched: variant.untouched,
+          },
           known,
         );
     }
@@ -900,7 +930,11 @@ export async function defineMatrix(delivery, known, part = 1, parts = 2) {
             http: [...(premise.http ?? []), ...(testCase.http ?? [])],
             inProcess: testCase.inProcess ?? [],
           }),
-        { checks: checksFor(testCase), refuses: testCase.variant?.refuses },
+        {
+          checks: checksFor(testCase),
+          refuses: testCase.variant?.refuses,
+          untouched: testCase.variant?.untouched,
+        },
         known,
       );
     }

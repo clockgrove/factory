@@ -2,7 +2,14 @@
 // GitHub HTTP fake that lives in the test process (GitHub outlives every
 // controller crash), then restarts the controller after a crash or stop.
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -152,7 +159,7 @@ async function repositorySnapshot(origin, fake, items) {
  * `times`); `inProcess` faults and the `operator` action (cancel when a
  * driver method begins for an item) apply to the first controller run only.
  * `actions` adds to an item's scripted worker action; `barrier: true` holds
- * its worker until Factory cancels it.
+ * its worker until Factory cancels it or an `after` rule releases it.
  * `beforeRun(fake, index)` may change GitHub between controller runs. With
  * `answer`, each restart first runs the `factory retry` the status names for
  * the previous stop (the run reports it as `answered`).
@@ -209,7 +216,18 @@ export async function runScenario({
       },
     });
     await fake.start();
-    for (const rule of http) fake.inject(rule);
+    // An `after` rule's run also gets `release(item)`, which opens that
+    // item's barrier, so a test can hold a worker until GitHub changed.
+    const release = (item) => {
+      mkdirSync(join(root, "barriers"), { recursive: true });
+      writeFileSync(join(root, "barriers", item), "released\n");
+    };
+    for (const rule of http)
+      fake.inject(
+        rule.run
+          ? { ...rule, run: (f, entry) => rule.run(f, entry, { release }) }
+          : rule,
+      );
     const fakeRoot = join(root, "fake");
     const descriptorPath = join(root, "descriptor.json");
     const descriptor = {

@@ -203,8 +203,10 @@ test("regular merge sends the exact expected head and verifies integrated identi
   const calls = [];
   let merged = false;
   const client = clientFor(async (url, options) => {
-    calls.push(options);
-    if (new URL(url).pathname === "/repos/a/b") return json(repository);
+    const path = new URL(url).pathname;
+    calls.push({ ...options, path });
+    if (path === "/repos/a/b") return json(repository);
+    if (path === "/repos/a/b/rules/branches/main") return json([]);
     if (options.method !== "PUT") return json(merged ? mergedPull : openPull);
     merged = true;
     return json({ merged: true, sha: integratedSha });
@@ -214,13 +216,19 @@ test("regular merge sends the exact expected head and verifies integrated identi
     await gateway.merge({ number: 4, headSha, branch: "branch" }, headSha),
     { integratedSha },
   );
-  // Look up the PR and the allowed merge method first, merge it at the
-  // exact head, then confirm it.
+  // Look up the PR, the allowed merge method and the base's rulesets first,
+  // merge it at the exact head, then confirm it.
   assert.deepEqual(
-    calls.map((call) => call.method),
-    ["GET", "GET", "PUT", "GET"],
+    calls.map((call) => `${call.method} ${call.path}`),
+    [
+      "GET /repos/a/b/pulls/4",
+      "GET /repos/a/b",
+      "GET /repos/a/b/rules/branches/main",
+      "PUT /repos/a/b/pulls/4/merge",
+      "GET /repos/a/b/pulls/4",
+    ],
   );
-  assert.deepEqual(JSON.parse(calls[2].body), {
+  assert.deepEqual(JSON.parse(calls[3].body), {
     sha: headSha,
     merge_method: "merge",
   });
@@ -228,7 +236,7 @@ test("regular merge sends the exact expected head and verifies integrated identi
     gateway.merge({ number: 4, headSha, branch: "branch" }, "other"),
     /expected head/,
   );
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 5);
   assert.ok(
     calls.every(
       (call) => call.headers["x-github-api-version"] === "2026-03-10",
@@ -454,7 +462,9 @@ test("regular merge rejects unsuccessful acknowledgement and changed current PR 
   ]) {
     const methods = [];
     const client = clientFor(async (url, options) => {
-      if (new URL(url).pathname === "/repos/a/b") return json(repository);
+      const path = new URL(url).pathname;
+      if (path === "/repos/a/b") return json(repository);
+      if (path === "/repos/a/b/rules/branches/main") return json([]);
       methods.push(options.method);
       assert.equal(options.headers["x-github-api-version"], "2026-03-10");
       if (options.method === "PUT") return json(result);

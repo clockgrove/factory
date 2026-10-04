@@ -550,7 +550,7 @@ test("an App token has no user; what it creates carries the bot login", async (t
   );
   assert.deepEqual(branch.protection.required_status_checks.contexts, ["ci"]);
   await assert.rejects(
-    client.request("GET", "user"),
+    client.viewer(),
     (error) => error instanceof GitHubRequestError && error.status === 403,
   );
   const created = await client.request("POST", "repos/example/target/issues", {

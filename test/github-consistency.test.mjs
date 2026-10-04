@@ -287,7 +287,10 @@ scenarios.push({
     },
   ],
   checks: ["refusal"],
-  refuses: /^Objective #\d+ needs a human decision/,
+  // The paid bound is a decision on the item (contract 2); test/paid-bounds
+  // answers it and drives the Objective to completion.
+  refuses:
+    /^Objective #\d+ Work Item alpha needs a decision: review failed 4 times/,
 });
 
 // Factory must refuse, not complete: the merge it observed is gone from the

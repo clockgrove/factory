@@ -701,7 +701,7 @@ for (const failure of ["missing", "pending", "failure", "stale", "unrelated"])
         const running = application.runObjective(1);
         const waiting = await until(() => {
           const state = runSnapshot(`example/qa-${failure}`);
-          return state?.work.qa.waitingReason ? state : undefined;
+          return state?.work.qa.wait?.kind === "ci" ? state : undefined;
         });
         assert.equal(waiting.work.qa.status, "running");
         assert.equal(waiting.error, undefined);
@@ -764,7 +764,7 @@ for (const delivery of ["regular", "native-stack"])
         const running = application.runObjective(1);
         const waiting = await until(() => {
           const state = runSnapshot(config.repository);
-          return state?.work.qa.waitingReason ? state : undefined;
+          return state?.work.qa.wait?.kind === "ci" ? state : undefined;
         });
         assert.equal(waiting.work.qa.status, "running");
         const attempt = waiting.work.qa.attempt;
@@ -805,7 +805,7 @@ for (const delivery of ["regular", "native-stack"])
         assert.equal(paused.work.qa.status, "running");
         assert.equal(paused.work.qa.attempt, attempt);
         assert.equal(paused.work.qa.pendingEffect, undefined);
-        assert.ok(paused.work.qa.waitingReason);
+        assert.equal(paused.work.qa.wait?.kind, "ci");
         assert.equal(paused.error, undefined);
         assert.equal(
           readEvents(planningPath).filter(

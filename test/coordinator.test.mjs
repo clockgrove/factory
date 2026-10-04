@@ -947,24 +947,32 @@ test("handoff settles an already running worker and preserves its attempt instea
         running,
         (error) => error.constructor.name === "CoordinatorHandoff",
       );
+      // A handoff stops at the next safe point after the worker settled
+      // (contract 3): delivery stops at its CI wait, not done.
       const state = readState(config.repository, 1);
       assert.equal(state.work.result.attemptId, attempt);
       assert.equal(state.cancelledAt, undefined);
       assert.equal(state.cancelRequested, undefined);
-      assert.equal(state.work.result.status, "done");
-      assert.equal(
-        readEvents(eventsPath).filter((event) => event.type === "start").length,
-        1,
-      );
-      assert.equal(
+      assert.equal(state.work.result.status, "published");
+      assert.equal(state.work.result.wait?.kind, "ci");
+      const starts = () =>
+        readEvents(eventsPath).filter((event) => event.type === "start").length;
+      const cancels = () =>
         readEvents(eventsPath).filter((event) => event.type === "cancel")
-          .length,
-        0,
-      );
+          .length;
+      assert.equal(starts(), 1);
+      assert.equal(cancels(), 0);
       assert.equal(
         existsSync(join(stateRoot(config.repository), "controller.lock")),
         false,
       );
+      await controlObjective(config, { objective: 1, action: "resume" });
+      const completed = await application.runObjective(1);
+      assert.equal(completed.finalValidation.passed, true);
+      assert.equal(completed.work.result.status, "done");
+      assert.equal(completed.work.result.attemptId, attempt);
+      assert.equal(starts(), 1);
+      assert.equal(cancels(), 0);
     },
   );
 });

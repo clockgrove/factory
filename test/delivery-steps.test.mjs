@@ -40,7 +40,12 @@ const repository = () =>
  * A gateway over scripted routes. A route answers with a function, or a list
  * of functions used in turn (the last one repeats). Returns the request log.
  */
-function gateway(routes) {
+// Read before every merge (regular and native): no ruleset forbids merge
+// commits. A scenario's own routes override it.
+const MERGE_RULES = { "GET /repos/a/b/rules/branches/main": () => json([]) };
+
+function gateway(scenario) {
+  const routes = { ...MERGE_RULES, ...scenario };
   const log = [];
   const seen = new Map();
   const fetch = async (url, init) => {

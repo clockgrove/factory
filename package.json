@@ -53,6 +53,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepare": "git config core.hooksPath .githooks || true",
     "lint": "biome lint --error-on-warnings . && node scripts/check-ts-directives.mjs",
     "format:check": "biome format . && prettier --check package-lock.json \"**/*.{md,yml,yaml}\"",
     "format": "biome format --write . && prettier --write package-lock.json \"**/*.{md,yml,yaml}\"",

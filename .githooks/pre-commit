@@ -1,0 +1,38 @@
+#!/bin/sh
+# Format and lint staged files with the same Biome commands CI runs.
+# Enabled by `npm install` (the prepare script sets core.hooksPath).
+set -e
+
+# Biome from this checkout, else from the main checkout (worktrees share it).
+biome=./node_modules/.bin/biome
+if [ ! -x "$biome" ]; then
+  common=$(git rev-parse --path-format=absolute --git-common-dir)
+  biome="$(dirname "$common")/node_modules/.bin/biome"
+fi
+if [ ! -x "$biome" ]; then
+  echo "pre-commit: Biome not found; run npm install" >&2
+  exit 1
+fi
+
+list=$(mktemp)
+trap 'rm -f "$list"' EXIT
+git diff --cached --name-only --diff-filter=ACMR -z -- '*.ts' '*.mts' '*.js' '*.mjs' '*.json' >"$list"
+[ -s "$list" ] || exit 0
+
+# Fix fully staged files in place; only check files with unstaged edits, so
+# those edits never land in the commit.
+export biome
+xargs -0 sh -c '
+  status=0
+  for f do
+    if GIT_LITERAL_PATHSPECS=1 git diff --quiet -- "$f"; then
+      "$biome" format --write --no-errors-on-unmatched "$f" >/dev/null
+      GIT_LITERAL_PATHSPECS=1 git add -- "$f"
+    elif ! "$biome" format --no-errors-on-unmatched "$f" >/dev/null 2>&1; then
+      echo "pre-commit: $f is partially staged and not formatted; run npm run format" >&2
+      status=1
+    fi
+  done
+  exit $status
+' sh <"$list"
+xargs -0 "$biome" lint --error-on-warnings --no-errors-on-unmatched <"$list"

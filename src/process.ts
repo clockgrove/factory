@@ -5,6 +5,13 @@ import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { type Fault, transient, withFault } from "./fault.js";
+import {
+  assertOrigin,
+  boundRepository,
+  isBoundRepository,
+  OriginBindingChanged,
+  remoteRepository,
+} from "./origin-binding.js";
 
 export function command(
   file: string,
@@ -75,11 +82,17 @@ export function gitFault(args: string[], error: unknown): Fault | undefined {
       detail: "Git LFS is not installed on the controller host",
       fix: "Install Git LFS, then `factory run`",
     };
+  if (error instanceof OriginBindingChanged)
+    return {
+      kind: "config",
+      detail: error.message,
+      fix: "Point origin's fetch and push URLs (and any insteadOf rewrite) at the configured GitHub repository with its default LFS route, then `factory run`",
+    };
   if (error instanceof RepositoryProgramConfigured)
     return {
       kind: "config",
       detail: error.message,
-      fix: `Remove ${error.key} from the target checkout's repository configuration (configure a trusted driver in your global git configuration instead), then \`factory run\``,
+      fix: `Remove ${error.key} from the target checkout's repository configuration (configure a trusted driver or transport setting in your global git configuration instead), then \`factory run\``,
     };
   // A stalled fetch was stopped so it does not hold the repository lock.
   if (error instanceof GitDeadlineExceeded)
@@ -317,7 +330,18 @@ const GIT_CONFIG: [string, string][] = [
  * running. Operator configuration (global or system scope) is trusted.
  */
 const REPOSITORY_PROGRAMS =
-  "^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge))$";
+  "filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge)|remote\\..+\\.vcs";
+/**
+ * Transport settings a remote command must take only from the operator:
+ * proxies, TLS verification and trust, connection resolution and extra
+ * headers decide where credentials go. A repository-scope `http.<url>.*`
+ * key would outrank any generic pin by URL specificity, so these are refused
+ * rather than overridden.
+ */
+const REPOSITORY_TRANSPORT = "http\\..+|remote\\..+\\.(proxy|proxyauthmethod)";
+/** Transfer tuning that a repository may set. */
+const HARMLESS_TRANSPORT =
+  /^http\.(.+\.)?(postbuffer|lowspeedlimit|lowspeedtime|maxrequests)$/;
 /** The filter commands `git lfs install` writes. */
 const LFS_FILTER_COMMANDS: Record<string, string[]> = {
   "filter.lfs.clean": ["git-lfs clean -- %f"],
@@ -335,17 +359,22 @@ export class RepositoryProgramConfigured extends Error {
     readonly key: string,
   ) {
     super(
-      `Repository configuration for ${directory} defines ${key}; Factory's git runs no program from repository configuration other than Git LFS`,
+      `Repository configuration for ${directory} defines ${key}; Factory's git takes programs and remote transport settings only from operator (global or system) configuration, apart from Git LFS's own filter`,
     );
   }
 }
 
-/** One `git config --show-scope --get-regexp` read: [scope, key, value]. */
+/**
+ * One `git config --show-scope --get-regexp` read as [scope, key, value].
+ * NUL-terminated records ("scope\0key\nvalue\0"), so a value containing a
+ * newline or tab stays inside its own entry. A key without a value (an
+ * implicit boolean true) has value undefined.
+ */
 function configEntries(
   directory: string,
   env: NodeJS.ProcessEnv,
   pattern: string,
-): [string, string, string][] {
+): [string, string, string | undefined][] {
   // Without the directory there is no repository configuration to read;
   // the command itself reports the missing directory.
   if (!existsSync(directory)) return [];
@@ -355,6 +384,7 @@ function configEntries(
       "-C",
       directory,
       "config",
+      "--null",
       "--show-scope",
       "--includes",
       "--get-regexp",
@@ -368,33 +398,77 @@ function configEntries(
     throw new Error(
       `git config --get-regexp failed (${result.status}): ${result.stderr}`,
     );
-  return result.stdout
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const tab = line.indexOf("\t");
-      const entry = line.slice(tab + 1);
-      const space = entry.indexOf(" ");
-      return space < 0
-        ? [line.slice(0, tab), entry, ""]
-        : [line.slice(0, tab), entry.slice(0, space), entry.slice(space + 1)];
-    });
+  const fields = result.stdout.split("\0");
+  if (fields.pop() !== "" || fields.length % 2)
+    throw new Error("git config returned malformed entries");
+  const entries: [string, string, string | undefined][] = [];
+  for (let index = 0; index < fields.length; index += 2) {
+    const entry = fields[index + 1]!;
+    const newline = entry.indexOf("\n");
+    entries.push(
+      newline < 0
+        ? [fields[index]!, entry, undefined]
+        : [fields[index]!, entry.slice(0, newline), entry.slice(newline + 1)],
+    );
+  }
+  return entries;
 }
 
+const repositoryScope = (scope: string) =>
+  scope === "local" || scope === "worktree";
+
+/** Refuse repository-scope programs, and for a remote command its transport. */
 function assertNoRepositoryPrograms(
   directory: string,
   env: NodeJS.ProcessEnv,
+  remote: boolean,
 ): void {
-  for (const [scope, key, value] of configEntries(
-    directory,
-    env,
-    REPOSITORY_PROGRAMS,
-  ))
-    if (
-      (scope === "local" || scope === "worktree") &&
-      !LFS_FILTER_COMMANDS[key]?.includes(value)
-    )
-      throw new RepositoryProgramConfigured(directory, key);
+  const pattern = `^(${REPOSITORY_PROGRAMS}${remote ? `|${REPOSITORY_TRANSPORT}` : ""})$`;
+  for (const [scope, key, value] of configEntries(directory, env, pattern)) {
+    if (!repositoryScope(scope)) continue;
+    // Git LFS's own filter: the whole value must be one git-lfs writes.
+    if (value !== undefined && LFS_FILTER_COMMANDS[key]?.includes(value))
+      continue;
+    if (HARMLESS_TRANSPORT.test(key)) continue;
+    throw new RepositoryProgramConfigured(directory, key);
+  }
+}
+
+/** Tests serve origin from local bare repositories; nothing else sets this. */
+const localOriginsForTests = () =>
+  process.env.FACTORY_TEST_LOCAL_ORIGINS === "1";
+
+/** The first argument after the subcommand that is not an option. */
+function firstOperand(args: string[]): string | undefined {
+  return args
+    .slice(subcommandIndex(args) + 1)
+    .find((arg) => !arg.startsWith("-"));
+}
+
+/**
+ * An ambient remote command talks to the bound origin: verify that origin's
+ * fetch and push URLs (after rewriting) and LFS route still serve the bound
+ * repository. A clone, which runs outside any repository, must name a bound
+ * repository's URL; only operator configuration can rewrite it.
+ */
+function assertBoundOrigin(
+  directory: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): void {
+  const repository = boundRepository(directory);
+  if (repository) {
+    assertOrigin(directory, repository, env);
+    return;
+  }
+  if (gitSubcommand(args) === "clone") {
+    const source = remoteRepository(firstOperand(args) ?? "");
+    if (source && isBoundRepository(source)) return;
+  }
+  if (localOriginsForTests()) return;
+  throw new OriginBindingChanged(
+    `git ${gitSubcommand(args)} in ${directory} does not use a bound target repository origin`,
+  );
 }
 
 /**
@@ -411,7 +485,7 @@ function withOperatorRemoteSettings(
 ): NodeJS.ProcessEnv {
   const entries: [string, string][] = [];
   let sshCommand: string | undefined;
-  for (const [scope, key, value] of configEntries(
+  for (const [scope, key, value = ""] of configEntries(
     directory,
     env,
     "^(credential\\..*helper|core\\.askpass|core\\.sshcommand)$",
@@ -456,11 +530,18 @@ function factoryGit(
     ...(pinned ? pinnedGitEnvironment() : ambientGitEnvironment()),
     ...overrides,
   };
-  if (GIT_REMOTE.has(gitSubcommand(args)))
-    env = withOperatorRemoteSettings(directory, env);
+  const remote = GIT_REMOTE.has(gitSubcommand(args));
+  if (remote) env = withOperatorRemoteSettings(directory, env);
   if (["fetch", "pull"].includes(gitSubcommand(args)))
     env = withGitConfig(env, LOCKED_NETWORK_CONFIG);
-  assertNoRepositoryPrograms(directory, env);
+  assertNoRepositoryPrograms(directory, env, remote);
+  // Ambient remote commands reach origin; pinned ones read Factory's own
+  // local repositories by path.
+  if (remote && !pinned) {
+    if (!localOriginsForTests())
+      env = withGitConfig(env, [["protocol.file.allow", "never"]]);
+    assertBoundOrigin(directory, args, env);
+  }
   return {
     args: ["-C", directory, ...withoutDiffPrograms(args)],
     env,

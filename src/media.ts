@@ -43,6 +43,7 @@ import {
   pinnedGitRaw,
   removeWorktree,
 } from "./process.js";
+import { bindOrigin, boundRepository } from "./origin-binding.js";
 import type { FactoryState } from "./state.js";
 
 const LFS_POINTER_HEADER = Buffer.from(
@@ -1060,6 +1061,10 @@ export async function verifyHydratedAssets(args: {
       remote,
       resolve(clone),
     );
+    // The fresh clone serves the checkout's repository; its later LFS pull
+    // verifies that binding like any remote command.
+    const repository = boundRepository(args.checkout);
+    if (repository) bindOrigin(clone, repository);
     phase = "lfs-setup";
     await gitAsync(clone, "lfs", "install", "--local", "--skip-repo");
     phase = "integrated-checkout";

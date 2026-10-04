@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { attachedFault } from "../dist/fault.js";
+import { bindOrigin, OriginBindingChanged } from "../dist/origin-binding.js";
 import {
   git,
   gitAsync,
@@ -248,4 +249,181 @@ test("inherited git -c configuration cannot override Factory's pins", async (t) 
     },
   );
   assert.deepEqual(ran(), []);
+});
+
+test("a configuration value cannot forge another entry or scope", async (t) => {
+  const { root, worktree, canary, ran } = fixture(t);
+  // Read line by line, this value forged a global-scope helper entry.
+  run(
+    worktree,
+    "config",
+    "credential.helper",
+    `x\nglobal\tcredential.helper ${canary("forged-helper")}`,
+  );
+  const remote = await authenticatingRemote(t);
+  await withEnvironment({ GIT_TERMINAL_PROMPT: "0" }, () =>
+    assert.rejects(gitAsync(worktree, "ls-remote", remote)),
+  );
+  run(worktree, "config", "--unset", "credential.helper");
+  // Git LFS's filter command followed by another line is not Git LFS's.
+  writeFileSync(join(worktree, ".gitattributes"), "*.bin filter=lfs\n");
+  writeFileSync(join(worktree, "model.bin"), "model\n");
+  run(
+    worktree,
+    "config",
+    "filter.lfs.clean",
+    `git-lfs clean -- %f\n${canary("forged-filter")}`,
+  );
+  await assert.rejects(pinnedGitAsync(worktree, "add", "-A"), (error) => {
+    assert.ok(error instanceof RepositoryProgramConfigured, String(error));
+    assert.equal(error.key, "filter.lfs.clean");
+    return true;
+  });
+  assert.deepEqual(ran(), []);
+  assert.equal(existsSync(join(root, "ran")), false);
+});
+
+test("remote commands refuse repository transport settings", async (t) => {
+  const { worktree, ran } = fixture(t);
+  // A proxy that would see the request (and, with TLS verification off,
+  // the credentials Git sends).
+  let proxied = 0;
+  const proxy = createServer((_, response) => {
+    proxied++;
+    response.writeHead(502);
+    response.end();
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  t.after(() => proxy.close());
+  const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
+  const remote = await authenticatingRemote(t);
+  for (const settings of [
+    [
+      ["http.proxy", proxyUrl],
+      ["http.sslVerify", "false"],
+    ],
+    // URL-specific keys outrank any generic pin, so they are refused too.
+    [[`http.${remote}/info/refs.proxy`, proxyUrl]],
+    [["remote.origin.proxy", proxyUrl]],
+    [["http.curloptResolve", "github.com:443:127.0.0.1"]],
+    [["http.extraHeader", "X-Leak: yes"]],
+  ]) {
+    for (const [key, value] of settings) run(worktree, "config", key, value);
+    for (const attempt of [
+      () => gitAsync(worktree, "ls-remote", remote),
+      () => gitAsync(worktree, "fetch", "origin", "main"),
+      () => gitAsync(worktree, "lfs", "push", "origin", "HEAD"),
+    ])
+      await assert.rejects(attempt(), (error) => {
+        assert.ok(error instanceof RepositoryProgramConfigured, String(error));
+        assert.equal(attachedFault(error)?.kind, "config");
+        return true;
+      });
+    for (const [key] of settings) run(worktree, "config", "--unset", key);
+  }
+  assert.equal(proxied, 0);
+  // Transfer tuning is allowed, and local commands ignore transport keys.
+  run(worktree, "config", "http.postBuffer", "524288000");
+  await gitAsync(worktree, "fetch", "origin", "main");
+  run(worktree, "config", "http.proxy", proxyUrl);
+  await gitAsync(worktree, "status");
+  assert.deepEqual(ran(), []);
+});
+
+/** A checkout whose origin is bound to a GitHub repository. */
+function boundFixture(t) {
+  const fixed = fixture(t);
+  run(
+    fixed.checkout,
+    "remote",
+    "set-url",
+    "origin",
+    "https://github.com/example/target.git",
+  );
+  bindOrigin(fixed.checkout, "example/target");
+  return fixed;
+}
+
+test("remote commands verify origin's binding every time", async (t) => {
+  const { root, checkout, worktree } = boundFixture(t);
+  const verified = () => gitAsync(worktree, "ls-remote", "--get-url", "origin");
+  assert.equal(await verified(), "https://github.com/example/target.git");
+  for (const [key, value] of [
+    ["remote.origin.url", "https://github.com/attacker/target.git"],
+    ["remote.origin.pushurl", "https://github.com/attacker/target.git"],
+    [
+      "url.https://github.com/attacker/target.git.insteadOf",
+      "https://github.com/example/target.git",
+    ],
+    [
+      "url.https://github.com/attacker/target.git.pushInsteadOf",
+      "https://github.com/example/target.git",
+    ],
+    ["lfs.url", "https://lfs.attacker.invalid/target"],
+  ]) {
+    const original = spawnSync(
+      "git",
+      ["-C", checkout, "config", "--get", key],
+      {
+        encoding: "utf8",
+      },
+    ).stdout.trim();
+    run(worktree, "config", key, value);
+    for (const attempt of [
+      verified,
+      () => gitAsync(worktree, "push", "origin", "HEAD:refs/heads/x"),
+      () => gitAsync(worktree, "lfs", "push", "origin", "HEAD"),
+    ])
+      await assert.rejects(attempt(), (error) => {
+        assert.ok(error instanceof OriginBindingChanged, `${key}: ${error}`);
+        assert.equal(attachedFault(error)?.kind, "config");
+        return true;
+      });
+    if (original) run(worktree, "config", key, original);
+    else run(worktree, "config", "--unset", key);
+  }
+  assert.equal(await verified(), "https://github.com/example/target.git");
+  // A clone must name a bound repository.
+  await assert.rejects(
+    withEnvironment({ FACTORY_TEST_LOCAL_ORIGINS: "0" }, () =>
+      gitAsync(
+        root,
+        "clone",
+        "https://github.com/attacker/target.git",
+        join(root, "clone"),
+      ),
+    ),
+    OriginBindingChanged,
+  );
+});
+
+test("without the test override, origin must be bound and file transport is refused", async (t) => {
+  const { root, checkout } = fixture(t);
+  await withEnvironment({ FACTORY_TEST_LOCAL_ORIGINS: "0" }, async () => {
+    // A local bare origin is not a bound GitHub repository.
+    await assert.rejects(
+      gitAsync(checkout, "fetch", "origin", "main"),
+      OriginBindingChanged,
+    );
+    // An operator rewrite of a bound URL to a local path reaches the
+    // transport, which refuses file://.
+    const bound = boundFixture(t);
+    const operator = join(root, "operator-gitconfig");
+    writeFileSync(
+      operator,
+      `[url "${join(root, "origin.git")}"]\n\tinsteadOf = https://github.com/example/target.git\n`,
+    );
+    await withEnvironment({ GIT_CONFIG_GLOBAL: operator }, () =>
+      assert.rejects(
+        gitAsync(
+          bound.root,
+          "clone",
+          "https://github.com/example/target.git",
+          join(bound.root, "clone"),
+        ),
+        /transport 'file' not allowed/,
+      ),
+    );
+  });
 });

@@ -6,6 +6,11 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import {
+  bindOrigin,
+  originRepositories,
+  validateLfsRouting,
+} from "./origin-binding.js";
 import { type AutonomyConfig, resolveAutonomy } from "./repair-policy.js";
 
 export type CodexReasoningEffort =
@@ -390,132 +395,6 @@ function assertUniqueStrings(value: unknown, name: string): string[] {
   return value as string[];
 }
 
-/** Parse only supported GitHub clone URLs; never return credentials or raw URLs. */
-function remoteRepository(remote: string): string | undefined {
-  const scp =
-    /^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(
-      remote,
-    );
-  if (scp) return `${scp[1]}/${scp[2]}`.toLowerCase();
-  try {
-    const url = new URL(remote);
-    const https =
-      url.protocol === "https:" && url.hostname === "github.com" && !url.port;
-    const ssh =
-      url.protocol === "ssh:" &&
-      url.username === "git" &&
-      !url.password &&
-      ((url.hostname === "github.com" && (!url.port || url.port === "22")) ||
-        (url.hostname === "ssh.github.com" && url.port === "443"));
-    if ((!https && !ssh) || url.search || url.hash) return undefined;
-    const path = /^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(
-      url.pathname,
-    );
-    return path ? `${path[1]}/${path[2]}`.toLowerCase() : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function originRepositories(checkout: string, push: boolean): string[] {
-  const direction = push ? "push" : "fetch";
-  let output: string;
-  try {
-    output = execFileSync(
-      "git",
-      [
-        "-C",
-        checkout,
-        "remote",
-        "get-url",
-        ...(push ? ["--push"] : []),
-        "--all",
-        "origin",
-      ],
-      {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    ).trim();
-  } catch {
-    throw new Error(
-      `Cannot resolve origin ${direction} URLs; configure origin for the target GitHub repository`,
-    );
-  }
-  const repositories = output.split("\n").map(remoteRepository);
-  if (repositories.some((repository) => !repository))
-    throw new Error(
-      `Origin ${direction} URL is not a supported GitHub repository URL; use the target repository's HTTPS or SSH clone URL`,
-    );
-  return repositories as string[];
-}
-
-/** Custom LFS routing cannot be proven from Git clone URLs; keep the default origin route. */
-function validateLfsRouting(checkout: string): void {
-  const keys =
-    "^(lfs\\.(url|pushurl|remote\\.(autodetect|searchall)|standalonetransferagent|customtransfer\\..*|transfer\\.enablehrefrewrite)|remote\\.(lfsdefault|lfspushdefault|.+\\.(lfsurl|lfspushurl)))$";
-  const check = (source: string[]) => {
-    let output: string;
-    try {
-      output = execFileSync(
-        "git",
-        [
-          "-C",
-          checkout,
-          "config",
-          "--includes",
-          ...source,
-          "--null",
-          "--get-regexp",
-          keys,
-        ],
-        {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
-    } catch (error) {
-      if ((error as { status?: number }).status === 1) return;
-      throw new Error(
-        "Cannot inspect LFS routing configuration; repair Git/.lfsconfig settings before using Factory",
-      );
-    }
-    for (const entry of output.split("\0").filter(Boolean)) {
-      const newline = entry.indexOf("\n");
-      const key = (newline < 0 ? entry : entry.slice(0, newline)).toLowerCase();
-      const value = newline < 0 ? undefined : entry.slice(newline + 1).trim();
-      if (value === "") continue;
-      if (
-        /^lfs\.(remote\.(autodetect|searchall)|transfer\.enablehrefrewrite)$/.test(
-          key,
-        ) &&
-        value !== undefined &&
-        /^(false|no|off|0)$/i.test(value)
-      )
-        continue;
-      if (/^remote\.lfs(push)?default$/.test(key) && value === "origin")
-        continue;
-      throw new Error(
-        "Custom LFS routing is unsupported for target binding; remove LFS URL, alternate-remote, rewrite, or custom-transfer settings and use origin's default GitHub LFS endpoint",
-      );
-    }
-  };
-  check([]);
-  // A fresh clone can use committed settings even when the working file overrides them.
-  const file = join(checkout, ".lfsconfig");
-  if (existsSync(file)) check(["--file", file]);
-  for (const blob of [":.lfsconfig", "HEAD:.lfsconfig"]) {
-    try {
-      execFileSync("git", ["-C", checkout, "cat-file", "-e", blob], {
-        stdio: "ignore",
-      });
-    } catch {
-      continue;
-    }
-    check(["--blob", blob]);
-  }
-}
-
 /** Factory's git wrapper needs `rev-parse --path-format` and GIT_CONFIG_COUNT (Git 2.31). */
 export function assertSupportedGit(): void {
   let output: string;
@@ -576,6 +455,8 @@ export function validateTarget(repository: string, checkout: string): void {
     }
   }
   validateLfsRouting(root);
+  // Factory's remote git commands re-verify this binding every time.
+  bindOrigin(root, repo);
 }
 
 /** Validate declared scheduling reservations; also used for the copy stored in state. */

@@ -619,6 +619,11 @@ export interface DeliveryObservation {
   /** Names of completed check runs that failed on this exact head. */
   failedChecks?: string[];
   /**
+   * Check names the repository's rulesets or branch protection require on
+   * the base branch; read only when a check failed.
+   */
+  requiredChecks?: string[];
+  /**
    * Authenticated target protection readiness; absent only on custom
    * gateways. `ready` includes failing checks the repository does not
    * require; `conflict`: the head conflicts with the base; `draft`: someone

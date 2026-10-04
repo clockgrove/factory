@@ -398,3 +398,75 @@ test("a postcondition that does not hold is lag for GitHub's lag window, then it
   assert.equal(kind(start + 300_000), "transient");
   restore();
 });
+
+test("a failed check the repository's rules or branch protection require is work; an optional one never gates", async () => {
+  const observe = async ({ rules = [], protection }) => {
+    const { gateway: g } = gateway({
+      "GET /repos/a/b/pulls/5": () => json(pull()),
+      [`GET /repos/a/b/commits/${head}/check-runs`]: () =>
+        json({
+          total_count: 2,
+          check_runs: ["quality", "lint"].map((name, index) => ({
+            id: 10 + index,
+            name,
+            head_sha: head,
+            status: "completed",
+            conclusion: "failure",
+            html_url: `https://example.test/${name}`,
+          })),
+        }),
+      [`GET /repos/a/b/commits/${head}/status`]: () =>
+        json({ state: "success", total_count: 0 }),
+      "POST /graphql": () =>
+        json({
+          data: {
+            repository: {
+              pullRequest: {
+                number: 5,
+                headRefOid: head,
+                headRefName: "factory/one",
+                baseRefName: "main",
+                mergeStateStatus: "UNSTABLE",
+              },
+            },
+          },
+        }),
+      "GET /repos/a/b/rules/branches/main": () =>
+        json(
+          rules.length
+            ? [
+                {
+                  type: "required_status_checks",
+                  parameters: {
+                    required_status_checks: rules.map((context) => ({
+                      context,
+                    })),
+                  },
+                },
+              ]
+            : [],
+        ),
+      "GET /repos/a/b/branches/main/protection/required_status_checks": () =>
+        protection
+          ? json({ contexts: protection, checks: [] })
+          : json({ message: "Branch not protected" }, 404),
+    });
+    return g.observe({ number: 5, branch: "factory/one", headSha: head });
+  };
+  const kind = (observation) => {
+    try {
+      deliveryReadiness(5, observation, [], head);
+    } catch (error) {
+      return faultOf(error).kind;
+    }
+    return "ready";
+  };
+  // Neither failing check is required: GitHub may merge.
+  assert.equal(kind(await observe({})), "ready");
+  const ruled = await observe({ rules: ["quality"] });
+  assert.deepEqual(ruled.requiredChecks, ["quality"]);
+  assert.equal(kind(ruled), "work");
+  const protectedBranch = await observe({ protection: ["quality"] });
+  assert.deepEqual(protectedBranch.requiredChecks, ["quality"]);
+  assert.equal(kind(protectedBranch), "work");
+});

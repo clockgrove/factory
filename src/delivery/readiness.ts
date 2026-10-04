@@ -53,11 +53,11 @@ export function assertPreIntegrationCheckSources(
 
 /**
  * Whether a published PR may merge. Returns undefined when it may (or has
- * already merged), or what it is waiting for. Only required checks gate:
- * a failed source-required check or a conflict with the base is `work` on
- * the published result; GitHub's protection readiness covers the checks
- * the repository requires, and checks it does not require never block. A
- * PR made a draft, or closed without merging, is a decision.
+ * already merged), or what it is waiting for. Only required checks gate: a
+ * failed check the source or the repository's rules require, or a conflict
+ * with the base, is `work` on the published result; checks the repository
+ * does not require never block. A PR made a draft, or closed without
+ * merging, is a decision.
  */
 export function deliveryReadiness(
   pullRequest: number,
@@ -79,9 +79,10 @@ export function deliveryReadiness(
       ),
     );
   settled(`closed:${pullRequest}:${expectedHead}`);
-  const failed = requiredChecks.filter((name) =>
-    observation.failedChecks?.includes(name),
-  );
+  // Source-required checks, and those the repository's rules require.
+  const failed = [
+    ...new Set([...requiredChecks, ...(observation.requiredChecks ?? [])]),
+  ].filter((name) => observation.failedChecks?.includes(name));
   if (failed.length)
     throw work(
       `Required checks failed on PR #${pullRequest} at ${expectedHead}: ${failed.join(", ")}`,

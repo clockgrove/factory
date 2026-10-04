@@ -14,7 +14,7 @@ import type {
 } from "./contracts.js";
 import { notYet as lagged, settled } from "./delivery/lag.js";
 import type { NativeStackDelivery } from "./delivery/native-stack.js";
-import { attachFault, decision, transient } from "./fault.js";
+import { attachedFault, attachFault, decision, transient } from "./fault.js";
 import {
   classifiedGitHubCall,
   type GitHubClient,
@@ -835,6 +835,57 @@ export class RealGitHubGateway implements GitHubGateway {
     settled(key);
   }
 
+  /**
+   * The check names the repository requires on `branch`: its rulesets
+   * (readable with read access) and its classic branch protection, when the
+   * login may read it.
+   */
+  private async requiredChecks(branch: string): Promise<string[]> {
+    type Rule = {
+      type?: string;
+      parameters?: { required_status_checks?: { context?: string }[] };
+    };
+    const rules = await this.pages<Rule>(
+      `rules/branches/${encodeURIComponent(branch)}`,
+    );
+    const names = rules.flatMap((rule) =>
+      rule.type === "required_status_checks"
+        ? (rule.parameters?.required_status_checks ?? []).flatMap((check) =>
+            typeof check.context === "string" ? [check.context] : [],
+          )
+        : [],
+    );
+    let classic: { contexts?: string[]; checks?: { context?: string }[] } = {};
+    try {
+      classic = await this.client.request(
+        "GET",
+        this.route(
+          `branches/${encodeURIComponent(branch)}/protection/required_status_checks`,
+        ),
+      );
+    } catch (error) {
+      // Unprotected (404), or protection the login may not read (403); a
+      // rate limit is still a rate limit.
+      if (
+        !(
+          error instanceof GitHubRequestError &&
+          [403, 404].includes(error.status) &&
+          attachedFault(error)?.kind !== "transient"
+        )
+      )
+        throw error;
+    }
+    return [
+      ...new Set([
+        ...names,
+        ...(classic.contexts ?? []),
+        ...(classic.checks ?? []).flatMap((check) =>
+          typeof check.context === "string" ? [check.context] : [],
+        ),
+      ]),
+    ];
+  }
+
   async observe(
     identity: PullRequestIdentity,
   ): Promise<PullRequestObservation> {
@@ -978,9 +1029,15 @@ export class RealGitHubGateway implements GitHubGateway {
           throw new Error("GitHub PR readiness status is unsupported");
       }
     }
+    // Which checks the repository requires matters only once one failed.
+    const requiredChecks =
+      failedChecks.length && !detail.merged && detail.state !== "closed"
+        ? await this.requiredChecks(detail.base.ref)
+        : [];
     return {
       namedChecks,
       ...(failedChecks.length ? { failedChecks } : {}),
+      ...(requiredChecks.length ? { requiredChecks } : {}),
       ...(mergeReadiness ? { mergeReadiness } : {}),
       ...(!detail.merged && detail.state === "closed" && detail.closed_at
         ? { closedAt: detail.closed_at }

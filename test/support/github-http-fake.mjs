@@ -77,6 +77,12 @@ const ROUTES = [
   ["GET", "/pulls/:number/merge-async/:uuid", "mergeAsyncStatus"],
   ["GET", "/commits/:sha/check-runs", "checkRuns"],
   ["GET", "/commits/:sha/status", "combinedStatus"],
+  ["GET", "/rules/branches/:branch", "branchRules"],
+  [
+    "GET",
+    "/branches/:branch/protection/required_status_checks",
+    "requiredStatusChecks",
+  ],
   ["GET", "/stacks", "listStacks"],
   ["POST", "/stacks", "createStack"],
 ].map(([method, pattern, handler]) => ({
@@ -222,6 +228,10 @@ export class GitHubHttpFake {
    *   of the `read` endpoint still see the state before that write
    * @param {(sha: string) => object[]} [options.checkRuns]
    * @param {(sha: string) => object} [options.statuses]
+   * @param {(branch: string) => string[]} [options.rulesetChecks] checks a
+   *   ruleset requires on a branch (none by default)
+   * @param {(branch: string) => string[] | undefined} [options.protectionChecks]
+   *   checks classic branch protection requires (unprotected by default)
    * @param {number} [options.readinessUnknownReads] readiness reads per PR
    *   that report UNKNOWN before GitHub computes mergeability
    * @param {number} [options.asyncMergePolls] merge-async status polls before
@@ -1485,6 +1495,48 @@ export class GitHubHttpFake {
       status: 200,
       data: { total_count: runs.length, check_runs: page.data },
       headers: page.headers,
+    };
+  }
+
+  /** Active rules for a branch: required status checks from rulesets. */
+  branchRules(s, { params, query }) {
+    const branch = decodeURIComponent(params.branch);
+    const checks = this.options.rulesetChecks?.(branch) ?? [];
+    const rules = checks.length
+      ? [
+          {
+            type: "required_status_checks",
+            ruleset_source_type: "Repository",
+            ruleset_source: this.repository,
+            ruleset_id: 1,
+            parameters: {
+              strict_required_status_checks_policy: false,
+              required_status_checks: checks.map((context) => ({ context })),
+            },
+          },
+        ]
+      : [];
+    const page = this.page(
+      query,
+      rules,
+      `/repos/${this.repository}/rules/branches/${params.branch}`,
+    );
+    return { status: 200, data: page.data, headers: page.headers };
+  }
+
+  /** Classic protection's required status checks; 404 when unprotected. */
+  requiredStatusChecks(s, { params }) {
+    const branch = decodeURIComponent(params.branch);
+    const checks = this.options.protectionChecks?.(branch);
+    if (!checks) throw new HttpError(404, "Branch not protected");
+    return {
+      status: 200,
+      data: {
+        url: `${API}/repos/${this.repository}/branches/${params.branch}/protection/required_status_checks`,
+        strict: false,
+        contexts: checks,
+        checks: checks.map((context) => ({ context, app_id: null })),
+      },
     };
   }
 

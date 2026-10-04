@@ -12,12 +12,14 @@ import {
   resolveCapacity,
   validateConfig,
 } from "../dist/config.js";
+import { capacityView } from "../dist/diagnostics.js";
 import { defaultAutonomy, resolveAutonomy } from "../dist/index.js";
 import {
   bindTarget,
   createTarget,
   factoryConfig,
 } from "./support/integration-fixture.mjs";
+import { renderStatusText, summarizeStatus } from "../dist/status-summary.js";
 
 const GiB = 1024 ** 3;
 const light = { cpu: 0.5, memoryMiB: 512 };
@@ -265,4 +267,106 @@ test("live capacity takes the smaller of stored and current host values only whe
     os.totalmem = memory;
     syncBuiltinESMExports();
   }
+});
+
+test("omitted concurrency sizes a 24-thread/45 GB host and a 4-core/16 GB runner from injected host facts", () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-host-injected-"));
+  try {
+    const target = createTarget(root);
+    const { execution, ...rest } = factoryConfig(
+      target.checkout,
+      "example/host-injected",
+    );
+    const { concurrency: _explicit, ...sizedExecution } = execution;
+    const sized = validateConfig({ ...rest, execution: sizedExecution });
+    const big = { cpus: 24, memoryBytes: 45 * GiB };
+    const runner = { cpus: 4, memoryBytes: 16 * GiB };
+    assert.deepEqual(resolveCapacity(sized, big), {
+      concurrency: 11,
+      scheduling: hostSchedulingDefaults(big).scheduling,
+      hostSized: { concurrency: true, scheduling: true },
+    });
+    const small = resolveCapacity(sized, runner);
+    assert.equal(small.concurrency, 1);
+    assert.deepEqual(small.scheduling, {
+      cpu: 2,
+      memoryMiB: 12288,
+      reviewConcurrency: 2,
+      validationConcurrency: 1,
+      phases: {
+        coding: { cpu: 2, memoryMiB: 2048 },
+        validation: { cpu: 2, memoryMiB: 4096 },
+        review: light,
+        delivery: light,
+      },
+    });
+    // The explicit override wins on either host.
+    const explicit = validateConfig({
+      ...rest,
+      execution: { ...sizedExecution, concurrency: 3 },
+    });
+    assert.deepEqual(resolveCapacity(explicit, big), { concurrency: 3 });
+    assert.deepEqual(resolveCapacity(explicit, runner), { concurrency: 3 });
+    // A capacity stored on the big host shrinks to the runner without oversubscribing it.
+    const stored = resolveCapacity(sized, big);
+    assert.deepEqual(liveCapacity(stored, runner), {
+      concurrency: 1,
+      scheduling: small.scheduling,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("status shows the sizing in use and whether the host or the configuration chose it", () => {
+  const big = { cpus: 24, memoryBytes: 45 * GiB };
+  const runner = { cpus: 4, memoryBytes: 16 * GiB };
+  const hostSized = {
+    concurrency: 11,
+    scheduling: hostSchedulingDefaults(big).scheduling,
+    hostSized: { concurrency: true, scheduling: true },
+  };
+  const view = capacityView(hostSized, big);
+  assert.deepEqual(view, {
+    concurrency: 11,
+    concurrencySource: "host",
+    schedulingSource: "host",
+    scheduling: hostSchedulingDefaults(big).scheduling,
+  });
+  // The stored big-host sizing is shown as clamped by the runner that now schedules it.
+  const clamped = capacityView(hostSized, runner);
+  assert.equal(clamped.concurrency, 1);
+  assert.equal(clamped.scheduling.validationConcurrency, 1);
+  assert.equal(clamped.scheduling.reviewConcurrency, 2);
+  assert.deepEqual(capacityView({ concurrency: 3 }, runner), {
+    concurrency: 3,
+    concurrencySource: "config",
+    schedulingSource: null,
+    scheduling: null,
+  });
+  const base = {
+    objective: 7,
+    state: "active",
+    runActive: true,
+    coordinator: { mode: "running", phase: "active" },
+    pendingAmendment: null,
+    repairs: {},
+    finalValidation: false,
+    finalAcceptancePending: null,
+    objectiveClosure: null,
+    lastError: null,
+    work: [],
+  };
+  const text = (capacity) =>
+    renderStatusText({ ...base, capacity, ...summarizeStatus(base) });
+  assert.ok(
+    text(view).includes(
+      "Capacity: 11 coding workers (sized from host), validation 5, review 22, cpu 22, memory 41984 MiB; phase reservations sized from host",
+    ),
+  );
+  assert.ok(
+    text(capacityView({ concurrency: 3 }, runner)).includes(
+      "Capacity: 3 coding workers (configured)",
+    ),
+  );
 });

@@ -1,15 +1,13 @@
 import { assertIntegrated, laterIntegration } from "./integration.js";
 import { deliveryReadiness } from "./readiness.js";
 import { workerContext } from "../execution/checkpoint.js";
+import { recordWorkFailure, diagnoseWorkRepair } from "../work-repair.js";
 import {
-  recordWorkFailure,
-  diagnoseWorkRepair,
-  repeatInterrupted,
-} from "../work-repair.js";
-import {
+  cancelledFault,
   executeItem,
-  operatorWait,
+  ItemPaused,
   reviewItem,
+  staysInPlace,
   validateItem,
 } from "../item-steps.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
@@ -37,7 +35,7 @@ import {
   selectedInputsForItem,
   validationLfsMembersForItem,
 } from "../media.js";
-import { faultOf, StepFault } from "../fault.js";
+import { faultOf } from "../fault.js";
 import { earlierHeads } from "../repair-policy.js";
 import { currentProcessSignal } from "../process.js";
 import { preflightItemEnvironment, runQaItem } from "../qa-execution.js";
@@ -71,6 +69,8 @@ export async function runNativeGraph(args: {
   amendmentPending?: () => boolean;
   reconcile?: () => Promise<void>;
   diagnostics?: DiagnosticEmitter;
+  /** The Objective run's cancel signal, passed to every step. */
+  signal?: AbortSignal;
 }): Promise<void> {
   const {
     config,
@@ -86,6 +86,20 @@ export async function runNativeGraph(args: {
   } = args;
   const phases = phaseAdmission(state, save, args.cancelled);
   const branchFor = (id: string) => `factory/objective-${objective}/${id}`;
+  const signal = args.signal ?? currentProcessSignal();
+  /** The operator cancelled the Objective. */
+  const stopped = () => Boolean(signal?.aborted || args.cancelled());
+  /** Faults the Objective's re-observation raised: the Objective's, not an item's. */
+  const objectiveFaults = new WeakSet<object>();
+  const reconcile = async (): Promise<void> => {
+    try {
+      await args.reconcile?.();
+    } catch (error) {
+      if (error !== null && typeof error === "object")
+        objectiveFaults.add(error);
+      throw error;
+    }
+  };
   /** What a diagnostics span records for one try of a delivery step. */
   interface Span<T> {
     itemId?: string;
@@ -121,7 +135,7 @@ export async function runNativeGraph(args: {
               span.summarize,
             )
           : fn(context),
-      { save, signal: currentProcessSignal() },
+      { save, signal },
     );
   /** A unit's CI wait, stack and merge steps belong to its top item. */
   const unitStep = <T>(
@@ -130,15 +144,28 @@ export async function runNativeGraph(args: {
     fn: (context: StepContext) => Promise<T>,
     span?: Span<T>,
   ): Promise<T> => itemStep(unit.items.at(-1)!.id, name, fn, span);
-  /**
-   * A delivery step that stopped without failing the attempt: it waits for
-   * the operator (a decision or a configuration fix; `factory retry` or the
-   * next run repeats it), or it was cancelled, or the owner paused while it
-   * waited for CI. The item keeps its place.
-   */
-  const stopped = (error: unknown): boolean => {
-    const { kind } = faultOf(error);
-    return ["decision", "config", "cancelled"].includes(kind);
+  /** Diagnose a failed item's wrong result within its repair allowances. */
+  const diagnose = async (item: WorkItem): Promise<void> => {
+    phases.release(item.id);
+    save();
+    await phases.reserve(item.id, "review");
+    try {
+      await diagnoseWorkRepair({
+        state,
+        item,
+        model: args.planningModel,
+        diagnostics: args.diagnostics,
+        sources: planningSources(
+          args.objectiveBody,
+          state.baseSha,
+          config.checkout,
+        ),
+        save,
+        stopped: () => stopped() || Boolean(args.paused?.()),
+      });
+    } finally {
+      phases.release(item.id);
+    }
   };
   const units = linearDeliveryUnits(state.graph);
   let preparationFailure: unknown;
@@ -168,6 +195,7 @@ export async function runNativeGraph(args: {
       item,
       driver,
       save,
+      signal,
       cancelled: args.cancelled,
       diagnostics: args.diagnostics,
       request: (attemptId) => ({
@@ -201,7 +229,7 @@ export async function runNativeGraph(args: {
         },
         detail: JSON.stringify(result.collection),
       });
-    if (args.cancelled()) throw new Error("Objective cancelled");
+    if (stopped()) throw cancelledFault();
     // The collected result is recorded once, with the handle that held it.
     recordWorkerDiscovery(state, item.id, result.discovery);
     work.changeRef = result.changeRef;
@@ -288,7 +316,7 @@ export async function runNativeGraph(args: {
     }
     if (prepared.length) {
       await args.reconcile?.();
-      if (args.cancelled()) throw new Error("Objective cancelled");
+      if (stopped()) throw cancelledFault();
       if (args.paused?.() || args.amendmentPending?.()) return;
       const tasks = prepared.map(async (unit) => {
         const item = unit.items[0]!;
@@ -311,6 +339,15 @@ export async function runNativeGraph(args: {
           work.step = "validate";
           save();
         } catch (error) {
+          // Step rule 7: a decision or a configuration fix waits on this
+          // item only, cancel stops it quietly; it keeps its place.
+          if (staysInPlace(error)) {
+            if (error instanceof AuthenticationRequiredError)
+              work.authentication = error.authentication;
+            if (!work.execution) phases.release(item.id);
+            save();
+            return;
+          }
           work.status = "failed";
           work.error = error instanceof Error ? error.message : String(error);
           if (
@@ -321,31 +358,11 @@ export async function runNativeGraph(args: {
           else delete work.authentication;
           if (work.step === "execute") await stopWorker(item);
           const isolated = recordWorkFailure(state, item.id, error);
-          if (isolated && !args.cancelled()) {
-            phases.release(item.id);
-            save();
-            await phases.reserve(item.id, "review");
-            try {
-              await diagnoseWorkRepair({
-                state,
-                item,
-                model: args.planningModel,
-                diagnostics: args.diagnostics,
-                sources: planningSources(
-                  args.objectiveBody,
-                  state.baseSha,
-                  config.checkout,
-                ),
-                save,
-                stopped: () => args.cancelled() || Boolean(args.paused?.()),
-              });
-            } finally {
-              phases.release(item.id);
-            }
+          if (isolated && !stopped()) {
+            await diagnose(item);
             return;
           }
           save();
-          if (operatorWait(error)) return;
           throw error;
         }
       });
@@ -459,7 +476,7 @@ export async function runNativeGraph(args: {
         if (args.paused?.() || args.amendmentPending?.())
           return settlePrepared();
       }
-      if (args.paused?.() && state.work[item.id]?.waitingReason)
+      if (args.paused?.() && state.work[item.id]?.wait?.kind === "ci")
         return settlePrepared();
       await runQaItem({
         config,
@@ -480,7 +497,7 @@ export async function runNativeGraph(args: {
       continue;
     }
     for (const [index, item] of unit.items.entries()) {
-      if (args.cancelled()) throw new Error("Objective cancelled");
+      if (stopped()) throw cancelledFault();
       const work = state.work[item.id]!;
       if (work.status === "published") continue;
       if (state.work[item.id]?.status === "waiting") return settlePrepared();
@@ -498,7 +515,7 @@ export async function runNativeGraph(args: {
         const available = await driver.availableSlots();
         if (phases.availableSlots(available) <= 0) return settlePrepared();
         await args.reconcile?.();
-        if (args.cancelled()) throw new Error("Objective cancelled");
+        if (stopped()) throw cancelledFault();
         if (args.paused?.()) return settlePrepared();
         work.status = "running";
         work.step = "execute";
@@ -520,7 +537,8 @@ export async function runNativeGraph(args: {
         throw new Error(
           `Work Item ${item.id} has ambiguous active state; operator direction required`,
         );
-      // Set when a delivery step waits for the operator.
+      // Set when the item stays in place: it waits for the operator, or it
+      // was cancelled or paused.
       let waiting = false;
       const perform = async (): Promise<void> => {
         if (work.step === "approve-asset") {
@@ -726,148 +744,93 @@ export async function runNativeGraph(args: {
           }
           work.validation = reviewed.evidence;
           delete work.acceptancePending;
-          if (args.cancelled()) throw new Error("Objective cancelled");
+          if (stopped()) throw cancelledFault();
         }
-<<<<<<< HEAD
-=======
-        // Publication still repeats interruptions (bounded) until the
-        // delivery steps move to `step`.
-        await repeatInterrupted(work, save, publishLayer);
-      };
-      const publishLayer = async (): Promise<void> => {
-        await phases.reserve(item.id, "delivery");
->>>>>>> origin/claude/phase-a-3-items
         work.step = "deliver";
         save();
       };
-      // Publication repeats itself: it runs outside the interruption repeat.
       const publishLayer = async (): Promise<void> => {
         if (work.status !== "running" || work.step !== "deliver") return;
         await phases.reserve(item.id, "delivery");
-        let published: DeliveryResult;
-        try {
-          // A decision the Objective asks here waits on the Objective.
-          await args.reconcile?.();
-          published = await itemStep(
-            item.id,
-            "publish",
-            async () =>
-              delivery.publish({
-                item,
-                baseSha: itemBase,
-                treeSha: work.treeSha!,
-                changeRef: work.changeRef!,
-                branch: branchFor(item.id),
-                lfs: Boolean(work.selectedAssetSet),
-                earlierHeads: earlierHeads(work),
-                baseBranch: previous
-                  ? branchFor(unit.items[index - 1]!.id)
-                  : await github.defaultBranch(),
-              }),
-            {
-              itemId: item.id,
-              operation: "github-publication",
-              metadata: {
-                baseSha: itemBase,
-                treeSha: work.treeSha!,
-                headSha: work.changeRef!,
-              },
-              summarize: (result) => ({ pullRequest: result.pullRequest }),
+        // A decision the Objective asks here waits on the Objective.
+        await reconcile();
+        const published: DeliveryResult = await itemStep(
+          item.id,
+          "publish",
+          async () =>
+            delivery.publish({
+              item,
+              baseSha: itemBase,
+              treeSha: work.treeSha!,
+              changeRef: work.changeRef!,
+              branch: branchFor(item.id),
+              lfs: Boolean(work.selectedAssetSet),
+              earlierHeads: earlierHeads(work),
+              baseBranch: previous
+                ? branchFor(unit.items[index - 1]!.id)
+                : await github.defaultBranch(),
+            }),
+          {
+            itemId: item.id,
+            operation: "github-publication",
+            metadata: {
+              baseSha: itemBase,
+              treeSha: work.treeSha!,
+              headSha: work.changeRef!,
             },
-          );
-        } catch (error) {
-          if (!stopped(error)) throw error;
-          waiting = true;
-          phases.release(item.id);
-          save();
-          return;
-        }
+            summarize: (result) => ({ pullRequest: result.pullRequest }),
+          },
+        );
         work.pullRequest = published.pullRequest;
         phases.release(item.id);
         work.status = "published";
         delete work.step;
         save();
       };
-<<<<<<< HEAD
-      const task = repeatInterrupted(work, save, perform)
+      const task = perform()
         .then(publishLayer)
         .catch(async (error: unknown) => {
-          if (error instanceof AcceptanceDecisionRequired) {
-            phases.release(item.id);
-            work.status = "waiting";
-            work.step = "approve-result";
-            work.acceptancePending = error.pending;
-            if (!args.cancelled() && !args.paused?.())
-              prepareEvidenceRecovery(state, item.id);
+          // The Objective's own fault leaves the item where it is.
+          if (objectiveFaults.has(error as object)) {
+            if (!work.execution) phases.release(item.id);
             save();
+            if (staysInPlace(error)) {
+              waiting = true;
+              return;
+            }
+            throw error;
+          }
+          // Step rule 7: a decision or a configuration fix waits on this
+          // item only, cancel or pause stops it quietly; it keeps its place
+          // and its worker.
+          if (staysInPlace(error)) {
+            if (error instanceof AuthenticationRequiredError)
+              work.authentication = error.authentication;
+            if (!work.execution) phases.release(item.id);
+            save();
+            waiting = true;
             return;
           }
           if (work.status !== "done" && work.status !== "published") {
+            if (work.step === "execute") await stopWorker(item);
             work.status = "failed";
             work.error = error instanceof Error ? error.message : String(error);
-            if (
-              error instanceof AuthenticationRequiredError &&
-              work.status === "failed"
-            )
+            if (error instanceof AuthenticationRequiredError)
               work.authentication = error.authentication;
             else delete work.authentication;
             save();
           }
+          // A wrong result is repaired, published or not: the next attempt
+          // republishes the same branch with a lease.
           const isolated = recordWorkFailure(state, item.id, error);
-=======
-      const task = perform().catch(async (error: unknown) => {
-        if (work.status !== "done" && work.status !== "published") {
-          if (work.step === "execute") await stopWorker(item);
-          work.status = "failed";
-          work.error = error instanceof Error ? error.message : String(error);
->>>>>>> origin/claude/phase-a-3-items
-          if (
-            error instanceof AuthenticationRequiredError &&
-            work.status === "failed"
-          )
-            work.authentication = error.authentication;
-          else delete work.authentication;
+          if (isolated && !stopped()) {
+            await diagnose(item);
+            return;
+          }
+          if (work.phaseReservation !== "coding") phases.release(item.id);
           save();
-<<<<<<< HEAD
           throw error;
         });
-=======
-        }
-        const isolated = recordWorkFailure(state, item.id, error);
-        if (
-          isolated &&
-          !unit.items.some((entry) => state.work[entry.id]?.pullRequest) &&
-          !args.cancelled()
-        ) {
-          phases.release(item.id);
-          save();
-          await phases.reserve(item.id, "review");
-          try {
-            await diagnoseWorkRepair({
-              state,
-              item,
-              model: args.planningModel,
-              diagnostics: args.diagnostics,
-              sources: planningSources(
-                args.objectiveBody,
-                state.baseSha,
-                config.checkout,
-              ),
-              save,
-              stopped: () => args.cancelled() || Boolean(args.paused?.()),
-            });
-          } finally {
-            phases.release(item.id);
-          }
-          return;
-        }
-        if (work.phaseReservation !== "coding") phases.release(item.id);
-        save();
-        // A decision or a configuration fix waits on this item only.
-        if (operatorWait(error)) return;
-        throw error;
-      });
->>>>>>> origin/claude/phase-a-3-items
       active.set(item.id, task);
       try {
         await task;
@@ -916,6 +879,7 @@ export async function runNativeGraph(args: {
     let failedLayer: number | undefined;
     /** Observe every layer; return them when the unit may merge, else wait for CI. */
     const ready = async (context: StepContext) => {
+      failedLayer = undefined;
       // If the default branch moved, the layers' checks and mergeability
       // decide; a move is not a fault.
       const defaultBranch = await github.defaultBranch();
@@ -931,6 +895,32 @@ export async function runNativeGraph(args: {
         ),
       );
       context.progress();
+      // Strict protection: bring a layer up to date with its base, from
+      // exactly the head Factory published; its checks run again.
+      const behind = observations.findIndex(
+        (observation) => observation.mergeReadiness === "behind",
+      );
+      if (behind >= 0) {
+        const layer = layers[behind]!;
+        const work = state.work[unit.items[behind]!.id]!;
+        const head = await github.updateBranch(
+          {
+            number: layer.pullRequest,
+            branch: layer.branch,
+            headSha: layer.headSha,
+            earlierHeads: earlierHeads(work),
+          },
+          layer.headSha,
+        );
+        context.progress();
+        work.changeRef = head;
+        layer.headSha = head;
+        save();
+        context.pending({
+          kind: "ci",
+          detail: `PR #${layer.pullRequest} was updated with its base; awaiting its checks`,
+        });
+      }
       // Every layer is judged before any wait: another layer's failure must
       // still surface, and it is that layer's.
       const pending = observations
@@ -960,8 +950,7 @@ export async function runNativeGraph(args: {
           unit,
           "await-ci",
           async (context) => {
-            if (pausedWhileWaiting())
-              throw new StepFault({ kind: "cancelled", detail: "paused" });
+            if (pausedWhileWaiting()) throw new ItemPaused();
             return ready(context);
           },
         );
@@ -1079,21 +1068,32 @@ export async function runNativeGraph(args: {
         throw error;
       }
     } catch (error) {
-      if (stopped(error)) {
+      // The Objective's own fault leaves the unit where it is.
+      if (objectiveFaults.has(error as object)) {
+        phases.release(top.id);
+        save();
+        if (staysInPlace(error)) return settlePrepared();
+        throw error;
+      }
+      // Step rule 7: a decision or a configuration fix waits, cancel or
+      // pause stops quietly; the unit keeps its place.
+      if (staysInPlace(error)) {
         phases.release(top.id);
         save();
         return settlePrepared();
       }
-      // A published layer is wrong (a failed check, a conflict): that
-      // layer's item fails with the evidence; independent units continue.
+      // A published layer is wrong (a failed required check, a conflict):
+      // that layer's item fails with the evidence and is repaired like any
+      // wrong result; independent units continue.
       if (faultOf(error).kind === "work") {
         const failed = unit.items[failedLayer ?? unit.items.length - 1]!;
         const work = state.work[failed.id]!;
         work.status = "failed";
         work.error = error instanceof Error ? error.message : String(error);
-        recordWorkFailure(state, failed.id, error);
         phases.release(top.id);
+        const isolated = recordWorkFailure(state, failed.id, error);
         save();
+        if (isolated && !stopped()) await diagnose(failed);
         continue;
       }
       throw error;

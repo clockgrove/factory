@@ -106,7 +106,12 @@ export function recordWorkFailure(
       : isolated
         ? "new-attempt-from-accepted-base"
         : "operator-decision",
-    unfinishedEdits: "unavailable",
+    // A work fault at execute ends the attempt only after the driver
+    // disposed of the worker's workspace (attempt.ts endAttempt).
+    unfinishedEdits:
+      fault.kind === "work" && (work.step ?? "execute") === "execute"
+        ? "removed"
+        : "unavailable",
     decision: decisions[classification],
   };
   // A new failure starts a fresh record: an earlier correction belongs to

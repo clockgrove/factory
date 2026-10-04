@@ -86,6 +86,13 @@ export interface WorkState {
   /** Mutable validation/delivery base; native replay may advance it. */
   baseSha?: string;
   changeRef?: string;
+  /**
+   * Head a GitHub update-branch was requested from. Set before the PUT,
+   * cleared once the updated head is saved as `changeRef`.
+   */
+  branchUpdateFrom?: string;
+  /** Review answer found invalid once; a second invalid answer is a decision. */
+  reviewInvalid?: string;
   treeSha?: string;
   validation?: ValidationEvidence;
   acceptancePending?: AcceptancePending;
@@ -551,7 +558,13 @@ export function parseFactoryState(
           `Work Item ${id} authentication request requires failed status`,
         );
     }
-    for (const key of ["baseSha", "executionBaseSha", "treeSha", "changeRef"])
+    for (const key of [
+      "baseSha",
+      "executionBaseSha",
+      "treeSha",
+      "changeRef",
+      "branchUpdateFrom",
+    ])
       if (item[key] !== undefined) sha(item[key], `${id}.${key}`);
     if (
       item.integratedShaAtStart !== undefined &&
@@ -560,6 +573,10 @@ export function parseFactoryState(
       sha(item.integratedShaAtStart, `${id}.integratedShaAtStart`);
     if (item.integratedSha !== undefined)
       sha(item.integratedSha, `${id}.integratedSha`);
+    if (item.branchUpdateFrom !== undefined && !item.pullRequest)
+      throw new Error(`Work Item ${id} branch update lacks a pull request`);
+    if (item.reviewInvalid !== undefined)
+      string(item.reviewInvalid, `${id}.reviewInvalid`);
     if (
       item.startedAt !== undefined &&
       Number.isNaN(Date.parse(string(item.startedAt, `${id}.startedAt`)))

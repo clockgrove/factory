@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { FactoryConfig } from "./config.js";
 import type { GitHubGateway, PlanningPrerequisites } from "./contracts.js";
 import { objectiveComplete } from "./completion.js";
+import { decision, StepFault } from "./fault.js";
 import { git, gitAsync } from "./process.js";
 import { readContinuation } from "./state-store.js";
 
@@ -23,6 +24,14 @@ export async function planningPrerequisites(
     baseSha,
     predecessors: [],
   };
+  /** The operator restores the predecessor's evidence; the amend step waits. */
+  const refusal = (predecessor: number, reason: string) =>
+    new StepFault(
+      decision(
+        `Predecessor #${predecessor} ${reason}; restore it, then factory retry --objective ${objective}`,
+        `predecessor #${predecessor}`,
+      ),
+    );
   for (const predecessor of [...predecessors].sort((a, b) => a - b)) {
     const previous = readContinuation(config.repository, predecessor);
     if (
@@ -30,17 +39,13 @@ export async function planningPrerequisites(
       !objectiveComplete(previous) ||
       !previous.finalAcceptance
     )
-      throw new Error(
-        `Predecessor #${predecessor} lacks bound accepted candidate evidence`,
-      );
+      throw refusal(predecessor, "lacks bound accepted candidate evidence");
     const remote = await github.objective(predecessor);
     if (
       createHash("sha256").update(remote.body).digest("hex") !==
       previous.objectiveBodyDigest
     )
-      throw new Error(
-        `Predecessor #${predecessor} body changed after acceptance`,
-      );
+      throw refusal(predecessor, "body changed after acceptance");
     const {
       sealedAt,
       commit,
@@ -49,17 +54,29 @@ export async function planningPrerequisites(
       configDigest,
       evidenceDigest,
     } = previous.finalAcceptance;
-    await gitAsync(
+    const ancestor = await gitAsync(
       config.checkout,
       "merge-base",
       "--is-ancestor",
       commit,
       baseSha,
+    ).then(
+      () => true,
+      () => false,
     );
-    if (git(config.checkout, "rev-parse", `${commit}^{tree}`) !== tree)
-      throw new Error(
-        `Predecessor #${predecessor} accepted tree differs from Git`,
+    if (!ancestor)
+      throw refusal(
+        predecessor,
+        `accepted commit ${commit} is not in base ${baseSha}`,
       );
+    let gitTree: string | undefined;
+    try {
+      gitTree = git(config.checkout, "rev-parse", `${commit}^{tree}`);
+    } catch {
+      gitTree = undefined;
+    }
+    if (gitTree !== tree)
+      throw refusal(predecessor, "accepted tree differs from Git");
     evidence.predecessors.push({
       objective: predecessor,
       bodyDigest: previous.objectiveBodyDigest,

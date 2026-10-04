@@ -1122,10 +1122,12 @@ export function statusDocument(
       : Math.max(0, concurrency - activeCount);
   const work = state.graph.items.map((item) => {
     const current = state.work[item.id]!;
-    const waitDetail = waitOf(state, { item: item.id })?.detail;
-    let blockedReason: string | undefined = current.requestedPhase
-      ? waitDetail
-      : undefined;
+    // A code only; a step's or the scheduler's wait is on `wait`.
+    let blockedReason: string | undefined =
+      current.requestedPhase &&
+      waitOf(state, { item: item.id })?.kind === "capacity"
+        ? "capacity"
+        : undefined;
     let eligible = false;
     if (current.status === "pending") {
       const dependency = item.dependencies.find(
@@ -1151,12 +1153,12 @@ export function statusDocument(
               item.kind !== "aggregate" &&
               configuredSlots === 0
             ? "capacity"
-            : waitDetail;
+            : blockedReason;
     } else if (current.status === "waiting")
       blockedReason =
         current.step === "approve-result"
           ? "acceptance-decision"
-          : (waitDetail ?? "asset-selection");
+          : "asset-selection";
     return {
       id: item.id,
       issue: state.issueByItemId[item.id],
@@ -1169,9 +1171,6 @@ export function statusDocument(
       // Provider capacity is not persisted in the state snapshot.
       ready: current.status === "pending" && !blockedReason ? null : false,
       blockedReason: blockedReason ?? null,
-      waitingReason: waitDetail
-        ? redactDiagnosticDetail(waitDetail, secrets)
-        : null,
       attemptId: current.attempt ?? null,
       ...(item.executionBinding
         ? {

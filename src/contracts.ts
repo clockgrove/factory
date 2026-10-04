@@ -542,6 +542,12 @@ export interface AgentHarness {
   observe(handle: HarnessHandle): Promise<HarnessObservation>;
   cancel(handle: HarnessHandle): Promise<void>;
   collect(handle: HarnessHandle): Promise<HarnessResult>;
+  /**
+   * Stop whatever a start of `identity` spawned before its handle was
+   * recorded (a crash between spawn and save). Harnesses that spawn
+   * processes implement it; it is a no-op when nothing runs.
+   */
+  cancelUnrecorded?(identity: string): Promise<void>;
 }
 
 /** Infrastructure only; the configured AgentHarness runs in a separate installed process. */
@@ -906,16 +912,5 @@ export class CompletedModelInvocationError extends Error {
   constructor(cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
     this.name = "CompletedModelInvocationError";
-  }
-}
-
-/**
- * A step that did not finish for reasons unrelated to the work itself, such
- * as a lost provider response. Repeating the step is safe.
- */
-export class Interruption extends Error {
-  constructor(cause: unknown) {
-    super(cause instanceof Error ? cause.message : String(cause), { cause });
-    this.name = "Interruption";
   }
 }

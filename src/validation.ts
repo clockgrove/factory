@@ -1940,14 +1940,18 @@ export async function reviewAcceptance(args: {
       continue;
     }
     const finding = decoded.findings[index];
-    const invalid = decoded.errors[index];
-    if (invalid) {
+    // The decoder gives every criterion a finding or an error. A missing
+    // finding is an invalid answer, never a question the reviewer did not ask.
+    const invalid =
+      decoded.errors[index] ??
+      (finding ? undefined : "Review omitted this criterion");
+    if (invalid || !finding) {
       observeInvalidReview(args.invocation, "finding", "invalid-response");
       invalidAnswers.push(`criterion ${index}: ${invalid}`);
       firstInvalid ??= criterion;
       continue;
     }
-    if (finding?.verdict === "pass") {
+    if (finding.verdict === "pass") {
       proven.push({
         criterion,
         verdict: "pass",
@@ -1956,17 +1960,15 @@ export async function reviewAcceptance(args: {
       });
       continue;
     }
-    if (finding?.verdict === "refuse") {
+    if (finding.verdict === "refuse") {
       refused ??= `Acceptance criterion disproved: ${criterion}: ${finding.detail}`;
       continue;
     }
     pending ??= {
       criterion,
       treeSha: evidence.treeSha,
-      detail: finding?.detail ?? "Independent review omitted this criterion",
-      question:
-        finding?.question ||
-        `Inspect the preserved review for ${criterion}; transport failure is not a substantive product decision or approval.`,
+      detail: finding.detail,
+      question: finding.question,
     };
   }
   const automaticCriterion = criteria.find(

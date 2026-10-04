@@ -58,7 +58,7 @@
  *     }
  *   }, opts);
  */
-import { setTimeout as sleep } from "node:timers/promises";
+import * as time from "./clock.js";
 import {
   attachedFault,
   decision,
@@ -154,16 +154,7 @@ export const ESCALATE_AFTER_MS = 24 * 60 * 60_000;
 /** Paid faults a paid step repeats; the next one is a decision. */
 export const PAID_FAULT_LIMIT = 3;
 
-const MAX_TIMER_MS = 2_147_483_647;
-const systemClock: StepClock = {
-  now: () => Date.now(),
-  sleep: (milliseconds, signal) =>
-    sleep(
-      Math.min(milliseconds, MAX_TIMER_MS),
-      undefined,
-      signal ? { signal } : undefined,
-    ),
-};
+const systemClock: StepClock = { now: time.now, sleep: time.sleep };
 
 /** Delay before the `count`th repeat: 1 s doubling to a 5-minute cap. */
 export function backoffDelay(count: number): number {
@@ -285,7 +276,7 @@ export interface Outage {
 export function outageOf(
   state: StepState,
   scope: StepScope,
-  now = Date.now(),
+  now = time.now(),
 ): Outage | undefined {
   let found: Outage | undefined;
   for (const [key, record] of Object.entries(state.repeats ?? {})) {

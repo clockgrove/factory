@@ -18,6 +18,7 @@ import {
   type FactoryConfig,
 } from "./config.js";
 import type { GitHubGateway, IntakeIssuePage } from "./contracts.js";
+import * as time from "./clock.js";
 import { objectiveComplete } from "./completion.js";
 import { attachedFault } from "./fault.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
@@ -832,12 +833,12 @@ export async function runIntake(
         // Unavailable: wait below for GitHub, as an idle observation does.
         if (!unavailable) continue;
       }
-      const wait = Math.max(record.pollSeconds * 1000, heldUntil - Date.now());
+      const wait = Math.max(record.pollSeconds * 1000, heldUntil - time.now());
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           wake = undefined;
           resolve();
-        }, wait);
+        }, time.realDelay(wait));
         wake = () => {
           clearTimeout(timer);
           wake = undefined;

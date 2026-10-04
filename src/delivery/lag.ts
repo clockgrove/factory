@@ -1,4 +1,5 @@
 import { attachFault, type Fault, transient } from "../fault.js";
+import * as time from "../clock.js";
 import { GITHUB_LAG_MS } from "../github-client.js";
 
 /**
@@ -8,7 +9,7 @@ import { GITHUB_LAG_MS } from "../github-client.js";
  */
 const firstSeen = new Map<string, number>();
 
-let now = (): number => Date.now();
+let now = time.now;
 
 /** Replace the lag window's clock; returns a restore. Tests only. */
 export function setLagClock(clock: () => number): () => void {

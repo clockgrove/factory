@@ -21,6 +21,11 @@ process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 // that refusal clear this.
 process.env.FACTORY_TEST_LOCAL_ORIGINS = "1";
 process.env.GIT_CONFIG_NOSYSTEM = "1";
+// Logical waits (backoff, polls, lag windows, rate-limit gates) run 100x
+// fast, and every process of this run shares one timeline (src/clock.ts).
+// A test that needs real time sets FACTORY_TIME_SCALE=1 for its process.
+process.env.FACTORY_TIME_SCALE ??= "100";
+process.env.FACTORY_TIME_ORIGIN ??= String(Date.now());
 for (const name of Object.keys(process.env))
   if (
     /^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|CLAUDE_CODE_OAUTH_TOKEN)$/.test(

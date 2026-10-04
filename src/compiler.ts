@@ -3,6 +3,7 @@ import {
   assertPreIntegrationCheckShape,
 } from "./delivery/readiness.js";
 import { assertKnownCheckNames, workflowCheckNames } from "./check-names.js";
+import * as time from "./clock.js";
 import { compilerWire, PlannerChoiceError } from "./compiler-wire.js";
 import {
   allowanceAvailable,
@@ -243,7 +244,7 @@ export function modelFault(
     /** The transport's classification from structured provider facts. */
     fault?: Fault;
   },
-  now = Date.now(),
+  now = time.now(),
 ): Fault {
   if (call.fault) return call.fault;
   const detail = error instanceof Error ? error.message : String(error);
@@ -747,10 +748,7 @@ export class StructuredPlanningModel implements PlanningModel {
       throw new Error(
         "Review capacity retry policy exceeds its bounded attempts or delay",
       );
-    this.wait =
-      options.wait ??
-      ((milliseconds) =>
-        new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.wait = options.wait ?? ((milliseconds) => time.sleep(milliseconds));
   }
 
   private async runStructured<T>(args: StructuredCall): Promise<T> {

@@ -23,6 +23,7 @@ import { Octokit } from "@octokit/core";
 import { Codex } from "@openai/codex-sdk";
 import { ClaudePlanningModel } from "../dist/claude-planning.js";
 import { CodexPlanningModel, modelFault } from "../dist/compiler.js";
+import { now as clockNow, realDelay } from "../dist/clock.js";
 import { AuthenticationRequiredError } from "../dist/contracts.js";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { verifyHydratedAssets } from "../dist/media.js";
@@ -71,7 +72,7 @@ function assertFault(actual, expected, label) {
     );
   if (expected.retryIn) {
     const [low, high] = expected.retryIn;
-    const wait = Date.parse(actual.retryAt) - Date.now();
+    const wait = Date.parse(actual.retryAt) - clockNow();
     assert.ok(
       wait > low && wait <= high,
       `${label}: retryAt ${actual.retryAt} is ${wait} ms away`,
@@ -138,7 +139,7 @@ const pull = (sha = headSha) => ({
   base: { ref: "main" },
 });
 const identity = { number: 5, branch: "factory/one", headSha };
-const secondsFromNow = (seconds) => Math.floor(Date.now() / 1000) + seconds;
+const secondsFromNow = (seconds) => Math.floor(clockNow() / 1000) + seconds;
 
 /** A fresh client per case, so one case's rate gate never delays another. */
 function gateway(routes) {
@@ -727,13 +728,14 @@ test("a rate limit without a reset header waits a minute instead of stopping eve
 
 /** Run `fn` with the clock just past `retryAt`, as if the gate had opened. */
 async function afterGate(retryAt, fn) {
-  const now = Date.now;
-  const skew = Date.parse(retryAt) + 1 - now();
-  Date.now = () => now() + skew;
+  const real = Date.now;
+  // Real milliseconds that put the logical clock (src/clock.ts) past retryAt.
+  const skew = realDelay(Date.parse(retryAt) + 1 - clockNow());
+  Date.now = () => real() + skew;
   try {
     return await fn();
   } finally {
-    Date.now = now;
+    Date.now = real;
   }
 }
 

@@ -1,4 +1,4 @@
-import { setTimeout as sleep } from "node:timers/promises";
+import * as time from "../clock.js";
 import { attachFault, attachedFault, decision } from "../fault.js";
 import {
   classifiedGitHubCall,
@@ -254,7 +254,7 @@ export class NativeStackDelivery {
         observed = { status: "pending", details: { uuid: error.pendingMerge } };
       }
       if (observed.status === "pending" && observed.details.uuid) {
-        submittedAt = Date.now();
+        submittedAt = time.now();
         uuid = observed.details.uuid;
         options.onPending(uuid);
       }
@@ -266,7 +266,7 @@ export class NativeStackDelivery {
         options.queued(
           `Native stack PR #${top.pullRequest} is queued to merge`,
         );
-      await sleep(500, undefined, { signal: currentProcessSignal() });
+      await time.sleep(500, currentProcessSignal());
       observed = await this.api<AsyncResult>(
         `${route}/${uuid}`,
         "GET",

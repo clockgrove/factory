@@ -21,7 +21,6 @@ import { createTarget, git, writeDescriptor } from "./integration-fixture.mjs";
 
 const execFileAsync = promisify(execFile);
 const controller = join(import.meta.dirname, "fault-controller.mjs");
-const fastTimers = join(import.meta.dirname, "fast-timers.mjs");
 const repositoryRoot = join(import.meta.dirname, "..", "..");
 
 export const OBJECTIVE = 1;
@@ -79,7 +78,7 @@ function runController(env, descriptorPath, runTimeoutMs, started) {
     let stderr = "";
     const child = spawn(
       process.execPath,
-      ["--import", fastTimers, controller, descriptorPath],
+      [controller, descriptorPath],
       // A process group of its own: a signal sent to the test runner's group
       // (an interrupt, a supervisor stopping the suite) never reaches it. Only
       // the harness signals a controller, and only with SIGKILL.
@@ -180,7 +179,6 @@ export async function runScenario({
   beforeRun,
   earlierIssues = 0,
   runTimeoutMs = 90_000,
-  timeScale = 0.01,
 }) {
   const root = mkdtempSync(join(tmpdir(), `factory-fault-${name}-`));
   liveRoots.add(root);
@@ -279,7 +277,6 @@ export async function runScenario({
       ...process.env,
       ...gitTransportEnvironment(fake.gitUrl),
       XDG_STATE_HOME: join(root, "state"),
-      FACTORY_TEST_TIME_SCALE: String(timeScale),
     };
     const runs = [];
     for (let index = 0; ; index++) {

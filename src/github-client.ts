@@ -1,4 +1,3 @@
-import { setTimeout } from "node:timers/promises";
 import { Octokit } from "@octokit/core";
 import { attachFault, decision, transient, type Fault } from "./fault.js";
 import {
@@ -492,13 +491,17 @@ export class GitHubClient {
       await Promise.race([previous, aborted]);
       if (signal?.aborted) throw cancelled();
       const client = await this.octokit();
-      while (Date.now() < this.notBefore)
-        await setTimeout(this.notBefore - Date.now(), undefined, {
-          signal,
-        }).catch(() => {
-          throw cancelled();
-        });
-      if (signal?.aborted) throw cancelled();
+      // Rate-limited: nothing is sent. The caller's step waits until the
+      // gate opens, where pause, drain and handoff can stop it (#641).
+      if (Date.now() < this.notBefore)
+        throw attachFault(
+          new Error("GitHub request held by the rate limit"),
+          transient(
+            "GitHub rate limit",
+            false,
+            new Date(this.notBefore).toISOString(),
+          ),
+        );
       try {
         const response = await client.request(`${method} /${route}`, {
           ...body,

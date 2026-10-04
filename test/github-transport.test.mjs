@@ -6,6 +6,7 @@ import { RealGitHubGateway, projectedIssueBody } from "../dist/github.js";
 import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { faultOf } from "../dist/fault.js";
 import { withProcessCancellation } from "../dist/process.js";
+import { step } from "../dist/step.js";
 
 const json = (data, status = 200, headers = {}) =>
   new Response(JSON.stringify(data), {
@@ -30,21 +31,31 @@ const item = {
   brief: "brief",
 };
 
-test("shared gate observes successful response delay before queued dispatch", async () => {
+/** A transient fault that retries at `at` (ms), raised without sending. */
+const gated = (at) => (error) =>
+  faultOf(error).kind === "transient" &&
+  faultOf(error).outcomeUnknown === false &&
+  Math.abs(Date.parse(faultOf(error).retryAt) - at) <= 1;
+
+test("shared gate holds queued dispatch as a transient fault with retryAt", async () => {
   const calls = [];
   const client = clientFor(async () => {
     calls.push(Date.now());
-    return json({}, 200, calls.length === 1 ? { "retry-after": "0.06" } : {});
+    return json({}, 200, calls.length === 1 ? { "retry-after": "60" } : {});
   });
-  await Promise.all([
+  const results = await Promise.allSettled([
     client.request("GET", "repos/a/b/issues/1"),
     client.request("GET", "repos/a/b/issues/2"),
   ]);
-  assert.equal(calls.length, 2);
-  assert.ok(calls[1] - calls[0] >= 50);
+  assert.equal(results[0].status, "fulfilled");
+  assert.equal(results[1].status, "rejected");
+  const fault = faultOf(results[1].reason);
+  assert.equal(fault.kind, "transient");
+  assert.ok(Date.parse(fault.retryAt) >= calls[0] + 59_000);
+  assert.equal(calls.length, 1);
 });
 
-test("rate rejection is not retried, and queued wait is cancellable", async () => {
+test("rate rejection is not retried, and the gated request is not sent", async () => {
   let calls = 0;
   const client = clientFor(async () => {
     calls++;
@@ -53,12 +64,54 @@ test("rate rejection is not retried, and queued wait is cancellable", async () =
     });
   });
   await assert.rejects(client.request("GET", "repos/a/b/issues/1"), /HTTP 403/);
-  const controller = new AbortController();
-  const waiting = withProcessCancellation(controller.signal, () =>
-    client.request("GET", "repos/a/b/issues/2"),
+  await assert.rejects(
+    client.request("POST", "repos/a/b/issues", { title: "x" }),
+    (error) =>
+      faultOf(error).kind === "transient" &&
+      faultOf(error).outcomeUnknown === false &&
+      Boolean(faultOf(error).retryAt),
   );
-  setTimeout(() => controller.abort(), 15);
-  await assert.rejects(waiting);
+  assert.equal(calls, 1);
+});
+
+test("a rate-limit gate an hour away lets pause stop the step at once (#641)", async () => {
+  let calls = 0;
+  const reset = Math.ceil(Date.now() / 1000) + 3600;
+  const client = clientFor(async () => {
+    calls++;
+    return json({}, 200, {
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-reset": String(reset),
+    });
+  });
+  await client.request("GET", "repos/a/b/issues/1");
+  const state = {};
+  const cancel = new AbortController();
+  const pause = new AbortController();
+  const started = Date.now();
+  const running = step(
+    state,
+    { scope: "objective", name: "project" },
+    () => client.request("GET", "repos/a/b/issues/2"),
+    { save: () => {}, signal: cancel.signal, pause: pause.signal },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // The step records the outage with the gate's reset as its next try.
+  const record = Object.values(state.repeats ?? {})[0];
+  assert.equal(Date.parse(record?.nextAt), reset * 1000);
+  pause.abort();
+  await assert.rejects(running, { name: "StepPaused" });
+  assert.ok(Date.now() - started < 5000);
+  assert.equal(calls, 1);
+  // Cancel ends the same wait with a cancelled fault.
+  const again = step(
+    state,
+    { scope: "objective", name: "project" },
+    () => client.request("GET", "repos/a/b/issues/2"),
+    { save: () => {}, signal: cancel.signal },
+  );
+  setTimeout(() => cancel.abort(), 20);
+  await assert.rejects(again, (error) => faultOf(error).kind === "cancelled");
   assert.equal(calls, 1);
 });
 
@@ -355,8 +408,16 @@ test("primary exhaustion on a successful response gates the next request", async
     );
   });
   await client.request("GET", "repos/a/b/issues/1");
-  await client.request("GET", "repos/a/b/issues/2");
-  assert.ok(calls[1] >= reset);
+  await assert.rejects(
+    client.request("GET", "repos/a/b/issues/2"),
+    gated(reset),
+  );
+  assert.equal(calls.length, 1);
+  await new Promise((resolve) =>
+    setTimeout(resolve, Math.max(reset - Date.now(), 0) + 5),
+  );
+  await client.request("GET", "repos/a/b/issues/3");
+  assert.equal(calls.length, 2);
 });
 
 test("cancelled queued request cannot let later dispatch overtake its owner", async () => {

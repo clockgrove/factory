@@ -4,8 +4,10 @@
 // NativeStackDelivery and RegularDelivery; only the planning model and the
 // harness are scripted. Model and execution-driver calls can be faulted on
 // their Nth call: crash (SIGKILL) before or after the call, a lost response
-// (the call happened, the caller sees an error) or an unavailable burst (the
-// call never happened). Prints one JSON line.
+// (the call happened, the caller sees an error), an unavailable burst (the
+// call never happened) or, for model calls, a usage limit with a reset time.
+// An operator action (cancel) can be taken when a driver call for an item
+// begins. Prints one JSON line.
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Octokit } from "@octokit/core";
@@ -56,8 +58,29 @@ const rules = (descriptor.faults ?? []).map((fault) => ({
 
 function record(value) {
   mkdirSync(dirname(callsPath), { recursive: true });
-  appendFileSync(callsPath, `${JSON.stringify(value)}\n`);
+  appendFileSync(
+    callsPath,
+    `${JSON.stringify({ run: descriptor.run ?? 0, ...value })}\n`,
+  );
 }
+
+/**
+ * The operator runs `factory cancel` while this controller owns the
+ * Objective: the CLI signals the owner with SIGUSR1. With `settle`, wait
+ * until Factory's handler has run, so the cancellation is recorded before
+ * the intercepted call proceeds.
+ */
+async function operatorCancel(settle) {
+  if (!settle) return void process.kill(process.pid, "SIGUSR1");
+  await new Promise((resolve) => {
+    process.once("SIGUSR1", () => setImmediate(resolve));
+    process.kill(process.pid, "SIGUSR1");
+  });
+}
+
+/** The Work Item a driver call is for: a request names it, a handle carries it. */
+const itemOf = (request) =>
+  request?.item?.id ?? request?.data?.request?.item?.id;
 
 // The harness signals a controller only with SIGKILL. A SIGTERM came from
 // outside the test (it makes Factory drain and release ownership), so record
@@ -95,6 +118,25 @@ function unavailable(target, method) {
   return classified(target, method, cause, false);
 }
 
+/**
+ * A model provider's usage limit with its reset time: the call never ran,
+ * and the caller is told when it may try again.
+ */
+const USAGE_RESET_MS = 3_000;
+function usageLimited() {
+  const cause = Object.assign(new Error("429 usage limit reached"), {
+    status: 429,
+  });
+  return attachFault(
+    cause,
+    transient(
+      cause.message,
+      false,
+      new Date(Date.now() + USAGE_RESET_MS).toISOString(),
+    ),
+  );
+}
+
 /** The error a caller sees when the call happened but its response was lost. */
 function lost(target, method) {
   const cause = Object.assign(new Error("socket hang up"), {
@@ -116,18 +158,35 @@ async function intercept(target, method, request, call) {
     )
       fired = rule;
   }
+  const item = target === "driver" ? itemOf(request) : request?.item?.id;
   record({
     target,
     method,
     phase: request?.reviewPhase ?? request?.invocation?.phase,
-    item: request?.item?.id,
+    item,
     attempt: request?.attemptId ?? request?.identity,
     fault: fired?.kind,
     // Whether the call reached its service (and may have had an effect).
-    reached: !["crash-before", "unavailable"].includes(fired?.kind),
+    reached: !["crash-before", "unavailable", "usage-limit"].includes(
+      fired?.kind,
+    ),
   });
+  const operator = descriptor.operator;
+  if (
+    operator &&
+    !operator.done &&
+    target === "driver" &&
+    operator.method === method &&
+    operator.item === item
+  ) {
+    operator.done = true;
+    // Cancelling while start is in flight must be recorded before start
+    // returns; cancelling a running worker only needs to arrive.
+    await operatorCancel(method === "start");
+  }
   if (fired?.kind === "crash-before") process.kill(process.pid, "SIGKILL");
   if (fired?.kind === "unavailable") throw unavailable(target, method);
+  if (fired?.kind === "usage-limit") throw usageLimited();
   const result = await call();
   if (fired?.kind === "crash-after") process.kill(process.pid, "SIGKILL");
   if (fired?.kind === "lost") throw lost(target, method);
@@ -194,6 +253,11 @@ function summary() {
       error: state.error,
       mode: state.coordinator?.mode,
       waitReason: state.coordinator?.waitReason,
+      // Only an Objective an operator cancelled reports its cancellation.
+      ...(state.cancelRequested && {
+        cancel: state.cancelledAt ? "done" : "requested",
+        cancelError: state.coordinator?.cancelError,
+      }),
       work: Object.fromEntries(
         Object.entries(state.work ?? {}).map(([id, work]) => [
           id,

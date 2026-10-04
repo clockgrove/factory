@@ -1,10 +1,13 @@
 // The fault matrix: run an uninterrupted two-item Objective (alpha → beta)
 // once per delivery strategy, derive every effect boundary from what that
-// run did, then inject a crash, a lost response or an unavailable burst at
-// each boundary, restart the controller, and check invariants of the end
-// state read from GitHub's request log and the repository, not from
-// Factory's own state. Nothing here names Factory internals, so the matrix
-// survives the recovery redesign.
+// run did, then inject a crash, a lost response, a connection reset or an
+// unavailable burst at each boundary, restart the controller, and check
+// invariants of the end state read from GitHub's request log and the
+// repository, not from Factory's own state. Driver lifecycle premises (an
+// operator cancel, a run stopped for a decision) reach the execution
+// driver's cancel and observe calls, which an uninterrupted run never makes;
+// the matrix derives and faults those the same way. Nothing here names
+// Factory internals, so the matrix survives the recovery redesign.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
@@ -20,7 +23,13 @@ import { availableParallelism } from "node:os";
 import { basename, join } from "node:path";
 import { describe, test } from "node:test";
 import { faults } from "./github-http-fake.mjs";
-import { OBJECTIVE, branch, marker, runScenario } from "./fault-harness.mjs";
+import {
+  OBJECTIVE,
+  branch,
+  marker,
+  runScenario,
+  workItem,
+} from "./fault-harness.mjs";
 
 /**
  * Scenarios run concurrently within one test file: every available core by
@@ -35,6 +44,8 @@ export function scenarioConcurrency() {
 
 const KINDS = ["crash-before", "crash-after", "lost", "unavailable"];
 const MERGE_ASYNC = "PUT /repos/{owner}/{repo}/pulls/{number}/merge-async";
+// A reset before the effect: the client cannot tell it from a lost response.
+const MUTATION_KINDS = [...KINDS, "reset"];
 const PAID = new Set(["crash-after", "lost"]);
 
 /**
@@ -101,7 +112,7 @@ export function deriveCases(reference) {
     const occurrence = (seen.get(entry.endpoint) ?? 0) + 1;
     seen.set(entry.endpoint, occurrence);
     if (entry.effect)
-      for (const kind of KINDS)
+      for (const kind of MUTATION_KINDS)
         cases.push({
           name: `${kind} at ${entry.endpoint} #${occurrence}`,
           group: "mutations",
@@ -137,6 +148,99 @@ export function deriveCases(reference) {
           method: call.method,
           occurrence,
         },
+        inProcess: [
+          {
+            target: call.target,
+            method: call.method,
+            occurrence,
+            kind,
+            ...(kind === "unavailable" ? { times: 2 } : {}),
+          },
+        ],
+      });
+  }
+  return cases;
+}
+
+/**
+ * Premises under which a run reaches the execution driver's cancel and
+ * observe calls. Each runs once uninterrupted as its own reference; its
+ * driver.cancel and driver.observe calls in the first controller run become
+ * boundaries (the main matrix covers every other call). The snapshot records
+ * each premise's boundaries, so a premise that stops reaching them, or a
+ * driver path that appears, fails until it is reviewed.
+ */
+const repo = "/repos/{owner}/{repo}";
+export const VARIANTS = [
+  {
+    key: "cancel-running",
+    when: "when an operator cancels while alpha's worker runs",
+    // The cancel sweep stops the recorded attempt.
+    scenario: {
+      actions: { alpha: { barrier: true } },
+      operator: { action: "cancel", method: "collect", item: "alpha" },
+    },
+    checks: ["cancelled"],
+  },
+  {
+    key: "cancel-starting",
+    when: "when an operator cancels while alpha's worker is starting",
+    // The delivery runner cancels the handle that start returns.
+    scenario: {
+      actions: { alpha: { barrier: true } },
+      operator: { action: "cancel", method: "start", item: "alpha" },
+    },
+    checks: ["cancelled"],
+  },
+  {
+    key: "stop-running",
+    when: "when the Objective is edited while beta's worker runs",
+    // Independent items run together; the edit stops the run at alpha's
+    // merge, and the run's teardown observes and cancels beta's attempt.
+    scenario: {
+      items: [workItem("alpha"), workItem("beta")],
+      actions: { beta: { barrier: true } },
+      http: [
+        {
+          match: `POST ${repo}/pulls`,
+          kind: "after",
+          run: (fake) =>
+            fake.editIssueBody(
+              OBJECTIVE,
+              `${fake.issue(OBJECTIVE).body}\nEdited by the Objective's author.\n`,
+            ),
+        },
+      ],
+    },
+    checks: ["refusal"],
+    refuses: /Objective issue body changed; operator direction required/,
+  },
+];
+
+const LIFECYCLE = new Set(["cancel", "observe"]);
+
+/** Driver cancel and observe boundaries of one premise's reference run. */
+export function deriveVariantCases(variant, reference) {
+  const cases = [];
+  const calls = new Map();
+  for (const call of reference.calls) {
+    if (call.run !== 0 || call.target !== "driver") continue;
+    if (!LIFECYCLE.has(call.method)) continue;
+    const key = `${call.target}.${call.method}`;
+    const occurrence = (calls.get(key) ?? 0) + 1;
+    calls.set(key, occurrence);
+    for (const kind of KINDS)
+      cases.push({
+        name: `${kind} at ${key} #${occurrence} ${variant.when}`,
+        group: variant.key,
+        boundaryName: `${key} #${occurrence}`,
+        boundary: {
+          kind: "call",
+          target: call.target,
+          method: call.method,
+          occurrence,
+        },
+        variant,
         inProcess: [
           {
             target: call.target,
@@ -361,7 +465,44 @@ export function assertRefusal(result, { refuses, unsent = [] }) {
       assert.equal(issue.state, "open", `issue for ${item.id} open`);
 }
 
+/**
+ * The operator's cancellation took effect: the last run reports the
+ * Objective cancelled without an unresolved cessation, every worker attempt
+ * that started was cancelled, and nothing was delivered or closed on GitHub.
+ */
+export function assertCancelled(result) {
+  const runs = () => result.runs.map(summarizeRun).join(" | ");
+  assert.equal(result.final.cancel, "done", `cancellation: ${runs()}`);
+  assert.equal(
+    result.final.cancelError,
+    undefined,
+    `cancellation error: ${runs()}`,
+  );
+  const cancelled = new Set(
+    result.harness
+      .filter((event) => event.type === "cancel")
+      .map((event) => event.attempt),
+  );
+  for (const start of result.harness.filter((event) => event.type === "start"))
+    assert.ok(
+      cancelled.has(start.attempt),
+      `${start.item}'s attempt ${start.attempt} was never cancelled: ${runs()}`,
+    );
+  assert.equal(result.fake.issue(OBJECTIVE).state, "open", "Objective open");
+  for (const item of result.items)
+    for (const issue of result.fake.issuesWithMarker(marker(item.id)))
+      assert.equal(issue.state, "open", `issue for ${item.id} open`);
+  assert.deepEqual(
+    Object.values(result.fake.state.pulls)
+      .filter((pull) => (pull.merges ?? 0) > 0)
+      .map((pull) => pull.number),
+    [],
+    "merged PRs",
+  );
+}
+
 export const CHECKS = {
+  cancelled: { suffix: " is cancelled", assert: assertCancelled },
   refusal: { suffix: " is refused", assert: assertRefusal },
   end: { suffix: "", assert: assertEndState },
   stop: { suffix: " without an operator stop", assert: assertNoOperatorStop },
@@ -426,7 +567,10 @@ export function summarizeRun(run) {
     .map(([id, item]) => `; failure[${id}]=${item.failure.trim()}`)
     .join("");
   const message = (run.message ?? run.stderr ?? "").replace(/\s+/g, " ").trim();
-  return `outcome=${run.outcome}; message=${message}; work=${work}${failures}`;
+  const cancel = run.cancel
+    ? `; cancel=${run.cancel}${run.cancelError ? `; cancelError=${run.cancelError.replace(/\s+/g, " ").trim()}` : ""}`
+    : "";
+  return `outcome=${run.outcome}; message=${message}; work=${work}${failures}${cancel}`;
 }
 
 /**
@@ -493,19 +637,26 @@ export function declareScenario(name, run, options, known) {
 }
 
 const checksFor = (testCase) =>
-  testCase.boundary.kind === "call" &&
-  testCase.boundary.method === "reviewGraph"
-    ? ["end", "stop", "budget", "plan"]
-    : ["end", "stop", "budget"];
+  testCase.variant
+    ? testCase.variant.checks
+    : testCase.boundary.kind === "call" &&
+        testCase.boundary.method === "reviewGraph"
+      ? ["end", "stop", "budget", "plan"]
+      : ["end", "stop", "budget"];
 
 export const SNAPSHOT = join(import.meta.dirname, "fault-boundaries.json");
 
 /** The delivery modes the matrix derives boundaries for; the snapshot holds exactly these. */
 export const MATRIX_DELIVERIES = ["native-stack", "regular"];
 
-/** Derived boundary names by group, sorted so request interleaving cannot reorder them. */
+/**
+ * Derived boundary names by group, sorted so request interleaving cannot
+ * reorder them. Every premise has a group, empty when it reaches no
+ * boundary.
+ */
 export function boundarySnapshot(cases) {
   const groups = { mutations: new Set(), reads: new Set(), calls: new Set() };
+  for (const variant of VARIANTS) groups[variant.key] = new Set();
   for (const testCase of cases)
     groups[testCase.group].add(testCase.boundaryName);
   return Object.fromEntries(
@@ -598,6 +749,22 @@ export function checkBoundarySnapshot(delivery, snapshot, path = SNAPSHOT) {
     );
 }
 
+/** A premise's reference run, once per process, delivery and premise. */
+const variantReferences = new Map();
+export function variantReferenceRun(variant, delivery) {
+  const key = `${variant.key}/${delivery}`;
+  if (!variantReferences.has(key))
+    variantReferences.set(
+      key,
+      runScenario({
+        name: `${variant.key}-${delivery}`,
+        delivery,
+        ...variant.scenario,
+      }),
+    );
+  return variantReferences.get(key);
+}
+
 /** Stable part (1-based) for a case, independent of every other case. */
 export function partOf(caseName, parts) {
   const hash = createHash("sha256").update(caseName).digest();
@@ -613,35 +780,59 @@ export function partOf(caseName, parts) {
  * boundaries, splits 62/90; hashing the case splits about evenly.
  */
 export async function defineMatrix(delivery, known, part = 1, parts = 2) {
-  const reference = await referenceRun(delivery);
-  const cases = deriveCases(reference);
+  const [reference, ...premises] = await Promise.all([
+    referenceRun(delivery),
+    ...VARIANTS.map((variant) => variantReferenceRun(variant, delivery)),
+  ]);
+  const cases = [
+    ...deriveCases(reference),
+    ...VARIANTS.flatMap((variant, index) =>
+      deriveVariantCases(variant, premises[index]),
+    ),
+  ];
   checkBoundarySnapshot(delivery, boundarySnapshot(cases));
-  checkKnown(
-    known,
-    cases.flatMap((testCase) => testNames(testCase.name, checksFor(testCase))),
-  );
+  const premiseName = (variant) => `premise run ${variant.when}`;
+  checkKnown(known, [
+    ...cases.flatMap((testCase) =>
+      testNames(testCase.name, checksFor(testCase)),
+    ),
+    ...VARIANTS.flatMap((variant) =>
+      testNames(premiseName(variant), variant.checks),
+    ),
+  ]);
   describe(`fault matrix: ${delivery} delivery (${part}/${parts})`, {
     concurrency: scenarioConcurrency(),
   }, () => {
-    if (part === 1)
+    if (part === 1) {
       declareScenario(
         "uninterrupted run",
         () => referenceRun(delivery),
         { checks: ["end", "stop"] },
         {},
       );
+      // Each premise must hold uninterrupted before its faults mean anything.
+      for (const variant of VARIANTS)
+        declareScenario(
+          premiseName(variant),
+          () => variantReferenceRun(variant, delivery),
+          { checks: variant.checks, refuses: variant.refuses },
+          known,
+        );
+    }
     for (const [index, testCase] of cases.entries()) {
       if (partOf(testCase.name, parts) !== part) continue;
+      const premise = testCase.variant?.scenario ?? {};
       declareScenario(
         testCase.name,
         () =>
           runScenario({
             name: `${delivery === "regular" ? "r" : "n"}${index}`,
             delivery,
-            http: testCase.http ?? [],
+            ...premise,
+            http: [...(premise.http ?? []), ...(testCase.http ?? [])],
             inProcess: testCase.inProcess ?? [],
           }),
-        { checks: checksFor(testCase) },
+        { checks: checksFor(testCase), refuses: testCase.variant?.refuses },
         known,
       );
     }

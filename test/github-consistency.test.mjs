@@ -10,11 +10,12 @@ import {
   testNames,
 } from "./support/fault-matrix.mjs";
 
-// Real-GitHub behaviors the fault matrix does not cover: read-after-write lag,
-// rate limits, merge refusals, pagination and other actors. Every scenario
-// must reach the end state of an uninterrupted run (see assertEndState),
-// except where Factory must refuse. Known Factory bugs are inverted tests
-// listed in support/fault-known.mjs.
+// Real-GitHub and provider behaviors the fault matrix does not cover:
+// read-after-write lag, rate limits (REST and model usage limits), merge
+// refusals, pagination, other actors, a worker that dies and the paid-call
+// bound. Every scenario must reach the end state of an uninterrupted run (see
+// assertEndState), except where Factory must refuse or stop for a decision.
+// Known Factory bugs are inverted tests listed in support/fault-known.mjs.
 
 const repo = "/repos/{owner}/{repo}";
 const PULL = `GET ${repo}/pulls/{number}`;
@@ -143,6 +144,59 @@ const scenarios = [
       },
     ],
   },
+  // Secondary limits without retry-after: the body alone names the limit,
+  // so Factory waits GitHub's documented minute before the next request.
+  {
+    name: "429 secondary rate limit without retry-after on issue creation",
+    deliveries: BOTH,
+    http: [
+      { match: CREATE_ISSUE, ...faults.secondaryRateLimit({ status: 429 }) },
+    ],
+  },
+  {
+    name: "429 secondary rate limit without retry-after on PR creation",
+    deliveries: BOTH,
+    http: [
+      { match: CREATE_PULL, ...faults.secondaryRateLimit({ status: 429 }) },
+    ],
+  },
+  {
+    name: "429 secondary rate limit without retry-after on merge",
+    deliveries: BOTH,
+    http: (delivery) => [
+      {
+        match: delivery === "regular" ? MERGE : MERGE_ASYNC,
+        ...faults.secondaryRateLimit({ status: 429 }),
+      },
+    ],
+  },
+  {
+    name: "403 secondary rate limit without retry-after on PR creation",
+    deliveries: BOTH,
+    http: [{ match: CREATE_PULL, ...faults.secondaryRateLimit() }],
+  },
+  {
+    name: "403 secondary rate limit with retry-after on issue creation",
+    deliveries: BOTH,
+    http: [
+      { match: CREATE_ISSUE, ...faults.secondaryRateLimit({ retryAfter: 1 }) },
+    ],
+  },
+  {
+    name: "403 secondary rate limit without retry-after on a completion comment",
+    deliveries: ["native-stack"],
+    http: [
+      {
+        match: `POST ${repo}/issues/{number}/comments`,
+        ...faults.secondaryRateLimit(),
+      },
+    ],
+  },
+  {
+    name: "403 primary rate limit without a reset header on PR observation",
+    deliveries: BOTH,
+    http: [{ match: PULL, ...faults.primaryRateLimitWithoutReset() }],
+  },
   {
     name: "403 primary rate limit with a reset on PR observation",
     deliveries: BOTH,
@@ -194,7 +248,47 @@ const scenarios = [
         : { match: MERGE_ASYNC, kind: "after", run: pushForeign },
     ],
   },
+  {
+    // A usage limit carries its reset time; waiting for it is not a paid
+    // fault, so four in a row stay within the paid-call bound of three.
+    name: "a model usage limit with a reset time four times at the first result review",
+    deliveries: BOTH,
+    inProcess: [
+      {
+        target: "model",
+        method: "reviewResult",
+        occurrence: 1,
+        times: 4,
+        kind: "usage-limit",
+      },
+    ],
+  },
+  {
+    // The fresh attempt is one more worker start than the reference.
+    name: "alpha's worker ends without a result once",
+    deliveries: BOTH,
+    actions: { alpha: { dieAttempts: 1 } },
+    checks: ["end", "stop"],
+  },
 ];
+
+// Factory must stop for a decision once a paid call's transient faults
+// exceed its bound of three, instead of repeating it without end.
+scenarios.push({
+  name: "four lost responses at the first result review",
+  deliveries: BOTH,
+  inProcess: [
+    {
+      target: "model",
+      method: "reviewResult",
+      occurrence: 1,
+      times: 4,
+      kind: "lost",
+    },
+  ],
+  checks: ["refusal"],
+  refuses: /^Objective #\d+ needs a human decision/,
+});
 
 // Factory must refuse, not complete: the merge it observed is gone from the
 // default branch. Regular checks right after the merge; native after the stack.
@@ -253,6 +347,8 @@ describe("GitHub consistency, rate limits and other actors", {
               typeof scenario.http === "function"
                 ? scenario.http(delivery)
                 : (scenario.http ?? []),
+            inProcess: scenario.inProcess ?? [],
+            actions: scenario.actions ?? {},
             fake: scenario.fake ?? {},
             beforeRun: scenario.beforeRun,
             earlierIssues: scenario.earlierIssues ?? 0,

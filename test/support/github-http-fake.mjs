@@ -403,6 +403,13 @@ export class GitHubHttpFake {
   }
 
   /** Another actor opens an issue. */
+  /** Another actor edits an issue's body. */
+  editIssueBody(number, body) {
+    const issue = this.state.issues[number];
+    issue.body = body;
+    issue.updated_at = this.tick(this.state);
+  }
+
   openForeignIssue(title = "Unrelated issue", body = "Not a Factory issue") {
     return this.createIssueRecord(this.state, { title, body });
   }
@@ -471,6 +478,9 @@ export class GitHubHttpFake {
         ...rateHeaders(),
         ...(rule.headers?.() ?? {}),
       };
+      // A preset removes a header GitHub would otherwise send with null.
+      for (const [name, value] of Object.entries(headers))
+        if (value === null) delete headers[name];
       response.writeHead(rule.status, headers);
       response.end(
         JSON.stringify({
@@ -1738,9 +1748,10 @@ export const faults = {
     headers: () =>
       retryAfter === undefined ? {} : { "retry-after": String(retryAfter) },
   }),
-  secondaryRateLimit: ({ retryAfter } = {}) => ({
+  // GitHub answers a secondary limit with 403 or 429, the body naming it.
+  secondaryRateLimit: ({ retryAfter, status = 403 } = {}) => ({
     kind: "status",
-    status: 403,
+    status,
     message:
       "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
     headers: () =>
@@ -1757,6 +1768,17 @@ export const faults = {
       "x-ratelimit-reset": String(
         Math.ceil(Date.now() / 1000 + resetInSeconds),
       ),
+    }),
+  }),
+  // An exhausted primary limit whose reset header a proxy stripped.
+  primaryRateLimitWithoutReset: () => ({
+    kind: "status",
+    status: 403,
+    message: "API rate limit exceeded for user ID 1.",
+    headers: () => ({
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-used": "5000",
+      "x-ratelimit-reset": null,
     }),
   }),
   baseModified: () => ({

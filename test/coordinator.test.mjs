@@ -578,7 +578,7 @@ test("failed worker cancellation preserves unresolved ownership and cannot becom
         throw new Error("driver cessation not confirmed");
       };
       const run = application.runObjective(1);
-      const rejected = assert.rejects(run, /cancel|aborted/i);
+      const rejected = assert.rejects(run, /cancel/);
       await until(() =>
         readEvents(eventsPath).some((event) => event.type === "start"),
       );

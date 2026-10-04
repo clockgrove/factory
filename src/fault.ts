@@ -370,6 +370,11 @@ export interface RepeatRecord {
   inFlight?: true;
   /** A decision the step asked and the operator has not answered. */
   asked?: string;
+  /**
+   * Why the paid step's last answer was invalid: the next ask carries it,
+   * across a restart, until the step ends.
+   */
+  invalid?: string;
 }
 
 export type WaitKind =
@@ -464,12 +469,14 @@ export function assertRepeats(value: unknown, label: string): void {
             "paid",
             "inFlight",
             "asked",
+            "invalid",
           ].includes(name),
       ) ||
       (record.nextAt === undefined) !== (record.scheduledAt === undefined) ||
       (record.nextAt !== undefined &&
         (!iso(record.nextAt) || !iso(record.scheduledAt))) ||
       (record.asked !== undefined && !text(record.asked)) ||
+      (record.invalid !== undefined && !text(record.invalid)) ||
       (record.faults !== undefined && !validFaultRun(record.faults)) ||
       (record.paid !== undefined && !atLeast(record.paid, 1)) ||
       (record.inFlight !== undefined && record.inFlight !== true)

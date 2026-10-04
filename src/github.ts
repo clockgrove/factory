@@ -79,9 +79,31 @@ const latest = (...times: (number | undefined)[]): number | undefined => {
 /** Empty issue numbers in a row past the newest listed issue that end a probe. */
 const PROBE_GAP = 3;
 
-/** A readback has not caught up with a write GitHub accepted. */
-function notYet(message: string): Error {
+/**
+ * A list that has not caught up yet, where the caller bounds the repeat
+ * itself: the closure comment only within the lag window after the close,
+ * and a PR create is sent again on the following repeat.
+ */
+function listedSoon(message: string): Error {
   return attachFault(new Error(message), transient(message, false));
+}
+
+/**
+ * A readback of Factory's own object has not caught up with a write GitHub
+ * accepted: transient for GitHub's lag window, then the operator's decision,
+ * so a human edit that keeps it from matching never repeats for 24 h (#613).
+ * The key names the object; the success path calls `settled(key)`, or a
+ * stale window makes the next lag an immediate decision.
+ */
+function notYet(key: string, message: string): Error {
+  return lagged(
+    key,
+    message,
+    decision(
+      "GitHub does not show what Factory wrote. Inspect it, then retry or cancel.",
+      message,
+    ),
+  );
 }
 
 /** A create answered with something unreadable: it may exist; find it again. */
@@ -306,6 +328,11 @@ export class RealGitHubGateway implements GitHubGateway {
       : undefined;
   }
 
+  /** The lag key of a PR that should show the pushed head. */
+  private pushedHeadKey(request: PullRequestPublication): string {
+    return `${this.repository}:pr-head:${request.branch}:${request.headSha}`;
+  }
+
   /**
    * The open PR for Factory's branch, found by its head. A PR on a head an
    * earlier attempt pushed has not caught up with the push yet; any other
@@ -324,14 +351,18 @@ export class RealGitHubGateway implements GitHubGateway {
     if (!pull) return undefined;
     if (pull.head.ref !== request.branch || pull.base.ref !== request.base)
       throw foreignChange(`Existing PR for ${request.branch} changed base`);
-    if (pull.head.sha === request.headSha)
+    const key = this.pushedHeadKey(request);
+    if (pull.head.sha === request.headSha) {
+      settled(key);
       return {
         number: pull.number,
         branch: request.branch,
         headSha: request.headSha,
       };
+    }
     if (request.earlierHeads?.includes(pull.head.sha))
       throw notYet(
+        key,
         `PR #${pull.number} does not show the pushed head ${request.headSha} yet`,
       );
     throw foreignChange(`Existing PR for ${request.branch} changed head`);
@@ -495,7 +526,9 @@ export class RealGitHubGateway implements GitHubGateway {
       // comment Factory just posted yet.
       const closedFor = time.now() - Date.parse(issue.closed_at ?? "");
       if (issue.state !== "open" && closedFor >= 0 && closedFor < GITHUB_LAG_MS)
-        throw notYet(`Issue #${number} completion comment is not listed yet`);
+        throw listedSoon(
+          `Issue #${number} completion comment is not listed yet`,
+        );
       // Closure follows a merged Work Item or a sealed Objective, so a human
       // closing the issue reached the intended end: record it anyway.
       await this.api("POST", `issues/${number}/comments`, {
@@ -586,10 +619,13 @@ export class RealGitHubGateway implements GitHubGateway {
           archived_at?: string | null;
         }>("labels");
         const created = observed.filter((label) => label.name === role);
+        const key = `${this.repository}:label:${role}`;
         if (created.length !== 1 || created[0]!.archived_at)
           throw notYet(
+            key,
             `Factory role label creation did not reconcile exactly: ${role}`,
           );
+        settled(key);
       }
     }
     const ensureRole = async (issue: Issue, role: string): Promise<Issue> => {
@@ -617,8 +653,10 @@ export class RealGitHubGateway implements GitHubGateway {
         throw foreignChange(
           "Factory role label did not reconcile exactly; issue changed",
         );
+      const key = `${this.repository}:issue-label:${issue.number}:${role}`;
       if (!observedNames.includes(role))
-        throw notYet(`Factory role label ${role} is not visible yet`);
+        throw notYet(key, `Factory role label ${role} is not visible yet`);
+      settled(key);
       return observed;
     };
     const objective = authenticated(
@@ -737,14 +775,17 @@ export class RealGitHubGateway implements GitHubGateway {
               `issues/${found.number}`,
             );
             authenticated(observed, found.number);
+            const key = `${this.repository}:amend:${found.number}`;
             if (
               observed.id !== found.id ||
               observed.body !== expectedBody ||
               observed.title !== item.title
             )
               throw notYet(
-                "Amendment issue projection did not reconcile exactly",
+                key,
+                `Amendment issue #${found.number} projection did not reconcile exactly`,
               );
+            settled(key);
             found = observed;
           }
         }
@@ -881,6 +922,7 @@ export class RealGitHubGateway implements GitHubGateway {
           fresh,
         );
         const expected = item.dependencies.map((id) => issueByItemId[id]);
+        const key = `${this.repository}:dependencies:${number}`;
         if (
           observed.length !== expected.length ||
           new Set(observed.map((issue) => issue.number)).size !==
@@ -893,7 +935,11 @@ export class RealGitHubGateway implements GitHubGateway {
             );
           })
         )
-          throw notYet("Work Item dependencies did not reconcile exactly");
+          throw notYet(
+            key,
+            `Work Item issue #${number} dependencies did not reconcile exactly`,
+          );
+        settled(key);
       }
     }
     {
@@ -1010,6 +1056,7 @@ export class RealGitHubGateway implements GitHubGateway {
           `issues/${parent}/sub_issues`,
           { createdAt: createdAt.get(parent) },
         );
+        const key = `${this.repository}:sub-issues:${parent}`;
         if (
           observed.length !== children.length ||
           new Set(observed.map((issue) => issue.number)).size !==
@@ -1022,7 +1069,11 @@ export class RealGitHubGateway implements GitHubGateway {
             );
           })
         )
-          throw notYet("Work Item hierarchy did not reconcile exactly");
+          throw notYet(
+            key,
+            `Issue #${parent} sub-issues did not reconcile exactly`,
+          );
+        settled(key);
       }
     }
     return { issueByItemId };
@@ -1041,7 +1092,7 @@ export class RealGitHubGateway implements GitHubGateway {
       return found;
     }
     if (this.pullCreates.delete(request.branch))
-      throw notYet(`GitHub does not list the PR for ${request.branch} yet`);
+      throw listedSoon(`GitHub does not list the PR for ${request.branch} yet`);
     this.pullCreates.add(request.branch);
     const detail = await this.api<Pull>("POST", "pulls", {
       head: request.branch,
@@ -1066,6 +1117,7 @@ export class RealGitHubGateway implements GitHubGateway {
     this.pullCreates.delete(request.branch);
     if (request.earlierHeads?.includes(detail.head.sha))
       throw notYet(
+        this.pushedHeadKey(request),
         `PR #${detail.number} does not show the pushed head ${request.headSha} yet`,
       );
     if (detail.head.sha !== request.headSha)

@@ -11,9 +11,12 @@ import {
   readEvents,
 } from "./integration-fixture.mjs";
 import { withCoverage } from "./coverage.mjs";
+import { startHeartbeat } from "./liveness.mjs";
 
-// Parent owns the disposable root and a hard process timeout: a microtask spin
-// must not starve the timeout that detects this concrete regression.
+// Parent owns the disposable root and a heartbeat watchdog: a microtask spin
+// starves this timer, so the parent detects the regression without a
+// total-duration budget (see liveness.mjs).
+const stopHeartbeat = startHeartbeat();
 const root = process.argv[2];
 mkdirSync(root, { recursive: true });
 process.env.XDG_STATE_HOME = join(root, "state");
@@ -177,3 +180,5 @@ assert.equal(
 console.log(
   "discovery and CI wait completed with one worker and a responsive owner",
 );
+// Done: a process that now fails to exit stops beating and is reported.
+stopHeartbeat();

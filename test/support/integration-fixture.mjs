@@ -168,53 +168,96 @@ export function readEvents(path) {
     .map((line) => JSON.parse(line));
 }
 
-export async function waitFor(check, directory, message, timeout = 10_000) {
-  const current = check();
-  if (current) return current;
-  mkdirSync(directory, { recursive: true });
+/**
+ * Settle on `check` whenever `subscribe` reports a change, and once more after
+ * subscribing so a change made before the watch armed is never lost. There is
+ * no total-duration budget: a loaded machine only slows the wait. It fails
+ * only after `stallMs` with no observed change (and a final check), which
+ * means the watched run has stopped making progress.
+ */
+function settleOn(subscribe, check, message, stallMs) {
   return new Promise((resolvePromise, reject) => {
     let settled = false;
-    const observer = watch(directory, { recursive: true }, () => {
+    let timer;
+    let unsubscribe = () => undefined;
+    const finish = (settle, value) => {
       if (settled) return;
-      const result = check();
-      if (!result) return;
       settled = true;
       clearTimeout(timer);
-      observer.close();
-      resolvePromise(result);
-    });
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      observer.close();
-      reject(new Error(`Timed out waiting for ${message}`));
-    }, timeout);
+      unsubscribe();
+      settle(value);
+    };
+    const evaluate = () => {
+      try {
+        const result = check();
+        if (result) finish(resolvePromise, result);
+        return result;
+      } catch (error) {
+        finish(reject, error);
+        return true;
+      }
+    };
+    const poll = () => {
+      if (settled || evaluate()) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        // A change can land before a stat-polling watch takes its baseline.
+        if (!evaluate())
+          finish(
+            reject,
+            new Error(`No progress for ${stallMs}ms waiting for ${message}`),
+          );
+      }, stallMs);
+    };
+    unsubscribe = subscribe(poll, (error) => finish(reject, error));
+    poll();
   });
 }
 
-export async function waitForFile(check, path, message, timeout = 10_000) {
-  const current = check();
-  if (current) return current;
+/** A stalled fixture shows no file activity for this long. */
+export const fixtureStallMs = 60_000;
+
+/** Wait for `check` while anything under `directories` changes. */
+export async function waitFor(
+  check,
+  directories,
+  message,
+  stallMs = fixtureStallMs,
+) {
+  const watched = [directories].flat();
+  for (const directory of watched) mkdirSync(directory, { recursive: true });
+  return settleOn(
+    (changed, failed) => {
+      const observers = watched.map((directory) =>
+        watch(directory, { recursive: true }, changed).on("error", failed),
+      );
+      return () => {
+        for (const observer of observers) observer.close();
+      };
+    },
+    check,
+    message,
+    stallMs,
+  );
+}
+
+/** Wait for `check` while the file at `path` changes. */
+export async function waitForFile(
+  check,
+  path,
+  message,
+  stallMs = fixtureStallMs,
+) {
   mkdirSync(dirname(path), { recursive: true });
-  return new Promise((resolvePromise, reject) => {
-    let settled = false;
-    const observe = () => {
-      if (settled) return;
-      const result = check();
-      if (!result) return;
-      settled = true;
-      clearTimeout(timer);
-      unwatchFile(path, observe);
-      resolvePromise(result);
-    };
-    watchFile(path, { interval: 20 }, observe);
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      unwatchFile(path, observe);
-      reject(new Error(`Timed out waiting for ${message}`));
-    }, timeout);
-  });
+  return settleOn(
+    (changed) => {
+      watchFile(path, { interval: 20 }, changed);
+      return () => unwatchFile(path, changed);
+    },
+    check,
+    message,
+    stallMs,
+  );
 }
 
 export class ScriptedPlanningModel {
@@ -458,6 +501,8 @@ export class ScriptedHarness {
     this.root = resolve(root);
     this.actions = actions;
     this.eventsPath = eventsPath;
+    // Factory's own progress (state, diagnostics, worktrees) lands here.
+    this.stateHome = process.env.XDG_STATE_HOME;
     mkdirSync(this.root, { recursive: true });
   }
 
@@ -535,14 +580,29 @@ export class ScriptedHarness {
   async collect(handle) {
     const data = this.require(handle);
     const action = this.actions[data.item] ?? {};
-    if (action.barrier && !existsSync(action.barrier)) {
-      await waitFor(
-        () =>
+    if (action.barrier) {
+      // An explicit sync point held by the test. It opens on release, on
+      // cancellation, or when teardown removes the fixture. It fails only when
+      // the barrier, harness and Factory state all stop changing, e.g. after a
+      // reviewer assertion stopped the run that would have released it.
+      const open = () => {
+        if (
           existsSync(action.barrier) ||
-          existsSync(`${data.resultPath}.cancelled`),
-        dirname(action.barrier),
-        `barrier for ${data.item}`,
-      );
+          existsSync(`${data.resultPath}.cancelled`)
+        )
+          return true;
+        if (!existsSync(this.root) || !existsSync(dirname(action.barrier)))
+          throw new Error(`Fixture torn down at barrier for ${data.item}`);
+        return false;
+      };
+      if (existsSync(this.root))
+        mkdirSync(dirname(action.barrier), { recursive: true });
+      if (!open())
+        await waitFor(
+          open,
+          [dirname(action.barrier), this.root, this.stateHome].filter(Boolean),
+          `barrier for ${data.item}`,
+        );
     }
     if (existsSync(`${data.resultPath}.cancelled`))
       throw new Error(`Scripted attempt ${data.item} was cancelled`);

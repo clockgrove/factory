@@ -26,6 +26,7 @@ import {
   statePath,
 } from "../dist/state-store.js";
 import { withCoverage } from "./support/coverage.mjs";
+import { eventually } from "./support/eventually.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -41,13 +42,8 @@ const deferred = () => {
   });
   return { promise, resolve };
 };
-async function until(predicate) {
-  for (let i = 0; i < 300; i++) {
-    if (predicate()) return;
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  throw new Error("Fixture condition not reached");
-}
+const until = (predicate) =>
+  eventually(predicate, { message: "fixture condition" });
 async function fixture(name, fn, model, customize) {
   const root = mkdtempSync(join(tmpdir(), `fc-${name}-`));
   const previous = process.env.XDG_STATE_HOME;
@@ -746,9 +742,7 @@ test("first deadline added to existing preparation persists before a wait and ca
   });
 });
 
-test("one resume wakes both concurrent GitHub outage waiters without replaying workers", {
-  timeout: 10_000,
-}, async () => {
+test("one resume wakes both concurrent GitHub outage waiters without replaying workers", async () => {
   await fixture(
     "concurrent-outage",
     async ({ application, config, github, eventsPath }) => {

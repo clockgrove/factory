@@ -28,6 +28,7 @@ import {
   statePath,
 } from "../dist/state-store.js";
 import { withCoverage } from "./support/coverage.mjs";
+import { eventually } from "./support/eventually.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -894,14 +895,11 @@ test("pause after predecessor completion and restart keep accepted work and pres
     };
     await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
     const running = f.application.runIntake();
-    for (let i = 0; i < 500; i++) {
-      if (
+    await eventually(
+      () =>
         readContinuation(f.config.repository, 1)?.objectiveClosure ===
-        "complete"
-      )
-        break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+        "complete",
+    );
     assert.equal(readIntake(f.config).mode, "paused");
     assert.equal(readContinuation(f.config.repository, 2), undefined);
     await intakeControl(f.config, "drain");
@@ -920,10 +918,7 @@ test("changed queued issue and missing predecessor remain precisely ineligible w
     f.issues.get(1).body += "Changed requirement\n";
     f.dependencies.set(2, [99]);
     const running = f.application.runIntake();
-    for (let i = 0; i < 100; i++) {
-      if (readIntake(f.config).observation?.reasons[2]) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    await eventually(() => readIntake(f.config).observation?.reasons[2]);
     assert.match(readIntake(f.config).observation.reasons[1], /body changed/);
     assert.match(
       readIntake(f.config).observation.reasons[2],
@@ -939,10 +934,7 @@ test("dirty compilation checkout is retained and cannot start planning", async (
     await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
     writeFileSync(join(f.config.checkout, "README.md"), "User change\n");
     const running = f.application.runIntake();
-    for (let i = 0; i < 100; i++) {
-      if (readIntake(f.config).observation?.reasons[1]) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    await eventually(() => readIntake(f.config).observation?.reasons[1]);
     assert.match(readIntake(f.config).observation.reasons[1], /local changes/);
     assert.equal(f.plans.length, 0);
     assert.match(git(f.config.checkout, "diff"), /User change/);
@@ -1011,10 +1003,7 @@ for (const disposition of ["failed", "cancelled"])
       if (disposition === "failed") await f.application.runIntake();
       else {
         const running = f.application.runIntake();
-        for (let i = 0; i < 100; i++) {
-          if (readIntake(f.config).observation?.reasons[2]) break;
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
+        await eventually(() => readIntake(f.config).observation?.reasons[2]);
         assert.match(
           readIntake(f.config).observation.reasons[2],
           /Predecessor #1/,
@@ -1059,11 +1048,9 @@ test("pause during durable compilation and restart reuse known model output with
     await intakeControl(f.config, "dequeue", 2);
     await controlObjective(f.config, { objective: 1, action: "pause" });
     release();
-    for (let i = 0; i < 100; i++) {
-      if (readContinuation(f.config.repository, 1).planningRecovery?.response)
-        break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    await eventually(
+      () => readContinuation(f.config.repository, 1).planningRecovery?.response,
+    );
     // A paused preparation keeps its owner waiting for resume; hand off to stop it.
     await requestControl(f.config.repository, {
       objective: 0,
@@ -1084,12 +1071,7 @@ test("closed selection stays ineligible until explicit dequeue without model cal
     await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
     f.issues.get(1).state = "closed";
     const running = f.application.runIntake();
-    for (
-      let i = 0;
-      i < 100 && !readIntake(f.config).observation?.reasons[1];
-      i++
-    )
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    await eventually(() => readIntake(f.config).observation?.reasons[1]);
     assert.equal(
       readIntake(f.config).observation.reasons[1],
       "Issue is closed",
@@ -1185,24 +1167,24 @@ test("idle intake status does not rescan or race an immediate same-owner refill"
     );
   }));
 
-async function waitFor(check) {
-  for (let attempt = 0; attempt < 300; attempt++) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("Intake fixture condition did not settle");
-}
-async function settledEnqueue(application, selection) {
-  for (let attempt = 0; attempt < 50; attempt++) {
-    try {
-      return await application.enqueueIntake(selection);
-    } catch (error) {
-      if (!String(error).includes("settled refill boundary")) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
-  throw new Error("Refill did not reach its settled boundary");
-}
+const waitFor = (check) =>
+  eventually(check, { message: "intake fixture condition" });
+/** Retry only the transient refill-boundary refusal; other errors fail now. */
+const settledEnqueue = (application, selection) =>
+  eventually(
+    () =>
+      application.enqueueIntake(selection).then(
+        (value) => ({ value }),
+        (error) => {
+          if (String(error).includes("settled refill boundary")) return false;
+          return { error };
+        },
+      ),
+    { message: "settled refill boundary" },
+  ).then((outcome) => {
+    if ("error" in outcome) throw outcome.error;
+    return outcome.value;
+  });
 
 test("consented continuous intake stays model-free while idle and refills through its same owner without reviving completed work", async () =>
   fixture(async (f) => {

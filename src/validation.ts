@@ -1436,7 +1436,11 @@ function retainedRepairProof(
   assertRepairLedger(state);
   const prior = [...(current.recovery?.history ?? [])]
     .reverse()
-    .find((entry) => entry.failure?.digest === correction.failureDigest);
+    .find((entry) =>
+      correction.event
+        ? entry.failure?.event === correction.event
+        : entry.failure?.digest === correction.failureDigest,
+    );
   if (
     !prior?.failure ||
     prior.failure.digest !== failureDigest(prior.failure.detail) ||

@@ -291,9 +291,11 @@ export function recordWorkFailure(
             ? "Interrupted repeatedly; check the provider, network or GitHub status, then run again"
             : "Resolve external outcome or ownership before another attempt",
   };
+  // A new failure starts a fresh record: an earlier correction belongs to
+  // the attempt it corrected, which the history keeps.
   work.recovery = {
-    ...work.recovery,
     scopes: repairScopes(state, id),
+    ...(work.recovery?.history && { history: work.recovery.history }),
     failure,
     phase: "stopped",
   };
@@ -321,8 +323,16 @@ export function applyWorkCorrection(
   if (work.recovery?.failure?.classification === "uncertain")
     throw new Error("Unknown outcome cannot be repaired automatically");
 
-  const recovery = archiveAttempt(work);
-  recovery.correction = correction;
+  // The correction is bound to the event of the failure it corrects, and
+  // archived with that failure and the attempt it ended.
+  const { event: _unbound, ...admitted } = correction;
+  const event = work.recovery?.failure?.event;
+  const bound = { ...admitted, ...(event && { event }) };
+  const recovery = archiveAttempt({
+    ...work,
+    recovery: { ...work.recovery, correction: bound },
+  });
+  recovery.correction = bound;
   recovery.phase = "ready";
   if (correction.kind === "implementation") {
     // A wrong result at delivery (the remote refused its content) published
@@ -495,6 +505,7 @@ export async function diagnoseWorkRepair(args: {
   const correction: RepairCorrection = {
     kind: "implementation",
     failureDigest: failure.digest,
+    event: failure.event,
     diagnosis: response.diagnosis,
     correction: response.correction,
     actor: "factory-controller",
@@ -532,8 +543,8 @@ export function prepareEvidenceRecovery(
     work.recovery?.history?.length ?? 0,
   );
   work.recovery = {
-    ...work.recovery,
     scopes: repairScopes(state, id),
+    ...(work.recovery?.history && { history: work.recovery.history }),
     failure: {
       digest: failureDigest(detail),
       event,

@@ -1,8 +1,8 @@
 // A charge is made once per failure event (#515, recovery v2.2 rule 5).
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { compilePlan, MalformedPlannerOutput } from "../dist/compiler.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
@@ -13,7 +13,7 @@ import {
   failureDigest,
   PAID_ATTEMPTS,
 } from "../dist/repair-policy.js";
-import { readState } from "../dist/state-store.js";
+import { readState, saveState, statePath } from "../dist/state-store.js";
 import {
   applyWorkCorrection,
   CandidateEnvironmentFailure,
@@ -754,3 +754,134 @@ for (const delivery of ["regular", "native-stack"]) {
     );
   });
 }
+
+for (const delivery of ["regular", "native-stack"])
+  test(`${delivery}: a repeated identical failure after a correction stops for retry, and retry writes loadable state`, async () => {
+    let diagnoses = 0;
+    await withApplication(
+      "repeated",
+      delivery,
+      (graph) => ({
+        actions: {
+          result: {
+            failAttempts: 2,
+            files: [{ path: "result.txt", text: "accepted\n" }],
+          },
+        },
+        planningModel: {
+          generateStructured: async (request) => {
+            if (request.purpose !== "diagnosis")
+              return withCoverage(request, graph);
+            diagnoses++;
+            return {
+              decision: "repair",
+              diagnosis: `The worker did not write the required file (${diagnoses})`,
+              correction: `Write result.txt from the accepted base (${diagnoses})`,
+            };
+          },
+          reviewGraph: async (request) => ({
+            packetId: request.reviewPacket.id,
+            findings: [],
+          }),
+          reviewResult: async (request) => reviewer(request),
+        },
+      }),
+      async ({ application, config }) => {
+        config.autonomy.repairPolicy.perPath.implementationRepairs = 1;
+        const fixture = application();
+        const stopped = await fixture.application.runObjective(1);
+        const work = stopped.work.result;
+        assert.equal(work.status, "failed");
+        // Both failures have the same detail, but they are two events.
+        const [first] = work.recovery.history;
+        assert.equal(first.failure.digest, work.recovery.failure.digest);
+        assert.notEqual(first.failure.event, work.recovery.failure.event);
+        // The new failure does not inherit the earlier correction.
+        assert.equal(work.recovery.correction, undefined);
+        assert.match(
+          work.recovery.failure.decision,
+          /exhausted; start a new attempt with `factory retry --objective 1 --item result`/,
+        );
+        assert.equal(consumption(stopped).implementationRepairs, 1);
+        fixture.application.retryWorkItem(1, "result");
+        const retried = readState(config.repository, 1);
+        assert.equal(retried.work.result.status, "pending");
+        const done = await application().application.runObjective(1);
+        assert.equal(done.finalValidation.passed, true);
+        assert.equal(diagnoses, 1);
+        assert.equal(consumption(done).implementationRepairs, 1);
+      },
+    );
+  });
+
+test("state that a load would refuse is never written", async () => {
+  await withApplication(
+    "save",
+    "regular",
+    (graph) => ({
+      actions: { result: { files: [{ path: "result.txt", text: "ok\n" }] } },
+      planningModel: {
+        generateStructured: async (request) => withCoverage(request, graph),
+        reviewGraph: async (request) => ({
+          packetId: request.reviewPacket.id,
+          findings: [],
+        }),
+        reviewResult: async (request) => reviewer(request),
+      },
+    }),
+    async ({ application, config }) => {
+      const done = await application().application.runObjective(1);
+      assert.equal(done.finalValidation.passed, true);
+      const path = statePath(config.repository, 1);
+      const before = readFileSync(path, "utf8");
+      const invalid = (mutate) => {
+        const state = JSON.parse(before);
+        mutate(state);
+        return state;
+      };
+      for (const mutate of [
+        // A charge beyond the snapshotted allowance.
+        (state) => {
+          state.charges = Object.fromEntries(
+            [0, 1, 2].map((round) => [
+              `item/result/execute/${round}`,
+              { allowances: ["implementationRepairs"], scopes: ["result"] },
+            ]),
+          );
+        },
+        // A wrong result without its event.
+        (state) => {
+          state.work.result.recovery = {
+            failure: {
+              digest: failureDigest("x"),
+              detail: "x",
+              at: new Date().toISOString(),
+              classification: "implementation",
+              continuation: "new-attempt-from-accepted-base",
+              unfinishedEdits: "unavailable",
+              decision: "d",
+            },
+            phase: "stopped",
+          };
+        },
+        // Counters from an earlier version.
+        (state) => {
+          state.allowanceConsumption = {
+            planningRevisions: 0,
+            implementationRepairs: 0,
+            resultRereviews: 0,
+          };
+        },
+      ])
+        assert.throws(
+          () => saveState(path, invalid(mutate)),
+          /Refusing to save invalid Factory state/,
+        );
+      assert.equal(readFileSync(path, "utf8"), before);
+      assert.deepEqual(
+        readdirSync(dirname(path)).filter((name) => name.endsWith(".tmp")),
+        [],
+      );
+    },
+  );
+});

@@ -20,6 +20,7 @@ import {
   readEvents,
 } from "./support/integration-fixture.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
+import { writeStateFile } from "./support/state-file.mjs";
 
 for (const delivery of ["regular", "native-stack"]) {
   test(`${delivery} explicit re-review preserves implementation and final run resumes automatic review`, async () => {
@@ -171,7 +172,7 @@ for (const delivery of ["regular", "native-stack"]) {
       ]) {
         const altered = structuredClone(waiting);
         mutate(altered);
-        saveState(path, altered);
+        writeStateFile(path, altered);
         const invalid = readFileSync(path, "utf8");
         assert.throws(() => application.rereviewWorkItem(1, input));
         assert.equal(readFileSync(path, "utf8"), invalid);

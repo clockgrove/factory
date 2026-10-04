@@ -173,6 +173,8 @@ export interface FailureDisposition {
 }
 export interface RepairCorrection {
   failureDigest: string;
+  /** The failure event it was admitted for; the controller sets it. */
+  event?: string;
   kind: RepairClass;
   diagnosis: string;
   correction: string;
@@ -475,13 +477,17 @@ export function assertRepairLedger(
   for (const work of Object.values(state.work ?? {})) {
     const recovery = work.recovery;
     if (!recovery) continue;
+    // A record pairs a failure with the correction admitted for it, bound by
+    // the failure's event.
     const bound = (
       failure: FailureDisposition | undefined,
       correction: RepairCorrection | undefined,
-    ) =>
-      correction && correction.failureDigest === failure?.digest
-        ? allowanceKey(correction.kind)
-        : undefined;
+    ): Allowance | undefined => {
+      if (!correction) return undefined;
+      if (correction.event !== failure?.event)
+        throw new Error("Correction is not bound to its failure event");
+      return correction.event ? allowanceKey(correction.kind) : undefined;
+    };
     assertCharged(
       recovery.failure,
       recovery.phase === "diagnosing"

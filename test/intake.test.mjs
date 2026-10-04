@@ -37,6 +37,7 @@ import {
   git,
   readEvents,
 } from "./support/integration-fixture.mjs";
+import { writeStateFile } from "./support/state-file.mjs";
 
 const objectives = [1, 2];
 /** No unattended repair or amendment unless a test raises a limit. */
@@ -480,14 +481,14 @@ test("native planning facts refuse missing, unaccepted, changed and mismatched p
     assert.equal(descendant.predecessors[0].baseRelationship, "descendant");
     const original = structuredClone(first);
     first.finalAcceptance.tree = f.target.baseSha;
-    saveState(statePath(f.config.repository, 1), first);
+    writeStateFile(statePath(f.config.repository, 1), first);
     await assert.rejects(
       planningPrerequisites(f.config, f.github, 2, later),
       /sealed candidate|evidence/,
     );
     Object.assign(first, original);
     first.objectiveClosure = "pending";
-    saveState(statePath(f.config.repository, 1), first);
+    writeStateFile(statePath(f.config.repository, 1), first);
     await assert.rejects(
       planningPrerequisites(f.config, f.github, 2, later),
       /lacks bound accepted/,
@@ -738,7 +739,7 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
       successorDiscovery(state);
       if (fault === "missing") rmSync(statePath(f.config.repository, 1));
       if (fault === "unaccepted")
-        saveState(statePath(f.config.repository, 1), {
+        writeStateFile(statePath(f.config.repository, 1), {
           ...first,
           objectiveClosure: "pending",
         });
@@ -748,7 +749,7 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
       if (fault === "tree") {
         const changed = structuredClone(first);
         changed.finalAcceptance.tree = f.target.baseSha;
-        saveState(statePath(f.config.repository, 1), changed);
+        writeStateFile(statePath(f.config.repository, 1), changed);
       }
       await assert.rejects(
         applyPendingAmendment({

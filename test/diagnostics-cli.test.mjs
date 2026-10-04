@@ -10,6 +10,7 @@ import { coverageObligations } from "../dist/qa.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 import { defaultAutonomy } from "../dist/index.js";
 import { graphDigest } from "../dist/graph-amendments.js";
+import { writeStateFile } from "./support/state-file.mjs";
 
 test("diagnostics and status CLI preserve snapshots, unknown usage and coordinator error redaction", (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-diagnostics-cli-"));
@@ -158,7 +159,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
       { objective: 2 },
       { schemaVersion: 99 },
     ]) {
-      saveState(snapshotPath, { ...snapshot, ...mutation });
+      writeStateFile(snapshotPath, { ...snapshot, ...mutation });
       for (const flags of [[], ["--summary"], ["--follow"]]) {
         const invalid = cli(...flags);
         assert.notEqual(invalid.status, 0);

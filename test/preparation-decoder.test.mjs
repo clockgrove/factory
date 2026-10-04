@@ -8,6 +8,7 @@ import { factoryConfigDigest } from "../dist/config.js";
 import { defaultAutonomy } from "../dist/index.js";
 import { readContinuation, saveState, statePath } from "../dist/state-store.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
+import { writeStateFile } from "./support/state-file.mjs";
 
 // A preparation snapshot records the plan and the issues projected so far.
 // Inconsistent issue maps are refused without touching the snapshot.
@@ -48,7 +49,7 @@ for (const invalid of ["unknown-item", "duplicate", "map-without-plan"])
       if (invalid === "duplicate") snapshot.issueByItemId.qa = 2;
       if (invalid === "map-without-plan") delete snapshot.plan;
       const path = statePath(config.repository, 1);
-      saveState(path, snapshot);
+      writeStateFile(path, snapshot);
       const frozen = readFileSync(path);
       assert.throws(
         () => readContinuation(config.repository, 1),

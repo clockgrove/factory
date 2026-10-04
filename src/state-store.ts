@@ -35,12 +35,24 @@ export function statePath(repository: string, objective: number): string {
   );
 }
 
+/**
+ * Write a snapshot atomically. It is validated exactly as a load validates
+ * it first, so no write can persist state a later run would refuse.
+ */
 export function saveState(path: string, state: ContinuationState): void {
+  const text = `${JSON.stringify(state, null, 2)}\n`;
+  try {
+    parseContinuation(JSON.parse(text), state.repository, state.objective);
+  } catch (error) {
+    throw new Error(
+      `Refusing to save invalid Factory state: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${randomUUID()}.tmp`;
   const fd = openSync(temporary, "wx", 0o600);
   try {
-    writeFileSync(fd, `${JSON.stringify(state, null, 2)}\n`);
+    writeFileSync(fd, text);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -100,6 +112,25 @@ export function readContinuation(
   const value = JSON.parse(readFileSync(path, "utf8"));
   assertCurrentVersion(repository, path, value);
   if (value.schemaVersion !== 8) return readState(repository, objective);
+  return parsePreparation(value, repository, objective);
+}
+
+/** Validate a current-version snapshot of either kind. */
+function parseContinuation(
+  value: ContinuationState,
+  repository: string,
+  objective: number,
+): ContinuationState {
+  return value.schemaVersion === 8
+    ? parsePreparation(value, repository, objective)
+    : parseExecution(value, repository, objective);
+}
+
+function parsePreparation(
+  value: PreparationState,
+  repository: string,
+  objective: number,
+): PreparationState {
   if (
     value.kind !== "preparing" ||
     value.repository !== repository ||
@@ -125,7 +156,7 @@ export function readContinuation(
     (value.plan &&
       Object.keys(value.issueByItemId).some(
         (id) =>
-          !value.plan.graph?.items?.some(
+          !value.plan?.graph?.items?.some(
             (item: { id: string }) => item.id === id,
           ),
       ))
@@ -155,28 +186,36 @@ export function readState(
   const value = JSON.parse(readFileSync(path, "utf8"));
   assertCurrentVersion(repository, path, value);
   try {
-    const state = parseFactoryState(value, repository, objective);
-    const root = resolve(stateRoot(repository));
-    for (const [id, work] of Object.entries(state.work)) {
-      if (!work.execution) continue;
-      if (work.execution.provider !== "local") continue;
-      const active = work.execution.data as {
-        worktree?: unknown;
-      };
-      if (
-        typeof active.worktree !== "string" ||
-        !resolve(active.worktree).startsWith(`${join(root, "worktrees")}${sep}`)
-      )
-        throw new Error(
-          `Work Item ${id} attempt worktree is outside Factory state`,
-        );
-    }
-    return state;
+    return parseExecution(value, repository, objective);
   } catch (error) {
     throw new Error(
       `Invalid Factory state at ${path}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+function parseExecution(
+  value: unknown,
+  repository: string,
+  objective: number,
+): FactoryState {
+  const state = parseFactoryState(value, repository, objective);
+  const root = resolve(stateRoot(repository));
+  for (const [id, work] of Object.entries(state.work)) {
+    if (!work.execution) continue;
+    if (work.execution.provider !== "local") continue;
+    const active = work.execution.data as {
+      worktree?: unknown;
+    };
+    if (
+      typeof active.worktree !== "string" ||
+      !resolve(active.worktree).startsWith(`${join(root, "worktrees")}${sep}`)
+    )
+      throw new Error(
+        `Work Item ${id} attempt worktree is outside Factory state`,
+      );
+  }
+  return state;
 }
 
 export interface ControllerLock {

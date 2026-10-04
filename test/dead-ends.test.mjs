@@ -39,9 +39,15 @@ const D = {
   },
   REPAIR_REFUSED: {
     diagnosis:
-      "a step failure that is not isolated (an unclassified error or exhausted interruptions) leaves the item's recovery 'stopped' and stops the Objective (state.error): status names `factory repair`, which refuses any Objective with state.error ('Objective is not available for diagnosed repair'); `factory retry`, never named, also refuses at deliver, after a PR, and for an attempt with a handle and an uncertain outcome",
+      "a stopped Work Item failure combined with a stop outside any Work Item step (state.error): status names `factory repair`, which refuses any Objective with state.error ('Objective is not available for diagnosed repair')",
     pattern:
       /factory repair is refused \(.*Objective is not available for diagnosed repair/,
+  },
+  RETRY_REFUSED: {
+    diagnosis:
+      "a step failure that is not isolated stops the Objective (state.error) where retry cannot follow: status names `factory retry`, which refuses at deliver, after a PR ('Published PR requires operator direction before retry') and for an attempt with a handle and an unknown outcome, or only `factory logs` once the item has a PR",
+    pattern:
+      /factory retry is refused \((Published PR requires operator direction|Submitted effect outcome is unknown; operator direction required) before retry\)|only inspection \(factory logs\) after stopped: Objective stopped:/,
   },
   STOPPED_WITHOUT_EXIT: {
     diagnosis:
@@ -165,182 +171,14 @@ const KNOWN = {
     [
       "regular",
       "alpha running/validate (handle); beta pending",
-      "a step fails with an unclassified error",
-      "GitHub observation failed",
-    ],
-    [
-      "regular",
-      "alpha waiting/approve-result (handle, pending criterion); beta pending",
-      "a step exhausts its interruptions",
-      "draining",
-    ],
-    [
-      "regular",
-      "alpha published (handle, PR); beta pending",
-      "a step fails with an unclassified error",
-      "a recorded subprocess has exited",
-    ],
-    [
-      "regular",
-      "alpha running/execute (handle); beta pending",
-      "a step fails with an unclassified error",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "regular",
-      "alpha waiting/approve-result (handle, pending criterion); beta pending",
-      "a step fails with an unclassified error",
-      "review phase reserved",
-    ],
-    [
-      "regular",
-      "alpha published (handle, PR); beta pending",
-      "a step exhausts its interruptions",
-      "coding phase reserved",
-    ],
-    [
-      "regular",
-      "alpha running/execute; beta pending",
-      "a step fails with an unclassified error",
-      "review phase reserved",
-    ],
-    [
-      "regular",
-      "alpha running/validate (handle); beta pending",
       "validation fails",
       "an error stops the Objective outside any Work Item step",
-    ],
-    [
-      "regular",
-      "alpha running/deliver (handle); beta pending",
-      "a step exhausts its interruptions",
-      "paused",
-    ],
-    [
-      "regular",
-      "alpha published (handle, PR); beta pending",
-      "a step exhausts its interruptions",
-      "review phase reserved",
     ],
     [
       "regular",
       "alpha running/validate (handle); beta pending",
       "the validation environment fails",
       "an error stops the Objective outside any Work Item step",
-    ],
-    [
-      "regular",
-      "alpha waiting/approve-result (handle, pending criterion); beta pending",
-      "a step fails with an unclassified error",
-      "coding phase reserved",
-    ],
-    [
-      "regular",
-      "alpha running/deliver (handle); beta pending",
-      "a step exhausts its interruptions",
-      "a recorded subprocess has exited",
-    ],
-    [
-      "regular",
-      "alpha running/deliver (handle); beta pending",
-      "a step exhausts its interruptions",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "regular",
-      "alpha running/execute; beta pending",
-      "a step fails with an unclassified error",
-      "draining",
-    ],
-    [
-      "regular",
-      "alpha running/deliver (handle); beta pending",
-      "a step fails with an unclassified error",
-      "coding phase reserved",
-    ],
-    [
-      "regular",
-      "alpha running/deliver (handle); beta pending",
-      "a step fails with an unclassified error",
-      "review phase reserved",
-    ],
-    [
-      "native-stack",
-      "alpha running/execute; beta pending",
-      "a step fails with an unclassified error",
-      "GitHub observation failed",
-    ],
-    [
-      "native-stack",
-      "alpha waiting/approve-result (pending criterion); beta pending",
-      "a step exhausts its interruptions",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "native-stack",
-      "alpha running/deliver (PR); beta pending",
-      "a step fails with an unclassified error",
-      "a recorded subprocess has exited",
-    ],
-    [
-      "native-stack",
-      "alpha waiting/approve-result (pending criterion); beta pending",
-      "a step fails with an unclassified error",
-      "draining",
-    ],
-    [
-      "native-stack",
-      "alpha running/deliver (PR); beta pending",
-      "a step exhausts its interruptions",
-      "review phase reserved",
-    ],
-    [
-      "native-stack",
-      "alpha published (PR); beta pending",
-      "a step fails with an unclassified error",
-      "coding phase reserved",
-    ],
-    [
-      "native-stack",
-      "alpha running/validate; beta pending",
-      "a step fails with an unclassified error",
-      "a recorded subprocess's pid was reused",
-    ],
-    [
-      "native-stack",
-      "alpha running/validate; beta pending",
-      "a step exhausts its interruptions",
-      "paused",
-    ],
-    [
-      "native-stack",
-      "alpha waiting/approve-result (pending criterion); beta pending",
-      "a step fails with an unclassified error",
-      "review phase reserved",
-    ],
-    [
-      "native-stack",
-      "alpha running/validate; beta pending",
-      "a step exhausts its interruptions",
-      "a recorded subprocess has exited",
-    ],
-    [
-      "native-stack",
-      "alpha waiting/approve-result (pending criterion); beta pending",
-      "a step fails with an unclassified error",
-      "coding phase reserved",
-    ],
-    [
-      "native-stack",
-      "alpha running/execute; beta pending",
-      "a step fails with an unclassified error",
-      "review phase reserved",
-    ],
-    [
-      "native-stack",
-      "alpha running/execute; beta pending",
-      "a step exhausts its interruptions",
-      "draining",
     ],
     [
       "native-stack",
@@ -353,6 +191,80 @@ const KNOWN = {
       "alpha running/validate; beta pending",
       "the validation environment fails",
       "an error stops the Objective outside any Work Item step",
+    ],
+  ],
+  [D.RETRY_REFUSED.diagnosis]: [
+    [
+      "regular",
+      "alpha published (handle, PR); beta pending",
+      "a step fails with an unclassified error",
+      "a recorded subprocess has exited",
+    ],
+    [
+      "regular",
+      "alpha running/execute (handle); beta pending",
+      "a step fails with an unclassified error",
+      "a recorded subprocess's pid was reused",
+    ],
+    [
+      "regular",
+      "alpha published (handle, PR); beta pending",
+      "a step exhausts its interruptions",
+      "coding phase reserved",
+    ],
+    [
+      "regular",
+      "alpha running/deliver (handle); beta pending",
+      "a step exhausts its interruptions",
+      "paused",
+    ],
+    [
+      "regular",
+      "alpha published (handle, PR); beta pending",
+      "a step exhausts its interruptions",
+      "review phase reserved",
+    ],
+    [
+      "regular",
+      "alpha running/deliver (handle); beta pending",
+      "a step exhausts its interruptions",
+      "a recorded subprocess has exited",
+    ],
+    [
+      "regular",
+      "alpha running/deliver (handle); beta pending",
+      "a step exhausts its interruptions",
+      "a recorded subprocess's pid was reused",
+    ],
+    [
+      "regular",
+      "alpha running/deliver (handle); beta pending",
+      "a step fails with an unclassified error",
+      "coding phase reserved",
+    ],
+    [
+      "regular",
+      "alpha running/deliver (handle); beta pending",
+      "a step fails with an unclassified error",
+      "review phase reserved",
+    ],
+    [
+      "native-stack",
+      "alpha running/deliver (PR); beta pending",
+      "a step fails with an unclassified error",
+      "a recorded subprocess has exited",
+    ],
+    [
+      "native-stack",
+      "alpha running/deliver (PR); beta pending",
+      "a step exhausts its interruptions",
+      "review phase reserved",
+    ],
+    [
+      "native-stack",
+      "alpha published (PR); beta pending",
+      "a step fails with an unclassified error",
+      "coding phase reserved",
     ],
     [
       "native-stack",
@@ -529,6 +441,30 @@ const KNOWN = {
     [
       "native-stack",
       "alpha done; beta done (PR, closure complete); final validation; Objective closure pending; stack merge pending",
+      "draining",
+    ],
+    [
+      "regular",
+      "alpha waiting/approve-result (handle, pending criterion); beta pending",
+      "a step exhausts its interruptions",
+      "draining",
+    ],
+    [
+      "regular",
+      "alpha running/execute; beta pending",
+      "a step fails with an unclassified error",
+      "draining",
+    ],
+    [
+      "native-stack",
+      "alpha waiting/approve-result (pending criterion); beta pending",
+      "a step fails with an unclassified error",
+      "draining",
+    ],
+    [
+      "native-stack",
+      "alpha running/execute; beta pending",
+      "a step exhausts its interruptions",
       "draining",
     ],
   ],

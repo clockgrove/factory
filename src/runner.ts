@@ -2050,54 +2050,10 @@ async function runObjectivePass(
       saveState(path, current);
       throw error;
     }
-    if (
-      active.size &&
-      current?.schemaVersion === 7 &&
-      !cancellationRequested()
-    ) {
-      for (const work of Object.values(current.work)) {
-        if (!work.execution || work.status !== "running") continue;
-        try {
-          await driver.cancel(
-            structuredClone(work.execution),
-            executionContext(work, () => saveState(path, current)),
-          );
-        } catch (cancelError) {
-          current.coordinator!.cancelError = String(cancelError);
-        }
-      }
-      await Promise.allSettled(active.values());
-    }
-    if (current?.schemaVersion === 7 && !cancellationRequested()) {
-      for (const work of Object.values(current.work)) {
-        if (
-          !work.execution ||
-          work.step !== "execute" ||
-          work.status === "done"
-        )
-          continue;
-        try {
-          // Anything short of a complete result may still hold a live remote
-          // worker (an interrupted or unresolved attempt reports "failed"),
-          // so cancel it; cancelling a settled handle is a no-op.
-          const observed = await driver
-            .observe(
-              structuredClone(work.execution),
-              executionContext(work, () => saveState(path, current)),
-            )
-            .catch(() => undefined);
-          if (observed?.state !== "complete")
-            await driver.cancel(
-              structuredClone(work.execution),
-              executionContext(work, () => saveState(path, current)),
-            );
-        } catch (cessationError) {
-          current.coordinator!.cancelError = `Owned worker cessation unresolved: ${String(cessationError)}`;
-          current.coordinator!.waitReason =
-            "Operator direction required before retry";
-        }
-      }
-    }
+    // A failure stops only its own item (its runner stops its worker); only
+    // cancel stops other items' workers. Other items run on to their own
+    // stopping points.
+    if (!cancellationRequested()) await Promise.allSettled(active.values());
     if (current) {
       if (cancellationRequested()) {
         await owner.cancellation;

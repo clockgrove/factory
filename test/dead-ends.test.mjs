@@ -322,6 +322,29 @@ const diagnose = (testCase, reasons) =>
   );
 
 describe("dead ends", { concurrency: true }, () => {
+  // A diagnosis that no case shows any more is fixed: remove it. One test per
+  // diagnosis, each waiting only for the cases its `when` names (the only ones
+  // that can show it), and defined first so those cases are scheduled first.
+  for (const [key, entry] of Object.entries(D)) {
+    test(`diagnosis ${key} is still reproduced`, async () => {
+      const candidates = cases.filter(
+        (testCase) =>
+          entry.when(testCase.identity) || known.get(testCase.name) === key,
+      );
+      const shown = await Promise.all(
+        candidates.map(async (testCase) =>
+          diagnose(testCase, reasonsOf(await outcomeOf(testCase))).includes(
+            key,
+          ),
+        ),
+      );
+      assert.ok(
+        shown.includes(true),
+        `No case shows this diagnosis any more; remove ${key} from D in test/dead-ends.test.mjs: ${entry.diagnosis}\n${candidates.length} case(s) were in the states it names`,
+      );
+    });
+  }
+
   for (const testCase of cases) {
     test(testCase.name, { timeout: 3_600_000 }, async () => {
       const outcome = await outcomeOf(testCase);
@@ -361,23 +384,6 @@ describe("dead ends", { concurrency: true }, () => {
       OVERLAY_VALUES.filter((value) => !used.has(value)),
       [],
       "No case applies these overlays; they change nothing or apply to no anchor",
-    );
-  });
-
-  // A diagnosis that no case shows any more is fixed: remove it.
-  test("every diagnosis is still reproduced", async () => {
-    const seen = new Set();
-    for (const testCase of cases) {
-      const outcome = await outcomeOf(testCase);
-      for (const key of diagnose(testCase, reasonsOf(outcome)))
-        if (key) seen.add(key);
-    }
-    assert.deepEqual(
-      Object.entries(D)
-        .filter(([key]) => !seen.has(key))
-        .map(([key, entry]) => `${key}: ${entry.diagnosis}`),
-      [],
-      "No case shows these diagnoses any more; remove them from D in test/dead-ends.test.mjs",
     );
   });
 });

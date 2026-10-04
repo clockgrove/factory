@@ -14,7 +14,6 @@ const item = (id, overrides = {}) => ({
   step: null,
   requestedPhase: null,
   blockedReason: null,
-  waitingReason: null,
   pullRequest: null,
   acceptancePending: null,
   candidateAssetSets: [],
@@ -154,8 +153,11 @@ test("waiting says on what: CI check, capacity, dependency", () => {
         status: "running",
         step: "deliver",
         pullRequest: 12,
-        waitingReason:
-          "Awaiting exact published head checks or target protection readiness",
+        wait: {
+          kind: "ci",
+          detail:
+            "Awaiting exact published head checks or target protection readiness",
+        },
       }),
       item("B", { blockedReason: "dependency:A" }),
     ]),

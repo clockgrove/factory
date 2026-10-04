@@ -13,8 +13,11 @@ import { execFileSync } from "node:child_process";
 import { ClaudeManagedExecutionDriver } from "../dist/execution/claude-managed.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { claudeByteDigest } from "../dist/execution/claude-managed-transfer.js";
-import { SettledAttemptFailure } from "../dist/work-repair.js";
 import { faultOf } from "../dist/fault.js";
+/** The driver confirmed the worker stopped without a result. */
+const stoppedWithoutResult = (error) =>
+  faultOf(error).kind === "transient" &&
+  faultOf(error).outcomeUnknown === false;
 const config = () => ({
   agentId: "agent_pinned",
   agentVersion: 3,
@@ -336,9 +339,7 @@ test("Claude driver verifies bootstrap before implementation and collects exact 
   assert.equal(f.state.calls.filter((c) => c.startsWith("delete:")).length, 5);
   assert.equal(f.saved.at(-1).data.phase, "disposed");
 });
-const settledInterruption = (error) =>
-  error instanceof SettledAttemptFailure &&
-  error.classification === "interruption";
+const settledInterruption = (error) => stoppedWithoutResult(error);
 test("Claude create lost after submission adopts the tagged session instead of creating another", async (t) => {
   const f = fixture(t);
   f.state.loseCreate = true;
@@ -530,8 +531,7 @@ test("Claude verifies actual returned selected bytes instead of restoring origin
   await assert.rejects(
     f.driver().collect(handle, f.context),
     (error) =>
-      error instanceof SettledAttemptFailure &&
-      error.classification === "implementation" &&
+      faultOf(error).kind === "work" &&
       /changed|modified|digest|bytes|immutable/i.test(error.message),
   );
   // The rejected attempt's session is deleted so a new attempt never runs beside it.
@@ -546,9 +546,7 @@ test("Claude refused create is a real failure, not an interruption", async (t) =
   await assert.rejects(
     f.driver().start(f.request, f.context),
     (error) =>
-      error instanceof SettledAttemptFailure &&
-      error.classification === "implementation" &&
-      /permission denied/.test(error.message),
+      faultOf(error).kind === "work" && /permission denied/.test(error.message),
   );
   f.driver().args.client.create = create;
   assert.equal(f.saved.at(-1).data.phase, "disposed");
@@ -565,8 +563,7 @@ test("Claude refused read settles the attempt; a passed deadline settles it as a
     await assert.rejects(
       f.driver().collect(handle, f.context),
       (error) =>
-        error instanceof SettledAttemptFailure &&
-        error.classification === "implementation" &&
+        faultOf(error).kind === "work" &&
         (kind === "refused"
           ? /transient output read/
           : /configured timeout/
@@ -577,7 +574,7 @@ test("Claude refused read settles the attempt; a passed deadline settles it as a
     // A restart finishes the same settlement instead of resuming the work.
     await assert.rejects(
       f.driver().collect(structuredClone(f.saved.at(-1)), f.context),
-      (error) => error instanceof SettledAttemptFailure,
+      (error) => ["work", "transient"].includes(faultOf(error).kind),
     );
     assert.equal(f.state.sends, 1);
   }
@@ -605,11 +602,8 @@ test("Claude session that is gone settles the attempt and still deletes its file
   const handle = await f.driver().start(f.request, f.context);
   f.state.gone = true;
   // The worker is gone with its session: no result, not a wrong one.
-  await assert.rejects(
-    f.driver().collect(handle, f.context),
-    (error) =>
-      error instanceof SettledAttemptFailure &&
-      error.classification === "interruption",
+  await assert.rejects(f.driver().collect(handle, f.context), (error) =>
+    stoppedWithoutResult(error),
   );
   assert.equal(f.saved.at(-1).data.phase, "disposed");
   assert.equal(f.state.calls.filter((c) => /^delete:file_/.test(c)).length, 4);
@@ -676,11 +670,8 @@ test("Claude session gone while collecting is a dead worker, not a failed result
     .driver()
     .collect(handle, f.context)
     .catch((caught) => caught);
-  assert.ok(error instanceof SettledAttemptFailure);
-  assert.deepEqual(
-    [faultOf(error).kind, faultOf(error).outcomeUnknown],
-    ["transient", true],
-  );
+  // The session is gone: the worker stopped without a result.
+  assert.ok(stoppedWithoutResult(error));
 });
 
 test("Claude cancel succeeds when the session disappears before its interrupt", async (t) => {

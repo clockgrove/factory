@@ -10,11 +10,12 @@ import {
   testNames,
 } from "./support/fault-matrix.mjs";
 
-// Real-GitHub behaviors the fault matrix does not cover: read-after-write lag,
-// rate limits, merge refusals, pagination and other actors. Every scenario
-// must reach the end state of an uninterrupted run (see assertEndState),
-// except where Factory must refuse. Known Factory bugs are inverted tests
-// listed in support/fault-known.mjs.
+// Real-GitHub and provider behaviors the fault matrix does not cover:
+// read-after-write lag, rate limits (REST and model usage limits), merge
+// refusals, pagination, other actors, a worker that dies and the paid-call
+// bound. Every scenario must reach the end state of an uninterrupted run (see
+// assertEndState), except where Factory must refuse or stop for a decision.
+// Known Factory bugs are inverted tests listed in support/fault-known.mjs.
 
 const repo = "/repos/{owner}/{repo}";
 const PULL = `GET ${repo}/pulls/{number}`;
@@ -143,6 +144,59 @@ const scenarios = [
       },
     ],
   },
+  // Secondary limits without retry-after: the body alone names the limit,
+  // so Factory waits GitHub's documented minute before the next request.
+  {
+    name: "429 secondary rate limit without retry-after on issue creation",
+    deliveries: BOTH,
+    http: [
+      { match: CREATE_ISSUE, ...faults.secondaryRateLimit({ status: 429 }) },
+    ],
+  },
+  {
+    name: "429 secondary rate limit without retry-after on PR creation",
+    deliveries: BOTH,
+    http: [
+      { match: CREATE_PULL, ...faults.secondaryRateLimit({ status: 429 }) },
+    ],
+  },
+  {
+    name: "429 secondary rate limit without retry-after on merge",
+    deliveries: BOTH,
+    http: (delivery) => [
+      {
+        match: delivery === "regular" ? MERGE : MERGE_ASYNC,
+        ...faults.secondaryRateLimit({ status: 429 }),
+      },
+    ],
+  },
+  {
+    name: "403 secondary rate limit without retry-after on PR creation",
+    deliveries: BOTH,
+    http: [{ match: CREATE_PULL, ...faults.secondaryRateLimit() }],
+  },
+  {
+    name: "403 secondary rate limit with retry-after on issue creation",
+    deliveries: BOTH,
+    http: [
+      { match: CREATE_ISSUE, ...faults.secondaryRateLimit({ retryAfter: 1 }) },
+    ],
+  },
+  {
+    name: "403 secondary rate limit without retry-after on a completion comment",
+    deliveries: ["native-stack"],
+    http: [
+      {
+        match: `POST ${repo}/issues/{number}/comments`,
+        ...faults.secondaryRateLimit(),
+      },
+    ],
+  },
+  {
+    name: "403 primary rate limit without a reset header on PR observation",
+    deliveries: BOTH,
+    http: [{ match: PULL, ...faults.primaryRateLimitWithoutReset() }],
+  },
   {
     name: "403 primary rate limit with a reset on PR observation",
     deliveries: BOTH,
@@ -194,7 +248,47 @@ const scenarios = [
         : { match: MERGE_ASYNC, kind: "after", run: pushForeign },
     ],
   },
+  {
+    // A usage limit carries its reset time; waiting for it is not a paid
+    // fault, so four in a row stay within the paid-call bound of three.
+    name: "a model usage limit with a reset time four times at the first result review",
+    deliveries: BOTH,
+    inProcess: [
+      {
+        target: "model",
+        method: "reviewResult",
+        occurrence: 1,
+        times: 4,
+        kind: "usage-limit",
+      },
+    ],
+  },
+  {
+    // The fresh attempt is one more worker start than the reference.
+    name: "alpha's worker ends without a result once",
+    deliveries: BOTH,
+    actions: { alpha: { dieAttempts: 1 } },
+    checks: ["end", "stop"],
+  },
 ];
+
+// Factory must stop for a decision once a paid call's transient faults
+// exceed its bound of three, instead of repeating it without end.
+scenarios.push({
+  name: "four lost responses at the first result review",
+  deliveries: BOTH,
+  inProcess: [
+    {
+      target: "model",
+      method: "reviewResult",
+      occurrence: 1,
+      times: 4,
+      kind: "lost",
+    },
+  ],
+  checks: ["refusal"],
+  refuses: /^Objective #\d+ needs a human decision/,
+});
 
 // Factory must refuse, not complete: the merge it observed is gone from the
 // default branch. Regular checks right after the merge; native after the stack.
@@ -210,6 +304,37 @@ scenarios.push({
   ],
   checks: ["refusal"],
   refuses: /does not contain the merge/,
+});
+
+// An App installation token has no user: GET /user is 403, and the issues
+// and PRs Factory creates are authored by the App's bot. Ownership is the
+// author login persisted at the first create, not the viewer.
+scenarios.push({
+  name: "an App installation token without a user",
+  deliveries: BOTH,
+  fake: { appToken: true, protectionChecks: () => [] },
+});
+
+// A maintainer deleted the newest issue: the number probe past the newest
+// listed issue reads 410, which is a gap like 404.
+scenarios.push({
+  name: "a deleted issue right after the Objective",
+  deliveries: BOTH,
+  earlierIssues: 1,
+  beforeRun: (fake, index) => {
+    if (index === 0) fake.deleteIssue(2);
+  },
+});
+
+// Strict required checks: once the default branch moves, alpha's open PR is
+// BEHIND. Factory updates the branch with the head it expects instead of
+// waiting forever, then merges.
+scenarios.push({
+  name: "the default branch moves under strict protection while alpha's PR is open",
+  deliveries: ["regular"],
+  fake: { strict: true, protectionChecks: () => [] },
+  http: [{ match: CREATE_PULL, kind: "after", run: pushForeign }],
+  extraMutations: [`PUT ${repo}/pulls/{number}/update-branch`],
 });
 
 // Factory integrates with merge commits (its evidence binds the delivered
@@ -253,6 +378,8 @@ describe("GitHub consistency, rate limits and other actors", {
               typeof scenario.http === "function"
                 ? scenario.http(delivery)
                 : (scenario.http ?? []),
+            inProcess: scenario.inProcess ?? [],
+            actions: scenario.actions ?? {},
             fake: scenario.fake ?? {},
             beforeRun: scenario.beforeRun,
             earlierIssues: scenario.earlierIssues ?? 0,
@@ -262,6 +389,7 @@ describe("GitHub consistency, rate limits and other actors", {
           foreignIssues: scenario.foreignIssues ?? scenario.earlierIssues ?? 0,
           refuses: scenario.refuses,
           unsent: scenario.unsent ?? [],
+          extraMutations: scenario.extraMutations ?? [],
         },
         known,
       );

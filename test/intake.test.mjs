@@ -1,4 +1,5 @@
 import { consumption } from "../dist/repair-policy.js";
+import { faultOf } from "../dist/fault.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -761,10 +762,12 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
           save() {},
           cancelled: () => false,
         }),
-        /accepted|acceptance|sealed|evidence|prerequisite/,
+        // The predecessor's evidence changed or is missing: the operator
+        // decides or fixes it, and the amendment waits (contract 2).
+        (error) => ["decision", "config"].includes(faultOf(error).kind),
       );
       assert.equal(calls, 0, fault);
-      assert.equal(state.pendingAmendment.phase, "rejected");
+      assert.equal(state.pendingAmendment.phase, "ready", fault);
       assert.deepEqual(state.graph, second.graph);
       assert.equal(consumption(state).planningRevisions, 1);
       saveState(statePath(f.config.repository, 1), first);

@@ -19,7 +19,6 @@ import {
 import { OpenAIManagedExecutionDriver } from "../dist/execution/openai-managed.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { readState } from "../dist/state-store.js";
-import { Interruption } from "../dist/contracts.js";
 import { attachFault } from "../dist/fault.js";
 
 for (const delivery of ["regular", "native-stack"])
@@ -277,7 +276,7 @@ for (const delivery of ["regular", "native-stack"])
           reservations.push([work.phaseReservation, work.requestedPhase]);
           // As the driver classifies a lost response.
           if (reservations.length === 1)
-            throw attachFault(new Interruption("provider response lost"), {
+            throw attachFault(new Error("provider response lost"), {
               kind: "transient",
               detail: "provider response lost",
               outcomeUnknown: false,

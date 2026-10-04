@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { compilePlan, MalformedPlannerOutput } from "../dist/compiler.js";
 import { CompletedModelInvocationError } from "../dist/contracts.js";
-import { attachFault } from "../dist/fault.js";
+import { attachFault, StepFault, transient } from "../dist/fault.js";
 import {
   assertRepairLedger,
   consumption,
@@ -20,7 +20,6 @@ import {
   CandidateValidationFailure,
   diagnoseWorkRepair,
   recordWorkFailure,
-  SettledAttemptFailure,
 } from "../dist/work-repair.js";
 import { withCoverage } from "./support/coverage.mjs";
 import {
@@ -289,9 +288,10 @@ test("an operator correction of a diagnosed failure: same kind free, another kin
 test("transient and configuration failures are never charged", async () => {
   for (const [error, decision, kind] of [
     [
-      new SettledAttemptFailure(new Error("worker exited")),
+      // A worker the driver confirmed stopped without a result.
+      new StepFault(transient("worker exited", false)),
       /factory retry --objective 1 --item result/,
-      "implementation",
+      undefined,
     ],
     [
       new CandidateEnvironmentFailure("Validation environment unavailable"),
@@ -300,21 +300,26 @@ test("transient and configuration failures are never charged", async () => {
     ],
   ]) {
     const state = itemState(2);
-    assert.equal(recordWorkFailure(state, "result", error), true);
+    // A wrong result is isolated to its item; a stopped worker is retried.
+    assert.equal(recordWorkFailure(state, "result", error), Boolean(kind));
     const failure = state.work.result.recovery.failure;
     assert.equal(failure.event, undefined);
     assert.match(failure.decision, decision);
     const model = diagnoser();
     assert.equal(await diagnose(state, model), false);
     assert.equal(model.calls, 0);
-    // The operator may still correct it; nothing is charged.
-    applyWorkCorrection(state, "result", {
-      kind,
-      failureDigest: failure.digest,
-      actor: "operator",
-      diagnosis: "The controller environment is restored",
-      correction: "Run the same work again",
-    });
+    // Only a wrong result is corrected; a stopped worker is retried.
+    // Either way nothing is charged.
+    const correct = () =>
+      applyWorkCorrection(state, "result", {
+        kind: kind ?? "implementation",
+        failureDigest: failure.digest,
+        actor: "operator",
+        diagnosis: "The controller environment is restored",
+        correction: "Run the same work again",
+      });
+    if (kind) correct();
+    else assert.throws(correct, /factory retry --objective 1 --item result/);
     assert.equal(state.charges, undefined);
     assertRepairLedger(restart(state));
   }

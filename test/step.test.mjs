@@ -815,7 +815,6 @@ const itemView = (id, overrides = {}) => ({
   step: "publish",
   requestedPhase: null,
   blockedReason: null,
-  waitingReason: null,
   pullRequest: null,
   acceptancePending: null,
   candidateAssetSets: [],

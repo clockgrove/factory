@@ -22,8 +22,11 @@ import {
 } from "../dist/execution/openai-managed.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { executionContext } from "../dist/execution/checkpoint.js";
-import { SettledAttemptFailure } from "../dist/work-repair.js";
-import { Interruption } from "../dist/contracts.js";
+import { faultOf } from "../dist/fault.js";
+/** The driver confirmed the worker stopped without a result. */
+const stoppedWithoutResult = (error) =>
+  faultOf(error).kind === "transient" &&
+  faultOf(error).outcomeUnknown === false;
 
 const config = {
   model: "explicit-model",
@@ -235,8 +238,9 @@ test("managed complete result round-trips binary bytes, deletion, executable mod
 });
 
 const settled = (classification) => (error) =>
-  error instanceof SettledAttemptFailure &&
-  error.classification === classification;
+  classification === "implementation"
+    ? faultOf(error).kind === "work"
+    : stoppedWithoutResult(error);
 
 test("lost create ends the attempt directly as an interruption and records the possible orphan", async (t) => {
   const f = fixture(t);
@@ -293,7 +297,7 @@ test("restart during hosted setup submits the input once", async (t) => {
     if (!crashed && f.work.execution.data.phase === "prepared") {
       crashed = true;
       // Stands in for the controller stopping here.
-      throw new Interruption("controller stopped");
+      throw new Error("controller stopped");
     }
   });
   await assert.rejects(f.driver.start(f.request, context), /stopped/);
@@ -429,8 +433,7 @@ test("result import refuses corrupted bytes, wrong binding and unsafe entries be
     await assert.rejects(
       f.driver.collect(handle, f.context),
       (error) =>
-        error instanceof SettledAttemptFailure &&
-        error.classification === "implementation" &&
+        faultOf(error).kind === "work" &&
         /archive|TAR|binding|different|unsafe|inventory/i.test(error.message),
     );
     // The rejected attempt's session is deleted so a new attempt never runs beside it.
@@ -586,8 +589,7 @@ test("connected setup after deadline does not submit work; cleanup receives a se
   await assert.rejects(
     f.driver.start(f.request, f.context),
     (error) =>
-      error instanceof SettledAttemptFailure &&
-      error.classification === "implementation" &&
+      faultOf(error).kind === "work" &&
       /configured timeout/.test(error.message),
   );
   assert.equal(
@@ -625,8 +627,7 @@ test("remaining attempt time bounds each request and rejects collection after ex
   await assert.rejects(
     f.driver.collect(handle, f.context),
     (error) =>
-      error instanceof SettledAttemptFailure &&
-      error.classification === "implementation" &&
+      faultOf(error).kind === "work" &&
       /configured timeout/.test(error.message),
   );
   const after = f.state.calls.slice(calls);

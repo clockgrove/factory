@@ -7,7 +7,7 @@ import test from "node:test";
 import { Octokit } from "@octokit/core";
 import { RealGitHubGateway } from "../dist/github.js";
 import { faultOf } from "../dist/fault.js";
-import { GitHubClient, GitHubOutcomeUnknown } from "../dist/github-client.js";
+import { GitHubClient } from "../dist/github-client.js";
 import { withProcessCancellation } from "../dist/process.js";
 import { controlObjective } from "../dist/runner.js";
 import { intakeControl } from "../dist/intake.js";
@@ -782,8 +782,9 @@ test("fixed read query shares REST rate gate, rejects partial data and never cla
   );
   await assert.rejects(
     lost.pullRequestReadiness("example/target", 1),
+    // A read never has an unknown outcome.
     (error) =>
-      !(error instanceof GitHubOutcomeUnknown) &&
+      faultOf(error).outcomeUnknown !== true &&
       !error.message.includes("private"),
   );
   await assert.rejects(

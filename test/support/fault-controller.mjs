@@ -4,8 +4,12 @@
 // NativeStackDelivery and RegularDelivery; only the planning model and the
 // harness are scripted. Model and execution-driver calls can be faulted on
 // their Nth call: crash (SIGKILL) before or after the call, a lost response
-// (the call happened, the caller sees an error) or an unavailable burst (the
-// call never happened). Prints one JSON line.
+// (the call happened, the caller sees an error), an unavailable burst (the
+// call never happened) or, for model calls, a usage limit with a reset time.
+// An operator action (cancel) can be taken when a driver call for an item
+// begins. With `answer`, a restart first runs the `factory retry` command the
+// status names for the previous run's stop, as the operator would. Prints
+// one JSON line.
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Octokit } from "@octokit/core";
@@ -17,7 +21,8 @@ import { LocalExecutionDriver } from "../../dist/execution/local.js";
 import { attachFault, transient } from "../../dist/fault.js";
 import { GitHubClient } from "../../dist/github-client.js";
 import { RealGitHubGateway } from "../../dist/github.js";
-import { Interruption, composeWithLocalHarness } from "../../dist/index.js";
+import { composeWithLocalHarness } from "../../dist/index.js";
+import { continuationStatusDocument } from "../../dist/diagnostics.js";
 import {
   EXIT_COMPLETE,
   EXIT_NEEDS_DECISION,
@@ -56,8 +61,29 @@ const rules = (descriptor.faults ?? []).map((fault) => ({
 
 function record(value) {
   mkdirSync(dirname(callsPath), { recursive: true });
-  appendFileSync(callsPath, `${JSON.stringify(value)}\n`);
+  appendFileSync(
+    callsPath,
+    `${JSON.stringify({ run: descriptor.run ?? 0, ...value })}\n`,
+  );
 }
+
+/**
+ * The operator runs `factory cancel` while this controller owns the
+ * Objective: the CLI signals the owner with SIGUSR1. With `settle`, wait
+ * until Factory's handler has run, so the cancellation is recorded before
+ * the intercepted call proceeds.
+ */
+async function operatorCancel(settle) {
+  if (!settle) return void process.kill(process.pid, "SIGUSR1");
+  await new Promise((resolve) => {
+    process.once("SIGUSR1", () => setImmediate(resolve));
+    process.kill(process.pid, "SIGUSR1");
+  });
+}
+
+/** The Work Item a driver call is for: a request names it, a handle carries it. */
+const itemOf = (request) =>
+  request?.item?.id ?? request?.data?.request?.item?.id;
 
 // The harness signals a controller only with SIGKILL. A SIGTERM came from
 // outside the test (it makes Factory drain and release ownership), so record
@@ -75,9 +101,12 @@ process.on("SIGTERM", () => {
  * adapter's (unreached: nothing paid; lost mid-call: maybe paid).
  */
 function classified(target, method, error, reached) {
-  const interruption = new Interruption(error);
   return target === "driver"
-    ? attachFault(interruption, executionFault(interruption, method))
+    ? attachFault(
+        error,
+        executionFault(error, method) ??
+          transient(`Driver ${method} failed: ${error.message}`, reached),
+      )
     : attachFault(
         error,
         transient(
@@ -93,6 +122,25 @@ function unavailable(target, method) {
     status: 503,
   });
   return classified(target, method, cause, false);
+}
+
+/**
+ * A model provider's usage limit with its reset time: the call never ran,
+ * and the caller is told when it may try again.
+ */
+const USAGE_RESET_MS = 3_000;
+function usageLimited() {
+  const cause = Object.assign(new Error("429 usage limit reached"), {
+    status: 429,
+  });
+  return attachFault(
+    cause,
+    transient(
+      cause.message,
+      false,
+      new Date(Date.now() + USAGE_RESET_MS).toISOString(),
+    ),
+  );
 }
 
 /** The error a caller sees when the call happened but its response was lost. */
@@ -116,18 +164,35 @@ async function intercept(target, method, request, call) {
     )
       fired = rule;
   }
+  const item = target === "driver" ? itemOf(request) : request?.item?.id;
   record({
     target,
     method,
     phase: request?.reviewPhase ?? request?.invocation?.phase,
-    item: request?.item?.id,
+    item,
     attempt: request?.attemptId ?? request?.identity,
     fault: fired?.kind,
     // Whether the call reached its service (and may have had an effect).
-    reached: !["crash-before", "unavailable"].includes(fired?.kind),
+    reached: !["crash-before", "unavailable", "usage-limit"].includes(
+      fired?.kind,
+    ),
   });
+  const operator = descriptor.operator;
+  if (
+    operator &&
+    !operator.done &&
+    target === "driver" &&
+    operator.method === method &&
+    operator.item === item
+  ) {
+    operator.done = true;
+    // Cancelling while start is in flight must be recorded before start
+    // returns; cancelling a running worker only needs to arrive.
+    await operatorCancel(method === "start");
+  }
   if (fired?.kind === "crash-before") process.kill(process.pid, "SIGKILL");
   if (fired?.kind === "unavailable") throw unavailable(target, method);
+  if (fired?.kind === "usage-limit") throw usageLimited();
   const result = await call();
   if (fired?.kind === "crash-after") process.kill(process.pid, "SIGKILL");
   if (fired?.kind === "lost") throw lost(target, method);
@@ -194,6 +259,11 @@ function summary() {
       error: state.error,
       mode: state.coordinator?.mode,
       waitReason: state.coordinator?.waitReason,
+      // Only an Objective an operator cancelled reports its cancellation.
+      ...(state.cancelRequested && {
+        cancel: state.cancelledAt ? "done" : "requested",
+        cancelError: state.coordinator?.cancelError,
+      }),
       work: Object.fromEntries(
         Object.entries(state.work ?? {}).map(([id, work]) => [
           id,
@@ -211,6 +281,47 @@ function summary() {
   }
 }
 
+/**
+ * The operator answers the stop the status shows with the command it names,
+ * when that command is `factory retry` (the answer to a step's decision or
+ * configuration fix). Applied through the application, as the CLI does when
+ * no run owns the Objective. Returns the command and its result.
+ */
+function answerStop() {
+  const objective = descriptor.graph.objective;
+  const continuation = readContinuation(config.repository, objective);
+  if (!continuation) return undefined;
+  const command = continuationStatusDocument(
+    continuation,
+    config.repository,
+    objective,
+    config.delivery.kind,
+    [],
+    continuation.capacity?.concurrency,
+    false,
+  ).nextAction?.command;
+  const words = command?.split(" ") ?? [];
+  if (words[0] !== "factory" || words[1] !== "retry")
+    return command && { command, applied: "not a retry" };
+  const option = (name) => {
+    const index = words.indexOf(`--${name}`);
+    return index < 0 ? undefined : words[index + 1];
+  };
+  if (Number(option("objective")) !== objective)
+    return { command, applied: "another Objective" };
+  try {
+    return {
+      command,
+      applied: application.retryWorkItem(objective, option("item")),
+    };
+  } catch (error) {
+    return { command, applied: `refused: ${error?.message ?? error}` };
+  }
+}
+
+const answered =
+  descriptor.answer && (descriptor.run ?? 0) > 0 ? answerStop() : undefined;
+
 try {
   // A run stays alive through waits and returns complete, needing a human
   // decision, or failed (the `factory run` exit codes). The test judges the
@@ -226,6 +337,7 @@ try {
             ? "needs-decision"
             : "failed-run",
       message,
+      ...(answered && { answered }),
       ...summary(),
     }),
   );
@@ -234,6 +346,7 @@ try {
     JSON.stringify({
       outcome: "stopped",
       message: String(error?.message ?? error),
+      ...(answered && { answered }),
       ...summary(),
     }),
   );

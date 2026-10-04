@@ -7,7 +7,10 @@ import { compilerWire, PlannerChoiceError } from "./compiler-wire.js";
 import {
   allowanceAvailable,
   chargeRepair,
+  consumption,
   failureDigest,
+  objectiveEvent,
+  PAID_ATTEMPTS,
   type RepairClass,
   type RepairLedger,
 } from "./repair-policy.js";
@@ -45,6 +48,7 @@ import {
 import { authenticationFailure } from "./execution/harness-support.js";
 import {
   attachFault,
+  attachedFault,
   decision,
   networkFailure,
   transient,
@@ -2050,6 +2054,9 @@ async function checkedPlanReview(
     });
     return { findings };
   } catch (error) {
+    // A configuration fault needs its fix before the review can be asked.
+    if (!responseReceived && attachedFault(error)?.kind === "config")
+      throw error;
     if (responseReceived) {
       const rejections = [{ field: "findings", reason: "invalid" }];
       for (const rejection of rejections)
@@ -2154,13 +2161,9 @@ async function compileRecoverablePlan(
   state.planningRecovery ??= { phase: "ready", history: [] };
   const record = state.planningRecovery;
   // A call was in flight when the controller stopped. Model calls have no
-  // side effects, so issue it again. A diagnosis was charged before it was
-  // sent; its reissue must not charge the allowance a second time.
-  let resumingDiagnosis = false;
-  if (record.phase === "submitted") {
-    resumingDiagnosis = record.invocation?.phase === "diagnosis";
-    record.phase = "ready";
-  }
+  // side effects, so issue it again. Revisions are charged per failure
+  // event, so a reissued diagnosis is not charged twice.
+  if (record.phase === "submitted") record.phase = "ready";
   if (record.phase === "stopped")
     throw new Error(
       "Planning recovery stopped; inspect the preserved exact decision",
@@ -2233,7 +2236,7 @@ async function compileRecoverablePlan(
       return {
         invocationId: record.invocation?.id ?? "preserved",
         phase,
-        ordinal: state.allowanceConsumption?.planningRevisions ?? 0,
+        ordinal: consumption(state).planningRevisions,
       };
     const id = randomUUID();
     record.phase = "submitted";
@@ -2244,7 +2247,7 @@ async function compileRecoverablePlan(
     return {
       invocationId: id,
       phase,
-      ordinal: state.allowanceConsumption?.planningRevisions ?? 0,
+      ordinal: consumption(state).planningRevisions,
       observe,
     };
   };
@@ -2352,12 +2355,32 @@ async function compileRecoverablePlan(
         save();
         return candidate;
       }
+      // A review that did not answer validly is asked again, never charged
+      // as a revision; after PAID_ATTEMPTS the operator decides the plan.
+      if (!review.findings.length) {
+        const asked = (record.invocations ?? []).filter(
+          (entry) => entry.phase === "graph-review",
+        ).length;
+        if (asked < PAID_ATTEMPTS) {
+          delete record.review.response;
+          save();
+          continue;
+        }
+      }
       failure = JSON.stringify(review);
     } catch (error) {
+      // Only an answered plan (refused or invalid) is revised against the
+      // allowance; a transient or configuration fault is never charged.
+      const fault = attachedFault(error);
+      const answered =
+        error instanceof MalformedPlannerOutput ||
+        error instanceof PlanValidationError;
       if (
         error instanceof PlanningReviewBindingError ||
         context.stopped?.() ||
-        String(record.phase) === "submitted"
+        String(record.phase) === "submitted" ||
+        fault?.kind === "config" ||
+        (fault?.kind === "transient" && !answered)
       )
         throw error;
       if (record.review)
@@ -2374,11 +2397,19 @@ async function compileRecoverablePlan(
     const permitted = (
       ["planning-output", "planning-evidence", "planning-choice"] as const
     ).filter((kind) => state.autonomy.repairClasses.includes(kind));
+    // One revision is charged per failed round; the round is the number of
+    // accepted corrections before it.
+    const event = objectiveEvent("plan", record.history.length);
+    const unanswered = Boolean(review && !review.findings.length);
+    const diagnosed = (record.invocations ?? []).filter(
+      (entry) => entry.phase === "diagnosis",
+    ).length;
     if (
       unchanged ||
+      unanswered ||
+      diagnosed >= PAID_ATTEMPTS ||
       !permitted.length ||
-      (!resumingDiagnosis &&
-        !allowanceAvailable(state, "planningRevisions", ["$planning"]))
+      !allowanceAvailable(state, event, "planningRevisions", ["$planning"])
     ) {
       // A reviewed graph waits for an operator plan decision; anything else stops planning.
       record.phase = "stopped";
@@ -2403,13 +2434,14 @@ async function compileRecoverablePlan(
       throw new Error(
         unchanged
           ? "Unchanged planning failure; operator decision required"
-          : "Planning correction is disabled or its allowance is exhausted",
+          : diagnosed >= PAID_ATTEMPTS
+            ? `Planning diagnosis did not answer ${PAID_ATTEMPTS} times; operator decision required`
+            : "Planning correction is disabled or its allowance is exhausted",
       );
     }
     if (context.stopped?.())
       throw new Error("Planning is paused or cancelled before diagnosis");
-    if (!resumingDiagnosis) chargeRepair(state, permitted[0]!, ["$planning"]);
-    resumingDiagnosis = false;
+    chargeRepair(state, event, permitted[0]!, ["$planning"]);
     record.phase = "submitted";
     record.invocation = { id: randomUUID(), phase: "diagnosis" };
     record.invocations ??= [];
@@ -2443,7 +2475,7 @@ async function compileRecoverablePlan(
       invocation: {
         invocationId: record.invocation.id,
         phase: "diagnosis",
-        ordinal: state.allowanceConsumption!.planningRevisions,
+        ordinal: consumption(state).planningRevisions,
         observe,
       },
     });

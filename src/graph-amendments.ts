@@ -1,7 +1,12 @@
 import {
+  allowanceAvailable,
+  allowanceKey,
+  assertRepairClass,
+  charge,
   chargeRepair,
-  consumeAllowance,
+  consumption,
   failureDigest,
+  objectiveEvent,
   type RepairCorrection,
 } from "./repair-policy.js";
 import { isCompletedProjectionRejection } from "./github-client.js";
@@ -68,8 +73,6 @@ export interface PendingAmendment {
   reviewDigest?: string;
   issueByItemId: Record<string, number>;
   error?: string;
-  /** The revision allowance was charged; a repeat does not charge again. */
-  charged?: boolean;
   /** Interrupted repeats of the current call; reset when a call completes. */
   interruptions?: number;
   rejectionStage?:
@@ -179,25 +182,6 @@ export function assertGraphRevisions(state: FactoryState): void {
       throw new Error("Current graph differs from accepted revision");
   } else if (graphDigest(state.graph) !== state.planGraphDigest)
     throw new Error("Current graph differs from the accepted plan");
-  if (state.allowanceConsumption) {
-    for (const key of [
-      "planningRevisions",
-      "implementationRepairs",
-      "resultRereviews",
-    ] as const)
-      if (
-        !Number.isSafeInteger(state.allowanceConsumption[key]) ||
-        state.allowanceConsumption[key] < 0 ||
-        state.allowanceConsumption[key] > state.autonomy.allowances[key]
-      )
-        throw new Error("Objective allowance consumption is invalid");
-    if (
-      (revisions?.length ?? 1) - 1 >
-      state.allowanceConsumption.planningRevisions
-    )
-      throw new Error("Accepted revisions exceed consumed allowance");
-  } else if (revisions && revisions.length > 1)
-    throw new Error("Graph revisions lost Objective allowance consumption");
   for (const [id, work] of Object.entries(state.work)) {
     if (!work.graphRevisionDigest) continue;
     const revision =
@@ -290,21 +274,28 @@ export function assertGraphRevisions(state: FactoryState): void {
         "Amendment replacement lost its diagnosed rejection binding",
       );
   }
-  const knownPlanningCharges =
-    (state.graphRevisions?.length ?? 1) -
-    1 +
-    (state.rejectedAmendments?.length ?? 0) +
-    (pending && !["ready", "backlog"].includes(pending.phase) ? 1 : 0);
+  // Each started amendment was charged once, by its own id.
+  const started = [
+    ...(state.rejectedAmendments ?? []),
+    ...(pending && !["ready", "backlog"].includes(pending.phase)
+      ? [pending]
+      : []),
+  ];
+  const charged = Object.keys(state.charges ?? {}).filter((event) =>
+    event.startsWith(objectiveEvent("amend", "")),
+  ).length;
   if (
-    knownPlanningCharges >
-      (state.allowanceConsumption?.planningRevisions ?? 0) ||
-    knownPlanningCharges >
-      (state.repairConsumption?.$planning?.planningRevisions ?? 0)
+    started.some((entry) => !state.charges?.[amendmentEvent(entry)]) ||
+    (revisions?.length ?? 1) - 1 + started.length > charged
   )
     throw new Error(
-      "Known amendment attempts exceed retained planning consumption",
+      "Known amendment attempts exceed retained planning charges",
     );
 }
+
+/** The failure event an amendment is charged under: one plan revision per amendment. */
+const amendmentEvent = (pending: PendingAmendment): string =>
+  objectiveEvent("amend", pending.id);
 
 export function submitAmendment(
   state: FactoryState,
@@ -446,16 +437,17 @@ function validateAmendmentReplacement(
     throw new Error(
       "Replacement requires a new diagnosis bound to the rejection",
     );
-  // Check availability without charging or mutating the authoritative ledger.
-  chargeRepair(
-    {
-      autonomy: state.autonomy,
-      allowanceConsumption: structuredClone(state.allowanceConsumption),
-      repairConsumption: structuredClone(state.repairConsumption),
-    },
-    correction.kind,
-    ["$planning"],
-  );
+  // The replacement is charged when it starts; it must fit now.
+  assertRepairClass(state, correction.kind);
+  if (
+    !allowanceAvailable(
+      state,
+      objectiveEvent("amend", "replacement"),
+      allowanceKey(correction.kind),
+      ["$planning"],
+    )
+  )
+    throw new Error("Objective planningRevisions allowance exhausted");
   return rejected;
 }
 
@@ -630,20 +622,17 @@ async function advanceAmendment(args: {
   const stopped = () =>
     state.coordinator && state.coordinator.mode !== "running";
   if (stopped()) return false;
-  state.allowanceConsumption ??= {
-    planningRevisions: 0,
-    implementationRepairs: 0,
-    resultRereviews: 0,
-  };
-  const consumption = state.allowanceConsumption;
-  if (pending.phase === "ready" && !pending.charged) {
-    pending.charged = true;
-    if (pending.proposal.replacement)
-      chargeRepair(state, pending.proposal.replacement.correction.kind, [
-        "$planning",
-      ]);
-    else consumeAllowance(state, "planningRevisions", ["$planning"]);
-  }
+  // Charged by the amendment's id, so a repeat after a restart is free.
+  if (pending.proposal.replacement)
+    chargeRepair(
+      state,
+      amendmentEvent(pending),
+      pending.proposal.replacement.correction.kind,
+      ["$planning"],
+    );
+  else
+    charge(state, amendmentEvent(pending), "planningRevisions", ["$planning"]);
+  const ordinal = consumption(state).planningRevisions;
   state.graphRevisions ??= [
     { graph: structuredClone(state.graph), digest: graphDigest(state.graph) },
   ];
@@ -715,7 +704,7 @@ async function advanceAmendment(args: {
           {
             invocationId: randomUUID(),
             phase: "compile",
-            ordinal: consumption.planningRevisions,
+            ordinal,
             observe: args.diagnostics?.modelObserver({
               scopeId: pending.id,
               runId: state.runId,
@@ -784,7 +773,7 @@ async function advanceAmendment(args: {
         invocation: {
           invocationId: randomUUID(),
           phase: "graph-review",
-          ordinal: consumption.planningRevisions,
+          ordinal,
           observe: args.diagnostics?.modelObserver({
             scopeId: pending.id,
             runId: state.runId,

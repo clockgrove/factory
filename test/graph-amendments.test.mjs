@@ -1,3 +1,4 @@
+import { consumption } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -294,7 +295,7 @@ for (const delivery of ["regular", "native-stack"])
           state.graphRevisions[0].graph.items.map(({ id }) => id),
           ["result"],
         );
-        assert.equal(state.allowanceConsumption.planningRevisions, 1);
+        assert.equal(consumption(state).planningRevisions, 1);
         assert.equal(state.work.result.discoveryDisposition, "accepted");
         assert.equal(state.work.qa.status, "done");
         assert.equal(state.work.qa.pullRequest, undefined);
@@ -684,7 +685,7 @@ for (const delivery of ["regular", "native-stack"])
           const state = readState(config.repository, 1);
           assert.equal(generated, 2);
           assert.equal(amendmentReviews, 1);
-          assert.equal(state.allowanceConsumption.planningRevisions, 1);
+          assert.equal(consumption(state).planningRevisions, 1);
           if (weakened) {
             assert.deepEqual(state.graph, first);
             assert.equal(state.graphRevisions.length, 1);
@@ -830,7 +831,7 @@ test("operator amendment source inputs are hydrated from pinned citations before
     assert.equal(JSON.stringify(candidate), originalProposal);
     assert.deepEqual(state.graph.items[0], graph.items[0]);
     assert.equal(state.work.result.attempt, "preserved");
-    assert.equal(state.allowanceConsumption.planningRevisions, 1);
+    assert.equal(consumption(state).planningRevisions, 1);
   });
 });
 
@@ -871,7 +872,7 @@ function assertAmendmentCompleted(state) {
   );
   assert.equal(state.work.qa.status, "pending");
   assert.equal(state.graphRevisions.length, 2);
-  assert.equal(state.allowanceConsumption.planningRevisions, 1);
+  assert.equal(consumption(state).planningRevisions, 1);
 }
 
 async function assertProjectionRepeats(name, lostError, pattern) {
@@ -1053,14 +1054,17 @@ test("interrupted amendment compile is repeated and charged once", async () => {
           assert.equal(await applyPendingAmendment(args, 1), true);
           const interrupted = saved.find((entry) => entry.interruptions === 1);
           assert.equal(interrupted.phase, "ready");
-          assert.equal(interrupted.charged, true);
+          assert.ok(state.charges[`objective/amend/${interrupted.id}`]);
+          assert.equal(consumption(state).planningRevisions, 1);
         } else {
           await assert.rejects(
             applyPendingAmendment(args, 1),
             /compile response lost/,
           );
           assert.equal(state.pendingAmendment.phase, "ready");
-          assert.equal(state.pendingAmendment.charged, true);
+          assert.ok(
+            state.charges[`objective/amend/${state.pendingAmendment.id}`],
+          );
           assert.equal(state.pendingAmendment.interruptions, 2);
           assert.equal(state.pendingAmendment.rejectionStage, undefined);
           assert.equal(state.coordinator.mode, "paused");
@@ -1069,13 +1073,15 @@ test("interrupted amendment compile is repeated and charged once", async () => {
             state.pendingAmendment.error,
           );
           assert.equal(compiles, 3);
-          assert.equal(state.allowanceConsumption.planningRevisions, 1);
+          assert.equal(consumption(state).planningRevisions, 1);
           state.coordinator.mode = "running";
           assert.equal(await applyPendingAmendment(args, 1), true);
         }
         assert.equal(compiles, losses + 1);
         assert.equal(reviews, 1);
         assert.equal(projections, 1);
+        // Every repeat ran under the amendment's one charge.
+        assert.equal(consumption(state).planningRevisions, 1);
         assert.equal(state.work.result.attempt, "preserved");
         assertAmendmentCompleted(state);
       },
@@ -1154,7 +1160,7 @@ test("compound: amendment invalidates final review before lost closure acknowled
     assert.equal(pending.graphRevisions.length, 2);
     assert.equal(pending.work.qa.status, "done");
     assert.equal(finals, 2);
-    const consumption = structuredClone(pending.allowanceConsumption);
+    const charges = structuredClone(pending.charges);
     assert.equal(sealed.graphDigest, graphDigest(pending.graph));
     assert.notEqual(sealed.graphDigest, pending.graphRevisions[0].digest);
     assert.equal(sealed.usage.availability, "unavailable");
@@ -1162,7 +1168,7 @@ test("compound: amendment invalidates final review before lost closure acknowled
     assert.equal(closures, 2);
     assert.equal(state.objectiveClosure, "complete");
     assert.deepEqual(state.finalAcceptance, sealed);
-    assert.deepEqual(state.allowanceConsumption, consumption);
+    assert.deepEqual(state.charges, charges);
     assert.deepEqual(state.work, pending.work);
     assert.equal(finals, 2);
     assert.equal(state.finalValidation.passed, true);
@@ -1343,7 +1349,7 @@ test("out-of-scope discovery is retained as backlog without consuming authority 
     });
     const state = await setup.application.runObjective(1);
     assert.equal(state.work.result.discovery.scope, "backlog");
-    assert.equal(state.allowanceConsumption, undefined);
+    assert.equal(state.charges, undefined);
     assert.equal(state.graph.items.length, 1);
     assert.equal(state.finalValidation.passed, true);
   });
@@ -1444,8 +1450,11 @@ test("planning consumption survives acceptance and cannot reset for a second rev
     await applyPendingAmendment(args);
     assertGraphRevisions(state);
     const restarted = structuredClone(state);
-    restarted.allowanceConsumption.planningRevisions = 0;
-    assert.throws(() => assertGraphRevisions(restarted), /exceed consumed/);
+    delete restarted.charges;
+    assert.throws(
+      () => assertGraphRevisions(restarted),
+      /exceed retained planning charges/,
+    );
     submitAmendment(state, {
       ...discovery,
       actor: "operator",
@@ -1453,7 +1462,7 @@ test("planning consumption survives acceptance and cannot reset for a second rev
       graph: state.graph,
     });
     await assert.rejects(applyPendingAmendment(args), /allowance exhausted/);
-    assert.equal(state.allowanceConsumption.planningRevisions, 1);
+    assert.equal(consumption(state).planningRevisions, 1);
   });
 });
 
@@ -1704,7 +1713,7 @@ for (const delivery of ["regular", "native-stack"])
           ["one", "result", "two"],
         );
         assert.equal(state.graphRevisions.length, 2);
-        assert.equal(state.allowanceConsumption.planningRevisions, 1);
+        assert.equal(consumption(state).planningRevisions, 1);
       },
       delivery,
     );
@@ -1792,7 +1801,7 @@ for (const mode of ["paused", "draining"])
         assert.equal(await applyPendingAmendment({ ...args, state }), false);
         assert.equal(state.pendingAmendment.phase, boundary);
         assert.equal(JSON.stringify(state.graph), admittedBytes);
-        assert.equal(state.allowanceConsumption.planningRevisions, 1);
+        assert.equal(consumption(state).planningRevisions, 1);
         const expected = {
           compile: 1,
           review: boundary === "compiled" ? 0 : 1,
@@ -1807,7 +1816,7 @@ for (const mode of ["paused", "draining"])
         state.coordinator.mode = "running";
         assert.equal(await applyPendingAmendment({ ...args, state }), true);
         assert.deepEqual(calls, { compile: 1, review: 1, project: 1 });
-        assert.equal(state.allowanceConsumption.planningRevisions, 1);
+        assert.equal(consumption(state).planningRevisions, 1);
         assert.equal(state.graphRevisions.length, 2);
         assert.equal(
           JSON.stringify(state.graphRevisions[0].graph),
@@ -1901,7 +1910,7 @@ test("owner handoff after known amendment review resumes without repeating model
     assert.equal(result.finalValidation.passed, true);
     assert.equal(generated, 2);
     assert.equal(reviewed, 2);
-    assert.equal(result.allowanceConsumption.planningRevisions, 1);
+    assert.equal(consumption(result).planningRevisions, 1);
     assert.equal(
       readEvents(setup.eventsPath).filter((event) => event.type === "start")
         .length,
@@ -2096,7 +2105,7 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
         );
         assert.equal(stopped.graph.items.length, 1);
       }
-      assert.equal(stopped.allowanceConsumption.planningRevisions, 1);
+      assert.equal(consumption(stopped).planningRevisions, 1);
       const proposal = {
         ...stopped.pendingAmendment.proposal,
         actor: "operator",
@@ -2198,10 +2207,12 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
           s.autonomy.repairClasses = [];
         },
         (s) => {
-          s.allowanceConsumption.planningRevisions = 2;
-        },
-        (s) => {
-          s.repairConsumption.$planning.planningRevisions = 2;
+          // Spend the rest of the planning allowance on other events.
+          for (const round of [90, 91])
+            s.charges[`objective/plan/${round}`] = {
+              allowances: ["planningRevisions"],
+              scopes: ["$planning"],
+            };
         },
       ]) {
         const altered = structuredClone(stopped);
@@ -2256,25 +2267,18 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
       assert.doesNotThrow(() => checkServiceState(config, 1));
       for (const mutate of [
         (s) => {
-          delete s.allowanceConsumption;
-          delete s.repairConsumption;
+          delete s.charges;
         },
         (s) => {
-          s.allowanceConsumption.planningRevisions = 0;
-          s.repairConsumption.$planning.planningRevisions = 0;
-        },
-        (s) => {
-          s.repairConsumption.$planning.planningRevisions = 0;
-        },
-        (s) => {
-          delete s.repairConsumption;
+          for (const event of Object.keys(s.charges))
+            if (event.startsWith("objective/amend/")) delete s.charges[event];
         },
       ]) {
         const reset = structuredClone(replaced);
         mutate(reset);
         assert.throws(
           () => parseFactoryState(reset, config.repository, 1),
-          /Known amendment attempts exceed retained planning consumption/,
+          /Known amendment attempts exceed retained planning charges/,
         );
       }
       assert.deepEqual(replaced.rejectedAmendments, [stopped.pendingAmendment]);
@@ -2284,7 +2288,7 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
       assert.equal(replaced.runId, stopped.runId);
       assert.equal(replaced.error, undefined);
       assert.equal(replaced.coordinator.mode, "paused");
-      assert.equal(replaced.allowanceConsumption.planningRevisions, 1);
+      assert.equal(consumption(replaced).planningRevisions, 1);
       assert.equal(compilations, 2);
       assert.equal(graphReviews, rejection === "compilation" ? 1 : 2);
       const beforeDuplicate = readFileSync(
@@ -2314,8 +2318,8 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
           0,
         );
         assert.equal(refused.pendingAmendment.phase, "rejected");
-        assert.equal(refused.allowanceConsumption.planningRevisions, 2);
-        assert.equal(refused.repairConsumption.$planning.planningRevisions, 2);
+        assert.equal(consumption(refused).planningRevisions, 2);
+        assert.equal(consumption(refused, "$planning").planningRevisions, 2);
         assert.equal(compilations, 3);
         assert.equal(graphReviews, 3);
         const next = {
@@ -2343,8 +2347,8 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
       assert.equal(completed.finalValidation.passed, true);
       assert.equal(completed.objectiveClosure, "complete");
       assert.equal(status().pendingAmendment, null);
-      assert.equal(completed.allowanceConsumption.planningRevisions, 2);
-      assert.equal(completed.repairConsumption.$planning.planningRevisions, 2);
+      assert.equal(consumption(completed).planningRevisions, 2);
+      assert.equal(consumption(completed, "$planning").planningRevisions, 2);
       assert.equal(compilations, 3);
       assert.equal(graphReviews, rejection === "compilation" ? 2 : 3);
       assert.equal(completed.work.result.attempt, stopped.work.result.attempt);
@@ -2470,7 +2474,7 @@ test("actual review provider/protocol failures cannot authorize amendment replac
         assert.equal(state.coordinator.mode, "running");
         assert.equal(state.pendingAmendment, undefined);
         assert.deepEqual(state.issueByItemId, { result: 2, qa: 3 });
-        assert.equal(state.allowanceConsumption.planningRevisions, 1);
+        assert.equal(consumption(state).planningRevisions, 1);
         return;
       }
       await assert.rejects(applyPendingAmendment(args, 1));
@@ -2498,7 +2502,7 @@ test("actual review provider/protocol failures cannot authorize amendment replac
       assert.equal(state.pendingAmendment.reviewDigest, undefined);
       assert.equal(state.coordinator.mode, "paused");
       assert.equal(state.coordinator.waitReason, state.pendingAmendment.error);
-      assert.equal(state.allowanceConsumption.planningRevisions, 1);
+      assert.equal(consumption(state).planningRevisions, 1);
       const correction = {
         ...state.pendingAmendment.proposal,
         replacement: {
@@ -2537,7 +2541,7 @@ test("actual review provider/protocol failures cannot authorize amendment replac
       assert.equal(projected, 1);
       assert.equal(state.pendingAmendment, undefined);
       assert.deepEqual(state.issueByItemId, { result: 2, qa: 3 });
-      assert.equal(state.allowanceConsumption.planningRevisions, 1);
+      assert.equal(consumption(state).planningRevisions, 1);
     });
 });
 
@@ -2599,7 +2603,7 @@ test("completed-rejection preserves projection history without replay", async ()
       assert.equal(state.work.result.attempt, "preserved");
       await assert.rejects(applyPendingAmendment(args), /cannot be replayed/);
       assert.equal(creates, 1);
-      assert.equal(state.allowanceConsumption.planningRevisions, 1);
+      assert.equal(consumption(state).planningRevisions, 1);
     },
   );
 });
@@ -2670,7 +2674,7 @@ test("completed-auth-rejection preserves projection history without replay", asy
       assert.equal(state.work.result.attempt, "preserved");
       await assert.rejects(applyPendingAmendment(args), /cannot be replayed/);
       assert.equal(creates, 1);
-      assert.equal(state.allowanceConsumption.planningRevisions, 1);
+      assert.equal(consumption(state).planningRevisions, 1);
     },
   );
 });

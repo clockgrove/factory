@@ -1,3 +1,4 @@
+import { consumption } from "../dist/repair-policy.js";
 import { hydrateWorkerInputSources } from "../dist/compiler.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -136,7 +137,7 @@ test("accepted reprioritization changes pending order without resetting running 
       readyItems(state.graph, state.work, new Set(), 1)[0].id,
       "second",
     );
-    assert.equal(state.allowanceConsumption.planningRevisions, 1);
+    assert.equal(consumption(state).planningRevisions, 1);
     state.work.second = {
       status: "running",
       attempt: "owned",
@@ -155,7 +156,7 @@ test("accepted reprioritization changes pending order without resetting running 
     );
     assert.equal(state.work.second.attempt, "owned");
     assert.equal(state.work.second.phaseReservation, "coding");
-    assert.equal(state.allowanceConsumption.planningRevisions, 1);
+    assert.equal(consumption(state).planningRevisions, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

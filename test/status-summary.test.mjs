@@ -400,7 +400,7 @@ test("status documents carry the same phase, summary and next action", () => {
   assert.equal(empty.nextAction.command, "factory run --objective 7");
   const prepared = preparationStatusDocument(
     {
-      schemaVersion: 7,
+      schemaVersion: 8,
       kind: "preparing",
       repository: "example/repo",
       objective: 7,

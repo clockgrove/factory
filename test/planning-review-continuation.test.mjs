@@ -1,3 +1,4 @@
+import { consumption } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -155,7 +156,11 @@ async function fixture(
       }
       assert.equal(
         new Ajv({ strict: false }).compile(options.outputSchema)(response),
-        !(malformed && options.outputSchema.properties.packetId),
+        !(
+          malformed &&
+          reviews === 1 &&
+          options.outputSchema.properties.packetId
+        ),
       );
       const raw = JSON.stringify(response);
       emitted.push({ prompt, schema: options.outputSchema, raw });
@@ -201,8 +206,9 @@ async function fixture(
     undefined,
     executionBounds,
   );
-  // With no planning allowance a finding stops before the paused diagnosis.
-  if (pauseBeforeReview || ((rejected || malformed) && limit))
+  // With a planning allowance a finding stops before the paused diagnosis;
+  // a malformed review stops before it is asked again.
+  if (pauseBeforeReview || (rejected && limit) || malformed)
     await assert.rejects(initial, /paused or cancelled/);
   else await initial;
   return {
@@ -227,7 +233,7 @@ test("completed clean review survives persisted pause and repeated completion wi
   assert.equal(candidate.review.status, "clean");
   assert.equal(f.emitted.length, before);
   assert.deepEqual(state.planningRecovery.review, original);
-  assert.equal(state.allowanceConsumption?.planningRevisions ?? 0, 0);
+  assert.equal(consumption(state).planningRevisions, 0);
   verifyPlanCandidate(
     candidate,
     1,
@@ -250,7 +256,7 @@ test("known rejected review keeps exact resolved identities across pause and one
   const resolved = decodeGraphReview(original.response, original.packet);
   const candidate = await compilePlan(...f.args, { state, save() {} });
   assert.equal(candidate.review.status, "clean");
-  assert.equal(state.allowanceConsumption.planningRevisions, 1);
+  assert.equal(consumption(state).planningRevisions, 1);
   assert.equal(state.planningRecovery.history.length, 1);
   assert.deepEqual(state.planningRecovery.history[0].review, original);
   assert.deepEqual(
@@ -273,7 +279,7 @@ test("pause after packet retention and before submission reuses that packet for 
   assert.deepEqual(state.planningRecovery.review.packet, packet);
   assert.equal(f.reviews, 1);
   assert.equal(state.planningRecovery.review.response.packetId, packet.id);
-  assert.equal(state.allowanceConsumption?.planningRevisions ?? 0, 0);
+  assert.equal(consumption(state).planningRevisions, 0);
 });
 
 test("changed reviewed context, damaged request and old missing binding refuse before calls or consumption", async (t) => {
@@ -326,7 +332,7 @@ test("changed reviewed context, damaged request and old missing binding refuse b
   }
 });
 
-test("genuinely malformed completed review retains its original packet and stops as a protocol refusal for a human decision", async (t) => {
+test("a malformed completed review is asked again, keeps its receipt and is never charged", async (t) => {
   const f = await fixture(t, { malformed: true, limit: 0 });
   const state = structuredClone(f.retained);
   const original = structuredClone(state.planningRecovery.review);
@@ -334,13 +340,17 @@ test("genuinely malformed completed review retains its original packet and stops
     () => decodeGraphReview(original.response, original.packet),
     /invalid/,
   );
+  const receipts = structuredClone(state.planningRecovery.invocations);
   const calls = f.emitted.length;
   const candidate = await compilePlan(...f.args, { state, save() {} });
-  assert.equal(candidate.review.status, "needs-human");
-  assert.ok(candidate.review.failure);
-  assert.equal(state.planningRecovery.phase, "stopped");
-  assert.deepEqual(state.planningRecovery.review, original);
-  assert.equal(f.emitted.length, calls);
+  assert.equal(candidate.review.status, "clean");
+  assert.equal(f.emitted.length, calls + 1);
+  assert.deepEqual(state.planningRecovery.review.packet, original.packet);
+  assert.deepEqual(
+    state.planningRecovery.invocations.slice(0, receipts.length),
+    receipts,
+  );
+  assert.equal(consumption(state).planningRevisions, 0);
 });
 
 test("an interrupted review is reissued, or its retained response reused", async (t) => {
@@ -384,7 +394,7 @@ test("exhausted allowance and repeated failures keep real findings for a human d
     assert.deepEqual(state.plan, candidate);
     assert.equal(state.planningRecovery.phase, "stopped");
     assert.equal(f.emitted.length, calls);
-    assert.equal(state.allowanceConsumption?.planningRevisions ?? 0, 0);
+    assert.equal(consumption(state).planningRevisions, 0);
     assert.deepEqual(
       decodeGraphReview(
         state.planningRecovery.review.response,

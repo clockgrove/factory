@@ -27,8 +27,8 @@ const CREDENTIAL_FIX =
 
 /**
  * Classify an error leaving an execution driver or sandbox provider method.
- * A worker is dead only once the driver has settled it (SettledAttemptFailure),
- * so that, and a lost response to an effect, may have spent a paid run.
+ * A settled worker (SettledAttemptFailure) carries its own classification;
+ * a lost response to an effect may have spent a paid run.
  */
 export function executionFault(
   error: unknown,
@@ -41,10 +41,7 @@ export function executionFault(
       detail,
       fix: `Run \`${error.authentication.command}\` in the developer environment, then \`factory run\``,
     };
-  if (error instanceof SettledAttemptFailure)
-    return error.classification === "implementation"
-      ? { kind: "work", evidence: { detail } }
-      : transient(`The worker stopped without a result: ${detail}`, true);
+  if (error instanceof SettledAttemptFailure) return attachedFault(error);
   if (
     error instanceof ProviderTurnTimeoutError ||
     error instanceof ProviderTurnIncompleteError

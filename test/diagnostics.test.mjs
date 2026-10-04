@@ -1,3 +1,4 @@
+import { defaultAutonomy } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -199,10 +200,11 @@ test("private diagnostics redact secrets and validation streams command output",
     const stateDiagnostics = new StateDiagnostics(
       emitter,
       {
-        schemaVersion: 6,
+        schemaVersion: 7,
         repository: "example/diagnostics",
         objective: 1,
         runId: "run-review",
+        autonomy: defaultAutonomy,
         configDigest: "b".repeat(64),
         baseSha: "c".repeat(40),
         graph: { objective: 1, baseSha: "c".repeat(40), items: [] },

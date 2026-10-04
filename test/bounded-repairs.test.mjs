@@ -13,7 +13,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   chargeRepair,
-  emptyConsumption,
+  consumption,
   repairScopes,
   assertRepairLedger,
   failureDigest,
@@ -146,15 +146,25 @@ test("disabled repair classes are refused and inherited scopes cannot reset caps
   const disabled = autonomy();
   disabled.repairClasses = [];
   assert.throws(
-    () => chargeRepair({ autonomy: disabled }, "implementation", ["parent"]),
+    () =>
+      chargeRepair(
+        { autonomy: disabled },
+        "item/a/execute/0",
+        "implementation",
+        ["parent"],
+      ),
     /not enabled/,
   );
   const ledger = { autonomy: autonomy() };
-  chargeRepair(ledger, "implementation", ["parent"]);
+  chargeRepair(ledger, "item/a/execute/0", "implementation", ["parent"]);
   const restored = JSON.parse(JSON.stringify(ledger));
   assertRepairLedger(restored);
+  // A repeat of the charged event is free; a new event on the path is not.
+  chargeRepair(restored, "item/a/execute/0", "implementation", ["parent"]);
+  assert.equal(consumption(restored).implementationRepairs, 1);
   assert.throws(
-    () => chargeRepair(restored, "implementation", ["parent"]),
+    () =>
+      chargeRepair(restored, "item/b/execute/0", "implementation", ["parent"]),
     /path.*exhausted/,
   );
   const initial = { items: [item("parent")] };
@@ -168,7 +178,12 @@ test("disabled repair classes are refused and inherited scopes cannot reset caps
   assert.deepEqual(repairScopes(state, "child"), ["parent"]);
   assert.throws(
     () =>
-      chargeRepair(restored, "implementation", repairScopes(state, "child")),
+      chargeRepair(
+        restored,
+        "item/c/execute/0",
+        "implementation",
+        repairScopes(state, "child"),
+      ),
     /exhausted/,
   );
 });
@@ -269,7 +284,7 @@ test("settled failures ignore sibling processes while correction still requires 
         }),
       /unsettled/,
     );
-    assert.equal(state.allowanceConsumption, undefined);
+    assert.equal(state.charges, undefined);
     for (const guard of [
       { work: { pullRequest: 1 } },
       { coordinator: { cancelError: "owned cancellation unresolved" } },
@@ -319,7 +334,7 @@ test("transport recovery never accepts semantic findings or invents accounting",
   assert.equal(prepareEvidenceRecovery(state, "result"), true);
   assert.equal(state.work.result.attempt, "original");
   assert.equal(state.work.result.status, "running");
-  assert.equal(state.allowanceConsumption.resultRereviews, 1);
+  assert.equal(consumption(state).resultRereviews, 1);
   assert.equal(state.work.result.acceptanceDecisions, undefined);
   assert.equal(state.work.result.recovery.history[0].work.usage, undefined);
 });
@@ -353,7 +368,7 @@ for (const delivery of ["regular", "native-stack"])
       });
       const state = await fixture.application.runObjective(1);
       assert.equal(state.finalValidation.passed, true);
-      assert.equal(state.allowanceConsumption.implementationRepairs, 1);
+      assert.equal(consumption(state).implementationRepairs, 1);
       const work = state.work.result;
       assert.equal(work.recovery.history.length, 1);
       const prior = work.recovery.history[0];
@@ -488,7 +503,7 @@ for (const kind of [
         candidate.review.status,
         kind === "operator" ? "needs-human" : "clean",
       );
-      assert.equal(state.allowanceConsumption.planningRevisions, 1);
+      assert.equal(consumption(state).planningRevisions, 1);
       assert.ok(
         snapshots.some(
           (snapshot) => snapshot.planningRecovery?.phase === "submitted",
@@ -506,7 +521,17 @@ test("planning allowance survives restart and stops before a new model call", as
     const target = createTarget(root);
     const state = {
       autonomy: autonomy(),
-      allowanceConsumption: { ...emptyConsumption(), planningRevisions: 2 },
+      // Two earlier events spent the planning allowance.
+      charges: {
+        "objective/amend/earlier-1": {
+          allowances: ["planningRevisions"],
+          scopes: ["$planning"],
+        },
+        "objective/amend/earlier-2": {
+          allowances: ["planningRevisions"],
+          scopes: ["$planning"],
+        },
+      },
     };
     let calls = 0;
     const planner = {
@@ -594,7 +619,7 @@ for (const delivery of ["regular", "native-stack"])
         objectiveIssue: 1,
       });
       const state = {
-        schemaVersion: 6,
+        schemaVersion: 7,
         repository: config.repository,
         objective: 1,
         runId: "fixture",
@@ -697,7 +722,7 @@ test("run's durable planning carries consumed planning allowance into activation
     const state = await fixture.application.runObjective(1);
     assert.equal(calls, 2);
     assert.equal(state.finalValidation.passed, true);
-    assert.equal(state.allowanceConsumption.planningRevisions, 1);
+    assert.equal(consumption(state).planningRevisions, 1);
     const reloaded = JSON.parse(JSON.stringify(state));
     assertRepairLedger(reloaded);
     const retained = reloaded.planningRecovery;
@@ -833,16 +858,19 @@ for (const delivery of ["regular", "native-stack"])
         },
       });
       const charged = readState(config.repository, 1);
-      assert.equal(charged.allowanceConsumption.resultRereviews, 1);
+      assert.equal(consumption(charged).resultRereviews, 1);
       assert.equal(charged.work.result.attempt, work.attempt);
       const restarted = makeApplication(descriptor);
       const done = await restarted.application.runObjective(1);
       assert.equal(done.runId, charged.runId);
       assert.throws(
         () =>
-          chargeRepair(structuredClone(done), "validation-environment", [
-            "result",
-          ]),
+          chargeRepair(
+            structuredClone(done),
+            "item/result/validate/9",
+            "validation-environment",
+            ["result"],
+          ),
         /exhausted/,
       );
       assert.deepEqual(
@@ -857,7 +885,7 @@ for (const delivery of ["regular", "native-stack"])
           .length,
         1,
       );
-      assert.equal(done.allowanceConsumption.resultRereviews, 1);
+      assert.equal(consumption(done).resultRereviews, 1);
       assert.ok(reviews >= 2);
       assert.equal(done.work.result.recovery.history[0].work.error, work.error);
       assert.equal(done.work.qa.status, "done");
@@ -953,8 +981,7 @@ for (const delivery of ["regular", "native-stack"])
           broken.work.result.recovery.history[0].work.treeSha = "0".repeat(40);
         if (corruption === "candidate-base")
           delete broken.work.result.recovery.history[0].work.executionBaseSha;
-        if (corruption === "consumption")
-          broken.repairConsumption.result.resultRereviews = 0;
+        if (corruption === "consumption") delete broken.charges;
         if (corruption === "autonomy")
           broken.autonomy.repairClasses = ["implementation"];
         assert.throws(
@@ -965,7 +992,7 @@ for (const delivery of ["regular", "native-stack"])
               checkout: config.checkout,
               delivery,
             }),
-          /retained failure|tree|charged consumption|preservation bindings/,
+          /retained failure|tree|charged consumption|lacks its charge|preservation bindings/,
         );
         assert.throws(
           () =>
@@ -979,7 +1006,7 @@ for (const delivery of ["regular", "native-stack"])
                 `${broken.integratedSha}^{tree}`,
               ),
             }),
-          /retained failure|tree|charged consumption|preservation bindings/,
+          /retained failure|tree|charged consumption|lacks its charge|preservation bindings/,
         );
       }
       for (const corruption of ["attempt", "execution-base"]) {
@@ -1169,8 +1196,8 @@ test("regular: diagnosed read-only QA repair retains its selected commit through
     assert.equal(done.work.qa.treeSha, work.treeSha);
     assert.equal(done.work.qa.execution, undefined);
     assert.equal(done.work.qa.pullRequest, undefined);
-    assert.equal(done.allowanceConsumption.resultRereviews, 1);
-    assert.equal(done.allowanceConsumption.implementationRepairs, 0);
+    assert.equal(consumption(done).resultRereviews, 1);
+    assert.equal(consumption(done).implementationRepairs, 0);
     assert.deepEqual(
       readEvents(fixture.eventsPath)
         .filter((event) => event.type === "start")
@@ -1292,7 +1319,7 @@ for (const delivery of ["regular", "native-stack"])
       });
       const done = await fixture.application.runObjective(1);
       assert.equal(done.finalValidation.passed, true);
-      assert.equal(done.allowanceConsumption.resultRereviews, 1);
+      assert.equal(consumption(done).resultRereviews, 1);
       assert.equal(calls, 2);
       assert.equal(new Set(reviewedTrees).size, 1);
       assert.equal(
@@ -1353,7 +1380,7 @@ test("a lost diagnosis is reissued once charged; ambiguous publication never aut
     /unknown/,
   );
   assert.equal(work.recovery.phase, "diagnosing");
-  const charged = state.allowanceConsumption.implementationRepairs;
+  const charged = consumption(state).implementationRepairs;
   // A restart asks again; the diagnosis was already charged when first sent.
   const restarted = JSON.parse(JSON.stringify(state));
   await assert.rejects(
@@ -1367,7 +1394,7 @@ test("a lost diagnosis is reissued once charged; ambiguous publication never aut
     /unknown/,
   );
   assert.equal(calls, 2);
-  assert.equal(restarted.allowanceConsumption.implementationRepairs, charged);
+  assert.equal(consumption(restarted).implementationRepairs, charged);
   work.pullRequest = 1;
   recordWorkFailure(state, "result", new Error("publication response lost"));
   assert.equal(work.recovery.failure.classification, "uncertain");
@@ -1478,7 +1505,7 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
       planningModel: planner,
     });
     const waiting = await fixture.application.runObjective(1);
-    assert.equal(waiting.schemaVersion, 7);
+    assert.equal(waiting.schemaVersion, 8);
     assert.equal(waiting.plan.review.status, "needs-human");
     await fixture.application.decidePlan(1, {
       plan: shortPlanDigest(waiting.plan),
@@ -1491,7 +1518,9 @@ test("a real human-owned planning decision resolves the exact persisted plan wit
     const done = await fixture.application.runObjective(1);
     assert.equal(done.finalValidation.passed, true);
     assert.equal(calls, before);
-    assert.equal(done.allowanceConsumption.planningRevisions, 1);
+    // The review never answered validly (no packet ID): it was asked again,
+    // never charged as a revision, then left to the owner.
+    assert.equal(consumption(done).planningRevisions, 0);
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previous;
@@ -1540,13 +1569,13 @@ test("pause after known planning response preserves compilation for resume with 
     assert.equal(state.planningRecovery.phase, "ready");
     assert.ok(state.planningRecovery.response);
     assert.equal(reviews, 0);
-    assert.equal(state.allowanceConsumption, undefined);
+    assert.equal(state.charges, undefined);
     paused = false;
     const accepted = await compile();
     assert.equal(accepted.review.status, "clean");
     assert.equal(generations, 1);
     assert.equal(reviews, 1);
-    assert.equal(state.allowanceConsumption, undefined);
+    assert.equal(state.charges, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1738,8 +1767,8 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
     assert.equal(repaired.work.beta.attempt, original.attempt);
     assert.equal(repaired.work.beta.treeSha, original.treeSha);
     assert.equal(repaired.work.beta.changeRef, original.changeRef);
-    assert.equal(repaired.allowanceConsumption.implementationRepairs, 0);
-    assert.equal(repaired.allowanceConsumption.resultRereviews, 1);
+    assert.equal(consumption(repaired).implementationRepairs, 0);
+    assert.equal(consumption(repaired).resultRereviews, 1);
     const done = await makeApplication(descriptor).application.runObjective(1);
     assert.equal(done.finalValidation.passed, true);
     assert.equal(done.work.beta.attempt, original.attempt);
@@ -1766,7 +1795,7 @@ process.exit(existsSync(${JSON.stringify(prerequisite)}) ? 0 : 1);
       done.work.beta.recovery.history[0].failure.digest,
       correction.failureDigest,
     );
-    assert.equal(done.allowanceConsumption.resultRereviews, 1);
+    assert.equal(consumption(done).resultRereviews, 1);
     assert.notEqual(done.work.beta.changeRef, original.changeRef);
     assert.notEqual(done.work.beta.treeSha, original.treeSha);
     const repair = JSON.parse(

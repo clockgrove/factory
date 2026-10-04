@@ -1,3 +1,4 @@
+import { consumption } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import {
   chmodSync,
@@ -211,7 +212,7 @@ test("missing work-item tools stop activation before projection, attempt or targ
       pathContext: "/usr/bin:/bin",
     });
     const preparation = readContinuation("example/preflight", 1);
-    assert.equal(preparation.schemaVersion, 7);
+    assert.equal(preparation.schemaVersion, 8);
     assert.ok(preparation.plan);
     assert.deepEqual(preparation.issueByItemId, {});
     assert.match(preparation.coordinator.waitReason, /pnpm/);
@@ -561,7 +562,7 @@ test("actual planning packets carry presence without executing acceptance, and b
     const setup = makeApplication({ ...descriptorInput, planningModel: model });
     process.env.PATH = `${bin}:/usr/bin:/bin`;
     const waiting = await setup.application.runObjective(1);
-    assert.equal(waiting.schemaVersion, 7);
+    assert.equal(waiting.schemaVersion, 8);
     const candidate = waiting.plan;
     const facts = candidate.localExecutables;
     assert.equal(
@@ -600,7 +601,7 @@ test("actual planning packets carry presence without executing acceptance, and b
     assert.equal(existsSync(marker), false);
     assert.deepEqual(readEvents(setup.eventsPath), []);
     const preparation = readContinuation(descriptorInput.config.repository, 1);
-    assert.equal(preparation.allowanceConsumption.planningRevisions, 1);
+    assert.equal(consumption(preparation).planningRevisions, 1);
     assert.equal(preparation.planningRecovery.phase, "stopped");
     assert.equal(candidate.review.status, "needs-human");
     const verify = (value) =>
@@ -662,7 +663,7 @@ test("actual planning packets carry presence without executing acceptance, and b
     chmodSync(executable, 0o700);
     // A rerun returns the persisted plan decision without planning again.
     const again = await setup.application.runObjective(1);
-    assert.equal(again.schemaVersion, 7);
+    assert.equal(again.schemaVersion, 8);
     assert.equal(again.plan.reviewDigest, candidate.reviewDigest);
     assert.match(again.coordinator.waitReason, /Plan needs a decision/);
     assert.equal(existsSync(marker), false);

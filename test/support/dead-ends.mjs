@@ -88,7 +88,7 @@ function itemShape(work) {
  * of each key.
  */
 export function shapeKey(state) {
-  if (state.schemaVersion === 7)
+  if (state.schemaVersion === 8)
     return [
       "preparing",
       state.plan ? `plan ${state.plan.review?.status}` : "no plan",
@@ -145,7 +145,7 @@ function rank(work) {
 
 /** The progress-relevant facts of a snapshot. */
 export function fingerprint(state) {
-  if (state.schemaVersion === 7)
+  if (state.schemaVersion === 8)
     return {
       milestone:
         1 +
@@ -437,7 +437,7 @@ function startReusedPid() {
  * failure, and a failure that is not isolated also stops the Objective.
  */
 const failStep = (make, steps, handle) => (state) => {
-  if (state.schemaVersion !== 6) return false;
+  if (state.schemaVersion !== 7) return false;
   const id = focus(state);
   const work = state.work[id];
   if (
@@ -484,7 +484,7 @@ function reservable(work) {
 }
 
 const reserve = (phase) => (state) => {
-  if (state.schemaVersion !== 6) return false;
+  if (state.schemaVersion !== 7) return false;
   const work = state.work[focus(state)];
   if (work.phaseReservation || !reservable(work).includes(phase)) return false;
   work.phaseReservation = phase;
@@ -524,7 +524,7 @@ const OVERLAYS = {
   },
   "Objective event": {
     "an error stops the Objective outside any Work Item step": (state) => {
-      if (state.schemaVersion !== 6 || state.error) return false;
+      if (state.schemaVersion !== 7 || state.error) return false;
       state.error = "Injected stop outside a Work Item step";
       return true;
     },
@@ -538,7 +538,7 @@ const OVERLAYS = {
     // driver work; it reaches cancelError only through its recorded
     // subprocesses (see "a recorded subprocess's pid was reused").
     "cancellation is unresolved": (state) => {
-      if (state.schemaVersion !== 6 || state.cancelledAt) return false;
+      if (state.schemaVersion !== 7 || state.cancelledAt) return false;
       state.cancelRequested = true;
       coordinator(state).cancelError = "Injected unresolved cessation";
       coordinator(state).waitReason =
@@ -565,7 +565,7 @@ const OVERLAYS = {
     // Closure of the focus item or the Objective was under way.
     "GitHub closure failed": (state) => {
       if (
-        state.schemaVersion !== 6 ||
+        state.schemaVersion !== 7 ||
         state.githubClosureError ||
         (state.work[focus(state)].githubClosure !== "pending" &&
           state.objectiveClosure !== "pending")
@@ -583,7 +583,7 @@ const OVERLAYS = {
   },
   record: {
     "interruptions exhausted": (state) => {
-      if (state.schemaVersion !== 6) return false;
+      if (state.schemaVersion !== 7) return false;
       const work = state.work[focus(state)];
       if (!["running", "published"].includes(work.status) || work.interruptions)
         return false;
@@ -604,7 +604,7 @@ const OVERLAYS = {
       return true;
     },
     "a repeat record is pending": (state) => {
-      const id = state.schemaVersion === 6 ? focus(state) : undefined;
+      const id = state.schemaVersion === 7 ? focus(state) : undefined;
       const work = id && state.work[id];
       const key =
         work?.attempt && work.step
@@ -626,7 +626,7 @@ const OVERLAYS = {
     },
     "a wait is recorded": (state) => {
       state.wait = { kind: "outage", detail: "GitHub unavailable" };
-      if (state.schemaVersion === 6)
+      if (state.schemaVersion === 7)
         state.work[focus(state)].wait = {
           kind: "ci",
           detail: "checks pending",
@@ -634,7 +634,7 @@ const OVERLAYS = {
       return true;
     },
     "planning stopped": (state) => {
-      if (state.schemaVersion !== 7 || state.plan) return false;
+      if (state.schemaVersion !== 8 || state.plan) return false;
       state.planningRecovery = {
         ...(state.planningRecovery ?? { history: [] }),
         phase: "stopped",
@@ -657,7 +657,7 @@ function applyOverlays(state, values) {
 /** Whether Factory's own validators accept a snapshot. */
 function validSnapshot(state) {
   try {
-    if (state.schemaVersion === 6) {
+    if (state.schemaVersion === 7) {
       parseFactoryState(state, REPOSITORY, OBJECTIVE);
       return true;
     }
@@ -708,7 +708,7 @@ function dimensionsOf(state) {
     "observation error": Boolean(coordinator.observationError),
     "repeat or wait record": Boolean(state.repeats || state.wait),
   };
-  if (state.schemaVersion === 7)
+  if (state.schemaVersion === 8)
     return {
       paired: {
         ...shared,
@@ -750,7 +750,7 @@ function dimensionsOf(state) {
 function coverageOf(state) {
   const { paired, single } = dimensionsOf(state);
   // Preparations and executing Objectives are covered separately.
-  const family = state.schemaVersion === 7 ? "preparing" : "executing";
+  const family = state.schemaVersion === 8 ? "preparing" : "executing";
   const entries = Object.entries(paired).map(
     ([name, value]) => `${family} ${name}=${value}`,
   );
@@ -986,7 +986,7 @@ async function classify(slot, anchor, state) {
       if (applied.status?.phase === "cancelled") return result("terminal");
       // Refusing a plan discards the preparation, and the next run plans
       // again. That is the decision only when nothing else was pending.
-      if (!snapshot() && before?.schemaVersion === 7) {
+      if (!snapshot() && before?.schemaVersion === 8) {
         const lost = [
           before.cancelRequested && "cancel request",
           before.coordinator.cancelError && "unresolved cancellation",

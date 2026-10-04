@@ -28,7 +28,12 @@ import type {
   ModelInvocationUsage,
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
-import { failureDigest } from "./repair-policy.js";
+import {
+  consumption,
+  failureDigest,
+  remaining,
+  repairScopes,
+} from "./repair-policy.js";
 import { itemsConflict } from "./scheduler.js";
 import type {
   ContinuationState,
@@ -1265,8 +1270,16 @@ export function statusDocument(
             : null,
         }
       : null,
-    allowanceConsumption: state.allowanceConsumption ?? null,
-    repairConsumption: state.repairConsumption ?? null,
+    allowanceConsumption: consumption(state),
+    allowanceRemaining: remaining(
+      state,
+      [
+        ...new Set(
+          Object.keys(state.work).flatMap((id) => repairScopes(state, id)),
+        ),
+      ].sort(),
+    ),
+    charges: state.charges ?? {},
     repairs: Object.fromEntries(
       Object.entries(state.work)
         .filter(([, work]) => work.recovery)
@@ -1276,6 +1289,7 @@ export function statusDocument(
             phase: work.recovery!.phase ?? null,
             failureClass: work.recovery!.failure?.classification ?? null,
             failureDigest: work.recovery!.failure?.digest ?? null,
+            failureEvent: work.recovery!.failure?.event ?? null,
             continuation: work.recovery!.failure?.continuation ?? null,
             unfinishedEdits: work.recovery!.failure?.unfinishedEdits ?? null,
             priorAttempts: work.recovery!.history?.length ?? 0,
@@ -1356,7 +1370,7 @@ export function continuationStatusDocument(
   concurrency?: number,
   runActive: boolean | null = null,
 ) {
-  return continuation?.schemaVersion === 7
+  return continuation?.schemaVersion === 8
     ? preparationStatusDocument(continuation, secrets, runActive)
     : statusDocument(
         continuation,

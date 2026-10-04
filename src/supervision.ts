@@ -422,13 +422,13 @@ export function renderService(value: ServiceBinding): string {
 function checkServiceContinuationFields(state: ContinuationState): void {
   // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
   const fields =
-    state.schemaVersion === 7
-      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest autonomy capacity allowanceConsumption repairConsumption planningRecovery coordinator plan issueByItemId error cancelRequested cancelledAt permanentAbandonment"
-      : "schemaVersion repository objective runId configDigest baseSha autonomy capacity planGraphDigest prerequisitesDigest coordinator graph graphRevisions pendingAmendment rejectedAmendments allowanceConsumption repairConsumption planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error";
+    state.schemaVersion === 8
+      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest autonomy capacity charges planningRecovery coordinator plan issueByItemId error cancelRequested cancelledAt permanentAbandonment repeats wait"
+      : "schemaVersion repository objective runId configDigest baseSha autonomy capacity planGraphDigest prerequisitesDigest coordinator graph graphRevisions pendingAmendment rejectedAmendments charges planningRecovery backlogDiscoveries objectiveCommands issueByItemId work stackNumbers stackMerges integratedSha finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure githubClosureError cancelRequested cancelledAt error repeats wait";
   for (const field of Object.keys(state))
     if (!fields.split(" ").includes(field))
       throw new Error(
-        `Artifact cannot validate continuation field ${field}; upgrade/rollback refused`,
+        `This artifact cannot validate continuation field ${field}; use the Factory version that wrote the state`,
       );
 }
 /** Installing a service for an Objective is its service consent; state must match this installation. */
@@ -515,7 +515,7 @@ async function verifyServiceOwner(
     const current = readContinuation(config.repository, objective);
     if (
       current?.cancelledAt ||
-      (current?.schemaVersion === 6 && objectiveComplete(current))
+      (current?.schemaVersion === 7 && objectiveComplete(current))
     )
       return "settled";
     if (awaitsDecision(name)) return "needs-decision";

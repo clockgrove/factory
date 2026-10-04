@@ -68,12 +68,6 @@ const SAMPLES = {
     objectiveStopped("GitHub request failed (HTTP 503)"),
     published,
   ),
-  GRAPH_REVIEW_DECISION: summarizeRun({
-    outcome: "needs-decision",
-    message:
-      "Objective #1 plan 0123456789ab needs a decision: Plan needs a decision: Inspect pinned Factory plan for missing Objective obligations. Do you accept it despite the invalid independent review?",
-    work: {},
-  }),
   PLANNER_STOP: stopped("socket hang up", {}),
   FINAL_REVIEW: stopped(objectiveStopped("socket hang up"), done),
   START_AMBIGUOUS: stopped(

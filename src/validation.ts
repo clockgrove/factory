@@ -4,6 +4,7 @@ import { assertGraphRevisions } from "./graph-amendments.js";
 import {
   allowanceKey,
   assertRepairLedger,
+  consumption,
   failureDigest,
   repairScopes,
 } from "./repair-policy.js";
@@ -1435,7 +1436,11 @@ function retainedRepairProof(
   assertRepairLedger(state);
   const prior = [...(current.recovery?.history ?? [])]
     .reverse()
-    .find((entry) => entry.failure?.digest === correction.failureDigest);
+    .find((entry) =>
+      correction.event
+        ? entry.failure?.event === correction.event
+        : entry.failure?.digest === correction.failureDigest,
+    );
   if (
     !prior?.failure ||
     prior.failure.digest !== failureDigest(prior.failure.detail) ||
@@ -1456,12 +1461,15 @@ function retainedRepairProof(
     );
   }
   const key = allowanceKey(correction.kind);
-  const consumed = state.allowanceConsumption?.[key];
   const scopes = repairScopes(state, item.id);
+  // A wrong result is charged under its event; assertRepairLedger above
+  // refuses a wrong result that lost its event.
   if (
     !state.autonomy.repairClasses.includes(correction.kind) ||
-    !consumed ||
-    scopes.some((scope) => !state.repairConsumption?.[scope]?.[key])
+    (["implementation", "review-evidence"].includes(
+      prior.failure.classification,
+    ) &&
+      !state.charges?.[prior.failure.event ?? ""]?.allowances.includes(key))
   )
     throw new Error(
       `Work Item ${item.id} correction lacks charged consumption`,
@@ -1575,10 +1583,13 @@ function retainedRepairProof(
       repairClass: correction.kind,
       snapshotConsumption: {
         allowance: key,
-        objective: { consumed, limit: state.autonomy.allowances[key] },
+        objective: {
+          consumed: consumption(state)[key],
+          limit: state.autonomy.allowances[key],
+        },
         paths: scopes.map((scope) => ({
           scope,
-          consumed: state.repairConsumption![scope]![key],
+          consumed: consumption(state, scope)[key],
           limit: state.autonomy.repairPolicy.perPath[key],
         })),
       },

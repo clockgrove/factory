@@ -114,7 +114,7 @@ test("owner remains responsive during planning; cancellation succeeds and cannot
       const rejected = assert.rejects(running, /cancel/);
       await until(() => calls === 1);
       const snapshot = readContinuation(config.repository, 1);
-      assert.equal(snapshot.schemaVersion, 7);
+      assert.equal(snapshot.schemaVersion, 8);
       assert.equal(snapshot.plan, undefined);
       assert.throws(() => readState(config.repository, 1), /schema version/);
       assert.equal(
@@ -251,10 +251,7 @@ test("compound: after an interrupted projection, read-only observations keep the
     const stopped = readContinuation(config.repository, 1);
     assert.equal(stopped.runId, original.runId);
     assert.deepEqual(stopped.plan, original.plan);
-    assert.deepEqual(
-      stopped.allowanceConsumption,
-      original.allowanceConsumption,
-    );
+    assert.deepEqual(stopped.charges, original.charges);
     assert.equal(creates, 1);
   });
 });
@@ -490,7 +487,7 @@ test("drain stays idle under the owner and resumes its pending graph", async () 
       };
       const run = application.runObjective(1);
       await until(
-        () => readContinuation(config.repository, 1)?.schemaVersion === 6,
+        () => readContinuation(config.repository, 1)?.schemaVersion === 7,
       );
       const before = readEvents(planningPath).length;
       await new Promise((resolve) => setTimeout(resolve, 30));
@@ -530,7 +527,7 @@ test("resumed preparation keeps its persisted plan and autonomy without planning
         /preprojection preflight/,
       );
       const preparation = readContinuation(config.repository, 1);
-      assert.equal(preparation.schemaVersion, 7);
+      assert.equal(preparation.schemaVersion, 8);
       assert.ok(preparation.plan);
       assert.deepEqual(preparation.autonomy, defaultAutonomy);
       const compiles = () =>
@@ -662,7 +659,7 @@ test("pause during planning keeps the owner without projection; resume reuses th
         ),
       );
       const paused = readContinuation(config.repository, 1);
-      assert.equal(paused.schemaVersion, 7);
+      assert.equal(paused.schemaVersion, 8);
       assert.equal(paused.coordinator.mode, "paused");
       assert.equal(paused.plan, undefined);
       assert.equal(Object.keys(github.state().issues).length, 0);
@@ -840,13 +837,17 @@ test("a completed semantic refusal is failed evidence, not an unknown submitted 
       `refused-review-${delivery}`,
       async ({ application, config }) => {
         config.delivery.kind = delivery;
-        await assert.rejects(
-          application.runObjective(1),
-          /criterion disproved/,
-        );
+        // A refusal is a wrong result of this item: diagnosed and stopped
+        // for a decision, never an Objective failure.
+        const stopped = await application.runObjective(1);
+        assert.equal(stopped.error, undefined);
         const state = readState(config.repository, 1);
         assert.equal(state.work.result.pendingEffect, undefined);
         assert.equal(state.work.result.status, "failed");
+        assert.match(
+          state.work.result.recovery.failure.event,
+          /^item\/result\//,
+        );
       },
       undefined,
       (descriptor) => {

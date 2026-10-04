@@ -19,7 +19,7 @@ const sha = "a".repeat(40);
 
 function state() {
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
     repository,
     objective,
     runId: "run-1",

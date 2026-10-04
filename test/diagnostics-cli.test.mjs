@@ -10,6 +10,7 @@ import { coverageObligations } from "../dist/qa.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 import { defaultAutonomy } from "../dist/index.js";
 import { graphDigest } from "../dist/graph-amendments.js";
+import { writeStateFile } from "./support/state-file.mjs";
 
 test("diagnostics and status CLI preserve snapshots, unknown usage and coordinator error redaction", (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-diagnostics-cli-"));
@@ -27,7 +28,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
   writeFileSync(configPath, JSON.stringify(config));
   const snapshotPath = statePath(config.repository, 1);
   const preparation = {
-    schemaVersion: 7,
+    schemaVersion: 8,
     kind: "preparing",
     repository: config.repository,
     objective: 1,
@@ -80,7 +81,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
     );
   let expected;
   const execution = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     repository: config.repository,
     objective: 1,
     runId: "execution-run",
@@ -158,7 +159,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
       { objective: 2 },
       { schemaVersion: 99 },
     ]) {
-      saveState(snapshotPath, { ...snapshot, ...mutation });
+      writeStateFile(snapshotPath, { ...snapshot, ...mutation });
       for (const flags of [[], ["--summary"], ["--follow"]]) {
         const invalid = cli(...flags);
         assert.notEqual(invalid.status, 0);
@@ -225,7 +226,7 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
           ),
         );
         assert.ok(document.phase && document.summary);
-      } else if (snapshot.schemaVersion === 7) {
+      } else if (snapshot.schemaVersion === 8) {
         assert.match(
           status.stdout,
           /^Objective #1: failed — planning failed: Preparation failed: \[REDACTED\]\nNext: factory diagnostics --objective 1\n/,

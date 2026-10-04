@@ -1,3 +1,4 @@
+import { consumption } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -895,7 +896,7 @@ test("application fails closed once after exhausted result-review capacity witho
           .slice(0, 3)
           .every((prompt) => prompt === resultPrompts[0]),
       );
-      assert.equal(waiting.allowanceConsumption.resultRereviews, 1);
+      assert.equal(consumption(waiting).resultRereviews, 1);
       assert.equal(
         readEvents(eventsPath).filter(
           (event) =>
@@ -1383,15 +1384,18 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
       actions: { alpha: { files: [{ path: "alpha.txt", text: "alpha\n" }] } },
     });
     const preparing = await application.runObjective(objective);
-    assert.equal(preparing.schemaVersion, 7);
+    assert.equal(preparing.schemaVersion, 8);
     assert.equal(preparing.plan.review.status, "needs-human");
     assert.match(preparing.coordinator.waitReason, /^Plan needs a decision: /);
     assert.equal(Object.keys(github.state().issues).length, 0);
-    assert.equal(reviewCount, 1);
+    // An invalid review is asked again (never charged as a revision), then
+    // the plan waits for a decision.
+    assert.equal(reviewCount, 3);
+    assert.equal(preparing.charges, undefined);
     // A rerun resumes the persisted plan: no planning call, still waiting.
     const again = await application.runObjective(objective);
-    assert.equal(again.schemaVersion, 7);
-    assert.equal(reviewCount, 1);
+    assert.equal(again.schemaVersion, 8);
+    assert.equal(reviewCount, 3);
     assert.equal(Object.keys(github.state().issues).length, 0);
     // The persisted plan stays bound to the configuration it was planned with.
     config.planning.reviewer.reasoningEffort = "high";
@@ -1426,10 +1430,10 @@ test("an explicitly accepted malformed graph review runs the same pinned graph w
       readContinuation(config.repository, objective).plan.review.status,
       "human-accepted",
     );
-    assert.equal(reviewCount, 1);
+    assert.equal(reviewCount, 3);
     const completed = await application.runObjective(objective);
     assert.equal(completed.finalValidation.passed, true);
-    assert.equal(reviewCount, 1);
+    assert.equal(reviewCount, 3);
   });
 });
 
@@ -1576,7 +1580,7 @@ test("application lifecycle reattaches once, cancels owned work, and retries onl
           const state = existsSync(restartStatePath)
             ? readContinuation(descriptor.config.repository, objective)
             : undefined;
-          return state?.schemaVersion === 6 && state.work.restart.execution
+          return state?.schemaVersion === 7 && state.work.restart.execution
             ? state
             : undefined;
         },

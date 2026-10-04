@@ -92,10 +92,7 @@ function commitResult(target) {
   };
 }
 function accounting(state) {
-  return structuredClone({
-    allowanceConsumption: state.allowanceConsumption,
-    repairConsumption: state.repairConsumption,
-  });
+  return structuredClone({ charges: state.charges });
 }
 function pass(request) {
   return {

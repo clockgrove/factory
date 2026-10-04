@@ -4,6 +4,8 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- Repair allowances are charged once per failure event, and never for a transient or configuration failure (#515). State records the charged events as `charges`; consumption is derived from them. The state schema is now 7 for an Objective and 8 for a preparation, so state from earlier versions is refused: finish it with the version that wrote it, or start it fresh.
+- `status --json` replaces `repairConsumption` with `charges` and `allowanceRemaining` (Objective-wide and per Work Item path), and each repair shows its `failureEvent`.
 - A fetch for one Work Item no longer dies with `Invalid path '.git/worktrees/<id>'` while another Work Item's worktree is being added or removed. Git commands that change a checkout's worktree registry (`worktree add/remove/prune`, `gc`, `prune`, `maintenance`, `pull`) hold a per-repository lock exclusively; fetches and `worktree list` share it. Worktree creation and removal hold it only to register and unregister; files are checked out and deleted outside it.
 - Factory reads the default branch head without FETCH_HEAD or the remote-tracking ref, so concurrent fetches no longer race on them. A locked fetch stops after 15 minutes, or after 60 seconds below 1000 bytes per second over HTTP, and the step repeats later.
 - Factory's git commands never start automatic background maintenance.

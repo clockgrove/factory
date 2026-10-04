@@ -1,3 +1,4 @@
+import { consumption } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -36,6 +37,7 @@ import {
   git,
   readEvents,
 } from "./support/integration-fixture.mjs";
+import { writeStateFile } from "./support/state-file.mjs";
 
 const objectives = [1, 2];
 /** No unattended repair or amendment unless a test raises a limit. */
@@ -390,7 +392,7 @@ test("sequential planning supplies grounded native acceptance in every rendered 
         packet.prompt.includes(JSON.stringify(currentRequest.localExecutables)),
       );
     }
-    assert.equal(second.allowanceConsumption.planningRevisions, 1);
+    assert.equal(consumption(second).planningRevisions, 1);
     assert.equal(
       readEvents(f.eventsPath).filter((event) => event.type === "start").length,
       2,
@@ -479,14 +481,14 @@ test("native planning facts refuse missing, unaccepted, changed and mismatched p
     assert.equal(descendant.predecessors[0].baseRelationship, "descendant");
     const original = structuredClone(first);
     first.finalAcceptance.tree = f.target.baseSha;
-    saveState(statePath(f.config.repository, 1), first);
+    writeStateFile(statePath(f.config.repository, 1), first);
     await assert.rejects(
       planningPrerequisites(f.config, f.github, 2, later),
       /sealed candidate|evidence/,
     );
     Object.assign(first, original);
     first.objectiveClosure = "pending";
-    saveState(statePath(f.config.repository, 1), first);
+    writeStateFile(statePath(f.config.repository, 1), first);
     await assert.rejects(
       planningPrerequisites(f.config, f.github, 2, later),
       /lacks bound accepted/,
@@ -693,7 +695,7 @@ for (const [descendant, dependent, historical] of [
       assert.deepEqual(second.graph.items[0], candidate.graph.items[0]);
       assert.equal(second.graphRevisions.length, 2);
       assert.equal(second.graphRevisions[0].digest, candidate.graphDigest);
-      assert.equal(second.allowanceConsumption.planningRevisions, 1);
+      assert.equal(consumption(second).planningRevisions, 1);
       assert.equal(second.baseSha, candidate.baseSha);
       assert.equal(second.objectiveBodyDigest, candidate.bodyDigest);
       assert.equal(second.configDigest, candidate.configDigest);
@@ -737,7 +739,7 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
       successorDiscovery(state);
       if (fault === "missing") rmSync(statePath(f.config.repository, 1));
       if (fault === "unaccepted")
-        saveState(statePath(f.config.repository, 1), {
+        writeStateFile(statePath(f.config.repository, 1), {
           ...first,
           objectiveClosure: "pending",
         });
@@ -747,7 +749,7 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
       if (fault === "tree") {
         const changed = structuredClone(first);
         changed.finalAcceptance.tree = f.target.baseSha;
-        saveState(statePath(f.config.repository, 1), changed);
+        writeStateFile(statePath(f.config.repository, 1), changed);
       }
       await assert.rejects(
         applyPendingAmendment({
@@ -764,7 +766,7 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
       assert.equal(calls, 0, fault);
       assert.equal(state.pendingAmendment.phase, "rejected");
       assert.deepEqual(state.graph, second.graph);
-      assert.equal(state.allowanceConsumption.planningRevisions, 1);
+      assert.equal(consumption(state).planningRevisions, 1);
       saveState(statePath(f.config.repository, 1), first);
       f.issues.get(1).body = body(1);
       f.dependencies.set(2, [1]);
@@ -980,7 +982,7 @@ for (const disposition of ["failed", "cancelled"])
     fixture(async (f) => {
       await f.application.enqueueIntake(objectives, { pollSeconds: 0.01 });
       saveState(statePath(f.config.repository, 1), {
-        schemaVersion: 7,
+        schemaVersion: 8,
         kind: "preparing",
         repository: f.config.repository,
         objective: 1,
@@ -1206,7 +1208,7 @@ test("consented continuous intake stays model-free while idle and refills throug
     await waitFor(() => {
       const state = readContinuation(f.config.repository, 1);
       return (
-        state?.schemaVersion === 6 &&
+        state?.schemaVersion === 7 &&
         objectiveComplete(state) &&
         readIntake(f.config).observation?.idleReason ===
           "awaiting-approved-work"
@@ -1223,7 +1225,7 @@ test("consented continuous intake stays model-free while idle and refills throug
     await waitFor(() => {
       const state = readContinuation(f.config.repository, 2);
       return (
-        state?.schemaVersion === 6 &&
+        state?.schemaVersion === 7 &&
         objectiveComplete(state) &&
         readIntake(f.config).observation?.idleReason ===
           "awaiting-approved-work"
@@ -1304,7 +1306,7 @@ test("watch and refill preserve failed nonterminal fences and require real servi
     );
     await watchIntake(f.config, watcherConsent);
     const failed = {
-      schemaVersion: 7,
+      schemaVersion: 8,
       kind: "preparing",
       repository: f.config.repository,
       objective: 1,

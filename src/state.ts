@@ -137,12 +137,8 @@ export interface PreparationState {
   autonomy: Autonomy;
   /** Worker ceiling and scheduling resolved when the Objective started. */
   capacity: import("./config.js").Capacity;
-  allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
-  repairConsumption?: Record<
-    string,
-    import("./graph-amendments.js").AllowanceConsumption
-  >;
-  schemaVersion: 7;
+  charges?: import("./repair-policy.js").RepairLedger["charges"];
+  schemaVersion: 8;
   kind: "preparing";
   repository: string;
   objective: number;
@@ -167,16 +163,13 @@ export type ContinuationState = FactoryState | PreparationState;
 export interface FactoryState {
   finalAcceptance?: import("./completion.js").FinalAcceptance;
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
-  repairConsumption?: Record<
-    string,
-    import("./graph-amendments.js").AllowanceConsumption
-  >;
+  /** Charged failure events (see repair-policy.ts). */
+  charges?: import("./repair-policy.js").RepairLedger["charges"];
   backlogDiscoveries?: import("./graph-amendments.js").AmendmentProposal[];
   graphRevisions?: import("./graph-amendments.js").GraphRevision[];
   pendingAmendment?: import("./graph-amendments.js").PendingAmendment;
   /** Superseded known rejections retain their original proposal and evidence. */
   rejectedAmendments?: import("./graph-amendments.js").PendingAmendment[];
-  allowanceConsumption?: import("./graph-amendments.js").AllowanceConsumption;
   coordinator?: CoordinatorDisposition;
   /** Limits snapshotted from configuration when the Objective started. */
   autonomy: Autonomy;
@@ -186,7 +179,7 @@ export interface FactoryState {
   planGraphDigest: string;
   /** Native predecessor facts the plan was made with; absent when it had none. */
   prerequisitesDigest?: string;
-  schemaVersion: 6;
+  schemaVersion: 7;
   repository: string;
   objective: number;
   runId: string;
@@ -429,7 +422,7 @@ export function parseFactoryState(
   const state = record(value, "state");
   assertCoordinator(state.coordinator);
   if (
-    state.schemaVersion !== 6 ||
+    state.schemaVersion !== 7 ||
     state.repository !== repository ||
     state.objective !== objective
   )

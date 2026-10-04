@@ -7,7 +7,7 @@ import {
   type RepairCorrection,
   resolveAutonomy,
 } from "./repair-policy.js";
-import { applyWorkCorrection } from "./work-repair.js";
+import { applyWorkCorrection, resumeDiagnoses } from "./work-repair.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
 import {
@@ -255,7 +255,7 @@ export async function decidePlan(
   try {
     const path = statePath(config.repository, objective);
     const preparation = readContinuation(config.repository, objective);
-    if (preparation?.schemaVersion !== 7)
+    if (preparation?.schemaVersion !== 8)
       throw new Error(
         "Objective has no persisted plan awaiting a decision; run it first",
       );
@@ -324,7 +324,7 @@ function canHandoff(state: ContinuationState): boolean {
   if (state.coordinator?.processes?.length || state.coordinator?.cancelError)
     return false;
   // Preparation resumes by repeating its current step, so any point is safe.
-  if (state.schemaVersion === 7) return true;
+  if (state.schemaVersion === 8) return true;
   return (
     !state.coordinator?.phase.endsWith("-submitted") &&
     !Object.entries(state.work).some(
@@ -356,7 +356,7 @@ function mutationState(
   const snapshot =
     owners.get(ownerKey(config, objective))?.snapshot ??
     readContinuation(config.repository, objective);
-  if (snapshot?.schemaVersion === 7)
+  if (snapshot?.schemaVersion === 8)
     throw new Error("Objective is still preparing");
   const state = snapshot ?? readState(config.repository, objective);
   return state;
@@ -395,7 +395,7 @@ export async function controlObjective(
     if (!state) throw new Error("Objective has no Factory state");
     if (request.action === "status") return state.coordinator;
     if (request.action === "propose-amendment") {
-      if (state.schemaVersion !== 6 || !request.input?.replacement)
+      if (state.schemaVersion !== 7 || !request.input?.replacement)
         throw new Error(
           "Only diagnosed rejected-amendment replacement is supported without an active owner",
         );
@@ -469,7 +469,7 @@ async function cancelKnownWork(
 ): Promise<void> {
   const errors: string[] = [];
   const tasks: (() => Promise<void>)[] = [];
-  if (state.schemaVersion === 6)
+  if (state.schemaVersion === 7)
     for (const work of Object.values(state.work)) {
       if (
         work.step !== "execute" ||
@@ -590,7 +590,7 @@ export async function runObjective(
   };
   const cancel = (): void => {
     if (!owner.snapshot) return;
-    if (owner.snapshot.schemaVersion === 6 && owner.snapshot.finalAcceptance) {
+    if (owner.snapshot.schemaVersion === 7 && owner.snapshot.finalAcceptance) {
       owner.snapshot.coordinator!.waitReason =
         "Acceptance is sealed; reconcile Objective closure before successor work";
       persist();
@@ -675,7 +675,7 @@ export async function runObjective(
       };
       if (request.action === "status") return state.coordinator;
       if (request.action === "propose-amendment") {
-        if (state.schemaVersion !== 6)
+        if (state.schemaVersion !== 7)
           throw new Error("Planning has no active graph to amend");
         if (owner.abort.signal.aborted)
           throw new Error(
@@ -690,7 +690,7 @@ export async function runObjective(
         return result;
       }
       if (request.action === "cancel") {
-        if (state.schemaVersion === 6 && state.finalAcceptance)
+        if (state.schemaVersion === 7 && state.finalAcceptance)
           throw new Error(
             "Acceptance is sealed; resume to reconcile Objective closure",
           );
@@ -787,7 +787,7 @@ export async function runObjective(
         if (!state.coordinator?.cancelError) {
           state.cancelledAt = new Date().toISOString();
           clearAllRepeats(state);
-          if (state.schemaVersion === 6)
+          if (state.schemaVersion === 7)
             for (const work of Object.values(state.work))
               if (work.status === "pending" || work.status === "running")
                 work.status = "cancelled";
@@ -799,7 +799,7 @@ export async function runObjective(
         state?.coordinator?.mode !== "running" &&
         state?.coordinator &&
         !(
-          state.schemaVersion === 6 &&
+          state.schemaVersion === 7 &&
           Object.values(state.work).some(
             (work) => work.status === "running" || work.status === "published",
           )
@@ -827,7 +827,7 @@ export async function runObjective(
         const current = owner.snapshot;
         // Planning stops at a pause or drain; the owner keeps serving control until resume.
         if (
-          current?.schemaVersion === 7 &&
+          current?.schemaVersion === 8 &&
           current.coordinator.mode !== "running" &&
           !current.cancelRequested &&
           !owner.handoff
@@ -839,7 +839,7 @@ export async function runObjective(
       owner.snapshot = result;
       // A preparation comes back only when its plan needs a human decision.
       if (
-        result.schemaVersion === 7 ||
+        result.schemaVersion === 8 ||
         objectiveComplete(result) ||
         result.cancelledAt
       )
@@ -863,7 +863,8 @@ export async function runObjective(
       result.coordinator!.phase = "waiting";
       const stoppedRepair = Object.entries(result.work).find(
         ([, work]) =>
-          work.recovery?.phase === "stopped" &&
+          (work.recovery?.phase === "stopped" ||
+            work.recovery?.phase === "diagnosing") &&
           ["failed", "waiting"].includes(work.status),
       );
       result.coordinator!.waitReason = result.githubClosureError
@@ -997,8 +998,8 @@ async function runObjectivePass(
       saveState(path, continuation);
     }
     let preparation =
-      continuation?.schemaVersion === 7 ? continuation : undefined;
-    let state = continuation?.schemaVersion === 6 ? continuation : undefined;
+      continuation?.schemaVersion === 8 ? continuation : undefined;
+    let state = continuation?.schemaVersion === 7 ? continuation : undefined;
     if (issue.state === "closed" && !state?.finalValidation?.passed)
       throw new Error(
         "Objective issue is confirmed closed; operator direction required",
@@ -1012,7 +1013,7 @@ async function runObjectivePass(
         saveState(path, state);
       }
       if (
-        state.schemaVersion !== 6 ||
+        state.schemaVersion !== 7 ||
         state.repository !== config.repository ||
         state.configDigest !== installationConfigDigest
       ) {
@@ -1091,7 +1092,7 @@ async function runObjectivePass(
           const other = readContinuation(config.repository, Number(name));
           if (
             other &&
-            !(other.schemaVersion === 6 && objectiveComplete(other)) &&
+            !(other.schemaVersion === 7 && objectiveComplete(other)) &&
             !other.cancelledAt
           )
             throw new Error(
@@ -1108,7 +1109,7 @@ async function runObjectivePass(
       if (!preparation) {
         preparation = {
           sourcePacketDigest,
-          schemaVersion: 7,
+          schemaVersion: 8,
           kind: "preparing",
           repository: config.repository,
           objective,
@@ -1324,16 +1325,11 @@ async function runObjectivePass(
           }),
       );
       state = {
-        schemaVersion: 6,
+        schemaVersion: 7,
         ...(preparation.planningRecovery
           ? { planningRecovery: preparation.planningRecovery }
           : {}),
-        ...(preparation.allowanceConsumption
-          ? { allowanceConsumption: preparation.allowanceConsumption }
-          : {}),
-        ...(preparation.repairConsumption
-          ? { repairConsumption: preparation.repairConsumption }
-          : {}),
+        ...(preparation.charges ? { charges: preparation.charges } : {}),
         autonomy: preparation.autonomy,
         capacity,
         planGraphDigest: plan.graphDigest,
@@ -1388,17 +1384,28 @@ async function runObjectivePass(
       cancelled: cancellationRequested,
       diagnostics,
     });
-    if (state.coordinator.mode === "running" && !cancellationRequested())
+    if (state.coordinator.mode === "running" && !cancellationRequested()) {
       for (const [id, work] of Object.entries(state.work)) {
         if (
           work.status === "failed" &&
           work.recovery?.phase === "ready" &&
           work.recovery.correction
         ) {
-          applyWorkCorrection(state, id, work.recovery.correction, true);
+          applyWorkCorrection(state, id, work.recovery.correction);
           save(state);
         }
       }
+      const current = state;
+      await resumeDiagnoses({
+        state: current,
+        model: planningModel,
+        diagnostics,
+        sources: planningSources(issue.body, current.baseSha, config.checkout),
+        save: () => save(current),
+        stopped: () =>
+          cancellationRequested() || current.coordinator?.mode !== "running",
+      });
+    }
     const graph = state.graph;
     verifyExecutionProfiles(graph, executionProfileChoices(config));
     await driver.preflight?.(graph);
@@ -1758,7 +1765,7 @@ async function runObjectivePass(
     });
     const current = owner.snapshot;
     if (
-      current?.schemaVersion === 6 &&
+      current?.schemaVersion === 7 &&
       current.finalAcceptance &&
       !(error instanceof GitHubClosureFailure)
     ) {
@@ -1769,7 +1776,7 @@ async function runObjectivePass(
     }
     if (
       active.size &&
-      current?.schemaVersion === 6 &&
+      current?.schemaVersion === 7 &&
       !cancellationRequested()
     ) {
       for (const work of Object.values(current.work)) {
@@ -1785,7 +1792,7 @@ async function runObjectivePass(
       }
       await Promise.allSettled(active.values());
     }
-    if (current?.schemaVersion === 6 && !cancellationRequested()) {
+    if (current?.schemaVersion === 7 && !cancellationRequested()) {
       for (const work of Object.values(current.work)) {
         if (
           !work.execution ||
@@ -1822,17 +1829,17 @@ async function runObjectivePass(
         if (!current.coordinator?.cancelError && active.size === 0) {
           current.cancelledAt = new Date().toISOString();
           clearAllRepeats(current);
-          if (current.schemaVersion === 6)
+          if (current.schemaVersion === 7)
             for (const work of Object.values(current.work))
               if (work.status !== "done" && work.status !== "published")
                 work.status = "cancelled";
         }
       } else if (
         error instanceof GitHubClosureFailure &&
-        current.schemaVersion === 6
+        current.schemaVersion === 7
       ) {
         current.githubClosureError = error.message;
-      } else if (current.schemaVersion === 7) {
+      } else if (current.schemaVersion === 8) {
         // Preparation resumes by repeating its step; record why it paused.
         current.coordinator.waitReason =
           error instanceof Error ? error.message : String(error);
@@ -1872,11 +1879,11 @@ export async function cancelObjective(
     const continuation = readContinuation(config.repository, objective);
     if (!continuation) throw new Error("Objective has no Factory state");
     if (
-      (continuation.schemaVersion === 6 && objectiveComplete(continuation)) ||
+      (continuation.schemaVersion === 7 && objectiveComplete(continuation)) ||
       continuation.cancelledAt
     )
       return "cancelled";
-    if (continuation.schemaVersion === 6 && continuation.finalAcceptance)
+    if (continuation.schemaVersion === 7 && continuation.finalAcceptance)
       throw new Error(
         "Acceptance is sealed; resume to reconcile Objective closure",
       );
@@ -1898,7 +1905,7 @@ export async function cancelObjective(
       saveState(statePath(config.repository, objective), continuation);
       throw error;
     }
-    if (continuation.schemaVersion === 6)
+    if (continuation.schemaVersion === 7)
       for (const work of Object.values(continuation.work)) {
         if (work.execution && work.step === "execute")
           await driver

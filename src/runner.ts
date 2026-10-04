@@ -1001,12 +1001,17 @@ async function runObjectivePass(
   } = services;
   let stateForSignal: FactoryState | undefined;
   const cancellationRequested = () => Boolean(owner.snapshot?.cancelRequested);
-  // Objective steps stop backing off on cancel and on a handoff (SIGTERM,
-  // drain to another controller); item workers stop only on cancel.
-  const objectiveSignal = AbortSignal.any([
+  // Objective steps stop backing off on cancel, and on a handoff (SIGTERM)
+  // while ownership can be released; a drain that must still drive running
+  // items keeps them going. Item workers stop only on cancel.
+  const releasable = AbortSignal.any([
     owner.abort.signal,
     owner.release.signal,
   ]);
+  const objectiveSignal = () =>
+    owner.handoff && owner.snapshot && !canHandoff(owner.snapshot)
+      ? owner.abort.signal
+      : releasable;
   /** Stop a pass the operator cancelled: a `cancelled` fault, never a failure. */
   const stopIfCancelled = () => {
     if (cancellationRequested())
@@ -1045,7 +1050,7 @@ async function runObjectivePass(
                 );
             }
           },
-          signal: objectiveSignal,
+          signal: objectiveSignal(),
         },
       );
     const observeObjective = (state = owner.snapshot) =>
@@ -1118,7 +1123,7 @@ async function runObjectivePass(
             github,
             saveCurrent,
             config.delivery.kind === "native-stack",
-            objectiveSignal,
+            objectiveSignal(),
           );
       if (state.finalValidation?.passed) {
         reportRunStatus?.(
@@ -1138,7 +1143,7 @@ async function runObjectivePass(
           issue.body,
           github,
           saveCurrent,
-          objectiveSignal,
+          objectiveSignal(),
         );
         return state;
       }
@@ -1466,7 +1471,7 @@ async function runObjectivePass(
       github,
       save: () => save(state),
       cancelled: cancellationRequested,
-      signal: objectiveSignal,
+      signal: objectiveSignal(),
       diagnostics,
     });
     if (state.coordinator.mode === "running" && !cancellationRequested()) {
@@ -1891,7 +1896,7 @@ async function runObjectivePass(
         issue.body,
         github,
         () => save(state),
-        objectiveSignal,
+        objectiveSignal(),
       );
       return state;
     }

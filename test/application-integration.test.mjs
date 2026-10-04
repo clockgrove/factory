@@ -783,7 +783,7 @@ test("application retries capacity for exact Work Item and final review requests
   });
 });
 
-test("application fails closed once after exhausted result-review capacity without replaying work", async () => {
+test("exhausted result-review capacity repeats the review step without replaying work", async () => {
   await fixture("review-capacity-exhausted", async (root) => {
     const original = Codex.prototype.startThread;
     const target = createTarget(root);
@@ -844,10 +844,37 @@ test("application fails closed once after exhausted result-review capacity witho
               return;
             }
             resultPrompts.push(prompt);
+            // The adapter's own capacity retries (three tries) run out once.
+            if (resultPrompts.length <= 3) {
+              yield {
+                type: "turn.failed",
+                error: { message: "reviewer capacity unavailable" },
+              };
+              return;
+            }
+            const packet = packetFromPrompt(prompt);
             yield {
-              type: "turn.failed",
-              error: { message: "reviewer capacity unavailable" },
+              type: "item.completed",
+              item: {
+                id: `${id}-message`,
+                type: "agent_message",
+                text: JSON.stringify({
+                  packetId: packet.packetId,
+                  findings: packet.criteria.map(({ criterionIndex }) => ({
+                    criterionIndex,
+                    verdict: "pass",
+                    evidenceIndices: [
+                      packet.evidence.find((e) => e.path === "OBJECTIVE")
+                        .evidenceIndex,
+                    ],
+                    detail:
+                      "The exact validated result satisfies the criterion.",
+                    question: "",
+                  })),
+                }),
+              },
             };
+            yield { type: "turn.completed", usage: null };
           }
           return { events: events() };
         },
@@ -882,21 +909,22 @@ test("application fails closed once after exhausted result-review capacity witho
         },
       };
       const { application, eventsPath, github } = makeApplication(descriptor);
-      const waiting = await application.runObjective(objective);
-      assert.equal(waiting.work["review-exhausted"].status, "waiting");
-      assert.equal(waiting.work["review-exhausted"].step, "approve-result");
-      assert.match(
-        waiting.work["review-exhausted"].acceptancePending.detail,
-        /Independent review transport was invalid: reviewer capacity unavailable/,
-      );
-      // Default autonomy repeats the review once on fresh evidence, then stops.
-      assert.equal(resultPrompts.length, 6);
+      const completed = await application.runObjective(objective);
+      assert.equal(completed.finalValidation.passed, true);
+      assert.equal(completed.work["review-exhausted"].status, "done");
+      // Capacity is a wait, not a paid fault: the review step asks again
+      // (item review: 3 failed tries, then 1; final review: 1).
+      assert.equal(resultPrompts.length, 5);
+      // The adapter retries one prompt; the repeated step reviews the same tree.
       assert.ok(
         resultPrompts
           .slice(0, 3)
           .every((prompt) => prompt === resultPrompts[0]),
       );
-      assert.equal(consumption(waiting).resultRereviews, 1);
+      const tree = (prompt) => /Result tree: [0-9a-f]{40}/.exec(prompt)?.[0];
+      assert.ok(tree(resultPrompts[0]));
+      assert.equal(tree(resultPrompts[3]), tree(resultPrompts[0]));
+      assert.equal(consumption(completed).resultRereviews, 0);
       assert.equal(
         readEvents(eventsPath).filter(
           (event) =>
@@ -904,13 +932,12 @@ test("application fails closed once after exhausted result-review capacity witho
         ).length,
         1,
       );
-      assert.equal(Object.keys(github.state().pullRequests).length, 0);
+      assert.equal(Object.keys(github.state().pullRequests).length, 1);
       const summary = summarizeModelInvocations(
         readDiagnostics(descriptor.config.repository, objective),
       );
-      assert.equal(summary.byPhase["result-review"].invocationCount, 6);
-      assert.equal(summary.byPhase["result-review"].failedCount, 6);
-      assert.equal(summary.byPhase["result-review"].completedCount, 0);
+      assert.equal(summary.byPhase["result-review"].failedCount, 3);
+      assert.equal(summary.byPhase["result-review"].completedCount, 1);
     } finally {
       Codex.prototype.startThread = original;
     }
@@ -2026,7 +2053,7 @@ test("native execution failure is terminal until an explicit safe retry", async 
   });
 });
 
-test("native retry stops when its stack already has a published layer", async () => {
+test("native retry resumes a stack that already has a published layer", async () => {
   await fixture("native-published-retry", async (root) => {
     const target = createTarget(root);
     const commands = ["test -s first.txt", "test -s second.txt"];
@@ -2058,23 +2085,30 @@ test("native retry stops when its stack already has a published layer", async ()
         },
       },
     };
-    const { application, eventsPath } = makeApplication(descriptor);
-    await assert.rejects(
-      application.runObjective(objective),
-      /Scripted failure for second/,
-    );
-    const state = readState(descriptor.config.repository, objective);
-    assert.ok(state.work.first.pullRequest);
-    assert.equal(state.work.second.status, "failed");
-    assert.throws(
-      () => application.retryWorkItem(objective, "second"),
-      /Published PR requires operator direction/,
+    const { application, eventsPath, github } = makeApplication(descriptor);
+    // second's failed result is a work fault: the run keeps the failure for
+    // an explicit retry instead of rejecting, and first's layer stays
+    // published (#577).
+    const failed = await application.runObjective(objective);
+    assert.equal(failed.error, undefined);
+    assert.equal(failed.work.second.status, "failed");
+    const firstPull = failed.work.first.pullRequest;
+    assert.ok(firstPull);
+    application.retryWorkItem(objective, "second");
+    const done = await application.runObjective(objective);
+    assert.equal(done.finalValidation.passed, true);
+    // The stack resumes on first's PR: no duplicate PR for either layer.
+    assert.equal(done.work.first.pullRequest, firstPull);
+    const pulls = Object.values(github.state().pullRequests);
+    assert.deepEqual(
+      pulls.map((pull) => pull.number).sort(),
+      [done.work.first.pullRequest, done.work.second.pullRequest].sort(),
     );
     assert.equal(
       readEvents(eventsPath).filter(
         (event) => event.type === "start" && event.item === "second",
       ).length,
-      1,
+      2,
     );
   });
 });
@@ -2944,7 +2978,7 @@ test("hydration failure is URL-free and blocks final review, evidence, and closu
         assert.equal(
           error.message,
           attempt
-            ? "Objective stopped: Fresh-clone hydration verification failed during clone. Use explicit retry or operator direction."
+            ? `Objective stopped: Fresh-clone hydration verification failed during clone. Fix the cause, then run \`factory retry --objective ${objective}\``
             : "Fresh-clone hydration verification failed during clone",
         );
         assert.doesNotMatch(error.message, /arbitrary-secret|private-origin/);
@@ -2958,7 +2992,7 @@ test("hydration failure is URL-free and blocks final review, evidence, and closu
       assert.equal(
         failed.error,
         attempt
-          ? "Objective stopped: Fresh-clone hydration verification failed during clone. Use explicit retry or operator direction."
+          ? `Objective stopped: Fresh-clone hydration verification failed during clone. Fix the cause, then run \`factory retry --objective ${objective}\``
           : "Fresh-clone hydration verification failed during clone",
       );
       assert.equal(github.state().closedIssues[objective], undefined);
@@ -2984,6 +3018,127 @@ test("hydration failure is URL-free and blocks final review, evidence, and closu
         JSON.stringify(timeline),
         /arbitrary-secret|private-origin/,
       );
+    }
+  });
+});
+
+test("a transient fault in final hydration repeats final validation instead of stopping the Objective (#642)", async () => {
+  await fixture("hydration-transient", async (root) => {
+    const selectedModel = Buffer.from([0, 7, 0, 8, 255]);
+    const target = createTarget(root, { "approved/model.bin": selectedModel });
+    writeFileSync(
+      join(target.checkout, ".gitattributes"),
+      "approved/*.bin filter=lfs diff=lfs merge=lfs -text\n",
+    );
+    git(target.checkout, "add", ".gitattributes");
+    git(
+      target.checkout,
+      "-c",
+      "user.name=Factory Test",
+      "-c",
+      "user.email=factory-test@example.com",
+      "commit",
+      "-m",
+      "Require LFS for approved binaries",
+    );
+    git(target.checkout, "push", "origin", "main");
+    target.baseSha = git(target.checkout, "rev-parse", "HEAD");
+    git(target.checkout, "lfs", "install", "--local");
+    // The first fresh clone of final hydration cannot resolve the remote's
+    // host; every other git call is real.
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const bin = join(root, "bin");
+    const fired = join(root, "dns-fault-fired");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh
+case " $* " in
+  *" clone --no-checkout "*)
+    if [ ! -e ${JSON.stringify(fired)} ]; then
+      : > ${JSON.stringify(fired)}
+      echo "fatal: unable to access 'https://example.invalid/': Could not resolve host: example.invalid" >&2
+      exit 128
+    fi;;
+esac
+exec ${JSON.stringify(realGit)} "$@"
+`,
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    const command = "test -s approved/model.bin";
+    const media = item("media", {
+      path: "approved/model.bin",
+      command,
+      sourceAssets: [
+        {
+          kind: "repository",
+          path: "approved/model.bin",
+          role: "source",
+          mediaType: "application/octet-stream",
+          visibility: "repository",
+        },
+      ],
+      expectedOutputRoles: ["model"],
+      minimumAssetSets: 1,
+      requiredLfsRoles: ["model"],
+    });
+    const descriptor = {
+      config: factoryConfig(target.checkout, "example/hydration-transient"),
+      graph: { objective, baseSha: target.baseSha, items: [media] },
+      objectiveBody: `# Deterministic Objective
+
+## Acceptance
+- Fresh-clone hydration preserves the selected bytes at approved/model.bin.
+- \`${command}\`
+
+## Final validation
+- \`${command}\`
+`,
+      fakeRoot: join(root, "fake"),
+      actions: {
+        media: {
+          assets: [
+            {
+              id: "byte-identical",
+              members: [
+                {
+                  role: "model",
+                  file: "model.bin",
+                  mediaType: "application/octet-stream",
+                  destination: "approved/model.bin",
+                  base64: selectedModel.toString("base64"),
+                },
+              ],
+              provenance: {
+                source: "approved/model.bin",
+                rights: "public integration fixture",
+                visibility: "repository",
+                lineage: ["approved/model.bin"],
+              },
+            },
+          ],
+        },
+      },
+    };
+    const { application } = makeApplication(descriptor);
+    const waiting = await application.runObjective(objective);
+    assert.equal(waiting.work.media.status, "waiting");
+    await application.selectAssetSet(objective, "media", "byte-identical", {
+      actor: "test-operator",
+      reason: "transient-fault fixture",
+      downstreamItems: [],
+    });
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      const completed = await application.runObjective(objective);
+      assert.equal(existsSync(fired), true);
+      assert.equal(completed.error, undefined);
+      assert.equal(completed.finalValidation.passed, true);
+      assert.equal(completed.finalValidation.hydrationReceipt.passed, true);
+      assert.equal(completed.repeats, undefined);
+    } finally {
+      process.env.PATH = path;
     }
   });
 });
@@ -3104,24 +3259,27 @@ test("close failures replay after merge and final validation without worker or P
     };
     const { application, github, eventsPath } = makeApplication(descriptor);
     github.failCloseAfterComment = 100;
-    await assert.rejects(application.runObjective(objective), /close failure/);
+    // A refused closure waits for its fix; it does not fail the Objective.
+    await application.runObjective(objective);
     const afterMerge = readState(descriptor.config.repository, objective);
     assert.equal(afterMerge.work.result.status, "done");
     assert.equal(afterMerge.work.result.githubClosure, "pending");
     assert.equal(afterMerge.error, undefined);
-    assert.match(afterMerge.githubClosureError, /close failure/);
+    assert.equal(afterMerge.work.result.wait.kind, "prerequisite");
+    assert.match(afterMerge.work.result.wait.detail, /close failure/);
     const mergedPr = afterMerge.work.result.pullRequest;
     const expectedHead = github.state().pullRequests[mergedPr].headSha;
     github.update((state) => {
       state.pullRequests[mergedPr].headSha = target.baseSha;
     });
-    await assert.rejects(
-      application.runObjective(objective),
-      /identity changed/,
-    );
+    const changed = await application.runObjective(objective);
+    assert.equal(changed.error, undefined);
+    assert.match(changed.work.result.wait.detail, /identity changed/);
     github.update((state) => {
       state.pullRequests[mergedPr].headSha = expectedHead;
     });
+    // The operator answers the closure decision; the step runs again.
+    assert.equal(application.retryWorkItem(objective, "result"), "step");
     const counts = () => ({
       starts: readEvents(eventsPath).filter((event) => event.type === "start")
         .length,
@@ -3133,8 +3291,9 @@ test("close failures replay after merge and final validation without worker or P
     });
     const beforeReplay = counts();
     github.failCloseAfterComment = objective;
-    await assert.rejects(application.runObjective(objective), /close failure/);
+    await application.runObjective(objective);
     const afterValidation = readState(descriptor.config.repository, objective);
+    assert.equal(afterValidation.wait.kind, "prerequisite");
     assert.equal(afterValidation.finalValidation.passed, true);
     assert.equal(afterValidation.work.result.githubClosure, "complete");
     assert.equal(afterValidation.objectiveClosure, "pending");

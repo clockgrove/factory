@@ -121,6 +121,17 @@ for (const delivery of ["regular", "native-stack"]) {
                   body = { check_runs: runs };
                 else if (path.endsWith("/status"))
                   body = { state: "success", total_count: 0 };
+                // No rulesets and no classic protection on the base.
+                else if (/\/rules\/branches\/[^/]+$/.test(path)) body = [];
+                else if (
+                  /\/branches\/[^/]+\/protection\/required_status_checks$/.test(
+                    path,
+                  )
+                )
+                  return new Response('{"message":"Not Found"}', {
+                    status: 404,
+                    headers: { "content-type": "application/json" },
+                  });
                 else {
                   assert.equal(path, "/graphql");
                   body = {

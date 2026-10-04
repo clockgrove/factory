@@ -15,6 +15,7 @@ import { Octokit } from "@octokit/core";
 import { GitHubClient } from "../dist/github-client.js";
 import { RealGitHubGateway } from "../dist/github.js";
 import { withProcessCancellation } from "../dist/process.js";
+import { attachFault, decision, faultOf, transient } from "../dist/fault.js";
 import { stateRoot } from "../dist/config.js";
 import { defaultAutonomy } from "../dist/index.js";
 import { requestControl } from "../dist/coordinator-control.js";
@@ -245,6 +246,19 @@ test("compound: after an interrupted projection, read-only observations keep the
     abort.abort();
     await assert.rejects(queued);
     assert.equal(reads.length, 1);
+    // While the gate is closed the read is held, unsent, as a transient fault
+    // whose retryAt is the gate; the caller's step waits there (#641).
+    const held = await github.objective(1).catch((error) => error);
+    assert.equal(faultOf(held).kind, "transient");
+    assert.equal(faultOf(held).outcomeUnknown, false);
+    assert.ok(Date.parse(faultOf(held).retryAt) - reads[0] >= 90);
+    assert.equal(reads.length, 1);
+    await new Promise((resolve) =>
+      setTimeout(
+        resolve,
+        Math.max(Date.parse(faultOf(held).retryAt) - Date.now(), 0) + 5,
+      ),
+    );
     await github.objective(1);
     assert.equal(reads.length, 2);
     assert.ok(reads[1] - reads[0] >= 90);
@@ -328,39 +342,42 @@ test("deadline elapsed during a hung planning call preserves unknown disposition
   );
 });
 
-test("exact-ID API outage keeps the owner responsive and resumes without new planning", async () => {
+test("exact-ID API outage repeats the observation with backoff and resumes without new planning", async () => {
   await fixture(
     "outage",
     async ({ application, config, github, planningPath }) => {
-      const original = github.objective.bind(github);
-      let reads = 0;
-      let offline = true;
-      github.objective = async (...args) => {
-        reads++;
-        if (reads > 1 && offline) throw new Error("API unavailable");
-        return original(...args);
-      };
-      const run = application.runObjective(1);
-      await until(
-        () =>
-          readContinuation(config.repository, 1)?.coordinator.observationError,
-      );
-      const before = readEvents(planningPath).length;
-      const status = await requestControl(config.repository, {
-        objective: 1,
-        action: "status",
-      });
-      assert.equal(status.result.mode, "paused");
-      assert.match(status.result.waitReason, /GitHub API unavailable/);
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      assert.equal(readEvents(planningPath).length, before);
-      assert.equal(reads, 2, "no blind API polling");
-      offline = false;
-      await requestControl(config.repository, {
-        objective: 1,
-        action: "resume",
-      });
-      assert.equal((await run).finalValidation.passed, true);
+      {
+        const original = github.objective.bind(github);
+        let reads = 0;
+        let offline = true;
+        github.objective = async (...args) => {
+          reads++;
+          if (reads > 1 && offline)
+            throw attachFault(
+              new Error("API unavailable"),
+              transient("API unavailable", false),
+            );
+          return original(...args);
+        };
+        const run = application.runObjective(1);
+        await until(
+          () =>
+            readContinuation(config.repository, 1)?.repeats?.[
+              "objective/observe"
+            ]?.faults?.count >= 2,
+        );
+        const before = readEvents(planningPath).length;
+        const status = await requestControl(config.repository, {
+          objective: 1,
+          action: "status",
+        });
+        assert.equal(status.result.mode, "running");
+        assert.equal(readEvents(planningPath).length, before);
+        offline = false;
+        const result = await run;
+        assert.equal(result.finalValidation.passed, true);
+        assert.equal(result.repeats, undefined);
+      }
       assert.equal(
         readEvents(planningPath).filter(
           (event) => event.type !== "result-review",
@@ -385,10 +402,9 @@ test("confirmed closure or body change prevents dispatch rather than masqueradin
             ? { ...value, state: "closed" }
             : { ...value, body: `${value.body}changed` };
         };
-        await assert.rejects(
-          application.runObjective(1),
-          /confirmed closed|body changed/,
-        );
+        const result = await application.runObjective(1);
+        assert.equal(result.wait.kind, "decision");
+        assert.match(result.wait.detail, /was closed|body changed/);
         assert.equal(
           readEvents(eventsPath).filter((event) => event.type === "start")
             .length,
@@ -398,6 +414,125 @@ test("confirmed closure or body change prevents dispatch rather than masqueradin
     );
 });
 
+/** A reviewer that passes every criterion, after `before` saw the request. */
+const passingReviewer = (before) => async (request) => {
+  await before?.(request);
+  return {
+    packetId: request.reviewPacket.id,
+    findings: resultFindings(
+      request,
+      request.criteria.map((criterion) => ({
+        criterion,
+        verdict: "pass",
+        source: "OBJECTIVE",
+        quote: "## Acceptance",
+        detail: "Exact-tree command passed",
+        question: "",
+      })),
+    ),
+  };
+};
+
+test("a body change first seen at resume is a decision, as during the run (#648)", async () => {
+  let asks = 0;
+  await fixture(
+    "changed-at-resume",
+    async ({ application, config, github }) => {
+      // The first run stops on the item's question; nothing has failed.
+      const first = await application.runObjective(1);
+      assert.equal(first.work.result.wait.kind, "decision");
+      assert.equal(first.error, undefined);
+      const original = github.objective.bind(github);
+      let changed = true;
+      github.objective = async (...args) => {
+        const value = await original(...args);
+        return changed ? { ...value, body: `${value.body}changed` } : value;
+      };
+      // The resume sees the change first: the operator decides, the run
+      // has not failed.
+      const resumed = await application.runObjective(1);
+      assert.equal(resumed.wait.kind, "decision");
+      assert.match(resumed.wait.detail, /body changed outside Factory/);
+      const saved = readState(config.repository, 1);
+      assert.equal(saved.error, undefined);
+      assert.equal(saved.wait.kind, "decision");
+      // Asked again until the body is restored; still not a failure.
+      const again = await application.runObjective(1);
+      assert.equal(again.wait.kind, "decision");
+      assert.equal(readState(config.repository, 1).error, undefined);
+      // Restored and answered: the Objective completes.
+      changed = false;
+      assert.equal(application.retryWorkItem(1), "step");
+      assert.equal(application.retryWorkItem(1, "result"), "step");
+      const done = await application.runObjective(1);
+      assert.ok(done.finalValidation.passed);
+    },
+    undefined,
+    (descriptor) => {
+      descriptor.resultReviewer = passingReviewer(() => {
+        if (++asks === 1)
+          throw attachFault(
+            new Error("reviewer asks"),
+            decision("Is the result right?"),
+          );
+      });
+    },
+  );
+});
+
+test("a live retry of an item waiting in place resumes it in the running pass (#643)", async () => {
+  let asks = 0;
+  await fixture(
+    "live-retry",
+    async ({ application, config, root }) => {
+      const run = application.runObjective(1);
+      // The result item waits in place for its question while second runs.
+      await until(
+        () =>
+          readContinuation(config.repository, 1)?.work?.result?.wait?.kind ===
+          "decision",
+      );
+      const retried = await requestControl(config.repository, {
+        objective: 1,
+        action: "retry",
+        input: { item: "result" },
+      });
+      assert.equal(retried.handled, true);
+      assert.equal(retried.result, "step");
+      // The live owner resumes the item at once, before second finishes.
+      await until(() => asks >= 2);
+      writeFileSync(join(root, "barrier", "second"), "go\n");
+      const result = await run;
+      assert.ok(result.finalValidation.passed);
+      assert.equal(result.error, undefined);
+    },
+    undefined,
+    (descriptor) => {
+      const second = structuredClone(descriptor.graph.items[0]);
+      second.id = "second";
+      second.title = "Second";
+      second.ownedPaths = ["second.txt"];
+      second.acceptance = ["second.txt exists"];
+      second.validation[0].command = "test -s second.txt";
+      descriptor.graph.items.push(second);
+      descriptor.objectiveBody +=
+        "\n## Other validation\n- `test -s second.txt`\n";
+      descriptor.actions.second = {
+        files: [{ path: "second.txt", text: "second\n" }],
+        barrier: join(descriptor.fakeRoot, "..", "barrier", "second"),
+      };
+      descriptor.resultReviewer = passingReviewer((request) => {
+        if (!request.criteria.includes("result.txt exists")) return;
+        if (++asks === 1)
+          throw attachFault(
+            new Error("reviewer asks"),
+            decision("Is the result right?"),
+          );
+      });
+    },
+  );
+});
+
 test("cancellation while GitHub is unavailable stops locally with no dispatch", async () => {
   await fixture(
     "cancel-outage",
@@ -405,12 +540,18 @@ test("cancellation while GitHub is unavailable stops locally with no dispatch", 
       const original = github.objective.bind(github);
       let reads = 0;
       github.objective = (...args) =>
-        ++reads > 1 ? Promise.reject(new Error("offline")) : original(...args);
+        ++reads > 1
+          ? Promise.reject(
+              attachFault(new Error("offline"), transient("offline", false)),
+            )
+          : original(...args);
       const run = application.runObjective(1);
       const rejected = assert.rejects(run, /cancel/);
       await until(
         () =>
-          readContinuation(config.repository, 1)?.coordinator.observationError,
+          readContinuation(config.repository, 1)?.repeats?.[
+            "objective/observe"
+          ],
       );
       await requestControl(config.repository, {
         objective: 1,
@@ -739,7 +880,7 @@ test("first deadline added to existing preparation persists before a wait and ca
   });
 });
 
-test("one resume wakes both concurrent GitHub outage waiters without replaying workers", async () => {
+test("concurrent deliveries share one repeated observation through a GitHub outage without replaying workers", async () => {
   await fixture(
     "concurrent-outage",
     async ({ application, config, github, eventsPath }) => {
@@ -748,16 +889,17 @@ test("one resume wakes both concurrent GitHub outage waiters without replaying w
       let offline = true;
       github.objective = async (...args) => {
         reads++;
-        if (reads >= 3 && offline) throw new Error("shared outage");
+        if (reads >= 3 && offline)
+          throw attachFault(
+            new Error("shared outage"),
+            transient("shared outage", false),
+          );
         return original(...args);
       };
+      // Both items' deliveries share one repeated observation.
       const run = application.runObjective(1);
       await until(() => reads >= 4);
       offline = false;
-      await requestControl(config.repository, {
-        objective: 1,
-        action: "resume",
-      });
       const result = await run;
       assert.ok(result.finalValidation.passed);
       assert.equal(
@@ -937,24 +1079,32 @@ test("handoff settles an already running worker and preserves its attempt instea
         running,
         (error) => error.constructor.name === "CoordinatorHandoff",
       );
+      // A handoff stops at the next safe point after the worker settled
+      // (contract 3): delivery stops at its CI wait, not done.
       const state = readState(config.repository, 1);
       assert.equal(state.work.result.attemptId, attempt);
       assert.equal(state.cancelledAt, undefined);
       assert.equal(state.cancelRequested, undefined);
-      assert.equal(state.work.result.status, "done");
-      assert.equal(
-        readEvents(eventsPath).filter((event) => event.type === "start").length,
-        1,
-      );
-      assert.equal(
+      assert.equal(state.work.result.status, "published");
+      assert.equal(state.work.result.wait?.kind, "ci");
+      const starts = () =>
+        readEvents(eventsPath).filter((event) => event.type === "start").length;
+      const cancels = () =>
         readEvents(eventsPath).filter((event) => event.type === "cancel")
-          .length,
-        0,
-      );
+          .length;
+      assert.equal(starts(), 1);
+      assert.equal(cancels(), 0);
       assert.equal(
         existsSync(join(stateRoot(config.repository), "controller.lock")),
         false,
       );
+      await controlObjective(config, { objective: 1, action: "resume" });
+      const completed = await application.runObjective(1);
+      assert.equal(completed.finalValidation.passed, true);
+      assert.equal(completed.work.result.status, "done");
+      assert.equal(completed.work.result.attemptId, attempt);
+      assert.equal(starts(), 1);
+      assert.equal(cancels(), 0);
     },
   );
 });
@@ -1085,6 +1235,79 @@ test("native handoff retains a known published layer and resumes its pending suc
         "\n## Successor validation\n- `test -s next.txt`\n";
       descriptor.actions.next = {
         files: [{ path: "next.txt", text: "next\n" }],
+      };
+    },
+  );
+});
+
+test("an item's defect stops only that item; a healthy sibling worker runs on uncancelled and uncharged", async () => {
+  await fixture(
+    "sibling-defect",
+    async ({ application, config, driver, eventsPath, root }) => {
+      const barrier = join(root, "barrier", "go");
+      const started = (item) =>
+        readEvents(eventsPath).some(
+          (event) => event.type === "start" && event.item === item,
+        );
+      const collect = driver.collect.bind(driver);
+      driver.collect = async (handle, context) => {
+        const owner = Object.entries(
+          readState(config.repository, 1)?.work ?? {},
+        ).find(([, work]) => work.execution?.identity === handle.identity);
+        if (owner?.[0] === "result") {
+          await until(() => started("other"));
+          // An unclassified error: a defect of this item only.
+          throw new Error("Selected AssetSet or captured change is missing");
+        }
+        return collect(handle, context);
+      };
+      const running = application.runObjective(1).catch((error) => error);
+      // The sibling finishes only after the defective item stopped.
+      await until(
+        () => readState(config.repository, 1)?.work.result.status === "failed",
+      );
+      mkdirSync(join(root, "barrier"), { recursive: true });
+      writeFileSync(barrier, "go");
+      await running;
+      const state = readState(config.repository, 1);
+      assert.equal(state.work.result.status, "failed");
+      assert.equal(state.work.result.recovery.failure.classification, "defect");
+      // The sibling was not cancelled, failed, charged or diagnosed.
+      assert.equal(
+        readEvents(eventsPath).some(
+          (event) => event.type === "cancel" && event.item === "other",
+        ),
+        false,
+      );
+      assert.notEqual(state.work.other.status, "failed");
+      assert.equal(state.work.other.recovery, undefined);
+      assert.equal(state.charges, undefined);
+      assert.equal(state.coordinator.cancelError, undefined);
+    },
+    undefined,
+    (descriptor) => {
+      const [first] = descriptor.graph.items;
+      descriptor.graph.items.push({
+        ...first,
+        id: "other",
+        title: "Other",
+        goal: "Write other.txt",
+        brief: "Write other.txt",
+        acceptance: ["other.txt exists"],
+        ownedPaths: ["other.txt"],
+        validation: [
+          {
+            command: "test -s other.txt",
+            provenance: "source-declared",
+            source: "OBJECTIVE",
+          },
+        ],
+      });
+      descriptor.objectiveBody =
+        "## Acceptance\n- `test -s result.txt`\n- `test -s other.txt`\n\n## Final validation\n- `test -s result.txt`\n";
+      descriptor.actions.other = {
+        barrier: join(descriptor.fakeRoot, "..", "barrier", "go"),
+        files: [{ path: "other.txt", text: "done\n" }],
       };
     },
   );

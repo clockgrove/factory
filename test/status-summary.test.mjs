@@ -14,7 +14,6 @@ const item = (id, overrides = {}) => ({
   step: null,
   requestedPhase: null,
   blockedReason: null,
-  waitingReason: null,
   pullRequest: null,
   acceptancePending: null,
   candidateAssetSets: [],
@@ -34,7 +33,6 @@ const execution = (work, overrides = {}) => ({
   finalAcceptancePending: null,
   objectiveClosure: null,
   lastError: null,
-  githubClosureError: null,
   work,
   ...overrides,
 });
@@ -155,8 +153,11 @@ test("waiting says on what: CI check, capacity, dependency", () => {
         status: "running",
         step: "deliver",
         pullRequest: 12,
-        waitingReason:
-          "Awaiting exact published head checks or target protection readiness",
+        wait: {
+          kind: "ci",
+          detail:
+            "Awaiting exact published head checks or target protection readiness",
+        },
       }),
       item("B", { blockedReason: "dependency:A" }),
     ]),
@@ -272,10 +273,27 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
       state: "failed",
     }),
   );
+  // A published item keeps its PR: retry resumes its delivery.
   assert.equal(
     published.nextAction.command,
-    "factory logs --objective 7 --item A",
+    "factory retry --objective 7 --item A",
   );
+  assert.match(published.nextAction.reason, /^Resumes delivery of PR #9\b/);
+  // A published wrong result (a failed check, a conflict) gets a new attempt.
+  const wrong = summarizeStatus(
+    execution([item("A", { status: "failed", pullRequest: 9 })], {
+      state: "failed",
+      repairs: {
+        A: {
+          phase: null,
+          failureClass: "implementation",
+          failureEvent: "A:await-ci:0",
+          nextDecision: null,
+        },
+      },
+    }),
+  );
+  assert.match(wrong.nextAction.reason, /^Starts a new attempt\b/);
   const authentication = summarizeStatus(
     execution([
       item("A", {
@@ -297,9 +315,10 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
     }),
   );
   assert.equal(objectiveFailure.summary, "final validation failed");
+  // A stop outside any Work Item names the command that runs it again.
   assert.equal(
     objectiveFailure.nextAction.command,
-    "factory diagnostics --objective 7",
+    "factory retry --objective 7",
   );
   // A failed item waits for running work to settle before retry is offered.
   const settling = summarizeStatus(
@@ -345,16 +364,10 @@ test("terminal, paused, cancellation and finalization states", () => {
     "1/1 done; final validation and review",
   );
   const closing = summarizeStatus(
-    execution([item("A", { status: "done" })], {
-      finalValidation: true,
-      githubClosureError: "rate limited",
-    }),
+    execution([item("A", { status: "done" })], { finalValidation: true }),
   );
-  assert.equal(closing.phase, "waiting");
-  assert.equal(
-    closing.summary,
-    "on external prerequisite: GitHub closure: rate limited",
-  );
+  assert.equal(closing.phase, "running");
+  assert.equal(closing.summary, "1/1 done; closing the Objective on GitHub");
 });
 
 test("text leads with the phase line, the next command, then the item table", () => {

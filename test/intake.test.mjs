@@ -1,4 +1,5 @@
 import { consumption } from "../dist/repair-policy.js";
+import { attachFault, faultOf, transient } from "../dist/fault.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -761,12 +762,19 @@ test("native successor amendments refuse missing, unaccepted, changed and remove
           save() {},
           cancelled: () => false,
         }),
-        /accepted|acceptance|sealed|evidence|prerequisite/,
+        // The predecessor's evidence changed or is missing: the operator
+        // decides or fixes it, and the amendment waits (contract 2).
+        (error) => ["decision", "config"].includes(faultOf(error).kind),
       );
       assert.equal(calls, 0, fault);
-      assert.equal(state.pendingAmendment.phase, "rejected");
+      assert.equal(state.pendingAmendment.phase, "ready", fault);
       assert.deepEqual(state.graph, second.graph);
-      assert.equal(consumption(state).planningRevisions, 1);
+      // No charge: the predecessor decision comes before the amend charge.
+      assert.equal(
+        consumption(state).planningRevisions,
+        consumption(second).planningRevisions,
+        fault,
+      );
       saveState(statePath(f.config.repository, 1), first);
       f.issues.get(1).body = body(1);
       f.dependencies.set(2, [1]);
@@ -1080,6 +1088,60 @@ test("closed selection stays ineligible until explicit dequeue without model cal
     );
     await intakeControl(f.config, "dequeue", 1);
     await running;
+    assert.equal(f.plans.length, 0);
+  }));
+
+/** A rate-limit hold the GitHub client raises without sending (#641). */
+const rateHeld = (milliseconds) => {
+  const until = new Date(Date.now() + milliseconds).toISOString();
+  return attachFault(
+    new Error(`GitHub request held by the rate limit until ${until}`),
+    transient(`GitHub rate limit until ${until}`, false, until),
+  );
+};
+
+test("a rate-limited read before compilation waits for GitHub instead of pausing intake (#641)", async () =>
+  fixture(async (f) => {
+    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
+    const read = f.github.objective;
+    const reads = [];
+    let held;
+    f.github.objective = async (id) => {
+      reads.push(Date.now());
+      // The second read is the check before compilation.
+      if (reads.length === 2) throw (held = rateHeld(500));
+      return read(id);
+    };
+    const running = f.application.runIntake();
+    await waitFor(() =>
+      readIntake(f.config).observation?.error?.includes("rate limit until"),
+    );
+    assert.equal(readIntake(f.config).mode, "running");
+    const record = await running;
+    assert.equal(record.mode, "running");
+    assert.equal(objectiveComplete(readState(f.config.repository, 1)), true);
+    assert.equal(f.plans.length, 1);
+    // The next observation waited for the hold, not the 10ms poll.
+    assert.ok(reads[2] >= Date.parse(faultOf(held).retryAt));
+  }));
+
+test("drain ends an intake wait on a GitHub rate limit at once (#641)", async () =>
+  fixture(async (f) => {
+    await f.application.enqueueIntake([1], { pollSeconds: 0.01 });
+    f.github.objective = async () => {
+      throw rateHeld(3_600_000);
+    };
+    const running = f.application.runIntake();
+    await waitFor(() =>
+      readIntake(f.config).observation?.reasons[1]?.includes(
+        "rate limit until",
+      ),
+    );
+    const started = Date.now();
+    await intakeControl(f.config, "drain");
+    const record = await running;
+    assert.ok(Date.now() - started < 5000);
+    assert.equal(record.mode, "draining");
     assert.equal(f.plans.length, 0);
   }));
 

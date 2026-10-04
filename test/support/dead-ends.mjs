@@ -51,7 +51,7 @@ const fastTimers = join(import.meta.dirname, "fast-timers.mjs");
 const repositoryRoot = join(import.meta.dirname, "..", "..");
 const dist = (path) => join(repositoryRoot, "dist", path);
 const errors = await import(dist("work-repair.js"));
-const { Interruption } = await import(dist("contracts.js"));
+const { attachFault } = await import(dist("fault.js"));
 const { parseFactoryState } = await import(dist("state.js"));
 const { readContinuation } = await import(dist("state-store.js"));
 
@@ -110,7 +110,6 @@ export function shapeKey(state) {
     state.finalAcceptancePending && "pending final criterion",
     state.finalValidation && "final validation",
     state.objectiveClosure && `Objective closure ${state.objectiveClosure}`,
-    state.githubClosureError && "closure error",
     state.cancelRequested && "cancel requested",
     state.cancelledAt && "cancelled",
     Object.keys(state.stackMerges ?? {}).length && "stack merge pending",
@@ -497,9 +496,6 @@ const OVERLAYS = {
     "a step fails with an unclassified error": failStep(
       () => new Error("Injected step failure"),
     ),
-    "a step exhausts its interruptions": failStep(
-      () => new Interruption(new Error("socket hang up")),
-    ),
     // Validation and settled-worker failures come only from their own step;
     // a worker settles only through a recorded handle.
     "validation fails": failStep(
@@ -512,12 +508,13 @@ const OVERLAYS = {
         new errors.CandidateEnvironmentFailure("Injected environment failure"),
       ["validate"],
     ),
+    // The driver collected a settled worker with no result: a `work` fault.
     "the worker settles without a result": failStep(
       () =>
-        new errors.SettledAttemptFailure(
-          new Error("Injected settled failure"),
-          "implementation",
-        ),
+        attachFault(new Error("Injected settled failure"), {
+          kind: "work",
+          evidence: { detail: "Injected settled failure" },
+        }),
       ["execute"],
       true,
     ),
@@ -553,27 +550,6 @@ const OVERLAYS = {
       coordinator(state).mode = "draining";
       return true;
     },
-    "GitHub observation failed": (state) => {
-      Object.assign(coordinator(state), {
-        mode: "paused",
-        observationError: "Exact Objective observation unavailable",
-        waitReason:
-          "GitHub API unavailable; resume to observe again or cancel locally",
-      });
-      return true;
-    },
-    // Closure of the focus item or the Objective was under way.
-    "GitHub closure failed": (state) => {
-      if (
-        state.schemaVersion !== 7 ||
-        state.githubClosureError ||
-        (state.work[focus(state)].githubClosure !== "pending" &&
-          state.objectiveClosure !== "pending")
-      )
-        return false;
-      state.githubClosureError = "Injected GitHub closure failure";
-      return true;
-    },
   },
   "phase reservation": {
     "coding phase reserved": reserve("coding"),
@@ -582,15 +558,6 @@ const OVERLAYS = {
     "delivery phase reserved": reserve("delivery"),
   },
   record: {
-    "interruptions exhausted": (state) => {
-      if (state.schemaVersion !== 7) return false;
-      const work = state.work[focus(state)];
-      if (!["running", "published"].includes(work.status) || work.interruptions)
-        return false;
-      work.interruptions = 2;
-      work.waitingReason = "Interrupted (2/2), repeating: socket hang up";
-      return true;
-    },
     "a recorded subprocess has exited": (state) => {
       // Above the kernel's largest pid_max (2^22), so it never exists.
       coordinator(state).processes = [{ pid: EXITED_PID, startTime: "0" }];
@@ -606,26 +573,28 @@ const OVERLAYS = {
     "a repeat record is pending": (state) => {
       const id = state.schemaVersion === 7 ? focus(state) : undefined;
       const work = id && state.work[id];
-      const key =
-        work?.attempt && work.step
-          ? `${id}/${work.attempt}/${work.step}`
-          : "objective/run";
+      const key = work?.step ? `item/${id}/${work.step}` : "objective/plan";
+      const now = new Date();
       state.repeats = {
         [key]: {
-          since: new Date().toISOString(),
-          count: 1,
-          last: {
-            kind: "transient",
-            detail: "socket hang up",
-            outcomeUnknown: true,
+          nextAt: new Date(now.getTime() + 60_000).toISOString(),
+          scheduledAt: now.toISOString(),
+          faults: {
+            since: now.toISOString(),
+            count: 1,
+            last: {
+              kind: "transient",
+              detail: "socket hang up",
+              outcomeUnknown: true,
+            },
+            activeMs: 1_000,
           },
-          nextAt: new Date(Date.now() + 60_000).toISOString(),
         },
       };
       return true;
     },
     "a wait is recorded": (state) => {
-      state.wait = { kind: "outage", detail: "GitHub unavailable" };
+      state.wait = { kind: "dependency", detail: "predecessor Objective open" };
       if (state.schemaVersion === 7)
         state.work[focus(state)].wait = {
           kind: "ci",
@@ -705,7 +674,6 @@ function dimensionsOf(state) {
         : "exited",
   };
   const single = {
-    "observation error": Boolean(coordinator.observationError),
     "repeat or wait record": Boolean(state.repeats || state.wait),
   };
   if (state.schemaVersion === 8)
@@ -731,7 +699,6 @@ function dimensionsOf(state) {
         : "none",
       "pending criterion": Boolean(work.acceptancePending),
       "phase reservation": work.phaseReservation ?? "none",
-      "interruptions exhausted": (work.interruptions ?? 0) >= 2,
       "Objective error": Boolean(state.error),
       "final stage": state.objectiveClosure
         ? `closure ${state.objectiveClosure}`
@@ -740,7 +707,6 @@ function dimensionsOf(state) {
           : state.finalAcceptancePending
             ? "pending criterion"
             : "none",
-      "closure error": Boolean(state.githubClosureError),
     },
     single,
   };

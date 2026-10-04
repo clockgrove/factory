@@ -24,6 +24,7 @@
     ],
     "reads": [
       "GET /repos/{owner}/{repo} #1",
+      "GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks #1",
       "GET /repos/{owner}/{repo}/commits/{sha}/check-runs #1",
       "GET /repos/{owner}/{repo}/commits/{sha}/status #1",
       "GET /repos/{owner}/{repo}/issues #1",
@@ -37,7 +38,9 @@
       "GET /repos/{owner}/{repo}/pulls #1",
       "GET /repos/{owner}/{repo}/pulls/{number} #1",
       "GET /repos/{owner}/{repo}/pulls/{number}/merge-async/{uuid} #1",
+      "GET /repos/{owner}/{repo}/rules/branches/{branch} #1",
       "GET /repos/{owner}/{repo}/stacks #1",
+      "GET /user #1",
       "GIT fetch-advertise #1",
       "GIT push-advertise #1",
       "POST /graphql #1"
@@ -52,7 +55,10 @@
       "model.reviewResult #1",
       "model.reviewResult #2",
       "model.reviewResult #3"
-    ]
+    ],
+    "cancel-running": ["driver.cancel #1"],
+    "cancel-starting": [],
+    "edit-running": []
   },
   "regular": {
     "mutations": [
@@ -79,6 +85,7 @@
     ],
     "reads": [
       "GET /repos/{owner}/{repo} #1",
+      "GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks #1",
       "GET /repos/{owner}/{repo}/commits/{sha}/check-runs #1",
       "GET /repos/{owner}/{repo}/commits/{sha}/status #1",
       "GET /repos/{owner}/{repo}/issues #1",
@@ -90,6 +97,8 @@
       "GET /repos/{owner}/{repo}/labels #1",
       "GET /repos/{owner}/{repo}/pulls #1",
       "GET /repos/{owner}/{repo}/pulls/{number} #1",
+      "GET /repos/{owner}/{repo}/rules/branches/{branch} #1",
+      "GET /user #1",
       "GIT fetch-advertise #1",
       "GIT push-advertise #1",
       "POST /graphql #1"
@@ -104,6 +113,9 @@
       "model.reviewResult #1",
       "model.reviewResult #2",
       "model.reviewResult #3"
-    ]
+    ],
+    "cancel-running": ["driver.cancel #1"],
+    "cancel-starting": [],
+    "edit-running": []
   }
 }

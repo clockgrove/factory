@@ -1,4 +1,17 @@
 import assert from "node:assert/strict";
+import { faultOf } from "../../dist/fault.js";
+
+/**
+ * An invalid review answer is a paid transient fault: the review step asks
+ * again with its validation error. For `assert.rejects`.
+ */
+export function invalidReviewAnswer(error) {
+  const fault = faultOf(error);
+  assert.equal(fault.kind, "transient", String(error?.message ?? error));
+  assert.equal(fault.outcomeUnknown, true);
+  assert.match(fault.detail, /Independent review answer was invalid/);
+  return true;
+}
 
 /** Bind a fixture's semantic result to the actual transient packet, not model text. */
 export function resultFindings(request, findings) {

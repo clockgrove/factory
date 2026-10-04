@@ -1,15 +1,10 @@
-import { AuthenticationRequiredError, Interruption } from "../contracts.js";
-import {
-  attachedFault,
-  type Fault,
-  requestFault,
-  transient,
-} from "../fault.js";
+import Anthropic from "@anthropic-ai/sdk";
+import { AuthenticationRequiredError } from "../contracts.js";
+import { type Fault, requestFault, StepFault, transient } from "../fault.js";
 import {
   ProviderTurnIncompleteError,
   ProviderTurnTimeoutError,
 } from "../provider-turn.js";
-import { SettledAttemptFailure } from "../work-repair.js";
 
 /** Methods whose effect may have happened when their response was lost. */
 const EFFECTS = new Set([
@@ -25,10 +20,15 @@ const EFFECTS = new Set([
 const CREDENTIAL_FIX =
   "Set the named credential in the controller environment, then `factory run`";
 
+/** A controller credential the driver needs is not set: `config`. */
+export function missingCredential(detail: string): StepFault {
+  return new StepFault({ kind: "config", detail, fix: CREDENTIAL_FIX });
+}
+
 /**
  * Classify an error leaving an execution driver or sandbox provider method.
- * A settled worker (SettledAttemptFailure) carries its own classification;
- * a lost response to an effect may have spent a paid run.
+ * A StepFault the driver built carries its own classification; a lost
+ * response to an effect may have spent a paid run.
  */
 export function executionFault(
   error: unknown,
@@ -41,25 +41,25 @@ export function executionFault(
       detail,
       fix: `Run \`${error.authentication.command}\` in the developer environment, then \`factory run\``,
     };
-  if (error instanceof SettledAttemptFailure) return attachedFault(error);
   if (
     error instanceof ProviderTurnTimeoutError ||
     error instanceof ProviderTurnIncompleteError
   )
     return transient(detail, true);
-  const outcomeUnknown = EFFECTS.has(method);
-  if (error instanceof Interruption)
-    return (
-      attachedFault(error.cause) ??
-      requestFault(error.cause, { outcomeUnknown, fix: CREDENTIAL_FIX }) ??
-      transient(detail, outcomeUnknown)
-    );
-  if (
-    /requires controller credential|^Set [A-Z_][A-Z0-9_]* outside the target repository|controller API key is unavailable/.test(
-      detail,
-    )
-  )
-    return { kind: "config", detail, fix: CREDENTIAL_FIX };
+  return providerRequestFault(error, EFFECTS.has(method));
+}
+
+/**
+ * A failed provider request: the shared HTTP and network rules, plus the
+ * Anthropic SDK's connection errors (including its timeout subclass), which
+ * carry no status and no network code.
+ */
+export function providerRequestFault(
+  error: unknown,
+  outcomeUnknown: boolean,
+): Fault | undefined {
+  if (error instanceof Anthropic.APIConnectionError)
+    return transient(error.message, outcomeUnknown);
   return requestFault(error, { outcomeUnknown, fix: CREDENTIAL_FIX });
 }
 

@@ -23,11 +23,7 @@ import { Octokit } from "@octokit/core";
 import { Codex } from "@openai/codex-sdk";
 import { ClaudePlanningModel } from "../dist/claude-planning.js";
 import { CodexPlanningModel, modelFault } from "../dist/compiler.js";
-import {
-  AuthenticationRequiredError,
-  CompletedModelInvocationError,
-  Interruption,
-} from "../dist/contracts.js";
+import { AuthenticationRequiredError } from "../dist/contracts.js";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { verifyHydratedAssets } from "../dist/media.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
@@ -46,26 +42,15 @@ import {
 import { projectedIssueBody, RealGitHubGateway } from "../dist/github.js";
 import {
   GitHubClient,
-  GitHubOutcomeUnknown,
   GitHubRequestError,
   gitHubFault,
 } from "../dist/github-client.js";
-import {
-  git,
-  gitAsync,
-  gitFault,
-  withProcessCancellation,
-} from "../dist/process.js";
+import { git, gitAsync, gitFault } from "../dist/process.js";
 import {
   ProviderTurnIncompleteError,
   ProviderTurnTimeoutError,
 } from "../dist/provider-turn.js";
-import {
-  AcceptanceDecisionRequired,
-  reviewAcceptance,
-  validateTree,
-} from "../dist/validation.js";
-import { SettledAttemptFailure } from "../dist/work-repair.js";
+import { reviewAcceptance, validateTree } from "../dist/validation.js";
 import {
   createTarget,
   git as fixtureGit,
@@ -108,7 +93,8 @@ test("faults attach once, invisibly, and default to defect", () => {
   assert.deepEqual(faultOf(error), fault);
   assert.deepEqual(Object.keys(error), []);
   assert.equal(JSON.stringify(error), "{}");
-  assert.deepEqual(faultOf(new Interruption(error)), fault);
+  // A wrapper that carries the classified error as its cause keeps its fault.
+  assert.deepEqual(faultOf(new Error("wrapped", { cause: error })), fault);
   assert.deepEqual(faultOf(new Error("plain")), {
     kind: "defect",
     detail: "plain",
@@ -173,8 +159,23 @@ const repo = "GET /repos/a/b";
 const lost = () => {
   throw new TypeError("fetch failed");
 };
+/** A PR create, after the lookup by head found none. */
+const publication = {
+  branch: "factory/one",
+  base: "main",
+  headSha,
+  title: "t",
+  body: "b",
+};
+const noPulls = { "GET /repos/a/b/pulls": () => json([]) };
 const readyPull = {
   "GET /repos/a/b/pulls/5": () => json(pull()),
+  [repo]: () => json({ default_branch: "main", allow_merge_commit: true }),
+  // Read before every merge: no ruleset forbids merge commits.
+  "GET /repos/a/b/rules/branches/main": () => json([]),
+  // Read when GitHub says the PR is ready: no classic protection.
+  "GET /repos/a/b/branches/main/protection/required_status_checks": () =>
+    json({ message: "Not Found" }, 404),
 };
 
 const gitHubCases = [
@@ -239,9 +240,11 @@ const gitHubCases = [
   ],
   [
     "5xx on a create",
-    (g) =>
-      g.publish({ branch: "factory/one", base: "main", title: "t", body: "b" }),
-    { "POST /repos/a/b/pulls": () => json({ message: "Server Error" }, 502) },
+    (g) => g.publish(publication),
+    {
+      ...noPulls,
+      "POST /repos/a/b/pulls": () => json({ message: "Server Error" }, 502),
+    },
     { kind: "transient", outcomeUnknown: true },
   ],
   [
@@ -252,9 +255,8 @@ const gitHubCases = [
   ],
   [
     "network failure on a create",
-    (g) =>
-      g.publish({ branch: "factory/one", base: "main", title: "t", body: "b" }),
-    { "POST /repos/a/b/pulls": lost },
+    (g) => g.publish(publication),
+    { ...noPulls, "POST /repos/a/b/pulls": lost },
     { kind: "transient", outcomeUnknown: true },
   ],
   [
@@ -293,7 +295,12 @@ const gitHubCases = [
       "GET /repos/a/b/labels": () =>
         json([{ name: "factory:objective" }, { name: "factory:work-item" }]),
       "GET /repos/a/b/issues/7": () => json(objectiveIssue),
+      "GET /user": () => json({ login: "factory" }),
       "GET /repos/a/b/issues": () => json([]),
+      // Projection reads past the newest listed issue before creating one.
+      "GET /repos/a/b/issues/1": () => json({ message: "Not Found" }, 404),
+      "GET /repos/a/b/issues/2": () => json({ message: "Not Found" }, 404),
+      "GET /repos/a/b/issues/3": () => json({ message: "Not Found" }, 404),
       "POST /repos/a/b/issues": () =>
         json(
           {
@@ -348,9 +355,9 @@ const gitHubCases = [
   ],
   [
     "422 PR already exists",
-    (g) =>
-      g.publish({ branch: "factory/one", base: "main", title: "t", body: "b" }),
+    (g) => g.publish(publication),
     {
+      ...noPulls,
       "POST /repos/a/b/pulls": () =>
         json(
           {
@@ -395,7 +402,12 @@ const gitHubCases = [
       "GET /repos/a/b/labels": () =>
         json([{ name: "factory:objective" }, { name: "factory:work-item" }]),
       "GET /repos/a/b/issues/7": () => json(objectiveIssue),
+      "GET /user": () => json({ login: "factory" }),
       "GET /repos/a/b/issues": () => json([]),
+      // Projection reads past the newest listed issue before creating one.
+      "GET /repos/a/b/issues/1": () => json({ message: "Not Found" }, 404),
+      "GET /repos/a/b/issues/2": () => json({ message: "Not Found" }, 404),
+      "GET /repos/a/b/issues/3": () => json({ message: "Not Found" }, 404),
       "POST /repos/a/b/issues": () =>
         json(
           {
@@ -437,6 +449,21 @@ const gitHubCases = [
     { kind: "config", fix: /merge commits/ },
   ],
   [
+    "a repository that allows no merge method",
+    (g) => g.merge(identity, headSha),
+    {
+      ...readyPull,
+      [repo]: () =>
+        json({
+          default_branch: "main",
+          allow_merge_commit: false,
+          allow_squash_merge: false,
+          allow_rebase_merge: false,
+        }),
+    },
+    { kind: "config", fix: /merge/ },
+  ],
+  [
     "405 not mergeable",
     (g) => g.merge(identity, headSha),
     {
@@ -444,7 +471,8 @@ const gitHubCases = [
       "PUT /repos/a/b/pulls/5/merge": () =>
         json({ message: "Pull Request is not mergeable" }, 405),
     },
-    { kind: "decision" },
+    // Observed again (readiness first) within GitHub's lag window.
+    { kind: "transient", outcomeUnknown: false },
   ],
   [
     "405 repository rule",
@@ -460,7 +488,7 @@ const gitHubCases = [
           405,
         ),
     },
-    { kind: "decision" },
+    { kind: "transient", outcomeUnknown: false },
   ],
   [
     "409 head mismatch on Factory's head",
@@ -487,6 +515,46 @@ const gitHubCases = [
         json({ message: "Head branch was modified." }, 409),
     },
     { kind: "decision" },
+  ],
+  [
+    // Real GitHub (#627): PUT merge on a stacked PR is 403, not a permission
+    // fault. The PR is open in a stack Factory did not record.
+    "403 merging a PR in an unrecorded native stack",
+    (g) => g.merge(identity, headSha),
+    {
+      ...readyPull,
+      "PUT /repos/a/b/pulls/5/merge": () =>
+        json(
+          {
+            message: "Merging stacked PRs via this endpoint is not supported",
+          },
+          403,
+        ),
+      "GET /repos/a/b/stacks": () => json([{ id: 1, number: 1 }]),
+    },
+    { kind: "decision" },
+  ],
+  [
+    "403 merging a PR in no stack",
+    (g) => g.merge(identity, headSha),
+    {
+      ...readyPull,
+      "PUT /repos/a/b/pulls/5/merge": () =>
+        json({ message: "Resource not accessible by integration" }, 403),
+      "GET /repos/a/b/stacks": () => json([]),
+    },
+    { kind: "config", fix: /write access/ },
+  ],
+  [
+    // Real GitHub (#627): a stale expected head is 400; observe it again.
+    "400 merging at a stale head",
+    (g) => g.merge(identity, headSha),
+    {
+      ...readyPull,
+      "PUT /repos/a/b/pulls/5/merge": () =>
+        json({ message: "Head sha does not match", status: "failed" }, 400),
+    },
+    { kind: "transient", outcomeUnknown: false },
   ],
   [
     "merge accepted but not yet readable",
@@ -608,11 +676,11 @@ for (const [name, call, routes, expected] of gitHubCases)
     assertFault(faultOf(error), expected, name);
   });
 
-test("a lost mutation is still GitHubOutcomeUnknown, now carrying its fault", async () => {
-  const error = await gateway({ "POST /repos/a/b/pulls": lost })
-    .publish({ branch: "factory/one", base: "main", title: "t", body: "b" })
+test("a lost mutation is a transient fault with an unknown outcome", async () => {
+  const error = await gateway({ ...noPulls, "POST /repos/a/b/pulls": lost })
+    .publish(publication)
     .catch((caught) => caught);
-  assert.ok(error instanceof GitHubOutcomeUnknown);
+  assert.equal(faultOf(error).kind, "transient");
   assert.equal(faultOf(error).outcomeUnknown, true);
 });
 
@@ -638,26 +706,36 @@ test("a rate limit without a reset header waits a minute instead of stopping eve
     { kind: "transient", outcomeUnknown: false, retryIn: [55_000, MINUTE] },
     "missing reset",
   );
-  // The gate is finite: the next request waits for it rather than failing
-  // with "rate reset unavailable" for the rest of the process.
-  const controller = new AbortController();
-  const queued = withProcessCancellation(controller.signal, () =>
-    client.request("GET", "repos/a/b/issues/2"),
-  ).then(
-    () => "sent",
-    (caught) => caught,
+  // The gate is finite: the next request is held, unsent, until the default
+  // minute passes rather than failing with "rate reset unavailable" for the
+  // rest of the process; the caller's step waits for its retryAt (#641).
+  const held = await client
+    .request("GET", "repos/a/b/issues/2")
+    .catch((caught) => caught);
+  assert.doesNotMatch(held.message, /rate reset unavailable/);
+  assertFault(
+    faultOf(held),
+    { kind: "transient", outcomeUnknown: false, retryIn: [55_000, MINUTE] },
+    "held by the gate",
   );
-  const early = await Promise.race([
-    queued,
-    new Promise((resolve) => setTimeout(() => resolve("waiting"), 50)),
-  ]);
-  assert.equal(early, "waiting");
-  controller.abort();
-  const settled = await queued;
-  assert.ok(settled instanceof Error);
-  assert.doesNotMatch(settled.message, /rate reset unavailable/);
   assert.equal(calls, 1);
+  await afterGate(faultOf(held).retryAt, () =>
+    client.request("GET", "repos/a/b/issues/3").catch(() => undefined),
+  );
+  assert.equal(calls, 2);
 });
+
+/** Run `fn` with the clock just past `retryAt`, as if the gate had opened. */
+async function afterGate(retryAt, fn) {
+  const now = Date.now;
+  const skew = Date.parse(retryAt) + 1 - now();
+  Date.now = () => now() + skew;
+  try {
+    return await fn();
+  } finally {
+    Date.now = now;
+  }
+}
 
 test("projection treats a missing dependency as lag right after creating the issue", async () => {
   const error = await gateway({
@@ -754,21 +832,20 @@ test("a GraphQL rate limit gates the next request like REST headers do", async (
     }),
   );
   await assert.rejects(client.pullRequestReadiness("a/b", 5));
-  const controller = new AbortController();
-  const queued = withProcessCancellation(controller.signal, () =>
-    client.request("GET", "repos/a/b/issues/2"),
-  ).then(
-    () => "sent",
-    (caught) => caught,
+  // The next REST request is held, unsent, as a transient fault at the gate.
+  const held = await client
+    .request("GET", "repos/a/b/issues/2")
+    .catch((caught) => caught);
+  assertFault(
+    faultOf(held),
+    { kind: "transient", outcomeUnknown: false, retryIn: [55_000, MINUTE] },
+    "held by the GraphQL gate",
   );
-  const early = await Promise.race([
-    queued,
-    new Promise((resolve) => setTimeout(() => resolve("waiting"), 50)),
-  ]);
-  assert.equal(early, "waiting");
-  controller.abort();
-  await queued;
   assert.equal(calls, 1);
+  await afterGate(faultOf(held).retryAt, () =>
+    client.request("GET", "repos/a/b/issues/3").catch(() => undefined),
+  );
+  assert.equal(calls, 2);
 });
 
 test("a 404 on a Factory object is lag only within two minutes of its creation", () => {
@@ -845,6 +922,17 @@ const gitCases = [
     { kind: "defect" },
   ],
   [
+    ["push", "--force-with-lease=refs/heads/f:", "origin", "x:refs/heads/f"],
+    " ! [remote rejected] x -> f (reference already exists)",
+    // A create-only lease lost to the branch appearing: observed again at the push site.
+    { kind: "defect" },
+  ],
+  [
+    ["ls-remote", "origin", "refs/heads/f"],
+    "fatal: unable to access 'https://github.com/a/b.git/': Empty reply from server",
+    { kind: "transient", outcomeUnknown: false },
+  ],
+  [
     ["push", "origin", "x:refs/heads/main"],
     "remote: error: GH006: Protected branch update failed for refs/heads/main.\n ! [remote rejected] x -> main (protected branch hook declined)",
     { kind: "config" },
@@ -910,7 +998,7 @@ test("the git wrappers attach faults to the errors they already throw", async ()
   );
 });
 
-/** A target checkout with a bare origin; the branch holds `remoteHead`. */
+/** A target checkout with a bare origin, and a gateway that records publications. */
 function pushFixture(t) {
   const root = mkdtempSync(join(tmpdir(), "factory-push-faults-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -931,10 +1019,13 @@ function pushFixture(t) {
   };
   const base = commit("base");
   run(checkout, "push", "-q", "origin", "main");
+  const published = [];
   const delivery = new RegularDelivery(checkout, {
     defaultBranch: async () => "main",
-    findOpenPullRequest: async () => undefined,
-    publish: async () => assert.fail("publish follows only a successful push"),
+    publish: async (request) => {
+      published.push(request);
+      return { number: 7, branch: request.branch, headSha: request.headSha };
+    },
   });
   const publish = (changeRef, earlierHeads) =>
     delivery.publish({
@@ -946,10 +1037,12 @@ function pushFixture(t) {
       baseBranch: "main",
       ...(earlierHeads && { earlierHeads }),
     });
-  return { root, run, checkout, commit, base, publish };
+  const remote = () =>
+    run(origin, "rev-parse", "--verify", "-q", "refs/heads/factory/one");
+  return { root, run, checkout, commit, base, publish, published, remote };
 }
 
-test("a push rejected by an earlier attempt's recorded head is transient", async (t) => {
+test("a branch holding an earlier attempt's recorded head is pushed over with a lease", async (t) => {
   const f = pushFixture(t);
   const earlier = f.commit("earlier attempt");
   f.run(
@@ -961,17 +1054,16 @@ test("a push rejected by an earlier attempt's recorded head is transient", async
   );
   f.run(f.checkout, "reset", "-q", "--hard", f.base);
   const retry = f.commit("retry");
-  const error = await f.publish(retry, [earlier]).catch((caught) => caught);
-  assert.match(error.message, /\[rejected\]/);
-  assertFault(
-    faultOf(error),
-    { kind: "transient", outcomeUnknown: false },
-    "earlier head",
-  );
-  // Without the record the same head is someone else's, in neutral words.
-  const unknown = await f.publish(retry).catch((caught) => caught);
-  assert.equal(faultOf(unknown).kind, "decision");
-  assert.match(faultOf(unknown).question, /has no record of/);
+  const result = await f.publish(retry, [earlier]);
+  assert.equal(f.remote(), retry);
+  assert.deepEqual(result, {
+    branch: "factory/one",
+    pullRequest: 7,
+    headSha: retry,
+    earlierHeads: [earlier],
+  });
+  assert.equal(f.published[0].headSha, retry);
+  assert.deepEqual(f.published[0].earlierHeads, [earlier]);
 });
 
 test("earlier attempt heads come from the archived attempt history", () => {
@@ -993,7 +1085,7 @@ test("earlier attempt heads come from the archived attempt history", () => {
   assert.deepEqual(earlierHeads({ status: "pending" }), []);
 });
 
-test("a push rejected by a foreign branch head is a decision", async (t) => {
+test("a branch holding a head Factory has no record of is a decision, not pushed over", async (t) => {
   const f = pushFixture(t);
   const foreign = f.commit("foreign");
   f.run(
@@ -1006,22 +1098,23 @@ test("a push rejected by a foreign branch head is a decision", async (t) => {
   f.run(f.checkout, "reset", "-q", "--hard", f.base);
   const ours = f.commit("ours");
   const error = await f.publish(ours).catch((caught) => caught);
-  assert.match(error.message, /\[rejected\]/);
   assertFault(faultOf(error), { kind: "decision" }, "foreign head");
+  assert.match(faultOf(error).question, /has no record of/);
+  assert.equal(f.remote(), foreign);
+  assert.deepEqual(f.published, []);
 });
 
-test("a push rejected while the remote already holds Factory's commit is lag", async (t) => {
+test("a branch already holding Factory's commit is not pushed again", async (t) => {
   const f = pushFixture(t);
   const ours = f.commit("ours");
   f.run(f.checkout, "push", "-q", "origin", `${ours}:refs/heads/factory/one`);
-  // A push whose acknowledgement was lost: the remote reports a rejection
-  // although the branch already holds the commit.
+  // Any push now would be refused: the observation must make it unneeded.
   const bin = join(f.root, "bin");
   mkdirSync(bin);
   const real = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
   writeFileSync(
     join(bin, "git"),
-    `#!/bin/sh\ncase " $* " in\n  *" push origin "*) echo " ! [rejected]        x -> factory/one (fetch first)" >&2; exit 1 ;;\nesac\nexec '${real}' "$@"\n`,
+    `#!/bin/sh\ncase " $* " in\n  *" push "*) echo " ! [rejected]        x -> factory/one (stale info)" >&2; exit 1 ;;\nesac\nexec '${real}' "$@"\n`,
   );
   chmodSync(join(bin, "git"), 0o755);
   const path = process.env.PATH;
@@ -1029,11 +1122,27 @@ test("a push rejected while the remote already holds Factory's commit is lag", a
   t.after(() => {
     process.env.PATH = path;
   });
-  const error = await f.publish(ours).catch((caught) => caught);
+  await f.publish(ours);
+  assert.equal(f.published.length, 1);
+  // A refusal although the branch did not move: the remote refuses the
+  // lease itself, and no repeat changes that.
+  const next = f.commit("next");
+  const refused = await f.publish(next, [ours]).catch((caught) => caught);
+  assert.match(refused.message, /\[rejected\]/);
+  assertFault(faultOf(refused), { kind: "config" }, "lease refused in place");
+  // A branch that moved between the observation and the push is observed
+  // again on the repeat: the lease refusal is transient.
+  const moved = f.commit("moved");
+  writeFileSync(
+    join(bin, "git"),
+    `#!/bin/sh\ncase " $* " in\n  *" push "*) '${real}' -C '${f.checkout}' push -q -f origin ${moved}:refs/heads/factory/one; echo " ! [rejected]        x -> factory/one (stale info)" >&2; exit 1 ;;\nesac\nexec '${real}' "$@"\n`,
+  );
+  const error = await f.publish(next, [ours]).catch((caught) => caught);
+  assert.match(error.message, /\[rejected\]/);
   assertFault(
     faultOf(error),
     { kind: "transient", outcomeUnknown: false },
-    "own head",
+    "lease refused after a move",
   );
 });
 
@@ -1521,6 +1630,27 @@ const codexCases = [
     { kind: "transient", outcomeUnknown: true },
   ],
   [
+    // turn.started precedes the model request: nothing was paid yet.
+    "connection refused after turn.started, before any item",
+    codexThread(
+      [],
+      Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), {
+        code: "ECONNREFUSED",
+      }),
+    ),
+    { kind: "transient", outcomeUnknown: false },
+  ],
+  [
+    "connection refused after the model produced an item",
+    codexThread(
+      [{ type: "item.started", item: { id: "item-0", type: "reasoning" } }],
+      Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), {
+        code: "ECONNREFUSED",
+      }),
+    ),
+    { kind: "transient", outcomeUnknown: true },
+  ],
+  [
     "insufficient quota reported as 429",
     codexThread([
       {
@@ -1713,7 +1843,7 @@ const reviewCases = [
   [
     "no reviewer configured",
     () => ({}),
-    AcceptanceDecisionRequired,
+    Error,
     { kind: "config", fix: /reviewer/ },
   ],
   [
@@ -1725,7 +1855,7 @@ const reviewCases = [
           status: 529,
         }),
       ),
-    AcceptanceDecisionRequired,
+    Error,
     { kind: "transient", outcomeUnknown: false },
   ],
   [
@@ -1736,7 +1866,7 @@ const reviewCases = [
           error: "authentication_failed",
         }),
       ),
-    Interruption,
+    Error,
     { kind: "config", fix: /claude auth login/ },
   ],
   [
@@ -1746,8 +1876,8 @@ const reviewCases = [
         return { packetId: reviewPacket.id, findings: [] };
       },
     }),
-    AcceptanceDecisionRequired,
-    { kind: "decision" },
+    StepFault,
+    { kind: "transient", outcomeUnknown: true },
   ],
   [
     "reviewer refuses the criterion",
@@ -1767,7 +1897,7 @@ const reviewCases = [
         };
       },
     }),
-    CompletedModelInvocationError,
+    StepFault,
     { kind: "work" },
   ],
 ];
@@ -1802,18 +1932,6 @@ const executionCases = [
     }),
     "observe",
     { kind: "config", fix: /codex login/ },
-  ],
-  [
-    "worker settled without a result",
-    new SettledAttemptFailure(new Error("worker exited"), "interruption"),
-    "collect",
-    { kind: "transient", outcomeUnknown: true },
-  ],
-  [
-    "worker settled with a failed result",
-    new SettledAttemptFailure(new Error("tests failed"), "implementation"),
-    "collect",
-    { kind: "work" },
   ],
   [
     "provider turn idle",
@@ -1852,16 +1970,8 @@ const executionCases = [
     { kind: "defect" },
   ],
   [
-    "missing controller credential",
-    new Error(
-      "OpenAI Agents API requires controller credential OPENAI_API_KEY",
-    ),
-    "start",
-    { kind: "config" },
-  ],
-  [
-    "interrupted by a lost Anthropic connection",
-    new Interruption(new Anthropic.APIConnectionError({ message: "reset" })),
+    "a lost Anthropic connection",
+    new Anthropic.APIConnectionError({ message: "reset" }),
     "observe",
     { kind: "transient", outcomeUnknown: false },
   ],

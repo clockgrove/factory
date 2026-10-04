@@ -368,6 +368,8 @@ export interface PlanningModel {
     evidence?: ResultReviewEvidenceSource[];
     observations?: string;
     invocation?: ModelInvocationContext;
+    /** Why the previous answer was invalid; answer again without the error. */
+    previousInvalid?: string;
   }): Promise<{
     packetId: string;
     findings: ResultReviewFinding[];
@@ -450,6 +452,27 @@ export interface ExecutionDriver {
     request: ExecutionRequest,
     context?: ExecutionContext,
   ): Promise<ExecutionHandle>;
+  /**
+   * Adopt a recorded attempt before repeating its step (#515): the handle to
+   * continue with, or undefined once the driver confirmed nothing of the
+   * attempt runs and it left no result, so a new attempt may start. A worker
+   * that failed with a result to report is continued; collect reports it.
+   * `start` and `collect` are idempotent per attempt: a repeated start
+   * returns the running attempt and a repeated collect the saved result.
+   */
+  find(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionHandle | undefined>;
+  /**
+   * Stop whatever an attempt whose handle was never recorded started under
+   * `attemptId`; resolves once nothing of it runs. A driver that checkpoints
+   * before its first effect has nothing to stop.
+   */
+  cancelUnrecorded(
+    attemptId: string,
+    context?: ExecutionContext,
+  ): Promise<void>;
   observe(
     handle: ExecutionHandle,
     context?: ExecutionContext,
@@ -519,6 +542,12 @@ export interface AgentHarness {
   observe(handle: HarnessHandle): Promise<HarnessObservation>;
   cancel(handle: HarnessHandle): Promise<void>;
   collect(handle: HarnessHandle): Promise<HarnessResult>;
+  /**
+   * Stop whatever a start of `identity` spawned before its handle was
+   * recorded (a crash between spawn and save). Harnesses that spawn
+   * processes implement it; it is a no-op when nothing runs.
+   */
+  cancelUnrecorded?(identity: string): Promise<void>;
 }
 
 /** Infrastructure only; the configured AgentHarness runs in a separate installed process. */
@@ -606,14 +635,30 @@ export interface DeliveryResult {
   branch: string;
   pullRequest: number;
   headSha: string;
+  /** Heads earlier attempts pushed to `branch`; a read may still show one. */
+  earlierHeads?: string[];
 }
 export interface DeliveryObservation {
   /** Successful uniquely named check runs observed on this exact PR head. */
   namedChecks?: NamedCheckEvidence[];
   state: "open" | "merged" | "closed";
+  /** When a closed PR was closed. */
+  closedAt?: string;
   checks: "pending" | "passing" | "failing";
-  /** Authenticated target protection readiness; absent only on custom gateways. */
-  mergeReadiness?: "ready" | "waiting" | "blocked";
+  /** Names of completed check runs that failed on this exact head. */
+  failedChecks?: string[];
+  /**
+   * Check names the repository's rulesets or branch protection require on
+   * the base branch; read only when a check failed.
+   */
+  requiredChecks?: string[];
+  /**
+   * Authenticated target protection readiness; absent only on custom
+   * gateways. `ready` includes failing checks the repository does not
+   * require; `conflict`: the head conflicts with the base; `draft`: someone
+   * made the PR a draft.
+   */
+  mergeReadiness?: "ready" | "waiting" | "conflict" | "draft" | "behind";
 }
 export interface MergeResult {
   integratedSha: string;
@@ -621,10 +666,8 @@ export interface MergeResult {
 export interface DeliveryStrategy {
   publish(request: DeliveryRequest): Promise<DeliveryResult>;
   observe(result: DeliveryResult): Promise<DeliveryObservation>;
-  merge(
-    result: DeliveryResult,
-    beforeMerge?: (observation: DeliveryObservation) => void,
-  ): Promise<MergeResult>;
+  /** Merge the published head, or confirm a merge already made. */
+  merge(result: DeliveryResult): Promise<MergeResult>;
 }
 
 export interface ContentMetadata {
@@ -759,6 +802,10 @@ export interface GraphProjection {
   graph: WorkGraph;
   objectiveIssue: number;
   knownIssues?: Record<string, number>;
+  /** The login that authored Factory's issues, once known. */
+  author?: string;
+  /** Learned the author from Factory's first created issue. */
+  authored?: (login: string) => void;
   beforeCreate?: (itemId: string) => void | Promise<void>;
   projected?: (itemId: string, issue: number) => void;
 }
@@ -768,6 +815,10 @@ export interface ProjectedGraph {
 export interface PullRequestPublication {
   branch: string;
   base: string;
+  /** The commit Factory pushed to `branch`. */
+  headSha: string;
+  /** Heads earlier attempts pushed to `branch`; a PR may still show one. */
+  earlierHeads?: string[];
   treeSha: string;
   title: string;
   body: string;
@@ -777,6 +828,8 @@ export interface PullRequestIdentity {
   number: number;
   branch: string;
   headSha: string;
+  /** Heads earlier attempts pushed to `branch`; a read may still show one. */
+  earlierHeads?: string[];
 }
 export type PullRequestObservation = DeliveryObservation;
 export interface IntakeIssuePage {
@@ -805,6 +858,8 @@ export interface NamedCheckEvidence {
 }
 
 export interface GitHubGateway {
+  /** Strict protection: GitHub merges the base into the PR from exactly `identity.headSha`; returns the verified new head. */
+  updateBranch(identity: PullRequestIdentity): Promise<string>;
   intakePage?(page: number, etag?: string): Promise<IntakeIssuePage>;
   objectiveDependencies?(number: number): Promise<number[]>;
   namedCheck?(
@@ -816,14 +871,15 @@ export interface GitHubGateway {
   closeIssue(
     number: number,
     comment: string,
-    expected: { body?: string; workItem?: { objective: number; id: string } },
+    expected: {
+      body?: string;
+      workItem?: { objective: number; id: string };
+      /** The login that authored Factory's issues, once known. */
+      author?: string;
+    },
   ): Promise<void>;
   projectGraph(request: GraphProjection): Promise<ProjectedGraph>;
-  findOpenPullRequest(
-    branch: string,
-    base: string,
-    headSha: string,
-  ): Promise<PullRequestIdentity | undefined>;
+  /** The open PR for the pushed branch, found by its head before it is created. */
   publish(request: PullRequestPublication): Promise<PullRequestIdentity>;
   observe(identity: PullRequestIdentity): Promise<PullRequestObservation>;
   merge(
@@ -839,10 +895,20 @@ export interface GitHubGateway {
     baseBranch: string,
     expectedStack: number,
     options: {
+      /** The pending merge request an earlier repeat recorded. */
       resumeUuid?: string;
-      beforeMerge?: () => void;
+      /** Record a pending merge request before it is polled. */
       onPending: (uuid: string) => void;
-      cancelled: () => boolean;
+      /** A poll answered: the merge is progressing. */
+      progress?: () => void;
+      /** Queued without a request to poll: wait for CI, then observe again. */
+      queued: (detail: string) => never;
+      /**
+       * The merge request ended failed: observe the layers again. Throws a
+       * CI wait while a required check is pending (#626); returns when the
+       * layers are ready, and the failure stands.
+       */
+      failed?: () => Promise<void>;
     },
   ): Promise<string>;
 }
@@ -852,16 +918,5 @@ export class CompletedModelInvocationError extends Error {
   constructor(cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
     this.name = "CompletedModelInvocationError";
-  }
-}
-
-/**
- * A step that did not finish for reasons unrelated to the work itself, such
- * as a lost provider response. Repeating the step is safe.
- */
-export class Interruption extends Error {
-  constructor(cause: unknown) {
-    super(cause instanceof Error ? cause.message : String(cause), { cause });
-    this.name = "Interruption";
   }
 }

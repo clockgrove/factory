@@ -19,6 +19,7 @@ import {
 } from "./config.js";
 import type { GitHubGateway, IntakeIssuePage } from "./contracts.js";
 import { objectiveComplete } from "./completion.js";
+import { attachedFault } from "./fault.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import {
   type ControlRequest,
@@ -509,6 +510,20 @@ export async function runIntake(
   let observing = false;
   let refilling = false;
   let wake: (() => void) | undefined;
+  /**
+   * When GitHub may answer again after a transient fault with a time (a
+   * rate limit): the next observation waits until then (#641).
+   */
+  let heldUntil = 0;
+  const holdFor = (error: unknown) => {
+    const fault = attachedFault(error);
+    const at =
+      fault?.kind === "transient" && fault.retryAt
+        ? Date.parse(fault.retryAt)
+        : Number.NaN;
+    if (Number.isFinite(at)) heldUntil = Math.max(heldUntil, at);
+    return fault?.kind === "transient";
+  };
   const onHandoff = () => {
     handingOff = true;
     record.mode = "draining";
@@ -703,6 +718,7 @@ export async function runIntake(
               selected = id;
               break;
             } catch (error) {
+              holdFor(error);
               reasons[id] =
                 `Observation or baseline unavailable: ${String(error)}`;
             }
@@ -726,6 +742,7 @@ export async function runIntake(
               : {}),
           };
         } catch (error) {
+          holdFor(error);
           record.observation = {
             at: new Date().toISOString(),
             reasons,
@@ -737,6 +754,7 @@ export async function runIntake(
         saveIntake(config, record);
       }
       if (selected && record.mode === "running" && !refilling) {
+        let unavailable = false;
         activeObjective = selected;
         retargetControllerLock(lockPath, lock, selected);
         try {
@@ -746,31 +764,47 @@ export async function runIntake(
               "Current Objective is failed or cancelling; explicit supported recovery is required",
             );
           if (!state || state.schemaVersion === 8) {
-            const issue = await services.github.objective(selected);
-            if (
+            const issue = await services.github
+              .objective(selected)
+              .catch((error: unknown) => {
+                // GitHub cannot answer yet (a rate limit, an outage): nothing
+                // has started, so observe again when it may, not pause (#641).
+                if (!holdFor(error)) throw error;
+                record.observation = {
+                  at: new Date().toISOString(),
+                  reasons,
+                  error: String(error),
+                };
+                saveIntake(config, record);
+                return undefined;
+              });
+            if (!issue) unavailable = true;
+            else if (
               issue.state !== "open" ||
               digest(issue.body) !== record.bodyDigests[selected]
             )
               throw new Error("Selected Objective changed before compilation");
           }
           if (record.mode !== "running" || handingOff) continue;
-          const result = await runObjective(config, selected, services, {
-            ownerLock: lock,
-            observeControl: (handler) => {
-              objectiveControl = handler;
-            },
-          });
-          if (!terminal(result)) {
-            // The queue stops on a human decision; C2 redesigns this route.
-            record.mode = "paused";
-            record.observation = {
-              at: new Date().toISOString(),
-              reasons,
-              needsDecision: selected,
-              error: `Objective #${selected} needs a human decision: ${result.coordinator?.waitReason ?? "inspect its status"}`,
-            };
-            saveIntake(config, record);
-            return record;
+          if (!unavailable) {
+            const result = await runObjective(config, selected, services, {
+              ownerLock: lock,
+              observeControl: (handler) => {
+                objectiveControl = handler;
+              },
+            });
+            if (!terminal(result)) {
+              // The queue stops on a human decision; C2 redesigns this route.
+              record.mode = "paused";
+              record.observation = {
+                at: new Date().toISOString(),
+                reasons,
+                needsDecision: selected,
+                error: `Objective #${selected} needs a human decision: ${result.coordinator?.waitReason ?? "inspect its status"}`,
+              };
+              saveIntake(config, record);
+              return record;
+            }
           }
         } catch (error) {
           if (record.mode !== "running" || handingOff) {
@@ -795,13 +829,15 @@ export async function runIntake(
           activeObjective = undefined;
           retargetControllerLock(lockPath, lock, 0);
         }
-        continue;
+        // Unavailable: wait below for GitHub, as an idle observation does.
+        if (!unavailable) continue;
       }
+      const wait = Math.max(record.pollSeconds * 1000, heldUntil - Date.now());
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           wake = undefined;
           resolve();
-        }, record.pollSeconds * 1000);
+        }, wait);
         wake = () => {
           clearTimeout(timer);
           wake = undefined;

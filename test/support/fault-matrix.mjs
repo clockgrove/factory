@@ -1,10 +1,13 @@
 // The fault matrix: run an uninterrupted two-item Objective (alpha → beta)
 // once per delivery strategy, derive every effect boundary from what that
-// run did, then inject a crash, a lost response or an unavailable burst at
-// each boundary, restart the controller, and check invariants of the end
-// state read from GitHub's request log and the repository, not from
-// Factory's own state. Nothing here names Factory internals, so the matrix
-// survives the recovery redesign.
+// run did, then inject a crash, a lost response, a connection reset or an
+// unavailable burst at each boundary, restart the controller, and check
+// invariants of the end state read from GitHub's request log and the
+// repository, not from Factory's own state. Driver lifecycle premises (an
+// operator cancel, a run stopped for a decision) reach the execution
+// driver's cancel and observe calls, which an uninterrupted run never makes;
+// the matrix derives and faults those the same way. Nothing here names
+// Factory internals, so the matrix survives the recovery redesign.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
@@ -20,7 +23,13 @@ import { availableParallelism } from "node:os";
 import { basename, join } from "node:path";
 import { describe, test } from "node:test";
 import { faults } from "./github-http-fake.mjs";
-import { OBJECTIVE, branch, marker, runScenario } from "./fault-harness.mjs";
+import {
+  OBJECTIVE,
+  branch,
+  marker,
+  runScenario,
+  workItem,
+} from "./fault-harness.mjs";
 
 /**
  * Scenarios run concurrently within one test file: every available core by
@@ -34,7 +43,37 @@ export function scenarioConcurrency() {
 }
 
 const KINDS = ["crash-before", "crash-after", "lost", "unavailable"];
+const MERGE_ASYNC = "PUT /repos/{owner}/{repo}/pulls/{number}/merge-async";
+const MERGE_ASYNC_STATUS =
+  "GET /repos/{owner}/{repo}/pulls/{number}/merge-async/{uuid}";
+// A reset before the effect: the client cannot tell it from a lost response.
+const MUTATION_KINDS = [...KINDS, "reset"];
 const PAID = new Set(["crash-after", "lost"]);
+
+/**
+ * Whether the log entry at `index` is a merge-async 409 that directly
+ * follows a dropped or crashed merge-async on the same PR, and that Factory
+ * then used: after a lost response, the 409 naming the pending request is
+ * the only way to learn its uuid, so a status poll of that PR's merge
+ * request must follow. Any other 409 is Factory's request refused.
+ */
+function resumesLostMerge(log, index) {
+  const entry = log[index];
+  if (entry.endpoint !== MERGE_ASYNC || entry.status !== 409) return false;
+  const previous = log
+    .slice(0, index)
+    .findLast(
+      (other) => other.endpoint === MERGE_ASYNC && other.path === entry.path,
+    );
+  const polled = log
+    .slice(index + 1)
+    .some(
+      (other) =>
+        other.endpoint === MERGE_ASYNC_STATUS &&
+        other.path.startsWith(`${entry.path.split("?")[0]}/`),
+    );
+  return ["dropped", "crash"].includes(previous?.status) && polled;
+}
 
 /** The run every case is compared with, once per process and delivery. */
 const references = new Map();
@@ -82,7 +121,7 @@ export function deriveCases(reference) {
     const occurrence = (seen.get(entry.endpoint) ?? 0) + 1;
     seen.set(entry.endpoint, occurrence);
     if (entry.effect)
-      for (const kind of KINDS)
+      for (const kind of MUTATION_KINDS)
         cases.push({
           name: `${kind} at ${entry.endpoint} #${occurrence}`,
           group: "mutations",
@@ -118,6 +157,105 @@ export function deriveCases(reference) {
           method: call.method,
           occurrence,
         },
+        inProcess: [
+          {
+            target: call.target,
+            method: call.method,
+            occurrence,
+            kind,
+            ...(kind === "unavailable" ? { times: 2 } : {}),
+          },
+        ],
+      });
+  }
+  return cases;
+}
+
+/**
+ * Premises under which a run reaches the execution driver's cancel and
+ * observe calls. Each runs once uninterrupted as its own reference; its
+ * driver.cancel and driver.observe calls in the first controller run become
+ * boundaries (the main matrix covers every other call). The snapshot records
+ * each premise's boundaries, so a premise that stops reaching them, or a
+ * driver path that appears, fails until it is reviewed.
+ */
+const repo = "/repos/{owner}/{repo}";
+export const VARIANTS = [
+  {
+    key: "cancel-running",
+    when: "when an operator cancels while alpha's worker runs",
+    // The cancel sweep stops the recorded attempt.
+    scenario: {
+      actions: { alpha: { barrier: true } },
+      operator: { action: "cancel", method: "collect", item: "alpha" },
+    },
+    checks: ["cancelled"],
+  },
+  {
+    key: "cancel-starting",
+    when: "when an operator cancels while alpha's worker is starting",
+    // The delivery runner cancels the handle that start returns.
+    scenario: {
+      actions: { alpha: { barrier: true } },
+      operator: { action: "cancel", method: "start", item: "alpha" },
+    },
+    checks: ["cancelled"],
+  },
+  {
+    key: "edit-running",
+    when: "when the Objective is edited while beta's worker runs",
+    // Independent items run together. The edit at alpha's PR is an
+    // Objective decision (contracts 2 and 4): the Objective waits for it, and
+    // beta's running worker is neither failed nor stopped. Beta's barrier
+    // opens only after the edit, so beta's worker spans it.
+    scenario: {
+      items: [workItem("alpha"), workItem("beta")],
+      actions: { beta: { barrier: true } },
+      http: [
+        {
+          match: `POST ${repo}/pulls`,
+          kind: "after",
+          run: (fake, _entry, { release }) => {
+            fake.editIssueBody(
+              OBJECTIVE,
+              `${fake.issue(OBJECTIVE).body}\nEdited by the Objective's author.\n`,
+            );
+            release("beta");
+          },
+        },
+      ],
+    },
+    checks: ["refusal"],
+    refuses:
+      /needs a decision: The Objective issue body changed outside Factory/,
+    untouched: ["beta"],
+  },
+];
+
+const LIFECYCLE = new Set(["cancel", "observe"]);
+
+/** Driver cancel and observe boundaries of one premise's reference run. */
+export function deriveVariantCases(variant, reference) {
+  const cases = [];
+  const calls = new Map();
+  for (const call of reference.calls) {
+    if (call.run !== 0 || call.target !== "driver") continue;
+    if (!LIFECYCLE.has(call.method)) continue;
+    const key = `${call.target}.${call.method}`;
+    const occurrence = (calls.get(key) ?? 0) + 1;
+    calls.set(key, occurrence);
+    for (const kind of KINDS)
+      cases.push({
+        name: `${kind} at ${key} #${occurrence} ${variant.when}`,
+        group: variant.key,
+        boundaryName: `${key} #${occurrence}`,
+        boundary: {
+          kind: "call",
+          target: call.target,
+          method: call.method,
+          occurrence,
+        },
+        variant,
         inProcess: [
           {
             target: call.target,
@@ -193,7 +331,10 @@ export function assertFaultsFired(result) {
  * merge commit an ancestor of it, and the reviewed dependency and sub-issue
  * topology.
  */
-export async function assertEndState(result, { foreignIssues = 0 } = {}) {
+export async function assertEndState(
+  result,
+  { foreignIssues = 0, extraMutations = [] } = {},
+) {
   const { fake, items, repository } = result;
   const reference = await referenceRun(result.delivery);
   const context = () =>
@@ -239,14 +380,18 @@ export async function assertEndState(result, { foreignIssues = 0 } = {}) {
   }
   assert.deepEqual(
     effectEndpoints(result),
-    effectEndpoints(reference),
+    [...new Set([...effectEndpoints(reference), ...extraMutations])].sort(),
     "kinds of mutation",
   );
   assert.deepEqual(
     fake.log
       .filter(
-        (entry) =>
-          [405, 409, 422].includes(entry.status) || entry.unhandled === true,
+        (entry, index) =>
+          // A refusal the test injected is not Factory's request refused.
+          (entry.fault !== "status" &&
+            [405, 409, 422].includes(entry.status) &&
+            !resumesLostMerge(fake.log, index)) ||
+          entry.unhandled === true,
       )
       .map((entry) => `${entry.endpoint} → ${entry.status}`),
     [],
@@ -318,9 +463,32 @@ export async function assertPlanCompiledOnce(result) {
 /**
  * Factory refused to continue past a fact it must not accept: a run stopped
  * with `refuses`, and neither the Objective nor any Work Item issue was
- * closed as completed.
+ * closed as completed, and none of the `unsent` endpoints was requested.
  */
-export function assertRefusal(result, { refuses }) {
+export function assertRefusal(
+  result,
+  { refuses, unsent = [], untouched = [] },
+) {
+  // Items an Objective-scope stop must leave in place: never failed and
+  // their workers never stopped (contract 2).
+  for (const id of untouched) {
+    assert.deepEqual(
+      result.harness.filter(
+        (event) => event.type === "cancel" && event.item === id,
+      ),
+      [],
+      `${id}'s worker was stopped: ${result.runs.map(summarizeRun).join(" | ")}`,
+    );
+    for (const run of result.runs)
+      assert.notEqual(
+        run.work?.[id]?.status,
+        "failed",
+        `${id} failed: ${summarizeRun(run)}`,
+      );
+  }
+  // Requests Factory must refuse before sending.
+  for (const endpoint of unsent)
+    assert.equal(result.fake.requests(endpoint).length, 0, `sent ${endpoint}`);
   assert.ok(
     result.runs.some(
       (run) =>
@@ -335,7 +503,100 @@ export function assertRefusal(result, { refuses }) {
       assert.equal(issue.state, "open", `issue for ${item.id} open`);
 }
 
+/**
+ * The operator's cancellation took effect: the last run reports the
+ * Objective cancelled without an unresolved cessation, every worker attempt
+ * that started was cancelled, and nothing was delivered or closed on GitHub.
+ */
+export function assertCancelled(result) {
+  const runs = () => result.runs.map(summarizeRun).join(" | ");
+  assert.equal(result.final.cancel, "done", `cancellation: ${runs()}`);
+  assert.equal(
+    result.final.cancelError,
+    undefined,
+    `cancellation error: ${runs()}`,
+  );
+  const cancelled = new Set(
+    result.harness
+      .filter((event) => event.type === "cancel")
+      .map((event) => event.attempt),
+  );
+  for (const start of result.harness.filter((event) => event.type === "start"))
+    assert.ok(
+      cancelled.has(start.attempt),
+      `${start.item}'s attempt ${start.attempt} was never cancelled: ${runs()}`,
+    );
+  assert.equal(result.fake.issue(OBJECTIVE).state, "open", "Objective open");
+  for (const item of result.items)
+    for (const issue of result.fake.issuesWithMarker(marker(item.id)))
+      assert.equal(issue.state, "open", `issue for ${item.id} open`);
+  assert.deepEqual(
+    Object.values(result.fake.state.pulls)
+      .filter((pull) => (pull.merges ?? 0) > 0)
+      .map((pull) => pull.number),
+    [],
+    "merged PRs",
+  );
+}
+
+/**
+ * A paid step hit its bound and the operator's answer converged: the first
+ * run made exactly `bound.calls` paid tries of the faulted call (three
+ * transient faults, then the fourth becomes a decision) and stopped for a
+ * decision with the Work Item still in place, not failed; the restart ran the
+ * `factory retry` command the status named (`bound.answer`), and the step
+ * ran again. The end state is checked separately.
+ */
+export function assertBoundAnswered(result, { bound }) {
+  const runs = () => result.runs.map(summarizeRun).join(" | ");
+  const [first, second] = result.runs;
+  assert.equal(first?.outcome, "needs-decision", `first run: ${runs()}`);
+  if (bound.item)
+    assert.notEqual(
+      first.work?.[bound.item]?.status,
+      "failed",
+      `${bound.item} waits in place for the decision: ${runs()}`,
+    );
+  if (bound.call) {
+    const tries = result.calls.filter(
+      (call) =>
+        call.run === 0 &&
+        call.target === bound.call.target &&
+        call.method === bound.call.method &&
+        (bound.call.phase === undefined || call.phase === bound.call.phase) &&
+        (bound.call.item === undefined || call.item === bound.call.item),
+    );
+    assert.deepEqual(
+      tries.map((call) => call.fault ?? "none"),
+      Array(bound.calls).fill(bound.call.kind),
+      `paid tries of ${bound.call.target}.${bound.call.method} before the decision: ${runs()}`,
+    );
+  }
+  if (bound.worker) {
+    const events = (type) =>
+      result.harness.filter(
+        (event) => event.type === type && event.item === bound.worker,
+      ).length;
+    assert.equal(events("died"), bound.calls, `${bound.worker}'s workers died`);
+    assert.equal(
+      events("start"),
+      bound.calls + 1,
+      `${bound.worker}'s workers started: ${runs()}`,
+    );
+  }
+  assert.deepEqual(
+    second?.answered,
+    { command: bound.answer, applied: "step" },
+    `the operator's answer: ${runs()}`,
+  );
+}
+
 export const CHECKS = {
+  bound: {
+    suffix: " stops for a decision that factory retry answers",
+    assert: assertBoundAnswered,
+  },
+  cancelled: { suffix: " is cancelled", assert: assertCancelled },
   refusal: { suffix: " is refused", assert: assertRefusal },
   end: { suffix: "", assert: assertEndState },
   stop: { suffix: " without an operator stop", assert: assertNoOperatorStop },
@@ -400,7 +661,10 @@ export function summarizeRun(run) {
     .map(([id, item]) => `; failure[${id}]=${item.failure.trim()}`)
     .join("");
   const message = (run.message ?? run.stderr ?? "").replace(/\s+/g, " ").trim();
-  return `outcome=${run.outcome}; message=${message}; work=${work}${failures}`;
+  const cancel = run.cancel
+    ? `; cancel=${run.cancel}${run.cancelError ? `; cancelError=${run.cancelError.replace(/\s+/g, " ").trim()}` : ""}`
+    : "";
+  return `outcome=${run.outcome}; message=${message}; work=${work}${failures}${cancel}`;
 }
 
 /**
@@ -467,19 +731,26 @@ export function declareScenario(name, run, options, known) {
 }
 
 const checksFor = (testCase) =>
-  testCase.boundary.kind === "call" &&
-  testCase.boundary.method === "reviewGraph"
-    ? ["end", "stop", "budget", "plan"]
-    : ["end", "stop", "budget"];
+  testCase.variant
+    ? testCase.variant.checks
+    : testCase.boundary.kind === "call" &&
+        testCase.boundary.method === "reviewGraph"
+      ? ["end", "stop", "budget", "plan"]
+      : ["end", "stop", "budget"];
 
 export const SNAPSHOT = join(import.meta.dirname, "fault-boundaries.json");
 
 /** The delivery modes the matrix derives boundaries for; the snapshot holds exactly these. */
 export const MATRIX_DELIVERIES = ["native-stack", "regular"];
 
-/** Derived boundary names by group, sorted so request interleaving cannot reorder them. */
+/**
+ * Derived boundary names by group, sorted so request interleaving cannot
+ * reorder them. Every premise has a group, empty when it reaches no
+ * boundary.
+ */
 export function boundarySnapshot(cases) {
   const groups = { mutations: new Set(), reads: new Set(), calls: new Set() };
+  for (const variant of VARIANTS) groups[variant.key] = new Set();
   for (const testCase of cases)
     groups[testCase.group].add(testCase.boundaryName);
   return Object.fromEntries(
@@ -572,6 +843,22 @@ export function checkBoundarySnapshot(delivery, snapshot, path = SNAPSHOT) {
     );
 }
 
+/** A premise's reference run, once per process, delivery and premise. */
+const variantReferences = new Map();
+export function variantReferenceRun(variant, delivery) {
+  const key = `${variant.key}/${delivery}`;
+  if (!variantReferences.has(key))
+    variantReferences.set(
+      key,
+      runScenario({
+        name: `${variant.key}-${delivery}`,
+        delivery,
+        ...variant.scenario,
+      }),
+    );
+  return variantReferences.get(key);
+}
+
 /** Stable part (1-based) for a case, independent of every other case. */
 export function partOf(caseName, parts) {
   const hash = createHash("sha256").update(caseName).digest();
@@ -587,35 +874,67 @@ export function partOf(caseName, parts) {
  * boundaries, splits 62/90; hashing the case splits about evenly.
  */
 export async function defineMatrix(delivery, known, part = 1, parts = 2) {
-  const reference = await referenceRun(delivery);
-  const cases = deriveCases(reference);
+  const [reference, ...premises] = await Promise.all([
+    referenceRun(delivery),
+    ...VARIANTS.map((variant) => variantReferenceRun(variant, delivery)),
+  ]);
+  const cases = [
+    ...deriveCases(reference),
+    ...VARIANTS.flatMap((variant, index) =>
+      deriveVariantCases(variant, premises[index]),
+    ),
+  ];
   checkBoundarySnapshot(delivery, boundarySnapshot(cases));
-  checkKnown(
-    known,
-    cases.flatMap((testCase) => testNames(testCase.name, checksFor(testCase))),
-  );
+  const premiseName = (variant) => `premise run ${variant.when}`;
+  checkKnown(known, [
+    ...cases.flatMap((testCase) =>
+      testNames(testCase.name, checksFor(testCase)),
+    ),
+    ...VARIANTS.flatMap((variant) =>
+      testNames(premiseName(variant), variant.checks),
+    ),
+  ]);
   describe(`fault matrix: ${delivery} delivery (${part}/${parts})`, {
     concurrency: scenarioConcurrency(),
   }, () => {
-    if (part === 1)
+    if (part === 1) {
       declareScenario(
         "uninterrupted run",
         () => referenceRun(delivery),
         { checks: ["end", "stop"] },
         {},
       );
+      // Each premise must hold uninterrupted before its faults mean anything.
+      for (const variant of VARIANTS)
+        declareScenario(
+          premiseName(variant),
+          () => variantReferenceRun(variant, delivery),
+          {
+            checks: variant.checks,
+            refuses: variant.refuses,
+            untouched: variant.untouched,
+          },
+          known,
+        );
+    }
     for (const [index, testCase] of cases.entries()) {
       if (partOf(testCase.name, parts) !== part) continue;
+      const premise = testCase.variant?.scenario ?? {};
       declareScenario(
         testCase.name,
         () =>
           runScenario({
             name: `${delivery === "regular" ? "r" : "n"}${index}`,
             delivery,
-            http: testCase.http ?? [],
+            ...premise,
+            http: [...(premise.http ?? []), ...(testCase.http ?? [])],
             inProcess: testCase.inProcess ?? [],
           }),
-        { checks: checksFor(testCase) },
+        {
+          checks: checksFor(testCase),
+          refuses: testCase.variant?.refuses,
+          untouched: testCase.variant?.untouched,
+        },
         known,
       );
     }

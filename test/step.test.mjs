@@ -806,7 +806,6 @@ const view = (work, overrides = {}) => ({
   finalAcceptancePending: null,
   objectiveClosure: null,
   lastError: null,
-  githubClosureError: null,
   work,
   ...overrides,
 });
@@ -816,7 +815,6 @@ const itemView = (id, overrides = {}) => ({
   step: "publish",
   requestedPhase: null,
   blockedReason: null,
-  waitingReason: null,
   pullRequest: null,
   acceptancePending: null,
   candidateAssetSets: [],

@@ -21,6 +21,7 @@ import { resolveCapacity, stateRoot } from "../../dist/config.js";
 import { LocalContentStore } from "../../dist/content/local.js";
 import { RegularDelivery } from "../../dist/delivery/regular.js";
 import { LocalExecutionDriver } from "../../dist/execution/local.js";
+import { attachFault, decision } from "../../dist/fault.js";
 import { withCoverage } from "./coverage.mjs";
 import { resultFindings } from "./review-protocol.mjs";
 
@@ -82,7 +83,7 @@ export function bindTarget(checkout, repository) {
       `#!/bin/sh
 for argument in "$@"; do
   case "$argument" in
-    push|fetch|clone|pull|checkout) exec ${quote(process.execPath)} ${quote(helper)} ${quote(realGit)} ${quote(routesFile)} "$@" ;;
+    push|fetch|clone|pull|ls-remote|checkout) exec ${quote(process.execPath)} ${quote(helper)} ${quote(realGit)} ${quote(routesFile)} "$@" ;;
   esac
 done
 exec ${quote(realGit)} "$@"
@@ -750,7 +751,12 @@ export class StatefulGitHubFake {
     });
     if (this.failCloseAfterComment === number) {
       this.failCloseAfterComment = undefined;
-      throw new Error("Injected close failure after comment");
+      // Classified as the real gateway classifies a refused permission.
+      throw attachFault(new Error("Injected close failure after comment"), {
+        kind: "config",
+        detail: "Injected close failure after comment",
+        fix: "Restore the login's issue permission, then `factory run`",
+      });
     }
     this.update((state) => {
       state.closedIssues[number] = true;
@@ -811,6 +817,19 @@ export class StatefulGitHubFake {
       );
       if (existing) {
         assert.equal(existing.base, request.base);
+        // An open PR follows its branch: a leased push of a new attempt
+        // moved its head, and its checks run again on that head.
+        if (existing.state === "open" && existing.headSha !== headSha) {
+          existing.headSha = headSha;
+          existing.treeSha = request.treeSha;
+          existing.checks = "passing";
+          state.events.push({
+            type: "republish",
+            number: existing.number,
+            ...request,
+            headSha,
+          });
+        }
         assert.equal(existing.headSha, headSha);
         return { number: existing.number, branch: request.branch, headSha };
       }
@@ -836,7 +855,11 @@ export class StatefulGitHubFake {
       pull.branch !== identity.branch ||
       pull.headSha !== identity.headSha
     )
-      throw new Error("Pull request identity changed");
+      // A foreign change, as the real gateway classifies it.
+      throw attachFault(
+        new Error("Pull request identity changed"),
+        decision("Pull request identity changed. Inspect it, then retry."),
+      );
     return { state: pull.state, checks: pull.checks };
   }
 
@@ -909,8 +932,7 @@ export class StatefulGitHubFake {
     });
   }
 
-  async mergeNativeStack(layers, baseBranch, expectedStack, options) {
-    if (options.cancelled()) throw new Error("Objective cancelled");
+  async mergeNativeStack(layers, baseBranch, expectedStack) {
     // Like the real gateway: a stack already merged at these heads is confirmed.
     const pulls = layers.map(
       (layer) => this.state().pullRequests[layer.pullRequest],
@@ -926,7 +948,6 @@ export class StatefulGitHubFake {
       await this.ensureNativeStack(layers, baseBranch),
       expectedStack,
     );
-    options.beforeMerge?.();
     const integratedSha = this.integrate(layers.at(-1).branch);
     this.update((state) => {
       for (const layer of layers) {

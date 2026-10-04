@@ -1,6 +1,3 @@
-import { objectiveCandidate } from "./qa.js";
-import { objectiveComplete } from "./completion.js";
-import { graphDigest } from "./graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -21,6 +18,7 @@ import {
   CaptureWriter,
   type InteractionMetadata,
 } from "./capture.js";
+import { objectiveComplete } from "./completion.js";
 import { stateRoot } from "./config.js";
 import type {
   ModelInvocationObservation,
@@ -28,6 +26,9 @@ import type {
   ModelInvocationUsage,
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
+import { faultDetail, type Wait } from "./fault.js";
+import { graphDigest } from "./graph-amendments.js";
+import { objectiveCandidate } from "./qa.js";
 import {
   consumption,
   failureDigest,
@@ -43,8 +44,7 @@ import type {
   WorkState,
 } from "./state.js";
 import { shortPlanDigest, summarizeStatus } from "./status-summary.js";
-import { type StepScope, type StepState, outageOf } from "./step.js";
-import { faultDetail, type Wait } from "./fault.js";
+import { outageOf, type StepScope, type StepState, waitOf } from "./step.js";
 import { normalizeTokenUsage, tokenCategories } from "./usage.js";
 
 /** A scope's structured wait and failing step, redacted for status. */
@@ -120,14 +120,6 @@ export function redactCoordinatorDisposition(
   return coordinator
     ? {
         ...coordinator,
-        ...(coordinator.observationError
-          ? {
-              observationError: redactDiagnosticDetail(
-                coordinator.observationError,
-                secrets,
-              ),
-            }
-          : {}),
         ...(coordinator.cancelError
           ? {
               cancelError: redactDiagnosticDetail(
@@ -1115,7 +1107,6 @@ export function statusDocument(
                 ]),
               )
             : null,
-          reviewRejection: pending.reviewRejection ?? null,
         }
       : null;
   const activeCount = Object.values(state.work).filter(
@@ -1131,9 +1122,12 @@ export function statusDocument(
       : Math.max(0, concurrency - activeCount);
   const work = state.graph.items.map((item) => {
     const current = state.work[item.id]!;
-    let blockedReason: string | undefined = current.requestedPhase
-      ? current.waitingReason
-      : undefined;
+    // A code only; a step's or the scheduler's wait is on `wait`.
+    let blockedReason: string | undefined =
+      current.requestedPhase &&
+      waitOf(state, { item: item.id })?.kind === "capacity"
+        ? "capacity"
+        : undefined;
     let eligible = false;
     if (current.status === "pending") {
       const dependency = item.dependencies.find(
@@ -1159,12 +1153,12 @@ export function statusDocument(
               item.kind !== "aggregate" &&
               configuredSlots === 0
             ? "capacity"
-            : current.waitingReason;
+            : blockedReason;
     } else if (current.status === "waiting")
       blockedReason =
         current.step === "approve-result"
           ? "acceptance-decision"
-          : (current.waitingReason ?? "asset-selection");
+          : "asset-selection";
     return {
       id: item.id,
       issue: state.issueByItemId[item.id],
@@ -1177,9 +1171,6 @@ export function statusDocument(
       // Provider capacity is not persisted in the state snapshot.
       ready: current.status === "pending" && !blockedReason ? null : false,
       blockedReason: blockedReason ?? null,
-      waitingReason: current.waitingReason
-        ? redactDiagnosticDetail(current.waitingReason, secrets)
-        : null,
       attemptId: current.attempt ?? null,
       ...(item.executionBinding
         ? {
@@ -1307,15 +1298,8 @@ export function statusDocument(
     finalAcceptance: state.finalAcceptance ?? null,
     finalAcceptancePending: pendingDecision(state.finalAcceptancePending),
     objectiveClosure: state.objectiveClosure ?? null,
-    lastError:
-      state.error || state.githubClosureError
-        ? redactDiagnosticDetail(
-            state.error ?? state.githubClosureError!,
-            secrets,
-          )
-        : null,
-    githubClosureError: state.githubClosureError
-      ? redactDiagnosticDetail(state.githubClosureError, secrets)
+    lastError: state.error
+      ? redactDiagnosticDetail(state.error, secrets)
       : null,
     ...waitStatus(state, state.wait, "objective", secrets),
     work,
@@ -1345,6 +1329,7 @@ export function preparationStatusDocument(
     planReview: review?.status
       ? {
           status: review.status,
+          acceptable: review.acceptable !== false,
           question: redact(question),
           digest: shortPlanDigest(preparation.plan!),
         }
@@ -1416,7 +1401,6 @@ export class StateDiagnostics {
             question: work.acceptancePending.question,
             detail: work.acceptancePending.detail,
             reviewFinding: work.acceptancePending.reviewFinding ?? null,
-            reviewRejection: work.acceptancePending.reviewRejection ?? null,
           }),
         });
       }
@@ -1549,8 +1533,6 @@ export class StateDiagnostics {
               detail: this.state.finalAcceptancePending.detail,
               reviewFinding:
                 this.state.finalAcceptancePending.reviewFinding ?? null,
-              reviewRejection:
-                this.state.finalAcceptancePending.reviewRejection ?? null,
             })
           : undefined,
       });

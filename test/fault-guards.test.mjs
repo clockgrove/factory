@@ -20,127 +20,12 @@ import {
 // stopped; the boundary snapshot must change only deliberately.
 
 const run = promisify(execFile);
-const sha = "a".repeat(40);
-const stopped = (message, work, failures = {}) =>
-  summarizeRun({ outcome: "stopped", message, work: workOf(work, failures) });
-function workOf(work, failures) {
-  return Object.fromEntries(
-    Object.entries(work).map(([id, status]) => {
-      const [state, step] = status.split("@");
-      return [
-        id,
-        {
-          status: state,
-          ...(step ? { step } : {}),
-          ...(failures[id] ? { failure: failures[id] } : {}),
-        },
-      ];
-    }),
-  );
-}
-const objectiveStopped = (message) =>
-  `Objective stopped: Objective stopped: ${message}. Use explicit retry or operator direction.. Use explicit retry or operator direction.`;
-const pending = { alpha: "pending", beta: "pending" };
-const published = { alpha: "published", beta: "published" };
-const done = { alpha: "done", beta: "done" };
 
-/** One representative target per diagnosis, as the matrix produces them. */
-const SAMPLES = {
-  GIT_PUSH: stopped(
-    objectiveStopped(
-      `git -C /tmp/t/target push origin ${sha}:refs/heads/factory/objective-1/alpha failed (1): error: RPC failed; HTTP 503`,
-    ),
-    { alpha: "failed@deliver", beta: "pending" },
-  ),
-  GIT_FETCH: stopped(
-    objectiveStopped(
-      "git -C /tmp/t/target fetch --no-tags --no-write-fetch-head --refmap= origin +refs/heads/main:refs/factory/fetch/0f8fad5b-d9cb-469f-a165-70867728950e failed (128): fatal: unable to access 'http://127.0.0.1:1/git/example/r.git/': The requested URL returned error: 503 ",
-    ),
-    published,
-  ),
-  GIT_FETCH_RESET: stopped(
-    objectiveStopped(
-      "git -C /tmp/t/target fetch --no-tags --no-write-fetch-head --refmap= origin +refs/heads/main:refs/factory/fetch/0f8fad5b-d9cb-469f-a165-70867728950e failed (128): fatal: unable to access 'http://127.0.0.1:1/git/example/r.git/': Empty reply from server ",
-    ),
-    { alpha: "failed", beta: "pending" },
-  ),
-  NATIVE_READS: stopped(
-    objectiveStopped("GitHub request failed (HTTP 503)"),
-    published,
-  ),
-  PLANNER_STOP: stopped("socket hang up", {}),
-  FINAL_REVIEW: stopped(objectiveStopped("socket hang up"), done),
-  START_AMBIGUOUS: stopped(
-    "Objective stopped: Work Item beta has ambiguous active state at execute; operator direction required. Use explicit retry or operator direction.",
-    { alpha: "done", beta: "running@execute" },
-  ),
-  START_REPEAT: stopped(
-    objectiveStopped(
-      `git -C /tmp/t/target worktree add --no-checkout --detach /tmp/t/w ${sha} failed (128): Preparing worktree (detached HEAD abc1234) fatal: '/tmp/t/w' already exists `,
-    ),
-    { alpha: "failed@execute", beta: "pending" },
-  ),
-  COLLECT_REPEAT: summarizeRun({
-    outcome: "needs-decision",
-    message:
-      "Objective #1 needs a human decision: Work Item alpha: Failure requires an operator decision",
-    work: workOf(
-      { alpha: "failed@execute", beta: "pending" },
-      {
-        alpha:
-          "git rev-parse HEAD failed (128): fatal: cannot change to '/tmp/t/w': No such file or directory",
-      },
-    ),
-  }),
-  PROJECTION_STOP: stopped(
-    "GitHub mutation outcome unknown; reconcile authenticated evidence before retrying",
-    {},
-  ),
-  CLOSURE_PAUSE: stopped(
-    "Objective #1: GitHub mutation outcome unknown; reconcile authenticated evidence before retrying",
-    done,
-  ),
-  READBACK_LAG: stopped("Work Item hierarchy did not reconcile exactly", {}),
-  MERGE_READ_LAG: stopped(
-    objectiveStopped("PR merge has not confirmed the exact integrated commit"),
-    { alpha: "failed", beta: "pending" },
-  ),
-  TIMELINE_LAG: stopped(
-    objectiveStopped("PR #4 has missing or conflicting merge evidence"),
-    published,
-  ),
-  PULL_LIST_LAG: stopped(objectiveStopped("GitHub request failed (HTTP 422)"), {
-    alpha: "failed@deliver",
-    beta: "pending",
-  }),
-  ISSUE_LIST_LAG: "Work Item alpha has 2 issues with its marker\n{}",
-  STACK_MERGE_REPEAT: stopped(
-    objectiveStopped("GitHub request failed (HTTP 409)"),
-    published,
-  ),
-  SECONDARY_403: stopped(objectiveStopped("GitHub request failed (HTTP 403)"), {
-    alpha: "failed@deliver",
-    beta: "pending",
-  }),
-  PRIMARY_403: stopped(objectiveStopped("GitHub request failed (HTTP 403)"), {
-    alpha: "failed",
-    beta: "pending",
-  }),
-  BASE_MODIFIED: stopped(objectiveStopped("GitHub request failed (HTTP 405)"), {
-    alpha: "failed",
-    beta: "pending",
-  }),
-  PAGE_SHIFT: stopped(
-    "Multiple Work Item issues for alpha; operator direction required",
-    {},
-  ),
-  FOREIGN_PUSH: stopped(
-    objectiveStopped(
-      `Default branch changed before final validation: expected ${sha}, observed ${"b".repeat(40)}`,
-    ),
-    done,
-  ),
-};
+/**
+ * One representative target per diagnosis, as the matrix produces them. Empty
+ * while the known lists are; a new diagnosis adds its sample here.
+ */
+const SAMPLES = {};
 
 test("every diagnosis has a sample, and each sample matches only its own diagnosis", () => {
   assert.deepEqual(Object.keys(SAMPLES).sort(), Object.keys(DIAGNOSES).sort());
@@ -174,41 +59,6 @@ test("no pattern matches the checks' own failure labels", () => {
       assert.equal(diagnosis.pattern.test(label), false, `${key} ~ ${label}`);
 });
 
-test("generic transport text matches only where the run stopped", () => {
-  // A socket hang up while Work Items run is neither a planner stop nor a
-  // final review; a 503 with work in flight is neither projection nor a
-  // native read.
-  const midRun = stopped("socket hang up", {
-    alpha: "running@execute",
-    beta: "pending",
-  });
-  const midDelivery = stopped(
-    objectiveStopped("GitHub request failed (HTTP 503)"),
-    {
-      alpha: "failed@deliver",
-      beta: "pending",
-    },
-  );
-  for (const key of [
-    "PLANNER_STOP",
-    "FINAL_REVIEW",
-    "PROJECTION_STOP",
-    "NATIVE_READS",
-  ]) {
-    assert.equal(DIAGNOSES[key].pattern.test(midRun), false, key);
-    assert.equal(DIAGNOSES[key].pattern.test(midDelivery), false, key);
-  }
-  // The page-shift stop is not a duplicate issue, nor the reverse.
-  assert.equal(
-    DIAGNOSES.ISSUE_LIST_LAG.pattern.test(SAMPLES.PAGE_SHIFT),
-    false,
-  );
-  assert.equal(
-    DIAGNOSES.PAGE_SHIFT.pattern.test(SAMPLES.ISSUE_LIST_LAG),
-    false,
-  );
-});
-
 test("the target is the run that ended the scenario, or the last stop", () => {
   const early = {
     outcome: "stopped",
@@ -221,12 +71,6 @@ test("the target is the run that ended the scenario, or the last stop", () => {
   assert.equal(
     diagnosisTarget({ runs: [early, late] }, "end", error),
     summarizeRun(late),
-  );
-  assert.equal(
-    DIAGNOSES.PAGE_SHIFT.pattern.test(
-      diagnosisTarget({ runs: [early, late] }, "end", error),
-    ),
-    false,
   );
   // After a complete run: the operator-stop check names the last stop, other
   // checks the end-state fact.
@@ -245,14 +89,22 @@ test("the target is the run that ended the scenario, or the last stop", () => {
 });
 
 test("racy and inverted entries share one duplicate check", () => {
+  const diagnoses = {
+    ONE: { text: "one", pattern: /^one$/ },
+    TWO: { text: "two", pattern: /^two$/ },
+  };
   assert.throws(
-    () => todos({ GIT_PUSH: ["a"] }, { START_AMBIGUOUS: ["a"] }),
+    () => todos({ ONE: ["a"] }, { TWO: ["a"] }, diagnoses),
     /Duplicate known failure: a/,
   );
   assert.throws(() => todos({ NOT_A_DIAGNOSIS: ["b"] }), /Unknown diagnosis/);
-  const racy = Object.values(KNOWN.regular).filter((entry) => entry.racy);
-  assert.equal(racy.length, 8);
-  assert.ok(racy.every((entry) => entry.key === "START_AMBIGUOUS"));
+  assert.deepEqual(todos({ ONE: ["a"] }, { TWO: ["b"] }, diagnoses), {
+    a: { key: "ONE", ...diagnoses.ONE },
+    b: { key: "TWO", ...diagnoses.TWO, racy: true },
+  });
+  // Every known list is empty at merge (#515 exit).
+  for (const [suite, entries] of Object.entries(KNOWN))
+    assert.deepEqual(Object.keys(entries), [], suite);
 });
 
 test("the snapshot refuses deliveries it no longer derives and boundary changes", () => {

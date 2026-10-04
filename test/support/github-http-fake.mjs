@@ -19,9 +19,31 @@
 //   with id, node_id, number, open and base; creating one with a nonexistent
 //   PR is 422.
 // - Lists paginate (per_page default 30, max 100) with Link headers, and the
-//   issues list includes pull requests. A 422 carries one errors entry.
+//   issues list includes pull requests. The issues list paginates with an
+//   opaque `after` cursor, and refuses a page number past the first without
+//   one with 422. Link URLs name the repository by id, as GitHub's do:
+//   /repositories/{id}/..., which the fake also serves.
+//   A 422 carries one errors entry.
 // - Every REST response carries x-ratelimit-* headers.
+// - PUT /pulls/{n}/update-branch merges the base into the head branch: 202,
+//   or 422 for a stale expected_head_sha, a closed PR, a conflict or a head
+//   that already contains the base. Under strict protection (`strict`), a PR
+//   whose head lacks the base tip reads BEHIND.
+//   The update is GitHub's commit (committer web-flow, GET /commits/{sha});
+//   GET /compare/{base}...{head} reports identical, ahead, behind or
+//   diverged.
+// - A deleted issue (`deleteIssue`) answers 410 and leaves every list.
+// - With `appToken`, GET /user is 403 (an App installation token has no user)
+//   and what Factory creates is authored by the App's bot login; the classic
+//   protection route is 403 too, and GET /branches/{branch} shows the same
+//   required checks.
 // - Unknown routes are 404 and recorded as `unhandled`.
+//
+// Time: `now` (default Date.now) is the fake's clock. Lag for a number of
+// reads or for a span of time (real GitHub's issue list shows a new issue
+// after 2.5-3.4 s), and merge-async that lands after a span of time (real
+// GitHub: about 5-7 s) both read it, so a test with a manual clock is
+// deterministic.
 //
 // Modes: read-after-write lag per endpoint, fault rules on the Nth matching
 // request (5xx, 429 and 403 rate limits with or without retry-after, a
@@ -74,9 +96,19 @@ const ROUTES = [
   ["GET", "/pulls/:number", "getPull"],
   ["PUT", "/pulls/:number/merge", "mergePull"],
   ["PUT", "/pulls/:number/merge-async", "mergeAsync"],
+  ["PUT", "/pulls/:number/update-branch", "updateBranch"],
   ["GET", "/pulls/:number/merge-async/:uuid", "mergeAsyncStatus"],
   ["GET", "/commits/:sha/check-runs", "checkRuns"],
   ["GET", "/commits/:sha/status", "combinedStatus"],
+  ["GET", "/rules/branches/:branch", "branchRules"],
+  ["GET", "/branches/:branch", "getBranch"],
+  ["GET", "/commits/:sha", "getCommit"],
+  ["GET", "/compare/:basehead", "compare"],
+  [
+    "GET",
+    "/branches/:branch/protection/required_status_checks",
+    "requiredStatusChecks",
+  ],
   ["GET", "/stacks", "listStacks"],
   ["POST", "/stacks", "createStack"],
 ].map(([method, pattern, handler]) => ({
@@ -91,6 +123,7 @@ const ROUTES = [
 /** Endpoint names as they appear in the request log. */
 export const ENDPOINTS = [
   ...ROUTES.map((route) => route.endpoint),
+  "GET /user",
   "POST /graphql",
   "GIT fetch-advertise",
   "GIT fetch",
@@ -217,25 +250,45 @@ export class GitHubHttpFake {
    * @param {string} options.origin path of the bare Git repository
    * @param {{title: string, body: string, labels?: string[]}[]} [options.issues]
    *   issues created first, numbered from 1 (e.g. the Objective)
-   * @param {{read: string, after?: string, reads: number}[]} [options.lag]
+   * @param {{read: string, after?: string, reads?: number, ms?: number}[]} [options.lag]
    *   after each write (to `after`, or any endpoint), the next `reads` reads
-   *   of the `read` endpoint still see the state before that write
+   *   of the `read` endpoint, or every read of it for `ms` on the fake's
+   *   clock, still see the state before that write
+   * @param {() => number} [options.now] the fake's clock in ms (Date.now)
    * @param {(sha: string) => object[]} [options.checkRuns]
    * @param {(sha: string) => object} [options.statuses]
+   * @param {(branch: string) => string[]} [options.rulesetChecks] checks a
+   *   ruleset requires on a branch (none by default)
+   * @param {(branch: string) => string[] | undefined} [options.protectionChecks]
+   *   checks classic branch protection requires (unprotected by default)
    * @param {number} [options.readinessUnknownReads] readiness reads per PR
    *   that report UNKNOWN before GitHub computes mergeability
    * @param {number} [options.asyncMergePolls] merge-async status polls before
    *   the merge lands (0: lands with the PUT, reported on the first poll)
+   * @param {number} [options.asyncMergeMs] merge-async lands this long after
+   *   the PUT on the fake's clock, polled or not (overrides asyncMergePolls)
    * @param {string[]} [options.mergeMethods]
+   * @param {boolean} [options.strict] required checks are strict: a PR
+   *   must contain the base tip before it merges (BEHIND otherwise)
+   * @param {boolean} [options.appToken] the token is an App installation
+   *   token: GET /user is 403 and Factory's objects carry the bot login
    * @param {(entry: object) => void} [options.onCrash] kills the controller
    */
   constructor(options) {
     this.repository = options.repository;
+    /** GitHub's numeric repository id, which its Link URLs use. */
+    this.repositoryId = 1382474350;
     [this.owner, this.name] = options.repository.split("/");
     this.origin = options.origin;
     this.defaultBranch = options.defaultBranch ?? "main";
     this.options = options;
+    /** Who authors what the token creates: the owner, or the App's bot. */
+    this.author = options.appToken
+      ? { login: `${this.name}-factory[bot]`, id: 2, type: "Bot" }
+      : { login: this.owner, id: 1, type: "User" };
     this.lag = (options.lag ?? []).map((rule) => ({ ...rule, served: 0 }));
+    /** The fake's clock: lag spans and merge-async timing read it. */
+    this.now = options.now ?? Date.now;
     this.onCrash = options.onCrash;
     this.rules = [];
     this.log = [];
@@ -257,6 +310,8 @@ export class GitHubHttpFake {
       stacks: [],
       jobs: {},
       readinessReads: {},
+      // Commits GitHub made itself (branch updates), committed by web-flow.
+      webFlow: [],
     };
     for (const issue of options.issues ?? [])
       this.createIssueRecord(this.state, issue);
@@ -392,6 +447,18 @@ export class GitHubHttpFake {
   }
 
   /** Another actor opens an issue. */
+  /** Another actor edits an issue's body. */
+  editIssueBody(number, body) {
+    const issue = this.state.issues[number];
+    issue.body = body;
+    issue.updated_at = this.tick(this.state);
+  }
+
+  /** A maintainer deletes an issue: reads answer 410 and lists omit it. */
+  deleteIssue(number) {
+    this.state.issues[number].deleted = true;
+  }
+
   openForeignIssue(title = "Unrelated issue", body = "Not a Factory issue") {
     return this.createIssueRecord(this.state, { title, body });
   }
@@ -460,11 +527,16 @@ export class GitHubHttpFake {
         ...rateHeaders(),
         ...(rule.headers?.() ?? {}),
       };
+      // A preset removes a header GitHub would otherwise send with null.
+      for (const [name, value] of Object.entries(headers))
+        if (value === null) delete headers[name];
       response.writeHead(rule.status, headers);
       response.end(
         JSON.stringify({
           message: rule.message ?? `Injected HTTP ${rule.status}`,
           documentation_url: "https://docs.github.com/rest",
+          // Real error bodies carry the status as a string (#630).
+          status: String(rule.status),
         }),
       );
       return true;
@@ -495,6 +567,15 @@ export class GitHubHttpFake {
     if (path === "/graphql")
       return method === "POST"
         ? { endpoint: "POST /graphql", handler: "graphql", params: {} }
+        : undefined;
+    if (path === "/user")
+      return method === "GET"
+        ? { endpoint: "GET /user", handler: "viewer", params: {} }
+        : undefined;
+    const byId = /^\/repositories\/(\d+)(\/.*)?$/.exec(path);
+    if (byId)
+      return Number(byId[1]) === this.repositoryId
+        ? this.route(method, `/repos/${this.repository}${byId[2] ?? ""}`)
         : undefined;
     const match = /^\/repos\/([^/]+)\/([^/]+)(\/.*)?$/.exec(path);
     if (!match) return undefined;
@@ -544,6 +625,7 @@ export class GitHubHttpFake {
     const rule = this.matchRules(entry);
     if (this.preEffect(rule, entry, response)) return;
     await this.synchronizeHeads();
+    await this.landDueMerges();
     const reading = method === "GET" || route.handler === "graphql";
     const before = reading ? undefined : structuredClone(this.state);
     const view = reading ? this.view(route.endpoint) : this.state;
@@ -564,6 +646,7 @@ export class GitHubHttpFake {
         data: {
           message: error.message,
           documentation_url: "https://docs.github.com/rest",
+          status: String(error.status),
           ...error.extra,
         },
       };
@@ -606,9 +689,17 @@ export class GitHubHttpFake {
   recordWrite(before, endpoint) {
     const pending = {};
     for (const [index, rule] of this.lag.entries())
-      if (rule.reads > 0 && (!rule.after || rule.after === endpoint))
-        pending[index] = rule.reads;
+      if (rule.after && rule.after !== endpoint) continue;
+      else if (rule.ms > 0) pending[index] = { until: this.now() + rule.ms };
+      else if (rule.reads > 0) pending[index] = rule.reads;
     if (Object.keys(pending).length) this.writes.push({ before, pending });
+  }
+
+  /** Whether a write still lags for one rule: reads left, or time left. */
+  lagging(pending) {
+    return typeof pending === "number"
+      ? pending > 0
+      : pending !== undefined && this.now() < pending.until;
   }
 
   /** The state a read of `endpoint` observes: before the oldest lagging write. */
@@ -618,18 +709,22 @@ export class GitHubHttpFake {
     );
     if (!rules.length) return this.state;
     const lagging = this.writes.find((write) =>
-      rules.some((index) => write.pending[index] > 0),
+      rules.some((index) => this.lagging(write.pending[index])),
     );
     // Count stale reads per rule so a test can prove its lag took effect.
     if (lagging)
       for (const index of rules)
-        if (lagging.pending[index] > 0)
+        if (this.lagging(lagging.pending[index]))
           this.lag[index].served = (this.lag[index].served ?? 0) + 1;
     for (const write of this.writes)
       for (const index of rules)
-        if (write.pending[index] > 0) write.pending[index]--;
+        if (
+          typeof write.pending[index] === "number" &&
+          write.pending[index] > 0
+        )
+          write.pending[index]--;
     this.writes = this.writes.filter((write) =>
-      Object.values(write.pending).some((reads) => reads > 0),
+      Object.values(write.pending).some((pending) => this.lagging(pending)),
     );
     return lagging ? lagging.before : this.state;
   }
@@ -668,7 +763,7 @@ export class GitHubHttpFake {
       state_reason: issue.state_reason ?? null,
       title: issue.title,
       body: issue.body ?? null,
-      user: { login: this.owner, id: 1, type: "User" },
+      user: issue.user,
       labels: issue.labels.map((name) => this.labelJson(s, name)),
       locked: false,
       comments: (s.comments[number] ?? []).length,
@@ -708,7 +803,7 @@ export class GitHubHttpFake {
       locked: false,
       title: issue.title,
       body: issue.body ?? null,
-      user: { login: this.owner },
+      user: { login: this.author.login },
       created_at: issue.created_at,
       updated_at: issue.updated_at,
       closed_at: issue.closed_at ?? null,
@@ -731,7 +826,7 @@ export class GitHubHttpFake {
       const next = new URLSearchParams(query);
       next.set("per_page", String(perPage));
       next.set("page", String(target));
-      return `<${API}${path}?${next}>`;
+      return `<${this.linkUrl(path)}?${next}>`;
     };
     const links = [];
     if (page < last)
@@ -744,7 +839,59 @@ export class GitHubHttpFake {
     };
   }
 
-  createIssueRecord(s, { title, body, labels = [] }, pull) {
+  /**
+   * A cursor page of issue numbers, as GitHub's issue list paginates: `after`
+   * names the last issue of the previous page, and the Link header carries
+   * only rel="next". A page number past the first is refused.
+   */
+  cursorPage(query, numbers, path) {
+    const perPage = Math.min(
+      Math.max(Number(query.get("per_page")) || 30, 1),
+      100,
+    );
+    if ((Number(query.get("page")) || 1) > 1 && query.get("after") === null)
+      throw validation(
+        "Pagination with the page parameter is not supported for large datasets, please use cursor based pagination (after/before)",
+      );
+    const after = query.get("after");
+    let start = 0;
+    if (after !== null) {
+      const match = /^cursor:v2:(\d+)$/.exec(
+        Buffer.from(after, "base64url").toString("utf8"),
+      );
+      if (!match) throw validation("Invalid cursor");
+      // The first issue past the cursor's, even if that one left the list.
+      const last = Number(match[1]);
+      start = numbers.findIndex((number) =>
+        query.get("direction") === "asc" ? number > last : number < last,
+      );
+      if (start < 0) start = numbers.length;
+    }
+    const data = numbers.slice(start, start + perPage);
+    if (start + perPage >= numbers.length) return { data, headers: {} };
+    // GitHub carries a page number next to the cursor.
+    const next = new URLSearchParams(query);
+    next.set("per_page", String(perPage));
+    next.set(
+      "after",
+      Buffer.from(`cursor:v2:${data.at(-1)}`).toString("base64url"),
+    );
+    next.set("page", String((Number(query.get("page")) || 1) + 1));
+    return {
+      data,
+      headers: { link: `<${this.linkUrl(path)}?${next}>; rel="next"` },
+    };
+  }
+
+  /** A Link URL for a /repos/{owner}/{name}/... path, by repository id. */
+  linkUrl(path) {
+    const prefix = `/repos/${this.repository}/`;
+    return path.startsWith(prefix)
+      ? `${API}/repositories/${this.repositoryId}/${path.slice(prefix.length)}`
+      : `${API}${path}`;
+  }
+
+  createIssueRecord(s, { title, body, labels = [], user }, pull) {
     const number = s.nextNumber++;
     const now = this.tick(s);
     for (const name of labels) this.ensureLabel(s, name);
@@ -758,6 +905,7 @@ export class GitHubHttpFake {
       created_at: now,
       updated_at: now,
       pull: Boolean(pull),
+      user: user ?? { login: this.owner, id: 1, type: "User" },
     };
     s.timeline[number] = [];
     if (pull) s.pulls[number] = pull;
@@ -786,6 +934,7 @@ export class GitHubHttpFake {
   requireIssue(s, number) {
     const issue = s.issues[Number(number)];
     if (!issue) throw new HttpError(404, "Not Found");
+    if (issue.deleted) throw new HttpError(410, "This issue was deleted");
     return issue;
   }
 
@@ -822,6 +971,69 @@ export class GitHubHttpFake {
         this.event(this.state, pull.number, "head_ref_force_pushed");
       }
     }
+  }
+
+  async isAncestor(ancestor, descendant) {
+    const result = await gitStatus(
+      this.origin,
+      "merge-base",
+      "--is-ancestor",
+      ancestor,
+      descendant,
+    );
+    return result.status === 0;
+  }
+
+  /**
+   * Update a PR's branch with its base, like the "Update branch" button: a
+   * merge commit of the base tip into the head, guarded by the head the
+   * caller expects.
+   */
+  async updateBranch(s, { params, body }) {
+    const number = Number(params.number);
+    const pull = s.pulls[number];
+    if (!pull) throw new HttpError(404, "Not Found");
+    if (s.issues[number].state !== "open" || pull.merged_at)
+      throw validation("Pull request is not open");
+    if (
+      body?.expected_head_sha !== undefined &&
+      body.expected_head_sha !== pull.head.sha
+    )
+      throw validation("expected head sha didn't match current head ref.");
+    const refs = await this.refs();
+    const base = refs.get(pull.base.ref);
+    if (await this.isAncestor(base, pull.head.sha))
+      throw validation("There are no new commits on the base branch.");
+    const merged = await this.conflicts(pull.head.sha, base);
+    if (!merged) throw validation("merge conflict between base and head");
+    const commit = await git(
+      this.origin,
+      "commit-tree",
+      merged.tree,
+      "-p",
+      pull.head.sha,
+      "-p",
+      base,
+      "-m",
+      `Merge branch '${pull.base.ref}' into ${pull.head.ref}`,
+    );
+    await git(
+      this.origin,
+      "update-ref",
+      `refs/heads/${pull.head.ref}`,
+      commit,
+      pull.head.sha,
+    );
+    pull.head.sha = commit;
+    s.webFlow.push(commit);
+    this.event(s, number, "head_ref_force_pushed");
+    return {
+      status: 202,
+      data: {
+        message: "Updating pull request branch.",
+        url: `https://github.com/${this.repository}/pull/${number}`,
+      },
+    };
   }
 
   async conflicts(base, head) {
@@ -913,9 +1125,17 @@ export class GitHubHttpFake {
     };
   }
 
+  /** The token's user, who authors everything Factory creates here. */
+  viewer() {
+    if (this.options.appToken)
+      throw new HttpError(403, "Resource not accessible by integration");
+    return { status: 200, data: this.author };
+  }
+
   listIssues(s, { query }) {
     const state = query.get("state") ?? "open";
     const labels = query.get("labels")?.split(",").filter(Boolean) ?? [];
+    const creator = query.get("creator");
     const direction = query.get("direction") ?? "desc";
     const sort = query.get("sort") ?? "created";
     if (!["open", "closed", "all"].includes(state))
@@ -928,8 +1148,18 @@ export class GitHubHttpFake {
       .filter((number) =>
         labels.every((name) => s.issues[number].labels.includes(name)),
       )
+      .filter(
+        (number) =>
+          creator === null ||
+          creator.toLowerCase() === s.issues[number].user.login.toLowerCase(),
+      )
+      .filter((number) => !s.issues[number].deleted)
       .sort((a, b) => (direction === "asc" ? a - b : b - a));
-    const page = this.page(query, issues, `/repos/${this.repository}/issues`);
+    const page = this.cursorPage(
+      query,
+      issues,
+      `/repos/${this.repository}/issues`,
+    );
     return {
       status: 200,
       data: page.data.map((number) => this.issueJson(s, number)),
@@ -944,6 +1174,7 @@ export class GitHubHttpFake {
     if (typeof body.body === "string" && body.body.length > 65536)
       throw validation("body is too long (maximum is 65536 characters)");
     const number = this.createIssueRecord(s, {
+      user: this.author,
       title: body.title,
       body: body.body,
       labels: (body.labels ?? []).map((label) =>
@@ -1009,7 +1240,7 @@ export class GitHubHttpFake {
       id: s.nextId++,
       node_id: `IC_${s.nextId}`,
       body: body.body,
-      user: { login: this.owner },
+      user: { login: this.author.login },
       html_url: `https://github.com/${this.repository}/issues/${number}#issuecomment-${s.nextId}`,
       issue_url: `${API}/repos/${this.repository}/issues/${number}`,
       created_at: this.tick(s),
@@ -1076,8 +1307,9 @@ export class GitHubHttpFake {
     if (blocker.number === number)
       throw validation("An issue cannot be blocked by itself");
     s.blockedBy[number] ??= [];
+    // Real GitHub answers a duplicate with a bare message (#628).
     if (s.blockedBy[number].includes(blocker.number))
-      throw validation("Dependency already exists");
+      throw new HttpError(422, "Dependency already exists");
     s.blockedBy[number].push(blocker.number);
     return { status: 201, data: this.issueJson(s, blocker.number) };
   }
@@ -1116,8 +1348,9 @@ export class GitHubHttpFake {
     if (child.number === parent)
       throw validation("An issue cannot be its own sub-issue");
     const current = s.parent[child.number];
+    // Real GitHub answers a duplicate with a bare message (#628).
     if (current === parent)
-      throw validation("Issue is already a sub-issue of this parent");
+      throw new HttpError(422, "Issue is already a sub-issue of this parent");
     if (current !== undefined && body.replace_parent !== true)
       throw validation("Issue may only have one parent");
     if (current !== undefined)
@@ -1238,7 +1471,7 @@ export class GitHubHttpFake {
     const number = s.nextNumber;
     this.createIssueRecord(
       s,
-      { title: body.title, body: body.body },
+      { title: body.title, body: body.body, user: this.author },
       {
         number,
         head: { ref: headRef, sha: headSha },
@@ -1279,11 +1512,31 @@ export class GitHubHttpFake {
     return pull;
   }
 
+  /**
+   * PUT merge, as real GitHub answers it (#627): 403 for any PR in a stack,
+   * merged or not; 200 with the existing merge commit for a PR already
+   * merged; otherwise the mergeability checks.
+   */
   async mergePull(s, { params, body }) {
     const number = Number(params.number);
-    const pull = this.checkMergeable(s, number, body);
+    this.requirePull(s, number);
     if (s.stacks.some((stack) => stack.pulls.includes(number)))
-      throw new HttpError(405, "Stacked pull requests merge as a stack");
+      throw new HttpError(
+        403,
+        "Merging stacked PRs via this endpoint is not supported",
+      );
+    const merged = s.pulls[number];
+    if (merged.merged_at)
+      return {
+        status: 200,
+        effect: false,
+        data: {
+          sha: merged.mergeSha,
+          merged: true,
+          message: "Pull Request successfully merged",
+        },
+      };
+    const pull = this.checkMergeable(s, number, body);
     const sha = await this.mergeCommit(
       pull.base.ref,
       pull.head.sha,
@@ -1353,6 +1606,7 @@ export class GitHubHttpFake {
   /**
    * Land an async merge: the requested PR with every open PR below it in its
    * stack, as one merge commit of the requested head into the stack's base.
+   * The open layer above it then targets the stack's base.
    * Unverified against GitHub: whether each layer reports that one commit on
    * its timeline, or a commit of its own.
    */
@@ -1365,6 +1619,14 @@ export class GitHubHttpFake {
       `Merge pull request #${job.top} from ${this.owner}/${top.head.ref}`,
     );
     for (const number of job.layers) this.markMerged(s, number, sha);
+    // Real GitHub retargets the lowest open layer above the merge onto the
+    // stack's base (#630).
+    const stack = s.stacks.find((candidate) =>
+      candidate.pulls.includes(job.top),
+    );
+    const above = stack?.pulls[stack.pulls.indexOf(job.top) + 1];
+    if (above !== undefined && !s.pulls[above].merged_at)
+      s.pulls[above].base = { ref: base, sha };
     job.sha = sha;
     job.applied = true;
   }
@@ -1382,7 +1644,8 @@ export class GitHubHttpFake {
 
   /**
    * PUT merge-async (API 2026-03-10): 202 pending with a uuid; 200 merged
-   * when the PR already merged; 400 when it is closed or a draft; 409 with
+   * when the PR already merged; 400 when it is closed or a draft, or with a
+   * failed status when the expected head is stale; 409 with
    * the pending request when a merge is already requested. For a stacked PR
    * the merge includes every open PR below it.
    */
@@ -1416,8 +1679,15 @@ export class GitHubHttpFake {
     const method = body.merge_method ?? "merge";
     if (!methods.includes(method) || method !== "merge")
       throw validation(`${method} merges are not allowed on this repository`);
+    // A stale expected head: real GitHub answers 400 with a failed status.
     if (body.sha !== undefined && body.sha !== pull.head.sha)
-      throw validation("Head sha does not match the pull request head");
+      throw new HttpError(
+        400,
+        "Head sha does not match the pull request head",
+        {
+          status: "failed",
+        },
+      );
     const stack = s.stacks.find((candidate) =>
       candidate.pulls.includes(number),
     );
@@ -1431,6 +1701,10 @@ export class GitHubHttpFake {
       top: number,
       layers,
       polls: this.options.asyncMergePolls ?? 0,
+      // Real GitHub keeps a merge-async pending for about 5-7 s.
+      ...(this.options.asyncMergeMs !== undefined
+        ? { landsAt: this.now() + this.options.asyncMergeMs }
+        : {}),
       applied: false,
       merge_method: method,
       merge_action: body.merge_action ?? "default",
@@ -1438,7 +1712,8 @@ export class GitHubHttpFake {
       bypass_rules: body.bypass_rules ?? false,
     };
     s.jobs[job.uuid] = job;
-    if (job.polls <= 0) await this.applyJob(s, job);
+    if (job.landsAt === undefined ? job.polls <= 0 : job.landsAt <= this.now())
+      await this.applyJob(s, job);
     return {
       status: 202,
       data: {
@@ -1448,12 +1723,24 @@ export class GitHubHttpFake {
     };
   }
 
+  /** Land every timed merge-async whose time has come, polled or not. */
+  async landDueMerges() {
+    for (const job of Object.values(this.state.jobs))
+      if (
+        !job.applied &&
+        job.landsAt !== undefined &&
+        job.landsAt <= this.now()
+      )
+        await this.applyJob(this.state, job);
+  }
+
   async mergeAsyncStatus(s, { params }) {
     // A status poll observes the live job, never a lagged snapshot.
     const job = this.state.jobs[params.uuid];
     if (!job || job.top !== Number(params.number))
       throw new HttpError(404, "Not Found");
-    if (!job.applied && --job.polls <= 0) await this.applyJob(this.state, job);
+    if (!job.applied && job.landsAt === undefined && --job.polls <= 0)
+      await this.applyJob(this.state, job);
     return {
       status: 200,
       data: {
@@ -1488,20 +1775,155 @@ export class GitHubHttpFake {
     };
   }
 
-  combinedStatus(s, { params }) {
+  /** Active rules for a branch: required status checks from rulesets. */
+  branchRules(s, { params, query }) {
+    const branch = decodeURIComponent(params.branch);
+    const checks = this.options.rulesetChecks?.(branch) ?? [];
+    const rules = checks.length
+      ? [
+          {
+            type: "required_status_checks",
+            ruleset_source_type: "Repository",
+            ruleset_source: this.repository,
+            ruleset_id: 1,
+            parameters: {
+              strict_required_status_checks_policy: Boolean(
+                this.options.strict,
+              ),
+              required_status_checks: checks.map((context) => ({ context })),
+            },
+          },
+        ]
+      : [];
+    const page = this.page(
+      query,
+      rules,
+      `/repos/${this.repository}/rules/branches/${params.branch}`,
+    );
+    return { status: 200, data: page.data, headers: page.headers };
+  }
+
+  /** Classic protection's required status checks; 404 when unprotected. */
+  requiredStatusChecks(s, { params }) {
+    const branch = decodeURIComponent(params.branch);
+    const checks = this.options.protectionChecks?.(branch);
+    if (!checks) throw new HttpError(404, "Branch not protected");
+    if (this.options.appToken)
+      throw new HttpError(403, "Resource not accessible by integration");
+    return {
+      status: 200,
+      data: {
+        url: `${API}/repos/${this.repository}/branches/${params.branch}/protection/required_status_checks`,
+        strict: Boolean(this.options.strict),
+        contexts: checks,
+        checks: checks.map((context) => ({ context, app_id: null })),
+      },
+    };
+  }
+
+  /** A branch with its protection's required checks (readable with read access). */
+  async getBranch(s, { params }) {
+    const branch = decodeURIComponent(params.branch);
+    const sha = (await this.refs()).get(branch);
+    if (!sha) throw new HttpError(404, "Branch not found");
+    const checks = this.options.protectionChecks?.(branch);
+    return {
+      status: 200,
+      data: {
+        name: branch,
+        commit: { sha },
+        protected: Boolean(checks),
+        protection: checks
+          ? {
+              enabled: true,
+              required_status_checks: {
+                enforcement_level: "non_admins",
+                contexts: checks,
+                checks: checks.map((context) => ({ context, app_id: null })),
+              },
+            }
+          : { enabled: false, required_status_checks: null },
+      },
+    };
+  }
+
+  /** A commit with its parents; GitHub's own commits name web-flow. */
+  async getCommit(s, { params }) {
+    const result = await gitStatus(
+      this.origin,
+      "rev-list",
+      "--parents",
+      "-n",
+      "1",
+      params.sha,
+    );
+    if (result.status !== 0)
+      throw validation(`No commit found for SHA: ${params.sha}`);
+    const [sha, ...parents] = result.stdout.trim().split(" ");
+    const login = s.webFlow.includes(sha) ? "web-flow" : this.owner;
+    return {
+      status: 200,
+      data: {
+        sha,
+        url: `${API}/repos/${this.repository}/commits/${sha}`,
+        parents: parents.map((parent) => ({ sha: parent })),
+        author: { login },
+        committer: { login },
+      },
+    };
+  }
+
+  /** How `head` relates to `base` (`base...head`, branch names or SHAs). */
+  async compare(s, { params }) {
+    const [base, head] = decodeURIComponent(params.basehead).split("...");
+    const resolve = async (ref) => {
+      const result = await gitStatus(
+        this.origin,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `${ref}^{commit}`,
+      );
+      if (result.status !== 0) throw new HttpError(404, "Not Found");
+      return result.stdout.trim();
+    };
+    const [from, to] = [await resolve(base), await resolve(head)];
+    const status =
+      from === to
+        ? "identical"
+        : (await this.isAncestor(from, to))
+          ? "ahead"
+          : (await this.isAncestor(to, from))
+            ? "behind"
+            : "diverged";
+    return { status: 200, data: { status, base_commit: { sha: from } } };
+  }
+
+  combinedStatus(s, { params, query }) {
     // With no commit statuses GitHub reports a pending combined state.
-    const statuses = this.options.statuses?.(params.sha) ?? [];
-    const state = statuses.some((status) =>
+    const all = this.options.statuses?.(params.sha) ?? [];
+    const page = this.page(
+      query,
+      all,
+      `/repos/${this.repository}/commits/${params.sha}/status`,
+    );
+    // The combined state covers every status; the list is one page.
+    const state = all.some((status) =>
       ["error", "failure"].includes(status.state),
     )
       ? "failure"
-      : statuses.length &&
-          statuses.every((status) => status.state === "success")
+      : all.length && all.every((status) => status.state === "success")
         ? "success"
         : "pending";
     return {
       status: 200,
-      data: { state, sha: params.sha, total_count: statuses.length, statuses },
+      data: {
+        state,
+        sha: params.sha,
+        total_count: all.length,
+        statuses: page.data,
+      },
+      headers: page.headers,
     };
   }
 
@@ -1545,7 +1967,10 @@ export class GitHubHttpFake {
         const base = refs.get(pull.base.ref);
         status =
           base && (await this.conflicts(base, pull.head.sha))
-            ? "CLEAN"
+            ? this.options.strict &&
+              !(await this.isAncestor(base, pull.head.sha))
+              ? "BEHIND"
+              : "CLEAN"
             : "DIRTY";
       }
     }
@@ -1666,9 +2091,10 @@ export const faults = {
     headers: () =>
       retryAfter === undefined ? {} : { "retry-after": String(retryAfter) },
   }),
-  secondaryRateLimit: ({ retryAfter } = {}) => ({
+  // GitHub answers a secondary limit with 403 or 429, the body naming it.
+  secondaryRateLimit: ({ retryAfter, status = 403 } = {}) => ({
     kind: "status",
-    status: 403,
+    status,
     message:
       "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
     headers: () =>
@@ -1685,6 +2111,17 @@ export const faults = {
       "x-ratelimit-reset": String(
         Math.ceil(Date.now() / 1000 + resetInSeconds),
       ),
+    }),
+  }),
+  // An exhausted primary limit whose reset header a proxy stripped.
+  primaryRateLimitWithoutReset: () => ({
+    kind: "status",
+    status: 403,
+    message: "API rate limit exceeded for user ID 1.",
+    headers: () => ({
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-used": "5000",
+      "x-ratelimit-reset": null,
     }),
   }),
   baseModified: () => ({

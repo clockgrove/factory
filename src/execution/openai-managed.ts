@@ -1,7 +1,7 @@
 import { classifyFaults } from "../fault.js";
-import { executionFault } from "./fault.js";
+import { executionFault, missingCredential } from "./fault.js";
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   ContentStore,
@@ -12,14 +12,13 @@ import type {
   ExecutionRequest,
   ExecutionResult,
 } from "../contracts.js";
-import { Interruption } from "../contracts.js";
 import { hasUnresolvedSubprocesses, removeWorktree } from "../process.js";
 import {
-  SettledAttemptFailure,
-  failAttempt,
-  retryTransient,
-  transientRequestFailure,
-} from "../work-repair.js";
+  cancelledFault,
+  endAttempt,
+  stoppedFault,
+  transportFailure,
+} from "./attempt.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import { collectWorktreeResult } from "./local.js";
 import {
@@ -94,7 +93,7 @@ export class OpenAIAgentsClient implements OpenAIManagedTransport {
       throw new Error("Invalid Agents API path");
     const key = this.apiKey ?? process.env[this.keyName];
     if (!key)
-      throw new Error(
+      throw missingCredential(
         `OpenAI Agents API requires controller credential ${this.keyName}`,
       );
     return this.fetcher(`https://api.openai.com/v1${path}`, {
@@ -248,14 +247,13 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       data.startedAt + this.args.config.timeoutSeconds * 1000 <= Date.now()
     );
   }
-  /** Ends the attempt for a failed step; see failAttempt. */
+  /** Ends the attempt for a failed step; see endAttempt. */
   private async fail(
     error: unknown,
     handle: ExecutionHandle,
     context: ExecutionContext,
   ): Promise<never> {
-    return failAttempt(error, {
-      transient: transientRequestFailure,
+    return endAttempt(error, {
       expired: this.expired(this.active(handle)),
       cancelled: context.cancelled(),
       settle: (detail) => this.settle(handle, context, detail, false),
@@ -278,15 +276,8 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       });
     data.stopped ??= { detail, interrupted };
     this.save(handle, context);
-    try {
-      await this.stop(handle, "failed", context);
-    } catch (error) {
-      throw transientRequestFailure(error) ? new Interruption(error) : error;
-    }
-    throw new SettledAttemptFailure(
-      new Error(data.stopped.detail),
-      data.stopped.interrupted ? "interruption" : "implementation",
-    );
+    await this.stop(handle, "failed", context);
+    throw stoppedFault(data.stopped.detail, data.stopped.interrupted);
   }
   private async request(
     data: Active,
@@ -417,16 +408,15 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       if (
         !context.cancelled() &&
         !this.expired(data) &&
-        transientRequestFailure(error)
+        transportFailure(error)
       ) {
         // A known session's recorded phase is resolved by collection. A lost
-        // create cannot be found, so the attempt ends here without spending
-        // a step interruption first.
+        // create cannot be found, so the attempt ends here without a result.
         if (data.sessionId) return handle;
         await this.settle(
           handle,
           context,
-          "Managed session creation outcome is unknown; repeating with a fresh attempt",
+          "Managed session creation outcome is unknown",
           true,
         );
       }
@@ -454,7 +444,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       await this.wait(data);
     }
     if (context.cancelled())
-      throw new Error("Managed input cancelled before submission");
+      throw cancelledFault("Managed input cancelled before submission");
     this.remaining(data);
     data.phase = "input-submitted";
     this.save(handle, context);
@@ -493,8 +483,18 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     );
   }
 
+  /**
+   * Faults are classified once, here at the driver boundary. Collection
+   * reads through `observeActive`, so `endAttempt` sees the raw error.
+   */
   @classifyFaults(executionFault)
   async observe(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionObservation> {
+    return this.observeActive(handle, context);
+  }
+  private async observeActive(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<ExecutionObservation> {
@@ -513,8 +513,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       return {
         state: "failed",
         interrupted: true,
-        detail:
-          "Managed session creation outcome is unknown; repeating with a fresh attempt",
+        detail: "Managed session creation outcome is unknown",
       };
     if (data.phase === "prepared")
       return { state: "running", detail: "Preparing the managed session" };
@@ -639,6 +638,27 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
   ): Promise<void> {
     await this.stop(handle, "cancelled", context);
   }
+  /** Start checkpoints before any provider call: only local input files can exist. */
+  @classifyFaults(executionFault)
+  async cancelUnrecorded(attemptId: string): Promise<void> {
+    if (!/^[A-Za-z0-9_-]+$/.test(attemptId))
+      throw new Error("Invalid OpenAI managed attempt identity");
+    rmSync(join(this.args.workRoot, attemptId), {
+      recursive: true,
+      force: true,
+    });
+  }
+  /** A session that stopped without a result is stopped again (idempotent) to confirm it. */
+  @classifyFaults(executionFault)
+  async find(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionHandle | undefined> {
+    const data = this.active(handle);
+    if (data.result || !data.stopped?.interrupted) return handle;
+    await this.stop(handle, "failed", context);
+    return undefined;
+  }
   /** Stops the owned turn, if any, and deletes the session. */
   private async stop(
     handle: ExecutionHandle,
@@ -676,7 +696,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       }
     }
     while (data.phase !== "delete-submitted") {
-      const observed = await this.observe(handle, context);
+      const observed = await this.observeActive(handle, context);
       if (observed.state !== "running") break;
       await this.wait(data);
     }
@@ -712,11 +732,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       }
       this.save(handle, context);
     }
-    try {
-      if (data.phase !== "disposed") await this.dispose(handle, context);
-    } catch (error) {
-      throw transientRequestFailure(error) ? new Interruption(error) : error;
-    }
+    if (data.phase !== "disposed") await this.dispose(handle, context);
     return data.result!;
   }
   private async produce(
@@ -725,12 +741,11 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
   ): Promise<ExecutionResult> {
     const data = this.active(handle);
     while (true) {
-      // Each pass resolves the recorded phase first, so a transient failure
-      // is retried in place; a lost input is resolved from the turn list.
-      const observed = await retryTransient(async () => {
-        if (data.phase === "prepared") await this.submitInput(handle, context);
-        return this.observe(handle, context);
-      }, transientRequestFailure);
+      // Each pass resolves the recorded phase first, so a transport failure
+      // leaves collect and the step's repeat resumes here; a lost input is
+      // resolved from the turn list.
+      if (data.phase === "prepared") await this.submitInput(handle, context);
+      const observed = await this.observeActive(handle, context);
       if (observed.state === "complete") break;
       if (observed.state !== "running")
         await this.settle(

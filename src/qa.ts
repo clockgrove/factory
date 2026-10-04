@@ -21,6 +21,7 @@ export function objectiveCandidate(
     | "graph"
     | "baseSha"
     | "integratedSha"
+    | "finalHead"
     | "work"
     | "stackNumbers"
     | "stackMerges"
@@ -42,16 +43,24 @@ export function objectiveCandidate(
           work.preIntegrationChecks?.length,
       ) ||
       Object.keys(state.stackNumbers ?? {}).length ||
-      Object.keys(state.stackMerges ?? {}).length
+      Object.keys(state.stackMerges ?? {}).length ||
+      state.finalHead
     )
       throw new Error(
         "Baseline-only QA cannot claim current-graph integration",
       );
     return { basis: "pinned-baseline", commitSha: state.baseSha };
   }
-  return state.integratedSha
-    ? { basis: "current-graph-integration", commitSha: state.integratedSha }
-    : undefined;
+  if (!state.integratedSha) return undefined;
+  // Heads others pushed on top of Factory's integration, when followed.
+  const followed =
+    state.finalHead?.integratedSha === state.integratedSha
+      ? state.finalHead.heads.at(-1)
+      : undefined;
+  return {
+    basis: "current-graph-integration",
+    commitSha: followed ?? state.integratedSha,
+  };
 }
 
 /** New parents join implementation delivery and read-only proof, not fictional QA delivery. */

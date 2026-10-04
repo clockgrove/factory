@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { attachFault, faultOf } from "../dist/fault.js";
-import { GitHubOutcomeUnknown } from "../dist/github-client.js";
+import { setLagClock } from "../dist/delivery/lag.js";
+import { attachFault, faultOf, requestFault } from "../dist/fault.js";
 import { readState } from "../dist/state-store.js";
 import {
   createTarget,
@@ -16,7 +16,7 @@ import {
 import { resultFindings } from "./support/review-protocol.mjs";
 
 // An interruption is not a failure of the work: Factory repeats the step in
-// the same run (at most twice per attempt) instead of stopping.
+// the same run instead of stopping (a paid step up to its bound).
 
 const objective = 1;
 const command = 'test "$(cat result.txt)" = result';
@@ -98,6 +98,14 @@ function passingReview(request) {
   };
 }
 
+/** A review answer lost mid-call, classified as the model adapter does. */
+const lostAnswer = () =>
+  attachFault(new Error("socket hang up"), {
+    kind: "transient",
+    detail: "Model connection failed mid-call: socket hang up",
+    outcomeUnknown: true,
+  });
+
 const mergeEvents = (github) =>
   github
     .state()
@@ -114,7 +122,7 @@ for (const delivery of ["regular", "native-stack"])
         {
           resultReviewer(request) {
             reviews++;
-            if (reviews === 1) throw new Error("socket hang up");
+            if (reviews === 1) throw lostAnswer();
             return passingReview(request);
           },
         },
@@ -136,7 +144,13 @@ for (const delivery of ["regular", "native-stack"])
         let calls = 0;
         github.merge = async (...args) => {
           const result = await original(...args);
-          if (++calls === 1) throw new GitHubOutcomeUnknown();
+          // As the client raises it: a lost response, outcome unknown.
+          if (++calls === 1)
+            throw attachFault(new Error("GitHub mutation outcome unknown"), {
+              kind: "transient",
+              detail: "GitHub PUT response was lost; it may have taken effect",
+              outcomeUnknown: true,
+            });
           return result;
         };
         const state = await application.runObjective(objective);
@@ -146,12 +160,18 @@ for (const delivery of ["regular", "native-stack"])
       });
     });
 
-    test("a merge the default branch does not show yet is classified as lag", async () => {
+    test("a merge the default branch does not show is lag for GitHub's lag window, then a defect", async (t) => {
       await withApp(
         "ancestry",
         delivery,
         {},
         async ({ application, github, descriptor }) => {
+          // GitHub's two-minute lag window passes in a fraction of a second.
+          const started = Date.now();
+          const restore = setLagClock(
+            () => started + (Date.now() - started) * 1_000,
+          );
+          t.after(restore);
           const checkout = descriptor.config.checkout;
           // A commit GitHub reports as merged but the fetched default
           // branch does not contain yet.
@@ -177,34 +197,36 @@ for (const delivery of ["regular", "native-stack"])
           const error = await application
             .runObjective(objective)
             .catch((caught) => caught);
+          // The merge step repeats while GitHub may lag (two minutes), then
+          // stops: the default branch lost a merge GitHub confirmed.
           assert.match(error.message, /Default branch does not contain/);
-          assert.deepEqual(
-            [faultOf(error).kind, faultOf(error).outcomeUnknown],
-            ["transient", false],
-          );
+          assert.equal(faultOf(error).kind, "defect");
         },
       );
     });
 
-    test("an issue closure failure keeps the gateway's fault as its cause", async () => {
+    test("a transient issue closure failure repeats until the issue closes", async () => {
       await withApp(
         "closure",
         delivery,
         {},
         async ({ application, github }) => {
-          const outage = attachFault(new Error("GitHub HTTP 502"), {
-            kind: "transient",
-            detail: "GitHub HTTP 502",
-            outcomeUnknown: false,
-          });
-          github.closeIssue = async () => {
-            throw outage;
+          const close = github.closeIssue.bind(github);
+          let failures = 0;
+          github.closeIssue = async (...args) => {
+            if (failures++ < 2)
+              throw attachFault(new Error("GitHub HTTP 502"), {
+                kind: "transient",
+                detail: "GitHub HTTP 502",
+                outcomeUnknown: false,
+              });
+            return close(...args);
           };
-          const error = await application
-            .runObjective(objective)
-            .catch((caught) => caught);
-          assert.ok(error instanceof Error, String(error));
-          assert.deepEqual(faultOf(error), faultOf(outage));
+          const state = await application.runObjective(objective);
+          assert.equal(state.work.result.githubClosure, "complete");
+          assert.equal(state.objectiveClosure, "complete");
+          assert.equal(state.repeats, undefined);
+          assert.equal(failures, 4);
         },
       );
     });
@@ -226,7 +248,7 @@ for (const delivery of ["regular", "native-stack"])
       );
     });
 
-    test("a persistent interruption stops after two repeats and allows retry", async () => {
+    test("a review answer lost past the paid bound asks the operator and allows retry", async () => {
       let reviews = 0;
       await withApp(
         "persistent",
@@ -234,23 +256,27 @@ for (const delivery of ["regular", "native-stack"])
         {
           resultReviewer(request) {
             reviews++;
-            if (reviews <= 3) throw new Error("socket hang up");
+            if (reviews <= 4) throw lostAnswer();
             return passingReview(request);
           },
         },
         async ({ application, descriptor }) => {
-          await assert.rejects(
-            application.runObjective(objective),
-            /socket hang up/,
+          // Three lost answers repeat; the fourth is a decision for this
+          // item only: the run waits instead of stopping the Objective.
+          const waiting = await application.runObjective(objective);
+          assert.equal(waiting.error, undefined);
+          assert.equal(reviews, 4);
+          // The item waits in place for the answer (contract 2).
+          const asked = readState(descriptor.config.repository, objective);
+          assert.equal(asked.error, undefined);
+          assert.equal(asked.work.result.status, "running");
+          assert.equal(asked.work.result.recovery?.failure, undefined);
+          assert.equal(asked.work.result.wait?.kind, "decision");
+          assert.match(
+            asked.work.result.wait.detail,
+            /review failed 4 times .*retry or cancel/,
           );
-          assert.equal(reviews, 3);
-          const failed = readState(descriptor.config.repository, objective);
-          assert.equal(failed.work.result.status, "failed");
-          assert.equal(
-            failed.work.result.recovery.failure.classification,
-            "interruption",
-          );
-          application.retryWorkItem(objective, "result");
+          assert.equal(application.retryWorkItem(objective, "result"), "step");
           const state = await application.runObjective(objective);
           assert.equal(state.finalValidation.passed, true);
         },
@@ -258,81 +284,28 @@ for (const delivery of ["regular", "native-stack"])
     });
   });
 
-test("provider request failures in transit are transient; refusals are not", async () => {
-  const { transientRequestFailure } = await import("../dist/work-repair.js");
+test("provider request failures in transit are transient; refusals are not", () => {
+  const transient = (error) =>
+    requestFault(error, { outcomeUnknown: true, fix: "fix" })?.kind ===
+    "transient";
   const status = (code) => Object.assign(new Error("http"), { status: code });
   for (const code of [408, 429, 500, 503])
-    assert.equal(transientRequestFailure(status(code)), true, String(code));
+    assert.equal(transient(status(code)), true, String(code));
   for (const code of [400, 401, 403, 404, 409, 422])
-    assert.equal(transientRequestFailure(status(code)), false, String(code));
+    assert.equal(transient(status(code)), false, String(code));
   assert.equal(
-    transientRequestFailure(
-      Object.assign(new Error("daytona"), { statusCode: 502 }),
-    ),
+    transient(Object.assign(new Error("daytona"), { statusCode: 502 })),
     true,
   );
   assert.equal(
-    transientRequestFailure(
+    transient(
       new TypeError("fetch failed", {
         cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }),
       }),
     ),
     true,
   );
-  assert.equal(
-    transientRequestFailure(new DOMException("timed out", "TimeoutError")),
-    true,
-  );
-  assert.equal(transientRequestFailure(new TypeError("x is undefined")), false);
-  assert.equal(transientRequestFailure(new Error("invalid result")), false);
-});
-
-test("transient failures are retried in place until the budget, then surface", async () => {
-  const { retryTransient, transientRequestFailure } = await import(
-    "../dist/work-repair.js"
-  );
-  const unavailable = () =>
-    Object.assign(new Error("unavailable"), { status: 503 });
-  let calls = 0;
-  assert.equal(
-    await retryTransient(
-      async () => {
-        if (++calls < 3) throw unavailable();
-        return "read";
-      },
-      transientRequestFailure,
-      1_000,
-      1,
-    ),
-    "read",
-  );
-  assert.equal(calls, 3);
-  calls = 0;
-  await assert.rejects(
-    retryTransient(
-      async () => {
-        calls++;
-        throw unavailable();
-      },
-      transientRequestFailure,
-      30,
-      5,
-    ),
-    /unavailable/,
-  );
-  assert.ok(calls >= 2 && calls < 10);
-  calls = 0;
-  await assert.rejects(
-    retryTransient(
-      async () => {
-        calls++;
-        throw Object.assign(new Error("forbidden"), { status: 403 });
-      },
-      transientRequestFailure,
-      1_000,
-      1,
-    ),
-    /forbidden/,
-  );
-  assert.equal(calls, 1);
+  assert.equal(transient(new DOMException("timed out", "TimeoutError")), true);
+  assert.equal(transient(new TypeError("x is undefined")), false);
+  assert.equal(transient(new Error("invalid result")), false);
 });

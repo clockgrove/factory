@@ -1,16 +1,10 @@
-import { setTimeout } from "node:timers/promises";
 import { Octokit } from "@octokit/core";
 import { attachFault, decision, transient, type Fault } from "./fault.js";
-import { commandAsync, currentProcessSignal } from "./process.js";
-
-/** A mutation may have reached GitHub even when its response was lost. */
-export class GitHubOutcomeUnknown extends Error {
-  constructor() {
-    super(
-      "GitHub mutation outcome unknown; reconcile authenticated evidence before retrying",
-    );
-  }
-}
+import {
+  commandAsync,
+  currentProcessSignal,
+  withProcessCancellation,
+} from "./process.js";
 
 /**
  * GitHub refusals recognised by their documented message or error code.
@@ -26,9 +20,26 @@ export class GitHubRequestError extends Error {
   constructor(
     readonly status: number,
     readonly refusal?: GitHubRefusal,
+    /** A 409 to merge-async names the merge request already pending. */
+    readonly pendingMerge?: string,
   ) {
     super(`GitHub request failed (HTTP ${status})`);
   }
+}
+
+/** The pending merge request a 409 to merge-async answers with, if any. */
+function pendingMerge(status: number, data: unknown): string | undefined {
+  const body = data as
+    | { status?: unknown; details?: { uuid?: unknown } | null }
+    | null
+    | undefined;
+  const uuid = body?.details?.uuid;
+  return status === 409 &&
+    body?.status === "pending" &&
+    typeof uuid === "string" &&
+    /^[A-Za-z0-9-]{1,64}$/.test(uuid)
+    ? uuid
+    : undefined;
 }
 
 /** GitHub's documented minimum wait when a limit gives no reset time. */
@@ -83,6 +94,17 @@ export interface GitHubCall {
   head?: "ours" | "foreign";
 }
 
+/**
+ * Factory integrates with merge commits: its integration evidence binds
+ * the delivered head as the merge commit's second parent.
+ */
+export const MERGE_COMMITS_REQUIRED: Extract<Fault, { kind: "config" }> = {
+  kind: "config",
+  detail:
+    "The repository does not allow merge commits, which Factory needs to bind each delivered head into the default branch",
+  fix: "Allow merge commits in the repository settings (Settings → General → Pull Requests), then `factory run`",
+};
+
 const GITHUB_PERMISSION_FIX =
   "Give the GitHub login write access to the repository's contents, issues and pull requests, then `factory run`";
 
@@ -104,6 +126,12 @@ export function gitHubFault(
   const what = `${call.method} ${path || "repository"}`;
   const merge = /^pulls\/\d+\/merge(-async)?$/.test(path);
   switch (error.status) {
+    case 400:
+      // merge-async answers a head that moved with 400 {status: "failed"}:
+      // the repeat observes the head again, which settles it (#627).
+      return merge
+        ? transient(`GitHub refused ${what} at a stale head`, false)
+        : undefined;
     case 401:
       return { ...GITHUB_LOGIN, detail: `GitHub rejected the login (${what})` };
     case 403:
@@ -136,11 +164,7 @@ export function gitHubFault(
     case 405:
       if (!merge) return undefined;
       if (error.refusal === "merge-method-not-allowed")
-        return {
-          kind: "config",
-          detail: "The repository does not allow merge commits",
-          fix: "Allow merge commits in the repository settings, then `factory run`",
-        };
+        return MERGE_COMMITS_REQUIRED;
       // Re-observe and repeat with the same head.
       if (error.refusal === "base-modified")
         return transient(`The base branch moved during ${what}`, false);
@@ -150,6 +174,9 @@ export function gitHubFault(
       );
     case 409:
       if (!merge) return undefined;
+      // A merge request already pending (its response was lost): poll it.
+      if (error.pendingMerge)
+        return transient(`A merge is already requested (${what})`, false);
       return call.head === "foreign"
         ? decision(
             "The pull request head differs from what Factory recorded. Inspect it, then retry or cancel.",
@@ -230,15 +257,6 @@ export async function classifiedGitHubCall<T>(
   }
 }
 
-/** Classify only an actual acknowledged rejection; retained prose is never evidence. */
-export function isCompletedProjectionRejection(error: unknown): boolean {
-  return (
-    error instanceof GitHubRequestError &&
-    error.status >= 400 &&
-    error.status < 500
-  );
-}
-
 /** One account/host gate shared by ordinary and native-stack delivery. No retries. */
 export class GitHubClient {
   private client?: Promise<Octokit>;
@@ -253,12 +271,11 @@ export class GitHubClient {
         if (this.supplied) return this.supplied;
         let token: string;
         try {
-          token = await commandAsync("gh", [
-            "auth",
-            "token",
-            "--hostname",
-            "github.com",
-          ]);
+          // A credential helper is not owned work: it keeps the caller's
+          // cancellation but is not recorded in coordinator.processes.
+          token = await withProcessCancellation(currentProcessSignal(), () =>
+            commandAsync("gh", ["auth", "token", "--hostname", "github.com"]),
+          );
         } catch {
           throw attachFault(
             new Error("GitHub credential lookup failed"),
@@ -343,6 +360,20 @@ export class GitHubClient {
     if (!["GET", "POST", "PATCH", "PUT", "DELETE"].includes(method))
       throw new Error("Unsupported GitHub method");
     return this.dispatch<T>(method, route, body, observation, method === "GET");
+  }
+
+  /** The login of the token's user: the author of everything Factory creates. */
+  async viewer(): Promise<string> {
+    const user = await this.dispatch<{ login?: unknown }>(
+      "GET",
+      "user",
+      undefined,
+      undefined,
+      true,
+    );
+    if (typeof user?.login !== "string" || !user.login)
+      throw new Error("GitHub returned no login for the token's user");
+    return user.login;
   }
 
   /** Fixed repository-scoped observation; callers cannot submit arbitrary GraphQL. */
@@ -437,7 +468,13 @@ export class GitHubClient {
     readOnly: boolean,
   ): Promise<T> {
     const signal = currentProcessSignal();
-    signal?.throwIfAborted();
+    // Cancelled before the request was sent: nothing reached GitHub.
+    const cancelled = () =>
+      attachFault(new Error("GitHub request cancelled before dispatch"), {
+        kind: "cancelled",
+        detail: `GitHub ${method} cancelled before it was sent`,
+      });
+    if (signal?.aborted) throw cancelled();
     const previous = this.queue;
     let release!: () => void;
     this.queue = new Promise<void>((resolve) => {
@@ -445,17 +482,25 @@ export class GitHubClient {
     });
     let abortListener: (() => void) | undefined;
     const aborted = new Promise<never>((_resolve, reject) => {
-      abortListener = () =>
-        reject(new Error("GitHub request cancelled before dispatch"));
+      abortListener = () => reject(cancelled());
       signal?.addEventListener("abort", abortListener, { once: true });
     });
+    // Unobserved when the queue wins the race.
+    aborted.catch(() => undefined);
     try {
       await Promise.race([previous, aborted]);
-      signal?.throwIfAborted();
+      if (signal?.aborted) throw cancelled();
       const client = await this.octokit();
-      while (Date.now() < this.notBefore)
-        await setTimeout(this.notBefore - Date.now(), undefined, { signal });
-      signal?.throwIfAborted();
+      // Rate-limited: nothing is sent. The caller's step waits until the
+      // gate opens, where pause, drain and handoff can stop it (#641).
+      if (Date.now() < this.notBefore) {
+        const until = new Date(this.notBefore).toISOString();
+        // A command outside a step reports this message: name the reset.
+        throw attachFault(
+          new Error(`GitHub request held by the rate limit until ${until}`),
+          transient(`GitHub rate limit until ${until}`, false, until),
+        );
+      }
       try {
         const response = await client.request(`${method} /${route}`, {
           ...body,
@@ -472,6 +517,7 @@ export class GitHubClient {
             ? {
                 status: response.status,
                 etag: response.headers.etag,
+                link: response.headers.link,
                 data: response.data,
               }
             : response.data
@@ -494,12 +540,13 @@ export class GitHubClient {
           return { status: 304, etag: error.response?.headers?.etag } as T;
         // Only facts that mean the same for every caller are classified
         // here; the gateway classifies statuses whose meaning depends on it.
+        // A mutation may have reached GitHub even when its response was lost.
         if (
           !readOnly &&
           (!error.status || error.status >= 500 || signal?.aborted)
         )
           throw attachFault(
-            new GitHubOutcomeUnknown(),
+            new Error(`GitHub ${method} outcome unknown`),
             transient(
               error.status
                 ? `GitHub answered HTTP ${error.status} to a ${method}; it may have taken effect`
@@ -511,6 +558,7 @@ export class GitHubClient {
           const rejection = new GitHubRequestError(
             error.status,
             refusal(error.status, error.response?.data),
+            pendingMerge(error.status, error.response?.data),
           );
           throw attachFault(
             rejection,
@@ -536,32 +584,76 @@ export class GitHubClient {
     }
   }
 
+  /**
+   * Every page of a list, following GitHub's Link rel="next": a page number
+   * on most lists, an opaque cursor on the issue list (#630).
+   */
   async paginate<T>(route: string): Promise<T[]> {
+    const repository = /^repos\/[^/]+\/[^/]+\//.exec(route)?.[0];
+    if (!repository)
+      throw new Error("GitHub route is outside the approved repository API");
     const result: T[] = [];
-    for (let page = 1; ; page++) {
-      const values = await this.request<T[]>(
+    const seen = new Set<string>();
+    let next: string | undefined =
+      `${route}${route.includes("?") ? "&" : "?"}per_page=100`;
+    while (next) {
+      if (seen.has(next))
+        throw new Error("GitHub returned a paginated response that repeats");
+      seen.add(next);
+      const page: { data?: unknown; link?: string } = await this.request(
         "GET",
-        `${route}${route.includes("?") ? "&" : "?"}per_page=100&page=${page}`,
+        next,
+        undefined,
+        {},
       );
-      if (!Array.isArray(values))
+      if (!Array.isArray(page.data))
         throw new Error("GitHub returned an invalid paginated response");
-      result.push(...values);
-      if (values.length < 100) return result;
+      result.push(...(page.data as T[]));
+      next = nextPage(page.link, repository);
     }
+    return result;
   }
+}
+
+/**
+ * The route of a Link header's rel="next" page on api.github.com, if any,
+ * within `repository` (the `repos/<owner>/<name>/` prefix of the first page).
+ * GitHub links later pages by repository id (`repositories/<id>/...`); that
+ * id names the repository the first page was read from, so the page is read
+ * through the same approved `repos/<owner>/<name>/` route (#646).
+ */
+function nextPage(
+  link: string | undefined,
+  repository: string,
+): string | undefined {
+  const target = link
+    ?.split(",")
+    .map((part) => /^\s*<([^>]+)>\s*;\s*rel="next"\s*$/.exec(part)?.[1])
+    .find((url) => url !== undefined);
+  if (!target) return undefined;
+  const url = new URL(target);
+  if (url.origin !== "https://api.github.com")
+    throw new Error("GitHub returned a next page outside its API");
+  const path = url.pathname.slice(1);
+  const byId = /^repositories\/\d+\/(.+)$/.exec(path)?.[1];
+  if (byId !== undefined) return `${repository}${byId}${url.search}`;
+  if (path.toLowerCase().startsWith(repository.toLowerCase()))
+    return `${path}${url.search}`;
+  throw new Error("GitHub returned a next page outside the repository");
 }
 
 export const sharedGitHubClient = new GitHubClient();
 
 /**
  * The merge commit of a merged pull request, read from its issue timeline.
- * PR responses in the pinned API version omit `merge_commit_sha`.
+ * PR responses in the pinned API version omit `merge_commit_sha`. Undefined
+ * while the timeline does not show the merge yet.
  */
 export async function timelineMergeCommit(
   client: GitHubClient,
   repository: string,
   pullRequest: number,
-): Promise<string> {
+): Promise<string | undefined> {
   const events = await client.paginate<{ event?: string; commit_id?: unknown }>(
     `repos/${repository}/issues/${pullRequest}/timeline`,
   );
@@ -575,17 +667,8 @@ export async function timelineMergeCommit(
       throw new Error(`PR #${pullRequest} has malformed merge evidence`);
     commits.add(event.commit_id);
   }
-  if (commits.size !== 1)
-    throw attachFault(
-      new Error(`PR #${pullRequest} has missing or conflicting merge evidence`),
-      // A merge the timeline does not show yet is read-after-write lag; two
-      // merge commits for one PR is a broken invariant.
-      commits.size === 0
-        ? transient(
-            `PR #${pullRequest} merge is not on its timeline yet`,
-            false,
-          )
-        : undefined,
-    );
-  return [...commits][0]!;
+  // Two merge commits for one PR is a broken invariant.
+  if (commits.size > 1)
+    throw new Error(`PR #${pullRequest} has conflicting merge evidence`);
+  return [...commits][0];
 }

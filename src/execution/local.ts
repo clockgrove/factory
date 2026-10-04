@@ -1,18 +1,14 @@
-import { classifyFaults } from "../fault.js";
+import { classifyFaults, StepFault } from "../fault.js";
 import { executionFault } from "./fault.js";
-import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  closeSync,
   createReadStream,
   existsSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
   realpathSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +22,7 @@ import type {
   ContentRef,
   ContentStore,
   ExecutionBinding,
+  ExecutionContext,
   ExecutionDriver,
   ExecutionHandle,
   ExecutionObservation,
@@ -47,21 +44,32 @@ import {
   parseProducedAssetSets,
 } from "../media.js";
 import {
-  addWorktree,
   hasUnresolvedSubprocesses,
   linuxProcessIdentity,
   pinnedGit,
   pinnedGitAsync,
   pinnedGitMagicAsync,
   processGroupExists,
-  removeWorktree,
   sanitizedWorkerEnvironment,
+  removeWorktree,
 } from "../process.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
-import { SettledAttemptFailure } from "../work-repair.js";
+import { stoppedFault } from "./attempt.js";
 import { assertDurableValue } from "./checkpoint.js";
-import { parseAuthenticationRequest } from "./harness-support.js";
+import {
+  launchWorker,
+  observeWorker,
+  stopUnrecordedWorker,
+} from "./worker-process.js";
 import { checkStagedCandidate } from "./staged-candidate.js";
+
+/**
+ * A harness that can stop what a start of an identity spawned before its
+ * handle was recorded (#585). Optional until AgentHarness declares it.
+ */
+type RecoverableHarness = AgentHarness & {
+  cancelUnrecorded?(identity: string): Promise<void>;
+};
 
 export interface LocalProfileRegistration {
   environment?: ExecutionProfileEnvironment;
@@ -126,90 +134,45 @@ export class CodexHarness implements AgentHarness {
     return value as WorkerHandleData;
   }
 
+  private get harnessRoot(): string {
+    return join(dirname(this.credentialDirectory), "harness");
+  }
+
+  /**
+   * Start a fresh worker for the attempt identity. Whatever an earlier
+   * unrecorded start of it spawned is stopped first (#585).
+   */
   async start(request: HarnessRequest): Promise<HarnessHandle> {
     const identity = request.attemptId ?? randomUUID();
-    const root = join(dirname(this.credentialDirectory), "harness");
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    const requestPath = join(root, `${identity}.request.json`);
-    const resultPath = join(root, `${identity}.result.json`);
-    const logPath = join(root, `${identity}.log`);
-    writeFileSync(
-      requestPath,
-      `${JSON.stringify(
-        codexWorkerInput(
+    return {
+      identity,
+      data: await launchWorker({
+        root: this.harnessRoot,
+        identity,
+        label: "Codex harness",
+        script: fileURLToPath(new URL("./worker.js", import.meta.url)),
+        input: codexWorkerInput(
           request,
           this.network,
           this.allowedSecretNames,
           this.model,
           this.providerTurnIdleTimeoutMs,
         ),
-      )}\n`,
-      { flag: "wx", mode: 0o600 },
-    );
-    const log = openSync(logPath, "a", 0o600);
-    let pid: number;
-    try {
-      const worker = fileURLToPath(new URL("./worker.js", import.meta.url));
-      const child = spawn(process.execPath, [worker, requestPath, resultPath], {
-        detached: true,
-        stdio: ["ignore", log, log],
         env: sanitizedWorkerEnvironment(
           this.credentialDirectory,
           this.allowedSecretNames,
         ),
-      });
-      if (!child.pid) throw new Error("Failed to launch Codex harness worker");
-      pid = child.pid;
-      child.unref();
-    } finally {
-      closeSync(log);
-    }
-    const identityOnHost = linuxProcessIdentity(pid);
-    if (!identityOnHost || identityOnHost.group !== pid) {
-      throw new Error(
-        "Codex harness worker did not start in its own process group",
-      );
-    }
-    return {
-      identity,
-      data: {
-        pid,
-        startTime: identityOnHost.startTime,
-        requestPath,
-        resultPath,
-        logPath,
-      } satisfies WorkerHandleData,
+      }),
     };
   }
 
+  /** Stop what a start of `identity` spawned before its handle was recorded. */
+  async cancelUnrecorded(identity: string): Promise<void> {
+    await stopUnrecordedWorker(this.harnessRoot, identity, "Codex harness");
+  }
+
   async observe(handle: HarnessHandle): Promise<HarnessObservation> {
-    const data = this.require(handle);
-    if (existsSync(data.resultPath)) {
-      const result = JSON.parse(readFileSync(data.resultPath, "utf8")) as {
-        state: "complete" | "failed";
-        error?: string;
-        authentication?: unknown;
-      };
-      const authentication = parseAuthenticationRequest(result.authentication);
-      return result.state === "complete"
-        ? { state: "complete" }
-        : {
-            state: "failed",
-            detail: result.error,
-            ...(authentication && { authentication }),
-          };
-    }
-    const current = linuxProcessIdentity(data.pid);
-    return current?.startTime === data.startTime &&
-      current.group === data.pid &&
-      current.state !== "Z"
-      ? { state: "running" }
-      : {
-          state: "failed",
-          interrupted: true,
-          detail:
-            "Worker exited without a durable result; repeating with a fresh attempt",
-        };
+    return observeWorker(this.require(handle), "Codex harness");
   }
 
   async cancel(handle: HarnessHandle): Promise<void> {
@@ -358,6 +321,10 @@ async function preserveControllerAssetDestinations(
   return destinations;
 }
 
+const FACTORY_EMAIL = "factory@users.noreply.github.com";
+const collectionMessage = (request: ExecutionRequest) =>
+  `Factory: ${request.item.title}`;
+
 /** Shared exact collection boundary for local work and imported managed bytes. */
 export async function collectWorktreeResult(
   checkout: string,
@@ -390,6 +357,15 @@ export async function collectWorktreeResult(
     )
       throw new Error("Discovery manifest must be untracked private staging");
   }
+  // A collection interrupted after its own commit is undone to the staged
+  // candidate and checked again from the top.
+  if (
+    pinnedGit(worktree, "rev-parse", "HEAD") !== request.baseSha &&
+    pinnedGit(worktree, "rev-parse", "HEAD^") === request.baseSha &&
+    pinnedGit(worktree, "log", "-1", "--format=%ae%n%s") ===
+      `${FACTORY_EMAIL}\n${collectionMessage(request)}`
+  )
+    await pinnedGitAsync(worktree, "reset", "--soft", request.baseSha);
   if (pinnedGit(worktree, "rev-parse", "HEAD") !== request.baseSha) {
     throw new Error(
       "Worker changed HEAD; expected uncommitted changes at exact base",
@@ -463,10 +439,10 @@ export async function collectWorktreeResult(
       "-c",
       "user.name=Factory",
       "-c",
-      "user.email=factory@users.noreply.github.com",
+      `user.email=${FACTORY_EMAIL}`,
       "commit",
       "-m",
-      `Factory: ${request.item.title}`,
+      collectionMessage(request),
     );
   const commit = pinnedGit(worktree, "rev-parse", "HEAD");
   const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
@@ -595,12 +571,34 @@ export class LocalExecutionDriver implements ExecutionDriver {
     return Math.max(0, this.concurrency - this.active.size);
   }
 
+  /**
+   * Starting an attempt is idempotent: a repeat in this process returns the
+   * running attempt, and the handle is checkpointed before start returns. A
+   * start that crashed before its checkpoint left a worktree and perhaps a
+   * worker: both are stopped and removed, and the attempt starts fresh in
+   * this same call. The crash was already counted once by the paid step, so
+   * nothing here counts it again (#585).
+   */
   @classifyFaults(executionFault)
-  async start(request: ExecutionRequest): Promise<ExecutionHandle> {
+  async start(
+    request: ExecutionRequest,
+    context?: ExecutionContext,
+  ): Promise<ExecutionHandle> {
     const harness = this.resolveHarness(request.item);
     const identity = request.attemptId ?? randomUUID();
+    const running = this.active.get(identity);
+    if (running) return { provider: "local", identity, data: running };
     const worktree = join(this.workRoot, identity);
     mkdirSync(this.workRoot, { recursive: true });
+    if (existsSync(worktree)) {
+      await (harness as RecoverableHarness).cancelUnrecorded?.(identity);
+      await removeWorktree(this.checkout, worktree);
+    }
+    if (context?.cancelled())
+      throw new StepFault({
+        kind: "cancelled",
+        detail: "Cancelled before the worker started",
+      });
     const verified = pinnedGit(
       this.checkout,
       "rev-parse",
@@ -609,7 +607,14 @@ export class LocalExecutionDriver implements ExecutionDriver {
     );
     if (verified !== request.baseSha)
       throw new Error("Execution base does not resolve exactly");
-    await addWorktree(this.checkout, worktree, request.baseSha);
+    await pinnedGitAsync(
+      this.checkout,
+      "worktree",
+      "add",
+      "--detach",
+      worktree,
+      request.baseSha,
+    );
     try {
       const sourceAssets = await importSourceAssets(
         this.contentStore,
@@ -698,15 +703,77 @@ export class LocalExecutionDriver implements ExecutionDriver {
         handle,
       };
       this.active.set(identity, active);
-      return { provider: "local", identity, data: active };
+      const started = { provider: "local", identity, data: active };
+      context?.checkpoint(started);
+      return started;
     } catch (error) {
+      this.active.delete(identity);
       await removeWorktree(this.checkout, worktree);
       throw error;
     }
   }
 
+  /**
+   * Stop an attempt whose start was never recorded: a worker this process
+   * still runs is cancelled, a worker a crashed start spawned is found by
+   * its identity and stopped, and the worktree is removed.
+   */
+  @classifyFaults(executionFault)
+  async cancelUnrecorded(attemptId: string): Promise<void> {
+    const running = this.active.get(attemptId);
+    if (running) {
+      await this.cancel({
+        provider: "local",
+        identity: attemptId,
+        data: running,
+      });
+      this.active.delete(attemptId);
+    }
+    for (const harness of this.harnesses())
+      await harness.cancelUnrecorded?.(attemptId);
+    const worktree = join(this.workRoot, attemptId);
+    if (
+      resolve(worktree).startsWith(`${resolve(this.workRoot)}${sep}`) &&
+      existsSync(worktree)
+    )
+      await removeWorktree(this.checkout, worktree);
+  }
+
+  /** Every harness this driver can start a worker with. */
+  private harnesses(): RecoverableHarness[] {
+    if (!this.profiles) return [this.harness as RecoverableHarness];
+    return [...this.profiles].map(([id, registration]) => {
+      let harness = this.profileHarnesses.get(id);
+      if (!harness) {
+        harness = registration.createHarness();
+        this.assertCapabilities(harness, registration.binding.adapter);
+        this.profileHarnesses.set(id, harness);
+      }
+      return harness as RecoverableHarness;
+    });
+  }
+
+  /**
+   * The handle to continue with, or undefined once the attempt is confirmed
+   * stopped without a result (a settled dead worker or an interrupted
+   * start). A collected result, a running worker and a finished worker whose
+   * result is still in its worktree are continued.
+   */
+  @classifyFaults(executionFault)
+  async find(handle: ExecutionHandle): Promise<ExecutionHandle | undefined> {
+    const data = handle.data as Partial<Settled> | undefined;
+    if (data?.result) return handle;
+    if (data?.stopped !== undefined) return undefined;
+    if (this.active.has(handle.identity)) return handle;
+    return existsSync(this.require(handle).worktree) ? handle : undefined;
+  }
+
   @classifyFaults(executionFault)
   async observe(handle: ExecutionHandle): Promise<ExecutionObservation> {
+    const settled = handle.data as Partial<Settled> | undefined;
+    if (settled?.result) return { state: "complete" };
+    if (settled?.stopped !== undefined)
+      return { state: "failed", interrupted: true, detail: settled.stopped };
     const active = this.require(handle);
     return this.resolveHarness(
       active.request.item,
@@ -716,6 +783,9 @@ export class LocalExecutionDriver implements ExecutionDriver {
 
   @classifyFaults(executionFault)
   async cancel(handle: ExecutionHandle): Promise<void> {
+    const settled = handle.data as Partial<Settled> | undefined;
+    // An attempt that ended has nothing left to stop.
+    if (settled?.result || settled?.stopped !== undefined) return;
     const active = this.require(handle);
     await this.resolveHarness(
       active.request.item,
@@ -723,11 +793,26 @@ export class LocalExecutionDriver implements ExecutionDriver {
     ).cancel(active.handle);
   }
 
+  /**
+   * Collect the worker's result. The result is checkpointed into the handle
+   * before the worktree is removed, so a repeated collect returns it; a dead
+   * worker is recorded as stopped before its worktree goes.
+   */
   @classifyFaults(executionFault)
-  async collect(handle: ExecutionHandle): Promise<ExecutionResult> {
+  async collect(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionResult> {
+    const settled = handle.data as Partial<Settled> | undefined;
+    // An ended attempt: its worktree goes if a crash kept it.
+    if (settled?.result || settled?.stopped !== undefined) {
+      if (settled.worktree && existsSync(settled.worktree))
+        await removeWorktree(this.checkout, settled.worktree);
+      if (settled.result) return structuredClone(settled.result);
+      throw stoppedFault(settled.stopped!, true);
+    }
     const active = this.require(handle);
     let collected: ExecutionResult | undefined;
-    let failed = false;
     let collectionError: unknown;
     try {
       const result = await this.resolveHarness(
@@ -742,39 +827,64 @@ export class LocalExecutionDriver implements ExecutionDriver {
         result,
       );
     } catch (error) {
-      failed = true;
       collectionError = error;
     }
-    let failureClassification: "implementation" | "interruption" =
-      "implementation";
-    {
-      const observed = await this.resolveHarness(
-        active.request.item,
-        active.executionBinding,
-      ).observe(active.handle);
-      if (observed.state === "running")
-        throw new Error(
-          "Collection failed while worker remains active; checkout retained",
-        );
-      if (hasUnresolvedSubprocesses())
-        throw new Error(
-          "Collection subprocess ownership unresolved; checkout retained",
-        );
-      failureClassification = observed.interrupted
-        ? "interruption"
-        : "implementation";
-      this.active.delete(handle.identity);
-      if (
-        !failed ||
-        !existsSync(join(active.worktree, ".factory-discovery.json"))
-      )
-        await removeWorktree(this.checkout, active.worktree);
-    }
-    if (failed) {
+    const observed = await this.resolveHarness(
+      active.request.item,
+      active.executionBinding,
+    ).observe(active.handle);
+    if (observed.state === "running")
+      throw new Error(
+        "Collection failed while worker remains active; checkout retained",
+      );
+    if (hasUnresolvedSubprocesses())
+      throw new Error(
+        "Collection subprocess ownership unresolved; checkout retained",
+      );
+    const interrupted = !collected && observed.interrupted === true;
+    if (collected)
+      context?.checkpoint({
+        ...handle,
+        data: { ...active, result: JSON.parse(JSON.stringify(collected)) },
+      });
+    else if (interrupted)
+      context?.checkpoint({
+        ...handle,
+        data: {
+          ...active,
+          stopped:
+            collectionError instanceof Error
+              ? collectionError.message
+              : String(collectionError),
+        },
+      });
+    this.active.delete(handle.identity);
+    if (
+      collected ||
+      !existsSync(join(active.worktree, ".factory-discovery.json"))
+    )
+      await removeWorktree(this.checkout, active.worktree);
+    if (!collected) {
       if (collectionError instanceof AuthenticationRequiredError)
         throw collectionError;
-      throw new SettledAttemptFailure(collectionError, failureClassification);
+      throw stoppedFault(
+        collectionError instanceof Error
+          ? collectionError.message
+          : String(collectionError),
+        interrupted,
+        collectionError,
+      );
     }
-    return collected!;
+    return collected;
   }
+}
+
+/** What a local handle records once its attempt ended (#515). */
+interface Settled {
+  /** The collected result, saved before the worktree was removed. */
+  result: ExecutionResult;
+  /** Why the attempt stopped without a result. */
+  stopped: string;
+  /** The attempt's worktree, removed once the attempt ended. */
+  worktree: string;
 }

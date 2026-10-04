@@ -16,16 +16,14 @@ import {
   consumption,
   repairScopes,
   assertRepairLedger,
+  earlierHeads,
   failureDigest,
 } from "../dist/repair-policy.js";
 import {
   applyWorkCorrection,
-  isInterruption,
   recordWorkFailure,
   CandidateValidationFailure,
   CandidateEnvironmentFailure,
-  SettledAttemptFailure,
-  prepareEvidenceRecovery,
 } from "../dist/work-repair.js";
 import {
   compilePlan,
@@ -33,6 +31,7 @@ import {
   CodexPlanningModel,
 } from "../dist/compiler.js";
 import { coverageObligations, aggregateAcceptance } from "../dist/qa.js";
+import { StepFault } from "../dist/fault.js";
 import { shortPlanDigest } from "../dist/status-summary.js";
 import {
   validateTree,
@@ -61,7 +60,6 @@ const autonomy = () => ({
   },
   repairClasses: [
     "implementation",
-    "review-evidence",
     "validation-environment",
     "planning-output",
     "planning-evidence",
@@ -233,11 +231,55 @@ test("exact candidate recovery retains failure and rejects ambiguity and unchang
     () => applyWorkCorrection(state, "result", correction),
     /Unchanged/,
   );
-  work.pullRequest = 1;
+  work.integratedSha = "a".repeat(40);
   assert.throws(
     () => applyWorkCorrection(state, "result", correction),
     /unsettled/,
   );
+});
+test("a published result that fails a required check is repaired by a new attempt that republishes it", () => {
+  const head = "b".repeat(40);
+  const work = {
+    status: "failed",
+    attempt: "first",
+    baseSha: "a".repeat(40),
+    changeRef: head,
+    treeSha: "c".repeat(40),
+    pullRequest: 7,
+  };
+  const state = {
+    autonomy: autonomy(),
+    graph: { items: [item()] },
+    work: { result: work },
+  };
+  const failure = new StepFault({
+    kind: "work",
+    evidence: { detail: "Required checks failed on PR #7: quality" },
+  });
+  assert.equal(recordWorkFailure(state, "result", failure), true);
+  assert.equal(work.recovery.failure.classification, "implementation");
+  applyWorkCorrection(state, "result", {
+    kind: "implementation",
+    failureDigest: work.recovery.failure.digest,
+    actor: "fixture",
+    diagnosis: "The quality check rejects the formatting",
+    correction: "Format the result as the quality check requires",
+  });
+  const next = state.work.result;
+  assert.equal(next.status, "pending");
+  assert.equal(next.pullRequest, undefined);
+  // The new attempt pushes over the published head with a lease.
+  assert.deepEqual(earlierHeads(next), [head]);
+  assert.equal(next.recovery.history[0].work.pullRequest, 7);
+  // Once integrated, the result is no longer the attempt's to repair.
+  const merged = {
+    ...structuredClone(work),
+    status: "failed",
+    integratedSha: "d".repeat(40),
+  };
+  delete merged.recovery;
+  const integrated = { ...state, work: { result: merged } };
+  assert.equal(recordWorkFailure(integrated, "result", failure), false);
 });
 test("settled failures ignore sibling processes while correction still requires global quiescence", () => {
   for (const [error, classification] of [
@@ -249,7 +291,11 @@ test("settled failures ignore sibling processes while correction still requires 
       new CandidateEnvironmentFailure("temporary path unavailable"),
       "validation-environment",
     ],
-    [new SettledAttemptFailure("worker stopped"), "interruption"],
+    [
+      // A worker that settled with a failed result.
+      new StepFault({ kind: "work", evidence: { detail: "worker failed" } }),
+      "implementation",
+    ],
   ]) {
     const state = {
       autonomy: autonomy(),
@@ -286,58 +332,29 @@ test("settled failures ignore sibling processes while correction still requires 
     );
     assert.equal(state.charges, undefined);
     for (const guard of [
-      { work: { pullRequest: 1 } },
+      { work: { integratedSha: "a".repeat(40) } },
       { coordinator: { cancelError: "owned cancellation unresolved" } },
     ]) {
       const uncertain = structuredClone(state);
       Object.assign(uncertain.work.result, guard.work);
       Object.assign(uncertain.coordinator, guard.coordinator);
       assert.equal(recordWorkFailure(uncertain, "result", error), false);
-      // Not isolated either way; an interrupted worker is still named as such.
+      // Not isolated: a wrong result past these boundaries is a decision.
       assert.equal(
         uncertain.work.result.recovery.failure.classification,
-        isInterruption(error) ? "interruption" : "uncertain",
+        error instanceof CandidateEnvironmentFailure
+          ? "validation-environment"
+          : "decision",
       );
     }
     assert.equal(
       recordWorkFailure(state, "result", new Error("ownership unresolved")),
       false,
     );
-    assert.equal(
-      state.work.result.recovery.failure.classification,
-      "uncertain",
-    );
+    assert.equal(state.work.result.recovery.failure.classification, "defect");
   }
 });
 
-test("transport recovery never accepts semantic findings or invents accounting", () => {
-  const state = {
-    autonomy: autonomy(),
-    graph: { items: [item()] },
-    work: {
-      result: {
-        status: "waiting",
-        step: "approve-result",
-        attempt: "original",
-        baseSha: "a".repeat(40),
-        changeRef: "b".repeat(40),
-        treeSha: "c".repeat(40),
-        acceptancePending: { detail: "semantic disagreement" },
-      },
-    },
-  };
-  assert.equal(prepareEvidenceRecovery(state, "result"), false);
-  state.work.result.acceptancePending.reviewRejection = {
-    field: "source",
-    reason: "unknown-source",
-  };
-  assert.equal(prepareEvidenceRecovery(state, "result"), true);
-  assert.equal(state.work.result.attempt, "original");
-  assert.equal(state.work.result.status, "running");
-  assert.equal(consumption(state).resultRereviews, 1);
-  assert.equal(state.work.result.acceptanceDecisions, undefined);
-  assert.equal(state.work.result.recovery.history[0].work.usage, undefined);
-});
 for (const delivery of ["regular", "native-stack"])
   test(`${delivery}: diagnosed lost-connectivity repair preserves original attempt, cleans its workspace and completes without duplicate worker`, async () => {
     const root = mkdtempSync(join(tmpdir(), "factory-repair-"));
@@ -668,6 +685,109 @@ for (const delivery of ["regular", "native-stack"])
       assert.match(
         state.work.failed.recovery.failure.decision,
         /allowance exhausted/,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+for (const delivery of ["regular", "native-stack"])
+  test(`${delivery}: an Objective decision during delivery leaves the Work Item in place, and delivery resumes once it is answered`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "factory-objective-scope-"));
+    const previous = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = join(root, "state");
+    try {
+      const target = createTarget(root);
+      const config = factoryConfig(
+        target.checkout,
+        `example/objective-scope-${delivery}`,
+        delivery,
+        1,
+      );
+      const graph = {
+        objective: 1,
+        baseSha: target.baseSha,
+        items: [item()],
+      };
+      const fixture = makeApplication({
+        config,
+        graph,
+        objectiveBody: body,
+        fakeRoot: join(root, "fake"),
+        actions: {
+          result: { files: [{ path: "result.txt", text: "done\n" }] },
+        },
+        planningModel: model(graph),
+      });
+      const plan = await fixture.application.planObjective(1);
+      const projection = await fixture.github.projectGraph({
+        graph: plan.graph,
+        objectiveIssue: 1,
+      });
+      const state = {
+        schemaVersion: 7,
+        repository: config.repository,
+        objective: 1,
+        runId: "fixture",
+        configDigest: "d".repeat(64),
+        baseSha: target.baseSha,
+        graph: plan.graph,
+        autonomy: autonomy(),
+        capacity: { concurrency: config.execution.concurrency },
+        planGraphDigest: plan.graphDigest,
+        issueByItemId: projection.issueByItemId,
+        work: { result: { status: "pending" } },
+      };
+      const { RegularDelivery } = await import("../dist/delivery/regular.js");
+      const { runRegularGraph } = await import(
+        "../dist/delivery/regular-runner.js"
+      );
+      const { runNativeGraph } = await import(
+        "../dist/delivery/native-runner.js"
+      );
+      // The Objective re-observation before publication finds a foreign
+      // edit: a decision on the Objective, not on the Work Item.
+      let edited = true;
+      const reconcile = async () => {
+        if (edited && state.work.result.step === "deliver")
+          throw new StepFault({
+            kind: "decision",
+            question: "The Objective issue body changed outside Factory",
+            evidence: [],
+          });
+      };
+      const run = () =>
+        (delivery === "regular" ? runRegularGraph : runNativeGraph)({
+          config,
+          objective: 1,
+          objectiveBody: body,
+          root: join(root, "run"),
+          state,
+          driver: fixture.driver,
+          delivery: new RegularDelivery(config.checkout, fixture.github),
+          contentStore: fixture.contentStore,
+          github: fixture.github,
+          planningModel: model(graph),
+          save: () => {},
+          active: new Map(),
+          cancelled: () => false,
+          reconcile,
+        });
+      await run();
+      assert.equal(state.work.result.status, "running");
+      assert.equal(state.work.result.step, "deliver");
+      assert.equal(state.work.result.recovery, undefined);
+      assert.equal(state.work.result.pullRequest, undefined);
+      // The operator answers the Objective's decision; delivery resumes.
+      edited = false;
+      await run();
+      assert.equal(state.work.result.status, "done");
+      assert.equal(
+        readEvents(fixture.eventsPath).filter((event) => event.type === "start")
+          .length,
+        1,
       );
     } finally {
       if (previous === undefined) delete process.env.XDG_STATE_HOME;
@@ -1271,7 +1391,7 @@ test("regular: diagnosed read-only QA repair retains its selected commit through
 });
 
 for (const delivery of ["regular", "native-stack"])
-  test(`${delivery}: evidence-only recovery retains original rejection and exact worker result`, async () => {
+  test(`${delivery}: an invalid review answer is asked again with its error on the exact worker result`, async () => {
     const root = mkdtempSync(join(tmpdir(), "factory-evidence-repair-"));
     const previous = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = join(root, "state");
@@ -1303,7 +1423,10 @@ for (const delivery of ["regular", "native-stack"])
                 },
               ],
             };
-          assert.match(request.observations, /reviewTransportCorrection/);
+          assert.match(
+            request.previousInvalid,
+            /Independent review answer was invalid/,
+          );
         }
         return reviewer(request);
       };
@@ -1319,7 +1442,8 @@ for (const delivery of ["regular", "native-stack"])
       });
       const done = await fixture.application.runObjective(1);
       assert.equal(done.finalValidation.passed, true);
-      assert.equal(consumption(done).resultRereviews, 1);
+      // A re-ask is the review step's paid repeat, not a repair.
+      assert.equal(consumption(done).resultRereviews, 0);
       assert.equal(calls, 2);
       assert.equal(new Set(reviewedTrees).size, 1);
       assert.equal(
@@ -1327,11 +1451,7 @@ for (const delivery of ["regular", "native-stack"])
           .length,
         1,
       );
-      assert.equal(
-        done.work.result.recovery.history[0].work.acceptancePending
-          .reviewRejection.reason,
-        "invalid-response",
-      );
+      assert.equal(done.work.result.recovery, undefined);
       assert.equal(done.work.result.acceptanceDecisions, undefined);
     } finally {
       if (previous === undefined) delete process.env.XDG_STATE_HOME;
@@ -1397,7 +1517,8 @@ test("a lost diagnosis is reissued once charged; ambiguous publication never aut
   assert.equal(consumption(restarted).implementationRepairs, charged);
   work.pullRequest = 1;
   recordWorkFailure(state, "result", new Error("publication response lost"));
-  assert.equal(work.recovery.failure.classification, "uncertain");
+  // Unclassified: a defect, never repaired by diagnosis.
+  assert.equal(work.recovery.failure.classification, "defect");
   assert.equal(
     await diagnoseWorkRepair({
       state,
@@ -1409,6 +1530,69 @@ test("a lost diagnosis is reissued once charged; ambiguous publication never aut
     false,
   );
   assert.equal(calls, 2);
+});
+
+test("a failure while paused or an amendment is pending is diagnosed once the run goes on", async () => {
+  const { diagnoseWorkRepair, resumeDiagnoses } = await import(
+    "../dist/work-repair.js"
+  );
+  const work = {
+    status: "failed",
+    step: "validate",
+    attempt: "first",
+    baseSha: "a".repeat(40),
+    changeRef: "b".repeat(40),
+    treeSha: "c".repeat(40),
+  };
+  const state = {
+    autonomy: autonomy(),
+    graph: { items: [item()] },
+    work: { result: work },
+    baseSha: "a".repeat(40),
+    runId: "r",
+  };
+  assert.equal(
+    recordWorkFailure(
+      state,
+      "result",
+      new CandidateValidationFailure("failed command"),
+    ),
+    true,
+  );
+  let calls = 0;
+  const planner = model({ items: [item()] }, () => {
+    calls++;
+    return {
+      decision: "repair",
+      diagnosis: "The result file was left empty by the worker",
+      correction: "Write non-empty content to result.txt",
+    };
+  });
+  // The Objective is paused (or an amendment is pending) when the item fails.
+  assert.equal(
+    await diagnoseWorkRepair({
+      state,
+      item: item(),
+      model: planner,
+      save: () => {},
+      stopped: () => true,
+    }),
+    false,
+  );
+  assert.equal(calls, 0);
+  // The diagnosis is due, not dropped: the next pass asks it.
+  assert.equal(work.recovery.phase, "diagnosing");
+  const charged = consumption(state).implementationRepairs;
+  await resumeDiagnoses({
+    state,
+    model: planner,
+    save: () => {},
+    stopped: () => false,
+  });
+  assert.equal(calls, 1);
+  assert.equal(state.work.result.status, "pending");
+  assert.equal(state.work.result.recovery.phase, "ready");
+  assert.equal(consumption(state).implementationRepairs, charged);
 });
 
 test("real structured adapter uses a diagnosis request rather than a graph-compilation prompt", async (t) => {

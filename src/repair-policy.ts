@@ -5,7 +5,6 @@ import type { FactoryState, WorkState } from "./state.js";
 
 export const repairClasses = [
   "implementation",
-  "review-evidence",
   "validation-environment",
   "planning-output",
   "planning-evidence",
@@ -79,6 +78,12 @@ export function validateAutonomy(value: Autonomy): Autonomy {
     throw new Error("autonomy.repairPolicy must be an object");
   onlyKeys(value.repairPolicy, ["perPath"], "autonomy.repairPolicy");
   assertAllowances(value.repairPolicy.perPath, "autonomy.repairPolicy.perPath");
+  if (Array.isArray(value.repairClasses))
+    for (const kind of value.repairClasses)
+      if (legacyClasses.includes(kind))
+        throw new Error(
+          `autonomy.repairClasses lists ${kind}, which Factory no longer has: remove it from the configuration, or start an Objective that snapshotted it fresh`,
+        );
   if (
     !Array.isArray(value.repairClasses) ||
     value.repairClasses.some((kind) => !repairClasses.includes(kind))
@@ -149,8 +154,32 @@ export interface RepairLedger {
    */
   charges?: Record<string, Charge>;
 }
-/** Paid calls (diagnoses, reviews) asked per failure event before the operator decides. */
+/** Paid calls (planning diagnoses, reviews) asked per failure event before the operator decides. */
 export const PAID_ATTEMPTS = 3;
+/**
+ * What a failed attempt was: a repair class for a wrong result, else the
+ * kind of fault that ended it.
+ */
+export type FailureClass =
+  | RepairClass
+  | Exclude<import("./fault.js").FaultKind, "work">;
+const failureClasses: readonly string[] = [
+  ...repairClasses,
+  "transient",
+  "decision",
+  "config",
+  "defect",
+  "cancelled",
+];
+/** Classes and repair kinds earlier Factory versions persisted; never migrated. */
+const legacyClasses: readonly string[] = [
+  "interruption",
+  "authority",
+  "uncertain",
+  "review-evidence",
+];
+const startFresh = (what: string) =>
+  `State records ${what} from an earlier Factory version; start the Objective fresh`;
 export interface FailureDisposition {
   digest: string;
   /**
@@ -158,15 +187,12 @@ export interface FailureDisposition {
    * transient or configuration failure is never charged.
    */
   event?: string;
-  /** Diagnoses sent for this failure; bounded by PAID_ATTEMPTS. */
-  diagnoses?: number;
-  classification: RepairClass | "interruption" | "authority" | "uncertain";
+  classification: FailureClass;
   detail: string;
   at: string;
   continuation:
     | "new-attempt-from-accepted-base"
     | "exact-candidate-revalidation"
-    | "exact-result-review"
     | "operator-decision";
   unfinishedEdits: "removed" | "unavailable";
   decision: string;
@@ -215,7 +241,7 @@ export const objectiveEvent = (step: string, round: number | string) =>
 const EVENT =
   /^(objective|item\/[A-Za-z0-9][A-Za-z0-9_-]*)\/[a-z][a-z-]*\/[A-Za-z0-9_-]+$/;
 /** Failure classes that are wrong results; only their failures carry an event. */
-const CHARGED: readonly string[] = ["implementation", "review-evidence"];
+const CHARGED: readonly string[] = ["implementation"];
 
 /** Consumption derived from the charged events, Objective-wide or for one scope. */
 export function consumption(
@@ -465,6 +491,10 @@ export function assertRepairLedger(
     key: Allowance | undefined,
   ): void => {
     if (!failure) return;
+    if (legacyClasses.includes(failure.classification))
+      throw new Error(startFresh(`a ${failure.classification} failure`));
+    if (!failureClasses.includes(failure.classification))
+      throw new Error("Invalid failure classification");
     if (CHARGED.includes(failure.classification) !== Boolean(failure.event))
       throw new Error("Failure event does not match its classification");
     if (
@@ -477,6 +507,14 @@ export function assertRepairLedger(
   for (const work of Object.values(state.work ?? {})) {
     const recovery = work.recovery;
     if (!recovery) continue;
+    for (const correction of [
+      recovery.correction,
+      ...(Array.isArray(recovery.history) ? recovery.history : []).map(
+        (entry) => entry.correction,
+      ),
+    ])
+      if (correction && legacyClasses.includes(correction.kind))
+        throw new Error(startFresh(`a ${correction.kind} correction`));
     // A record pairs a failure with the correction admitted for it, bound by
     // the failure's event.
     const bound = (

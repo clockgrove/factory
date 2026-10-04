@@ -49,17 +49,6 @@ export type WorkStep =
   | "approve-result"
   | "deliver";
 
-export type ReviewRejectionReason =
-  | "invalid-response"
-  | "missing-finding"
-  | "criterion-mismatch"
-  | "invalid-verdict"
-  | "empty-detail"
-  | "unknown-source"
-  | "source-truncated"
-  | "empty-quote"
-  | "quote-not-found";
-
 export interface AcceptancePending {
   criterion: string;
   treeSha: string;
@@ -68,10 +57,6 @@ export interface AcceptancePending {
   question: string;
   detail: string;
   reviewFinding?: ResultReviewCandidate;
-  reviewRejection?: {
-    field: "finding" | "criterion" | "verdict" | "detail" | "source" | "quote";
-    reason: ReviewRejectionReason;
-  };
 }
 
 export interface WorkState {
@@ -80,8 +65,6 @@ export interface WorkState {
   phaseReservation?: import("./config.js").ResourcePhase;
   requestedPhase?: import("./config.js").ResourcePhase;
   graphRevisionDigest?: string;
-  /** Interruptions repeated during the current attempt (see repeatInterrupted). */
-  interruptions?: number;
   discovery?: import("./contracts.js").WorkDiscovery & { attempt: string };
   discoveryDisposition?: "proposed" | "accepted";
   qaChecks?: NamedCheckEvidence[];
@@ -90,8 +73,12 @@ export interface WorkState {
   status: WorkStatus;
   step?: WorkStep;
   attempt?: string;
-  waitingReason?: string;
   execution?: ExecutionHandle;
+  /**
+   * Workers of this attempt that stopped without a result. The driver's
+   * identity for the current worker is the attempt, then `<attempt>-<n>`.
+   */
+  worker?: number;
   /** Immutable base supplied to the worker for this attempt. */
   executionBaseSha?: string;
   /** Integrated default-branch head observed when this attempt started. */
@@ -99,6 +86,28 @@ export interface WorkState {
   /** Mutable validation/delivery base; native replay may advance it. */
   baseSha?: string;
   changeRef?: string;
+  /**
+   * Strict protection: the PR head GitHub made by updating the branch with
+   * its base (update-branch). Its first-parent chain of GitHub merges leads
+   * to `changeRef`, the validated result. Unset while the PR head is
+   * `changeRef`.
+   */
+  deliveredHead?: string;
+  /**
+   * The PR head a GitHub update-branch was requested from. Set before the
+   * PUT, cleared once the new head is saved as `deliveredHead`, so a repeat
+   * or a restart adopts the update instead of reading GitHub's merge as a
+   * foreign change (#576, #620).
+   */
+  branchUpdateFrom?: string;
+  /**
+   * PR heads of this attempt that a later head replaced: GitHub's branch
+   * update, or a replay onto a repaired lower native layer. A lease and a
+   * lagging read accept them.
+   */
+  replacedHeads?: string[];
+  /** Review answer found invalid once; a second invalid answer is a decision. */
+  reviewInvalid?: string;
   treeSha?: string;
   validation?: ValidationEvidence;
   acceptancePending?: AcceptancePending;
@@ -114,7 +123,7 @@ export interface WorkState {
   completedAt?: string;
   integratedSha?: string;
   githubClosure?: "pending" | "complete";
-  /** Structured wait; replaces waitingReason once steps use it (#515). */
+  /** Why the item is not progressing: a step's or the scheduler's structured wait. */
   wait?: Wait;
 }
 
@@ -124,7 +133,6 @@ export interface CoordinatorDisposition {
   phaseStartedAt: string;
   deadlineAt?: string;
   observedAt?: string;
-  observationError?: string;
   waitReason?: string;
   cancelError?: string;
   processes?: { pid: number; startTime: string }[];
@@ -152,6 +160,8 @@ export interface PreparationState {
   plan?: import("./compiler.js").PlanCandidate;
   /** Issues already projected; projection reconciles the rest by marker. */
   issueByItemId: Record<string, number>;
+  /** The login that authored Factory's first issue: its GitHub identity. */
+  issueAuthor?: string;
   error?: string;
   cancelRequested?: boolean;
   cancelledAt?: string;
@@ -189,6 +199,8 @@ export interface FactoryState {
   graph: WorkGraph;
   objectiveCommands?: string[];
   issueByItemId: Record<string, number>;
+  /** The login that authored Factory's issues: its GitHub identity. */
+  issueAuthor?: string;
   work: Record<string, WorkState>;
   stackNumbers?: Record<string, number>;
   stackMerges?: Record<
@@ -196,12 +208,17 @@ export interface FactoryState {
     { topPullRequest: number; expectedHeadSha: string; uuid: string }
   >;
   integratedSha?: string;
+  /**
+   * Heads others pushed on top of `integratedSha` that final validation
+   * followed, oldest first; the last is the final candidate. `asked` is a
+   * further head awaiting the operator's answer.
+   */
+  finalHead?: { integratedSha: string; heads: string[]; asked?: string };
   finalValidation?: ValidationEvidence & { passed: boolean; detail?: string };
   finalAcceptancePending?: AcceptancePending;
   finalAcceptanceDecisions?: AcceptanceDecision[];
   objectiveBodyDigest?: string;
   objectiveClosure?: "pending" | "complete";
-  githubClosureError?: string;
   cancelRequested?: boolean;
   cancelledAt?: string;
   error?: string;
@@ -335,34 +352,6 @@ function acceptancePending(value: unknown, label: string): void {
       if (typeof finding[key] !== "string" || finding[key].length > 4_096)
         throw new Error(`${label}.reviewFinding.${key} is invalid`);
     }
-  }
-  if (pending.reviewRejection !== undefined) {
-    const rejection = record(
-      pending.reviewRejection,
-      `${label}.reviewRejection`,
-    );
-    if (
-      ![
-        "finding",
-        "criterion",
-        "verdict",
-        "detail",
-        "source",
-        "quote",
-      ].includes(String(rejection.field)) ||
-      ![
-        "invalid-response",
-        "missing-finding",
-        "criterion-mismatch",
-        "invalid-verdict",
-        "empty-detail",
-        "unknown-source",
-        "source-truncated",
-        "empty-quote",
-        "quote-not-found",
-      ].includes(String(rejection.reason))
-    )
-      throw new Error(`${label}.reviewRejection is invalid`);
   }
 }
 
@@ -540,6 +529,7 @@ export function parseFactoryState(
       throw new Error(`Work Item ${item.id} has an unknown dependency`);
   }
   const projected = record(state.issueByItemId, "issueByItemId");
+  if (state.issueAuthor !== undefined) string(state.issueAuthor, "issueAuthor");
   const work = record(state.work, "work");
   if (new Set(Object.values(projected)).size !== ids.size)
     throw new Error("Projected Work Item Issue identities are not unique");
@@ -554,10 +544,11 @@ export function parseFactoryState(
     if (!Number.isSafeInteger(projected[id]) || Number(projected[id]) <= 0)
       throw new Error(`Work Item ${id} has no projected Issue identity`);
     const item = record(work[id], `work.${id}`);
-    if (item.pendingEffect !== undefined)
-      throw new Error(
-        `Work Item ${id} has an unsupported pendingEffect field from an older Factory version`,
-      );
+    for (const legacy of ["pendingEffect", "interruptions", "waitingReason"])
+      if (item[legacy] !== undefined)
+        throw new Error(
+          `Work Item ${id} records ${legacy} from an earlier Factory version; start the Objective fresh`,
+        );
     if (!statuses.has(item.status as WorkStatus))
       throw new Error(`Work Item ${id} has an invalid status`);
     for (const field of ["phaseReservation", "requestedPhase"])
@@ -582,8 +573,23 @@ export function parseFactoryState(
           `Work Item ${id} authentication request requires failed status`,
         );
     }
-    for (const key of ["baseSha", "executionBaseSha", "treeSha", "changeRef"])
+    for (const key of [
+      "baseSha",
+      "executionBaseSha",
+      "treeSha",
+      "changeRef",
+      "deliveredHead",
+      "branchUpdateFrom",
+    ])
       if (item[key] !== undefined) sha(item[key], `${id}.${key}`);
+    if (item.replacedHeads !== undefined) {
+      if (!Array.isArray(item.replacedHeads))
+        throw new Error(`Work Item ${id} replacedHeads must be an array`);
+      for (const [index, head] of item.replacedHeads.entries())
+        sha(head, `${id}.replacedHeads[${index}]`);
+    }
+    if (item.deliveredHead !== undefined && !item.pullRequest)
+      throw new Error(`Work Item ${id} delivered head lacks a pull request`);
     if (
       item.integratedShaAtStart !== undefined &&
       item.integratedShaAtStart !== null
@@ -591,6 +597,10 @@ export function parseFactoryState(
       sha(item.integratedShaAtStart, `${id}.integratedShaAtStart`);
     if (item.integratedSha !== undefined)
       sha(item.integratedSha, `${id}.integratedSha`);
+    if (item.branchUpdateFrom !== undefined && !item.pullRequest)
+      throw new Error(`Work Item ${id} branch update lacks a pull request`);
+    if (item.reviewInvalid !== undefined)
+      string(item.reviewInvalid, `${id}.reviewInvalid`);
     if (
       item.startedAt !== undefined &&
       Number.isNaN(Date.parse(string(item.startedAt, `${id}.startedAt`)))
@@ -921,7 +931,13 @@ export function parseFactoryState(
         throw new Error(`Work Item ${id} execution identity is invalid`);
       if (execution.data !== undefined)
         jsonSafe(execution.data, `work.${id}.execution.data`);
-      if (execution.provider === "local") {
+      const interruptedStart =
+        execution.provider === "local" &&
+        JSON.stringify(
+          Object.keys(record(execution.data, `${id}.data`)).sort(),
+        ) === '["stopped","worktree"]' &&
+        typeof (execution.data as { stopped?: unknown }).stopped === "string";
+      if (execution.provider === "local" && !interruptedStart) {
         const active = record(execution.data, `work.${id}.execution.data`);
         const request = record(active.request, `work.${id}.execution.request`);
         const attemptedItem = record(request.item, `work.${id}.execution.item`);
@@ -959,6 +975,20 @@ export function parseFactoryState(
   }
   if (state.integratedSha !== undefined)
     sha(state.integratedSha, "integratedSha");
+  if (state.finalHead !== undefined) {
+    const followed = record(state.finalHead, "finalHead");
+    const keys = Object.keys(followed).sort().join(",");
+    if (
+      !["heads,integratedSha", "asked,heads,integratedSha"].includes(keys) ||
+      !Array.isArray(followed.heads) ||
+      !followed.heads.length ||
+      new Set(followed.heads).size !== followed.heads.length
+    )
+      throw new Error("Followed final heads are invalid");
+    sha(followed.integratedSha, "finalHead.integratedSha");
+    for (const head of followed.heads) sha(head, "finalHead.heads");
+    if (followed.asked !== undefined) sha(followed.asked, "finalHead.asked");
+  }
   if (state.stackNumbers !== undefined) {
     const numbers = record(state.stackNumbers, "stackNumbers");
     for (const [unit, number] of Object.entries(numbers))
@@ -1001,7 +1031,10 @@ export function parseFactoryState(
     if (selections.length) {
       assertHydrationReceipt(
         final.hydrationReceipt,
-        sha(state.integratedSha, "integratedSha"),
+        sha(
+          objectiveCandidate(state as unknown as FactoryState)?.commitSha,
+          "final candidate",
+        ),
         sha(final.treeSha, "finalValidation.treeSha"),
         selections,
       );
@@ -1028,11 +1061,6 @@ export function parseFactoryState(
       !["pending", "complete"].includes(String(state.objectiveClosure)))
   )
     throw new Error("Objective GitHub closure is invalid");
-  if (
-    state.githubClosureError !== undefined &&
-    typeof state.githubClosureError !== "string"
-  )
-    throw new Error("githubClosureError is invalid");
   if (state.error !== undefined && typeof state.error !== "string")
     throw new Error("state.error is invalid");
   assertRepeats(state.repeats, "repeats");

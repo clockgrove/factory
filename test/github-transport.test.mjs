@@ -3,12 +3,10 @@ import test from "node:test";
 import { Octokit } from "@octokit/core";
 import { projectionClient } from "./support/projection-client.mjs";
 import { RealGitHubGateway, projectedIssueBody } from "../dist/github.js";
-import {
-  GitHubClient,
-  GitHubOutcomeUnknown,
-  GitHubRequestError,
-} from "../dist/github-client.js";
+import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
+import { faultOf } from "../dist/fault.js";
 import { withProcessCancellation } from "../dist/process.js";
+import { step } from "../dist/step.js";
 
 const json = (data, status = 200, headers = {}) =>
   new Response(JSON.stringify(data), {
@@ -33,21 +31,36 @@ const item = {
   brief: "brief",
 };
 
-test("shared gate observes successful response delay before queued dispatch", async () => {
+/** A transient fault that retries at `at` (ms), raised without sending. */
+const gated = (at) => (error) =>
+  faultOf(error).kind === "transient" &&
+  faultOf(error).outcomeUnknown === false &&
+  Math.abs(Date.parse(faultOf(error).retryAt) - at) <= 1;
+
+test("shared gate holds queued dispatch as a transient fault with retryAt", async () => {
   const calls = [];
   const client = clientFor(async () => {
     calls.push(Date.now());
-    return json({}, 200, calls.length === 1 ? { "retry-after": "0.06" } : {});
+    return json({}, 200, calls.length === 1 ? { "retry-after": "60" } : {});
   });
-  await Promise.all([
+  const results = await Promise.allSettled([
     client.request("GET", "repos/a/b/issues/1"),
     client.request("GET", "repos/a/b/issues/2"),
   ]);
-  assert.equal(calls.length, 2);
-  assert.ok(calls[1] - calls[0] >= 50);
+  assert.equal(results[0].status, "fulfilled");
+  assert.equal(results[1].status, "rejected");
+  const fault = faultOf(results[1].reason);
+  assert.equal(fault.kind, "transient");
+  assert.ok(Date.parse(fault.retryAt) >= calls[0] + 59_000);
+  // A command outside a step shows this message: it names the reset.
+  assert.equal(
+    results[1].reason.message,
+    `GitHub request held by the rate limit until ${fault.retryAt}`,
+  );
+  assert.equal(calls.length, 1);
 });
 
-test("rate rejection is not retried, and queued wait is cancellable", async () => {
+test("rate rejection is not retried, and the gated request is not sent", async () => {
   let calls = 0;
   const client = clientFor(async () => {
     calls++;
@@ -56,12 +69,54 @@ test("rate rejection is not retried, and queued wait is cancellable", async () =
     });
   });
   await assert.rejects(client.request("GET", "repos/a/b/issues/1"), /HTTP 403/);
-  const controller = new AbortController();
-  const waiting = withProcessCancellation(controller.signal, () =>
-    client.request("GET", "repos/a/b/issues/2"),
+  await assert.rejects(
+    client.request("POST", "repos/a/b/issues", { title: "x" }),
+    (error) =>
+      faultOf(error).kind === "transient" &&
+      faultOf(error).outcomeUnknown === false &&
+      Boolean(faultOf(error).retryAt),
   );
-  setTimeout(() => controller.abort(), 15);
-  await assert.rejects(waiting);
+  assert.equal(calls, 1);
+});
+
+test("a rate-limit gate an hour away lets pause stop the step at once (#641)", async () => {
+  let calls = 0;
+  const reset = Math.ceil(Date.now() / 1000) + 3600;
+  const client = clientFor(async () => {
+    calls++;
+    return json({}, 200, {
+      "x-ratelimit-remaining": "0",
+      "x-ratelimit-reset": String(reset),
+    });
+  });
+  await client.request("GET", "repos/a/b/issues/1");
+  const state = {};
+  const cancel = new AbortController();
+  const pause = new AbortController();
+  const started = Date.now();
+  const running = step(
+    state,
+    { scope: "objective", name: "project" },
+    () => client.request("GET", "repos/a/b/issues/2"),
+    { save: () => {}, signal: cancel.signal, pause: pause.signal },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // The step records the outage with the gate's reset as its next try.
+  const record = Object.values(state.repeats ?? {})[0];
+  assert.equal(Date.parse(record?.nextAt), reset * 1000);
+  pause.abort();
+  await assert.rejects(running, { name: "StepPaused" });
+  assert.ok(Date.now() - started < 5000);
+  assert.equal(calls, 1);
+  // Cancel ends the same wait with a cancelled fault.
+  const again = step(
+    state,
+    { scope: "objective", name: "project" },
+    () => client.request("GET", "repos/a/b/issues/2"),
+    { save: () => {}, signal: cancel.signal },
+  );
+  setTimeout(() => cancel.abort(), 20);
+  await assert.rejects(again, (error) => faultOf(error).kind === "cancelled");
   assert.equal(calls, 1);
 });
 
@@ -74,8 +129,10 @@ test("lost mutation response is unknown and does not expose transport details", 
   await assert.rejects(
     client.request("POST", "repos/a/b/issues", { title: "x" }),
     (error) =>
-      error instanceof GitHubOutcomeUnknown &&
-      !error.message.includes("private"),
+      faultOf(error).kind === "transient" &&
+      faultOf(error).outcomeUnknown === true &&
+      !error.message.includes("private") &&
+      !faultOf(error).detail.includes("private"),
   );
   assert.equal(calls, 1);
 });
@@ -88,6 +145,8 @@ function projectionTransport() {
     urls.push(String(url));
     const path = new URL(String(url)).pathname.slice(1);
     const method = options.method ?? "GET";
+    if (method === "GET" && path === "user")
+      return json({ login: await fixture.client.viewer() });
     if (
       method === "GET" &&
       (path.endsWith("/labels") ||
@@ -196,12 +255,16 @@ const openPull = {
   base: { ref: "main" },
 };
 const mergedPull = { ...openPull, state: "closed", merged: true };
+const repository = { default_branch: "main", allow_merge_commit: true };
 
 test("regular merge sends the exact expected head and verifies integrated identity", async () => {
   const calls = [];
   let merged = false;
-  const client = clientFor(async (_url, options) => {
-    calls.push(options);
+  const client = clientFor(async (url, options) => {
+    const path = new URL(url).pathname;
+    calls.push({ ...options, path });
+    if (path === "/repos/a/b") return json(repository);
+    if (path === "/repos/a/b/rules/branches/main") return json([]);
     if (options.method !== "PUT") return json(merged ? mergedPull : openPull);
     merged = true;
     return json({ merged: true, sha: integratedSha });
@@ -211,12 +274,19 @@ test("regular merge sends the exact expected head and verifies integrated identi
     await gateway.merge({ number: 4, headSha, branch: "branch" }, headSha),
     { integratedSha },
   );
-  // Look up the PR first, merge it at the exact head, then confirm it.
+  // Look up the PR, the allowed merge method and the base's rulesets first,
+  // merge it at the exact head, then confirm it.
   assert.deepEqual(
-    calls.map((call) => call.method),
-    ["GET", "PUT", "GET"],
+    calls.map((call) => `${call.method} ${call.path}`),
+    [
+      "GET /repos/a/b/pulls/4",
+      "GET /repos/a/b",
+      "GET /repos/a/b/rules/branches/main",
+      "PUT /repos/a/b/pulls/4/merge",
+      "GET /repos/a/b/pulls/4",
+    ],
   );
-  assert.deepEqual(JSON.parse(calls[1].body), {
+  assert.deepEqual(JSON.parse(calls[3].body), {
     sha: headSha,
     merge_method: "merge",
   });
@@ -224,7 +294,7 @@ test("regular merge sends the exact expected head and verifies integrated identi
     gateway.merge({ number: 4, headSha, branch: "branch" }, "other"),
     /expected head/,
   );
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 5);
   assert.ok(
     calls.every(
       (call) => call.headers["x-github-api-version"] === "2026-03-10",
@@ -271,15 +341,25 @@ test("regular merge refuses a PR already merged at a different head or branch", 
         { number: 4, headSha, branch: "branch" },
         headSha,
       ),
-      /PR #4 was merged at a different head/,
+      /PR #4 was merged at head/,
     );
     assert.deepEqual(methods, ["GET"]);
   }
 });
 
-test("regular merge refuses missing, malformed or conflicting timeline merge evidence", async () => {
+test("regular merge refuses malformed or conflicting timeline merge evidence, and waits for missing evidence", async () => {
+  const lagging = await new RealGitHubGateway(
+    "a/b",
+    {},
+    clientFor(async (url) =>
+      String(url).includes("/timeline") ? json([]) : json(mergedPull),
+    ),
+  )
+    .merge({ number: 4, headSha, branch: "branch" }, headSha)
+    .catch((error) => error);
+  assert.match(lagging.message, /not on its timeline yet/);
+  assert.equal(faultOf(lagging).kind, "transient");
   for (const events of [
-    [],
     [{ event: "merged", commit_id: "not-a-commit" }],
     [
       { event: "merged", commit_id: integratedSha },
@@ -309,7 +389,9 @@ test("cancelled in-flight mutation retains unknown outcome", async () => {
     withProcessCancellation(controller.signal, () =>
       client.request("POST", "repos/a/b/issues", { title: "x" }),
     ),
-    GitHubOutcomeUnknown,
+    (error) =>
+      faultOf(error).kind === "transient" &&
+      faultOf(error).outcomeUnknown === true,
   );
 });
 
@@ -331,8 +413,16 @@ test("primary exhaustion on a successful response gates the next request", async
     );
   });
   await client.request("GET", "repos/a/b/issues/1");
-  await client.request("GET", "repos/a/b/issues/2");
-  assert.ok(calls[1] >= reset);
+  await assert.rejects(
+    client.request("GET", "repos/a/b/issues/2"),
+    gated(reset),
+  );
+  assert.equal(calls.length, 1);
+  await new Promise((resolve) =>
+    setTimeout(resolve, Math.max(reset - Date.now(), 0) + 5),
+  );
+  await client.request("GET", "repos/a/b/issues/3");
+  assert.equal(calls.length, 2);
 });
 
 test("cancelled queued request cannot let later dispatch overtake its owner", async () => {
@@ -403,7 +493,9 @@ test("native merge resumes its UUID without submitting another mutation", async 
       {
         resumeUuid: "saved-uuid",
         onPending: () => assert.fail("already persisted"),
-        cancelled: () => false,
+        requireMergeCommits: async () =>
+          assert.fail("a resumed merge sends nothing"),
+        queued: () => assert.fail("the request is known"),
       },
     ),
     integratedSha,
@@ -417,25 +509,33 @@ test("native merge resumes its UUID without submitting another mutation", async 
 });
 
 test("regular merge rejects unsuccessful acknowledgement and changed current PR identity", async () => {
+  const stillOpen = { state: "open", merged: false };
   for (const [result, detail, expected] of [
-    [{ merged: false, sha: integratedSha }, undefined, /did not produce/],
-    [{ merged: true }, undefined, /did not produce/],
-    [{ merged: true, sha: "not-a-commit" }, undefined, /did not produce/],
-    [{ merged: true, sha: integratedSha }, { state: "open" }, /not confirmed/],
-    [{ merged: true, sha: integratedSha }, { merged: false }, /not confirmed/],
+    // An acknowledgement without a fresh merge reads the PR (#627): still
+    // open means the merge did not happen.
+    [{ merged: false, sha: integratedSha }, stillOpen, /did not produce/],
+    [{ merged: true }, stillOpen, /did not produce/],
+    [{ merged: true, sha: "not-a-commit" }, stillOpen, /did not produce/],
+    [{ merged: true, sha: integratedSha }, { state: "open" }, /yet/],
+    [{ merged: true, sha: integratedSha }, { merged: false }, /yet/],
     [
       { merged: true, sha: integratedSha },
       { head: { sha: "b".repeat(40), ref: "branch" } },
-      /not confirmed/,
+      /yet/,
     ],
     [
       { merged: true, sha: integratedSha },
       { head: { sha: headSha, ref: "changed" } },
-      /not confirmed/,
+      /yet/,
     ],
   ]) {
     const methods = [];
-    const client = clientFor(async (_url, options) => {
+    const client = clientFor(async (url, options) => {
+      const path = new URL(url).pathname;
+      if (path === "/repos/a/b") return json(repository);
+      if (path === "/repos/a/b/rules/branches/main") return json([]);
+      if (path === "/repos/a/b/issues/4/timeline")
+        return json([{ event: "merged", commit_id: integratedSha }]);
       methods.push(options.method);
       assert.equal(options.headers["x-github-api-version"], "2026-03-10");
       if (options.method === "PUT") return json(result);
@@ -491,8 +591,19 @@ async function nativeMergeFixture(mode, options = {}) {
       const events = options.events?.(number) ?? [
         { event: "merged", commit_id: integratedSha },
       ];
-      const page = Number(query.get("page"));
-      return json(events.slice((page - 1) * 100, page * 100));
+      // GitHub pages by Link rel="next" (#630).
+      const page = Number(query.get("page") ?? 1);
+      const next = page * 100 < events.length;
+      return json(
+        events.slice((page - 1) * 100, page * 100),
+        200,
+        next
+          ? {
+              // GitHub links later pages by repository id (#646).
+              link: `<https://api.github.com/repositories/1382474350/${path.split("/").slice(4).join("/")}?per_page=100&page=${page + 1}>; rel="next"`,
+            }
+          : {},
+      );
     }
     if (path.endsWith("/merge-async/saved-uuid")) {
       completed = true;
@@ -530,12 +641,15 @@ async function nativeMergeFixture(mode, options = {}) {
   const result = await delivery.mergeStack(layers, "main", 10, {
     ...(mode === "resume" ? { resumeUuid: "saved-uuid" } : {}),
     onPending: (uuid) => pending.push(uuid),
-    cancelled: () => false,
+    requireMergeCommits: async () => {},
+    queued: (detail) => {
+      throw Object.assign(new Error(detail), { queued: true });
+    },
   });
   return { result, calls, pending };
 }
 
-for (const mode of ["immediate", "pending", "no-uuid", "resume", "already"])
+for (const mode of ["immediate", "pending", "resume", "already"])
   test(`native ${mode} merge resolves current timeline evidence without obsolete PR fields`, async () => {
     const { result, calls, pending } = await nativeMergeFixture(mode);
     assert.equal(result, integratedSha);
@@ -547,6 +661,13 @@ for (const mode of ["immediate", "pending", "no-uuid", "resume", "already"])
     assert.ok(calls.some((call) => call.path.endsWith("/issues/1/timeline")));
     assert.ok(calls.some((call) => call.path.endsWith("/issues/2/timeline")));
   });
+
+test("a native merge queued without a request to poll waits for CI", async () => {
+  await assert.rejects(
+    nativeMergeFixture("no-uuid"),
+    (error) => error.queued === true && /queued/.test(error.message),
+  );
+});
 
 test("native merge evidence spans every timeline page and ignores unrelated events", async () => {
   const { result, calls } = await nativeMergeFixture("already", {
@@ -568,10 +689,10 @@ test("native merge evidence spans every timeline page and ignores unrelated even
 
 test("native merge refuses missing, malformed, conflicting and disagreeing commit evidence", async () => {
   for (const [events, expected] of [
-    [() => [], /missing or conflicting/],
+    [() => [], /not on its timeline yet/],
     [
       () => [{ event: "closed", commit_id: integratedSha }],
-      /missing or conflicting/,
+      /not on its timeline yet/,
     ],
     [() => [{ event: "merged" }], /malformed/],
     [() => [{ event: "merged", commit_id: null }], /malformed/],
@@ -581,7 +702,7 @@ test("native merge refuses missing, malformed, conflicting and disagreeing commi
         { event: "merged", commit_id: integratedSha },
         { event: "merged", commit_id: "d".repeat(40) },
       ],
-      /missing or conflicting/,
+      /conflicting merge evidence/,
     ],
     [
       (number) => [{ event: "merged", commit_id: String(number).repeat(40) }],
@@ -595,7 +716,7 @@ test("native merge refuses missing, malformed, conflicting and disagreeing commi
   );
   await assert.rejects(
     nativeMergeFixture("resume", { changedHead: true }),
-    /matching integrated head/,
+    /does not show its merge yet/,
   );
   await assert.rejects(
     nativeMergeFixture("already", { changedHead: true }),

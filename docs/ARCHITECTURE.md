@@ -99,9 +99,9 @@ One controller owns an Objective at a time, through a lock and a private control
   - issues are found by their `factory:` marker before any is created;
   - a PR is found by its deterministic branch before one is opened;
   - a merge first checks whether the PR or stack is already merged at the expected head.
-- **Restart** reattaches to the recorded attempt handle; it does not start a second agent.
+- **Restart** adopts the recorded attempt through its driver: the attempt id is saved before the worker starts, a started worker is checkpointed before `start` returns, and a collected result is checkpointed before its worktree is removed. A restart never starts a second worker beside the first; a new worker starts only after the driver confirms the old one stopped.
 - **Real decisions still stop:** an edited or closed Objective, a PR changed by someone else, failing required checks, or a criterion the reviewer could not decide.
-- **Interruptions repeat; failures stop.** A worker that ends without a result, a lost model or GitHub response, or a GitHub server error interrupts a step rather than failing the work, so the step is repeated in the same run (a dead worker gets a fresh attempt). After two interruptions in one attempt the Work Item stops. A real failure (validation failed, a criterion refused, the worker reported failure) keeps its evidence; a new attempt needs `factory retry` or a remaining repair allowance.
+- **Interruptions repeat; failures stop.** Work Item execution, validation, review and diagnosis are steps (`src/step.ts`): a transient fault repeats with a persisted backoff. A dead worker, a lost model answer and an invalid model answer (asked again with its validation error) may have been paid for, so a step repeats three of them and then asks the operator to retry or cancel. Publication and merge still repeat a lost GitHub response or server error twice per attempt. A real failure (validation failed, a criterion refused, the worker reported failure) keeps its evidence; a new attempt needs `factory retry` or a remaining repair allowance.
 
 Diagnostics (`factory diagnostics`, `logs`, `analyze`) are a private timeline of observations. They never drive lifecycle decisions.
 

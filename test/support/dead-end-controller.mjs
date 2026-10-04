@@ -204,11 +204,7 @@ async function command({ verb, options }) {
       if (!work?.recovery?.failure)
         throw new Error("No stopped repair names a failure to correct");
       const refusals = [];
-      for (const kind of [
-        "implementation",
-        "validation-environment",
-        "review-evidence",
-      ])
+      for (const kind of ["implementation", "validation-environment"])
         try {
           return application.repairWorkItem(objective, {
             item: id,

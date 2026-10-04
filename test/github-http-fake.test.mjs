@@ -8,11 +8,8 @@ import { promisify } from "node:util";
 import { Octokit } from "@octokit/core";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
-import {
-  GitHubClient,
-  GitHubOutcomeUnknown,
-  GitHubRequestError,
-} from "../dist/github-client.js";
+import { faultOf } from "../dist/fault.js";
+import { GitHubClient, GitHubRequestError } from "../dist/github-client.js";
 import { RealGitHubGateway } from "../dist/github.js";
 import {
   ENDPOINTS,
@@ -28,6 +25,11 @@ import { createTarget, git } from "./support/integration-fixture.mjs";
 
 const repo = "/repos/{owner}/{repo}";
 const run = promisify(execFile);
+/** A mutation that may have taken effect: transient, outcome unknown. */
+const unknownOutcome = (error) => {
+  const fault = faultOf(error);
+  return fault.kind === "transient" && fault.outcomeUnknown === true;
+};
 
 const commit = (checkout, message) =>
   git(
@@ -102,7 +104,7 @@ test("every served endpoint is named in the request log", () => {
   assert.equal(new Set(ENDPOINTS).size, ENDPOINTS.length);
 });
 
-test("a second PR for an open head is refused with 422, a merged PR with 405, a stale head with 409", async (t) => {
+test("a second PR for an open head is refused with 422, a stale head with 409; a merged PR answers 200 with its merge", async (t) => {
   const { fake, client, pushBranch } = await setup(t);
   const sha = await pushBranch("feature");
   const created = await client.request("POST", "repos/example/target/pulls", {
@@ -137,17 +139,14 @@ test("a second PR for an open head is refused with 422, a merged PR with 405, a 
     { sha, merge_method: "merge" },
   );
   assert.equal(merged.merged, true);
-  await assert.rejects(
-    client.request(
-      "PUT",
-      `repos/example/target/pulls/${created.number}/merge`,
-      {
-        sha,
-        merge_method: "merge",
-      },
-    ),
-    (error) => error instanceof GitHubRequestError && error.status === 405,
+  // Real GitHub (#627): merging an already merged PR answers 200 with the
+  // same merge commit and merges nothing again.
+  const again = await client.request(
+    "PUT",
+    `repos/example/target/pulls/${created.number}/merge`,
+    { sha, merge_method: "merge" },
   );
+  assert.deepEqual([again.merged, again.sha], [true, merged.sha]);
   // The merge commit is on the default branch and only on the timeline.
   const main = git(fake.origin, "rev-parse", "refs/heads/main");
   assert.equal(main, merged.sha);
@@ -163,7 +162,7 @@ test("a second PR for an open head is refused with 422, a merged PR with 405, a 
   assert.equal(fake.effects(`PUT ${repo}/pulls/{number}/merge`).length, 1);
 });
 
-test("lists paginate with Link headers and the issue list includes pull requests", async (t) => {
+test("lists paginate with Link headers, the issue list by cursor, and it includes pull requests", async (t) => {
   const { fake, pushBranch, client } = await setup(t, {});
   for (let index = 0; index < 4; index++)
     fake.openForeignIssue(`Issue ${index}`);
@@ -176,11 +175,134 @@ test("lists paginate with Link headers and the issue list includes pull requests
   const response = await fetch(
     `${fake.apiUrl}/repos/example/target/issues?state=all&per_page=2&page=1`,
   );
-  assert.match(response.headers.get("link"), /page=2>; rel="next"/);
-  assert.match(response.headers.get("link"), /page=3>; rel="last"/);
+  // The issue list paginates with a cursor (#630): only rel="next". Like
+  // GitHub, the link names the repository by id and carries a page number
+  // next to the cursor (#646).
+  const link = response.headers.get("link");
+  assert.match(
+    link,
+    /^<https:\/\/api\.github\.com\/repositories\/\d+\/issues\?[^>]*[?&]after=[^&>]+[^>]*>; rel="next"$/,
+  );
+  assert.match(link, /[?&]page=2[&>]/);
+  assert.doesNotMatch(link, /rel="last"/);
+  const second = await fetch(
+    link
+      .slice(1, link.indexOf(">"))
+      .replace("https://api.github.com", fake.apiUrl),
+  );
+  assert.deepEqual(
+    (await second.json()).map((issue) => issue.number),
+    [4, 3],
+  );
+  const paged = await fetch(
+    `${fake.apiUrl}/repos/example/target/issues?state=all&per_page=2&page=2`,
+  );
+  assert.equal(paged.status, 422);
   const all = await client.paginate("repos/example/target/issues?state=all");
   assert.equal(all.length, 6);
   assert.equal(all.filter((issue) => issue.pull_request).length, 1);
+});
+
+test("paginate follows GitHub's repositories/{id} Link URLs past the first page", async (t) => {
+  const { fake, client } = await setup(t, {});
+  const before = fake.state.nextNumber;
+  for (let index = 0; index < 120; index++)
+    fake.openForeignIssue(`Issue ${index}`);
+  // The cursor list (issues) and a page-number list (comments) (#646).
+  const issues = await client.paginate("repos/example/target/issues?state=all");
+  const numbers = new Set(issues.map((issue) => issue.number));
+  assert.equal(numbers.size, issues.length);
+  for (let number = before; number < before + 120; number++)
+    assert.ok(numbers.has(number), `issue #${number} is listed`);
+  const number = issues[0].number;
+  for (let index = 0; index < 101; index++)
+    await client.request(
+      "POST",
+      `repos/example/target/issues/${number}/comments`,
+      { body: `comment ${index}` },
+    );
+  const comments = await client.paginate(
+    `repos/example/target/issues/${number}/comments`,
+  );
+  assert.equal(comments.length, 101);
+  const pages = fake.log.filter((entry) =>
+    /^\/repos\/example\/target\/issues(\/\d+\/comments)?\?.*page=2/.test(
+      entry.path,
+    ),
+  );
+  assert.equal(pages.length, 2);
+});
+
+test("lag and merge-async timing read the fake's clock", async (t) => {
+  let now = Date.parse("2026-01-01T00:00:00Z");
+  const { fake, client, pushBranch } = await setup(t, {
+    now: () => now,
+    // Real GitHub: a new issue shows in the list after 2.5-3.4 s, and a
+    // merge-async stays pending for about 5-7 s.
+    lag: [
+      { read: `GET ${repo}/issues`, after: `POST ${repo}/issues`, ms: 3000 },
+    ],
+    asyncMergeMs: 6000,
+  });
+  const listed = async () =>
+    (await client.paginate("repos/example/target/issues?state=all")).map(
+      (issue) => issue.number,
+    );
+  const created = await client.request("POST", "repos/example/target/issues", {
+    title: "New",
+  });
+  // A single-issue read does not lag; the list does, for 3 s however often
+  // it is read.
+  assert.equal(
+    (
+      await client.request(
+        "GET",
+        `repos/example/target/issues/${created.number}`,
+      )
+    ).number,
+    created.number,
+  );
+  for (const elapsed of [0, 1000, 2999]) {
+    now = Date.parse("2026-01-01T00:00:00Z") + elapsed;
+    assert.equal((await listed()).includes(created.number), false);
+  }
+  now = Date.parse("2026-01-01T00:00:03Z");
+  assert.equal((await listed()).includes(created.number), true);
+  assert.equal(fake.lag[0].served, 3);
+
+  await pushBranch("feature");
+  const pull = await client.request("POST", "repos/example/target/pulls", {
+    head: "feature",
+    base: "main",
+    title: "Feature",
+  });
+  const start = now;
+  const accepted = await client.request(
+    "PUT",
+    `repos/example/target/pulls/${pull.number}/merge-async`,
+    { sha: pull.head.sha, merge_method: "merge", merge_action: "default" },
+  );
+  assert.equal(accepted.status, "pending");
+  const poll = () =>
+    client.request(
+      "GET",
+      `repos/example/target/pulls/${pull.number}/merge-async/${accepted.details.uuid}`,
+    );
+  // However often it is polled, it is pending until its time.
+  for (const elapsed of [0, 2000, 5999]) {
+    now = start + elapsed;
+    assert.equal((await poll()).status, "pending");
+  }
+  assert.equal(fake.state.pulls[pull.number].merged_at, undefined);
+  // Once due it lands whether or not it is polled: the PR read shows it.
+  now = start + 6000;
+  const merged = await client.request(
+    "GET",
+    `repos/example/target/pulls/${pull.number}`,
+  );
+  assert.equal(merged.merged, true);
+  assert.equal((await poll()).status, "merged");
+  assert.equal(fake.state.pulls[pull.number].merges, 1);
 });
 
 test("a dropped response applies the effect and the client reports an unknown outcome", async (t) => {
@@ -188,7 +310,7 @@ test("a dropped response applies the effect and the client reports an unknown ou
   fake.inject({ match: `POST ${repo}/issues`, kind: "drop" });
   await assert.rejects(
     client.request("POST", "repos/example/target/issues", { title: "Lost" }),
-    (error) => error instanceof GitHubOutcomeUnknown,
+    unknownOutcome,
   );
   assert.equal(fake.effects(`POST ${repo}/issues`).length, 1);
   assert.equal(
@@ -213,7 +335,7 @@ test("an unavailable burst and rate limits are answered without an effect", asyn
   for (let attempt = 0; attempt < 2; attempt++)
     await assert.rejects(
       client.request("POST", "repos/example/target/issues", { title: "X" }),
-      (error) => error instanceof GitHubOutcomeUnknown,
+      unknownOutcome,
     );
   await assert.rejects(
     client.request("POST", "repos/example/target/issues", { title: "X" }),
@@ -262,7 +384,7 @@ test("regular delivery finds the PR whose creation response was lost instead of 
   const previousGit = process.env.FACTORY_FAKE_GITHUB_GIT;
   Object.assign(process.env, gitTransportEnvironment(fake.gitUrl));
   try {
-    await assert.rejects(delivery.publish(request), GitHubOutcomeUnknown);
+    await assert.rejects(delivery.publish(request), unknownOutcome);
     const published = await delivery.publish(request);
     assert.equal(published.headSha, head);
   } finally {
@@ -288,18 +410,22 @@ test("the gateway refuses two open PRs for one branch and an existing PR with an
       base: { ref: "main", sha },
     },
   );
+  const publication = (headSha) => ({
+    branch: "factory/objective-1/alpha",
+    base: "main",
+    headSha,
+    title: "Alpha",
+    body: "b",
+  });
   await assert.rejects(
-    gateway.findOpenPullRequest(
-      "factory/objective-1/alpha",
-      "main",
-      "a".repeat(40),
-    ),
-    /changed head or base/,
+    gateway.publish(publication("a".repeat(40))),
+    /changed head/,
   );
-  assert.deepEqual(
-    await gateway.findOpenPullRequest("factory/objective-1/alpha", "main", sha),
-    { number, branch: "factory/objective-1/alpha", headSha: sha },
-  );
+  assert.deepEqual(await gateway.publish(publication(sha)), {
+    number,
+    branch: "factory/objective-1/alpha",
+    headSha: sha,
+  });
   // Another actor opened a second PR from the same head into another base.
   const second = fake.state.nextNumber;
   fake.createIssueRecord(
@@ -311,10 +437,7 @@ test("the gateway refuses two open PRs for one branch and an existing PR with an
       base: { ref: "release", sha },
     },
   );
-  await assert.rejects(
-    gateway.findOpenPullRequest("factory/objective-1/alpha", "main", sha),
-    /Multiple open PRs/,
-  );
+  await assert.rejects(gateway.publish(publication(sha)), /Multiple open PRs/);
 });
 
 test("stacks: listing fields, a nonexistent PR is 422, and merge-async follows the documented statuses", async (t) => {
@@ -348,6 +471,24 @@ test("stacks: listing fields, a nonexistent PR is 422, and merge-async follows t
   assert.equal(typeof listed.id, "number");
   assert.equal(typeof listed.node_id, "string");
   assert.equal(listed.open, true);
+  // Real GitHub (#627): a stacked PR never merges through PUT merge, and a
+  // stale expected head fails merge-async with 400.
+  await assert.rejects(
+    client.request("PUT", `repos/example/target/pulls/${one.number}/merge`, {
+      sha: one.head.sha,
+      merge_method: "merge",
+    }),
+    (error) => error instanceof GitHubRequestError && error.status === 403,
+  );
+  const stale = await fetch(
+    `${fake.apiUrl}/repos/example/target/pulls/${two.number}/merge-async`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ sha: "f".repeat(40), merge_method: "merge" }),
+    },
+  );
+  assert.equal(stale.status, 400);
+  assert.equal((await stale.json()).status, "failed");
   // Merging the middle PR includes the PR below it, not the one above.
   const accepted = await client.request(
     "PUT",
@@ -375,6 +516,8 @@ test("stacks: listing fields, a nonexistent PR is 422, and merge-async follows t
   assert.ok(fake.state.pulls[one.number].merged_at);
   assert.ok(fake.state.pulls[two.number].merged_at);
   assert.equal(fake.state.pulls[three.number].merged_at, undefined);
+  // The open layer above the merge now targets the stack's base.
+  assert.equal(fake.state.pulls[three.number].base.ref, "main");
   // Already merged: 200 with the merge commit, and no second merge.
   const again = await client.request(
     "PUT",
@@ -386,6 +529,13 @@ test("stacks: listing fields, a nonexistent PR is 422, and merge-async follows t
     ["merged", polled.details.sha],
   );
   assert.equal(fake.state.pulls[two.number].merges, 1);
+  await assert.rejects(
+    client.request("PUT", `repos/example/target/pulls/${two.number}/merge`, {
+      sha: two.head.sha,
+      merge_method: "merge",
+    }),
+    (error) => error instanceof GitHubRequestError && error.status === 403,
+  );
   // A closed PR is not ready to merge.
   await client.request("PATCH", `repos/example/target/issues/${three.number}`, {
     state: "closed",
@@ -415,6 +565,7 @@ test("every response carries rate-limit headers; a duplicate PR is one 422 error
   assert.equal(duplicate.status, 422);
   assert.ok(duplicate.headers.get("x-ratelimit-reset"));
   const body = await duplicate.json();
+  assert.equal(body.status, "422");
   assert.equal(body.errors.length, 1);
   assert.match(body.errors[0].message, /A pull request already exists/);
   fake.inject({ match: `GET ${repo}`, ...faults.secondaryRateLimit() });
@@ -422,4 +573,144 @@ test("every response carries rate-limit headers; a duplicate PR is one 422 error
   assert.equal(limited.status, 403);
   assert.equal(limited.headers.get("x-ratelimit-remaining"), "4999");
   assert.ok(limited.headers.get("x-ratelimit-reset"));
+});
+
+test("update-branch merges the base into the head, guarded by the expected head; strict protection reads BEHIND", async (t) => {
+  const { fake, client, pushBranch } = await setup(t, {
+    strict: true,
+    protectionChecks: () => [],
+  });
+  const head = await pushBranch("feature");
+  const pull = await client.request("POST", "repos/example/target/pulls", {
+    head: "feature",
+    base: "main",
+    title: "Feature",
+  });
+  const readiness = () =>
+    client.pullRequestReadiness("example/target", pull.number);
+  assert.equal((await readiness()).mergeStateStatus, "CLEAN");
+  await assert.rejects(
+    client.request(
+      "PUT",
+      `repos/example/target/pulls/${pull.number}/update-branch`,
+      { expected_head_sha: head },
+    ),
+    (error) => error instanceof GitHubRequestError && error.status === 422,
+    "nothing new on the base",
+  );
+  const base = await fake.pushForeignCommit();
+  assert.equal((await readiness()).mergeStateStatus, "BEHIND");
+  await assert.rejects(
+    client.request(
+      "PUT",
+      `repos/example/target/pulls/${pull.number}/update-branch`,
+      { expected_head_sha: "f".repeat(40) },
+    ),
+    (error) => error instanceof GitHubRequestError && error.status === 422,
+    "a stale expected head",
+  );
+  const updated = await client.request(
+    "PUT",
+    `repos/example/target/pulls/${pull.number}/update-branch`,
+    { expected_head_sha: head },
+  );
+  assert.match(updated.message, /Updating/);
+  const after = await client.request(
+    "GET",
+    `repos/example/target/pulls/${pull.number}`,
+  );
+  assert.notEqual(after.head.sha, head);
+  assert.deepEqual(
+    git(fake.origin, "rev-list", "--parents", "-n", "1", after.head.sha)
+      .split(" ")
+      .slice(1),
+    [head, base],
+  );
+  assert.equal((await readiness()).mergeStateStatus, "CLEAN");
+  const update = await client.request(
+    "GET",
+    `repos/example/target/commits/${after.head.sha}`,
+  );
+  assert.equal(update.committer.login, "web-flow");
+  assert.deepEqual(
+    update.parents.map((parent) => parent.sha),
+    [head, base],
+  );
+  assert.equal(
+    (await client.request("GET", `repos/example/target/compare/${base}...main`))
+      .status,
+    "identical",
+  );
+  assert.equal(
+    (
+      await client.request(
+        "GET",
+        `repos/example/target/compare/${head}...${after.head.sha}`,
+      )
+    ).status,
+    "ahead",
+  );
+  assert.equal(
+    (await client.request("GET", `repos/example/target/commits/${head}`))
+      .committer.login,
+    "example",
+  );
+  const protection = await client.request(
+    "GET",
+    "repos/example/target/branches/main/protection/required_status_checks",
+  );
+  assert.equal(protection.strict, true);
+});
+
+test("a deleted issue answers 410 and leaves the lists", async (t) => {
+  const { fake, client } = await setup(t);
+  const created = await client.request("POST", "repos/example/target/issues", {
+    title: "Doomed",
+  });
+  fake.deleteIssue(created.number);
+  await assert.rejects(
+    client.request("GET", `repos/example/target/issues/${created.number}`),
+    (error) => error instanceof GitHubRequestError && error.status === 410,
+  );
+  const listed = await client.paginate("repos/example/target/issues?state=all");
+  assert.deepEqual(
+    listed.map((issue) => issue.number),
+    [1],
+  );
+});
+
+test("an App token has no user; what it creates carries the bot login", async (t) => {
+  const { fake, client } = await setup(t, {
+    appToken: true,
+    protectionChecks: () => ["ci"],
+  });
+  // It cannot read classic protection; the branch shows the required checks.
+  await assert.rejects(
+    client.request(
+      "GET",
+      "repos/example/target/branches/main/protection/required_status_checks",
+    ),
+    (error) => error instanceof GitHubRequestError && error.status === 403,
+  );
+  const branch = await client.request(
+    "GET",
+    "repos/example/target/branches/main",
+  );
+  assert.deepEqual(branch.protection.required_status_checks.contexts, ["ci"]);
+  await assert.rejects(
+    client.viewer(),
+    (error) => error instanceof GitHubRequestError && error.status === 403,
+  );
+  const created = await client.request("POST", "repos/example/target/issues", {
+    title: "Work",
+  });
+  assert.equal(created.user.login, fake.author.login);
+  assert.match(created.user.login, /\[bot\]$/);
+  const mine = await client.paginate(
+    `repos/example/target/issues?state=all&creator=${encodeURIComponent(created.user.login)}`,
+  );
+  assert.deepEqual(
+    mine.map((issue) => issue.number),
+    [created.number],
+  );
 });

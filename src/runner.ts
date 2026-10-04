@@ -8,6 +8,7 @@ import {
   resolveAutonomy,
 } from "./repair-policy.js";
 import { applyWorkCorrection, resumeDiagnoses } from "./work-repair.js";
+import { workerIdentity } from "./item-steps.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
 import {
@@ -24,6 +25,7 @@ import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import {
   assertObjectiveCriteria,
   compilePlan,
+  paidModel,
   finalObjectiveCommands,
   objectiveCriteria,
   type PlanCandidate,
@@ -37,7 +39,6 @@ import {
   sealFinalAcceptance,
   closeObjectiveIssue,
   closeWorkItem,
-  GitHubClosureFailure,
 } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
 import {
@@ -53,7 +54,13 @@ import type {
   GitHubGateway,
   PlanningModel,
 } from "./contracts.js";
-import { CompletedModelInvocationError } from "./contracts.js";
+import {
+  attachedFault,
+  attachFault,
+  decision,
+  faultDetail,
+  StepFault,
+} from "./fault.js";
 import {
   type ControlRequest,
   requestControl,
@@ -67,6 +74,11 @@ import {
   awaitsOperator,
   clearAllRepeats,
   clearRepeats,
+  outageOf,
+  StepPaused,
+  step,
+  type StepContext,
+  type StepState,
   waitOf,
 } from "./step.js";
 import { namesPlan, shortPlanDigest } from "./status-summary.js";
@@ -96,6 +108,7 @@ import type {
   ContinuationState,
   FactoryState,
   PreparationState,
+  WorkState,
 } from "./state.js";
 import {
   acquireControllerLock,
@@ -108,12 +121,15 @@ import {
   statePath,
 } from "./state-store.js";
 import {
-  AcceptanceDecisionRequired,
   assertPinnedNpmScripts,
   objectiveReviewEvidence,
-  reviewAcceptance,
+  reviewOutcome,
+  sweepValidationWorktrees,
   validateTree,
 } from "./validation.js";
+
+/** Heads others push during final validation that Factory follows before asking. */
+const FOLLOWED_HEAD_LIMIT = 3;
 
 /** One controller-derived binding for the immutable preparation inputs. */
 function preparationSourceDigest(
@@ -278,6 +294,10 @@ export async function decidePlan(
     } else {
       if (!preparation.plan)
         throw new Error("Objective planning has not produced a plan yet");
+      if (preparation.plan.review.acceptable === false)
+        throw new Error(
+          `Factory cannot accept plan ${shortPlanDigest(preparation.plan)}; refuse it to plan again`,
+        );
       const issue = await services.github.objective(objective);
       preparation.plan = await resolvePlan(
         preparation.plan,
@@ -329,7 +349,10 @@ function canHandoff(state: ContinuationState): boolean {
     !state.coordinator?.phase.endsWith("-submitted") &&
     !Object.entries(state.work).some(
       ([id, work]) =>
-        (work.status === "running" && !isReadinessWait(state, id)) ||
+        // An item waiting in place for the operator holds no effect in flight.
+        (work.status === "running" &&
+          !isReadinessWait(state, id) &&
+          !awaitsOperator(work.wait)) ||
         (work.status === "published" &&
           (!work.pullRequest || !work.changeRef || !work.treeSha)),
     )
@@ -338,6 +361,12 @@ function canHandoff(state: ContinuationState): boolean {
 
 interface LocalOwner {
   handoff?: boolean;
+  /**
+   * Aborts on pause, drain and handoff (SIGTERM, `handoff`): a step waiting
+   * between tries stops with `StepPaused`, nothing charged or failed.
+   * Replaced by a fresh controller on resume.
+   */
+  pause: AbortController;
   snapshot?: ContinuationState;
   lock: ControllerLock;
   abort: AbortController;
@@ -345,6 +374,13 @@ interface LocalOwner {
   deadlineAt?: string;
   cancellation?: Promise<void>;
   waitForWake: () => Promise<void>;
+  /**
+   * Settles at the next wake without consuming it, so a running pass sees
+   * the operator's live control action (a `factory retry`) at once.
+   */
+  woken: () => Promise<void>;
+  /** The pass's observing save: emits each item's state change, terminal ones included. */
+  save?: (state: FactoryState) => void;
 }
 const owners = new Map<string, LocalOwner>();
 const ownerKey = (config: FactoryConfig, objective: number) =>
@@ -477,10 +513,16 @@ async function cancelKnownWork(
         work.status === "cancelled"
       )
         continue;
+      // An attempt saved before its start was recorded: the driver stops
+      // whatever it started under the attempt's identity, if anything.
       if (!work.execution) {
-        errors.push(
-          "Active attempt has no stable handle; cessation is unknown",
-        );
+        if (work.attempt)
+          tasks.push(() =>
+            driver.cancelUnrecorded(
+              workerIdentity(work),
+              executionContext(work, save),
+            ),
+          );
         continue;
       }
       tasks.push(() =>
@@ -490,7 +532,6 @@ async function cancelKnownWork(
         ),
       );
     }
-  if (errors.length) throw new Error(errors.join("; "));
   tasks.push(() => cancelRecordedSubprocesses(state));
   for (const result of await Promise.allSettled(tasks.map((task) => task())))
     if (result.status === "rejected") errors.push(String(result.reason));
@@ -547,11 +588,23 @@ export async function runObjective(
       phase: "idle",
       phaseStartedAt: new Date().toISOString(),
     };
+  let woke: { promise: Promise<void>; resolve: () => void } | undefined;
   const owner: LocalOwner = {
     changed: false,
     lock,
     abort: new AbortController(),
+    pause: new AbortController(),
     waitForWake: async () => undefined,
+    woken: () => {
+      if (!woke) {
+        let resolve!: () => void;
+        const promise = new Promise<void>((settle) => {
+          resolve = settle;
+        });
+        woke = { promise, resolve };
+      }
+      return woke.promise;
+    },
     snapshot,
     deadlineAt: options.deadlineAt,
   };
@@ -561,6 +614,13 @@ export async function runObjective(
     owner.changed = true;
     for (const resolve of waiters) resolve();
     waiters.clear();
+    woke?.resolve();
+    woke = undefined;
+  };
+  /** A handoff: stop at the next safe point and release ownership. */
+  const releaseOwnership = () => {
+    owner.handoff = true;
+    owner.pause.abort(new Error("Coordinator handoff requested"));
   };
   const wait = async (observationDelay?: number) => {
     if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
@@ -605,12 +665,14 @@ export async function runObjective(
     };
     owner.snapshot.coordinator.waitReason = "Verifying owned work cessation";
     persist();
-    owner.abort.abort();
+    owner.abort.abort(new Error("Objective cancellation requested"));
     if (owner.cancellation) return;
     owner.cancellation = (async () => {
       const state = owner.snapshot!;
       try {
         await cancelKnownWork(state, services.driver, persist);
+        // Cessation is verified: an earlier unresolved attempt is answered.
+        delete state.coordinator!.cancelError;
         // The run settles its in-flight effect before recording terminal cancellation.
         state.coordinator!.waitReason =
           "Owned cancellation acknowledged; waiting for in-flight phase to settle";
@@ -698,7 +760,11 @@ export async function runObjective(
         return "requested";
       }
       if (["pause", "drain", "resume", "handoff"].includes(request.action)) {
-        if (request.action === "handoff") owner.handoff = true;
+        if (request.action === "handoff") releaseOwnership();
+        else if (request.action === "resume") {
+          if (owner.pause.signal.aborted && !owner.handoff)
+            owner.pause = new AbortController();
+        } else owner.pause.abort(new Error(`Coordinator ${request.action}`));
         state.coordinator.mode =
           request.action === "pause"
             ? "paused"
@@ -769,7 +835,7 @@ export async function runObjective(
     throw error;
   }
   const handoff = () => {
-    owner.handoff = true;
+    releaseOwnership();
     if (owner.snapshot?.coordinator) {
       owner.snapshot.coordinator.mode = "draining";
       persist();
@@ -787,13 +853,18 @@ export async function runObjective(
         if (!state.coordinator?.cancelError) {
           state.cancelledAt = new Date().toISOString();
           clearAllRepeats(state);
-          if (state.schemaVersion === 7)
+          if (state.schemaVersion === 7) {
             for (const work of Object.values(state.work))
               if (work.status === "pending" || work.status === "running")
                 work.status = "cancelled";
-          persist();
+            if (owner.save) owner.save(state);
+            else persist();
+          } else persist();
         }
-        throw new Error("Objective cancellation requested");
+        throw new StepFault({
+          kind: "cancelled",
+          detail: "Objective cancellation requested",
+        });
       }
       if (
         state?.coordinator?.mode !== "running" &&
@@ -825,6 +896,9 @@ export async function runObjective(
         },
       ).catch((error: unknown) => {
         const current = owner.snapshot;
+        // A pass stopped by the cancel request (a step answers `cancelled`):
+        // the loop records the cancellation.
+        if (current?.cancelRequested && !owner.handoff) return undefined;
         // Planning stops at a pause or drain; the owner keeps serving control until resume.
         if (
           current?.schemaVersion === 8 &&
@@ -837,6 +911,8 @@ export async function runObjective(
       });
       if (!result) continue;
       owner.snapshot = result;
+      // A pass that stopped for the cancel request: the loop records it.
+      if (result.cancelRequested && !owner.handoff) continue;
       // A preparation comes back only when its plan needs a human decision.
       if (
         result.schemaVersion === 8 ||
@@ -867,15 +943,22 @@ export async function runObjective(
             work.recovery?.phase === "diagnosing") &&
           ["failed", "waiting"].includes(work.status),
       );
-      result.coordinator!.waitReason = result.githubClosureError
-        ? "GitHub closure acknowledgement unresolved; resume to reconcile"
+      // A step's question or configuration fix names what to answer: the
+      // Objective's own wait first, then a Work Item's.
+      const asked = Object.entries(result.work).find(([, work]) =>
+        awaitsOperator(work.wait),
+      );
+      result.coordinator!.waitReason = result.wait
+        ? `${result.wait.detail}${result.wait.fix ? `. ${result.wait.fix}` : ""}`
         : result.coordinator!.mode === "draining"
           ? "Drained; no owned attempts remain"
           : stoppedRepair
             ? `Work Item ${stoppedRepair[0]}: ${stoppedRepair[1].recovery!.failure?.decision ?? "Inspect the retained recovery failure"}`
-            : hasReadinessWait(result)
-              ? "Awaiting exact published checks or target protection readiness"
-              : "Awaiting exact candidate decision or resume";
+            : asked
+              ? `Work Item ${asked[0]}: ${asked[1].wait!.detail}${asked[1].wait!.fix ? `. ${asked[1].wait!.fix}` : ""}`
+              : hasReadinessWait(result)
+                ? "Awaiting exact published checks or target protection readiness"
+                : "Awaiting exact candidate decision or resume";
       persist();
       // Nothing automatic remains: the Objective needs a human decision.
       if (result.coordinator?.mode === "running" && !hasReadinessWait(result))
@@ -945,6 +1028,7 @@ async function runObjectivePass(
       );
     }
   };
+  owner.save = save;
   const active = new Map<string, Promise<void>>();
   const {
     driver,
@@ -956,36 +1040,84 @@ async function runObjectivePass(
   } = services;
   let stateForSignal: FactoryState | undefined;
   const cancellationRequested = () => Boolean(owner.snapshot?.cancelRequested);
+  // Cancel stops every step. Pause, drain and handoff stop an Objective step
+  // waiting between tries only at a safe point (no running item depends on
+  // it); a drain that must still drive running items keeps them going.
+  const objectiveSignal = () => owner.abort.signal;
+  const objectivePause = () =>
+    owner.snapshot && !canHandoff(owner.snapshot)
+      ? undefined
+      : owner.pause.signal;
+  /** Stop a pass the operator cancelled: a `cancelled` fault, never a failure. */
+  const stopIfCancelled = () => {
+    if (cancellationRequested())
+      throw new StepFault({
+        kind: "cancelled",
+        detail: "Objective cancellation requested",
+      });
+  };
   try {
     diagnostics.emit({ operation: "objective-run", outcome: "started" });
-    const observeObjective = async () => {
-      for (;;) {
-        if (cancellationRequested())
-          throw new Error("Objective cancellation requested");
-        try {
-          const observed = await github.objective(objective);
-          if (owner.snapshot?.coordinator) {
-            owner.snapshot.coordinator.observedAt = new Date().toISOString();
-            delete owner.snapshot.coordinator.observationError;
-          }
-          return observed;
-        } catch (error) {
-          if (!owner.snapshot?.coordinator || cancellationRequested())
-            throw error;
-          owner.snapshot.coordinator.observationError =
-            "Exact Objective observation unavailable";
-          owner.snapshot.coordinator.waitReason =
-            "GitHub API unavailable; resume to observe again or cancel locally";
-          owner.snapshot.coordinator.mode = "paused";
-          saveState(path, owner.snapshot);
-          do {
-            await owner.waitForWake();
-          } while (
-            String(owner.snapshot.coordinator.mode) !== "running" &&
-            !cancellationRequested()
-          );
-        }
-      }
+    // Before the Objective has state its first reads repeat in memory: there
+    // is nothing to save yet.
+    const unsaved: Pick<PreparationState, "repeats" | "wait"> = {};
+    /** Run one Objective step (see src/step.ts) on `state`'s records. */
+    const objectiveStep = <T>(
+      state: ContinuationState | undefined,
+      name: string,
+      fn: (context: StepContext) => Promise<T>,
+      paid = false,
+      /** False inside item runners, which keep driving their items. */
+      pausable = true,
+    ): Promise<T> =>
+      step(
+        state ?? (unsaved as StepState),
+        { scope: "objective", name, paid },
+        fn,
+        {
+          save: () => {
+            if (state?.schemaVersion === 7) save(state);
+            else if (state) saveState(path, state);
+            else {
+              // Nothing is saved before the Objective has state: report an
+              // outage to the run's output instead.
+              const outage = outageOf(unsaved as StepState, "objective");
+              if (outage)
+                reportRunStatus?.(
+                  `Factory: ${outage.step} failing since ${outage.since} (${outage.tries} tries): ${faultDetail(outage.last)}`,
+                );
+            }
+          },
+          signal: objectiveSignal(),
+          pause: pausable ? objectivePause() : undefined,
+        },
+      );
+    const observeObjective = (state = owner.snapshot) =>
+      objectiveStep(state, "observe", () => github.objective(objective));
+    /**
+     * The Objective issue changed outside Factory since planning: the
+     * operator's decision, whether the run or a resume sees it first.
+     */
+    const changedOutside = (
+      issue: { state?: string; body: string },
+      state: FactoryState,
+    ): Error | undefined => {
+      const changed =
+        issue.state === "closed" && !state.finalValidation?.passed
+          ? "The Objective issue was closed"
+          : state.objectiveBodyDigest &&
+              createHash("sha256").update(issue.body).digest("hex") !==
+                state.objectiveBodyDigest
+            ? "The Objective issue body changed"
+            : undefined;
+      return changed
+        ? attachFault(
+            new Error(`${changed}; operator direction required`),
+            decision(
+              `${changed} outside Factory. Restore it, then factory retry --objective ${objective}; or factory cancel --objective ${objective}`,
+            ),
+          )
+        : undefined;
     };
     const issue = await observeObjective();
     assertObjectiveCriteria(issue.body);
@@ -1000,7 +1132,7 @@ async function runObjectivePass(
     let preparation =
       continuation?.schemaVersion === 8 ? continuation : undefined;
     let state = continuation?.schemaVersion === 7 ? continuation : undefined;
-    if (issue.state === "closed" && !state?.finalValidation?.passed)
+    if (issue.state === "closed" && !state)
       throw new Error(
         "Objective issue is confirmed closed; operator direction required",
       );
@@ -1023,7 +1155,7 @@ async function runObjectivePass(
       }
       if (state.error)
         throw new Error(
-          `Objective stopped: ${state.error}. Use explicit retry or operator direction.`,
+          `Objective stopped: ${state.error}. Fix the cause, then run \`factory retry --objective ${objective}\``,
         );
       if (
         !state.objectiveBodyDigest &&
@@ -1032,14 +1164,13 @@ async function runObjectivePass(
         throw new Error(
           "Workspace package authority requires a digest-bound Objective; create a new plan",
         );
-      if (
-        state.objectiveBodyDigest &&
-        state.objectiveBodyDigest !==
-          createHash("sha256").update(issue.body).digest("hex")
-      )
-        throw new Error(
-          "Objective issue body changed; operator direction required",
-        );
+      // A decision, as when delivery observes the change: the observe
+      // step saves the question, and `factory retry` asks it again.
+      const changed = changedOutside(issue, state);
+      if (changed)
+        await objectiveStep(state, "observe", async () => {
+          throw changed;
+        });
       stateDiagnostics = new StateDiagnostics(
         diagnostics,
         state,
@@ -1055,21 +1186,31 @@ async function runObjectivePass(
             github,
             saveCurrent,
             config.delivery.kind === "native-stack",
+            objectiveSignal(),
+            objectivePause(),
           );
       if (state.finalValidation?.passed) {
         reportRunStatus?.(
           "Factory: resuming the existing run from atomic state",
         );
         if (!state.finalAcceptance && state.objectiveClosure !== "complete") {
-          if (
-            (await fetchHead(config.checkout, await github.defaultBranch())) !==
-            objectiveCandidate(state)?.commitSha
-          )
+          // A remote read: transient faults repeat with backoff.
+          const head = await objectiveStep(state, "final-head", async () =>
+            fetchHead(config.checkout, await github.defaultBranch()),
+          );
+          if (head !== objectiveCandidate(state)?.commitSha)
             throw new Error(
               "Default branch changed before historical final acceptance could be sealed",
             );
         }
-        await closeObjectiveIssue(state, issue.body, github, saveCurrent);
+        await closeObjectiveIssue(
+          state,
+          issue.body,
+          github,
+          saveCurrent,
+          objectiveSignal(),
+          objectivePause(),
+        );
         return state;
       }
       if (state.cancelRequested || state.cancelledAt)
@@ -1079,11 +1220,10 @@ async function runObjectivePass(
       reportRunStatus?.("Factory: resuming the existing run from atomic state");
     } else {
       const baseSha = git(config.checkout, "rev-parse", "HEAD");
-      const prerequisites = await planningPrerequisites(
-        config,
-        github,
-        objective,
-        baseSha,
+      const prerequisites = await objectiveStep(
+        owner.snapshot,
+        "prerequisites",
+        () => planningPrerequisites(config, github, objective, baseSha),
       );
       const objectivesRoot = join(root, "objectives");
       if (existsSync(objectivesRoot)) {
@@ -1180,26 +1320,33 @@ async function runObjectivePass(
               reportRunStatus?.(
                 "Factory: compiling and independently reviewing a fresh plan",
               );
-              // The plan and its review persist in the preparation, so a rerun never pays again.
-              return compilePlan(
-                objective,
-                issue.body,
-                baseSha,
-                config.checkout,
-                planningModel,
-                installationConfigDigest,
-                diagnostics.modelObserver({ scopeId: planningScopeId }),
-                executionProfileChoices(config),
-                {
-                  state: preparation!,
-                  save: () => saveState(path, preparation!),
-                  stopped: () =>
-                    cancellationRequested() ||
-                    preparation!.coordinator.mode !== "running",
-                },
-                prerequisites,
-                localExecutables,
-                { configuredConcurrency: capacity.concurrency },
+              // The plan and its review persist in the preparation, so a
+              // repeat never pays again for a call that completed.
+              return objectiveStep(
+                preparation,
+                "plan",
+                (context) =>
+                  compilePlan(
+                    objective,
+                    issue.body,
+                    baseSha,
+                    config.checkout,
+                    paidModel(planningModel, context),
+                    installationConfigDigest,
+                    diagnostics.modelObserver({ scopeId: planningScopeId }),
+                    executionProfileChoices(config),
+                    {
+                      state: preparation!,
+                      save: () => saveState(path, preparation!),
+                      stopped: () =>
+                        cancellationRequested() ||
+                        preparation!.coordinator.mode !== "running",
+                    },
+                    prerequisites,
+                    localExecutables,
+                    { configuredConcurrency: capacity.concurrency },
+                  ),
+                true,
               );
             },
             (candidate) => ({ itemCount: candidate.graph.items.length }),
@@ -1216,19 +1363,31 @@ async function runObjectivePass(
         }
       preparation.plan = plan;
       if (!["clean", "human-accepted"].includes(plan.review.status)) {
-        verifyPlanCandidate(
-          plan,
-          objective,
-          issue.body,
-          baseSha,
-          config.checkout,
-          installationConfigDigest,
-          true,
-          capacity.concurrency,
-        );
+        // A plan Factory's own checks refuse can only be refused: it still
+        // waits for the operator's plan decision (exit 2), never a failure.
+        let unacceptable: string | undefined;
+        try {
+          verifyPlanCandidate(
+            plan,
+            objective,
+            issue.body,
+            baseSha,
+            config.checkout,
+            installationConfigDigest,
+            true,
+            capacity.concurrency,
+          );
+        } catch (error) {
+          if (attachedFault(error)) throw error;
+          unacceptable = error instanceof Error ? error.message : String(error);
+        }
+        if (unacceptable) plan.review.acceptable = false;
+        else delete plan.review.acceptable;
         preparation.coordinator.phase = "waiting";
         preparation.coordinator.phaseStartedAt = new Date().toISOString();
-        preparation.coordinator.waitReason = `Plan needs a decision: ${plan.review.failure?.question ?? plan.review.findings[0]?.question ?? "inspect the plan review"}`;
+        preparation.coordinator.waitReason = unacceptable
+          ? `Plan needs a decision: it cannot be accepted (${unacceptable}); refuse it to plan again`
+          : `Plan needs a decision: ${plan.review.failure?.question ?? plan.review.findings[0]?.question ?? "inspect the plan review"}`;
         saveState(path, preparation);
         return preparation;
       }
@@ -1256,8 +1415,7 @@ async function runObjectivePass(
       preparation.coordinator.phase = "projection";
       preparation.coordinator.phaseStartedAt = new Date().toISOString();
       saveState(path, preparation);
-      if (cancellationRequested())
-        throw new Error("Objective cancellation requested");
+      stopIfCancelled();
       if (
         JSON.stringify(plan.executionProfiles) !==
         JSON.stringify(executionProfileChoices(config))
@@ -1301,28 +1459,35 @@ async function runObjectivePass(
           !cancellationRequested()
         )
           await owner.waitForWake();
-        if (cancellationRequested())
-          throw new Error("Objective cancellation requested");
+        stopIfCancelled();
       };
       await waitWhileStopped();
       // Projection finds existing issues by marker before creating any, so a
-      // restart simply projects again; recorded numbers are passed as known.
+      // repeat simply projects again; recorded numbers are passed as known.
       const projected = await diagnostics.span(
         {
           operation: "github-projection",
           metadata: { itemCount: graph.items.length },
         },
         () =>
-          github.projectGraph({
-            graph,
-            objectiveIssue: objective,
-            knownIssues: preparation!.issueByItemId,
-            beforeCreate: waitWhileStopped,
-            projected: (id, number) => {
-              preparation!.issueByItemId[id] = number;
-              saveState(path, preparation!);
-            },
-          }),
+          objectiveStep(preparation, "project", (context) =>
+            github.projectGraph({
+              graph,
+              objectiveIssue: objective,
+              knownIssues: preparation!.issueByItemId,
+              author: preparation!.issueAuthor,
+              authored: (login) => {
+                preparation!.issueAuthor = login;
+                saveState(path, preparation!);
+              },
+              beforeCreate: waitWhileStopped,
+              projected: (id, number) => {
+                preparation!.issueByItemId[id] = number;
+                saveState(path, preparation!);
+                context.progress();
+              },
+            }),
+          ),
       );
       state = {
         schemaVersion: 7,
@@ -1356,6 +1521,9 @@ async function runObjectivePass(
           .update(issue.body)
           .digest("hex"),
         issueByItemId: projected.issueByItemId,
+        ...(preparation.issueAuthor
+          ? { issueAuthor: preparation.issueAuthor }
+          : {}),
         work: Object.fromEntries(
           graph.items.map((item) => [item.id, { status: "pending" }]),
         ),
@@ -1373,7 +1541,6 @@ async function runObjectivePass(
       phaseStartedAt: new Date().toISOString(),
     };
     state.coordinator.observedAt = new Date().toISOString();
-    delete state.coordinator.observationError;
     await applyPendingAmendment({
       state,
       config,
@@ -1382,6 +1549,8 @@ async function runObjectivePass(
       github,
       save: () => save(state),
       cancelled: cancellationRequested,
+      signal: objectiveSignal(),
+      pause: objectivePause(),
       diagnostics,
     });
     if (state.coordinator.mode === "running" && !cancellationRequested()) {
@@ -1404,11 +1573,15 @@ async function runObjectivePass(
         save: () => save(current),
         stopped: () =>
           cancellationRequested() || current.coordinator?.mode !== "running",
+        signal: objectiveSignal(),
+        pause: objectivePause(),
       });
     }
     const graph = state.graph;
     verifyExecutionProfiles(graph, executionProfileChoices(config));
     await driver.preflight?.(graph);
+    // This controller holds the repository lock: no validation runs yet.
+    await sweepValidationWorktrees(config.checkout, root);
     validateCommandProvenance(
       graph,
       planningSources(issue.body, state.baseSha, config.checkout),
@@ -1416,6 +1589,33 @@ async function runObjectivePass(
     );
     stateForSignal = state;
     save(state);
+    /** Delivery re-observes the Objective: a foreign edit or closure is a decision. */
+    // Items deliver concurrently; they share one observation in flight.
+    let observing: Promise<void> | undefined;
+    const reconcile = async () => {
+      observing ??= observeUnchanged().finally(() => {
+        observing = undefined;
+      });
+      await observing;
+      stopIfCancelled();
+    };
+    const observeUnchanged = async () => {
+      await objectiveStep(
+        state,
+        "observe",
+        async () => {
+          const changed = changedOutside(
+            await github.objective(objective),
+            state,
+          );
+          if (changed) throw changed;
+        },
+        false,
+        false,
+      );
+      state.coordinator!.observedAt = new Date().toISOString();
+      save(state);
+    };
     if (config.delivery.kind === "native-stack") {
       await runNativeGraph({
         config,
@@ -1430,33 +1630,13 @@ async function runObjectivePass(
         planningModel,
         save: () => save(state),
         active,
-        reconcile: async () => {
-          try {
-            const refreshed = await observeObjective();
-            state.coordinator!.observedAt = new Date().toISOString();
-            delete state.coordinator!.observationError;
-            if (refreshed.state === "closed")
-              throw new Error(
-                "Objective issue is confirmed closed; operator direction required",
-              );
-            if (
-              createHash("sha256").update(refreshed.body).digest("hex") !==
-              state.objectiveBodyDigest
-            )
-              throw new Error(
-                "Objective issue body changed; operator direction required",
-              );
-          } catch (error) {
-            state.coordinator!.observationError =
-              error instanceof Error ? error.message : String(error);
-            save(state);
-            throw error;
-          }
-          if (cancellationRequested())
-            throw new Error("Objective cancellation requested");
-          save(state);
-        },
+        reconcile,
         cancelled: cancellationRequested,
+        signal: owner.abort.signal,
+        // Read at each step: resume replaces the controller.
+        get pause() {
+          return owner.pause.signal;
+        },
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
         diagnostics,
@@ -1477,191 +1657,280 @@ async function runObjectivePass(
         planningModel,
         save: () => save(state),
         active,
-        reconcile: async () => {
-          try {
-            const refreshed = await observeObjective();
-            state.coordinator!.observedAt = new Date().toISOString();
-            delete state.coordinator!.observationError;
-            if (refreshed.state === "closed")
-              throw new Error(
-                "Objective issue is confirmed closed; operator direction required",
-              );
-            if (
-              createHash("sha256").update(refreshed.body).digest("hex") !==
-              state.objectiveBodyDigest
-            )
-              throw new Error(
-                "Objective issue body changed; operator direction required",
-              );
-          } catch (error) {
-            state.coordinator!.observationError =
-              error instanceof Error ? error.message : String(error);
-            save(state);
-            throw error;
-          }
-          if (cancellationRequested())
-            throw new Error("Objective cancellation requested");
-          save(state);
-        },
+        reconcile,
         cancelled: cancellationRequested,
+        signal: owner.abort.signal,
+        // Read at each step: resume replaces the controller.
+        get pause() {
+          return owner.pause.signal;
+        },
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
+        woken: owner.woken,
         diagnostics,
       });
       if (awaitingSelection) return state;
     }
+    // A done item whose close step waits (a question, a fix, or a closure
+    // still pending) holds final validation; the next run repeats the close.
+    const closeWaits = (id: string): boolean => {
+      const work = state.work[id];
+      return (
+        awaitsOperator(work?.wait) ||
+        (work?.githubClosure !== "complete" && work?.wait !== undefined)
+      );
+    };
     if (
       state.coordinator.mode !== "running" ||
       amendmentBlocksDispatch(state) ||
-      graph.items.some((item) => state.work[item.id]?.status !== "done")
+      graph.items.some(
+        (item) => state.work[item.id]?.status !== "done" || closeWaits(item.id),
+      )
     )
       return state;
-    if (cancellationRequested())
-      throw new Error("Objective cancellation requested");
-    const observedHead = await fetchHead(
-      config.checkout,
-      await github.defaultBranch(),
-    );
-    const finalGraphDigest = graphDigest(state.graph);
-    const candidateCommitSha = objectiveCandidate(state)!.commitSha;
-    if (observedHead !== candidateCommitSha)
-      throw new Error(
-        `Default branch changed before final validation: expected ${candidateCommitSha}, observed ${observedHead}`,
+    stopIfCancelled();
+    /**
+     * Fetch the default branch. Commits others pushed on top of the
+     * integrated Objective move the final candidate to that head, which is
+     * validated again; that is not a fault. Returns whether it moved.
+     */
+    const followDefaultBranch = () =>
+      objectiveStep(state, "final-head", async (context) => {
+        const head = await fetchHead(
+          config.checkout,
+          await github.defaultBranch(),
+        );
+        context.progress();
+        const candidate = objectiveCandidate(state)!;
+        if (head === candidate.commitSha) return false;
+        const integrated = state.integratedSha;
+        let contained = false;
+        if (candidate.basis === "current-graph-integration" && integrated)
+          try {
+            git(
+              config.checkout,
+              "merge-base",
+              "--is-ancestor",
+              integrated,
+              head,
+            );
+            contained = true;
+          } catch {
+            contained = false;
+          }
+        if (!contained) {
+          const detail =
+            candidate.basis === "pinned-baseline"
+              ? `The default branch moved to ${head} from the pinned baseline ${candidate.commitSha}`
+              : `The default branch ${head} no longer contains the integrated Objective ${integrated}`;
+          throw attachFault(
+            new Error(detail),
+            decision(
+              `${detail}. Only cancelling resolves this: factory cancel --objective ${objective}`,
+            ),
+          );
+        }
+        // Commits others pushed on top: follow them, bounded, apart from
+        // the integration Factory made.
+        const followed =
+          state.finalHead?.integratedSha === integrated
+            ? state.finalHead
+            : undefined;
+        const heads = (followed?.heads ?? []).filter((entry) => entry !== head);
+        if (head === integrated) delete state.finalHead;
+        else {
+          // A pending question is answered once the step runs again.
+          if (
+            !followed?.asked &&
+            (followed?.heads.length ?? 0) >= FOLLOWED_HEAD_LIMIT
+          ) {
+            state.finalHead = { ...followed!, asked: head };
+            save(state);
+            throw attachFault(
+              new Error(`The default branch keeps moving; now at ${head}`),
+              decision(
+                `The default branch keeps moving: ${followed!.heads.length} pushes by others during final validation, now at ${head}. Validate at ${head} now with factory retry --objective ${objective}, or wait and retry later.`,
+              ),
+            );
+          }
+          state.finalHead = {
+            integratedSha: integrated!,
+            heads: [...heads, head],
+          };
+        }
+        save(state);
+        return true;
+      });
+    await followDefaultBranch();
+    for (;;) {
+      const finalGraphDigest = graphDigest(state.graph);
+      const candidateCommitSha = objectiveCandidate(state)!.commitSha;
+      const finalTree = git(
+        config.checkout,
+        "rev-parse",
+        `${candidateCommitSha}^{tree}`,
       );
-    const finalTree = git(
-      config.checkout,
-      "rev-parse",
-      `${candidateCommitSha}^{tree}`,
-    );
-    assertCompletedCoverage(state);
-    const finalValidationStarted = Date.now();
-    diagnostics.emit({
-      runId: state.runId,
-      operation: "objective-validation",
-      outcome: "started",
-      metadata: {
+      assertCompletedCoverage(state);
+      const finalValidationStarted = Date.now();
+      diagnostics.emit({
+        runId: state.runId,
+        operation: "objective-validation",
+        outcome: "started",
+        metadata: {
+          candidateCommitSha,
+          candidateBasis: objectiveCandidate(state)!.basis,
+          ...(state.integratedSha
+            ? { integratedSha: state.integratedSha }
+            : {}),
+          treeSha: finalTree,
+        },
+      });
+      assertPinnedNpmScripts(
+        config.checkout,
+        state.baseSha,
         candidateCommitSha,
-        candidateBasis: objectiveCandidate(state)!.basis,
-        ...(state.integratedSha ? { integratedSha: state.integratedSha } : {}),
-        treeSha: finalTree,
-      },
-    });
-    assertPinnedNpmScripts(
-      config.checkout,
-      state.baseSha,
-      candidateCommitSha,
-      state.objectiveCommands ?? finalObjectiveCommands(issue.body),
-      {
-        sourceDeclared:
-          state.objectiveCommands ?? finalObjectiveCommands(issue.body),
-        workspacePackageAdditions: workspacePackageAdditions(issue.body),
-      },
-    );
-    const commandEvidence = await validateTree(
-      config.checkout,
-      join(root, "final-validation"),
-      candidateCommitSha,
-      finalTree,
-      state.objectiveCommands ?? finalObjectiveCommands(issue.body),
-      (entry) =>
-        diagnostics.emit({
-          runId: state.runId,
-          operation: "objective-validation-command",
-          outcome: entry.passed ? "completed" : "failed",
-          durationMs: entry.durationMs,
-          metadata: { commandIndex: entry.index, exitCode: entry.exitCode },
-          detail: entry.output,
-        }),
-      (entry) =>
-        diagnostics.emitStream(
-          {
-            runId: state.runId,
-            operation: "objective-validation-output",
-            outcome: "observed",
-            metadata: { commandIndex: entry.index, stream: entry.stream },
-          },
-          entry.output,
-          entry.final,
-        ),
-      finalValidationLfsMembers(state),
-      contentStore,
-    );
-    const selectedAssets = graph.items.flatMap((item) => {
-      const work = state.work[item.id];
-      const set = work?.assets?.find(
-        (candidate) => candidate.id === work.selectedAssetSet,
+        state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+        {
+          sourceDeclared:
+            state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+          workspacePackageAdditions: workspacePackageAdditions(issue.body),
+        },
       );
-      return set ? [{ itemId: item.id, set }] : [];
-    });
-    const hydrationReceipt = selectedAssets.length
-      ? await diagnostics.span(
-          {
-            runId: state.runId,
-            operation: "media-hydration-verification",
-            metadata: {
-              integratedSha: state.integratedSha!,
-              treeSha: finalTree,
-            },
-          },
-          async () =>
-            verifyHydratedAssets({
-              checkout: config.checkout,
-              workRoot: join(root, "hydration"),
-              integratedSha: candidateCommitSha,
-              selections: selectedAssets,
-            }),
-          (receipt) => ({ members: receipt?.members.length ?? 0 }),
-        )
-      : undefined;
-    const acceptanceEvidence = hydrationReceipt
-      ? { ...commandEvidence, hydrationReceipt }
-      : commandEvidence;
-    let finalEvidence;
-    try {
+      // Validation and fresh-clone hydration read the remote: one step,
+      // repeatable from the top (a fresh worktree and clone per try), so a
+      // transient fault repeats with backoff instead of stopping the Objective.
+      const { commandEvidence, hydrationReceipt } = await objectiveStep(
+        state,
+        "final-validate",
+        async () => {
+          const commandEvidence = await validateTree(
+            config.checkout,
+            join(root, "final-validation"),
+            candidateCommitSha,
+            finalTree,
+            state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+            (entry) =>
+              diagnostics.emit({
+                runId: state.runId,
+                operation: "objective-validation-command",
+                outcome: entry.passed ? "completed" : "failed",
+                durationMs: entry.durationMs,
+                metadata: {
+                  commandIndex: entry.index,
+                  exitCode: entry.exitCode,
+                },
+                detail: entry.output,
+              }),
+            (entry) =>
+              diagnostics.emitStream(
+                {
+                  runId: state.runId,
+                  operation: "objective-validation-output",
+                  outcome: "observed",
+                  metadata: { commandIndex: entry.index, stream: entry.stream },
+                },
+                entry.output,
+                entry.final,
+              ),
+            finalValidationLfsMembers(state),
+            contentStore,
+          );
+          const selectedAssets = graph.items.flatMap((item) => {
+            const work = state.work[item.id];
+            const set = work?.assets?.find(
+              (candidate) => candidate.id === work.selectedAssetSet,
+            );
+            return set ? [{ itemId: item.id, set }] : [];
+          });
+          const hydrationReceipt = selectedAssets.length
+            ? await diagnostics.span(
+                {
+                  runId: state.runId,
+                  operation: "media-hydration-verification",
+                  metadata: {
+                    integratedSha: state.integratedSha!,
+                    treeSha: finalTree,
+                  },
+                },
+                async () =>
+                  verifyHydratedAssets({
+                    checkout: config.checkout,
+                    workRoot: join(root, "hydration"),
+                    integratedSha: candidateCommitSha,
+                    selections: selectedAssets,
+                  }),
+                (receipt) => ({ members: receipt?.members.length ?? 0 }),
+              )
+            : undefined;
+          return { commandEvidence, hydrationReceipt };
+        },
+      );
+      const acceptanceEvidence = hydrationReceipt
+        ? { ...commandEvidence, hydrationReceipt }
+        : commandEvidence;
       const objectiveEvidence = objectiveReviewEvidence({
         state,
         checkout: config.checkout,
         candidateCommitSha,
         candidateTreeSha: finalTree,
       });
+      // A paid step, like item review: the call and the decoding of its
+      // answer count toward the bound together, so a lost answer and an
+      // invalid one are both asked again (the invalid one with its
+      // validation error) until the bound makes it a decision. A criterion
+      // the operator must judge comes back as the pending final acceptance.
+      let previousInvalid: string | undefined;
       const reviewFinal = () =>
-        reviewAcceptance({
-          beforeSubmit: () => {
-            if (cancellationRequested())
-              throw new Error("Objective cancellation requested");
-          },
-          model: planningModel,
-          reviewPhase: "objective-review",
-          checkout: config.checkout,
-          baseSha: state.baseSha,
-          commit: candidateCommitSha,
-          evidence: acceptanceEvidence,
-          criteria: objectiveCriteria(issue.body),
-          sources: planningSources(issue.body, state.baseSha, config.checkout),
-          evidenceSources: [
-            ...objectiveEvidence.evidence,
-            ...(hydrationReceipt
-              ? [
-                  {
-                    path: "Controller hydration receipt",
-                    content: JSON.stringify(hydrationReceipt),
-                  },
-                ]
-              : []),
-          ],
-          decisions: state.finalAcceptanceDecisions,
-          observations: objectiveEvidence.observations,
-          invocation: {
-            invocationId: randomUUID(),
-            phase: "objective-review",
-            ordinal: 0,
-            observe: diagnostics.modelObserver({
-              scopeId: state.runId,
-              runId: state.runId,
-            }),
-          },
-        });
-      finalEvidence = await diagnostics.span(
+        objectiveStep(
+          state,
+          "final-review",
+          (context) =>
+            context.paid(() =>
+              reviewOutcome({
+                beforeSubmit: stopIfCancelled,
+                model: planningModel,
+                reviewPhase: "objective-review",
+                checkout: config.checkout,
+                baseSha: state.baseSha,
+                commit: candidateCommitSha,
+                evidence: acceptanceEvidence,
+                criteria: objectiveCriteria(issue.body),
+                sources: planningSources(
+                  issue.body,
+                  state.baseSha,
+                  config.checkout,
+                ),
+                evidenceSources: [
+                  ...objectiveEvidence.evidence,
+                  ...(hydrationReceipt
+                    ? [
+                        {
+                          path: "Controller hydration receipt",
+                          content: JSON.stringify(hydrationReceipt),
+                        },
+                      ]
+                    : []),
+                ],
+                decisions: state.finalAcceptanceDecisions,
+                observations: objectiveEvidence.observations,
+                invocation: {
+                  invocationId: randomUUID(),
+                  phase: "objective-review",
+                  ordinal: 0,
+                  observe: diagnostics.modelObserver({
+                    scopeId: state.runId,
+                    runId: state.runId,
+                  }),
+                },
+                ...(previousInvalid ? { previousInvalid } : {}),
+                onInvalid: (detail) => {
+                  previousInvalid = detail;
+                },
+              }),
+            ),
+          true,
+        );
+      const reviewed = await diagnostics.span(
         {
           runId: state.runId,
           operation: "objective-acceptance-review",
@@ -1675,20 +1944,11 @@ async function runObjectivePass(
           },
         },
         reviewFinal,
-        (result) => ({ criteria: result.criteria?.length ?? 0 }),
-        (error) =>
-          error instanceof AcceptanceDecisionRequired ? "waiting" : "failed",
+        (outcome) => ({ criteria: outcome.evidence?.criteria?.length ?? 0 }),
       );
-      if (cancellationRequested())
-        throw new Error("Objective cancellation requested");
-      state.coordinator.phase = "objective-review-complete";
-      delete state.finalAcceptancePending;
-    } catch (error) {
-      if (error instanceof CompletedModelInvocationError)
-        state.coordinator.phase = "objective-review-complete";
-      if (error instanceof AcceptanceDecisionRequired) {
+      if (reviewed.pending) {
         state.coordinator.phase = "waiting";
-        state.finalAcceptancePending = error.pending;
+        state.finalAcceptancePending = reviewed.pending;
         save(state);
         diagnostics.emit({
           runId: state.runId,
@@ -1697,131 +1957,153 @@ async function runObjectivePass(
           durationMs: Date.now() - finalValidationStarted,
           metadata: { treeSha: finalTree },
           detail: JSON.stringify({
-            question: error.pending.question,
-            detail: error.pending.detail,
-            reviewFinding: error.pending.reviewFinding ?? null,
-            reviewRejection: error.pending.reviewRejection ?? null,
+            question: reviewed.pending.question,
+            detail: reviewed.pending.detail,
+            reviewFinding: reviewed.pending.reviewFinding ?? null,
           }),
         });
         return state;
       }
-      throw error;
-    }
-    if (
-      state.coordinator.mode !== "running" ||
-      amendmentBlocksDispatch(state) ||
-      graphDigest(state.graph) !== finalGraphDigest ||
-      objectiveCandidate(state)?.commitSha !== candidateCommitSha
-    ) {
+      const finalEvidence = reviewed.evidence;
+      stopIfCancelled();
+      delete state.finalAcceptancePending;
+      if (
+        state.coordinator.mode !== "running" ||
+        amendmentBlocksDispatch(state) ||
+        graphDigest(state.graph) !== finalGraphDigest ||
+        objectiveCandidate(state)?.commitSha !== candidateCommitSha
+      ) {
+        save(state);
+        return state;
+      }
+      // The default branch moved during final validation: validate its head.
+      if (await followDefaultBranch()) continue;
+      // No await between this CAS, the immutable seal and pending closure persistence.
+      if (
+        cancellationRequested() ||
+        state.coordinator.mode !== "running" ||
+        amendmentBlocksDispatch(state) ||
+        graphDigest(state.graph) !== finalGraphDigest ||
+        objectiveCandidate(state)?.commitSha !== candidateCommitSha
+      ) {
+        save(state);
+        return state;
+      }
+      state.finalValidation = { ...finalEvidence, passed: true };
+      sealFinalAcceptance(state);
+      diagnostics.emit({
+        runId: state.runId,
+        operation: "objective-validation",
+        outcome: "completed",
+        durationMs: Date.now() - finalValidationStarted,
+        metadata: {
+          treeSha: finalTree,
+          candidateCommitSha,
+          candidateBasis: objectiveCandidate(state)!.basis,
+          ...(state.integratedSha
+            ? { integratedSha: state.integratedSha }
+            : {}),
+        },
+      });
       save(state);
-      return state;
-    }
-    const reviewedHead = await fetchHead(
-      config.checkout,
-      await github.defaultBranch(),
-    );
-    if (reviewedHead !== candidateCommitSha)
-      throw new Error(
-        `Default branch changed during final review: expected ${candidateCommitSha}, observed ${reviewedHead}`,
+      await closeObjectiveIssue(
+        state,
+        issue.body,
+        github,
+        () => save(state),
+        objectiveSignal(),
+        objectivePause(),
       );
-    // No await between this CAS, the immutable seal and pending closure persistence.
-    if (
-      cancellationRequested() ||
-      state.coordinator.mode !== "running" ||
-      amendmentBlocksDispatch(state) ||
-      graphDigest(state.graph) !== finalGraphDigest ||
-      objectiveCandidate(state)?.commitSha !== candidateCommitSha
-    ) {
-      save(state);
       return state;
     }
-    state.finalValidation = { ...finalEvidence, passed: true };
-    sealFinalAcceptance(state);
-    diagnostics.emit({
-      runId: state.runId,
-      operation: "objective-validation",
-      outcome: "completed",
-      durationMs: Date.now() - finalValidationStarted,
-      metadata: {
-        treeSha: finalTree,
-        candidateCommitSha,
-        candidateBasis: objectiveCandidate(state)!.basis,
-        ...(state.integratedSha ? { integratedSha: state.integratedSha } : {}),
-      },
-    });
-    save(state);
-    await closeObjectiveIssue(state, issue.body, github, () => save(state));
-    return state;
   } catch (error) {
     if (error instanceof CoordinatorHandoff) throw error;
-    // A handoff that stopped planning releases ownership; the step repeats on restart.
-    if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
+    // A step stopped by pause, drain or handoff while waiting between tries
+    // (or a try cut off by a handoff) is not a fault: its record stays and
+    // the next run resumes it.
+    const paused =
+      error instanceof StepPaused ||
+      (attachedFault(error)?.kind === "cancelled" &&
+        !!owner.handoff &&
+        !cancellationRequested());
+    // A handoff releases ownership at a safe point, also before the first
+    // snapshot exists; the step repeats on restart.
+    if (
+      owner.handoff &&
+      (owner.snapshot
+        ? canHandoff(owner.snapshot)
+        : paused && !cancellationRequested())
+    ) {
+      if (owner.snapshot?.coordinator) {
+        owner.snapshot.coordinator.mode = "draining";
+        saveState(path, owner.snapshot);
+      }
       throw new CoordinatorHandoff();
+    }
+    if (error instanceof StepPaused && owner.snapshot) {
+      await Promise.allSettled(active.values());
+      saveState(path, owner.snapshot);
+      // Paused planning: the owner serves control until resume.
+      if (owner.snapshot.schemaVersion === 8) throw error;
+      return owner.snapshot;
+    }
+    const current = owner.snapshot;
+    // A decision or a prerequisite to fix: the scope waits for the operator
+    // and nothing fails, no worker stops (step.ts rule 7). A handoff stops
+    // the pass; the next controller repeats the step.
+    const fault = attachedFault(error);
+    const handedOff =
+      fault?.kind === "cancelled" &&
+      !!owner.handoff &&
+      !cancellationRequested();
+    const waiting =
+      !!current &&
+      !cancellationRequested() &&
+      (fault?.kind === "decision" || fault?.kind === "config" || handedOff);
     diagnostics.emit({
       runId: stateForSignal?.runId,
       operation: "objective-run",
-      outcome: "failed",
+      outcome: waiting ? "waiting" : "failed",
       detail: error instanceof Error ? error.message : String(error),
     });
-    const current = owner.snapshot;
-    if (
-      current?.schemaVersion === 7 &&
-      current.finalAcceptance &&
-      !(error instanceof GitHubClosureFailure)
-    ) {
+    if (waiting && current) {
+      // Other items run on to their own stopping points.
+      await Promise.allSettled(active.values());
+      // A question raised outside a step still names its answer.
+      if (
+        (fault.kind === "decision" || fault.kind === "config") &&
+        !awaitsOperator(waitOf(current, "objective")) &&
+        !(
+          current.schemaVersion === 7 &&
+          Object.values(current.work).some((work) => awaitsOperator(work.wait))
+        )
+      )
+        current.wait =
+          fault.kind === "decision"
+            ? {
+                kind: "decision",
+                detail: fault.question,
+                step: "objective/coordinator",
+              }
+            : {
+                kind: "prerequisite",
+                detail: fault.detail,
+                fix: fault.fix,
+                step: "objective/coordinator",
+              };
+      saveState(path, current);
+      return current;
+    }
+    if (current?.schemaVersion === 7 && current.finalAcceptance) {
       // A rejected resume cannot turn immutable accepted evidence into a failed run.
       current.coordinator!.waitReason = `Sealed acceptance preserved: ${error instanceof Error ? error.message : String(error)}`;
       saveState(path, current);
       throw error;
     }
-    if (
-      active.size &&
-      current?.schemaVersion === 7 &&
-      !cancellationRequested()
-    ) {
-      for (const work of Object.values(current.work)) {
-        if (!work.execution || work.status !== "running") continue;
-        try {
-          await driver.cancel(
-            structuredClone(work.execution),
-            executionContext(work, () => saveState(path, current)),
-          );
-        } catch (cancelError) {
-          current.coordinator!.cancelError = String(cancelError);
-        }
-      }
-      await Promise.allSettled(active.values());
-    }
-    if (current?.schemaVersion === 7 && !cancellationRequested()) {
-      for (const work of Object.values(current.work)) {
-        if (
-          !work.execution ||
-          work.step !== "execute" ||
-          work.status === "done"
-        )
-          continue;
-        try {
-          // Anything short of a complete result may still hold a live remote
-          // worker (an interrupted or unresolved attempt reports "failed"),
-          // so cancel it; cancelling a settled handle is a no-op.
-          const observed = await driver
-            .observe(
-              structuredClone(work.execution),
-              executionContext(work, () => saveState(path, current)),
-            )
-            .catch(() => undefined);
-          if (observed?.state !== "complete")
-            await driver.cancel(
-              structuredClone(work.execution),
-              executionContext(work, () => saveState(path, current)),
-            );
-        } catch (cessationError) {
-          current.coordinator!.cancelError = `Owned worker cessation unresolved: ${String(cessationError)}`;
-          current.coordinator!.waitReason =
-            "Operator direction required before retry";
-        }
-      }
-    }
+    // A failure stops only its own item (its runner stops its worker); only
+    // cancel stops other items' workers. Other items run on to their own
+    // stopping points.
+    if (!cancellationRequested()) await Promise.allSettled(active.values());
     if (current) {
       if (cancellationRequested()) {
         await owner.cancellation;
@@ -1834,11 +2116,6 @@ async function runObjectivePass(
               if (work.status !== "done" && work.status !== "published")
                 work.status = "cancelled";
         }
-      } else if (
-        error instanceof GitHubClosureFailure &&
-        current.schemaVersion === 7
-      ) {
-        current.githubClosureError = error.message;
       } else if (current.schemaVersion === 8) {
         // Preparation resumes by repeating its step; record why it paused.
         current.coordinator.waitReason =
@@ -1846,7 +2123,8 @@ async function runObjectivePass(
       } else {
         current.error = error instanceof Error ? error.message : String(error);
       }
-      saveState(path, current);
+      if (current.schemaVersion === 7) save(current);
+      else saveState(path, current);
     }
     throw error;
   }
@@ -1970,8 +2248,16 @@ function retryStep(
     )
       return false;
     const scope = itemId === undefined ? "objective" : { item: itemId };
-    if (!awaitsOperator(waitOf(state, scope))) return false;
+    // An Objective stopped by a defect outside any Work Item runs its step
+    // again once the operator has dealt with the cause.
+    const stopped =
+      itemId === undefined &&
+      !!state.error &&
+      !state.cancelRequested &&
+      !state.cancelledAt;
+    if (!awaitsOperator(waitOf(state, scope)) && !stopped) return false;
     clearRepeats(state, scope);
+    if (stopped) delete state.error;
     saveState(statePath(config.repository, objective), state);
     new DiagnosticEmitter(config.repository, objective).emit({
       runId: state.runId,
@@ -1983,6 +2269,12 @@ function retryStep(
   } finally {
     releaseMutationLock(lock, lockHandle);
   }
+}
+
+/** The attempt failed with a wrong result: a new attempt corrects it. */
+function wrongResult(work: WorkState): boolean {
+  const failure = work.recovery?.failure;
+  return failure?.classification === "implementation" && !!failure.event;
 }
 
 /**
@@ -2012,34 +2304,86 @@ export function retryWorkItem(
       throw new Error(
         "Owned work cessation is unresolved; operator direction required before retry",
       );
-    if (Object.values(state.work).some((work) => work.status === "running"))
+    // An item waiting in place for the operator is not active work.
+    if (
+      Object.values(state.work).some(
+        (work) => work.status === "running" && !awaitsOperator(work.wait),
+      )
+    )
       throw new Error("Finish or cancel active work before retry");
     const work = state.work[itemId];
     if (!work || (work.status !== "failed" && work.status !== "cancelled"))
       throw new Error("Only a failed or cancelled Work Item can be retried");
-    if (
-      work.step === "execute" &&
-      work.execution !== undefined &&
-      work.recovery?.failure?.classification === "uncertain"
-    )
-      throw new Error(
-        "Submitted effect outcome is unknown; operator direction required before retry",
-      );
+    // A recorded worker of the failed attempt is stopped by the driver
+    // before the new attempt starts (see executeItem).
     const nativeUnit =
       config.delivery.kind === "native-stack"
         ? linearDeliveryUnits(state.graph).find((unit) =>
             unit.items.some((item) => item.id === itemId),
           )
         : undefined;
+    // An item that reached delivery resumes it with the same attempt, head
+    // and validation: a published item keeps its PR (publish leases against
+    // the recorded head), and an unpublished one repeats publish, which finds
+    // its PR by head. In a native unit every such item of the unit resumes.
+    // A wrong result (a failed required check, a conflict) is not resumed:
+    // the same head would fail the same way. It gets a new attempt that
+    // republishes the branch with a lease, as a repair does.
+    const delivering = (entry: WorkState | undefined): boolean =>
+      !!entry &&
+      (entry.status === "failed" || entry.status === "cancelled") &&
+      !wrongResult(entry) &&
+      (!!entry.pullRequest || (entry.step === "deliver" && !!entry.validation));
+    const resumed = (
+      nativeUnit?.items.map((item) => item.id) ?? [itemId]
+    ).filter((id) => delivering(state.work[id]));
+    if (resumed.includes(itemId)) {
+      for (const id of resumed) {
+        const entry = state.work[id]!;
+        if (!entry.changeRef || !entry.treeSha)
+          throw new Error(
+            `Work Item ${id} reached delivery without its recorded head; start the Objective fresh or factory cancel --objective ${objective}`,
+          );
+        clearRepeats(state, { item: id });
+        if (entry.pullRequest) {
+          entry.status = "published";
+          delete entry.step;
+        } else {
+          entry.status = "running";
+          entry.step = "deliver";
+        }
+        delete entry.error;
+      }
+      state.cancelRequested = false;
+      delete state.cancelledAt;
+      delete state.error;
+      saveState(statePath(config.repository, objective), state);
+      new DiagnosticEmitter(config.repository, objective).emit({
+        runId: state.runId,
+        itemId,
+        operation: "work-retry",
+        outcome: "completed",
+        detail: "resume delivery",
+      });
+      // Its delivery steps run again, like an answered step.
+      return "step";
+    }
+    // Only layers above this item were built on its old head (#619); a
+    // published layer below keeps its PR and the new attempt builds on it.
+    const above = nativeUnit?.items.slice(
+      nativeUnit.items.findIndex((item) => item.id === itemId) + 1,
+    );
     if (
-      work.pullRequest ||
-      work.step === "deliver" ||
-      nativeUnit?.items.some((item) => state.work[item.id]?.pullRequest) ||
-      (nativeUnit &&
-        (state.stackNumbers?.[nativeUnit.id] ||
-          state.stackMerges?.[nativeUnit.id]))
+      !wrongResult(work) &&
+      (work.step === "deliver" ||
+        above?.some((item) => state.work[item.id]?.pullRequest) ||
+        (nativeUnit &&
+          (state.stackNumbers?.[nativeUnit.id] ||
+            state.stackMerges?.[nativeUnit.id])))
     )
-      throw new Error("Published PR requires operator direction before retry");
+      throw new Error(
+        `Work Item ${itemId} is part of a delivery that cannot start again; retry the published item of its unit, or factory cancel --objective ${objective}`,
+      );
     // The new attempt starts without the old one's records or bound.
     clearRepeats(state, { item: itemId });
     state.work[itemId] = { status: "pending", recovery: archiveAttempt(work) };
@@ -2072,7 +2416,6 @@ export function repairWorkItem(
     if (
       !state ||
       state.finalValidation?.passed ||
-      state.error ||
       state.configDigest !== factoryConfigDigest(config)
     )
       throw new Error("Objective is not available for diagnosed repair");
@@ -2090,6 +2433,8 @@ export function repairWorkItem(
         );
     }
     applyWorkCorrection(state, input.item, input.correction);
+    // The repair answers the stop the item's failure caused, as retry does.
+    delete state.error;
     saveState(statePath(config.repository, objective), state);
   } finally {
     releaseMutationLock(lock, handle);

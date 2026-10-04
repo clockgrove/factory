@@ -20,23 +20,22 @@ import type {
   ExecutionResult,
   ModelInvocationUsage,
 } from "../contracts.js";
-import { Interruption } from "../contracts.js";
 import {
   addWorktree,
   hasUnresolvedSubprocesses,
   removeWorktree,
 } from "../process.js";
 import {
-  SettledAttemptFailure,
-  failAttempt,
-  retryTransient,
-} from "../work-repair.js";
+  cancelledFault,
+  endAttempt,
+  stoppedFault,
+  transportFailure,
+} from "./attempt.js";
 import { collectWorktreeResult } from "./local.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import {
   ClaudeManagedClient,
   claudeGone,
-  claudeTransient,
   validateClaudeManagedConfig,
   type ClaudeManagedConfig,
 } from "./claude-managed-client.js";
@@ -193,15 +192,14 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       Date.now()
     );
   }
-  /** Ends the attempt for a failed step; see failAttempt. */
+  /** Ends the attempt for a failed step; see endAttempt. */
   private async fail(
     error: unknown,
     handle: ExecutionHandle,
     context: ExecutionContext,
   ): Promise<never> {
     const data = this.active(handle);
-    return failAttempt(error, {
-      transient: claudeTransient,
+    return endAttempt(error, {
       expired: this.expired(data),
       cancelled: context.cancelled(),
       // The provider no longer has the session: its worker is gone with it,
@@ -220,15 +218,8 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     const data = this.active(handle);
     data.stopped ??= { detail, interrupted };
     this.save(handle, context);
-    try {
-      await this.stop(handle, "failed", context);
-    } catch (error) {
-      throw claudeTransient(error) ? new Interruption(error) : error;
-    }
-    throw new SettledAttemptFailure(
-      new Error(data.stopped.detail),
-      data.stopped.interrupted ? "interruption" : "implementation",
-    );
+    await this.stop(handle, "failed", context);
+    throw stoppedFault(data.stopped.detail, data.stopped.interrupted);
   }
   private async wait(data: Active): Promise<void> {
     await new Promise((resolve) =>
@@ -413,7 +404,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       await this.advance(handle, context);
     } catch (error) {
       // A transient failure leaves a recorded phase that collection resolves.
-      if (context.cancelled() || this.expired(data) || !claudeTransient(error))
+      if (context.cancelled() || this.expired(data) || !transportFailure(error))
         await this.fail(error, handle, context);
     }
     return handle;
@@ -429,13 +420,13 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       for (const name of inputs) {
         if (data.files.some((file) => file.name === name)) continue;
         if (context.cancelled())
-          throw new Error("Claude preparation cancelled before upload");
+          throw cancelledFault("Claude preparation cancelled before upload");
         // An upload whose response was lost may leave an unreferenced file
         // that cannot be found; it is recorded for operator cleanup.
         const file = await this.client
           .upload(join(data.root, name), this.remaining(data))
           .catch((error: unknown) => {
-            if (claudeTransient(error))
+            if (transportFailure(error))
               context.observeOrphan?.({
                 resource: "file",
                 detail: `Upload of ${name} for attempt ${handle.identity} lost its response at ${new Date().toISOString()}; the provider may hold an unreferenced copy`,
@@ -447,7 +438,9 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
         this.save(handle, context);
       }
       if (context.cancelled())
-        throw new Error("Claude preparation cancelled before session creation");
+        throw cancelledFault(
+          "Claude preparation cancelled before session creation",
+        );
       data.createdAfter ??= new Date(Date.now() - clockSkewMs).toISOString();
       data.phase = "create-submitted";
       this.save(handle, context);
@@ -491,7 +484,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     data.resourcesDigest = digest(session.resources);
     this.save(handle, context);
     if (context.cancelled())
-      throw new Error("Claude input cancelled before bootstrap");
+      throw cancelledFault("Claude input cancelled before bootstrap");
     data.phase = "bootstrap-submitted";
     this.save(handle, context);
     const sent = await this.client.send(
@@ -545,8 +538,18 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       throw new Error("Claude result download is truncated");
     return { bytes: Buffer.concat(chunks), id: file.id };
   }
+  /**
+   * Faults are classified once, here at the driver boundary. Collection
+   * reads through `observeActive`, so `endAttempt` sees the raw error.
+   */
   @classifyFaults(executionFault)
   async observe(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionObservation> {
+    return this.observeActive(handle, context);
+  }
+  private async observeActive(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<ExecutionObservation> {
@@ -712,7 +715,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       );
     const proof = data.bootstrap;
     if (!context || context.cancelled())
-      throw new Error("Claude implementation cancelled before submission");
+      throw cancelledFault("Claude implementation cancelled before submission");
     await this.client.verifyEnvironment(this.remaining(data));
     const current = await this.client.retrieve(
       data.sessionId,
@@ -730,7 +733,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       );
     const text = this.implementationText(data);
     if (context.cancelled())
-      throw new Error("Claude implementation cancelled before submission");
+      throw cancelledFault("Claude implementation cancelled before submission");
     data.phase = "implementation-submitted";
     this.save(handle, context);
     const sent = await this.client.send(
@@ -886,6 +889,27 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
   ): Promise<void> {
     await this.stop(handle, "cancelled", context);
   }
+  /** Start checkpoints before any provider call: only local input files can exist. */
+  @classifyFaults(executionFault)
+  async cancelUnrecorded(attemptId: string): Promise<void> {
+    if (!/^[A-Za-z0-9_-]+$/.test(attemptId))
+      throw new Error("Invalid Claude managed attempt identity");
+    rmSync(join(this.args.workRoot, attemptId), {
+      recursive: true,
+      force: true,
+    });
+  }
+  /** A session that stopped without a result is stopped again (idempotent) to confirm it. */
+  @classifyFaults(executionFault)
+  async find(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionHandle | undefined> {
+    const data = this.active(handle);
+    if (data.result || !data.stopped?.interrupted) return handle;
+    await this.stop(handle, "failed", context);
+    return undefined;
+  }
   /**
    * Any failure either interrupts the step (it reattaches) or stops the
    * session first, so a repeated attempt never runs beside it.
@@ -916,11 +940,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       data.terminal = "complete";
       this.save(handle, context);
     }
-    try {
-      await this.dispose(handle, context);
-    } catch (error) {
-      throw claudeTransient(error) ? new Interruption(error) : error;
-    }
+    await this.dispose(handle, context);
     return data.result!;
   }
   private async produce(
@@ -929,16 +949,18 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
   ): Promise<ExecutionResult> {
     const data = this.active(handle);
     while (true) {
-      if (context.cancelled()) throw new Error("Claude collection cancelled");
-      // Each pass resolves the recorded phase first, so a transient failure
-      // is retried in place without repeating a submission blindly.
-      const observation = await retryTransient(async () => {
-        await this.advance(handle, context);
-        const observed = await this.observe(handle, context);
-        if (observed.state === "running" && data.phase === "bootstrap-verified")
-          await this.submitImplementation(handle, context);
-        return observed;
-      }, claudeTransient);
+      if (context.cancelled())
+        throw cancelledFault("Claude collection cancelled");
+      // Each pass resolves the recorded phase first, so a transport failure
+      // leaves collect and the step's repeat resumes here without repeating
+      // a submission blindly.
+      await this.advance(handle, context);
+      const observation = await this.observeActive(handle, context);
+      if (
+        observation.state === "running" &&
+        data.phase === "bootstrap-verified"
+      )
+        await this.submitImplementation(handle, context);
       if (observation.state === "complete") break;
       if (observation.state !== "running")
         await this.settle(

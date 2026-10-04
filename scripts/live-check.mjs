@@ -481,6 +481,12 @@ function count(objective, work) {
       const dups = bodies.length - new Set(bodies).size;
       if (dups) duplicateComments[item] = dups;
     }
+  // The Objective's completion comment is an effect too (objective-comment).
+  const objectiveBodies = all(
+    `repos/${REPO}/issues/${objective}/comments?per_page=100`,
+  ).map((comment) => comment.body);
+  const objectiveDups = objectiveBodies.length - new Set(objectiveBodies).size;
+  if (objectiveDups) duplicateComments.objective = objectiveDups;
   const subIssues = all(
     `repos/${REPO}/issues/${objective}/sub_issues?per_page=100`,
   ).map((issue) => issue.number);

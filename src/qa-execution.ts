@@ -14,10 +14,11 @@ import { graphDigest } from "./graph-amendments.js";
 import { reviewItem } from "./item-steps.js";
 import { validationLfsMembersForItem } from "./media.js";
 import type { PhaseAdmission } from "./phase-admission.js";
-import { fetchHead, gitAsync } from "./process.js";
+import { faultOf, StepFault } from "./fault.js";
+import { currentProcessSignal, fetchHead, gitAsync } from "./process.js";
 import { itemCoverage, objectiveCandidate } from "./qa.js";
 import type { FactoryState } from "./state.js";
-import { clearWait, setWait, step, waitOf } from "./step.js";
+import { clearWait, StepPaused, setWait, step, waitOf } from "./step.js";
 import {
   validateWorkItem,
   workItemReviewEvidence,
@@ -82,10 +83,17 @@ export async function runQaItem(args: {
   save: () => void;
   cancelled: () => boolean;
   paused?: () => boolean;
+  /** The run's cancel signal; defaults to the pass's process signal. */
+  signal?: AbortSignal;
+  /** The run's pause signal: ends a step's wait; the item resumes later. */
+  pause?: AbortSignal;
   diagnostics?: DiagnosticEmitter;
   phases?: PhaseAdmission;
 }): Promise<void> {
   const { state, item, save } = args;
+  const signal = args.signal ?? currentProcessSignal();
+  const cancelled = () =>
+    new StepFault({ kind: "cancelled", detail: "Objective cancelled" });
   const work = state.work[item.id]!;
   const ciWait = () => waitOf(state, { item: item.id })?.kind === "ci";
   const readinessWasWaiting = ciWait();
@@ -115,7 +123,7 @@ export async function runQaItem(args: {
     )
       throw new Error("QA cannot run before actual dependency integration");
     if (!candidate) throw new Error("QA has no integrated candidate");
-    if (args.cancelled()) throw new Error("Objective cancelled");
+    if (args.cancelled()) throw cancelled();
     const commit = candidate.commitSha;
     if (!work.attempt) {
       work.attempt = randomUUID();
@@ -234,11 +242,15 @@ export async function runQaItem(args: {
           workspacePackageAdditions(args.objectiveBody),
         );
       },
-      { save },
+      {
+        save,
+        ...(signal && { signal }),
+        ...(args.pause && { pause: args.pause }),
+      },
     );
     if (!validation) return;
     work.validation = validation;
-    if (args.cancelled()) throw new Error("Objective cancelled");
+    if (args.cancelled()) throw cancelled();
     if (retainPausedWait()) return;
     await args.phases?.reserve(item.id, "review");
     if (retainPausedWait()) return;
@@ -298,7 +310,7 @@ export async function runQaItem(args: {
       return;
     }
     work.validation = reviewed.evidence;
-    if (args.cancelled()) throw new Error("Objective cancelled");
+    if (args.cancelled()) throw cancelled();
     delete work.acceptancePending;
     if (candidate.basis === "current-graph-integration")
       work.integratedSha = commit;
@@ -314,8 +326,15 @@ export async function runQaItem(args: {
     }
   } catch (error) {
     args.phases?.release(item.id);
-    if (work.status !== "done") work.status = "failed";
-    work.error = error instanceof Error ? error.message : String(error);
+    // Paused: stop quietly; the step's repeat record and wait stay.
+    if (error instanceof StepPaused) return;
+    // Decision, config and cancel leave the item in place (contract 2):
+    // the step saved its wait, and the caller stops or waits.
+    const kind = faultOf(error).kind;
+    if (kind === "work" || kind === "defect") {
+      if (work.status !== "done") work.status = "failed";
+      work.error = error instanceof Error ? error.message : String(error);
+    }
     save();
     throw error;
   }

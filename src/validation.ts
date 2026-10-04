@@ -28,7 +28,7 @@ import {
   realpathSync,
   rmSync,
 } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -2568,7 +2568,7 @@ export async function sweepValidationWorktrees(
   }
   for (const worktree of owned)
     if (existsSync(worktree)) await removeWorktree(checkout, worktree);
-  await pinnedGitAsync(checkout, "worktree", "prune");
+  await unregisterStaleWorktrees(checkout, root);
 }
 
 async function removeValidationWorktree(
@@ -2577,7 +2577,49 @@ async function removeValidationWorktree(
 ): Promise<void> {
   if (existsSync(worktree)) await removeWorktree(checkout, worktree);
   // A registration whose directory is gone would refuse the next add.
-  await pinnedGitAsync(checkout, "worktree", "prune");
+  await unregisterStaleWorktrees(checkout, worktree);
+}
+
+/**
+ * Unregister only Factory's own stale worktrees: registrations at or under
+ * `under` whose directory is gone. `git worktree prune` would also drop the
+ * operator's stale registrations elsewhere, so it is never run.
+ */
+async function unregisterStaleWorktrees(
+  checkout: string,
+  under: string,
+): Promise<void> {
+  const roots = [resolve(under)];
+  try {
+    roots.push(realpathSync(under));
+  } catch {
+    // The directory is gone; its resolved path is the registration.
+  }
+  const within = (path: string) =>
+    roots.some((root) => {
+      const rest = relative(root, path);
+      return rest === "" || (!rest.startsWith("..") && !isAbsolute(rest));
+    });
+  const listing = await pinnedGitAsync(
+    checkout,
+    "worktree",
+    "list",
+    "--porcelain",
+  );
+  for (const entry of listing.split(/\n\n+/)) {
+    const lines = entry.split("\n");
+    const path = lines
+      .find((line) => line.startsWith("worktree "))
+      ?.slice("worktree ".length);
+    if (
+      path &&
+      lines.some(
+        (line) => line === "prunable" || line.startsWith("prunable "),
+      ) &&
+      within(resolve(path))
+    )
+      await pinnedGitAsync(checkout, "worktree", "remove", "--force", path);
+  }
 }
 
 /** Package managers resolve scripts and lifecycle hooks from the result tree.

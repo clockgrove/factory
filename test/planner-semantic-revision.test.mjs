@@ -73,6 +73,7 @@ const refusals = {
       });
       for (const field of [
         "ownedPaths",
+        "newPackages",
         "sourceAssets",
         "expectedOutputRoles",
         "requiredLfsRoles",

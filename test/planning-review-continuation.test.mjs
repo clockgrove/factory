@@ -94,6 +94,7 @@ async function fixture(
               children: [],
               dependencies: [],
               ownedPaths: ["result.txt"],
+              newPackages: [],
               priority: 0,
               resources: [],
               validation: [

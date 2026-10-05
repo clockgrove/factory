@@ -179,7 +179,12 @@ export async function runNativeGraph(args: {
         save,
         signal,
         pause: args.pause,
-        stopped: () => stopped() || Boolean(args.paused?.()),
+        // A staged discovery is reviewed first, as in the regular runner:
+        // its amendment may be what corrects the failure.
+        stopped: () =>
+          stopped() ||
+          Boolean(args.paused?.()) ||
+          Boolean(args.amendmentPending?.()),
       });
     } finally {
       phases.release(item.id);

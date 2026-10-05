@@ -1,11 +1,13 @@
 import {
   amendmentAllowed,
   amendmentsUsedUp,
+  archiveAttempt,
   charge,
   chargeRepair,
   consumption,
   failureDigest,
   objectiveEvent,
+  releaseCharge,
   type RepairCorrection,
 } from "./repair-policy.js";
 export { replacementRefusal } from "./amendment-admission.js";
@@ -50,7 +52,7 @@ import {
   StepFault,
   transient,
 } from "./fault.js";
-import { step, type StepOptions } from "./step.js";
+import { clearRepeats, step, type StepOptions } from "./step.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import {
   executionProfileChoices,
@@ -457,6 +459,27 @@ export function selectWorkerAmendment(state: FactoryState): void {
   }
 }
 
+/**
+ * The Work Item whose failed, unpublished attempt proposed this amendment. Its
+ * result is gone and it is attempted again, so the amendment may widen its
+ * ownership: the worker saw paths the plan could not (#819, #827).
+ */
+function reattemptedItem(
+  state: FactoryState,
+  proposal: AmendmentProposal,
+): string | undefined {
+  const id = proposal.worker?.itemId ?? "";
+  const work = state.work[id];
+  const item = state.graph.items.find((entry) => entry.id === id);
+  return work?.status === "failed" &&
+    work.attempt === proposal.worker?.attempt &&
+    work.recovery?.failure?.event &&
+    !work.pullRequest &&
+    (item?.kind ?? "work") === "work"
+    ? id
+    : undefined;
+}
+
 export function amendmentBlocksDispatch(state: FactoryState): boolean {
   return (
     (!!state.pendingAmendment && state.pendingAmendment.phase !== "backlog") ||
@@ -502,8 +525,14 @@ export function validateAmendment(
       throw new Error("Amendments cannot remove stable Work Item identities");
     const changed = !sameItem(next, old);
     const work = state.work[old.id]!;
+    // Only ownership widens, and only for the attempt that is run again.
+    const widened =
+      old.id === reattemptedItem(state, pending.proposal) &&
+      sameItem({ ...next, ownedPaths: old.ownedPaths }, old) &&
+      old.ownedPaths.every((path) => next.ownedPaths.includes(path));
     if (
       changed &&
+      !widened &&
       (work.status !== "pending" ||
         work.attempt ||
         work.execution ||
@@ -754,6 +783,7 @@ async function advanceAmendment(args: {
               (id) =>
                 state.work[id]!.status !== "pending" || state.work[id]!.attempt,
             ),
+            reattemptItemId: reattemptedItem(state, pending.proposal),
           },
           prerequisites,
           localExecutables,
@@ -886,6 +916,13 @@ async function advanceAmendment(args: {
       reviewDigest: pending.reviewDigest!,
       acceptedAt: new Date().toISOString(),
     });
+    const reattempt = reattemptedItem(state, pending.proposal);
+    const widened =
+      reattempt !== undefined &&
+      !sameItem(
+        state.graph.items.find((item) => item.id === reattempt),
+        pending.graph!.items.find((item) => item.id === reattempt),
+      );
     state.graph = pending.graph!;
     state.issueByItemId = pending.issueByItemId;
     for (const item of state.graph.items)
@@ -893,6 +930,17 @@ async function advanceAmendment(args: {
     if (pending.proposal.worker)
       state.work[pending.proposal.worker.itemId]!.discoveryDisposition =
         "accepted";
+    if (widened) {
+      // The plan was wrong, not the implementation: the item starts a new
+      // attempt under its wider ownership, and no repair is spent on it.
+      const work = state.work[reattempt]!;
+      releaseCharge(state, work.recovery!.failure!.event!);
+      clearRepeats(state, { item: reattempt });
+      state.work[reattempt] = {
+        status: "pending",
+        recovery: { ...archiveAttempt(work), phase: "stopped" },
+      };
+    }
     delete state.pendingAmendment;
     delete state.error;
     delete state.errorItem;

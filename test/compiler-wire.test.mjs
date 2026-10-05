@@ -74,6 +74,7 @@ function item(overrides = {}) {
     children: [],
     dependencies: [],
     ownedPaths: ["result.txt"],
+    newPackages: [],
     priority: 0,
     resources: [],
     validation: [{ kind: "source-line", sourceIndex: 0, lineIndex: 6 }],
@@ -146,6 +147,7 @@ test("QA choices require source-owned coverage while work and aggregates may lea
   for (const readOnly of [qa, parent]) {
     for (const field of [
       "ownedPaths",
+      "newPackages",
       "sourceAssets",
       "expectedOutputRoles",
       "requiredLfsRoles",
@@ -388,6 +390,7 @@ test("actual choice schema and decoder admit supported proof forms and refuse ow
     if (kind !== "work") {
       for (const field of [
         "ownedPaths",
+        "newPackages",
         "sourceAssets",
         "expectedOutputRoles",
         "requiredLfsRoles",
@@ -889,6 +892,7 @@ test("aggregate choices derive the child join while preserving real QA semantics
   for (const field of [
     "acceptance",
     "ownedPaths",
+    "newPackages",
     "sourceAssets",
     "expectedOutputRoles",
     "requiredLfsRoles",
@@ -910,6 +914,7 @@ test("aggregate choices derive the child join while preserving real QA semantics
   });
   for (const field of [
     "ownedPaths",
+    "newPackages",
     "sourceAssets",
     "expectedOutputRoles",
     "requiredLfsRoles",
@@ -1015,6 +1020,7 @@ test("trusted prior graph retains aggregate and decomposed work acceptance exact
     for (const field of [
       "acceptance",
       "ownedPaths",
+      "newPackages",
       "sourceAssets",
       "expectedOutputRoles",
       "requiredLfsRoles",
@@ -1072,6 +1078,7 @@ test("unchanged historical aggregate review receipts remain verifiable without r
     for (const field of [
       "acceptance",
       "ownedPaths",
+      "newPackages",
       "sourceAssets",
       "expectedOutputRoles",
       "requiredLfsRoles",
@@ -1179,6 +1186,7 @@ test("amendment references retain exact started definitions while moving source 
   });
   for (const field of [
     "ownedPaths",
+    "newPackages",
     "sourceAssets",
     "expectedOutputRoles",
     "requiredLfsRoles",
@@ -1327,6 +1335,7 @@ test("compileObjective supplies trusted retained identity and keeps pending item
         });
         for (const field of [
           "ownedPaths",
+          "newPackages",
           "sourceAssets",
           "expectedOutputRoles",
           "requiredLfsRoles",
@@ -1828,6 +1837,7 @@ test("with no known check names the planner cannot create a gate or CI proof", (
   };
   for (const field of [
     "ownedPaths",
+    "newPackages",
     "sourceAssets",
     "expectedOutputRoles",
     "requiredLfsRoles",

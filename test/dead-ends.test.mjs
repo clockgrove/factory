@@ -249,6 +249,40 @@ const FIXED = [
     "a step fails with an unclassified error",
     "the installation configuration changed",
   ],
+  // Final acceptance sealed under a changed configuration: cancel is refused,
+  // so status names the run that restoring the configuration allows.
+  [
+    "regular",
+    "alpha done; beta done (handle, PR, closure complete); final validation; Objective closure pending",
+    "the installation configuration changed",
+  ],
+  [
+    "native-stack",
+    "alpha done; beta done (PR, closure complete); final validation; Objective closure pending; stack merge pending",
+    "the installation configuration changed",
+  ],
+  // A preparation under a changed configuration: a refusal discards the plan
+  // before projection; once issues exist only cancel ends it.
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 0 issues, planning",
+    "the installation configuration changed",
+  ],
+  [
+    "native-stack",
+    "preparing, plan clean, planning complete, 0 issues, projection",
+    "the installation configuration changed",
+  ],
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 1 issues, projection",
+    "the installation configuration changed",
+  ],
+  [
+    "native-stack",
+    "preparing, no plan, 0 issues, planning",
+    "the installation configuration changed",
+  ],
   // A cancelled item of a live Objective (#718).
   [
     "native-stack",

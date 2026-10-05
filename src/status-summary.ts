@@ -107,8 +107,8 @@ export interface PreparingStatusView extends WaitView {
   } | null;
   /** Planning stopped for a decision before producing a reviewable plan. */
   planningStopped: boolean;
-  /** Work Item issues projected so far; projection has started when any exist. */
-  issueByItemId?: Record<string, unknown>;
+  /** Projection has started (an issue exists or the phase was entered): a plan can no longer be refused. */
+  projectionStarted?: boolean;
   /** Set when the installation configuration differs from the one planning started under. */
   configurationChanged?: boolean;
   cancelledAt: string | null;
@@ -957,7 +957,7 @@ function configurationStop(
   const summary =
     "the installation configuration changed since this Objective started";
   if (view.state === "preparing") {
-    if (Object.keys(view.issueByItemId ?? {}).length)
+    if (view.projectionStarted)
       return {
         phase: "needs-decision",
         summary,

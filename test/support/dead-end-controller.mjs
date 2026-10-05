@@ -109,6 +109,7 @@ function status() {
       summary: document.summary,
       nextAction: document.nextAction,
       active: document.runActive ?? null,
+      configurationChanged: document.configurationChanged === true,
       // Every sentence of the status that can name a command: the summary,
       // the next action's reason, each repair's nextDecision, item errors
       // and waits, and the coordinator's wait reason.

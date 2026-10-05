@@ -174,6 +174,19 @@ export interface PreparationState {
 }
 export type ContinuationState = FactoryState | PreparationState;
 
+/**
+ * Projection may create an issue before recording it, so it has started once
+ * an issue is recorded or the phase is entered. A plan cannot be refused then.
+ */
+export function projectionStarted(
+  preparation: Pick<PreparationState, "issueByItemId" | "coordinator">,
+): boolean {
+  return (
+    Object.keys(preparation.issueByItemId).length > 0 ||
+    preparation.coordinator.phase === "projection"
+  );
+}
+
 export interface FactoryState {
   finalAcceptance?: import("./completion.js").FinalAcceptance;
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;

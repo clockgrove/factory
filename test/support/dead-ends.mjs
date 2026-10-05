@@ -764,6 +764,9 @@ const OVERLAYS = {
     },
     "the installation configuration changed": (state) => {
       state.configDigest = "0".repeat(64);
+      // The seal records the digest it was made under.
+      if (state.finalAcceptance)
+        state.finalAcceptance.configDigest = state.configDigest;
       return true;
     },
     "cancel was requested": (state) => {
@@ -1628,6 +1631,20 @@ async function classify(slot, anchor, state) {
         );
       if (stops.size > MAX_COMMANDS)
         return result("stranded", `commands do not converge after ${context}`);
+      // The configuration is the operator's to restore, outside Factory: when
+      // the status says it changed (a flag, not text) and names only the run
+      // that restoring it allows, the operator restores it first.
+      if (next.verb === "run" && report.status.configurationChanged) {
+        const restored = snapshot();
+        restored.configDigest = anchor.state.configDigest;
+        if (restored.finalAcceptance)
+          restored.finalAcceptance.configDigest =
+            anchor.state.finalAcceptance.configDigest;
+        writeFileSync(
+          statePath(slot.root),
+          `${JSON.stringify(restored, null, 2)}\n`,
+        );
+      }
       command = next;
     }
   };

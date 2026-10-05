@@ -50,6 +50,7 @@ import type {
   PreparationState,
   WorkState,
 } from "./state.js";
+import { projectionStarted } from "./state.js";
 import type { PreState } from "./state-store.js";
 import { shortPlanDigest, summarizeStatus } from "./status-summary.js";
 import { outageOf, type StepScope, type StepState, waitOf } from "./step.js";
@@ -1416,6 +1417,7 @@ export function preparationStatusDocument(
     planningStopped:
       !preparation.plan && preparation.planningRecovery?.phase === "stopped",
     issueByItemId: preparation.issueByItemId,
+    projectionStarted: projectionStarted(preparation),
     cancelledAt: preparation.cancelledAt ?? null,
     error: redact(preparation.error),
     waitReason: redact(preparation.coordinator.waitReason),

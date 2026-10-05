@@ -116,6 +116,7 @@ import type {
   PreparationState,
   WorkState,
 } from "./state.js";
+import { projectionStarted } from "./state.js";
 import {
   acquireControllerLock,
   type ControllerLock,
@@ -284,11 +285,7 @@ export async function decidePlan(
     if (input.outcome === "refuse") {
       if (!input.actor.trim() || !input.reason.trim())
         throw new Error("A plan refusal needs actor and reason");
-      // Projection may have created an issue before recording it.
-      if (
-        Object.keys(preparation.issueByItemId).length ||
-        preparation.coordinator.phase === "projection"
-      )
+      if (projectionStarted(preparation))
         throw new Error(
           "Work Item projection has started; cancel the Objective instead",
         );
@@ -1344,7 +1341,7 @@ async function runObjectivePass(
           createHash("sha256").update(issue.body).digest("hex")
       )
         throw new Error(
-          Object.keys(preparation.issueByItemId).length
+          projectionStarted(preparation)
             ? `Base, Objective, sources or configuration changed during projection; restore what changed, or run \`factory cancel --objective ${objective}\``
             : "Base, Objective, sources or configuration changed since planning; refuse the plan with factory decide to plan again",
         );

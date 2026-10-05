@@ -936,7 +936,7 @@ test("a preparation under a changed configuration names a refusal before project
     preparing({
       configurationChanged: true,
       runActive: false,
-      issueByItemId: { A: 11 },
+      projectionStarted: true,
     }),
   );
   assert.equal(after.nextAction.command, "factory cancel --objective 7");

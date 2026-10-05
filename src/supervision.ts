@@ -38,6 +38,8 @@ import { command, linuxProcessIdentity } from "./process.js";
 import { readContinuation, readControllerOwner } from "./state-store.js";
 
 interface ServiceBinding {
+  /** Set by a unit that an earlier build bound to one Objective; only teardown reads it. */
+  objective?: number;
   /** One systemd LoadCredential per credential the configured providers need. */
   credentials?: { name: string; file: string }[];
   version: 1;
@@ -466,13 +468,18 @@ export function checkIntakeServiceState(config: FactoryConfig): void {
   for (const id of intake.objectives) checkServiceState(config, id);
 }
 
-/** Ask the service to drain and release the installation; the queue is objective 0. */
+/**
+ * Ask the service to drain and release the installation. The queue is
+ * objective 0; a service an earlier build bound to one Objective answers only
+ * for that Objective.
+ */
 export async function handoffService(
   config: FactoryConfig,
   timeoutMs = 30_000,
+  objective = 0,
 ): Promise<void> {
   const reply = await requestControl(config.repository, {
-    objective: 0,
+    objective,
     action: "handoff",
   });
   if (!reply.handled) return;
@@ -650,7 +657,7 @@ export async function supervise(
       beforeIntake?.watch &&
       beforeIntake.mode === "running" &&
       intakeSettled(config);
-    await handoffService(config);
+    await handoffService(config, undefined, value.objective);
     systemctl("stop", name);
     if (candidate) {
       validateArtifact(candidate);

@@ -641,11 +641,6 @@ test("supervisor stop drains the service; --disable also stops it starting again
     const service = run(["status", "--json"]).document.service;
     assert.equal(service.registered, true);
     assert.notEqual(service.enabled, "enabled");
-    // The status line for a registered, stopped service names the command that starts it.
-    assert.match(
-      run(["status"]).stdout,
-      /Not running; `factory supervisor start` starts it/,
-    );
   }));
 
 test("guided setup leaves omitted concurrency to host sizing at run time and reports it", () =>
@@ -839,10 +834,15 @@ test("factory queue parses each form, and its stop messages name queue commands 
   }));
 
 /** Run the command a refusal names, as the operator would; `factory X` becomes the CLI with X. */
-function named(run, message, pattern) {
+function named(run, message, pattern, fill = {}) {
   const command = new RegExp(pattern).exec(message)?.[0];
   assert.ok(command, `${message} names ${pattern}`);
-  return run(command.replace(/^factory /, "").split(" "));
+  return run(
+    command
+      .replace(/^factory /, "")
+      .split(" ")
+      .map((word) => fill[word] ?? word),
+  );
 }
 
 test("while a foreground run holds the lock, status and queue list still read, and a refusal names a command that works", () =>
@@ -904,6 +904,15 @@ test("a stopped service leaves its queue draining; status and a refused start na
     assert.match(
       run(["status"]).stdout,
       /Draining; `factory queue resume` continues it, then `factory supervisor start`/,
+    );
+    // The line for the stopped service names the command that continues the queue before the start.
+    const line = run(["status"])
+      .stdout.split("\n")
+      .find((text) => text.includes("Not running"));
+    assert.ok(line, "status has a line for the stopped service");
+    assert.deepEqual(
+      [...line.matchAll(/`(factory [^`]+)`/g)].map((match) => match[1]),
+      ["factory queue resume", "factory supervisor start"],
     );
     const refused = run(["supervisor", "start"]);
     assert.equal(refused.status, 1);
@@ -975,4 +984,130 @@ test("supervisor --credential-file points to the setup command that takes it, an
       setup.stderr + JSON.stringify(setup.document ?? {}),
       /Unknown option|belongs to factory setup/,
     );
+  }));
+
+test("a queue command holding the installation is not reported as Objective 0", () =>
+  fixture(async ({ run, configure, env }) => {
+    configure();
+    const holder = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import {mkdirSync} from 'node:fs';
+import {join} from 'node:path';
+import {stateRoot} from ${JSON.stringify(new URL("../dist/config.js", import.meta.url).href)};
+import {acquireControllerLock} from ${JSON.stringify(new URL("../dist/state-store.js", import.meta.url).href)};
+mkdirSync(stateRoot('example/setup'),{recursive:true,mode:0o700});
+acquireControllerLock(join(stateRoot('example/setup'),'controller.lock'),0);
+console.log('held');process.stdin.resume();`,
+      ],
+      { env, stdio: ["pipe", "pipe", "inherit"] },
+    );
+    try {
+      await new Promise((resolve, reject) => {
+        holder.once("error", reject);
+        holder.stdout.once("data", resolve);
+      });
+      const refused = run(["retry", "--objective", "1"]);
+      assert.equal(refused.status, 1);
+      // No command it names points at Objective 0.
+      for (const [command] of refused.stderr.matchAll(/factory [^`;\n]*/g))
+        assert.doesNotMatch(command, /--objective 0\b/);
+    } finally {
+      holder.kill("SIGKILL");
+    }
+  }));
+
+test("an option that belongs to setup points at the setup command that takes it, and that command runs", () =>
+  fixture(async ({ run, configure }) => {
+    configure();
+    for (const [args, pointer, fill] of [
+      [
+        ["run", "--objective", "1", "--background"],
+        /factory setup --background$/m,
+      ],
+      [
+        ["run", "--objective", "1", "--concurrency", "1"],
+        /factory setup --config-only --concurrency VALUE/,
+        { VALUE: "1" },
+      ],
+      [
+        ["run", "--objective", "1", "--capture-content"],
+        /factory setup --config-only --capture-content /,
+      ],
+    ]) {
+      const refused = run(args);
+      assert.equal(refused.status, 1, args.join(" "));
+      const command = pointer.exec(refused.stderr)?.[0];
+      assert.ok(command, `${args.join(" ")}: ${refused.stderr}`);
+      assert.doesNotMatch(command, /--background --background/);
+      // The pointer is a command line the CLI parses: it is not refused as unknown or misplaced.
+      const followed = named(run, command.trim(), "factory .*", fill);
+      assert.doesNotMatch(
+        followed.stderr,
+        /Unknown option|belongs to factory setup|was removed/,
+        command,
+      );
+    }
+  }));
+
+test("factory queue says it takes Objective numbers, and the command it names adds them", () =>
+  fixture(async ({ run, configure }) => {
+    configure();
+    const refused = run(["queue", "add", "1", "--objective", "1"]);
+    assert.equal(refused.status, 1);
+    const command = /factory queue add 1/.exec(refused.stderr)?.[0];
+    assert.ok(command, refused.stderr);
+    assert.doesNotMatch(refused.stderr, /Unknown option/);
+    const added = named(run, command, "factory .*");
+    assert.equal(added.status, 0, added.stderr);
+    assert.deepEqual(added.document.objectives, [1]);
+  }));
+
+test("a queue written under another configuration can be read before it is deleted, and nothing is lost", () =>
+  fixture(async ({ run, configure, configPath }) => {
+    configure();
+    assert.equal(run(["queue", "add", "1"]).status, 0);
+    // A configuration change leaves the queue record bound to the earlier one.
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    config.policy.allowedSecretNames = ["EXTRA_SECRET"];
+    writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
+    const refused = run(["queue", "add", "1"]);
+    assert.equal(refused.status, 1);
+    const read = /factory queue list/.exec(refused.stderr)?.[0];
+    assert.ok(read, refused.stderr);
+    // Reading the queue is allowed under any configuration and shows the order the advice protects.
+    const listed = named(run, read, "factory queue list");
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.deepEqual(listed.document.objectives, [1]);
+    const overview = run(["status", "--json"]);
+    assert.equal(overview.status, 0, overview.stderr);
+    assert.deepEqual(overview.document.queue.objectives, [1]);
+    // Changing it still refuses until the record is deleted and the Objectives are added again.
+    assert.equal(run(["queue", "pause"]).status, 1);
+  }));
+
+test("the pointer for --objective on queue names the number given, inline or next, and N otherwise", () =>
+  fixture(async ({ run, configure }) => {
+    configure();
+    for (const [args, expected] of [
+      [["queue", "add", "--objective", "1"], "factory queue add 1"],
+      [["queue", "add", "--objective=1"], "factory queue add 1"],
+      [["queue", "add", "--objective"], "factory queue add N"],
+      [["queue", "--objective", "--json"], "factory queue add N"],
+      [["queue", "--objective=x"], "factory queue add N"],
+    ]) {
+      const refused = run(args);
+      assert.equal(refused.status, 1, args.join(" "));
+      assert.match(refused.stderr, /takes Objective numbers/, args.join(" "));
+      const command = /factory queue add \S+/.exec(refused.stderr)?.[0];
+      assert.equal(command, expected, `${args.join(" ")}: ${refused.stderr}`);
+      assert.doesNotMatch(refused.stderr, /Unknown option/);
+    }
+    const added = named(run, "factory queue add N", "factory queue add N", {
+      N: "1",
+    });
+    assert.equal(added.status, 0, added.stderr);
+    assert.deepEqual(added.document.objectives, [1]);
   }));

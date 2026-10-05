@@ -402,6 +402,15 @@ test("status without an Objective names the command that answers each service an
       "  Paused; `factory queue resume` continues it",
     ],
   );
+  // A draining queue ends a started service at once: resume it before starting.
+  const draining = lines(
+    { ...registered, active: "inactive", enabled: "enabled" },
+    { mode: "draining" },
+  );
+  assert.deepEqual(
+    [...draining[1].matchAll(/`(factory [^`]+)`/g)].map((match) => match[1]),
+    ["factory queue resume", "factory supervisor start"],
+  );
   // A service that stopped for a decision names the Objective's status, then the way back.
   const stopped = lines(
     {

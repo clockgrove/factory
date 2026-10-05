@@ -6,6 +6,7 @@ import { assertKnownFlags, option } from "./cli-flags.js";
 import {
   configPath,
   factoryConfigDigest,
+  type FactoryConfig,
   readConfig,
   stateRoot,
 } from "./config.js";
@@ -334,25 +335,9 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "status") {
-    const secrets = config.policy.allowedSecretNames
-      .map((name) => process.env[name])
-      .filter((value): value is string => Boolean(value));
-    const continuation = readContinuation(config.repository, objective);
-    const document = continuationStatusDocument(
-      continuation,
-      config.repository,
-      objective,
-      config.delivery.kind,
-      secrets,
-      continuation?.capacity.concurrency,
-      controllerActive(config.repository, objective),
-      continuation ? undefined : readPreState(config.repository, objective),
-      factoryConfigDigest(config),
-    );
+    const { document, secrets } = statusDocument(config, objective);
     if (args.includes("--json")) console.log(JSON.stringify(document));
-    else
-      for (const line of renderStatusText(document))
-        console.log(redactDiagnosticDetail(line, secrets));
+    else for (const line of statusLines(document, secrets)) console.log(line);
   } else if (command === "export-captures") {
     const result = await runCaptureExportCommand(config, objective, args);
     console.log(JSON.stringify(result, null, 2));
@@ -460,10 +445,12 @@ async function main(): Promise<void> {
       const ready = await checkReadiness(config);
       if (!ready.ready)
         return reportRun(
+          config,
           new AwaitingBeforeState(objective, ready.detail!, ready.fix),
         );
     }
     reportRun(
+      config,
       await requireApplication()
         .runObjective(objective, { deadlineAt: option(args, "deadline") })
         .catch(waitBeforeState),
@@ -483,12 +470,47 @@ function waitBeforeState(error: unknown): AwaitingBeforeState {
   throw error;
 }
 
+/** The status view `factory status --objective N` shows, from the recorded state. */
+function statusDocument(config: FactoryConfig, objective: number) {
+  const secrets = config.policy.allowedSecretNames
+    .map((name) => process.env[name])
+    .filter((value): value is string => Boolean(value));
+  const continuation = readContinuation(config.repository, objective);
+  const document = continuationStatusDocument(
+    continuation,
+    config.repository,
+    objective,
+    config.delivery.kind,
+    secrets,
+    continuation?.capacity.concurrency,
+    controllerActive(config.repository, objective),
+    continuation ? undefined : readPreState(config.repository, objective),
+    factoryConfigDigest(config),
+  );
+  return { document, secrets };
+}
+
+function statusLines(
+  document: ReturnType<typeof statusDocument>["document"],
+  secrets: string[],
+): string[] {
+  return renderStatusText(document).map((line) =>
+    redactDiagnosticDetail(line, secrets),
+  );
+}
+
 /** Print how a run ended and set the documented exit code. */
-function reportRun(state: ContinuationState | AwaitingBeforeState): void {
+function reportRun(
+  config: FactoryConfig,
+  state: ContinuationState | AwaitingBeforeState,
+): void {
   const outcome =
     state instanceof AwaitingBeforeState
       ? awaitingOutcome(state)
-      : runOutcome(state);
+      : runOutcome(state, () => {
+          const { document, secrets } = statusDocument(config, state.objective);
+          return statusLines(document, secrets);
+        });
   console.log(outcome.message);
   process.exitCode = outcome.code;
 }

@@ -536,7 +536,8 @@ export function assertRefusal(
 /**
  * The operator's cancellation took effect: the last run reports the
  * Objective cancelled without an unresolved cessation, every worker attempt
- * that started was cancelled, and nothing was delivered or closed on GitHub.
+ * that started was cancelled, the unfinished Work Item issues are closed as
+ * not planned, and nothing was delivered or the Objective issue closed.
  */
 export function assertCancelled(result) {
   const runs = () => result.runs.map(summarizeRun).join(" | ");
@@ -558,8 +559,14 @@ export function assertCancelled(result) {
     );
   assert.equal(result.fake.issue(OBJECTIVE).state, "open", "Objective open");
   for (const item of result.items)
-    for (const issue of result.fake.issuesWithMarker(marker(item.id)))
-      assert.equal(issue.state, "open", `issue for ${item.id} open`);
+    for (const issue of result.fake.issuesWithMarker(marker(item.id))) {
+      assert.equal(issue.state, "closed", `issue for ${item.id} closed`);
+      assert.equal(
+        issue.state_reason,
+        "not_planned",
+        `issue for ${item.id} not planned`,
+      );
+    }
   assert.deepEqual(
     Object.values(result.fake.state.pulls)
       .filter((pull) => (pull.merges ?? 0) > 0)

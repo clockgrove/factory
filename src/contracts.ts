@@ -814,6 +814,8 @@ export interface GitHubGateway {
       workItem?: { objective: number; id: string };
       /** The login that authored Factory's issues, once known. */
       author?: string;
+      /** Close as not planned (a cancelled Objective's Work Item); default completed. */
+      reason?: "not_planned";
     },
   ): Promise<void>;
   projectGraph(request: GraphProjection): Promise<ProjectedGraph>;

@@ -35,7 +35,11 @@ import {
   saveState,
   statePath,
 } from "../dist/state-store.js";
-import { shortPlanDigest, summarizeStatus } from "../dist/status-summary.js";
+import {
+  renderStatusText,
+  shortPlanDigest,
+  summarizeStatus,
+} from "../dist/status-summary.js";
 import { withCoverage } from "./support/coverage.mjs";
 import {
   createTarget,
@@ -535,10 +539,33 @@ test("the active graph stays bound to the accepted plan and runs report exit cod
         .code,
       1,
     );
-    assert.equal(
-      runOutcome({ ...completed, finalValidation: undefined }).code,
-      2,
+    // A stop no message names prints what `factory status` shows: the
+    // headline and the exact next command.
+    const stopped = {
+      ...completed,
+      finalValidation: undefined,
+      finalAcceptancePending: {
+        criterion: "result.txt reads done",
+        treeSha: "a".repeat(40),
+        question: "Does result.txt say what the Objective asked for?",
+        detail: "Evidence the reviewer could not settle",
+      },
+    };
+    const shown = continuationStatusDocument(
+      stopped,
+      config.repository,
+      1,
+      "regular",
+      [],
     );
+    const lines = renderStatusText(shown);
+    const stop = runOutcome(stopped, () => lines);
+    assert.equal(stop.code, 2);
+    assert.equal(stop.message, lines.join("\n"));
+    assert.ok(shown.nextAction);
+    assert.match(shown.nextAction.command, /^factory decide /);
+    assert.ok(stop.message.includes(shown.nextAction.command));
+    assert.ok(stop.message.includes(stopped.finalAcceptancePending.question));
     assert.equal(intakeExitCode({ mode: "running" }), 0);
     assert.equal(
       intakeExitCode({ mode: "paused", observation: { error: "failed" } }),

@@ -524,6 +524,7 @@ export class RealGitHubGateway implements GitHubGateway {
       body?: string;
       workItem?: { objective: number; id: string };
       author?: string;
+      reason?: "not_planned";
     },
   ): Promise<void> {
     const issue = await this.api<Issue>("GET", `issues/${number}`);
@@ -541,9 +542,12 @@ export class RealGitHubGateway implements GitHubGateway {
       );
     // The completion comment carries a marker, so a repeat after a lost
     // response finds it instead of posting it twice.
+    // Cancellation has its own marker: a Work Item retried after cancel
+    // still gets its completion comment.
+    const kind = expected.reason === "not_planned" ? "cancelled" : "closure";
     const closure = expected.workItem
-      ? `<!-- factory:closure objective=${expected.workItem.objective};item=${expected.workItem.id} -->`
-      : `<!-- factory:closure objective=${number} -->`;
+      ? `<!-- factory:${kind} objective=${expected.workItem.objective};item=${expected.workItem.id} -->`
+      : `<!-- factory:${kind} objective=${number} -->`;
     const author = expected.author ?? (await this.viewer());
     const comments = await this.pages<{
       body?: string;
@@ -572,7 +576,7 @@ export class RealGitHubGateway implements GitHubGateway {
     if (issue.state === "open")
       await this.api("PATCH", `issues/${number}`, {
         state: "closed",
-        state_reason: "completed",
+        state_reason: expected.reason ?? "completed",
       });
     else if (issue.state !== "closed")
       throw new Error(`Issue #${number} has unexpected state`);

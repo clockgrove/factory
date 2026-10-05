@@ -55,7 +55,11 @@ export function stopRetryCommand(state: ContinuationState): string {
 }
 
 /** How a run ended: the exit code and one message naming the next command. */
-export function runOutcome(state: ContinuationState): {
+export function runOutcome(
+  state: ContinuationState,
+  /** `factory status` for this Objective, for a stop no message above names. */
+  statusLines: () => string[],
+): {
   code: number;
   message: string;
 } {
@@ -131,10 +135,9 @@ export function runOutcome(state: ContinuationState): {
       code: EXIT_FAILED,
       message: `Objective #${objective} stopped: ${state.error}\nFix the cause, then \`${stopRetryCommand(state)}\` and \`${rerun}\`; or \`factory cancel --objective ${objective}\``,
     };
-  return {
-    code: EXIT_NEEDS_DECISION,
-    message: `Objective #${objective} needs a human decision: ${state.coordinator?.waitReason ?? "inspect status"}\nUse \`factory status --objective ${objective}\` for the pending criterion, AssetSet or failed Work Item, then rerun \`${rerun}\``,
-  };
+  // The pending decision is whatever status shows: its headline, question and
+  // exact next command.
+  return { code: EXIT_NEEDS_DECISION, message: statusLines().join("\n") };
 }
 
 /** Intake exits 2 when an Objective stopped the queue for a decision, 1 when a failure paused it. */

@@ -759,7 +759,12 @@ export class StatefulGitHubFake {
     }
     this.update((state) => {
       state.closedIssues[number] = true;
-      state.events.push({ type: "close-issue", number, comment });
+      state.events.push({
+        type: "close-issue",
+        number,
+        comment,
+        reason: expected.reason ?? "completed",
+      });
     });
   }
 

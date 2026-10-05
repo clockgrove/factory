@@ -296,27 +296,27 @@ const FIXED = [
   [
     "regular",
     "alpha pending; beta pending",
-    "an amendment was rejected, then the coordinator drained",
+    "an amendment was rejected, then the mode was left draining",
   ],
   [
     "regular",
     "alpha pending; beta pending",
-    "an amendment was rejected, then the coordinator resumed",
+    "an amendment was rejected, then the mode was left running",
   ],
   [
     "regular",
     "alpha pending; beta pending",
-    "an amendment was rejected with no planning revision left, then the coordinator drained",
+    "an amendment was rejected with no planning revision left, then the mode was left draining",
   ],
   [
     "native-stack",
     "alpha published (PR); beta pending",
-    "an amendment was rejected and the run stopped, then the coordinator resumed",
+    "an amendment was rejected and the run stopped, then the mode was left running",
   ],
   [
     "regular",
     "alpha running/execute; beta pending",
-    "an amendment was rejected and the run stopped, then the coordinator drained",
+    "an amendment was rejected and the run stopped, then the mode was left draining",
   ],
   // A pause or drain of a preparation outranks a changed configuration: a
   // refusal would discard it.
@@ -365,6 +365,23 @@ const FIXED = [
     "preparing, plan clean, planning complete, 0 issues, planning",
     "paused",
     "the base changed since planning",
+  ],
+  // A changed configuration beside changed inputs: restoring the configuration
+  // is not enough, and the refusal that status names still ends it.
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 0 issues, planning",
+    "the installation configuration changed",
+    "the base changed since planning",
+  ],
+  // The owner that is draining at a cancelled item is answered through its
+  // socket ("named commands were applied through a live owner" needs one; the
+  // sample does not always pick it).
+  [
+    "regular",
+    "alpha done; beta pending",
+    "an item was cancelled and the Objective retried",
+    "draining",
   ],
   // A cancelled item of a live Objective (#718).
   [
@@ -480,6 +497,18 @@ describe("dead ends", { concurrency: true }, () => {
             value === "draining",
         ),
     );
+    // A cancelled item with a parked owner first: the sample does not always
+    // pick one, and the named case is added after the sampled ones.
+    const cancelledParked = (testCase) => {
+      const values = Object.values(testCase.values ?? {});
+      return (
+        values.includes("an item was cancelled and the Objective retried") &&
+        (values.includes("paused") || values.includes("draining"))
+      );
+    };
+    parked.sort(
+      (a, b) => Number(cancelledParked(b)) - Number(cancelledParked(a)),
+    );
     for (const testCase of parked) {
       await outcomeOf(testCase);
       if (wanted.every(answered)) break;
@@ -499,6 +528,34 @@ describe("dead ends", { concurrency: true }, () => {
       wanted.filter((pair) => !answered(pair)).map((pair) => pair.join(": ")),
       [],
       `The owner's socket did not answer these commands at these stops; ${ownerProbes.answered} of ${ownerProbes.run} probes made with an owner running were answered; commands applied with an owner: ${JSON.stringify(ownerProbes.applied)}`,
+    );
+  });
+
+  // A rejection whose mode is not paused (the raw state a bypass of the
+  // setter or an old state file leaves) gets `factory pause` from status; the
+  // finder must apply it, then reach the replacement.
+  test("the pause status names for an unpaused rejection is applied", {
+    timeout: 3_600_000,
+  }, async () => {
+    const applied = () =>
+      ownerProbes.applied.some(
+        (command) =>
+          command.stop === "rejected amendment" && command.verb === "pause",
+      );
+    for (const testCase of cases) {
+      if (
+        testCase.unreachable ||
+        !Object.values(testCase.values ?? {}).some((value) =>
+          /, then the mode was left /.test(value),
+        )
+      )
+        continue;
+      await outcomeOf(testCase);
+      if (applied()) break;
+    }
+    assert.ok(
+      applied(),
+      "No case applied factory pause at a rejected amendment",
     );
   });
 

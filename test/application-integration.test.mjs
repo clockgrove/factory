@@ -1443,6 +1443,12 @@ test("an explicitly accepted unresolved graph review runs the same pinned graph 
       application.runObjective(objective),
       /changed since planning/,
     );
+    // The configuration is a live check in status: no run-recorded flag to
+    // go stale once it is restored.
+    assert.equal(
+      readContinuation(config.repository, objective).changedSincePlanning,
+      undefined,
+    );
     config.planning.reviewer.reasoningEffort = "medium";
     const decided = await application.decidePlan(objective, {
       actor: "test operator",

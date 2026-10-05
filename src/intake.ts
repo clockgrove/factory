@@ -42,6 +42,7 @@ import {
   saveState,
   statePath,
 } from "./state-store.js";
+import { setCoordinatorMode } from "./state.js";
 import type { PreparationState, ContinuationState } from "./state.js";
 
 /**
@@ -356,7 +357,7 @@ export async function intakeControl(
         (state) => !terminal(state),
       )) {
         if (current.coordinator) {
-          current.coordinator.mode = record.mode;
+          setCoordinatorMode(current, record.mode);
           saveState(statePath(config.repository, current.objective), current);
         }
       }
@@ -523,7 +524,7 @@ export async function runIntake(
       if (request.action === "status") return preparing.coordinator;
       if (request.action === "cancel") {
         preparing.cancelRequested = true;
-        preparing.coordinator.mode = "paused";
+        setCoordinatorMode(preparing, "paused");
         preparing.coordinator.waitReason =
           "Planning cancellation requested; submitted outcomes remain preserved";
         saveState(statePath(config.repository, preparing.objective), preparing);
@@ -562,7 +563,7 @@ export async function runIntake(
           state.schemaVersion === 8 && !terminal(state),
       );
       if (preparing) {
-        preparing.coordinator.mode = record.mode;
+        setCoordinatorMode(preparing, record.mode);
         saveState(statePath(config.repository, preparing.objective), preparing);
       }
     }

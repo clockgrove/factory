@@ -503,6 +503,62 @@ const twoRevisions = {
   ...limits,
   allowances: { ...limits.allowances, planningRevisions: 2 },
 };
+
+test("queue control and resume keep a rejected amendment's pause and name the command that lifts it", async () =>
+  fixture(async (f) => {
+    await f.application.enqueueIntake([1]);
+    await f.application.runIntake();
+    const state = readState(f.config.repository, 1);
+    // A rejected amendment on an Objective that has not completed.
+    delete state.objectiveClosure;
+    delete state.finalAcceptance;
+    delete state.finalValidation;
+    state.pendingAmendment = {
+      id: "amendment-1",
+      proposal: {
+        scope: "in-scope",
+        reason: "Discovered a missing step",
+        evidence: ["observed while working"],
+        ownership: ["extra.txt"],
+        acceptance: ["extra.txt exists"],
+        dependencies: [],
+        expectedGraphDigest: state.planGraphDigest,
+        actor: "operator",
+      },
+      phase: "rejected",
+      issueByItemId: structuredClone(state.issueByItemId),
+      error: "Injected amendment rejection",
+      rejectionStage: "compilation",
+    };
+    state.charges = {
+      ...state.charges,
+      "objective/amend/amendment-1": {
+        allowances: ["planningRevisions"],
+        scopes: ["$planning"],
+      },
+    };
+    state.coordinator.mode = "paused";
+    writeStateFile(statePath(f.config.repository, 1), state);
+    const mode = () => readState(f.config.repository, 1).coordinator.mode;
+    for (const action of ["resume", "drain", "pause", "resume"]) {
+      await intakeControl(f.config, action);
+      assert.equal(mode(), "paused", `queue ${action}`);
+    }
+    for (const action of ["resume", "drain"]) {
+      const reply = await controlObjective(f.config, {
+        objective: 1,
+        action,
+      });
+      assert.equal(reply.mode, "paused");
+      assert.equal(reply.hold.reason, "rejected-amendment");
+      assert.match(reply.hold.next, /^factory [a-z-]+ --objective 1/);
+    }
+    const reply = await controlObjective(f.config, {
+      objective: 1,
+      action: "pause",
+    });
+    assert.equal(reply.hold, undefined);
+  }, twoRevisions));
 async function activatedSuccessor(
   f,
   descendant = false,

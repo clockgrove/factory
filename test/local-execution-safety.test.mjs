@@ -1184,6 +1184,27 @@ test("a worker's unreadable or redirected files are its wrong result, not Factor
   assert.match(error.message, /unreadable path: sub\/locked.txt/);
 });
 
+test("a worker that changes nothing carries its own final response into the work fault (#802)", async () => {
+  const reason = "Blocked: the workspace config needs an operator amendment.";
+  const error = await runCandidate(() => {}, {
+    evidence: { harness: "scripted", finalResponse: reason },
+  }).then(
+    () => assert.fail("collection succeeded"),
+    (rejection) => rejection,
+  );
+  const fault = faultOf(error);
+  assert.equal(fault.kind, "work");
+  assert.ok(fault.evidence.detail.includes(reason));
+  const silent = await runCandidate(() => {}, {
+    evidence: { harness: "scripted", finalResponse: "  " },
+  }).then(
+    () => assert.fail("collection succeeded"),
+    (rejection) => rejection,
+  );
+  assert.equal(faultOf(silent).kind, "work");
+  assert.ok(!faultOf(silent).evidence.detail.includes("final response"));
+});
+
 test("a result file that is missing or malformed is the worker's wrong result; an unreadable one is not (#649)", async (t) => {
   const { readWorkerJson } = await import("../dist/fault.js");
   const root = mkdtempSync(join(tmpdir(), "factory-worker-json-"));

@@ -365,6 +365,26 @@ function firstUnreadable(directory: string, relative = ""): string | undefined {
   return undefined;
 }
 
+/** The longest worker final response carried into a failure detail. */
+const FINAL_RESPONSE_LIMIT = 2000;
+
+/**
+ * An empty result still has the worker's own account of why it changed
+ * nothing; the failure, its diagnosis and the stop message carry it.
+ */
+function noChangeDetail(evidence: unknown): string {
+  const response = (evidence as { finalResponse?: unknown } | null)
+    ?.finalResponse;
+  const text = typeof response === "string" ? response.trim() : "";
+  const shown =
+    text.length > FINAL_RESPONSE_LIMIT
+      ? `${text.slice(0, FINAL_RESPONSE_LIMIT)}...`
+      : text;
+  return shown
+    ? `Worker produced no repository change. Worker's final response: ${shown}`
+    : "Worker produced no repository change";
+}
+
 const FACTORY_EMAIL = "factory@users.noreply.github.com";
 const collectionMessage = (request: ExecutionRequest) =>
   `Factory: ${request.item.title}`;
@@ -487,7 +507,7 @@ export async function collectWorktreeResult(
     acceptedIgnoredLinks,
   );
   if (!paths.length && !assets.length)
-    throw workFault("Worker produced no repository change");
+    throw workFault(noChangeDetail(result.evidence));
   if (paths.length)
     await pinnedGitAsync(
       worktree,

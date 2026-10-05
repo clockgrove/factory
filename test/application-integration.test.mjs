@@ -609,9 +609,16 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
 });
 
 /** An Objective whose one Work Item validates with the frozen pnpm install, then `pnpm check`. */
-async function installFixture(name, shim, assertRun) {
+async function installFixture(name, shim, assertRun, changeManifest = false) {
   await fixture(name, async (root) => {
-    const target = createTarget(root);
+    const manifest = (extra = "") =>
+      `{"name":"install-fixture","private":true,${extra}"scripts":{"check":"true"}}\n`;
+    // The base already has the manifest and lockfile its install used.
+    const target = createTarget(root, {
+      "package.json": manifest(),
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n",
+      "pnpm-workspace.yaml": "packages: []\n",
+    });
     const bin = join(root, "bin");
     const installs = join(root, "installs");
     mkdirSync(bin);
@@ -625,9 +632,9 @@ async function installFixture(name, shim, assertRun) {
       "pnpm check",
     ];
     const criterion = "The frozen install and check pass at the exact tree.";
-    const work = item("install-item", { path: "package.json" });
+    const work = item("install-item", { path: "note.txt" });
     work.acceptance = [criterion];
-    work.ownedPaths = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"];
+    work.ownedPaths = ["note.txt", "package.json"];
     work.validation = commands.map((command) => ({
       command,
       provenance: "source-declared",
@@ -678,15 +685,10 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
       actions: {
         "install-item": {
           files: [
-            {
-              path: "package.json",
-              text: '{"name":"install-fixture","private":true,"scripts":{"check":"true"}}\n',
-            },
-            {
-              path: "pnpm-lock.yaml",
-              text: "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n",
-            },
-            { path: "pnpm-workspace.yaml", text: "packages: []\n" },
+            { path: "note.txt", text: "note\n" },
+            ...(changeManifest
+              ? [{ path: "package.json", text: manifest('"description":"x",') }]
+              : []),
           ],
         },
       },
@@ -723,6 +725,23 @@ test("a dependency install that fails in validation repeats without charging a r
       assert.equal(consumption(finished).implementationRepairs, 0);
       assert.equal(finished.work["install-item"].recovery, undefined);
     },
+  );
+});
+
+test("a failed install after the candidate changed package.json is an implementation failure (#839)", async () => {
+  await installFixture(
+    "install-manifest-changed",
+    {
+      install: 'echo "ERR_PNPM_OUTDATED_LOCKFILE" >&2; exit 1',
+      script: "exit 0",
+    },
+    (finished, installs) => {
+      assert.equal(installs, 1);
+      const work = finished.work["install-item"];
+      assert.equal(work.status, "failed");
+      assert.equal(work.recovery.failure.classification, "implementation");
+    },
+    true,
   );
 });
 

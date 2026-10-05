@@ -2367,6 +2367,35 @@ function validationMutationDetail(before: Buffer, after: Buffer): string {
   return detail(paths);
 }
 
+/** Whether the candidate changed any input of the dependency install relative to the base. */
+function dependencyInputsChanged(
+  worktree: string,
+  baseSha: string | undefined,
+  commit: string,
+): boolean {
+  if (!baseSha) return false;
+  const changed = pinnedGitRaw(
+    worktree,
+    "diff-tree",
+    "-r",
+    "--name-only",
+    "-z",
+    "--no-renames",
+    baseSha,
+    commit,
+  )
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean);
+  return changed.some(
+    (path) =>
+      path === "pnpm-lock.yaml" ||
+      path === "pnpm-workspace.yaml" ||
+      path === "package.json" ||
+      path.endsWith("/package.json"),
+  );
+}
+
 export async function validateTree(
   checkout: string,
   root: string,
@@ -2377,6 +2406,7 @@ export async function validateTree(
   observeOutput?: (entry: ValidationOutputObservation) => void,
   lfsMembers: ValidationLfsMember[] = [],
   contentStore?: ContentStore,
+  acceptedBaseSha?: string,
 ): Promise<ValidationEvidence> {
   const emptyCredentials = join(root, "empty-gh-config");
   try {
@@ -2458,10 +2488,15 @@ export async function validateTree(
       });
       if (result.status !== 0) {
         const detail = `Validation command failed (${result.status}): ${check}: ${output}`;
-        // The dependency install is the controller's own bootstrap step, not
-        // the candidate's behavior: its failure leaves the code unjudged, so it
-        // repeats like any environment fault and charges no repair (#839).
-        if (check.trim() === PINNED_PNPM_BOOTSTRAP)
+        // The dependency install is the controller's own bootstrap step. When
+        // the candidate left every manifest and lockfile as at the accepted
+        // base, the same install worked there, so its failure is the
+        // environment's: it repeats and charges no repair (#839). A changed
+        // manifest or lockfile may be what broke it: the candidate's fault.
+        if (
+          check.trim() === PINNED_PNPM_BOOTSTRAP &&
+          !dependencyInputsChanged(worktree, acceptedBaseSha, commit)
+        )
           throw new StepFault(transient(detail, false));
         throw new CandidateValidationFailure(detail);
       }
@@ -2895,5 +2930,6 @@ export async function validateWorkItem(
     observeOutput,
     lfsMembers,
     contentStore,
+    acceptedBaseSha,
   );
 }

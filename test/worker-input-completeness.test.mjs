@@ -272,3 +272,36 @@ test("the worker brief names the package scripts validation keeps identical to t
   );
   assert.deepEqual(scripts(prompt(["test -s a.txt"])), new Set());
 });
+
+test("the worker brief tells the worker to run exactly the item's validation commands before finishing (#840)", () => {
+  const brief = (checks) =>
+    workItemPrompt({
+      item: {
+        title: "t",
+        goal: "g",
+        acceptance: [],
+        nonGoals: [],
+        ownedPaths: ["src"],
+        brief: "b",
+        validation: checks,
+      },
+    });
+  const checks = [
+    { command: "npm run format:check", provenance: "source-declared" },
+    { command: "npm test", provenance: "source-declared" },
+  ];
+  const withChecks = brief(checks);
+  const section = withChecks
+    .split("Controller-run validation constraints")[1]
+    .split("\n\n")[0];
+  assert.match(section, /Before you finish, run each of them/);
+  const listed = section
+    .split("\n")
+    .filter((line) => line.startsWith("{"))
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(listed, checks);
+  assert.ok(
+    !brief([]).includes("Before you finish, run each of them"),
+    "no instruction without validation commands",
+  );
+});

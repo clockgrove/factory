@@ -91,24 +91,58 @@ const within = (path: string, directory: string) =>
   path === directory ||
   path.startsWith(directory.endsWith(sep) ? directory : directory + sep);
 
-/** The git directory a linked worktree points at: the checkout's `.git`. */
-function linkedGitDirectory(workspace: string): string[] {
+/**
+ * A linked worktree's git directories: its own administrative directory
+ * (`<common>/worktrees/<name>`) and the checkout's common git directory.
+ */
+function linkedGit(
+  workspace: string,
+): { administrative: string; common: string } | undefined {
   try {
     const link = /^gitdir: (.+)$/m.exec(
       readFileSync(join(workspace, ".git"), "utf8"),
     );
-    if (!link) return [];
-    const directory = resolve(workspace, link[1]!);
-    const common = join(directory, "commondir");
-    return [
-      existsSync(common)
-        ? resolve(directory, readFileSync(common, "utf8").trim())
-        : directory,
-    ];
+    if (!link) return undefined;
+    const administrative = resolve(workspace, link[1]!);
+    const common = join(administrative, "commondir");
+    return {
+      administrative,
+      common: existsSync(common)
+        ? resolve(administrative, readFileSync(common, "utf8").trim())
+        : administrative,
+    };
   } catch {
     // No `.git`, or a checkout whose `.git` directory the profile keeps read-only.
-    return [];
+    return undefined;
   }
+}
+
+/**
+ * What git reads in a linked worktree, mounted read-only at their real paths
+ * so read-only commands (`ls-files`, `status`, `diff`, `log`) work: the
+ * worktree's administrative directory (HEAD, index) and, from the common
+ * directory, the objects, refs and settings. Not the common directory as a
+ * whole: that would show other worktrees' metadata, hooks and reflogs.
+ * A `.git` that is not a linked worktree's gets nothing.
+ */
+function gitMetadata(workspace: string): string[] {
+  const git = linkedGit(workspace);
+  if (!git || git.common === git.administrative) return [];
+  return [
+    git.administrative,
+    ...[
+      "objects",
+      "refs",
+      "packed-refs",
+      "HEAD",
+      "config",
+      "info",
+      "shallow",
+      "reftable",
+    ].map((name) => join(git.common, name)),
+  ]
+    .filter((path) => existsSync(path))
+    .map((path) => realpathSync(path));
 }
 
 /**
@@ -130,6 +164,7 @@ function toolchainDirectories(
   const home = real(source.HOME || homedir());
   const config = source.XDG_CONFIG_HOME || join(home, ".config");
   const state = source.XDG_STATE_HOME || join(home, ".local", "state");
+  const linked = linkedGit(workspace);
   const sealed = [
     join(home, ".ssh"),
     join(home, ".claude"),
@@ -138,7 +173,7 @@ function toolchainDirectories(
     join(config, "gh"),
     join(config, "clockgrove-factory"),
     join(state, "clockgrove-factory"),
-    ...linkedGitDirectory(workspace),
+    ...(linked ? [linked.common] : []),
   ].map(real);
   const exposes = (directory: string) =>
     within(home, directory) ||
@@ -186,9 +221,10 @@ function toolchainDirectories(
  * A Codex permission profile: shell commands see only the platform paths
  * Codex calls `:minimal`, the Codex runtime, the working directory (its
  * `.git` entry read-only) and, when they may write, the private HOME and
- * TMPDIR plus the PATH's toolchains, read-only. Nothing else is mounted: not
- * the operator's HOME, logins, SSH keys or gh config, nor Factory's state or
- * the checkout's git directory.
+ * TMPDIR plus, read-only, the PATH's toolchains and the worktree's own git
+ * metadata. Nothing else is mounted: not the operator's HOME, logins, SSH
+ * keys or gh config, Factory's state, nor the rest of the checkout's git
+ * directory.
  */
 function permissionProfile(
   sandbox: CodexSandbox,
@@ -202,9 +238,10 @@ function permissionProfile(
     `${path(codexRuntimeDirectory())} = "read"`,
     ...(sandbox.workspace === "write"
       ? [
-          ...toolchainDirectories(source, real(sandbox.directory)).map(
-            (directory) => `${path(directory)} = "read"`,
-          ),
+          ...[
+            ...toolchainDirectories(source, real(sandbox.directory)),
+            ...gitMetadata(real(sandbox.directory)),
+          ].map((directory) => `${path(directory)} = "read"`),
           `${path(home)} = "write"`,
           `${path(temporary)} = "write"`,
         ]
@@ -277,6 +314,9 @@ export function createCodexHome(options: {
     env.HOME = home;
     env.CODEX_HOME = codexHome;
     env.TMPDIR = temporary;
+    // Git metadata is read-only in the sandbox: `git status` must not try to
+    // refresh the index.
+    if (options.sandbox) env.GIT_OPTIONAL_LOCKS = "0";
     return {
       env,
       dispose: () => rmSync(root, { recursive: true, force: true }),

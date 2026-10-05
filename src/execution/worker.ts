@@ -16,6 +16,7 @@ import {
   writeHarnessResult,
 } from "./harness-support.js";
 import type { CodexModelSelection } from "../config.js";
+import { createCodexHome } from "../codex-planning-isolation.js";
 import {
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   ProviderTurnGuard,
@@ -104,18 +105,18 @@ export async function runCodexWorker(
       reasoningEffort: model.reasoningEffort,
     },
   );
-  const codex = new Codex({
-    env: Object.fromEntries(
-      Object.entries(process.env).filter(
-        (entry): entry is [string, string] => entry[1] !== undefined,
-      ),
-    ),
+  // A private HOME with only the Codex login; shell commands see the
+  // worktree, the private HOME and TMPDIR, and the platform runtime alone.
+  const sandbox = { workspace: "write", network: network === "host" } as const;
+  const home = createCodexHome({
+    config: "",
+    sandbox: { ...sandbox, directory: request.worktree },
+    keep: allowedSecretNames,
   });
+  const codex = new Codex({ env: home.env });
   const thread = codex.startThread({
     workingDirectory: request.worktree,
-    sandboxMode: "workspace-write",
     approvalPolicy: "never",
-    networkAccessEnabled: network === "host",
     model: model.model,
     modelReasoningEffort: model.reasoningEffort,
   });
@@ -167,9 +168,8 @@ export async function runCodexWorker(
     );
     observeUsage("started");
     capture.request(prompt, {
-      sandboxMode: "workspace-write",
+      permissions: sandbox,
       approvalPolicy: "never",
-      networkAccessEnabled: network === "host",
     });
     const streamed = await turn.race(
       thread.runStreamed(prompt, { signal: turn.signal }),
@@ -261,6 +261,7 @@ export async function runCodexWorker(
     return false;
   } finally {
     turn?.finish();
+    home.dispose();
   }
 }
 

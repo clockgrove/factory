@@ -105,9 +105,13 @@ test("a Codex result review runs in the tree with a read-only shell", async (t) 
     tree: "/tmp/the-tree",
   });
   assert.equal(seen.thread.workingDirectory, "/tmp/the-tree");
-  assert.equal(seen.thread.sandboxMode, "read-only");
+  // The sandbox is Factory's permission profile: the tree read-only, offline.
+  assert.equal(seen.thread.sandboxMode, undefined);
   assert.equal(seen.thread.approvalPolicy, "never");
-  assert.equal(seen.config, CODEX_TREE_REVIEW_CONFIG);
+  assert.ok(seen.config.includes(CODEX_TREE_REVIEW_CONFIG));
+  assert.match(seen.config, /^default_permissions = "factory"$/m);
+  assert.match(seen.config, /^"\." = "read"$/m);
+  assert.match(seen.config, /^enabled = false$/m);
   assert.match(seen.config, /shell_tool = true/);
   assert.match(seen.config, /web_search = "disabled"/);
 });

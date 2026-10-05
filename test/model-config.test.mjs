@@ -2447,7 +2447,11 @@ test("actual worker packets preserve media requirements and isolate controller o
   let worktree;
   Codex.prototype.startThread = function (options) {
     assert.equal(options.workingDirectory, worktree);
-    assert.equal(options.networkAccessEnabled, false);
+    // Network is off in the worker's own permission profile.
+    assert.match(
+      readFileSync(join(this.options.env.CODEX_HOME, "config.toml"), "utf8"),
+      /^enabled = false$/m,
+    );
     return {
       id: `packet-${scenario.id}`,
       async runStreamed(prompt) {

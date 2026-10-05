@@ -21,7 +21,7 @@ async function fixture(mode, run) {
   const record = join(root, "requests.jsonl");
   writeFileSync(
     server,
-    `import {createInterface} from 'node:readline';import fs from 'node:fs';const mode=${JSON.stringify(mode)};const record=${JSON.stringify(record)};if(mode==='startup-failure'){console.error('state runtime unavailable');process.exit(1)}const lines=createInterface({input:process.stdin});lines.on('line',line=>{const m=JSON.parse(line);fs.appendFileSync(record,JSON.stringify({method:m.method,args:process.argv.slice(2),params:m.params,githubToken:process.env.GITHUB_TOKEN??null,sqliteHome:process.env.CODEX_SQLITE_HOME??null,codexHome:process.env.CODEX_HOME??null})+'\\n');if(!m.id)return;if(m.method==='initialize'){console.log(JSON.stringify({id:m.id,result:{}}));return}if(m.method!=='command/exec')throw Error('Unexpected method');const [, , ,inside,outside,token]=m.params.command;if(mode!=='forged')fs.writeFileSync(inside,token);if(mode==='outside-allowed')fs.writeFileSync(outside,token);console.log(JSON.stringify({id:m.id,result:{exitCode:0,stdout:JSON.stringify({writable:true,refused:mode!=='outside-allowed'}),stderr:''}}))});`,
+    `import {createInterface} from 'node:readline';import fs from 'node:fs';const mode=${JSON.stringify(mode)};const record=${JSON.stringify(record)};if(mode==='startup-failure'){console.error('state runtime unavailable');process.exit(1)}const lines=createInterface({input:process.stdin});lines.on('line',line=>{const m=JSON.parse(line);fs.appendFileSync(record,JSON.stringify({method:m.method,args:process.argv.slice(2),params:m.params,githubToken:process.env.GITHUB_TOKEN??null,sqliteHome:process.env.CODEX_SQLITE_HOME??null,codexHome:process.env.CODEX_HOME??null,codexConfig:process.env.CODEX_HOME?fs.readFileSync(process.env.CODEX_HOME+'/config.toml','utf8'):null})+'\\n');if(!m.id)return;if(m.method==='initialize'){console.log(JSON.stringify({id:m.id,result:{}}));return}if(m.method!=='command/exec')throw Error('Unexpected method');const [, , ,inside,outside,token]=m.params.command;if(mode!=='forged')fs.writeFileSync(inside,token);if(mode==='outside-allowed')fs.writeFileSync(outside,token);console.log(JSON.stringify({id:m.id,result:{exitCode:0,stdout:JSON.stringify({writable:true,refused:mode!=='outside-allowed'}),stderr:''}}))});`,
   );
   try {
     await run({
@@ -54,11 +54,11 @@ test("model-free readiness uses worker policy, private environment, exact sentin
       requests.map((x) => x.method),
       ["initialize", "initialized", "command/exec"],
     );
-    assert.ok(requests[0].args.includes('sandbox_mode="workspace-write"'));
+    // The worker's private home and permission profile.
     assert.ok(requests[0].args.includes('approval_policy="never"'));
-    assert.ok(
-      requests[0].args.includes("sandbox_workspace_write.network_access=false"),
-    );
+    assert.match(requests[0].codexConfig, /^default_permissions = "factory"$/m);
+    assert.match(requests[0].codexConfig, /^"\." = "write"$/m);
+    assert.match(requests[0].codexConfig, /^enabled = false$/m);
     assert.equal(requests[0].githubToken, null);
     assert.equal(requests[2].params.cwd, input.workspace);
     assert.equal(requests[2].params.sandboxPolicy, undefined);
@@ -179,7 +179,7 @@ test("a host-denied outside write is unavailable before harness startup", async 
   });
 });
 
-test("readiness inherits the host SQLite directory while retaining the same Codex home", async () => {
+test("readiness runs in the worker's private Codex home, not the operator's", async () => {
   const original = { ...process.env };
   try {
     process.env.CODEX_HOME = "/tmp/existing-codex-home";
@@ -191,8 +191,8 @@ test("readiness inherits the host SQLite directory while retaining the same Code
         "ready",
       );
       const observed = JSON.parse(readFileSync(record, "utf8").split("\n")[0]);
-      assert.equal(observed.codexHome, process.env.CODEX_HOME);
-      assert.equal(observed.sqliteHome, process.env.CODEX_SQLITE_HOME);
+      assert.notEqual(observed.codexHome, process.env.CODEX_HOME);
+      assert.equal(observed.sqliteHome, null);
       assert.equal(observed.githubToken, null);
     });
   } finally {

@@ -83,15 +83,16 @@ const root = resolve(import.meta.dirname, "..");
 /**
  * Frozen judges: a new judge is a new file; these digests never change. A
  * digest covers the spec, prompt, schema, input builder and provider system
- * prompt, so editing any of them fails here.
+ * prompt, so editing any of them fails here. The provider system prompt comes
+ * from the bundled Codex package, so a Codex upgrade re-pins the Codex judge.
  */
 const FROZEN_JUDGES = {
   "strict-rubric-v1-claude":
     "a77ab59477059969990bcb988b8a8be89275c79f61e8541c1ece87171316a1c2",
   "strict-rubric-v1-codex":
-    "86b546ee233c50e2b0d120f5e107164656eba2fa784b1567d7fb8481a74fc819",
+    "98bdea7ecda8518d04e3f21bab7815876ffe1176fc9b4dddaeda4ba089ac0145",
   "strict-rubric-v1-codex-gpt-6.1-sol":
-    "dc2aeb2b2257a5909ad0df97856459d0e62d1e26f224dcabdfd05d57970bbf16",
+    "0453dbd59ed8286431e89429e197c1378aad9b567917d532c04b42ecf2b641d1",
 };
 
 /** Fixture commits are the same on every machine. */

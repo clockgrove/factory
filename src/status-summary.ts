@@ -1254,7 +1254,12 @@ export function renderServiceStatus(document: ServiceStatusDocument): string[] {
           : "  Waiting for a decision; `factory queue list` names the Objective",
       );
     else if (service.active !== "active")
-      lines.push("  Not running; `factory supervisor start` starts it");
+      // A draining queue ends a started service at once: resume it first.
+      lines.push(
+        queue.mode === "draining"
+          ? "  Not running; the queue is draining, so `factory queue resume` first, then `factory supervisor start`"
+          : "  Not running; `factory supervisor start` starts it",
+      );
   }
   const queued = (queue.objectives ?? []).filter(
     (id) => !(queue.dequeued ?? []).includes(id),

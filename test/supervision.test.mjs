@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { spawn } from "node:child_process";
 import { enqueueIntake, watchIntake } from "../dist/intake.js";
 import { checkReadiness } from "../dist/readiness.js";
 import { factoryConfigDigest } from "../dist/config.js";
@@ -549,6 +550,62 @@ test("a service bound to one Objective by an earlier version is refused for reus
       evidenceRetained: true,
     });
     assert.equal(existsSync(path), false);
+  }));
+
+test("uninstalling a service an earlier version bound to one Objective hands off its running owner", () =>
+  fixture(async ({ config, configPath }) => {
+    await install(configPath);
+    const path = join(
+      process.env.XDG_CONFIG_HOME,
+      "systemd/user",
+      serviceName(config.repository),
+    );
+    const prefix = "# Factory local supervision v1 ";
+    const value = JSON.parse(
+      readFileSync(path, "utf8").split("\n")[0].slice(prefix.length),
+    );
+    value.objective = 1;
+    writeFileSync(path, renderService(value), { mode: 0o600 });
+    // The earlier build's owner answers control for its Objective only, and a handoff ends it.
+    const href = (file) => new URL(`../dist/${file}`, import.meta.url).href;
+    const owner = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import {mkdirSync} from 'node:fs';
+import {join} from 'node:path';
+import {stateRoot} from ${JSON.stringify(href("config.js"))};
+import {acquireControllerLock} from ${JSON.stringify(href("state-store.js"))};
+import {serveControl} from ${JSON.stringify(href("coordinator-control.js"))};
+const repository = ${JSON.stringify(config.repository)};
+mkdirSync(stateRoot(repository), {recursive: true, mode: 0o700});
+const lock = acquireControllerLock(join(stateRoot(repository), 'controller.lock'), 1);
+await serveControl(repository, lock, async (request) => {
+  if (request.action !== 'handoff') throw new Error('unexpected ' + request.action);
+  setTimeout(() => process.exit(0), 50);
+  return {};
+});
+console.log('held');`,
+      ],
+      { env: process.env, stdio: ["ignore", "pipe", "inherit"] },
+    );
+    try {
+      await new Promise((resolve, reject) => {
+        owner.once("error", reject);
+        owner.stdout.once("data", resolve);
+      });
+      const ended = new Promise((resolve) => owner.once("exit", resolve));
+      // The command the legacy message names removes it, owner and all.
+      assert.deepEqual(await supervise("uninstall", configPath), {
+        stopped: true,
+        evidenceRetained: true,
+      });
+      assert.equal(await ended, 0);
+      assert.equal(existsSync(path), false);
+    } finally {
+      owner.kill("SIGKILL");
+    }
   }));
 
 test("supervised install and upgrade retain the caller's nonsecret SQLite path", () =>

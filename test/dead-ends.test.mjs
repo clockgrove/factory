@@ -296,27 +296,27 @@ const FIXED = [
   [
     "regular",
     "alpha pending; beta pending",
-    "an amendment was rejected, then the coordinator drained",
+    "an amendment was rejected, then the mode was left draining",
   ],
   [
     "regular",
     "alpha pending; beta pending",
-    "an amendment was rejected, then the coordinator resumed",
+    "an amendment was rejected, then the mode was left running",
   ],
   [
     "regular",
     "alpha pending; beta pending",
-    "an amendment was rejected with no planning revision left, then the coordinator drained",
+    "an amendment was rejected with no planning revision left, then the mode was left draining",
   ],
   [
     "native-stack",
     "alpha published (PR); beta pending",
-    "an amendment was rejected and the run stopped, then the coordinator resumed",
+    "an amendment was rejected and the run stopped, then the mode was left running",
   ],
   [
     "regular",
     "alpha running/execute; beta pending",
-    "an amendment was rejected and the run stopped, then the coordinator drained",
+    "an amendment was rejected and the run stopped, then the mode was left draining",
   ],
   // A pause or drain of a preparation outranks a changed configuration: a
   // refusal would discard it.
@@ -364,6 +364,14 @@ const FIXED = [
     "regular",
     "preparing, plan clean, planning complete, 0 issues, planning",
     "paused",
+    "the base changed since planning",
+  ],
+  // A changed configuration beside changed inputs: restoring the configuration
+  // is not enough, and the refusal that status names still ends it.
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 0 issues, planning",
+    "the installation configuration changed",
     "the base changed since planning",
   ],
   // A cancelled item of a live Objective (#718).

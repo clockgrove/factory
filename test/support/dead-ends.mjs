@@ -27,8 +27,10 @@
 //   reused, a closure error, repeat and wait records (including a run of
 //   faults over a day old and a step asking the operator), a stopped planning,
 //   a rejected amendment (with and without a planning revision to spare, one
-//   that carries an operator's graph, and one the coordinator was then drained
-//   or resumed after), a plan whose base, Objective body or sources changed, a
+//   that carries an operator's graph, and one whose mode was left draining or
+//   running, as a bypass of the setter or an old state file leaves it), a plan
+//   whose base, Objective body or sources changed (alone or with a changed
+//   configuration, a pause or a drain), a
 //   cancelled item of a live
 //   Objective, spent
 //   autonomy allowances and disabled repair classes.
@@ -69,9 +71,7 @@ const repositoryRoot = join(import.meta.dirname, "..", "..");
 const dist = (path) => join(repositoryRoot, "dist", path);
 const errors = await import(dist("work-repair.js"));
 const { attachFault } = await import(dist("fault.js"));
-const { parseFactoryState, setCoordinatorMode } = await import(
-  dist("state.js")
-);
+const { parseFactoryState } = await import(dist("state.js"));
 const { readContinuation } = await import(dist("state-store.js"));
 
 const { consumption, repairClasses } = await import(dist("repair-policy.js"));
@@ -650,10 +650,11 @@ const rejectAmendment =
     if (stopped) state.error = error;
     // A later, unrelated stop replaced it: a replacement needs that cleared first.
     if (unrelated) state.error = "Injected unrelated stop";
-    // Then an operator or a handoff changed the mode, as a drain, a SIGTERM
-    // handoff of the rejecting pass or `factory resume` does: through the
-    // setter every one of them uses, which holds a rejection paused.
-    if (then) setCoordinatorMode(state, then);
+    // Then the mode is not paused. Every writer goes through the setter,
+    // which holds a rejection paused, so this is the raw state a bypass of
+    // it or a state file from before the hold leaves: written as it is, not
+    // through the setter (which would leave the plain rejection).
+    if (then) coordinator(state).mode = then;
     return true;
   };
 
@@ -1008,21 +1009,24 @@ const OVERLAYS = {
       spare: 1,
       unrelated: true,
     }),
-    // The mode changed after the rejection: a handoff of the pass that
-    // rejected it drains, and a resume runs.
-    "an amendment was rejected, then the coordinator drained": rejectAmendment({
-      spare: 1,
-      then: "draining",
-    }),
-    "an amendment was rejected, then the coordinator resumed": rejectAmendment({
-      spare: 1,
-      then: "running",
-    }),
-    "an amendment was rejected with no planning revision left, then the coordinator drained":
+    // The mode is not paused: the raw state a bypass of the setter (an old
+    // state file) leaves after a drain or a resume. Status names
+    // `factory pause`, then the replacement.
+    "an amendment was rejected, then the mode was left draining":
+      rejectAmendment({
+        spare: 1,
+        then: "draining",
+      }),
+    "an amendment was rejected, then the mode was left running":
+      rejectAmendment({
+        spare: 1,
+        then: "running",
+      }),
+    "an amendment was rejected with no planning revision left, then the mode was left draining":
       rejectAmendment({ spare: 0, then: "draining" }),
-    "an amendment was rejected and the run stopped, then the coordinator resumed":
+    "an amendment was rejected and the run stopped, then the mode was left running":
       rejectAmendment({ spare: 1, stopped: true, then: "running" }),
-    "an amendment was rejected and the run stopped, then the coordinator drained":
+    "an amendment was rejected and the run stopped, then the mode was left draining":
       rejectAmendment({ spare: 0, stopped: true, then: "draining" }),
   },
 };
@@ -1129,7 +1133,11 @@ function dimensionsOf(state) {
         : "partial with implementation"
       : "partial without implementation";
   const day = 24 * 3_600_000;
+  const configuration = /^0+$/.test(state.configDigest)
+    ? "changed"
+    : "as planned";
   const single = {
+    "installation configuration": configuration,
     "repeat or wait record": Boolean(state.repeats || state.wait),
     "fault run": Object.values(state.repeats ?? {}).some(
       (repeat) => Date.now() - Date.parse(repeat.faults?.since) > day,
@@ -1138,9 +1146,6 @@ function dimensionsOf(state) {
       : state.repeats
         ? "recent"
         : "none",
-    "installation configuration": /^0+$/.test(state.configDigest)
-      ? "changed"
-      : "as planned",
     "worker authentication": Object.values(state.work ?? {}).some(
       (work) => work.authentication,
     )
@@ -1154,13 +1159,27 @@ function dimensionsOf(state) {
     return {
       paired: {
         ...shared,
+        "installation configuration": configuration,
+        // What the plan was made from, if a run could see it differ.
+        "planning inputs": /^1+$/.test(state.baseSha)
+          ? "base changed"
+          : /^1+$/.test(state.objectiveBodyDigest)
+            ? "Objective body changed"
+            : /^1+$/.test(state.sourcePacketDigest)
+              ? "sources changed"
+              : "as planned",
         plan: state.plan
           ? `${state.plan.review.status}${state.plan.review.acceptable === false ? " (refusal only)" : ""}`
           : "none",
         "planning recovery": state.planningRecovery?.phase ?? "none",
         projection: `${Object.keys(state.issueByItemId).length} issues`,
       },
-      single,
+      // A preparation's configuration pairs with the other dimensions.
+      single: Object.fromEntries(
+        Object.entries(single).filter(
+          ([name]) => name !== "installation configuration",
+        ),
+      ),
     };
   const work = state.work[focus(state)];
   return {
@@ -1452,6 +1471,30 @@ function stopKind(state) {
   return undefined;
 }
 
+/**
+ * What a mode change must leave of a rejected amendment's hold: still paused,
+ * and (for a resume or a drain of the Objective) reported with the command
+ * status names. Read from the state and the structured result, not text.
+ */
+function holdProblem(command, before, after, applied) {
+  const { verb } = command;
+  if (!["resume", "drain", "queue"].includes(verb)) return undefined;
+  if (
+    before?.schemaVersion !== 7 ||
+    before.pendingAmendment?.phase !== "rejected"
+  )
+    return undefined;
+  if (after?.pendingAmendment?.phase !== "rejected") return undefined;
+  if (after.coordinator?.mode !== "paused")
+    return `factory ${verb} released a rejected amendment's pause (mode ${after.coordinator?.mode})`;
+  if (verb === "queue") return undefined;
+  const named = applied.status?.nextAction?.command ?? null;
+  return applied.hold?.reason === "rejected-amendment" &&
+    (applied.hold.next ?? null) === named
+    ? undefined
+    : `factory ${verb} did not report the hold with the command status names`;
+}
+
 /** Operator commands followed from one state before it counts as stranded. */
 const MAX_COMMANDS = 4;
 /** Named commands besides the next action that one case exercises. */
@@ -1577,7 +1620,11 @@ async function classify(slot, anchor, state) {
         ? replacementProposal(snapshot())
         : undefined;
     const stop = stopKind(snapshot());
-    const applied = await runCommand(world, { ...command, input });
+    const before = snapshot();
+    let applied = await runCommand(world, { ...command, input });
+    const problem =
+      applied.ok && holdProblem(command, before, snapshot(), applied);
+    if (problem) applied = { ok: false, message: problem };
     answeredByOwner ??= applied.viaOwner === true;
     // Every command applied, by the stop it answered, so a test can require
     // the ones it cares about to have reached an owner.
@@ -1712,7 +1759,21 @@ async function classify(slot, anchor, state) {
       all.length <= MAX_PROBES,
       `A stop names ${all.length} commands besides its next action; raise MAX_PROBES: ${all.map((c) => c.text).join(" | ")}`,
     );
-    const named = all;
+    // USER-GUIDE sends the operator to `factory queue resume` after a stop
+    // that needs a human, so it is executed at a rejection too: it must
+    // leave the rejection paused, like every other change of mode.
+    const named =
+      stopKind(snapshot()) === "rejected amendment"
+        ? [
+            ...all,
+            {
+              verb: "queue",
+              options: { action: "resume" },
+              source: "USER-GUIDE",
+              text: "factory queue resume",
+            },
+          ]
+        : all;
     if (named.length || report.outcome === "idle") {
       const context = stopText(report);
       // A stop whose controller is still up (a paused or draining owner, a
@@ -1757,8 +1818,11 @@ async function classify(slot, anchor, state) {
           : undefined;
       };
       try {
+        // The queue's control reaches an Objective only with no owner of it.
         for (const command of named)
-          for (const withOwner of live ? [false, true] : [false]) {
+          for (const withOwner of live && command.verb !== "queue"
+            ? [false, true]
+            : [false]) {
             const key = `${sight}|${commandKey(command)}|${withOwner ? "owner" : "none"}`;
             if (!probed.has(key)) probed.set(key, probe(command, withOwner));
             const problem = await probed.get(key);

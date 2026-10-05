@@ -46,6 +46,7 @@ const { continuationStatusDocument } = await import(
   "../../dist/diagnostics.js"
 );
 const { controlObjective } = await import("../../dist/runner.js");
+const { intakeControl, readIntake } = await import("../../dist/intake.js");
 const { rewritingFetch } = await import("./github-http-fake.mjs");
 const { ScriptedHarness, ScriptedPlanningModel, readDescriptor } = await import(
   "./integration-fixture.mjs"
@@ -294,6 +295,12 @@ async function command({ verb, options, input }) {
       return viaOwner(verb, undefined, () =>
         controlObjective(config, { objective, action: verb }),
       );
+    case "queue":
+      // The operator's `factory queue resume` with no service running: the
+      // Objective is queued (as `factory queue add` leaves it), then the
+      // queue's mode reaches every continuation.
+      if (!readIntake(config)) await application.enqueueIntake([objective]);
+      return intakeControl(config, options.action);
     case "propose-amendment":
       return viaOwner("propose-amendment", input, () =>
         controlObjective(config, {
@@ -312,8 +319,14 @@ if (descriptor.mode === "status")
 
 if (descriptor.mode === "command") {
   try {
-    await command(descriptor.command);
-    finish({ ok: true, status: status(), viaOwner: handledByOwner });
+    const result = await command(descriptor.command);
+    finish({
+      ok: true,
+      status: status(),
+      viaOwner: handledByOwner,
+      // The hold a resume or drain reports (a rejected amendment keeps the pause).
+      hold: result?.hold,
+    });
   } catch (error) {
     finish({ ok: false, message: String(error?.message ?? error) });
   }

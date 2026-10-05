@@ -45,7 +45,7 @@ The first line of `status` is the phase and a one-line summary. `Next:` is the e
 
 ## Missing contract
 
-Search the pinned repository for the canonical text before treating a gap as a human decision. If it exists, add `path#Exact heading` under `## Planning sources` in the Objective, refuse the saved plan and run again. If it is genuinely unspecified, ask the owner. Never invent a requirement or weaken acceptance to pass a plan.
+Search the pinned repository for the canonical text before treating a gap as a human decision. If it exists, add `path#Exact heading` under `## Sources` in the Objective, refuse the saved plan and run again. If it is genuinely unspecified, ask the owner. Never invent a requirement or weaken acceptance to pass a plan.
 
 ## Observe
 

@@ -288,7 +288,7 @@ test("each seeded defect changes exactly its rule in the authored plan", () => {
       ),
     [],
   );
-  // A command line that Final validation runs anyway is exempt.
+  // A command line the Objective runs on the integrated result anyway is exempt.
   assert.equal(
     planVariants(graph, {
       ...context,
@@ -410,7 +410,7 @@ test("judge-free metrics count structured fields only", () => {
           proof: { kind: "final-review" },
           source: { text: "`node check.mjs a`" },
         },
-        // A Final validation command runs anyway: exempt.
+        // A command the Objective runs on the integrated result anyway: exempt.
         { proof: { kind: "final-review" }, source: { text: "`npm test`" } },
         // Prose around a command is not a command-line criterion.
         {

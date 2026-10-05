@@ -164,7 +164,16 @@ function assertCurrentVersion(
 ): void {
   if (currentVersion(value)) return;
   const found = earlierVersionDirectories(repository);
-  const directories = found.length ? found : [dirname(path)];
+  refuseEarlierVersion(found.length ? found : [dirname(path)]);
+}
+
+/** A new Objective does not start beside state an earlier version wrote. */
+export function assertNoEarlierVersion(repository: string): void {
+  const found = earlierVersionDirectories(repository);
+  if (found.length) refuseEarlierVersion(found);
+}
+
+function refuseEarlierVersion(directories: string[]): never {
   throw new Error(
     `State from an earlier Factory version: ${directories.join(", ")}. v0.2.0 starts fresh: run \`factory supervisor uninstall\` (add \`--config PATH\` unless it is the default configuration), then \`rm -r ${directories.map((directory) => (/^[\w@%+=:,./-]+$/.test(directory) ? directory : `'${directory.replaceAll("'", "'\\''")}'`)).join(" ")}\` (this leaves worktrees and open PRs from that state in place), or finish them with the old version first`,
   );

@@ -128,6 +128,7 @@ import {
 } from "./state.js";
 import {
   acquireObjectiveLock,
+  assertNoEarlierVersion,
   type ControllerLock,
   installationLockPath,
   liveControllerOwner,
@@ -1378,6 +1379,7 @@ async function runObjectivePass(
         "prerequisites",
         () => planningPrerequisites(config, github, objective, baseSha),
       );
+      assertNoEarlierVersion(config.repository);
       const localExecutables = preflightObjective(config, issue.body, baseSha);
       const sourcePacketDigest = preparationSourceDigest(
         planningSources(issue.body, baseSha, config.checkout),

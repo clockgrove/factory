@@ -29,7 +29,7 @@ Configuration lives under `$XDG_CONFIG_HOME/clockgrove-factory` and state under 
 
 ### Models, network and delivery
 
-Choose these at setup. Defaults: planner and reviewer `gpt-5.6-sol`, worker `gpt-5.6-luna`, all `medium` reasoning.
+Choose these at setup. Defaults: planner, reviewer and worker `gpt-6.1-sol`, all `medium` reasoning.
 
 | Option                                                      | Effect                                                                                                                                    |
 | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |

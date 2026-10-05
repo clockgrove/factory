@@ -81,7 +81,7 @@ Profiles let the compiler assign different harness configs to different Work Ite
       "selectionHints": ["Default when no stronger match exists."],
       "harness": {
         "kind": "codex-sdk",
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6.1-sol",
         "reasoningEffort": "medium"
       }
     },

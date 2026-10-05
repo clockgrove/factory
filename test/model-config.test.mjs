@@ -1078,8 +1078,8 @@ test("install selects the pinned optional Claude adapter without changing planni
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     assert.deepEqual(config.planning, {
       kind: "codex-sdk",
-      planner: { model: "gpt-5.6-sol", reasoningEffort: "medium" },
-      reviewer: { model: "gpt-5.6-sol", reasoningEffort: "medium" },
+      planner: { model: "gpt-6.1-sol", reasoningEffort: "medium" },
+      reviewer: { model: "gpt-6.1-sol", reasoningEffort: "medium" },
     });
     assert.deepEqual(config.execution.harness, {
       kind: "claude-agent-sdk",

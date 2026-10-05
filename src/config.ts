@@ -28,17 +28,17 @@ export interface CodexModelSelection {
 }
 
 export const DEFAULT_PLANNER_MODEL_SELECTION: CodexModelSelection = {
-  model: "gpt-5.6-sol",
+  model: "gpt-6.1-sol",
   reasoningEffort: "medium",
 };
 
 export const DEFAULT_REVIEWER_MODEL_SELECTION: CodexModelSelection = {
-  model: "gpt-5.6-sol",
+  model: "gpt-6.1-sol",
   reasoningEffort: "medium",
 };
 
 export const DEFAULT_WORKER_MODEL_SELECTION: CodexModelSelection = {
-  model: "gpt-5.6-luna",
+  model: "gpt-6.1-sol",
   reasoningEffort: "medium",
 };
 

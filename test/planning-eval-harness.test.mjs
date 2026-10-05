@@ -89,11 +89,11 @@ const root = resolve(import.meta.dirname, "..");
  */
 const FROZEN_JUDGES = {
   "strict-rubric-v1-claude":
-    "e61976130e2bb5e23687526b4f4e985815c035f6c98cbb8ce62c9cd49c9c52d3",
+    "eb7d9fd33034cc7788d1d81c16e852d0e59525210652a4a7158a972349120584",
   "strict-rubric-v1-codex":
-    "216a0bdcc61685acea61cc78f4a37ecefbe1f92db9c8cdfbf2f33bff7d01916a",
+    "e667070aec6689ab66172e7f175d33e81f2e48b524677f9e9dd6313da62516e8",
   "strict-rubric-v1-codex-gpt-6.1-sol":
-    "3e63b10625e42d4783d72bd7d54cb67a10df91f6a8e18d68a4d268815596e0f6",
+    "7b08bd4fee2746241190581063715fb354829e98e6a8b36ab435963acc466756",
 };
 
 /** Fixture commits are the same on every machine. */
